@@ -1010,8 +1010,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Include routers
     # Models API is mounted at /api/models
-    from app.gateway.routers import managed_models
+    from app.gateway.routers import image_generation, managed_models
 
+    app.include_router(image_generation.router)
     app.include_router(managed_models.router)
     app.include_router(models.router)
 

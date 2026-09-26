@@ -1,15 +1,15 @@
 ### Gateway API (`app/gateway/`)
 
+`routers/image_generation.py`: admin-only profiles, redacted off-loop probes.
+
 Reject external run/state writes with `sandbox`, `thread_data`, or `viewed_images`.
 
 Studio retains sanitized creation metadata.
 
-Capability Center's `business` adapter validates bundled-provider credentials
-and creates an MCP connection. The MCP API accepts only the exact isolated
-interpreter/module/provider launcher and credential environment keys generated
-by `deerflow.capabilities.business`. Reject arbitrary Python commands; manifest
-metadata cannot bypass execution policy, and credentials stay out of tool
-schemas. Preserve admin checks, masked edits, atomic writes and MCP cache reloads.
+`deerflow.capabilities.business` validates credentials and creates MCP connections.
+Accept only its generated isolated launcher and credential keys; reject arbitrary
+commands and manifest bypasses. Hide credentials from tool schemas; preserve admin
+checks, masked edits, atomic writes, and MCP cache reloads.
 
 Memory shutdown resolves hot-reloaded config and the backend, flushes, then
 closes as one `await_drained` operation. Keep config resolution inside the

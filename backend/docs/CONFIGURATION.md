@@ -1106,6 +1106,8 @@ If you rebuild the runtime from scratch instead of extending the published image
 - `file.list_path(...)`
 - `file.search_in_file(...)`
 
+The controlled `generate_image` tool has a local-container compatibility path for web-managed image profiles: it probes the image with a temporary container, then creates the thread container with startup credentials when `/v1/bash/exec` is unavailable. This does not change the `required-secrets` contract for other skills or remote/provisioner AIO sandboxes.
+
 Custom images must also keep these compatibility constraints:
 
 - The container should listen on the configured sandbox port, `8080` by default.

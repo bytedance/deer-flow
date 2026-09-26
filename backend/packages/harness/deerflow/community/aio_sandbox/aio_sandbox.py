@@ -120,6 +120,12 @@ class AioSandbox(Sandbox):
         # Set to True after bash.exec answers 404 (image predates /v1/bash/*),
         # so later env-bearing calls fail fast instead of re-hitting HTTP (#3921).
         self._bash_exec_unsupported = False
+        self._command_environment_supported: bool | None = None
+        self._command_environment_probe_active = False
+        # Set by AioSandboxProvider when the container is bound to a thread.
+        self._deerflow_base_identity: str | None = None
+        self._deerflow_image_profile_revision: str | None = None
+        self._deerflow_managed_image_local = False
         self._session_creation_state_lock = threading.Lock()
         self._shell_session_creation_state = _SessionCreationState()
         self._bash_session_creation_state = _SessionCreationState()
@@ -727,6 +733,36 @@ class AioSandbox(Sandbox):
             "max_retries": 0,
         }
 
+    def supports_command_environment(self) -> bool:
+        """Probe the actual bash.exec route without sending a provider credential.
+
+        Only its specific 404 means a legacy image. Timeouts and other errors
+        are unknown capability, not permission to fall back to a persistent key.
+        """
+        cached = getattr(self, "_command_environment_supported", None)
+        if cached is not None:
+            return cached
+        if self._bash_exec_unsupported:
+            self._command_environment_supported = False
+            return False
+        marker = "__DEERFLOW_ENV_PROBE__"
+        self._command_environment_probe_active = True
+        try:
+            result = self.execute_command(
+                "printf '%s\\n' \"$DEERFLOW_ENV_PROBE\"",
+                env={"DEERFLOW_ENV_PROBE": marker},
+                timeout=10,
+            )
+        finally:
+            self._command_environment_probe_active = False
+        if self._bash_exec_unsupported:
+            self._command_environment_supported = False
+            return False
+        if result.strip() != marker:
+            raise RuntimeError("Sandbox command environment capability probe failed")
+        self._command_environment_supported = True
+        return True
+
     def execute_command(
         self,
         command: str,
@@ -967,7 +1003,10 @@ class AioSandbox(Sandbox):
                         return "Error: bash.exec session disappeared after retry", None
                     if e.status_code == 404:
                         self._bash_exec_unsupported = True
-                        logger.error("Sandbox %s does not support bash.exec (/v1/bash/exec returned 404); env-bearing commands are unavailable until the sandbox image is upgraded to all-in-one-sandbox >= 1.9.3", self.id)
+                        if getattr(self, "_command_environment_probe_active", False):
+                            logger.info("Sandbox %s does not support per-command environment; checking legacy startup-environment compatibility", self.id)
+                        else:
+                            logger.error("Sandbox %s does not support bash.exec (/v1/bash/exec returned 404); env-bearing commands are unavailable until the sandbox image is upgraded to all-in-one-sandbox >= 1.9.3", self.id)
                         return _BASH_EXEC_UNSUPPORTED_ERROR, None
                     logger.error(f"Failed to execute command with injected env in sandbox: {e}")
                     return f"Error: {e}", None

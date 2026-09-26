@@ -1628,6 +1628,13 @@ sandbox:
 #   # or implement the same AIO sandbox HTTP API used by agent-sandbox. See
 #   # backend/docs/CONFIGURATION.md.
 #   # image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0
+#   # Local AIO probes the image API for web-managed image providers. A 1.9.3+
+#   # image receives the key for one command. An older image is automatically
+#   # recreated with the key in its startup environment while retaining the
+#   # same thread workspace/uploads/outputs mounts. Active runs finish before
+#   # a changed web profile gets a new container. Remote/provisioner AIO still
+#   # needs /v1/bash/exec. Legacy keys in sandbox.environment are passed at
+#   # startup and require container recreation after a Gateway config change.
 #
 #   # Optional: Base port for sandbox containers (default: 8080)
 #   # port: 8080
