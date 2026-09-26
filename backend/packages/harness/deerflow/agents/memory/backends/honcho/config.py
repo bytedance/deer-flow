@@ -15,6 +15,8 @@ from math import isfinite
 from typing import Any
 from urllib.parse import urlsplit
 
+from pydantic import TypeAdapter, ValidationError
+
 _ID_RE = re.compile(r"[^a-zA-Z0-9_-]+")
 
 
@@ -56,6 +58,27 @@ def _number[T](cfg: dict[str, Any], key: str, default: T, cast: Callable[[Any], 
         return cast(value)
     except (TypeError, ValueError):
         raise ValueError(f"Honcho backend: {key} must be a number, got {type(value).__name__}") from None
+
+
+def _bool(cfg: dict[str, Any], key: str, default: bool) -> bool:
+    """Narrow an operator-supplied boolean knob.
+
+    ``AppConfig.resolve_env_variables`` substitutes a ``$VAR`` reference with
+    the raw environment string, and a quoted YAML scalar stays a string, so a
+    configured ``false`` can arrive as ``"false"``. Truthiness would read that
+    as ``True`` -- for ``allow_insecure_http`` it silently opts into sending the
+    API key over plaintext HTTP. Validate the literal with the same vocabulary
+    the sandbox providers accept (see the tenki ``sticky`` knob) and name the
+    knob in the error, so a typo fails at config load instead of degrading to
+    ``True``.
+    """
+    value = cfg.get(key, default)
+    if value is None:
+        return default
+    try:
+        return TypeAdapter(bool).validate_python(value)
+    except ValidationError:
+        raise ValueError(f"Honcho backend: {key} must be a boolean, got {type(value).__name__}") from None
 
 
 def _parse_override_map(cfg: dict[str, Any], key: str) -> dict[str, str]:
@@ -115,7 +138,7 @@ class HonchoConfig:
         failure_policy = _mapping(cfg.get("failure_policy"), "failure_policy")
         base_url = str(cfg.get("base_url", "http://localhost:8000")).rstrip("/")
         api_key = cfg.get("api_key") or None
-        allow_insecure = bool(cfg.get("allow_insecure_http", False))
+        allow_insecure = _bool(cfg, "allow_insecure_http", False)
         # The parsed scheme, not startswith("http://"): a caller can write
         # "HTTP://internal:8000" and urlsplit/httpx both treat that as plain
         # HTTP, so a case-sensitive prefix test leaks the key unencrypted.
