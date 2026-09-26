@@ -555,12 +555,14 @@ def build_middlewares(
     # is set, classify the incoming user turn through a small System One model and
     # log the recommended route and latency at the front door, before any other
     # middleware transforms the turn. It never changes routing, never skips the
-    # model call, and fails open on any error. Concept and reference code by
-    # Andrea Bruno (CC BY 4.0); see the harness-superfast white paper.
+    # model call, and fails open on any error. The turn is redacted with the same
+    # PII config the model-call wrapper uses before it leaves for the decision
+    # service. Concept and reference code by Andrea Bruno (CC BY 4.0); see the
+    # harness-superfast white paper.
     from deerflow.superfast import SuperfastDecisionGateMiddleware
 
     if SuperfastDecisionGateMiddleware.enabled():
-        middlewares.insert(0, SuperfastDecisionGateMiddleware())
+        middlewares.insert(0, SuperfastDecisionGateMiddleware(pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None)))
 
     # Always inject current date (and optionally memory) as <system-reminder> into the
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.

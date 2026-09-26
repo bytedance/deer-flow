@@ -24,7 +24,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import re
 import time
 from typing import Any
 
@@ -214,6 +213,43 @@ def _content_text(content: Any) -> str:
     return ""
 
 
+_REMINDER_OPEN = "<system-reminder>"
+_REMINDER_CLOSE = "</system-reminder>"
+
+
+def _strip_system_reminders(text: str) -> str:
+    """Drop ``<system-reminder>...</system-reminder>`` blocks in linear time.
+
+    The previous ``re.sub(r"<system-reminder>.*?</system-reminder>", "", text,
+    flags=re.DOTALL)`` is quadratic on adversarial input: every opener with no
+    closer makes the lazy ``.*?`` rescan to the end of the string looking for a
+    closer that never arrives, so a turn with many openers and no closers costs
+    O(n^2). That scan runs synchronously on the event loop in ``abefore_model``,
+    before the HTTP timeout can apply, so a crafted long turn could stall other
+    runs in the worker. This single left-to-right pass is O(n): each ``find``
+    resumes where the previous one stopped, so the scanned regions never overlap.
+    As with the non-greedy regex, only fully closed blocks are removed; an opener
+    with no closer anywhere after it leaves the remaining text verbatim.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        open_idx = text.find(_REMINDER_OPEN, i)
+        if open_idx == -1:
+            out.append(text[i:])
+            break
+        close_idx = text.find(_REMINDER_CLOSE, open_idx + len(_REMINDER_OPEN))
+        if close_idx == -1:
+            # No closer for this opener: keep the rest verbatim, exactly as the
+            # non-greedy regex would match nothing here.
+            out.append(text[i:])
+            break
+        out.append(text[i:open_idx])
+        i = close_idx + len(_REMINDER_CLOSE)
+    return "".join(out)
+
+
 def _latest_user_text(state: Any) -> str:
     """Return the most recent user message text, or an empty string.
 
@@ -228,24 +264,50 @@ def _latest_user_text(state: Any) -> str:
         return ""
     content = last.get("content") if isinstance(last, dict) else getattr(last, "content", "")
     text = _content_text(content)
-    text = re.sub(r"<system-reminder>.*?</system-reminder>", "", text, flags=re.DOTALL)
+    text = _strip_system_reminders(text)
     return text.strip()
 
 
 class SuperfastDecisionGateMiddleware(AgentMiddleware):
     """Shadow-only observer that classifies the incoming user turn and logs the route.
 
-    Registered at the front of the lead-agent middleware chain. It reads the most
-    recent user message, asks the decision backend the three typed questions, and
-    logs the recommended route and latency through the project logger. It never
-    returns state updates, never skips the model call, and never changes routing.
-    When the gate is disabled or unavailable it does nothing.
+    Registered at the front of the lead-agent middleware chain. On the async path
+    it reads the most recent user message, applies the configured PII boundary,
+    asks the decision backend the three typed questions, and logs the recommended
+    route and latency through the project logger. It never returns state updates,
+    never skips the model call, and never changes routing. When the gate is
+    disabled or unavailable it does nothing.
+
+    The shadow classifier needs an HTTP round-trip and runs only on the async
+    path, where the production gateway lives. The synchronous ``before_model``
+    hook is a deliberate no-op so synchronous graphs (for example
+    ``DeerFlowClient.stream()``) never raise and never block the event loop.
     """
+
+    def __init__(self, pii_redaction_config: Any = None) -> None:
+        super().__init__()
+        # The same PiiRedactionConfig the model-call wrapper uses, so the text
+        # sent to the decision service is redacted identically to the text the
+        # model sees. ``None`` (or a disabled config) leaves text unchanged.
+        self._pii_redaction_config = pii_redaction_config
 
     @staticmethod
     def enabled() -> bool:
         """Whether the gate should be installed for this process."""
         return is_enabled()
+
+    def before_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
+        """Synchronous counterpart: a deliberate no-op that fails open.
+
+        LangChain's agent factory registers the ``before_model`` node with a
+        ``None`` sync handler when only ``abefore_model`` is overridden, which
+        makes a synchronous run raise instead of responding. Providing this
+        no-op sync hook keeps the gate installed uniformly across sync and async
+        graphs while making synchronous runs behave exactly as if the gate were
+        absent: it never classifies, never issues the HTTP round-trip, and never
+        raises.
+        """
+        return None
 
     async def abefore_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
         if not is_enabled():
@@ -253,7 +315,20 @@ class SuperfastDecisionGateMiddleware(AgentMiddleware):
         user_text = _latest_user_text(state)
         if not user_text:
             return None
-        result = await classify_turn(user_text)
+        # Apply the configured PII boundary before the turn leaves for the
+        # decision service. The model-call redaction wrapper runs later, so the
+        # gate must redact its own request; if redaction fails, skip the request
+        # entirely rather than send unredacted protected identifiers (fail-open).
+        try:
+            from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+
+            safe_text = redact_text(user_text, self._pii_redaction_config)
+        except Exception:
+            logger.debug("superfast gate redaction failed (fail-open, request skipped)")
+            return None
+        if not safe_text or not safe_text.strip():
+            return None
+        result = await classify_turn(safe_text)
         if result is None:
             return None
         route, latency_ms = result
