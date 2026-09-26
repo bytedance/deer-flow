@@ -331,7 +331,7 @@
 - **技能：** 删除包目录为运维方管理的符号链接的自定义技能现在可以成功。存储契约允许
   `custom/` 下的一级链接，但 `delete_custom_skill` 用 `shutil.rmtree` 删除包目录，而它拒绝
   符号链接：删除在写入历史记录之后以 `OSError` 失败，退出时清空了用户的技能投影视图，
-  `DELETE /api/skills/custom/{name}` 返回 500。现在只移除链接本身，绝不触碰其指向的外部目录。
+  `DELETE /api/skills/custom/{name}` 返回 500。现在只移除链接本身，绝不触碰其指向的外部目录。([#5881])
 - **前端：** 子任务渲染状态不再在 `MessageList` 渲染过程中被就地修
   改。子任务同步从渲染阶段移入 effect，因此即使任务上下文尚未发布
   更新，卡片也能立即拿到纯派生自消息的快照——修复了最终流式参数与
@@ -5192,3 +5192,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5855]: https://github.com/bytedance/deer-flow/pull/5855
 [#5856]: https://github.com/bytedance/deer-flow/pull/5856
 [#5859]: https://github.com/bytedance/deer-flow/pull/5859
+[#5881]: https://github.com/bytedance/deer-flow/pull/5881

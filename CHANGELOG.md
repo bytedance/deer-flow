@@ -330,7 +330,7 @@ This release closes that milestone with **181 merged pull requests**.
   `OSError` after its history record had been written, the user's projected
   skill view was cleared on the way out, and `DELETE /api/skills/custom/{name}`
   answered 500. The link itself is now removed; the external tree it points
-  at is never touched.
+  at is never touched. ([#5881])
 - **frontend:** Stop mutating subtask render state during `MessageList` render.
   Subtask synchronization moved from render into an effect, so cards immediately
   receive pure message-derived snapshots even before the task context publishes
@@ -6102,4 +6102,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5855]: https://github.com/bytedance/deer-flow/pull/5855
 [#5856]: https://github.com/bytedance/deer-flow/pull/5856
 [#5859]: https://github.com/bytedance/deer-flow/pull/5859
+[#5881]: https://github.com/bytedance/deer-flow/pull/5881
 
