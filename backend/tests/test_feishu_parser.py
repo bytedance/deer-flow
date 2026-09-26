@@ -77,6 +77,54 @@ def _feishu_file_channel(*responses):
     return channel
 
 
+@pytest.mark.parametrize("failure", [None, "sync", "release"])
+def test_feishu_receive_single_file_releases_sandbox_after_sync(tmp_path, monkeypatch, failure):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        channel = _feishu_file_channel(_feishu_file_response("note.txt", b"hello uploads"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = False
+        provider.acquire_async = AsyncMock(return_value="aio-1")
+        sandbox = provider.get.return_value
+        if failure == "sync":
+            sandbox.update_file.side_effect = RuntimeError("sync failed")
+        elif failure == "release":
+            provider.release.side_effect = RuntimeError("release failed")
+        monkeypatch.setattr(feishu_module, "get_paths", lambda: Paths(base_dir=tmp_path))
+        monkeypatch.setattr(feishu_module, "get_sandbox_provider", lambda: provider)
+
+        result = await channel._receive_single_file("message-1", "file-key", "file", "thread-a", user_id="owner-upload")
+
+        assert result == ("Failed to obtain the [file]" if failure == "sync" else "/mnt/user-data/uploads/note.txt")
+        provider.acquire_async.assert_awaited_once_with("thread-a", user_id="owner-upload")
+        sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/note.txt", b"hello uploads")
+        provider.release.assert_called_once_with("aio-1")
+
+    _run(go())
+
+
+def test_feishu_receive_single_file_skips_release_for_mounted_sandbox(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        channel = _feishu_file_channel(_feishu_file_response("note.txt", b"hello uploads"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr(feishu_module, "get_paths", lambda: Paths(base_dir=tmp_path))
+        monkeypatch.setattr(feishu_module, "get_sandbox_provider", lambda: provider)
+
+        result = await channel._receive_single_file("message-1", "file-key", "file", "thread-a", user_id="owner-upload")
+
+        assert result == "/mnt/user-data/uploads/note.txt"
+        provider.acquire.assert_not_called()
+        provider.acquire_async.assert_not_called()
+        provider.get.assert_not_called()
+        provider.release.assert_not_called()
+
+    _run(go())
+
+
 def test_feishu_on_message_plain_text():
     bus = MessageBus()
     config = {"app_id": "test", "app_secret": "test"}

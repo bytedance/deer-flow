@@ -289,6 +289,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
                 dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
                 if SKILL_MD_FILE not in file_names:
                     continue
+                dir_names.clear()
                 yield SkillCategory.INTEGRATION, integration_path, Path(current_root) / SKILL_MD_FILE
 
         # 3. Custom skills: prefer user-level directory
