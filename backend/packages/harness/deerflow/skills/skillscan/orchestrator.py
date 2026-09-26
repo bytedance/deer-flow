@@ -355,6 +355,38 @@ def _python_secret_assignment_target(node: ast.expr) -> str | None:
     return None
 
 
+def _python_secret_literal_bindings(node: ast.AST) -> list[tuple[ast.expr, ast.expr]]:
+    """Yield ``(target, value)`` pairs that bind a literal through this node.
+
+    Covers more than plain assignments: a keyword argument
+    (``connect(token="...")``), a named expression (``(secret := "...")``) and
+    positional/keyword-only parameter defaults (``def load(api_key="...")``)
+    are all ``name = literal`` shapes that the previous sweep caught by text
+    but the AST walk missed (#5690).
+    """
+    if isinstance(node, ast.Assign):
+        return [(target, node.value) for target in node.targets]
+    if isinstance(node, ast.AnnAssign):
+        # A bare annotation binds no value at all, so `value` stays None.
+        return [(node.target, node.value)]
+    if isinstance(node, ast.keyword):
+        return [(ast.Name(node.arg), node.value)] if node.arg else []
+    if isinstance(node, ast.NamedExpr):
+        return [(node.target, node.value)]
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        pairs: list[tuple[ast.expr, ast.expr]] = []
+        positional = node.args.posonlyargs + node.args.args
+        defaults = [None] * (len(positional) - len(node.args.defaults)) + list(node.args.defaults)
+        for arg, default in zip(positional, defaults):
+            if default is not None:
+                pairs.append((ast.Name(arg.arg), default))
+        for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults):
+            if default is not None:
+                pairs.append((ast.Name(arg.arg), default))
+        return pairs
+    return []
+
+
 def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFinding]:
     """Report embedded Python secrets from real literal assignments, not from raw text.
 
@@ -373,20 +405,14 @@ def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFi
         return _scan_secret_assignments_by_text(rel_path, text)
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            targets, value = list(node.targets), node.value
-        elif isinstance(node, ast.AnnAssign):
-            # A bare annotation binds no value at all, so `value` stays None.
-            targets, value = [node.target], node.value
-        else:
-            continue
-        if not isinstance(value, ast.Constant) or not isinstance(value.value, (str, bytes, int)):
-            continue
-        literal = value.value.decode("utf-8", "replace") if isinstance(value.value, bytes) else str(value.value)
-        if _looks_like_placeholder(literal):
-            continue
-        if any(_SECRET_ASSIGNMENT_NAME_RE.match(_python_secret_assignment_target(target) or "") for target in targets):
-            return [_finding_for_node("secret-env-assignment", rel_path, value, literal)]
+        for target, value in _python_secret_literal_bindings(node):
+            if not isinstance(value, ast.Constant) or not isinstance(value.value, (str, bytes, int)):
+                continue
+            literal = value.value.decode("utf-8", "replace") if isinstance(value.value, bytes) else str(value.value)
+            if _looks_like_placeholder(literal):
+                continue
+            if _SECRET_ASSIGNMENT_NAME_RE.match(_python_secret_assignment_target(target) or ""):
+                return [_finding_for_node("secret-env-assignment", rel_path, value, literal)]
     return []
 
 
