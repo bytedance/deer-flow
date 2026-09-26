@@ -70,6 +70,11 @@ def _bound_error(error: str | None) -> str | None:
     return error[:_MAX_PERSISTED_ERROR_CHARS]
 
 
+def _notification_completion_time(*, not_before: datetime) -> datetime:
+    """Return notification completion time without moving before the claim."""
+    return max(not_before, datetime.now(UTC))
+
+
 def _consume_task_error(task: asyncio.Future[Any]) -> BaseException | None:
     try:
         return task.exception()
@@ -843,30 +848,32 @@ class McpTaskService:
             release=self._release_notification_after_cancellation,
         )
         if records:
-            states, results = await self._run_claimed_batch(
+            await self._run_claimed_batch(
                 records,
-                operation=lambda record: self._notify_one_claimed(record, now=now),
+                operation=lambda record: self._notify_one_claimed_safely(record, now=now),
                 release=self._release_notification_after_cancellation,
                 action="notification",
             )
-            for state, result in zip(states, results, strict=True):
-                if not isinstance(result, BaseException) or isinstance(result, asyncio.CancelledError):
-                    continue
-                record = state.record
-                error = _bound_error(str(result) or type(result).__name__) or type(result).__name__
-                logger.error(
-                    "Unexpected MCP task notification failure (task_id=%s)",
-                    record.get("id"),
-                    exc_info=(type(result), result, result.__traceback__),
-                )
-                await self._release_notification_failure(record, now=now, error=error)
+
+    async def _notify_one_claimed_safely(self, record: dict[str, Any], *, now: datetime) -> None:
+        try:
+            await self._notify_one_claimed(record, now=now)
+        except Exception as exc:  # noqa: BLE001 - isolate one notification from its claimed siblings
+            error = _bound_error(str(exc) or type(exc).__name__) or type(exc).__name__
+            logger.error(
+                "Unexpected MCP task notification failure (task_id=%s)",
+                record.get("id"),
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            await self._release_notification_failure(record, now=now, error=error)
 
     async def _notify_one_claimed(self, record: dict[str, Any], *, now: datetime) -> None:
         task_id = record["id"]
         dispatch_version = int(record.get("dispatch_version") or 0)
         notification_attempts = max(0, int(record.get("notification_attempt_count") or 0))
-        if notification_attempts >= _MAX_NOTIFICATION_ATTEMPTS:
+        if record.get("notification_status") != "launching" and notification_attempts >= _MAX_NOTIFICATION_ATTEMPTS:
             previous_error = record.get("notification_error") or "delivery failed"
+            completed_at = _notification_completion_time(not_before=now)
             await self._repository.dead_letter_notification(
                 task_id,
                 lease_owner=self._lease_owner,
@@ -874,12 +881,13 @@ class McpTaskService:
                 dispatch_version=dispatch_version,
                 error=_bound_error(f"Notification delivery stopped after {notification_attempts} failed attempts: {previous_error}"),
                 count_failure=False,
-                now=now,
+                now=completed_at,
             )
             return
 
         if record.get("notification_status") == "dispatched":
             run = await self._get_run(record.get("notification_run_id"), user_id=record["user_id"])
+            completed_at = _notification_completion_time(not_before=now)
             status = getattr(run, "status", None)
             if run is None:
                 run_id = record.get("notification_run_id")
@@ -889,9 +897,9 @@ class McpTaskService:
                     notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
                     delivered=False,
-                    next_notification_at=now + timedelta(seconds=self._notification_retry_seconds(record)),
+                    next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
                     error=_bound_error(f"Notification run {run_id!r} was not found"),
-                    now=now,
+                    now=completed_at,
                 )
             elif status == RunStatus.success:
                 await self._repository.finish_notification_run(
@@ -902,7 +910,7 @@ class McpTaskService:
                     delivered=True,
                     next_notification_at=None,
                     error=None,
-                    now=now,
+                    now=completed_at,
                 )
             elif status in {RunStatus.error, RunStatus.timeout, RunStatus.interrupted}:
                 await self._repository.finish_notification_run(
@@ -911,9 +919,9 @@ class McpTaskService:
                     notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
                     delivered=False,
-                    next_notification_at=now + timedelta(seconds=self._notification_retry_seconds(record)),
+                    next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
                     error=_bound_error(getattr(run, "error", None) or f"Notification run ended with {status}"),
-                    now=now,
+                    now=completed_at,
                 )
             else:
                 await self._repository.defer_dispatched_notification(
@@ -921,8 +929,8 @@ class McpTaskService:
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
-                    next_notification_at=now + timedelta(seconds=self._poll_interval_seconds),
-                    now=now,
+                    next_notification_at=completed_at + timedelta(seconds=self._poll_interval_seconds),
+                    now=completed_at,
                 )
             return
 
@@ -938,6 +946,7 @@ class McpTaskService:
                 event=dict(record.get("dispatch_event") or {}),
             )
         except PermanentNotificationError as exc:
+            completed_at = _notification_completion_time(not_before=now)
             await self._repository.dead_letter_notification(
                 task_id,
                 lease_owner=self._lease_owner,
@@ -945,10 +954,11 @@ class McpTaskService:
                 dispatch_version=dispatch_version,
                 error=_bound_error(str(exc) or type(exc).__name__),
                 count_failure=True,
-                now=now,
+                now=completed_at,
             )
             return
         except ConflictError as exc:
+            completed_at = _notification_completion_time(not_before=now)
             retry_error = _bound_error(str(exc))
             await self._release_ordinary_batch_record(
                 record,
@@ -956,7 +966,7 @@ class McpTaskService:
                     task_id,
                     lease_owner=self._lease_owner,
                     notification_lease_token=record["notification_lease_token"],
-                    next_notification_at=now + timedelta(seconds=self._poll_interval_seconds),
+                    next_notification_at=completed_at + timedelta(seconds=self._poll_interval_seconds),
                     error=retry_error,
                     replace_with_latest=True,
                 ),
@@ -964,28 +974,44 @@ class McpTaskService:
             )
             return
         except Exception as exc:  # noqa: BLE001 - retry the same idempotency key
+            completed_at = _notification_completion_time(not_before=now)
             retry_error = _bound_error(str(exc) or type(exc).__name__)
-            await self._release_ordinary_batch_record(
-                record,
-                release=lambda: self._repository.release_notification_claim(
-                    task_id,
-                    lease_owner=self._lease_owner,
-                    notification_lease_token=record["notification_lease_token"],
-                    next_notification_at=now + timedelta(seconds=self._notification_retry_seconds(record)),
-                    error=retry_error,
-                    replace_with_latest=True,
-                    count_failure=True,
-                ),
-                action="release notification retry",
-            )
+            if record.get("notification_status") == "launching":
+                await self._release_ordinary_batch_record(
+                    record,
+                    release=lambda: self._repository.release_notification_lease(
+                        task_id,
+                        lease_owner=self._lease_owner,
+                        notification_lease_token=record["notification_lease_token"],
+                        next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
+                        error=retry_error,
+                        count_failure=False,
+                    ),
+                    action="release uncertain notification launch",
+                )
+            else:
+                await self._release_ordinary_batch_record(
+                    record,
+                    release=lambda: self._repository.release_notification_claim(
+                        task_id,
+                        lease_owner=self._lease_owner,
+                        notification_lease_token=record["notification_lease_token"],
+                        next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
+                        error=retry_error,
+                        replace_with_latest=True,
+                        count_failure=True,
+                    ),
+                    action="release notification retry",
+                )
             return
+        completed_at = _notification_completion_time(not_before=now)
         await self._repository.mark_notification_dispatched(
             task_id,
             lease_owner=self._lease_owner,
             notification_lease_token=record["notification_lease_token"],
             dispatch_version=dispatch_version,
             run_id=result["run_id"],
-            now=now,
+            now=completed_at,
         )
 
     def _notification_retry_seconds(self, record: dict[str, Any]) -> int:
@@ -1176,52 +1202,21 @@ class McpTaskService:
         now: datetime,
         error: str,
     ) -> None:
-        task = asyncio.create_task(
-            self._repository.release_notification_lease(
-                record["id"],
-                lease_owner=self._lease_owner,
-                notification_lease_token=record["notification_lease_token"],
-                next_notification_at=now + timedelta(seconds=self._notification_retry_seconds(record)),
-                error=error,
-                count_failure=True,
-            ),
-            name=f"mcp-release-notification-failure-{record.get('id', 'unknown')}",
-        )
+        completed_at = _notification_completion_time(not_before=now)
         try:
-            await asyncio.wait_for(
-                asyncio.shield(task),
-                timeout=_CANCELLATION_DRAIN_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            self._track_compensation_task(
-                task,
+            await self._release_ordinary_batch_record(
+                record,
+                release=lambda: self._repository.release_notification_lease(
+                    record["id"],
+                    lease_owner=self._lease_owner,
+                    notification_lease_token=record["notification_lease_token"],
+                    next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
+                    error=error,
+                    count_failure=record.get("notification_status") != "launching",
+                ),
                 action="release notification failure",
-                task_id=record["id"],
             )
-            logger.warning(
-                "Timed out after %.1f seconds waiting for MCP task notification release; it continues in the background (task_id=%s)",
-                _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
-                record["id"],
-            )
-            return
         except asyncio.CancelledError:
-            caller_cancelling = asyncio.current_task().cancelling()
-            release_cancelled = _task_has_cancelled_terminal_state(task)
-            if release_cancelled and not caller_cancelling:
-                error = _consume_task_error(task)
-                if error is not None:
-                    self._log_batch_release_error(
-                        error,
-                        action="release notification failure",
-                        task_id=record["id"],
-                    )
-                return
-            await self._drain_cancellation_task(
-                task,
-                action="release notification failure",
-                task_id=record["id"],
-                deadline=asyncio.get_running_loop().time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
-            )
             raise
         except Exception:  # noqa: BLE001 - retain the task-scoped failure
             logger.exception(
@@ -1247,7 +1242,7 @@ class McpTaskService:
         record: dict[str, Any],
     ) -> None:
         task_id = record["id"]
-        if record.get("notification_status") == "dispatched":
+        if record.get("notification_status") in {"launching", "dispatched"}:
             compensation = self._repository.release_notification_lease(
                 task_id,
                 lease_owner=self._lease_owner,
@@ -1256,7 +1251,7 @@ class McpTaskService:
                 error=record.get("notification_error"),
                 count_failure=False,
             )
-            action = "release dispatched notification lease"
+            action = "release in-flight notification lease"
         else:
             compensation = self._repository.release_notification_claim(
                 task_id,
