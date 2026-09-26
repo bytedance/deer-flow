@@ -626,6 +626,27 @@ class DeerFlowClient:
             return "\n".join(pieces) if pieces else ""
         return str(content)
 
+    @staticmethod
+    def _resume_baseline_messages(checkpointer: Any, checkpoint_config: dict[str, Any]) -> list[Any]:
+        """Messages already in the checkpoint a resume continues from.
+
+        A resume needs this because it passes ``Command(resume=...)`` and appends
+        no ``HumanMessage``, so the ``run_id`` marker that normally separates this
+        turn from history never appears in the snapshot.
+
+        Best effort: without a baseline the stream is noisy, so a failure here
+        must not fail the resume.
+        """
+        if checkpointer is None:
+            return []
+        try:
+            snapshot = _run_async_from_sync(checkpointer.aget_tuple(checkpoint_config))
+            messages = (getattr(snapshot, "checkpoint", None) or {}).get("channel_values", {}).get("messages")
+        except Exception:
+            logger.debug("Could not read a resume baseline for thread %s", checkpoint_config, exc_info=True)
+            return []
+        return list(messages) if isinstance(messages, Sequence) and not isinstance(messages, (str, bytes)) else []
+
     # ------------------------------------------------------------------
     # Public API — threads
     # ------------------------------------------------------------------
@@ -1050,7 +1071,7 @@ class DeerFlowClient:
         else:
             state = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
         context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
-        if kwargs.get(DISABLE_TOOL_APPROVAL_KEY):
+        if resume is None and kwargs.get(DISABLE_TOOL_APPROVAL_KEY):
             context[DISABLE_TOOL_APPROVAL_KEY] = True
         if kwargs.get(TOOL_APPROVAL_OMIT_KEY):
             context[TOOL_APPROVAL_OMIT_KEY] = kwargs[TOOL_APPROVAL_OMIT_KEY]
@@ -1080,6 +1101,29 @@ class DeerFlowClient:
         counted_usage_ids: set[str] = set()
         sent_additional_kwargs_by_id: dict[str, dict[str, Any]] = {}
         cumulative_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+        # A resume appends no ``HumanMessage``, so the ``run_id`` marker used
+        # below never appears and the baseline must come from the checkpoint.
+        #
+        # The trailing AI message is held out of ``historical_message_ids`` but
+        # still counted in ``counted_usage_ids``, because those two answer
+        # different questions. It carries the gated tool calls and ``edit``
+        # rewrites its args under the same id, so suppressing it as history would
+        # drop the human's edit — the skip is a ``continue`` ahead of the "same
+        # id, replaced" branch, and that branch re-emits appended text only,
+        # never tool calls. Re-emitting it is harmless: clients merge a
+        # ``messages-tuple`` event into the message with that id, which is how an
+        # edit reaches them at all. Its ``usage_metadata`` is another matter — the
+        # tokens were spent on the turn that parked and were counted there, so
+        # counting them again would bill this resume for the park's model call.
+        if resume is not None:
+            baseline = self._resume_baseline_messages(checkpointer, checkpoint_config)
+            reviewable = next((index for index in range(len(baseline) - 1, -1, -1) if isinstance(baseline[index], AIMessage)), None)
+            for index, msg in enumerate(baseline):
+                if msg_id := getattr(msg, "id", None):
+                    counted_usage_ids.add(msg_id)
+                    if index != reviewable:
+                        historical_message_ids.add(msg_id)
 
         def _account_usage(msg_id: str | None, usage: Any) -> dict | None:
             """Add *usage* to cumulative totals if this id has not been counted.

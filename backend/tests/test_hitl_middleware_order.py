@@ -78,7 +78,7 @@ def test_registration_is_not_gated_on_a_client_capability_flag(gated_chain):
     ``DeerFlowClient.resume()`` unreachable for the embedded callers that do
     implement the resume protocol. Clients without an approval surface send
     ``disable_tool_approval`` on the run instead — see
-    ``tests/test_tui_disables_tool_approval.py`` and
-    ``tests/test_gateway_disables_tool_approval.py``.
+    ``tests/test_tool_approval_client_downgrade.py``, which pins that opt-out at
+    every such entry point.
     """
     assert any(isinstance(m, DeerFlowHumanInTheLoopMiddleware) for m in gated_chain)

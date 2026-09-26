@@ -4,9 +4,13 @@ Read this guide before changing tool approval, its middleware ordering, or the
 REST/stream surfaces that carry a pending approval. It is the depth for entry 37
 of the
 [middlewares guide](../packages/harness/deerflow/agents/middlewares/AGENTS.md),
-which only names the middleware and links here: that chain sits 15 bytes under
-`scripts/check_agent_guidance.py`'s hard limit and `app/gateway/AGENTS.md` 26
-under its own, so neither has room for more than a pointer. Anything that would
+which only names the middleware and links here. Neither guide has room for more
+than a pointer, against two different `scripts/check_agent_guidance.py` limits:
+that middleware chain runs close to the hard *chain* budget of 98304 bytes
+(inherited from four ancestors — adding entry 37 is what pushed it over, and
+entry 38's depth had to move to [Clarification](CLARIFICATION.md) to make room),
+and `app/gateway/AGENTS.md` sits 26 bytes under the hard *per-file* one (49126
+of 49152). Anything that would
 have gone in those guides belongs here, and the middleware's own docstrings
 carry the load-bearing invariants.
 
@@ -77,7 +81,66 @@ decisions is by definition the human this downgrade exists to protect. The path
 is reachable: a thread parked by an embedded `DeerFlowClient` on a shared
 checkpointer is visible over HTTP, and `GET /threads/{id}.interrupts` plus
 `docs/API.md` tell clients to resume it this way. Pinned by
-`test_a_resume_is_not_downgraded` and its two siblings.
+`tests/test_tool_approval_client_downgrade.py::test_a_resume_is_not_downgraded`
+and `::test_a_resume_with_no_decisions_is_still_not_downgraded`, with
+`::test_an_empty_command_still_downgrades` holding the other side.
+
+`DeerFlowClient._stream_turn` applies the same exclusion, and it is the entry
+point where the trap is easiest to fall into: `resume()` forwards `**kwargs`
+verbatim and its docstring advertises them as "same overrides as `stream()`", so
+a caller holding `disable_tool_approval` for its session would downgrade the one
+call that must not be. The embedded client is precisely the caller expected to
+park and answer — and the TUI passes that switch at every call site today, so it
+would hit this the moment it grows a resume submission, in the very change meant
+to remove the downgrade. Pinned by
+`tests/test_client_tool_approval.py::TestResumeIsNeverDowngraded`.
+
+### A resume seeds its dedup baseline from the checkpoint
+
+`_stream_turn` separates "this turn" from history by finding the `HumanMessage`
+that carries this call's `run_id`, and everything before it becomes
+`historical_message_ids` — skipped as a delta and excluded from cumulative usage.
+A resume passes `Command(resume=...)` and deliberately appends no `HumanMessage`,
+so that marker never appears: the index resolves to `None`, the baseline stays
+empty, and on a populated thread the whole prior turn is re-emitted as new deltas
+while its `usage_metadata` is added to this resume's total.
+
+`_resume_baseline_messages` therefore reads the parked checkpoint directly when
+`resume` is set. It is best effort — a failed read costs a noisy stream, not the
+resume.
+
+**The trailing AI message is held out of the history set but still added to the
+usage ledger**, and the split is the subtle part — the two sets answer different
+questions.
+
+It must not be history: it carries the gated tool calls, and `edit` rewrites its
+args under the *same id*. The baseline skip is a `continue` ahead of the "same id,
+different object" branch, and that branch re-emits appended *text* only, never
+tool calls, so suppressing this id would silently drop the human's edit.
+Re-emitting it costs nothing, because a `messages-tuple` event merges into the
+message carrying that id — which is precisely how an edit reaches the client.
+
+Its `usage_metadata` is the opposite case: those tokens were spent by the model
+call that produced the gated request, on the turn that parked, and were counted
+there. Counting them again would bill the resume for the park's model call. So the
+id goes into `counted_usage_ids` regardless.
+
+Pinned by `tests/test_client_tool_approval.py::TestResumeDoesNotReplayThePriorTurn`
+— `test_an_edited_gated_call_still_reaches_the_client` for the history exclusion,
+`test_the_gated_calls_own_usage_is_not_counted_again` for the usage inclusion, and
+`test_an_ordinary_turn_still_uses_its_run_id_marker` for the unchanged path.
+
+### The resume payload is validated, not trusted
+
+`start_run` forwards any non-`None` `command.resume` straight into
+`Command(resume=...)`, so what comes back from `interrupt()` is client-shaped: a
+bare string, a mapping with no `decisions`, or a `decisions` that is not a list.
+`_gate_on_review_batch` checks the shape before subscripting it and raises the
+same style of `ValueError` it raises for a decision-count mismatch. Every one of
+those inputs fails closed either way — the run errors and the checkpoint keeps
+its pending write, so the thread can be resumed again — so this is about the
+operator getting a failure that names the contract instead of a `KeyError` from
+wherever Python happened to complain. Pinned by `TestResumePayloadShape`.
 
 ## Middleware placement
 
@@ -160,26 +223,41 @@ catch this). Never name a `@task`-wrapped function's parameter `runtime`.
 
 ## Deviations from upstream
 
-1. **Two downgrade switches**, either of which auto-approves everything, so no
+1. **Two downgrade reasons**, either of which auto-approves everything, so no
    caller without a human on the other end can park a thread nobody can resume.
    `disable_tool_approval` is the tool-approval counterpart of
    `disable_clarification`, set by `channels/manager.py` for **all** channels
-   before the empty-by-default `CHANNEL_RUN_POLICY` lookup.
-   `non_interactive` is the pre-existing marker already set by the scheduler and
-   the MCP task-notification launcher, and already used to strip
-   `ask_clarification` from the toolset; reading it here means a non-interactive
-   entrypoint does not have to opt in twice, and mirrors how
-   `sandbox/middleware.py` treats the pair as one signal. Honouring only the
-   newer key is what left scheduled runs parking unresumably.
+   before the empty-by-default `CHANNEL_RUN_POLICY` lookup. It is the only raw
+   key `_approval_disabled` reads, because it is this middleware's own opt-out
+   for a client that has no approval surface.
+
+   Everything else goes through `resolve_run_interaction_policy`, the repo's one
+   definition of "no human is attached to this run" — the same call
+   `ClarificationMiddleware._clarification_disabled` and `sandbox/middleware.py`
+   make. That resolver covers `non_interactive` (scheduler, MCP task
+   notifications), `interaction_mode` (a GitHub webhook run sets `webhook`) and
+   `channel_name`. Reading `non_interactive` directly instead is a bug in two
+   directions: a run marked only by `interaction_mode` or `channel_name` would
+   park here with nothing able to post `Command(resume=...)`, and since
+   `interaction_mode` takes *precedence* over `non_interactive` inside the
+   resolver, a raw read can also invert the answer relative to clarification on
+   the same run — the model being invited to ask a question while every tool call
+   is silently auto-approved. Honouring only the newer key is what left scheduled
+   runs parking unresumably. Pinned by
+   `tests/test_human_in_the_loop_middleware.py::TestUnattendedRunsShareOneSignal`.
 2. **`tool_approval_omit`** carries tool names the human stopped wanting to be
    asked about ("don't ask again"), scoped to one caller's session rather than
    persisted to config. It is the one runtime-only key a client legitimately
    supplies, so the Gateway normalizes its shape and caps its length
    (`MAX_TOOL_APPROVAL_OMIT_ENTRIES`) rather than forwarding it verbatim. It
-   must be on `_CONTEXT_RUNTIME_ONLY_KEYS` to reach `runtime.context` at all:
-   `merge_run_context_overrides` forwards whitelisted keys only, and omitting it
-   is what first shipped the browser's button inert while the TUI's — a direct
-   `DeerFlowClient` caller that never crosses the Gateway — worked. Its shape is
+   must be on `_CONTEXT_CLIENT_RUNTIME_ONLY_KEYS` to reach `runtime.context` at
+   all: `merge_run_context_overrides` forwards whitelisted keys only, and
+   omitting it is what first shipped the browser's button inert while the TUI's
+   — a direct `DeerFlowClient` caller that never crosses the Gateway — worked.
+   That set, not `_CONTEXT_RUNTIME_ONLY_KEYS`, and the difference is the whole
+   point: keys on the latter are internal-only and `strip_internal_context_keys`
+   deletes a client's copy, which for this key would make the browser's button
+   inert all over again. Its shape is
    sanitized twice, not once: `merge_run_context_overrides` normalizes the copy
    it merges in from `body.context`, but `build_run_config` copies a client's
    `body.config['context']` largely verbatim, so a client naming the key there
@@ -240,6 +318,57 @@ and rewrite nothing. Pinned by
 which asserts each surface separately — a test that checks only `tool_calls`
 cannot catch this.
 
+### An `edit` is checked against the schema the human was shown
+
+The captured `args_schema` is forwarded into the `ReviewConfig` precisely so a
+client can render a schema-driven edit form, which makes it the contract the
+human was shown — but nothing downstream re-checks the reply. Upstream's
+`_process_decision` builds the revised call straight out of `edited_action`, and
+a tool declared with a raw-JSON `args_schema` gets no pydantic check at execution
+either, so an unvalidated bad edit would simply run. `_check_decision` validates
+`edited_action["args"]` against that same schema with `jsonschema`'s
+`Draft202012Validator` and raises `ValueError` naming the offending field.
+
+The check is exactly the schema and deliberately nothing stricter, which bounds
+what it catches. Against the real captured schema for `bash_tool`:
+
+| Edit | Result |
+| --- | --- |
+| the original args, resubmitted unchanged | accepted |
+| an optional field omitted (`timeout` has a default) | accepted |
+| an unknown extra key | **accepted** — see below |
+| a missing required field (`command`) | refused |
+| a required field set to `null` | refused |
+
+Unknown keys pass because pydantic emits no `additionalProperties: false`, and
+adding one here would make approval *stricter* than the ungated path: the same
+call with the same extra key executes fine when approval is off, and a human
+resubmitting what they were shown could be refused. The tool ignores fields it
+does not declare. So this validation is a guard against an edit that is broken
+on its face, not a schema-tightening layer. `TestEditIsValidatedAgainstTheArgsSchema`
+uses the real captured schema rather than a hand-written one for exactly this
+reason — a local schema with `additionalProperties: false` makes an
+unknown-field test pass while production accepts that edit — and
+`test_the_captured_schema_shape_these_tests_rely_on` pins the shape those
+expectations depend on.
+
+Two deliberate asymmetries. A schema the validator cannot walk is **our**
+capture's problem, not the human's, so it logs and allows the edit rather than
+refusing it — and both the construction and the `iter_errors` walk are guarded,
+since an invalid `type` only raises when the validator reaches it. And when no
+schema was captured at all the client was editing raw JSON, so there is nothing
+to validate against.
+
+`_check_decision` also runs *before* `_process_decision`, not after, because that
+upstream method reads `edited_action["name"]` unguarded: a client omitting the key
+would get a bare `KeyError` from library code before any check here could describe
+the contract. The rename refusal lives in the same place, for the same reason —
+`interrupt_on` is name-keyed, so a rename would run a *different* tool under the
+approval its own gate never issued, and `rewrite_tool_call_args` rewrites args but
+not names, so a rename would also leave the raw payload and content blocks naming
+the old tool. Pinned by `TestEditIsValidatedAgainstTheArgsSchema` and
+`TestEditShapeIsValidated`.
+
 ## Wire format
 
 A parked run keeps its payload on `snapshot.tasks` only. LangGraph records
@@ -268,9 +397,41 @@ stream requests `messages-tuple`/`updates`/`custom` while deliberately dropping
 routes that frame through `serialize_lc_object`, whose `Interrupt` branch gives
 it the same `{value, id}` shape as every other surface. Anything that changes the
 chat stream's mode set, or that starts rewriting non-`values` frames, has to keep
-that frame intact or the browser loses its approval card until the client's
-post-stream history refetch. The consuming side is documented under "Detecting a
-park" in `frontend/src/AGENTS.md`.
+that frame intact. No browser code reads it yet — the web UI downgrades instead,
+per the client table above — so this row is the wire contract the approval card
+will consume, not a description of a live consumer; the change that builds that
+card documents the consuming side in `frontend/src/AGENTS.md`.
+
+### A park is not a finished turn
+
+`interrupt()` exits the graph **normally**: the stream ends cleanly, so the run
+worker stages `RunStatus.success` — `RunStatus.interrupted` is only ever set by
+the cancellation path, and the worker never inspects `__interrupt__`. A park
+therefore reaches the run-history metadata writer looking exactly like a
+completed turn.
+
+Writing there would destroy the park. `pending_writes` is not a field of the
+checkpoint — the checkpointer keys it by checkpoint id — so
+`persist_run_history_metadata`'s `aput`, which parents a *new* latest checkpoint
+on the parked one, cannot carry it over. The pending task stays behind on the old
+id while the new checkpoint becomes latest, and every subsequent
+`GET /threads/{id}` or `/state` read then reports no pending approval even though
+the client just saw one on the stream. The thread stays resumable — a
+`Command(resume=...)` still finds the write — so what is lost is precisely the
+read surface an approval UI depends on.
+
+`persist_run_history_metadata` therefore returns early when the head checkpoint
+still carries an `__interrupt__` pending write. Skipping is correct rather than
+merely safe: a duration measured on a turn that has not ended is not that turn's
+duration, and the run that eventually completes the turn writes its own entry.
+Its other caller is a read-through history cache that already treats a skip as
+retryable, and no production caller reads the return value.
+
+This is reachable only because tool approval stopped being downgraded for
+Gateway resumes: before that no HTTP run could park, so "approve, then hit a
+second gated call" could not happen. Pinned by
+`tests/test_run_duration_preserves_park.py`, which drives a real compiled graph
+through park → approve → second park against an `InMemorySaver`.
 
 `interrupts` is added to a task only when one is pending, so an ordinary
 in-flight task keeps the `{id, name}` shape older clients already parse.

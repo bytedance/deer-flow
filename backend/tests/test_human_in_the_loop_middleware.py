@@ -18,6 +18,7 @@ from deerflow.agents.middlewares.human_in_the_loop import (
     NON_INTERACTIVE_KEY,
     TOOL_APPROVAL_OMIT_KEY,
     DeerFlowHumanInTheLoopMiddleware,
+    _tool_args_schema,
     create_interrupt_middleware,
 )
 from deerflow.config.tool_config import InterruptOnConfig as InterruptOnConfigModel
@@ -33,6 +34,10 @@ def bash_tool(command: str, timeout: int = 30) -> str:
 
 class _InterruptReached(Exception):
     """Sentinel raised in place of ``interrupt()`` to prove the gate fired."""
+
+
+# Distinguishes "no raw resume requested" from a raw resume of ``None``.
+_UNSET = object()
 
 
 def _runtime(**context):
@@ -68,13 +73,17 @@ def _middleware(allowed_decisions=("approve", "edit", "reject", "respond"), **ex
 
 
 @contextmanager
-def _patched_interrupt(decisions):
+def _patched_interrupt(decisions, *, raw_resume=_UNSET):
     """Stand in for LangGraph's ``interrupt()``.
 
     Outside a running graph the real ``interrupt()`` raises ``RuntimeError``
     from ``get_config()``, so the resume value is injected by patching the
     module-level symbol the middleware calls. Pass ``None`` to make the call
     raise :class:`_InterruptReached` instead of resuming.
+
+    ``raw_resume`` returns that value verbatim instead of wrapping *decisions*,
+    which is how the malformed-payload tests reach the resume-shape guard: a
+    real client posts whatever it likes into ``Command(resume=...)``.
     """
     import deerflow.agents.middlewares.human_in_the_loop as mod
 
@@ -83,6 +92,8 @@ def _patched_interrupt(decisions):
 
     def fake_interrupt(request):
         captured["request"] = request
+        if raw_resume is not _UNSET:
+            return raw_resume
         if decisions is None:
             raise _InterruptReached
         return {"decisions": list(decisions)}
@@ -740,3 +751,255 @@ class TestReplaySafeAcrossContextChange:
         assert tool_message.tool_call_id == "call-1"
         assert tool_message.status == "error"
         assert tool_message.content == "too risky"
+
+
+class TestUnattendedRunsShareOneSignal:
+    """ "No human attached" has one definition, and this middleware uses it.
+
+    ``_approval_disabled`` resolves everything except its own
+    ``disable_tool_approval`` opt-out through
+    ``resolve_run_interaction_policy`` — the same call
+    ``ClarificationMiddleware._clarification_disabled`` and
+    ``sandbox/middleware.py`` make. Reading ``non_interactive`` directly instead
+    would miss the markers below, so a run nothing can answer would park: the
+    blanket Gateway downgrade and ``_apply_channel_policy`` mask that today, but
+    the middleware is registered on every lead-agent build and the next entry
+    point that forgets its own downgrade reintroduces the unanswerable park.
+    """
+
+    @pytest.mark.parametrize(
+        "context",
+        [
+            pytest.param({"interaction_mode": "webhook"}, id="webhook"),
+            pytest.param({"interaction_mode": "scheduled"}, id="scheduled"),
+            pytest.param({"interaction_mode": "autonomous"}, id="autonomous"),
+            pytest.param({"channel_name": "github"}, id="github-channel"),
+            pytest.param({"disable_clarification": True}, id="disable-clarification"),
+        ],
+    )
+    def test_an_unattended_run_does_not_park(self, context):
+        """Each of these is unattended, and none of them is ``non_interactive``."""
+        _assert_not_gated(_middleware(), _state([_call()]), _runtime(**context))
+
+    def test_interaction_mode_wins_over_non_interactive(self):
+        """The resolver's own precedence, so both HITL paths agree on one answer.
+
+        ``interaction_mode`` takes precedence over ``non_interactive`` inside
+        ``resolve_run_interaction_policy``. A raw read of ``non_interactive``
+        here would auto-approve every tool call on this run while
+        ``ClarificationMiddleware`` — which asks the resolver — treats it as
+        interactive and invites the model to ask the human a question.
+        """
+        runtime = _runtime(**{"interaction_mode": "interactive", NON_INTERACTIVE_KEY: True})
+
+        _assert_gated(_middleware(), _state([_call()]), runtime)
+
+    def test_the_middlewares_own_switch_still_wins(self):
+        """``disable_tool_approval`` is not part of the resolver's vocabulary.
+
+        It is this middleware's opt-out for a client with no approval surface,
+        so it has to be honoured on an otherwise fully interactive run.
+        """
+        runtime = _runtime(**{"interaction_mode": "interactive", DISABLE_TOOL_APPROVAL_KEY: True})
+
+        _assert_not_gated(_middleware(), _state([_call()]), runtime)
+
+    def test_an_invalid_interaction_mode_raises(self):
+        """Matches the resolver's other two callers rather than guessing a policy."""
+        runtime = _runtime(interaction_mode="not-a-mode")
+
+        with pytest.raises(ValueError, match="interaction_mode"):
+            _assert_gated(_middleware(), _state([_call()]), runtime)
+
+
+class TestResumePayloadShape:
+    """A malformed resume must raise this module's ``ValueError``, not a KeyError.
+
+    ``start_run`` forwards any non-``None`` ``command.resume`` verbatim into
+    ``Command(resume=...)``, so the value reaching ``interrupt()``'s return is
+    client-shaped. Each case below fails closed either way — the run errors and
+    the checkpoint keeps its pending write — so this is about the operator
+    getting a failure that names the contract.
+    """
+
+    @pytest.mark.parametrize(
+        ("raw_resume", "match"),
+        [
+            pytest.param("plain-value", "must be a mapping", id="bare-string"),
+            pytest.param(["approve"], "must be a mapping", id="bare-list"),
+            pytest.param(None, "must be a mapping", id="none"),
+            pytest.param({"approve_all": True}, "must carry a 'decisions' list", id="no-decisions-key"),
+            pytest.param({"decisions": "approve"}, "'decisions' must be a list", id="string-decisions"),
+            pytest.param({"decisions": 1}, "'decisions' must be a list", id="int-decisions"),
+        ],
+    )
+    def test_a_malformed_resume_is_refused(self, raw_resume, match):
+        with _patched_interrupt(None, raw_resume=raw_resume):
+            with pytest.raises(ValueError, match=match):
+                _middleware().after_model(_state([_call()]), _runtime())
+
+    def test_a_well_formed_resume_still_works(self):
+        """The guard must not reject the shape the contract actually specifies."""
+        with _patched_interrupt(None, raw_resume={"decisions": [{"type": "approve"}]}):
+            result = _middleware().after_model(_state([_call()]), _runtime())
+
+        assert result["messages"][0].tool_calls[0]["args"] == {"command": "rm -rf /"}
+
+    def test_a_decision_that_is_not_a_mapping_is_refused(self):
+        with _patched_interrupt(None, raw_resume={"decisions": ["approve"]}):
+            with pytest.raises(ValueError, match="decision must be a mapping"):
+                _middleware().after_model(_state([_call()]), _runtime())
+
+
+class TestEditIsValidatedAgainstTheArgsSchema:
+    """The schema shown to the human is also the one their edit must satisfy.
+
+    ``args_schema`` is forwarded into the ``ReviewConfig`` so a client can render
+    a schema-driven edit form, which makes it the contract the human was shown.
+    Nothing downstream re-checks the reply: ``_process_decision`` builds the
+    revised call straight out of ``edited_action``, and a tool declared with a
+    raw-JSON ``args_schema`` gets no pydantic check at execution either — so an
+    unvalidated bad edit simply runs.
+
+    The check is deliberately no stricter than the schema itself. It catches a
+    missing or mistyped *required* field; it does not reject unknown keys,
+    because the captured schema carries no ``additionalProperties: false``.
+    Tightening past the schema would refuse edits that the same tool accepts
+    when approval is switched off. Every test here uses the real captured
+    schema so that ceiling stays visible.
+    """
+
+    # The *real* captured schema, not a hand-written one. A hand-written schema
+    # can quietly overstate what this validation catches: adding
+    # ``additionalProperties: false`` to it makes an unknown-field test pass
+    # while production — where pydantic emits no such key — accepts that edit.
+    SCHEMA = _tool_args_schema(real_bash_tool)
+
+    def _edit(self, args, *, schema=None):
+        middleware = _middleware(args_schema=self.SCHEMA if schema is None else schema)
+        decision = {"type": "edit", "edited_action": {"name": "bash_tool", "args": args}}
+        return _resume(middleware, _state([_call()]), [decision])
+
+    def test_the_captured_schema_shape_these_tests_rely_on(self):
+        """Pins what the real schema does and does not constrain.
+
+        If pydantic ever starts emitting ``additionalProperties``, the
+        unknown-field expectation below becomes wrong rather than merely
+        conservative, and this test is what says so.
+        """
+        assert self.SCHEMA["required"] == ["command"]
+        assert "additionalProperties" not in self.SCHEMA
+        # ``timeout`` carries a default, so omitting it is valid input.
+        assert "timeout" not in self.SCHEMA["required"]
+
+    def test_a_valid_edit_is_accepted(self):
+        result, _ = self._edit({"command": "ls", "timeout": 5})
+
+        assert result["messages"][0].tool_calls[0]["args"] == {"command": "ls", "timeout": 5}
+
+    def test_resubmitting_the_original_args_unchanged_is_accepted(self):
+        """A human who reviews and approves as-is must not be refused.
+
+        The model generated these args against this same schema, so they are
+        valid by construction — but only if the validation is the schema's and
+        not something stricter layered on top.
+        """
+        result, _ = self._edit({"command": "rm -rf /"})
+
+        assert result["messages"][0].tool_calls[0]["args"] == {"command": "rm -rf /"}
+
+    def test_omitting_an_optional_field_is_accepted(self):
+        """``timeout`` has a default, so it is not part of ``required``."""
+        result, _ = self._edit({"command": "ls"})
+
+        assert result["messages"][0].tool_calls[0]["args"] == {"command": "ls"}
+
+    def test_a_missing_required_field_is_refused(self):
+        with pytest.raises(ValueError, match="does not satisfy the tool's args schema"):
+            self._edit({"timeout": 5})
+
+    def test_a_null_required_field_is_refused(self):
+        with pytest.raises(ValueError, match="does not satisfy the tool's args schema"):
+            self._edit({"command": None})
+
+    def test_the_failure_names_the_offending_field(self):
+        with pytest.raises(ValueError, match="command"):
+            self._edit({"timeout": 5})
+
+    def test_an_unknown_field_is_accepted(self):
+        """Documents the ceiling of this check, deliberately.
+
+        The captured schema has no ``additionalProperties: false`` — pydantic
+        does not emit one — so an extra key passes. Injecting that constraint
+        ourselves would make approval *stricter* than running the same tool
+        without approval, where the model's own extra keys execute fine, and a
+        human resubmitting what they were shown could then be refused. The tool
+        ignores what it does not declare, so this is left to it.
+        """
+        result, _ = self._edit({"command": "ls", "shell": "/bin/sh"})
+
+        assert result["messages"][0].tool_calls[0]["args"] == {"command": "ls", "shell": "/bin/sh"}
+
+    def test_no_captured_schema_accepts_any_args(self):
+        """Without a schema the client was editing raw JSON; nothing to check against."""
+        middleware = _middleware()  # no ``args_schema`` configured
+        decision = {"type": "edit", "edited_action": {"name": "bash_tool", "args": {"anything": True}}}
+        result, _ = _resume(middleware, _state([_call()]), [decision])
+
+        assert result["messages"][0].tool_calls[0]["args"] == {"anything": True}
+
+    def test_an_unbuildable_schema_does_not_block_the_human(self):
+        """A schema our own capture got wrong must not be the human's problem."""
+        result, _ = self._edit({"command": "ls"}, schema={"type": "not-a-json-schema-type"})
+
+        assert result["messages"][0].tool_calls[0]["args"] == {"command": "ls"}
+
+    def test_other_decision_types_skip_schema_validation(self):
+        """Only ``edit`` carries args, so nothing else can violate the schema."""
+        middleware = _middleware(args_schema=self.SCHEMA)
+        result, _ = _resume(middleware, _state([_call()]), [{"type": "reject", "message": "no"}])
+
+        assert result["messages"][0].tool_calls[0]["args"] == {"command": "rm -rf /"}
+
+
+class TestEditShapeIsValidated:
+    """A malformed ``edit`` raises this module's error, not upstream's KeyError.
+
+    Upstream's ``_process_decision`` reads ``edited_action["name"]`` unguarded, so
+    these checks have to run before it or a client omitting a key gets a bare
+    ``KeyError`` from library code instead of a message naming the contract.
+    """
+
+    def _decide(self, decision):
+        return _resume(_middleware(), _state([_call()]), [decision])
+
+    def test_a_missing_edited_action_is_refused(self):
+        with pytest.raises(ValueError, match="must carry an 'edited_action' mapping"):
+            self._decide({"type": "edit"})
+
+    def test_a_non_mapping_edited_action_is_refused(self):
+        with pytest.raises(ValueError, match="must carry an 'edited_action' mapping"):
+            self._decide({"type": "edit", "edited_action": "ls"})
+
+    def test_a_missing_name_is_refused(self):
+        """Upstream would raise ``KeyError('name')`` from inside the library."""
+        with pytest.raises(ValueError, match="must carry 'name'"):
+            self._decide({"type": "edit", "edited_action": {"args": {"command": "ls"}}})
+
+    def test_a_missing_args_is_refused(self):
+        with pytest.raises(ValueError, match="must carry an 'args' mapping"):
+            self._decide({"type": "edit", "edited_action": {"name": "bash_tool"}})
+
+    def test_a_non_mapping_args_is_refused(self):
+        with pytest.raises(ValueError, match="must carry an 'args' mapping"):
+            self._decide({"type": "edit", "edited_action": {"name": "bash_tool", "args": "ls"}})
+
+    def test_a_rename_is_refused(self):
+        """``interrupt_on`` is name-keyed, so a rename escapes its own gate."""
+        with pytest.raises(ValueError, match="may not rename the call"):
+            self._decide({"type": "edit", "edited_action": {"name": "ls_tool", "args": {"command": "ls"}}})
+
+    def test_an_edit_keeping_the_name_is_allowed(self):
+        result, _ = self._decide({"type": "edit", "edited_action": {"name": "bash_tool", "args": {"command": "ls"}}})
+
+        assert result["messages"][0].tool_calls[0]["args"] == {"command": "ls"}

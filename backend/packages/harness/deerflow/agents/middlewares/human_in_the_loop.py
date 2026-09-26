@@ -16,17 +16,23 @@ rejects that combination and :func:`create_interrupt_middleware` drops it
 defensively.
 
 Runs that have no human on the other end must not park forever: every tool call
-is auto-approved when the run context carries ``disable_tool_approval`` (set by
-IM channels, mirroring the existing ``disable_clarification`` switch) or
-``non_interactive`` (already set by the scheduler and the MCP task-notification
-launcher).
+is auto-approved when the run context carries ``disable_tool_approval`` (this
+middleware's own opt-out, set by a client with no approval surface, mirroring
+the existing ``disable_clarification`` switch) or when
+:func:`~deerflow.agents.interaction_policy.resolve_run_interaction_policy` says
+the run is unattended — the shared signal that also covers ``non_interactive``
+(scheduler, MCP task notifications), ``interaction_mode`` (webhook runs), and
+``channel_name``, and that ``ClarificationMiddleware`` and
+``sandbox/middleware.py`` read the same way.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from jsonschema import Draft202012Validator
 from langchain.agents.middleware.human_in_the_loop import (
     ActionRequest,
     HITLRequest,
@@ -39,6 +45,7 @@ from langchain_core.messages import AIMessage, ToolCall, ToolMessage
 from langgraph.func import task
 from langgraph.types import interrupt
 
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.middlewares.tool_call_args import rewrite_tool_call_args
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.config.app_config import AppConfig, get_app_config
@@ -46,8 +53,6 @@ from deerflow.config.tool_config import NON_APPROVABLE_TOOL_NAMES
 from deerflow.reflection import resolve_variable
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from langchain_core.tools import BaseTool
     from langgraph.runtime import Runtime
 
@@ -58,12 +63,15 @@ logger = logging.getLogger(__name__)
 # thread with nobody able to resume it.
 DISABLE_TOOL_APPROVAL_KEY = "disable_tool_approval"
 
-# The pre-existing marker for a run with no human on the other end: the
-# scheduler and the MCP task-notification launcher set it, and the lead-agent
-# factory already strips ``ask_clarification`` on it. It is honoured here too,
-# so a non-interactive entrypoint cannot park a thread merely by not knowing
-# about the newer key. Mirrors ``sandbox/middleware.py``, which treats the two
-# as one signal for network approval.
+# The pre-existing marker for a run with no human on the other end, set by the
+# scheduler and the MCP task-notification launcher. It is honoured here too, so
+# a non-interactive entrypoint cannot park a thread merely by not knowing about
+# the newer key — but *not* by reading this key directly:
+# ``resolve_run_interaction_policy`` is what maps it (along with
+# ``interaction_mode`` and ``channel_name``) onto one interaction policy, and
+# ``_approval_disabled`` goes through that resolver exactly as
+# ``clarification_middleware.py`` and ``sandbox/middleware.py`` do. Kept as a
+# name because it is the key callers set and tests assert on.
 NON_INTERACTIVE_KEY = "non_interactive"
 
 # Run-context key holding tool names the human already chose to stop being
@@ -116,14 +124,34 @@ class DeerFlowHumanInTheLoopMiddleware(HumanInTheLoopMiddleware):
     def _approval_disabled(self, runtime: Runtime[ContextT]) -> bool:
         """Whether this run auto-approves every tool call.
 
-        Either marker is enough. Reading both means a non-interactive
-        entrypoint downgrades correctly without having to opt in twice, which
-        is what a scheduled run relies on.
+        Two independent reasons, and the second is deliberately not a raw-key
+        read. ``disable_tool_approval`` is this middleware's own opt-out, set by
+        a client that has no approval surface. Everything else routes through
+        :func:`resolve_run_interaction_policy`, the repo's single definition of
+        "no human is attached to this run" — the same call
+        ``ClarificationMiddleware._clarification_disabled`` and
+        ``sandbox/middleware.py`` make.
+
+        Sharing the resolver rather than reading ``non_interactive`` directly is
+        what keeps the two human-in-the-loop middlewares from disagreeing. The
+        resolver also honours ``interaction_mode`` (a GitHub webhook run sets
+        ``webhook``) and ``channel_name``, so a run whose only non-interactive
+        marker is one of those would otherwise park here with nothing able to
+        post ``Command(resume=...)`` — while clarification correctly treated it
+        as unattended. ``interaction_mode`` further takes *precedence* over
+        ``non_interactive`` inside the resolver, so a raw read of that key can
+        invert the answer relative to clarification on the same run.
+
+        A malformed ``interaction_mode`` raises from the resolver, as it already
+        does for the other two callers; failing the run beats silently choosing
+        an interaction policy nobody asked for.
         """
         context = getattr(runtime, "context", None)
         if not context:
             return False
-        return bool(context.get(DISABLE_TOOL_APPROVAL_KEY) or context.get(NON_INTERACTIVE_KEY))
+        if context.get(DISABLE_TOOL_APPROVAL_KEY):
+            return True
+        return not resolve_run_interaction_policy({"context": context}).allows_clarification
 
     def _omitted_tools(self, runtime: Runtime[ContextT]) -> frozenset[str]:
         """Tool names the human opted out of being asked about."""
@@ -323,6 +351,88 @@ class DeerFlowHumanInTheLoopMiddleware(HumanInTheLoopMiddleware):
 
         return self._gate_on_review_batch(last_ai_msg, batch)
 
+    @staticmethod
+    def _check_decision(decision: Any, tool_call: ToolCall, config: InterruptOnConfig) -> None:
+        """Validate one human decision before it is turned into a tool call.
+
+        Runs *before* upstream's ``_process_decision`` (inherited from
+        ``HumanInTheLoopMiddleware``, not defined here) rather than after,
+        because that method reads ``edited_action["name"]`` unguarded — a client
+        omitting the key would raise a bare ``KeyError`` from library code before
+        any check here could describe the contract.
+
+        Only ``edit`` is checked. The other decision types carry no tool args,
+        and upstream already raises a clear ``ValueError`` for a type that the
+        tool's ``allowed_decisions`` does not permit.
+        """
+        if not isinstance(decision, Mapping):
+            msg = f"Each tool-approval decision must be a mapping, got {type(decision).__name__}."
+            raise ValueError(msg)
+        if decision.get("type") != "edit":
+            return
+
+        edited_action = decision.get("edited_action")
+        if not isinstance(edited_action, Mapping):
+            msg = f"An 'edit' decision for {tool_call['name']!r} must carry an 'edited_action' mapping, got {type(edited_action).__name__}."
+            raise ValueError(msg)
+
+        # Upstream's ``edit`` accepts ``edited_action["name"]``, letting a
+        # decision rename the call. Refused here: ``interrupt_on`` is keyed by
+        # tool name, so a rename would run a *different* tool under the approval
+        # its own gate never issued — and ``when``/``args_schema`` were resolved
+        # for the original name. Rejecting is also what keeps the surface sync in
+        # ``_gate_on_review_batch`` sound: ``rewrite_tool_call_args`` rewrites
+        # args on every provider surface but not names, so a rename would leave
+        # the raw payload and content blocks naming the old tool.
+        if "name" not in edited_action:
+            msg = f"An 'edit' decision for {tool_call['name']!r} must carry 'name' (unchanged) in its 'edited_action'."
+            raise ValueError(msg)
+        if (edited_name := edited_action["name"]) != tool_call["name"]:
+            msg = f"A tool-approval 'edit' decision may not rename the call: {tool_call['name']!r} -> {edited_name!r}. Reject the call instead."
+            raise ValueError(msg)
+
+        args = edited_action.get("args")
+        if not isinstance(args, Mapping):
+            msg = f"An 'edit' decision for {tool_call['name']!r} must carry an 'args' mapping, got {type(args).__name__}."
+            raise ValueError(msg)
+
+        # The captured ``args_schema`` is the contract the human was *shown* —
+        # it is forwarded into the ``ReviewConfig`` precisely so a client can
+        # render a schema-driven edit form. Nothing downstream re-checks what
+        # comes back: ``_process_decision`` builds the revised call straight out
+        # of ``edited_action``, and a tool declared with a raw-JSON
+        # ``args_schema`` gets no pydantic validation at execution either, so a
+        # bad edit would simply run. Validating here turns it into the same
+        # ``ValueError`` this module raises for the other malformed-resume cases.
+        #
+        # Exactly the schema, nothing stricter. In practice that means a missing
+        # or mistyped *required* field is caught, while an unknown key is not:
+        # pydantic emits no ``additionalProperties: false``, and injecting one
+        # here would make an approved call fail where the identical call
+        # succeeds with approval switched off — including for a human who
+        # resubmits, unchanged, the args they were shown. The tool ignores
+        # fields it does not declare.
+        schema = config.get("args_schema")
+        if not isinstance(schema, Mapping):
+            # No schema was captured (``_tool_args_schema`` logs that case), so
+            # the client was editing raw JSON with nothing to validate against.
+            return
+        try:
+            # Both steps are guarded, not just construction: ``Draft202012Validator``
+            # accepts an invalid schema and only raises when it walks it, so a
+            # bad schema surfaces from ``iter_errors`` (``UnknownType`` for a
+            # bogus ``type``) rather than from the constructor.
+            errors = sorted(Draft202012Validator(dict(schema)).iter_errors(dict(args)), key=lambda err: list(err.absolute_path))
+        except Exception:
+            # A schema our own capture got wrong is not the human's problem;
+            # refusing their edit over it would be the wrong failure.
+            logger.warning("Could not validate an edit against %r's args schema; allowing it.", tool_call["name"], exc_info=True)
+            return
+        if errors:
+            detail = "; ".join(f"{'/'.join(map(str, err.absolute_path)) or '<root>'}: {err.message}" for err in errors[:5])
+            msg = f"An 'edit' decision for {tool_call['name']!r} does not satisfy the tool's args schema: {detail}"
+            raise ValueError(msg)
+
     def _gate_on_review_batch(
         self,
         last_ai_msg: AIMessage,
@@ -343,7 +453,28 @@ class DeerFlowHumanInTheLoopMiddleware(HumanInTheLoopMiddleware):
 
         # Parks the run in the checkpoint as a pending task. Execution resumes
         # from here on ``Command(resume={"decisions": [...]})``.
-        decisions = interrupt(hitl_request)["decisions"]
+        resume_value = interrupt(hitl_request)
+
+        # Validate the resume payload rather than subscripting it. ``start_run``
+        # forwards any non-``None`` ``command.resume`` straight into
+        # ``Command(resume=...)``, so what arrives here is client-shaped: a bare
+        # string, a mapping with no ``decisions``, or a ``decisions`` that is not
+        # a list. Each of those would surface as a raw ``KeyError`` or
+        # ``TypeError`` from deep inside this method instead of the ``ValueError``
+        # this module documents for a bad resume. It fails closed either way —
+        # the run errors and the checkpoint keeps its pending write, so the
+        # thread can be resumed again — but only one of the two failures tells
+        # the operator what the contract was.
+        if not isinstance(resume_value, Mapping):
+            msg = f"A tool-approval resume must be a mapping with a 'decisions' list, got {type(resume_value).__name__}."
+            raise ValueError(msg)
+        if "decisions" not in resume_value:
+            msg = f"A tool-approval resume must carry a 'decisions' list; got keys {sorted(map(str, resume_value))}."
+            raise ValueError(msg)
+        decisions = resume_value["decisions"]
+        if not isinstance(decisions, Sequence) or isinstance(decisions, (str, bytes)):
+            msg = f"A tool-approval resume's 'decisions' must be a list, got {type(decisions).__name__}."
+            raise ValueError(msg)
 
         if (decisions_len := len(decisions)) != (interrupt_count := len(interrupt_indices)):
             msg = f"Number of human decisions ({decisions_len}) does not match number of hanging tool calls ({interrupt_count})."
@@ -362,19 +493,10 @@ class DeerFlowHumanInTheLoopMiddleware(HumanInTheLoopMiddleware):
                 continue
 
             config = self.interrupt_on[tool_call["name"]]
-            revised_tool_call, tool_message = self._process_decision(decisions[position], tool_call, config)
+            decision = decisions[position]
+            self._check_decision(decision, tool_call, config)
+            revised_tool_call, tool_message = self._process_decision(decision, tool_call, config)
             if revised_tool_call is not None:
-                # Upstream's ``edit`` accepts ``edited_action["name"]``, letting a
-                # decision rename the call. Refused here: ``interrupt_on`` is keyed
-                # by tool name, so a rename would run a *different* tool under the
-                # approval its own gate never issued — and ``when``/``args_schema``
-                # were resolved for the original name. Rejecting is also what keeps
-                # the surface sync below sound: ``rewrite_tool_call_args`` rewrites
-                # args on every provider surface but not names, so a rename would
-                # leave the raw payload and content blocks naming the old tool.
-                if (edited_name := revised_tool_call.get("name")) != tool_call["name"]:
-                    msg = f"A tool-approval 'edit' decision may not rename the call: {tool_call['name']!r} -> {edited_name!r}. Reject the call instead."
-                    raise ValueError(msg)
                 revised_tool_calls.append(revised_tool_call)
                 if revised_tool_call is not tool_call and revised_tool_call.get("args") != tool_call.get("args") and isinstance(call_id := tool_call.get("id"), str) and call_id:
                     edited_args[call_id] = revised_tool_call["args"]
