@@ -74,6 +74,10 @@ class TestNormalizeFilename:
         with pytest.raises(ValueError, match="unsafe"):
             normalize_filename(".")
 
+    def test_rejects_embedded_nul(self):
+        with pytest.raises(ValueError, match="NUL"):
+            normalize_filename("report\x00.pdf")
+
 
 # ---------------------------------------------------------------------------
 # claim_unique_filename
