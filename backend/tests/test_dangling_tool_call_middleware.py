@@ -579,7 +579,7 @@ class TestBuildPatchedMessagesPatching:
         assert patched[3].tool_call_id == "web_search:11"
         assert patched[3].status == "error"
 
-    def test_reused_tool_call_id_consumes_later_result_for_first_dangling_occurrence(self):
+    def test_reused_tool_call_id_keeps_later_result_with_its_issuing_occurrence(self):
         mw = DanglingToolCallMiddleware()
         result = _tool_msg("web_search:11", "web_search")
         msgs = [
@@ -591,11 +591,56 @@ class TestBuildPatchedMessagesPatching:
         patched = mw._build_patched_messages(msgs)
 
         assert patched is not None
-        assert patched[1] is result
-        assert patched[1].status == "success"
-        assert isinstance(patched[3], ToolMessage)
-        assert patched[3].tool_call_id == "web_search:11"
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].tool_call_id == "web_search:11"
+        assert patched[1].status == "error"
+        assert patched[3] is result
+        assert patched[3].status == "success"
+
+    @pytest.mark.parametrize("source", ["structured", "invalid", "raw"])
+    def test_orphan_result_cannot_answer_a_future_call_with_the_same_id(self, source):
+        if source == "structured":
+            call = _ai_with_tool_calls([_tc("bash", "reused")])
+        elif source == "invalid":
+            call = _ai_with_invalid_tool_calls([_invalid_tc("bash", "reused")])
+        else:
+            call = AIMessage(content="").model_copy(update={"additional_kwargs": {"tool_calls": [{"id": "reused", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]}})
+        orphan = ToolMessage(content="STALE RESULT", tool_call_id="reused", name="bash")
+
+        patched = DanglingToolCallMiddleware()._build_patched_messages([orphan, call])
+
+        assert patched is not None
+        assert len(patched) == 2
+        assert patched[1].status == "error"
+        assert orphan not in patched
+
+    def test_duplicate_result_does_not_answer_a_later_reused_call(self):
+        first = ToolMessage(content="FIRST", tool_call_id="reused", name="bash")
+        duplicate = ToolMessage(content="DUPLICATE", tool_call_id="reused", name="bash")
+        messages = [_ai_with_tool_calls([_tc("bash", "reused")]), first, duplicate, _ai_with_tool_calls([_tc("bash", "reused")])]
+
+        patched = DanglingToolCallMiddleware()._build_patched_messages(messages)
+
+        assert patched is not None
+        assert patched[1] is first
         assert patched[3].status == "error"
+        assert duplicate not in patched
+
+    def test_plain_assistant_message_does_not_discard_a_delayed_result(self):
+        call = _ai_with_tool_calls([_tc("bash", "call_1")])
+        progress = AIMessage(content="Waiting for the command.")
+        result = _tool_msg("call_1", "bash")
+
+        patched = DanglingToolCallMiddleware()._build_patched_messages([call, progress, result])
+
+        assert patched == [call, result, progress]
+
+    def test_same_message_repeated_ids_keep_their_result_order(self):
+        first = ToolMessage(content="FIRST", tool_call_id="reused", name="bash")
+        second = ToolMessage(content="SECOND", tool_call_id="reused", name="bash")
+        messages = [_ai_with_tool_calls([_tc("bash", "reused"), _tc("bash", "reused")]), first, second]
+
+        assert DanglingToolCallMiddleware()._build_patched_messages(messages) is None
 
     def test_tool_results_are_grouped_with_their_own_ai_turn_across_multiple_ai_messages(self):
         mw = DanglingToolCallMiddleware()
