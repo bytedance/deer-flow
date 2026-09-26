@@ -28,6 +28,8 @@ export interface ToolStreamingContextValue {
     toolCallId: string,
     output: ToolStreamOutput | null,
   ) => void;
+  /** Drop every streaming output entry. */
+  clearToolStream: () => void;
 }
 
 /**
@@ -37,7 +39,9 @@ export interface ToolStreamingContextValue {
  * result arrives via the canonical ToolMessage in the message stream, so
  * keeping the entry would leak one map entry per tool call for the lifetime
  * of the thread and keep the streaming indicator rendered for a finished
- * tool.  The store therefore only ever holds actively-streaming calls.
+ * tool.  The store therefore only ever holds actively-streaming calls;
+ * ``clearToolStreamState`` handles the case where the final chunk never
+ * arrives because the run ended first.
  */
 export function toolStreamUpdateFromEvent(
   e: ToolOutputChunkEvent,
@@ -94,9 +98,23 @@ export function applyToolStreamUpdate(
   return { ...outputs, [toolCallId]: output };
 }
 
+/**
+ * Pure teardown for the whole streaming-output map.  Returns the input map
+ * (same reference) when there is nothing to clear so the provider can skip a
+ * render — mirroring ``applyToolStreamUpdate``.
+ */
+export function clearToolStreamState(
+  outputs: Readonly<Record<string, ToolStreamOutput>>,
+): Readonly<Record<string, ToolStreamOutput>> {
+  return Object.keys(outputs).length === 0 ? outputs : {};
+}
+
 const ToolStreamingContext = createContext<ToolStreamingContextValue>({
   state: { outputs: {} },
   updateToolStream: () => {
+    /* noop */
+  },
+  clearToolStream: () => {
     /* noop */
   },
 });
@@ -118,8 +136,17 @@ export function ToolStreamingProvider({
     [],
   );
 
+  const clearToolStream = useCallback(() => {
+    setState((prev) => {
+      const next = clearToolStreamState(prev.outputs);
+      return next === prev.outputs ? prev : { outputs: next };
+    });
+  }, []);
+
   return (
-    <ToolStreamingContext.Provider value={{ state, updateToolStream }}>
+    <ToolStreamingContext.Provider
+      value={{ state, updateToolStream, clearToolStream }}
+    >
       {children}
     </ToolStreamingContext.Provider>
   );

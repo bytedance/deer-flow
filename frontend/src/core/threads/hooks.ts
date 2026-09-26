@@ -1913,7 +1913,7 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
-  const { updateToolStream } = useToolStreaming();
+  const { updateToolStream, clearToolStream } = useToolStreaming();
 
   const scheduleActiveRunRejoinRetry = useCallback(() => {
     const rejoin = activeRunRejoinRef.current;
@@ -2086,6 +2086,10 @@ export function useThreadStream({
         localTurnAnchorRef.current = null;
         tasksRef.current = {};
         setTasks({});
+        // A gap means start/final chunks may have been dropped, so any entry
+        // still in the map can no longer be completed — without this it would
+        // keep its spinner rendered for the rest of the provider's lifetime.
+        clearToolStream();
         invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
         toast.warning(t.conversation.streamReplayGap);
         return;
@@ -2136,6 +2140,10 @@ export function useThreadStream({
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);
+      // The run errored, so the final chunk for an in-flight tool call may
+      // never arrive.  Drop the entries here rather than leaving their
+      // streaming cards spinning until the provider remounts.
+      clearToolStream();
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
@@ -2160,6 +2168,10 @@ export function useThreadStream({
       }
       settleActiveRunRejoin();
       listeners.current.onFinish?.(state.values);
+      // A tool call can finish without its final chunk ever reaching us (it was
+      // emitted before a disconnect, or the run ended first).  Teardown is tied
+      // to the run, not to that chunk, so the streaming cards cannot outlive it.
+      clearToolStream();
       pendingPreparedReplayRef.current = null;
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
