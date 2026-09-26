@@ -65,13 +65,13 @@ def _bound_text(text: str, cap: int) -> str:
     return f"{text[:head]}{omitted_marker}{text[-tail:]}"
 
 
-def _render_durable_context_data(summary_text: str | None, ledger: list, skills: list, task_notes: dict | None = None, task_history: dict | None = None) -> str:
+def _render_durable_context_data(summary_text: str | None, ledger: list, skills: list, task_notes: dict | None = None, task_history: dict | None = None, truncated_count: int = 0) -> str:
     data_parts: list[str] = []
     if summary_text:
         bounded_summary = _bound_text(str(summary_text), _SUMMARY_RENDER_CHAR_BUDGET)
         data_parts.append(f"## Conversation summary so far\n{escape(bounded_summary, quote=False)}")
 
-    ledger_block = render_delegation_ledger(ledger or [])
+    ledger_block = render_delegation_ledger(ledger or [], truncated_count=truncated_count)
     if ledger_block:
         data_parts.append(ledger_block)
 
@@ -100,6 +100,30 @@ def _retained_delegation_window(delegations: list[dict], existing: list[dict]) -
                 return delegations[index:]
 
     return delegations[-_DELEGATION_LEDGER_MAX_ENTRIES:]
+
+
+def _count_ledger_evictions(new_delegations: list[dict], existing: list[dict]) -> int:
+    """Number of entries ``merge_delegations`` will permanently evict for this update.
+
+    Derived from the merge inputs themselves - never reconstructed by re-scanning
+    ``state["messages"]``: after summarization compacts old task messages, the
+    raw message list no longer witnesses previously captured delegations, so a
+    message-based recount under-counts exactly on the production path this
+    counter exists for (a new delegation evicting a durable entry
+    post-compaction). Counting the net-new delegation ids that overflow the
+    existing capped ledger matches ``merge_delegations`` semantics (union by id,
+    keep the newest ``_DELEGATION_LEDGER_MAX_ENTRIES``), stays O(update) on the
+    hot before/after-model path, and surfaces a single turn that emits more than
+    the cap of delegations immediately instead of on a later capture.
+
+    The caller persists ``existing_count + increment`` onto the parallel
+    ``delegations_truncated_count`` channel; the channel's max-reducer keeps the
+    write idempotent when the same update is replayed (D2 in the agent-core
+    hunt).
+    """
+    existing_ids = {entry.get("id") for entry in existing if isinstance(entry, dict)}
+    new_ids = {entry.get("id") for entry in new_delegations if isinstance(entry, dict)}
+    return max(0, len(existing_ids | new_ids) - _DELEGATION_LEDGER_MAX_ENTRIES)
 
 
 def _filter_changed_delegations(delegations: list[dict], existing: list[dict]) -> list[dict]:
@@ -280,17 +304,21 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         )
         if run_id is not None and _run_opening_human_index(state["messages"], run_id, pre_existing_message_ids) is not None:
             delegations = [*delegations, *_close_delegations_left_by_earlier_runs(state["messages"], existing, run_id)]
-        if delegations:
-            return {"delegations": delegations}
-        return None
+        if not delegations:
+            return None
+        updates: dict = {"delegations": delegations}
+        evicted = _count_ledger_evictions(delegations, existing)
+        if evicted:
+            existing_count = state.get("delegations_truncated_count") or 0
+            updates["delegations_truncated_count"] = existing_count + evicted
+        return updates
 
     def _capture(self, state: AgentState, runtime: Runtime | None) -> dict | None:
-        messages = state["messages"]
         updates: dict = {}
         delegation_update = self._capture_delegations(state, runtime)
         if delegation_update:
             updates.update(delegation_update)
-        skills = extract_skills(messages, skills_root=self._skills_root, read_tool_names=self._skill_read_tool_names)
+        skills = extract_skills(state["messages"], skills_root=self._skills_root, read_tool_names=self._skill_read_tool_names)
         if skills:
             updates["skill_context"] = skills
         return updates or None
@@ -303,6 +331,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             state.get("skill_context") or [],
             (state.get("task_notes") or {}) if self._task_continuity_enabled else None,
             state.get("task_history") if self._task_continuity_enabled else None,
+            truncated_count=int(state.get("delegations_truncated_count") or 0),
         )
         if not data_block:
             return request
