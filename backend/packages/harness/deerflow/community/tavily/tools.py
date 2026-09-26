@@ -28,7 +28,6 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
     if config is not None and "max_results" in config.model_extra:
         max_results = config.model_extra.get("max_results")
 
-    client = _get_tavily_client()
     search_kwargs: dict[str, object] = {"max_results": max_results}
     if config is not None:
         for key in ("include_domains", "exclude_domains"):
@@ -38,7 +37,11 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
         search_kwargs["include_domains_mode"] = "filter"
     if time_range is not None:
         search_kwargs["time_range"] = time_range
-    res = await client.search(query, **search_kwargs)
+    client = _get_tavily_client()
+    try:
+        res = await client.search(query, **search_kwargs)
+    finally:
+        await client.close()
     normalized_results = [
         {
             "title": result["title"],
@@ -63,7 +66,10 @@ async def web_fetch_tool(url: str) -> str:
         url: The URL to fetch the contents of.
     """
     client = _get_tavily_client("web_fetch")
-    res = await client.extract([url])
+    try:
+        res = await client.extract([url])
+    finally:
+        await client.close()
     if "failed_results" in res and len(res["failed_results"]) > 0:
         return f"Error: {res['failed_results'][0]['error']}"
     elif "results" in res and len(res["results"]) > 0:

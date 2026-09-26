@@ -1,5 +1,6 @@
 """Unit tests for the Tavily community search and fetch tools."""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,6 +10,35 @@ from tavily import AsyncTavilyClient
 
 from deerflow.community.tavily.tools import web_fetch_tool, web_search_tool
 from deerflow.config.tool_config import ToolConfig
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("operation", ["search", "extract"])
+@pytest.mark.parametrize("outcome", ["success", "error", "cancelled"])
+async def test_tool_closes_sdk_client_on_every_request_outcome(monkeypatch, operation, outcome) -> None:
+    client = AsyncTavilyClient(api_key="test-key")
+    request = AsyncMock(return_value={"results": []})
+    if outcome == "error":
+        request.side_effect = RuntimeError("request failed")
+    elif outcome == "cancelled":
+        request.side_effect = asyncio.CancelledError()
+    monkeypatch.setattr(client, operation, request)
+    tool = web_search_tool if operation == "search" else web_fetch_tool
+    arguments = {"query": "documentation"} if operation == "search" else {"url": "https://example.com/report"}
+    try:
+        with (
+            patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client),
+            patch("deerflow.community.tavily.tools.get_app_config") as config,
+        ):
+            config.return_value.get_tool_config.return_value = None
+            if outcome == "success":
+                await tool.ainvoke(arguments)
+            else:
+                with pytest.raises(RuntimeError if outcome == "error" else asyncio.CancelledError):
+                    await tool.ainvoke(arguments)
+        assert client._client.is_closed
+    finally:
+        await client.close()
 
 
 @pytest.mark.parametrize(
@@ -32,7 +62,7 @@ async def test_web_fetch_uses_own_credentials(monkeypatch, search_provider, fetc
 
     with (
         patch("deerflow.community.tavily.tools.get_app_config") as mock_config,
-        patch("deerflow.community.tavily.tools.AsyncTavilyClient") as mock_client_cls,
+        patch("deerflow.community.tavily.tools.AsyncTavilyClient", autospec=True) as mock_client_cls,
     ):
         mock_client_cls.return_value.extract = AsyncMock(return_value={"results": []})
         mock_config.return_value.get_tool_config.side_effect = configs.get
@@ -53,7 +83,7 @@ async def test_web_search_preserves_own_credentials(monkeypatch, search_key) -> 
     }
     with (
         patch("deerflow.community.tavily.tools.get_app_config") as mock_config,
-        patch("deerflow.community.tavily.tools.AsyncTavilyClient") as mock_client_cls,
+        patch("deerflow.community.tavily.tools.AsyncTavilyClient", autospec=True) as mock_client_cls,
     ):
         mock_client_cls.return_value.search = AsyncMock(return_value={"results": []})
         mock_config.return_value.get_tool_config.side_effect = configs.get
@@ -78,7 +108,7 @@ def _tavily_response() -> dict:
 
 @pytest.mark.anyio
 async def test_web_search_forwards_time_range_to_tavily() -> None:
-    client = MagicMock()
+    client = MagicMock(spec=AsyncTavilyClient)
     client.search = AsyncMock(return_value=_tavily_response())
 
     with patch("deerflow.community.tavily.tools.get_app_config") as mock_config:
@@ -92,7 +122,7 @@ async def test_web_search_forwards_time_range_to_tavily() -> None:
 
 @pytest.mark.anyio
 async def test_web_search_omits_time_range_from_default_tavily_call() -> None:
-    client = MagicMock()
+    client = MagicMock(spec=AsyncTavilyClient)
     client.search = AsyncMock(return_value=_tavily_response())
 
     with patch("deerflow.community.tavily.tools.get_app_config") as mock_config:
@@ -155,7 +185,7 @@ async def test_web_fetch_accepts_extract_results_with_optional_title(title) -> N
     result = {"url": "https://example.com/report", "raw_content": "Important findings."}
     if title is not None:
         result["title"] = title
-    client = MagicMock()
+    client = MagicMock(spec=AsyncTavilyClient)
     client.extract = AsyncMock(return_value={"results": [result], "failed_results": []})
 
     with patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client):
@@ -167,7 +197,7 @@ async def test_web_fetch_accepts_extract_results_with_optional_title(title) -> N
 
 @pytest.mark.anyio
 async def test_web_fetch_falls_back_to_requested_url_without_result_metadata() -> None:
-    client = MagicMock()
+    client = MagicMock(spec=AsyncTavilyClient)
     client.extract = AsyncMock(return_value={"results": [{"title": None, "url": None, "raw_content": "Important findings."}]})
 
     with patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client):
@@ -178,7 +208,7 @@ async def test_web_fetch_falls_back_to_requested_url_without_result_metadata() -
 
 @pytest.mark.anyio
 async def test_web_fetch_preserves_content_limit_without_title() -> None:
-    client = MagicMock()
+    client = MagicMock(spec=AsyncTavilyClient)
     client.extract = AsyncMock(return_value={"results": [{"url": "https://example.com/report", "raw_content": "x" * 5000}]})
 
     with patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client):
@@ -196,7 +226,7 @@ async def test_web_fetch_preserves_content_limit_without_title() -> None:
 )
 @pytest.mark.anyio
 async def test_web_fetch_preserves_unsuccessful_extract_results(response, expected) -> None:
-    client = MagicMock()
+    client = MagicMock(spec=AsyncTavilyClient)
     client.extract = AsyncMock(return_value=response)
 
     with patch("deerflow.community.tavily.tools._get_tavily_client", return_value=client):
