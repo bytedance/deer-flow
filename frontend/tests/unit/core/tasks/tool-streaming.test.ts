@@ -13,6 +13,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   applyToolStreamUpdate,
+  clearToolStreamState,
   type ToolOutputChunkEvent,
   ToolStreamingProvider,
   toolStreamUpdateFromEvent,
@@ -101,6 +102,36 @@ describe("applyToolStreamUpdate (production reducer)", () => {
     expect(Object.keys(removed)).toHaveLength(0);
     // Unknown id: same reference back, so the provider skips a render.
     expect(applyToolStreamUpdate(removed, "tc-unknown", null)).toBe(removed);
+  });
+});
+
+// ----------------------------------------------------------------
+// clearToolStreamState — run-end teardown for the whole map
+// ----------------------------------------------------------------
+
+describe("clearToolStreamState (run-end teardown)", () => {
+  it("returns the same reference for an already-empty map", () => {
+    const outputs: Record<string, ToolStreamOutput> = {};
+    // Same reference back, so the provider skips a render.
+    expect(clearToolStreamState(outputs)).toBe(outputs);
+  });
+
+  it("drops every entry, including calls that never received a final chunk", () => {
+    let outputs = applyToolStreamUpdate({}, "tc-bash", partial("bash-output"));
+    outputs = applyToolStreamUpdate(
+      outputs,
+      "tc-search",
+      partial("search-output", "web_search"),
+    );
+    const cleared = clearToolStreamState(outputs);
+    expect(Object.keys(cleared)).toHaveLength(0);
+    expect(cleared).not.toBe(outputs);
+  });
+
+  it("is idempotent", () => {
+    const outputs = applyToolStreamUpdate({}, "tc-1", partial("text"));
+    const once = clearToolStreamState(outputs);
+    expect(clearToolStreamState(once)).toBe(once);
   });
 });
 
