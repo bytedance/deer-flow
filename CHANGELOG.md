@@ -328,7 +328,7 @@ This release closes that milestone with **181 merged pull requests**.
   `null` on the wire until title generation has run (or if it never does), but
   the file-group type declared it as a required string and rendered it as-is,
   so files uploaded before the first reply sat under a blank line. Such groups
-  now read "Untitled", matching the project's thread list.
+  now read "Untitled", matching the project's thread list. ([#5879])
 - **frontend:** Stop mutating subtask render state during `MessageList` render.
   Subtask synchronization moved from render into an effect, so cards immediately
   receive pure message-derived snapshots even before the task context publishes
@@ -6100,4 +6100,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5855]: https://github.com/bytedance/deer-flow/pull/5855
 [#5856]: https://github.com/bytedance/deer-flow/pull/5856
 [#5859]: https://github.com/bytedance/deer-flow/pull/5859
+[#5879]: https://github.com/bytedance/deer-flow/pull/5879
 
