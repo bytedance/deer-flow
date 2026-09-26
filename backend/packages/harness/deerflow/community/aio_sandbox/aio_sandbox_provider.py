@@ -47,6 +47,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.lease import run_sync_lifecycle_operation
+from deerflow.utils.file_io import await_drained
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.skills.types import SkillCategory
@@ -2214,7 +2215,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     # reason every other step in this coroutine is offloaded.
                     return await run_sync_lifecycle_operation(self._register_discovered_sandbox, thread_id, discovered, user_id=effective_user_id)
 
-            return await self._create_sandbox_async(thread_id, sandbox_id, user_id=effective_user_id)
+            # Keep the entire async create lifecycle under the cross-process flock.
+            # Shielding only individual to_thread workers is insufficient: cancellation
+            # after backend.create() would otherwise discard SandboxInfo before readiness
+            # and registration/cleanup run, then finally release the flock over an
+            # unregistered deterministic container.
+            return await await_drained(self._create_sandbox_async(thread_id, sandbox_id, user_id=effective_user_id))
         finally:
             try:
                 if locked:
