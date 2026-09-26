@@ -10,11 +10,11 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from deerflow.skills.review import LocalDirectoryReader, analyze_skill_package, stable_json_dumps
-from deerflow.skills.review.resource_graph import _extract_references
 from deerflow.skills.review.cli import main as review_cli_main
 from deerflow.skills.review.models import PackageLimits, normalize_relative_path
 from deerflow.skills.review.readers import ArchivePackageReader, parse_skill_uri
 from deerflow.skills.review.renderer import build_static_report, render_report_markdown
+from deerflow.skills.review.resource_graph import _extract_references
 
 CONTRACTS_DIR = Path(__file__).resolve().parents[2] / "contracts" / "skill_review"
 
@@ -316,18 +316,13 @@ def test_resource_graph_link_scan_stays_linear(make_payload):
     large = make_payload(65536)
 
     def timed(payload):
-        return min(
-            _elapsed(_extract_references, payload) for _ in range(5)
-        )
+        return min(_elapsed(_extract_references, payload) for _ in range(5))
 
     small_elapsed = timed(small)
     large_elapsed = timed(large)
 
     assert small_elapsed < 1.0, f"link scan took {small_elapsed:.2f}s"
-    assert large_elapsed / small_elapsed < 3, (
-        f"link scan looks superlinear: 32K took {small_elapsed:.4f}s, "
-        f"64K took {large_elapsed:.4f}s"
-    )
+    assert large_elapsed / small_elapsed < 3, f"link scan looks superlinear: 32K took {small_elapsed:.4f}s, 64K took {large_elapsed:.4f}s"
 
 
 def _elapsed(fn, payload):
@@ -369,9 +364,7 @@ def test_resource_graph_link_scan_matches_finditer(payload, expected):
         ),
         pytest.param('[a](foo/bar.md "")', {"foo/bar.md"}, id="empty-title"),
         pytest.param('[a](foo/bar.md\t"Title")', {"foo/bar.md"}, id="tab-separator"),
-        pytest.param(
-            '![a](foo/bar.png "Logo")', {"foo/bar.png"}, id="image-with-title"
-        ),
+        pytest.param('![a](foo/bar.png "Logo")', {"foo/bar.png"}, id="image-with-title"),
         pytest.param('[a](foo/bar.md "unterminated', set(), id="unterminated-title"),
     ],
 )
@@ -381,7 +374,6 @@ def test_resource_graph_quoted_title_targets(payload, expected):
     # `)`-inside-title case in particular exercises `content.find('"')`
     # against the regex's `[^"]*`.
     assert _extract_references(payload) == expected
-
 
 
 def test_resource_graph_link_blanking_starts_at_the_leftmost_opener(tmp_path):
