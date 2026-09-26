@@ -247,6 +247,7 @@ class DeerFlowClient:
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
         self._agent_config_key: tuple | None = None
+        self._effective_model_name: str | None = None
         self._loaded_agent_config_key: tuple[str, str] | None = None
         self._loaded_agent_config = None
 
@@ -259,6 +260,7 @@ class DeerFlowClient:
         """
         self._agent = None
         self._agent_config_key = None
+        self._effective_model_name = None
         self._loaded_agent_config_key = None
         self._loaded_agent_config = None
 
@@ -487,6 +489,7 @@ class DeerFlowClient:
 
         self._agent = create_agent(**kwargs)
         self._agent_config_key = key
+        self._effective_model_name = model_name
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
 
     @staticmethod
@@ -966,7 +969,6 @@ class DeerFlowClient:
             if key in kwargs:
                 context[key] = kwargs[key]
 
-        configurable = config.get("configurable") or {}
         deerflow_trace_id = ensure_trace_id()
         effective_user_id = context.get("user_id") or get_effective_user_id()
         # Materialize the storage owner in runtime context in every auth mode.
@@ -974,17 +976,18 @@ class DeerFlowClient:
         # survives worker/isolated-loop boundaries and matches the identity
         # used by prompt assembly and the agent cache.
         context["user_id"] = effective_user_id
+        self._ensure_agent(config, context=context)
+        configurable = config.get("configurable") or {}
+        effective_model_name = getattr(self, "_effective_model_name", None)
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
             user_id=effective_user_id,
             assistant_id=self._agent_name or "lead-agent",
-            model_name=configurable.get("model_name") or self._model_name,
+            model_name=effective_model_name or configurable.get("model_name") or self._model_name,
             environment=self._environment or os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
             deerflow_trace_id=deerflow_trace_id,
         )
-
-        self._ensure_agent(config, context=context)
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
         context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id

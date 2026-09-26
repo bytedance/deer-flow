@@ -9,7 +9,9 @@ same resulting prompt. Empty overlays preserve bytes.
 - `make_lead_agent(config: RunnableConfig)` is the published `langgraph.json`
   entry point; preserve its signature and bare-graph return type.
 - Gateway calls `assemble_lead_agent(config, *, app_config=None)` for a
-  `LeadAgentAssembly(graph, descriptor)`; `make_lead_agent` returns `.graph`.
+  `LeadAgentAssembly(graph, descriptor, effective_model)`; `make_lead_agent` returns `.graph`.
+  `effective_model` is available even when no observer requests a descriptor,
+  so graph-root tracing can tag the selected default or fallback model.
   `assembly_descriptor.py::build_assembly_descriptor()` records the model after
   runtime overrides, rendered prompt hash, authorized tools and middleware order.
   Consumers must unwrap via `runtime/runs/worker.py::_agent_graph` to also accept
