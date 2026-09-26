@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager
 from contextvars import Context
 from dataclasses import dataclass, field
@@ -101,6 +101,7 @@ from deerflow.workspace_changes.types import WorkspaceSnapshot
 from .manager import RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
 from .schemas import RunStatus
+from .terminal_events import persist_run_terminal_event
 
 logger = logging.getLogger(__name__)
 _THREAD_INCARNATION_UNSET = object()
@@ -276,43 +277,34 @@ def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str,
     ]
 
 
-async def _persist_delivery_receipt(
-    event_store: Any,
+async def _persist_terminal_event_with_retry(
+    operation: Callable[[], Awaitable[Any]],
     *,
-    thread_id: str,
     run_id: str,
-    content: dict[str, Any],
+    description: str,
+    exhausted_message: str,
 ) -> bool:
-    """Persist a terminal receipt with short bounded retries.
-
-    The owning worker still knows the real terminal outcome and renews its
-    lease while this coroutine runs. Retrying here handles transient event
-    store failures without handing a successful run to orphan recovery, which
-    cannot reconstruct either the terminal status or the detailed receipt.
-    """
+    """Retry terminal singleton writes while preserving caller cancellation."""
     attempts = len(_DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS) + 1
     for attempt in range(attempts):
         try:
-            await event_store.put_if_absent(
-                thread_id=thread_id,
-                run_id=run_id,
-                event_type="run.delivery",
-                category="outputs",
-                content=content,
-            )
+            await operation()
             return True
         except Exception:
             if attempt == attempts - 1:
                 logger.warning(
-                    "Failed to persist delivery receipt for run %s after %d attempts; applying terminal delivery semantics without a receipt",
+                    "Failed to persist %s for run %s after %d attempts; %s",
+                    description,
                     run_id,
                     attempts,
+                    exhausted_message,
                     exc_info=True,
                 )
                 return False
             delay = _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS[attempt]
             logger.warning(
-                "Failed to persist delivery receipt for run %s (attempt %d/%d); retrying in %.1fs",
+                "Failed to persist %s for run %s (attempt %d/%d); retrying in %.1fs",
+                description,
                 run_id,
                 attempt + 1,
                 attempts,
@@ -322,6 +314,50 @@ async def _persist_delivery_receipt(
             await asyncio.sleep(delay)
 
     return False  # pragma: no cover - loop always returns
+
+
+async def _persist_delivery_receipt(
+    event_store: Any,
+    *,
+    thread_id: str,
+    run_id: str,
+    content: dict[str, Any],
+) -> bool:
+    """Retry the known delivery outcome before terminalizing its RunRow."""
+    return await _persist_terminal_event_with_retry(
+        lambda: event_store.put_if_absent(
+            thread_id=thread_id,
+            run_id=run_id,
+            event_type="run.delivery",
+            category="outputs",
+            content=content,
+        ),
+        run_id=run_id,
+        description="delivery receipt",
+        exhausted_message="applying terminal delivery semantics without a receipt",
+    )
+
+
+async def _persist_authoritative_terminal_event(
+    event_store: Any,
+    *,
+    record: RunRecord,
+    content: Any,
+) -> bool:
+    """Persist ``run.end`` after the RunRow outcome with bounded retries."""
+    return await _persist_terminal_event_with_retry(
+        lambda: persist_run_terminal_event(
+            event_store,
+            thread_id=record.thread_id,
+            run_id=record.run_id,
+            status=record.status,
+            content=content,
+            user_id=record.user_id,
+        ),
+        run_id=record.run_id,
+        description="authoritative terminal event",
+        exhausted_message="RunRow remains authoritative",
+    )
 
 
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
@@ -851,7 +887,7 @@ async def run_agent(
     event_store = ctx.event_store
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
-    terminal_status_kwargs = {"persist": False} if event_store is not None else {}
+    terminal_status_kwargs = {"persist": False, "stage_terminal": True} if event_store is not None else {}
 
     run_id = record.run_id
     thread_id = record.thread_id
@@ -875,6 +911,7 @@ async def run_agent(
     workspace_changes_user_id: str | None = None
     workspace_excluded_dir_names: frozenset[str] | None = None
     snapshot_capture_failed = False
+    rollback_boundary_captured = False
     llm_error_fallback_message: str | None = None
     checkpoint_rollback_completed = False
     # Message ids checkpointed *before* this run started. The stream loop uses
@@ -915,8 +952,9 @@ async def run_agent(
         restore_checkpoint: bool = True,
     ) -> None:
         nonlocal checkpoint_rollback_completed
-        await run_manager.set_finalizing(run_id, True)
-        if action == "rollback":
+        if event_store is None:
+            await run_manager.set_finalizing(run_id, True)
+        if action == "rollback" and started:
             await run_manager.set_status(
                 run_id,
                 RunStatus.error,
@@ -924,6 +962,12 @@ async def run_agent(
                 **terminal_status_kwargs,
             )
             if not restore_checkpoint:
+                return
+            if not rollback_boundary_captured:
+                logger.warning(
+                    "Run %s rollback skipped: cancellation preceded the pre-run checkpoint boundary",
+                    run_id,
+                )
                 return
             try:
                 checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
@@ -1001,7 +1045,18 @@ async def run_agent(
 
         start_outcome = await run_manager.try_start(run_id)
         if start_outcome is not RunStartOutcome.started:
-            if record.abort_event.is_set():
+            # A metadata/setup wrapper can fail the still-pending run and set
+            # its abort event before this worker reaches the startup barrier.
+            # In that case ``error`` is already the authoritative outcome;
+            # treating every abort as a cancellation would overwrite it with
+            # ``interrupted`` and make the local record diverge from a durable
+            # row whose terminal CAS has already committed.  Only active runs
+            # still need the cancellation transition here.  Already-terminal
+            # runs continue through ``finally`` so their run.end is published.
+            if record.abort_event.is_set() and record.status in {
+                RunStatus.pending,
+                RunStatus.running,
+            }:
                 await _finish_cancellation(
                     record.abort_action,
                     restore_checkpoint=False,
@@ -1210,6 +1265,7 @@ async def run_agent(
             async with _checkpoint_thread_lock(thread_id):
                 try:
                     rollback_point = await _capture_rollback_point(accessor, checkpointer, checkpoint_config)
+                    rollback_boundary_captured = True
                 except Exception:
                     snapshot_capture_failed = True
                     logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
@@ -1557,9 +1613,8 @@ async def run_agent(
 
             # Flush buffered journal events before the terminal receipt. The
             # receipt uses a run-scoped idempotent write shared with recovery, then
-            # the staged terminal status is persisted. This ordering closes the
-            # crash window where a terminal run could otherwise outlive its receipt.
-            # A fenced worker leaves receipt recovery to the peer that claimed it.
+            # the staged terminal status is persisted. A fenced worker leaves both
+            # terminal singletons to the peer that claimed it.
             if not record.ownership_lost and journal is not None:
                 try:
                     await journal.flush()
@@ -1626,9 +1681,7 @@ async def run_agent(
                     # real worker outcome. Leaving a successful row inflight would
                     # let lease recovery rewrite it as an error with a synthetic
                     # zero receipt.
-                    if record.abort_event.is_set():
-                        await run_manager.persist_current_status(run_id)
-                    else:
+                    if not record.abort_event.is_set():
                         cancel_action = await run_manager.set_status_if_not_cancelled(
                             run_id,
                             record.status,
@@ -1637,9 +1690,15 @@ async def run_agent(
                         )
                         if cancel_action is not None:
                             await _finish_cancellation(cancel_action)
-                            await run_manager.persist_current_status(run_id)
+                    terminal_status_persisted = await run_manager.persist_current_status(run_id)
+                    if terminal_status_persisted and not record.ownership_lost:
+                        await _persist_authoritative_terminal_event(
+                            event_store,
+                            record=record,
+                            content=journal.get_root_chain_outputs() if journal is not None else {},
+                        )
                 except Exception:
-                    logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
+                    logger.warning("Failed to persist terminal status or event for run %s after delivery receipt attempts", run_id, exc_info=True)
 
             if not record.ownership_lost and journal is not None and persist_completion:
                 try:
@@ -1733,10 +1792,12 @@ async def run_agent(
                         "Extension task-stop notification interrupted for run %s; completing cleanup first",
                         run_id,
                     )
-            if record.finalizing:
-                await run_manager.set_finalizing(run_id, False)
-
-            await bridge.publish_end(run_id)
+            # All checkpoint/output writes and completion observers are done.
+            # END lets the client submit its next message, so local teardown
+            # must not leave that request behind a finalizing barrier.
+            await run_manager.set_finalizing(run_id, False)
+            if not record.ownership_lost:
+                await bridge.publish_end(run_id)
 
             if deferred_finalization_interrupt is not None:
                 raise deferred_finalization_interrupt
@@ -1765,11 +1826,20 @@ async def run_agent(
                         run_id,
                     )
                 finally:
-                    _release_run_scoped_references(
-                        runnable_configs,
-                        runtime_ctx,
-                        journal,
-                    )
+                    try:
+                        _release_run_scoped_references(
+                            runnable_configs,
+                            runtime_ctx,
+                            journal,
+                        )
+                    finally:
+                        if record.finalizing:
+                            clear_finalizing = asyncio.create_task(run_manager.set_finalizing(run_id, False))
+                            clear_finalizing.set_name(f"deerflow-clear-finalizing-{run_id}")
+                            lease_cleanup_interrupt = await _await_task_stop_after_host_cancellation(
+                                clear_finalizing,
+                                lease_cleanup_interrupt,
+                            )
                 # Drop graph and per-run payload references before the terminal
                 # worker task itself becomes collectable.
                 agent = None
@@ -1788,7 +1858,10 @@ async def run_agent(
 
                 # Durable finalization and terminal publication may depend on
                 # external backends, but local housekeeping must always run.
-                _create_contextless_task(bridge.cleanup(run_id, delay=60))
+                # The bridge may be shared (Redis); only the owning producer
+                # may remove its stream after the late-subscriber window.
+                if not record.ownership_lost:
+                    _create_contextless_task(bridge.cleanup(run_id, delay=60))
                 # Preserve the existing five-minute grace period for local
                 # join/status paths, then release the terminal record, completed
                 # task, and request payload. Durable run history remains available

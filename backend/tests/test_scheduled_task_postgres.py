@@ -151,12 +151,20 @@ async def test_postgres_reconciliation_uses_metadata_and_atomically_claims_expir
         lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
     )
 
-    assert await task_run_repo.reconcile_active_runs(error="lease expired", now=now) == 1
+    assert (
+        await task_run_repo.reconcile_active_runs(
+            error="lease expired",
+            now=now,
+            owner_worker_id="scheduler-recovery",
+        )
+        == 1
+    )
     assert (await task_run_repo.list_by_task("task-live"))[0]["status"] == "queued"
     assert (await task_run_repo.list_by_task("task-expired"))[0]["status"] == "interrupted"
     recovered = await run_repo.get("run-expired", user_id=None)
     assert recovered is not None
     assert recovered["status"] == "error"
+    assert recovered["owner_worker_id"] == "scheduler-recovery"
     assert recovered["stop_reason"] == "scheduled_task_orphan_recovered"
 
 
@@ -215,6 +223,7 @@ async def test_postgres_once_recovery_uses_occurrence_order_despite_clock_skew(p
     kwargs = {"error": "interrupted: recovery"}
     if recovery_method == "reconcile_stuck_once_tasks":
         kwargs["now"] = now + timedelta(minutes=1)
+        kwargs["owner_worker_id"] = "scheduler-recovery"
     count = await getattr(task_repo, recovery_method)(**kwargs)
 
     task = await task_repo.get_internal("task-once")

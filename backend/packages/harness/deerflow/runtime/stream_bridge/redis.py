@@ -47,6 +47,28 @@ _XREAD_COUNT = 64
 # capped at ``heartbeat_interval``.
 _MAX_SUBSCRIBE_RETRIES = 3
 
+# One atomic recovery claim prevents duplicate ENDs from evicting retained
+# output, and never recreates an expired stream as an END-only key.
+_PUBLISH_RECOVERED_END_LUA = """
+if redis.call('EXISTS', KEYS[1]) == 0 then
+    return 0
+end
+local tail = redis.call('XREVRANGE', KEYS[1], '+', '-', 'COUNT', 1)
+if #tail > 0 then
+    local fields = tail[1][2]
+    for i = 1, #fields, 2 do
+        if fields[i] == 'kind' and fields[i + 1] == 'end' then
+            return 0
+        end
+    end
+end
+redis.call('XADD', KEYS[1], 'MAXLEN', '=', ARGV[1], '*', 'kind', 'end')
+if tonumber(ARGV[2]) > 0 then
+    redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 1
+"""
+
 
 class RedisStreamBridge(StreamBridge):
     """Per-run stream bridge backed by Redis Streams.
@@ -184,6 +206,17 @@ class RedisStreamBridge(StreamBridge):
             key,
             {"kind": _KIND_END},
             maxlen=self._maxsize + 1,
+        )
+
+    async def publish_recovered_end(self, run_id: str) -> bool:
+        return bool(
+            await self._redis.eval(
+                _PUBLISH_RECOVERED_END_LUA,
+                1,
+                self._stream_key(run_id),
+                self._maxsize + 1,
+                self._stream_ttl_seconds or 0,
+            )
         )
 
     async def stream_exists(self, run_id: str) -> bool:

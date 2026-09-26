@@ -53,8 +53,8 @@ class CurrentUser(Protocol):
 _current_user: Final[ContextVar[CurrentUser | None]] = ContextVar("deerflow_current_user", default=None)
 
 
-def set_current_user(user: CurrentUser) -> Token[CurrentUser | None]:
-    """Set the current user for this async task.
+def set_current_user(user: CurrentUser | None) -> Token[CurrentUser | None]:
+    """Set or explicitly clear the current user for this async task.
 
     Returns a reset token that should be passed to
     :func:`reset_current_user` in a ``finally`` block to restore the

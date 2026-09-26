@@ -19,6 +19,7 @@ from deerflow.persistence import thread_meta as thread_meta_module
 from deerflow.runtime import END_SENTINEL, MemoryStreamBridge, RunManager
 from deerflow.runtime.checkpointer import async_provider as checkpointer_module
 from deerflow.runtime.events import store as event_store_module
+from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
@@ -31,7 +32,7 @@ class _FakeRunManager:
     """RunManager double that records startup reconciliation calls."""
 
     instances: list[_FakeRunManager] = []
-    recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1")]
+    recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1", status=RunStatus.error)]
     latest_by_thread: dict[str, list[SimpleNamespace]] = {}
 
     def __init__(
@@ -67,6 +68,9 @@ class _FakeRunManager:
 
     async def start_heartbeat(self) -> None:
         pass
+
+    async def terminalize_recovered_runs(self, recovered_runs) -> bool:
+        return await self.on_orphans_recovered(recovered_runs)
 
     async def stop_heartbeat(self) -> None:
         pass
@@ -130,16 +134,24 @@ class _DelayedCleanupStreamBridge(_FakeStreamBridge):
             raise
 
 
+class _FailingEndStreamBridge(_FakeStreamBridge):
+    async def publish_end(self, run_id: str) -> None:
+        self.publish_end_calls.append(run_id)
+        raise RuntimeError("stream backend unavailable")
+
+
 @pytest.mark.anyio
-async def test_recovered_run_stream_end_skips_expired_stream():
-    """Startup recovery should not recreate an already-expired retained stream."""
+async def test_recovered_run_stream_end_preserves_missing_stream_gap():
+    """An END-only key would hide the durable-reload gap from later retries."""
     stream_bridge = _FakeStreamBridge(existing_streams=set())
 
-    await gateway_deps._publish_recovered_run_stream_end(
+    cleanups, all_streams_terminalized = await gateway_deps._publish_recovered_run_stream_end(
         stream_bridge,
         [SimpleNamespace(run_id="expired-run", thread_id="thread-1")],
     )
 
+    assert all_streams_terminalized is True
+    assert cleanups == []
     assert stream_bridge.publish_end_calls == []
     assert stream_bridge.cleanup_calls == []
 
@@ -148,11 +160,12 @@ async def test_recovered_run_stream_end_skips_expired_stream():
 async def test_shutdown_flushes_delayed_recovered_stream_cleanup_immediately():
     """Bridge shutdown must not abandon a delayed cleanup until the stream TTL."""
     stream_bridge = _DelayedCleanupStreamBridge()
-    cleanups = await gateway_deps._publish_recovered_run_stream_end(
+    cleanups, all_streams_terminalized = await gateway_deps._publish_recovered_run_stream_end(
         stream_bridge,
         [SimpleNamespace(run_id="run-1", thread_id="thread-1")],
         cleanup_delay=60.0,
     )
+    assert all_streams_terminalized is True
     cleanup_tasks = {task: run_id for run_id, task in cleanups}
     await asyncio.wait_for(stream_bridge.delayed_cleanup_started.wait(), timeout=0.5)
 
@@ -163,6 +176,22 @@ async def test_shutdown_flushes_delayed_recovered_stream_cleanup_immediately():
 
     assert stream_bridge.delayed_cleanup_cancelled.is_set()
     assert stream_bridge.cleanup_calls == [("run-1", 60.0), ("run-1", 0)]
+
+
+@pytest.mark.anyio
+async def test_recovered_run_terminalization_reports_publish_end_failure():
+    """Scheduler recovery must retain its parent outbox when END is unavailable."""
+    stream_bridge = _FailingEndStreamBridge(existing_streams={"run-1"})
+
+    all_streams_terminalized = await gateway_deps._terminalize_recovered_runs(
+        stream_bridge,
+        [SimpleNamespace(run_id="run-1", thread_id="thread-1")],
+        cleanup_delay=60.0,
+    )
+
+    assert all_streams_terminalized is False
+    assert stream_bridge.publish_end_calls == ["run-1"]
+    assert stream_bridge.cleanup_calls == []
 
 
 @pytest.mark.anyio
@@ -183,7 +212,7 @@ async def test_periodic_recovery_terminalizes_stream_without_thread_projection()
     await stream_bridge.publish("periodic-orphan", "values", {"step": 1})
 
     async def terminalize(recovered_runs):
-        await gateway_deps._terminalize_recovered_runs(
+        return await gateway_deps._terminalize_recovered_runs(
             stream_bridge,
             recovered_runs,
             cleanup_delay=60.0,
@@ -228,7 +257,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     thread_store = _FakeThreadStore()
     stream_bridge = _FakeStreamBridge(existing_streams={"run-1"})
     _FakeRunManager.instances.clear()
-    _FakeRunManager.recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1")]
+    _FakeRunManager.recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1", status=RunStatus.error)]
     _FakeRunManager.latest_by_thread = {}
 
     async def fake_init_engine_from_config(_database):

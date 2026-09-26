@@ -50,6 +50,14 @@ answers for paginated history. See `docs/skill-usage-ui.md`.
 
 **Run delivery receipts:** Journal artifact evidence and terminal status must finalize in order. Details: `backend/docs/runtime-guidance-details.md`.
 
+**Terminal contract:** visible tail → receipt → durable status → singleton
+`run.end`. Clear LFP on final write; same-owner terminal CAS alone uses takeover
+grace, returns strict bool, and advances change discovery. Fence admission during
+CAS. Clear `finalizing` after observers/checkpoint writes but before END/disposal.
+Fenced workers cannot publish END or delete shared streams. Recovery preserves
+accepted cancel as `interrupted`; both singletons gate idempotent END/cleanup
+without creating a missing stream.
+
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
 `tool_search` Sends read the same pre-step state, so state diffing alone can
@@ -121,7 +129,7 @@ a pre-admission miss can become an exact hit.
 
 **Changed-run discovery:** Use the durable `(change_seq, run_id)` cursor and repeat history audits after admission. Details: `backend/docs/runtime-guidance-details.md`.
 
-**Terminal run cleanup:** Close streams, journals, and graph references even on cancellation. Details: `backend/docs/runtime-guidance-details.md`.
+**Terminal run cleanup:** Close streams, journals, and graph references even on cancellation. Clear `finalizing` before END, and never publish END or delete shared streams after ownership loss. Details: `backend/docs/runtime-guidance-details.md`.
 
 **`RunManager._runs` holds only records this worker admitted.** A cross-worker idempotent reuse returns the `store_only` row from `_record_from_store()` unregistered: the peer never finalizes or `cleanup()`s it, so a registered copy stays `pending`/`running`, 409s later same-thread admissions, hides the owner's orphan from reconciliation, and sends a peer `cancel()` down the local-owner path. Pinned by `test_peer_idempotent_reuse_*` and `test_peer_cancel_of_reused_run_*` (`tests/test_multi_worker_run_ownership.py`) plus `tests/test_gateway_services.py::test_start_run_peer_idempotent_reuse_*`.
 

@@ -262,10 +262,68 @@ async def test_pending_cancel_stops_waiting_for_prior_finalization():
     outcome = await run_manager.cancel(record.run_id)
     await asyncio.wait_for(record.task, timeout=0.2)
 
-    assert outcome == CancelOutcome.cancelled
+    assert outcome == CancelOutcome.requested
     assert prior.finalizing is True
     assert factory_called is False
     assert record.status == RunStatus.interrupted
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_rollback_before_checkpoint_boundary_never_deletes_existing_thread(
+    monkeypatch,
+):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-cancel-before-rollback-snapshot")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    running_status_started = asyncio.Event()
+
+    class BlockingThreadStore:
+        async def update_status(self, _thread_id, status):
+            if status == "running":
+                running_status_started.set()
+                await asyncio.Event().wait()
+
+        async def update_display_name(self, *_args, **_kwargs):
+            return None
+
+    checkpointer = FakeCheckpointer()
+    rollback = AsyncMock(return_value=True)
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint",
+        rollback,
+    )
+    agent_factory = MagicMock(side_effect=AssertionError("cancelled pre-snapshot run built the Agent"))
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(
+                checkpointer=checkpointer,
+                thread_store=BlockingThreadStore(),
+            ),
+            agent_factory=agent_factory,
+            graph_input={"messages": []},
+            config={},
+        )
+    )
+    record.task = task
+    await asyncio.wait_for(running_status_started.wait(), timeout=1)
+
+    assert await run_manager.cancel(record.run_id, action="rollback") == CancelOutcome.requested
+    await asyncio.wait_for(task, timeout=1)
+
+    assert record.status == RunStatus.error
+    assert record.error == "Rolled back by user"
+    assert record.finalizing is False
+    agent_factory.assert_not_called()
+    rollback.assert_not_awaited()
+    checkpointer.adelete_thread.assert_not_awaited()
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
@@ -1619,10 +1677,10 @@ async def test_run_agent_marks_rollback_unusable_when_capture_fails():
             config={},
         )
 
-    rollback.assert_awaited_once()
-    rollback_kwargs = rollback.await_args.kwargs
-    assert rollback_kwargs["snapshot_capture_failed"] is True
-    assert rollback_kwargs["rollback_point"] is None
+    # No trustworthy pre-run boundary was captured, so mutating checkpoint
+    # history would risk deleting a pre-existing thread.  The run still
+    # terminalizes as an error, but rollback is intentionally skipped.
+    rollback.assert_not_awaited()
 
 
 @pytest.mark.anyio
@@ -4094,7 +4152,7 @@ async def test_worker_finally_block_swallows_helper_exceptions(monkeypatch):
 
 @pytest.mark.anyio
 async def test_worker_skips_execution_and_finalization_after_ownership_loss():
-    """A fenced worker closes its stream without starting or finalizing work."""
+    """A fenced worker leaves the stream and durable outcome to its new owner."""
     run_manager = RunManager()
     record = await run_manager.create("thread-lease-lost")
     record.ownership_lost = True
@@ -4131,7 +4189,7 @@ async def test_worker_skips_execution_and_finalization_after_ownership_loss():
     thread_store.update_display_name.assert_not_awaited()
     thread_store.update_status.assert_not_awaited()
     on_run_completed.assert_not_awaited()
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.publish_end.assert_not_awaited()
 
 
 @pytest.mark.anyio

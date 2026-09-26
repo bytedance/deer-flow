@@ -935,6 +935,16 @@ including zero-output and crash-recovered runs. The receipt is persisted before
 the durable terminal run status during normal execution. Orphan recovery first
 atomically claims an expired lease and then idempotently backfills the receipt,
 so a stale recovery scan cannot overwrite a live run's detailed delivery facts.
+
+Gateway `run.end` describes the durable worker outcome, not an intermediate
+graph completion. Accepted cancellation survives owner failure as `interrupted`;
+it does not imply an unfinished rollback was completed. The worker releases its
+local thread-finalization barrier before announcing stream completion, so a next
+message is not rejected while slow resource disposal continues. Reconnection
+to a missing stream can recover after a bounded liveness check even when its
+event journal was lost; a creating retry reports a replay gap rather than
+claiming the missing output was replayed. Retained streams keep strict tail-frame
+completion checks. See [Streaming](backend/docs/STREAMING.md).
 Receipt persistence remains best-effort during an event-store outage. Runs that
 fail checkpoint preflight (or are cancelled while waiting for prior
 finalization) keep the existing completion-data behavior: they receive the

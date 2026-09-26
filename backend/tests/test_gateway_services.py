@@ -3049,9 +3049,9 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
             record = await start_run(body, "channel-thread", request)
             await record.task
 
-        return captured_context
+        return captured_context, record.user_id
 
-    context = asyncio.run(_scenario())
+    context, run_user_id = asyncio.run(_scenario())
 
     assert context["user_id"] == "owner-1"
     assert context["user_role"] == "user"
@@ -3059,6 +3059,7 @@ def test_start_run_stamps_internal_owner_guardrail_attribution(_stub_app_config)
     assert context["oauth_id"] == "subject-123"
     assert context["channel_user_id"] == "trusted-im-sender"
     assert context["is_internal"] is True
+    assert run_user_id == "owner-1"
 
 
 def test_start_run_session_caller_anti_forgery(_stub_app_config):
@@ -3135,9 +3136,9 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
             record = await start_run(body, "thread-session-authz", request)
             await record.task
 
-        return captured_context
+        return captured_context, record.user_id
 
-    context = asyncio.run(_scenario())
+    context, run_user_id = asyncio.run(_scenario())
 
     # is_internal must be False (server-derived from auth_source="session")
     assert context["is_internal"] is False
@@ -3148,6 +3149,9 @@ def test_start_run_session_caller_anti_forgery(_stub_app_config):
     # Agent Server's reserved auth fields are never valid on the Gateway path.
     assert context.get("langgraph_auth_user") is None
     assert context.get("langgraph_auth_user_id") is None
+    # The terminal-event writer consumes RunRecord.user_id explicitly.  Keep it
+    # aligned with the ambient owner used by the durable run-row insert.
+    assert run_user_id == "u1"
 
 
 def test_start_run_strips_client_supplied_project_context_key(_stub_app_config):
@@ -4339,6 +4343,7 @@ async def test_run_agent_full_mode_rejects_delta_before_graph_invocation():
         wait_for_prior_finalizing=AsyncMock(),
         set_status=set_status,
         set_status_if_not_cancelled=AsyncMock(side_effect=set_status_if_not_cancelled),
+        set_finalizing=AsyncMock(),
         cleanup=AsyncMock(),
     )
     record = RunRecord(
@@ -4419,6 +4424,7 @@ async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
         wait_for_prior_finalizing=AsyncMock(),
         set_status=set_status,
         set_status_if_not_cancelled=AsyncMock(side_effect=set_status_if_not_cancelled),
+        set_finalizing=AsyncMock(),
         cleanup=AsyncMock(),
     )
     record = RunRecord(

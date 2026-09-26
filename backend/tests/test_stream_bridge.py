@@ -1308,6 +1308,49 @@ async def real_redis_bridge():
 @pytest.mark.integration
 @requires_redis
 @pytest.mark.anyio
+async def test_redis_recovered_end_is_atomic_without_trimming_retained_output(real_redis_bridge):
+    run_id = "integ-recovered-end"
+    await real_redis_bridge.publish(run_id, "first", {"step": 1})
+    await real_redis_bridge.publish(run_id, "second", {"step": 2})
+    key = real_redis_bridge._stream_key(run_id)
+    before = await real_redis_bridge._redis.xrange(key)
+
+    published = await asyncio.gather(*(real_redis_bridge.publish_recovered_end(run_id) for _ in range(8)))
+
+    assert published.count(True) == 1
+    after = await real_redis_bridge._redis.xrange(key)
+    assert after[:2] == before
+    assert len(after) == 3
+    assert after[-1][1] == {"kind": "end"}
+    assert 0 < await real_redis_bridge._redis.ttl(key) <= real_redis_bridge._stream_ttl_seconds
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+async def test_redis_recovered_end_does_not_create_missing_stream(real_redis_bridge):
+    assert await real_redis_bridge.publish_recovered_end("missing-recovery") is False
+    assert not await real_redis_bridge.stream_exists("missing-recovery")
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+async def test_redis_recovered_end_preserves_existing_end_and_optional_ttl(real_redis_bridge):
+    real_redis_bridge._stream_ttl_seconds = None
+    run_id = "integ-recovered-no-ttl"
+    await real_redis_bridge.publish(run_id, "values", {"answer": "retained"})
+    assert await real_redis_bridge.publish_recovered_end(run_id) is True
+    key = real_redis_bridge._stream_key(run_id)
+    before = await real_redis_bridge._redis.xrange(key)
+    assert await real_redis_bridge.publish_recovered_end(run_id) is False
+    assert await real_redis_bridge._redis.xrange(key) == before
+    assert await real_redis_bridge._redis.ttl(key) == -1
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
 async def test_redis_integration_publish_subscribe_and_id_format(real_redis_bridge):
     run_id = "integ-basic"
     await real_redis_bridge.publish(run_id, "metadata", {"run_id": run_id})

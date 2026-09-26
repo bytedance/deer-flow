@@ -101,7 +101,10 @@ class MemoryStreamBridge(StreamBridge):
 
     async def stream_exists(self, run_id: str) -> bool:
         """Return whether the in-process event log still has data for *run_id*."""
-        return run_id in self._streams
+        stream = self._streams.get(run_id)
+        # subscribe() allocates a condition even before the first publication.
+        # That empty wait handle is not retained history (nor a live producer).
+        return stream is not None and bool(stream.events or stream.ended)
 
     # -- StreamBridge API ------------------------------------------------------
 
@@ -121,6 +124,17 @@ class MemoryStreamBridge(StreamBridge):
         async with stream.condition:
             stream.ended = True
             stream.condition.notify_all()
+
+    async def publish_recovered_end(self, run_id: str) -> bool:
+        stream = self._streams.get(run_id)
+        if stream is None:
+            return False
+        async with stream.condition:
+            if self._streams.get(run_id) is not stream or stream.ended or not stream.events:
+                return False
+            stream.ended = True
+            stream.condition.notify_all()
+            return True
 
     async def subscribe(
         self,

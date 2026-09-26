@@ -143,11 +143,21 @@ sequenceDiagram
 关键组件：
 
 - `runtime/runs/worker.py::run_agent` — 在 `asyncio.Task` 里跑 `agent.astream()`，把每个 chunk 通过 `serialize(chunk, mode=mode)` 转成 JSON，再 `bridge.publish()`。
-- `runtime/stream_bridge` — 抽象 Queue。`publish/subscribe` 解耦生产者和消费者，支持 `Last-Event-ID` 重连、心跳、多订阅者 fan-out。`stream_bridge.heartbeat_interval_seconds`（默认 15 秒）是 bridge 实例的默认心跳周期，统一作用于 Gateway SSE、`/wait` 和内部 channel watcher；显式传给 `subscribe()` 的值仍可覆盖单次订阅。Memory 和 Redis 都只保留 `queue_maxsize` 条数据事件；游标早于保留水位线时返回 `StreamGap`，不会从当前最早事件静默部分重放。Redis backend 会在每次 `publish()` / `publish_end()` 刷新 retained stream key TTL；启动恢复与基于 worker lease 的周期恢复共用 Gateway stream terminalization 路径：`RunManager` 先将 orphan run 持久化为 `error` 并写入显式的 `stop_reason=orphan_recovered`，随后 Gateway 发布 `END_SENTINEL` 并安排 stream cleanup。周期扫描、逐行状态写入和 Gateway callback 作为一个受监督的 single-flight 后台 task 执行；慢任务不会堆积，也不会阻塞唯一的 lease heartbeat。shutdown 优先收敛活跃 run，再处理恢复 task；尚未执行的延迟 stream cleanup 会改为立即删除。只有 runtime `yield` 前、无并发请求的启动恢复会把最新受影响 thread 标记为 error；周期恢复不做非原子的 thread 投影。store-only SSE 与 `/wait` consumer 不能把普通 durable terminal status 当成流已完成，否则可能跳过延迟发布的 error 等尾部事件；只有 `orphan_recovered` 信号能在 heartbeat 时触发 END fallback，因为此时 producer 已被确认失联。TTL 仍是 Redis 内存和故障安全网，不是正常的 subscriber 终止机制。
+- `runtime/stream_bridge` — 抽象 Queue。`publish/subscribe` 解耦生产者和消费者，支持 `Last-Event-ID` 重连、心跳、多订阅者 fan-out。`stream_bridge.heartbeat_interval_seconds`（默认 15 秒）是 bridge 实例的默认心跳周期，统一作用于 Gateway SSE、`/wait` 和内部 channel watcher；显式传给 `subscribe()` 的值仍可覆盖单次订阅。Memory 和 Redis 都只保留 `queue_maxsize` 条数据事件；游标早于保留水位线时返回 `StreamGap`，不会从当前最早事件静默部分重放。Redis backend 会在每次 `publish()` / `publish_end()` 刷新 retained stream key TTL；启动恢复与基于 worker lease 的周期恢复共用 Gateway stream terminalization 路径：`RunManager` 先将 orphan run 持久化为 `error` 并写入显式的 `stop_reason=orphan_recovered`，随后 Gateway 发布 `END_SENTINEL` 并安排 stream cleanup。周期扫描、逐行状态写入和 Gateway callback 作为一个受监督的 single-flight 后台 task 执行；慢任务不会堆积，也不会阻塞唯一的 lease heartbeat。shutdown 优先收敛活跃 run，再处理恢复 task；尚未执行的延迟 stream cleanup 会改为立即删除。只有 runtime `yield` 前、无并发请求的启动恢复会把最新受影响 thread 标记为 error；周期恢复不做非原子的 thread 投影。SSE 与 `/wait` 的终态恢复条件见下节。TTL 仍是 Redis 内存和故障安全网，不是正常的 subscriber 终止机制。
 - `app/gateway/services.py::sse_consumer` — 从 bridge 订阅，格式化为 SSE wire 帧。
 - `runtime/serialization.py::serialize` — mode-aware 序列化；`messages` mode 下 `serialize_messages_tuple` 把 `(chunk, metadata)` 转成 `[chunk.model_dump(), metadata]`。
 
 **`StreamBridge` 的存在价值**：当生产者（`run_agent` 任务）和消费者（HTTP 连接）在不同的 asyncio task 里运行时，需要一个可以跨 task 传递事件的中介。Queue 同时还承担断连重连的 buffer 和多订阅者的 fan-out。
+
+### 终态与缺失 stream 的恢复
+
+普通 durable terminal status 不代表最后的流事件已经发布。只要 bridge 仍有保留数据，store-only SSE 与 `/wait` 必须继续读取尾帧；heartbeat 只有在重新按 run 的用户归属读取终态后，看到显式 `orphan_recovered` / `scheduled_task_orphan_recovered`，或 `run.delivery` receipt，或状态匹配且 `metadata.authoritative=true` 的 `run.end`，才能补出 END。新 runtime 在可见尾帧之后写这两类事件；旧版无标记的 `run.end` 不具备这个顺序保证。
+
+另一个场景是整个 stream 已经丢失，例如重启后仍有数据库 RunRow，但进程内 stream 与 run-event store 都消失了。此时 receipt 不可能再出现。Gateway 允许一个有界的兼容恢复：每次重新读取终态，并确认没有活跃的本地任务、owner lease 已经过期并超过 `run_ownership.grace_seconds`、终态行的 `updated_at`（缺失时使用 `created_at`）也已经过同样宽限，最后重新探测 bridge 仍无数据。默认宽限为 10 秒，实际发现时间还受 heartbeat 周期影响。Memory bridge 的空订阅等待对象不算保留数据，与 Redis 空订阅不创建 stream key 的行为一致；一旦有新帧出现，就恢复到上面的严格证据规则，不以超时截断仍存在的尾部。
+
+`local_finalizer_pending` 表示终态之后仍有 owner 负责收尾，必须先取得原子过期接管，或读到 receipt / authoritative end；它不能走普通缺流兼容路径。有效 lease、仍运行的本地 task、读取失败和探测失败都不会被当成已完成。不会永久缓存“没有 receipt/stream”，以便下一次 heartbeat 看见刚提交的证据或刚发布的尾帧。跨 worker 部署仍要求启用 ownership heartbeat。
+
+恢复时，普通 observer join 返回 `end`，创建接口的幂等重试返回 `gap` 与 `recovery: reload_durable_state`，提醒客户端重新加载持久化结果；`/wait` 可结束等待。缺流恢复仅完成消费者，不伪造历史 receipt 或覆盖 run 的最终状态。
 
 ### 有界历史与 `gap` 恢复
 

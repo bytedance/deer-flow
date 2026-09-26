@@ -25,6 +25,8 @@ from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, ONCE
 
 pytestmark = pytest.mark.asyncio
 
+_RECOVERY_OWNER_WORKER_ID = "scheduler-recovery-test"
+
 
 @pytest_asyncio.fixture(params=["sqlite", "postgres"])
 async def occurrence_factories(request, tmp_path):
@@ -287,6 +289,7 @@ async def test_once_recovery_defers_while_any_occurrence_is_live_then_projects_t
     kwargs = {"error": "interrupted: recovery"}
     if recovery_method == "reconcile_stuck_once_tasks":
         kwargs["now"] = datetime.now(UTC) + timedelta(minutes=10)
+        kwargs["owner_worker_id"] = _RECOVERY_OWNER_WORKER_ID
 
     async def recover():
         count = await getattr(task_repo, recovery_method)(**kwargs)

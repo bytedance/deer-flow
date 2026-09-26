@@ -86,6 +86,18 @@ class StreamBridge(abc.ABC):
     async def publish_end(self, run_id: str) -> None:
         """Signal that no more events will be produced for *run_id*."""
 
+    async def publish_recovered_end(self, run_id: str) -> bool:
+        """Finish a retained recovered stream; report whether END was added.
+
+        Backends override this compatibility default to atomically skip absent
+        and already-ended streams. A skipped stream needs no new cleanup task.
+        """
+        stream_exists = getattr(type(self), "stream_exists", None)
+        if stream_exists is not None and not await stream_exists(self, run_id):
+            return False
+        await self.publish_end(run_id)
+        return True
+
     @abc.abstractmethod
     def subscribe(
         self,

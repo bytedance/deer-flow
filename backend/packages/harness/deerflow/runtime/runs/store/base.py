@@ -17,6 +17,8 @@ from typing import Any
 
 from deerflow.utils.time import coerce_iso
 
+LOCAL_FINALIZER_PENDING_STOP_REASON = "local_finalizer_pending"
+
 
 @dataclass(frozen=True)
 class EditReplayVisibility:
@@ -110,6 +112,13 @@ def run_is_before_cursor(
 
 
 class RunStore(abc.ABC):
+    # The class that defines create_thread_operation_atomic() may opt into the
+    # extended atomic-recovery keywords by defining this flag alongside it.
+    # Passive subclasses inherit that proven implementation; a subclass that
+    # overrides the method must opt in again so old strict signatures remain
+    # compatible.
+    supports_atomic_recovery_markers = False
+
     async def list_changed(
         self,
         *,
@@ -210,8 +219,48 @@ class RunStore(abc.ABC):
 
         Returns ``False`` when the store can prove no row was updated. Older or
         lightweight stores may return ``None`` when they cannot report rowcount.
+        Finalizing terminal rows may clear ``local_finalizer_pending`` by
+        omitting *stop_reason*; omission must retain any other stop reason.
         """
         pass
+
+    async def update_status_if_owned(
+        self,
+        run_id: str,
+        status: str,
+        *,
+        owner_worker_id: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+        grace_seconds: int = 0,
+    ) -> bool | None:
+        """Update status while *owner_worker_id* retains the terminal lease grace.
+
+        Multi-worker stores must implement the owner and lease-within-grace
+        predicates atomically for active rows. The grace permits terminal
+        persistence, not further Agent execution, and uses the same deadline
+        as takeover. A same-owner ``interrupted`` to
+        ``error`` rollback refinement may proceed without an active lease
+        because the terminal row already fences peers. Failing closed keeps an
+        older third-party store safe in heartbeat mode; single-worker callers
+        continue to use :meth:`update_status` directly.
+        """
+        raise NotImplementedError("RunStore.update_status_if_owned() must atomically fence status writes by owner and lease")
+
+    async def start_run_if_owned(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+    ) -> bool:
+        """Start a pending run only while *owner_worker_id* has a live lease.
+
+        Multi-worker stores must check pending status, owner, lease deadline,
+        and the absence of a cancellation request in one atomic operation. The
+        default fails closed so an older custom store cannot start duplicate or
+        already-cancelled Agent work in heartbeat mode.
+        """
+        raise NotImplementedError("RunStore.start_run_if_owned() must atomically check pending status, owner, live lease, and cancellation")
 
     @abc.abstractmethod
     async def start_run(self, run_id: str) -> bool:
@@ -370,6 +419,43 @@ class RunStore(abc.ABC):
         )
         return StatusFinalization(finalized=updated is not False)
 
+    async def finalize_if_owned_and_not_cancelled(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        status: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+        grace_seconds: int = 0,
+    ) -> StatusFinalization:
+        """Finalize only while the caller still owns the active row.
+
+        Multi-worker stores must combine the owner, lease-within-grace, active-status,
+        and cancellation predicates in one atomic operation. Failing closed
+        keeps a stale worker from publishing an outcome through a legacy store
+        that cannot provide that fencing guarantee.
+        """
+        raise NotImplementedError("RunStore.finalize_if_owned_and_not_cancelled() must atomically fence terminal writes by owner, lease, and cancellation")
+
+    async def claim_expired_local_finalizer(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        recovery_stop_reason: str,
+        grace_seconds: int,
+    ) -> dict[str, Any] | None:
+        """Fence an expired terminal local finalizer and return its new row.
+
+        Implementations must atomically match the exact
+        ``local_finalizer_pending`` marker and an expired (or missing) lease,
+        transfer ownership, and replace the marker with
+        *recovery_stop_reason*. Returning ``None`` means a live finalizer or a
+        concurrent receipt/recovery path still owns the decision.
+        """
+        raise NotImplementedError("RunStore.claim_expired_local_finalizer() must atomically transfer ownership of an expired local finalizer")
+
     @abc.abstractmethod
     async def claim_for_takeover(
         self,
@@ -379,7 +465,10 @@ class RunStore(abc.ABC):
         error: str,
         stop_reason: str | None = None,
     ) -> bool:
-        """Atomically mark an expired-lease active run as ``error``.
+        """Atomically terminalize an expired-lease active run.
+
+        An accepted cancellation is recovered as ``interrupted``; otherwise
+        recovery records ``error``. Preserve the first cancellation action.
 
         Only rows whose lease has expired past *grace_seconds* (or whose
         lease is NULL — pre-ownership data) are updated.  The conditional
@@ -393,6 +482,23 @@ class RunStore(abc.ABC):
           - the row doesn't exist.
         """
         pass
+
+    async def claim_for_takeover_as(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        grace_seconds: int,
+        error: str,
+        stop_reason: str | None = None,
+    ) -> bool:
+        """Claim an expired run and atomically transfer its fencing owner.
+
+        Multi-worker stores must override this primitive. Keeping it separate
+        from the legacy claim method avoids silently pretending that a store
+        without an owner CAS can fence the former worker.
+        """
+        raise NotImplementedError("RunStore.claim_for_takeover_as() must atomically transfer expired-run ownership and preserve accepted cancellation")
 
     @abc.abstractmethod
     async def list_inflight_with_expired_lease(

@@ -58,6 +58,7 @@ from deerflow.projects.context import PROJECT_CONTEXT_MESSAGE_MARKER, resolve_pr
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
+    LOCAL_FINALIZER_PENDING_STOP_REASON,
     ORPHAN_RECOVERY_STOP_REASON,
     CheckpointStateAccessor,
     ConflictError,
@@ -99,8 +100,17 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_con
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
+from deerflow.utils.time import is_lease_expired
 
 logger = logging.getLogger(__name__)
+
+_SCHEDULED_TASK_ORPHAN_RECOVERY_STOP_REASON = "scheduled_task_orphan_recovered"
+_ORPHAN_RECOVERY_STOP_REASONS = frozenset(
+    {
+        ORPHAN_RECOVERY_STOP_REASON,
+        _SCHEDULED_TASK_ORPHAN_RECOVERY_STOP_REASON,
+    }
+)
 
 
 @asynccontextmanager
@@ -246,40 +256,96 @@ async def _ensure_thread_metadata(
     return existing
 
 
-async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
-    """True when a terminal run has no retained stream on bridges that can tell."""
+async def _terminal_record_stream_missing(
+    bridge: StreamBridge,
+    record: RunRecord,
+    run_mgr: RunManager,
+) -> bool:
+    """Check completion without entering a stream that has no retained data."""
     if not _run_is_terminal(record):
         return False
+    if not await _stream_is_missing(bridge, record.run_id):
+        return False
+    return await _terminal_completion_observed_after_heartbeat(record, run_mgr, bridge=bridge)
+
+
+async def _stream_is_missing(bridge: StreamBridge, run_id: str) -> bool:
+    """Do not confuse an unavailable existence probe with an absent stream."""
     stream_exists = getattr(bridge, "stream_exists", None)
     if stream_exists is None:
         return False
     try:
-        return not bool(await stream_exists(record.run_id))
+        return not bool(await stream_exists(run_id))
     except Exception:
         logger.debug(
             "Failed to probe stream existence for terminal run %s",
-            sanitize_log_param(record.run_id),
+            sanitize_log_param(run_id),
             exc_info=True,
         )
         return False
 
 
-async def _orphan_recovery_observed_after_heartbeat(
+async def _terminal_completion_observed_after_heartbeat(
     record: RunRecord,
     run_mgr: RunManager,
+    *,
+    bridge: StreamBridge | None = None,
 ) -> bool:
-    """Return whether durable orphan recovery is the consumer's liveness edge.
+    """Return whether durable evidence makes a missing bridge END recoverable.
 
-    A normal terminal status is not sufficient: the producer persists status
-    before publishing its final error/data frames and END. Orphan recovery is
-    different because the producer is known to be gone and the durable
-    ``stop_reason`` is written atomically with the terminal status. Only that
-    explicit signal may synthesize END after a heartbeat.
+    A normal terminal status is not sufficient: older producers could persist
+    it before publishing their final error/data frames and END. Orphan recovery
+    is safe because its durable ``stop_reason`` proves the producer is gone.
+    ``run.delivery`` provides a second safe boundary: workers persist that
+    singleton only after all visible tail frames and before the terminal row.
+    New-runtime ``run.end`` events carry an explicit authoritative marker and
+    are written after the terminal row; either pair acts as a durable outbox if
+    bridge END publication is lost. Legacy unmarked ``run.end`` rows are not
+    trusted because their tail ordering is unknown. If the entire stream is
+    absent, legacy rows and lost in-memory event stores instead recover after
+    the terminal row's grace window and any owner lease have elapsed. Retained
+    streams never use that compatibility fallback, so delayed tail frames stay
+    readable. Absence is freshly checked rather than negatively cached.
     """
-    if not record.store_only:
+    task = record.task
+    if not (record.store_only or record.ownership_lost or task is None or task.done()):
         return False
-    refreshed = await run_mgr.get(record.run_id, user_id=record.user_id)
-    return refreshed is not None and _run_is_terminal(refreshed) and refreshed.stop_reason == ORPHAN_RECOVERY_STOP_REASON
+    refreshed = await run_mgr.get_durable(record.run_id, user_id=record.user_id)
+    if refreshed is None or not _run_is_terminal(refreshed):
+        return False
+    if refreshed.stop_reason in _ORPHAN_RECOVERY_STOP_REASONS:
+        return True
+    if await run_mgr.has_durable_run_delivery(refreshed):
+        return True
+    if await run_mgr.has_durable_authoritative_run_end(refreshed):
+        return True
+    if refreshed.stop_reason == LOCAL_FINALIZER_PENDING_STOP_REASON:
+        return await run_mgr.recover_expired_local_finalizer(refreshed)
+    if bridge is None:
+        return False
+    if not is_lease_expired(refreshed.lease_expires_at, grace_seconds=run_mgr.grace_seconds):
+        return False
+    if not is_lease_expired(refreshed.updated_at or refreshed.created_at, grace_seconds=run_mgr.grace_seconds):
+        return False
+    return await _stream_is_missing(bridge, record.run_id)
+
+
+def _missing_stream_frame(record: RunRecord, last_event_id: str | None, *, emit_gap: bool) -> str:
+    if not emit_gap:
+        return format_sse("end", None)
+    # A creating-endpoint retry must reload durable state rather than treating
+    # an empty replay as proof that the completed run produced nothing.
+    return format_sse(
+        "gap",
+        {
+            "code": "stream_replay_gap",
+            "run_id": record.run_id,
+            "requested_event_id": last_event_id,
+            "earliest_available_event_id": None,
+            "latest_available_event_id": None,
+            "recovery": "reload_durable_state",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1754,6 +1820,13 @@ async def start_run(
     # bypassing the check -- a leaked internal token must not grant cross-user
     # thread access.
     user = getattr(request.state, "user", None)
+    # Always freeze the effective owner on the RunRecord.  Ordinary authenticated
+    # requests do not carry the trusted internal-owner header, but the SQL store
+    # still resolves their ambient user context when it inserts the row.  Passing
+    # only ``owner_user_id`` therefore left the in-memory record unowned while its
+    # durable row was user-scoped; terminal event writers then explicitly cleared
+    # the ambient context and produced events that the owner could not query.
+    run_user_id = owner_user_id or (str(user.id) if user is not None else None)
 
     async def thread_access_allowed() -> bool:
         if user is None:
@@ -2082,7 +2155,7 @@ async def start_run(
                     },
                     multitask_strategy=body.multitask_strategy,
                     model_name=model_name,
-                    user_id=owner_user_id,
+                    user_id=run_user_id,
                     idempotency_key=idempotency_key,
                 )
 
@@ -2121,6 +2194,7 @@ async def start_run(
                     await run_mgr.fail_start_if_pending(
                         record.run_id,
                         error=f"Failed to attach run worker: {exc}",
+                        emit_terminal_events=True,
                     )
                     raise
         except ConflictError as exc:
@@ -2324,23 +2398,8 @@ async def sse_consumer(
     tests) keep ``end`` when a terminal record's stream is gone.
     """
     last_event_id = request.headers.get("Last-Event-ID")
-    if await _terminal_record_stream_missing(bridge, record):
-        if emit_gap_on_missing_stream:
-            # Creating-endpoint retry: a bare `end` looks like the run
-            # produced nothing. Point the client at durable state instead.
-            yield format_sse(
-                "gap",
-                {
-                    "code": "stream_replay_gap",
-                    "run_id": record.run_id,
-                    "requested_event_id": last_event_id,
-                    "earliest_available_event_id": None,
-                    "latest_available_event_id": None,
-                    "recovery": "reload_durable_state",
-                },
-            )
-            return
-        yield format_sse("end", None)
+    if await _terminal_record_stream_missing(bridge, record, run_mgr):
+        yield _missing_stream_frame(record, last_event_id, emit_gap=emit_gap_on_missing_stream)
         return
 
     gap_emitted = False
@@ -2365,8 +2424,9 @@ async def sse_consumer(
                 return
 
             if entry is HEARTBEAT_SENTINEL:
-                if await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
-                    yield format_sse("end", None)
+                if await _terminal_completion_observed_after_heartbeat(record, run_mgr, bridge=bridge):
+                    gap_emitted = emit_gap_on_missing_stream and await _stream_is_missing(bridge, record.run_id)
+                    yield _missing_stream_frame(record, last_event_id, emit_gap=gap_emitted)
                     return
                 yield ": heartbeat\n\n"
                 continue
@@ -2424,7 +2484,7 @@ async def wait_for_run_completion(
         response.
     """
     completed = False
-    if await _terminal_record_stream_missing(bridge, record):
+    if await _terminal_record_stream_missing(bridge, record, run_mgr):
         return True
 
     resume_from_event_id: str | None = None
@@ -2445,7 +2505,7 @@ async def wait_for_run_completion(
                     resume_from_event_id = entry.latest_available_event_id
                     gap_seen = True
                     break
-                if entry is HEARTBEAT_SENTINEL and await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
+                if entry is HEARTBEAT_SENTINEL and await _terminal_completion_observed_after_heartbeat(record, run_mgr, bridge=bridge):
                     completed = True
                     return True
                 if await request.is_disconnected():
