@@ -829,6 +829,31 @@ def test_url_redaction_filter_collapses_credentials_in_a_header_parse_dump() -> 
         assert "bad line" in formatted
 
 
+def test_url_redaction_filter_collapses_credentials_behind_escaped_bare_cr_separators() -> None:
+    """A payload separated on bare CR alone must collapse too.
+
+    ``http.client`` accepts ``\\r`` as a line terminator even though RFC 9112
+    defines only CRLF, so ``parse_headers`` + ``assert_header_parsing`` yield a
+    ``HeaderParsingError`` whose payload carries every field after a bare-CR
+    break. That block reaches the record through ``!r``, so its separators are
+    the two characters ``\\r`` rather than the four of ``\\r\\n``: a splitter
+    that knows escaped CRLF and escaped LF but not escaped bare CR keeps the
+    whole dump in one segment. No field name then sits at a segment start, the
+    anchor never fires, and the cookie and the signed ``Location`` are logged
+    verbatim in both the message and the ``exc_text`` that repeats it.
+    """
+    url = "https://cdn.example.com:443/tenant-42/reports/q1?sig=UrlSecret"
+    raw = b"bad line\rSet-Cookie: session=BareCRSecret\rLocation: /p?sig=LocationSecret\r\r"
+
+    formatted = _emit_real_header_parse_warning(url, raw)
+    for secret in ("BareCRSecret", "LocationSecret", "session=", "UrlSecret"):
+        assert secret not in formatted, secret
+    # The names survive for operator legibility, and so does the malformed line.
+    assert "Set-Cookie: <redacted>" in formatted
+    assert "Location: <redacted>" in formatted
+    assert "bad line" in formatted
+
+
 def test_url_redaction_filter_collapses_folded_continuations_and_proxy_auth_info() -> None:
     """A collapsed field's value can continue on the following line, and
     ``Proxy-Authentication-Info`` is the proxy-side twin of a field already on

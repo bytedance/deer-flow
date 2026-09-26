@@ -153,7 +153,13 @@ _CREDENTIAL_FIELD_RE = re.compile(r"(?i)(?P<name>set-cookie2?|cookie|authorizati
 # quote is a break too — the dump's first field follows ``unparsed data: `` and
 # its ``b?`` bytes form on the same segment as the warning's own scaffolding, so
 # without it that first field would never start a segment and never be anchored.
-_DUMP_LOGICAL_BREAK_RE = re.compile(r"(\\r\\n|\\n|\r\n|\r|\n|unparsed data: b?['\"])")
+# Every break spelling needs both forms. A bare CR is a separator to
+# ``parse_headers`` even though RFC 9112 only defines CRLF, so a payload can be
+# split on ``\r`` alone; in the repr that is the two characters ``\\r``, which
+# ``\\r\\n`` and ``\\n`` never match. Missing it leaves the whole dump in one
+# segment, so the leading field name is not at a segment start, no anchor fires,
+# and every credential in the block is logged verbatim.
+_DUMP_LOGICAL_BREAK_RE = re.compile(r"(\\r\\n|\\r|\\n|\r\n|\r|\n|unparsed data: b?['\"])")
 _HEADER_DUMP_PREFIX = "Failed to parse headers (url="
 # An RFC 5322 obs-fold continuation keeps the field's value on the next line and
 # is marked by a leading SP/HTAB. This warning exists to dump malformed upstream
