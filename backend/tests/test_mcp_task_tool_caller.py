@@ -14,7 +14,7 @@ from mcp.types import CONNECTION_CLOSED, ErrorData
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpUserScopedAuthConfig
 from deerflow.config.paths import Paths
-from deerflow.mcp.session_pool import MCPSessionPool
+from deerflow.mcp.session_pool import MCPSessionPool, ServerBinding
 from deerflow.mcp.task_tool_caller import McpTaskToolCaller
 from deerflow.mcp_scope import mcp_session_scope_key
 from deerflow.runtime.user_context import get_current_user, reset_current_user, set_current_user
@@ -76,6 +76,19 @@ class _SessionContext:
         return None
 
 
+def _binding_aware_pool(pool: MagicMock) -> ServerBinding:
+    """Model the pool's per-server binding API for a first-seen stdio server.
+
+    The caller resolves a binding from the BASE connection before touching the
+    pool, via ``ensure_binding`` (one locked read+install). A bare MagicMock
+    would return a truthy value that never matches, so model a first-seen seed
+    and return that binding for the call site to assert on.
+    """
+    binding = ServerBinding(server_name="reports", epoch=1, fingerprint="base-fp")
+    pool.ensure_binding = MagicMock(return_value=binding)
+    return binding
+
+
 async def _assert_configured_timeout(awaitable: Coroutine[Any, Any, Any], *, wait_timeout: float = 0.25, expected_message: str | None = None) -> None:
     task = asyncio.create_task(awaitable)
     try:
@@ -116,6 +129,7 @@ async def test_stdio_task_call_reuses_exact_scope_and_raw_tool_name() -> None:
     pool = MagicMock()
     pool.get_session = AsyncMock(return_value=session)
     pool.close_session = AsyncMock()
+    binding = _binding_aware_pool(pool)
     caller = McpTaskToolCaller(_config())
 
     with (
@@ -139,6 +153,7 @@ async def test_stdio_task_call_reuses_exact_scope_and_raw_tool_name() -> None:
         "reports",
         "user-1:thread-1",
         {"transport": "stdio", "command": "report-mcp"},
+        binding=binding,
     )
     session.call_tool.assert_awaited_once_with("status_report", {"task_id": "remote-1"})
     pool.close_session.assert_not_awaited()
@@ -205,6 +220,7 @@ async def test_broken_stdio_task_session_is_evicted_for_next_poll_reconnect(disc
     pool.get_session = AsyncMock(return_value=session)
     pool.close_session = AsyncMock()
     pool.close_session_if_current = AsyncMock()
+    _binding_aware_pool(pool)
     caller = McpTaskToolCaller(_config())
 
     with (
@@ -240,6 +256,7 @@ async def test_stdio_task_timeout_keeps_healthy_stateful_session() -> None:
     pool.get_session = AsyncMock(return_value=session)
     pool.close_session = AsyncMock()
     pool.close_session_if_current = AsyncMock()
+    _binding_aware_pool(pool)
     caller = McpTaskToolCaller(_config())
 
     with (
@@ -270,6 +287,7 @@ async def test_stdio_task_interceptor_failure_keeps_healthy_session() -> None:
     pool.get_session = AsyncMock(return_value=session)
     pool.close_session = AsyncMock()
     pool.close_session_if_current = AsyncMock()
+    _binding_aware_pool(pool)
     caller = McpTaskToolCaller(_config())
 
     async def reject_call(_request, _handler):
@@ -394,12 +412,13 @@ async def test_stdio_task_session_initialization_respects_configured_timeout() -
     config = _config()
     config.mcp_servers["reports"].session_init_timeout = 0.01
 
-    async def slow_get_session(*_args):
+    async def slow_get_session(*_args, **_kwargs):
         await asyncio.sleep(60)
 
     pool = MagicMock()
     pool.get_session = AsyncMock(side_effect=slow_get_session)
     pool.close_session = AsyncMock()
+    _binding_aware_pool(pool)
     caller = McpTaskToolCaller(config)
 
     with (

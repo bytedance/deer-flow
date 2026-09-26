@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 from pathlib import Path
@@ -35,6 +36,7 @@ from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+from fastapi import HTTPException
 
 from app.gateway.routers import mcp as mcp_router
 from app.gateway.routers import skills as skills_router
@@ -112,11 +114,20 @@ async def test_update_skill_writes_from_snapshot_without_mutating_singleton(tmp_
     written = json.loads(config_text)
     # A new file is seeded with the cached skill states only. The cached model
     # holds $VAR-resolved values, so none of its other fields are serialized.
+    assert written["mcpLifecycle"]["lifecycleId"]
+    written["mcpLifecycle"]["lifecycleId"] = "lineage"
     assert written == {
         "skills": {
             "existing-skill": {"enabled": True},
             "demo-skill": {"enabled": False},
-        }
+        },
+        "mcpLifecycle": {
+            "schemaVersion": 2,
+            "lifecycleId": "lineage",
+            "configRevision": 1,
+            "globalGeneration": 0,
+            "serverGenerations": {},
+        },
     }
 
 
@@ -205,7 +216,7 @@ async def test_skill_and_mcp_config_writes_are_serialized(tmp_path: Path, monkey
 
     monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
     monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda _body: None)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation_from_revision", lambda _committed: None)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", _tracking_reload)
 
     await asyncio.gather(
@@ -239,7 +250,7 @@ async def test_cancelled_writer_keeps_the_lock_until_its_worker_finishes(tmp_pat
     order_lock = threading.Lock()
     skills_inside = threading.Event()
     release_skills = threading.Event()
-    mcp_cache_reset = threading.Event()
+    mcp_reconciled = threading.Event()
 
     def _skills_reload() -> None:
         # Inside the real _write_extensions_skill_state, under the lock, after the
@@ -259,10 +270,14 @@ async def test_cancelled_writer_keeps_the_lock_until_its_worker_finishes(tmp_pat
     async def _noop_admin(_request, **_kwargs) -> None:
         return None
 
+    def _mcp_reconcile(_committed):
+        mcp_reconciled.set()
+        return None
+
     _patch_config_infra(monkeypatch, config_path, reload_hook=_skills_reload)
     monkeypatch.setattr(mcp_router, "require_admin_user", _noop_admin)
     monkeypatch.setattr(mcp_router, "_validate_mcp_update_request", lambda _body: None)
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", mcp_cache_reset.set)
+    monkeypatch.setattr(mcp_router, "prepare_mcp_reconciliation_from_revision", _mcp_reconcile)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", _mcp_reload)
 
     skills_task = asyncio.create_task(update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace()))
@@ -286,5 +301,78 @@ async def test_cancelled_writer_keeps_the_lock_until_its_worker_finishes(tmp_pat
     with order_lock:
         assert order == ["skills-enter", "skills-exit", "mcp-enter"], order
 
-    # The non-cancelled writer still completed its cache invalidation.
-    assert mcp_cache_reset.is_set()
+    # The non-cancelled writer still completed its cache reconciliation.
+    assert mcp_reconciled.is_set()
+
+
+async def test_update_skill_advances_only_config_revision_and_preserves_raw_keys(tmp_path: Path, monkeypatch) -> None:
+    """A skills write moves ``configRevision`` only and keeps unknown/raw keys intact."""
+    monkeypatch.delenv("DEERFLOW_TEST_SKILL_TOKEN", raising=False)
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "A": {
+                        "enabled": True,
+                        "type": "stdio",
+                        "command": "npx",
+                        "env": {"TOKEN": "$DEERFLOW_TEST_SKILL_TOKEN"},
+                    },
+                },
+                "skills": {"demo-skill": {"enabled": True}},
+                "mcpInterceptors": ["pkg.before:Interceptor"],
+                "customTopLevel": {"keep": [1, 2, 3]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _patch_config_infra(monkeypatch, config_path)
+
+    result = await update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace())
+
+    assert result.name == "demo-skill"
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert written["mcpLifecycle"]["lifecycleId"]
+    written["mcpLifecycle"]["lifecycleId"] = "lineage"
+    assert written["mcpLifecycle"] == {
+        "schemaVersion": 2,
+        "lifecycleId": "lineage",
+        "configRevision": 1,
+        "globalGeneration": 0,
+        "serverGenerations": {"A": 0},
+    }
+    assert written["skills"]["demo-skill"]["enabled"] is False
+    assert written["mcpServers"]["A"]["env"]["TOKEN"] == "$DEERFLOW_TEST_SKILL_TOKEN"
+    assert written["mcpInterceptors"] == ["pkg.before:Interceptor"]
+    assert written["customTopLevel"] == {"keep": [1, 2, 3]}
+
+
+async def test_update_skill_does_not_leak_resolved_secrets(tmp_path: Path, monkeypatch, caplog) -> None:
+    """A validation failure must not echo a resolved ``$VAR`` value.
+
+    Config validation resolves placeholders before validating, so the failure
+    carries the resolved credential in its message and traceback. Neither the
+    HTTP detail nor the log may reproduce it.
+    """
+    secret = "ghp_do_not_log_me_1234567890"
+    monkeypatch.setenv("DEERFLOW_LEAK_PROBE", secret)
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {"A": {"enabled": "$DEERFLOW_LEAK_PROBE"}},
+                "skills": {"demo-skill": {"enabled": True}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _patch_config_infra(monkeypatch, config_path)
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(HTTPException) as exc_info:
+            await update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace())
+
+    assert exc_info.value.status_code == 500
+    assert secret not in str(exc_info.value.detail)
+    assert secret not in caplog.text

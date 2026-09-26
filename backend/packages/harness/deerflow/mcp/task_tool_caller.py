@@ -17,7 +17,13 @@ from deerflow.mcp.context_headers import build_context_headers_interceptor
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
-from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
+from deerflow.mcp.session_pool import (
+    MCPSessionPool,
+    ServerBinding,
+    call_pooled_session_tool,
+    get_session_pool,
+    normalized_connection_fingerprint,
+)
 from deerflow.mcp_scope import mcp_session_scope_key
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -52,6 +58,26 @@ def _prepare_stdio_connection(
     env.setdefault("TEMP", str(tmp_dir))
     prepared["env"] = env
     return prepared
+
+
+def _resolve_stdio_binding(
+    pool: MCPSessionPool,
+    server_name: str,
+    connection: Mapping[str, Any],
+) -> ServerBinding:
+    """Resolve *server_name*'s binding from the BASE connection.
+
+    Mirrors ``tools._resolve_discovery_binding`` via
+    :meth:`MCPSessionPool.ensure_binding`: a first-seen name is seeded, an
+    unchanged fingerprint re-resolves idempotently, and a tombstone or
+    superseded fingerprint is fenced with ``StaleMCPBindingError`` rather than
+    silently minting a new epoch for a stale connection — all under one
+    ``_lock`` hold so a concurrent reconciliation cannot be overwritten.
+    Callers pass the *base* connection, before ``_prepare_stdio_connection``
+    adds the per-call workspace cwd/TMPDIR, so those additions never affect
+    identity. Fingerprints are never logged.
+    """
+    return pool.ensure_binding(server_name, normalized_connection_fingerprint(connection))
 
 
 class McpTaskToolCaller:
@@ -122,18 +148,24 @@ class McpTaskToolCaller:
         )
 
         if transport == "stdio":
+            pool = get_session_pool()
+            # Capture the binding from the BASE connection BEFORE
+            # ``_prepare_stdio_connection`` augments it with the per-call
+            # workspace cwd/TMPDIR: those additions must not affect identity,
+            # and a mid-flight config change must fence this wrapper rather
+            # than silently rebinding it to a new epoch.
+            binding = _resolve_stdio_binding(pool, server_name, connection)
             connection = await asyncio.to_thread(
                 _prepare_stdio_connection,
                 connection,
                 user_id=user_id,
                 thread_id=thread_id,
             )
-            pool = get_session_pool()
             session_init_timeout = server_config.session_init_timeout
             if session_init_timeout is not None:
                 try:
                     session = await asyncio.wait_for(
-                        pool.get_session(server_name, scope_key, connection),
+                        pool.get_session(server_name, scope_key, connection, binding=binding),
                         timeout=session_init_timeout,
                     )
                 except TimeoutError:
@@ -144,7 +176,7 @@ class McpTaskToolCaller:
                     )
                     raise
             else:
-                session = await pool.get_session(server_name, scope_key, connection)
+                session = await pool.get_session(server_name, scope_key, connection, binding=binding)
             return await self._invoke(
                 session=session,
                 pool=pool,

@@ -2357,11 +2357,21 @@ class TestMcpConfig:
             client.update_mcp_config({"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}})
 
         written_text = config_file.read_text(encoding="utf-8")
-        assert json.loads(written_text) == {
+        written = json.loads(written_text)
+        expected = {
             "mcpServers": {"new": {"type": "stdio", "command": "uvx", "env": {"TOKEN": "$DEERFLOW_TEST_GH_TOKEN"}}},
             "mcpInterceptors": {"auth": "$DEERFLOW_TEST_GH_TOKEN"},
             "skills": {"kept": {"enabled": False}},
+            "mcpLifecycle": {
+                "schemaVersion": 2,
+                "configRevision": 1,
+                "globalGeneration": 0,
+                "serverGenerations": {"new": 1, "old": 1},
+            },
         }
+        # A fresh baseline mints a new lineage id, so only its presence is fixed.
+        expected["mcpLifecycle"]["lifecycleId"] = written["mcpLifecycle"]["lifecycleId"]
+        assert written == expected
         assert "ghp_live_secret_value" not in written_text
 
     def test_update_mcp_config_rejects_invalid_candidate_without_writing(self, client, tmp_path):
@@ -2498,8 +2508,16 @@ class TestSkillsManagement:
 
         expected = self._config_with_placeholders()
         expected["skills"]["test-skill"] = {"enabled": False}
+        expected["mcpLifecycle"] = {
+            "schemaVersion": 2,
+            "configRevision": 1,
+            "globalGeneration": 0,
+            "serverGenerations": {"github": 0},
+        }
         written_text = config_file.read_text(encoding="utf-8")
-        assert json.loads(written_text) == expected
+        written = json.loads(written_text)
+        expected["mcpLifecycle"]["lifecycleId"] = written["mcpLifecycle"]["lifecycleId"]
+        assert written == expected
         assert "ghp_live_secret_value" not in written_text
 
     def test_update_skill_not_found(self, client):
@@ -4256,59 +4274,6 @@ class TestInstallSkillSecurity:
         with tempfile.TemporaryDirectory() as tmp:
             with pytest.raises(ValueError, match="not a file"):
                 client.install_skill(tmp)
-
-
-# ===========================================================================
-# Hardening — _atomic_write_json error paths
-# ===========================================================================
-
-
-class TestAtomicWriteJson:
-    def test_temp_file_cleaned_on_serialization_failure(self):
-        """If json.dump raises, the temp file is removed."""
-        with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "config.json"
-
-            # An object that cannot be serialized to JSON.
-            bad_data = {"key": object()}
-
-            with pytest.raises(TypeError):
-                DeerFlowClient._atomic_write_json(target, bad_data)
-
-            # Target should not have been created.
-            assert not target.exists()
-            # No stray .tmp files should remain.
-            tmp_files = list(Path(tmp).glob("*.tmp"))
-            assert tmp_files == []
-
-    def test_happy_path_writes_atomically(self):
-        """Normal write produces correct JSON and no temp files."""
-        with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "out.json"
-            data = {"key": "value", "nested": [1, 2, 3]}
-
-            DeerFlowClient._atomic_write_json(target, data)
-
-            assert target.exists()
-            with open(target) as f:
-                loaded = json.load(f)
-            assert loaded == data
-            # No temp files left behind.
-            assert list(Path(tmp).glob("*.tmp")) == []
-
-    def test_original_preserved_on_failure(self):
-        """If write fails, the original file is not corrupted."""
-        with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "config.json"
-            target.write_text('{"original": true}')
-
-            bad_data = {"key": object()}
-            with pytest.raises(TypeError):
-                DeerFlowClient._atomic_write_json(target, bad_data)
-
-            # Original content must survive.
-            with open(target) as f:
-                assert json.load(f) == {"original": True}
 
 
 # ===========================================================================

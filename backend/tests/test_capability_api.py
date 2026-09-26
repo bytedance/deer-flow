@@ -20,7 +20,7 @@ def capability_client(tmp_path, monkeypatch):
     path.write_text(json.dumps({"mcpServers": {"legacy": {"enabled": True, "type": "http", "url": "https://private.example/mcp", "headers": {"Authorization": "Bearer private-secret"}, "capability": {"plugin_id": 42}}}, "skills": {}}))
     monkeypatch.setattr(ExtensionsConfig, "resolve_config_path", lambda *args: path)
     monkeypatch.setattr(mcp, "reload_extensions_config", lambda: None)
-    monkeypatch.setattr(mcp, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.setattr(mcp, "prepare_mcp_reconciliation_from_revision", lambda _committed: None)
     app = FastAPI()
     app.dependency_overrides[get_config] = lambda: SimpleNamespace()
 
@@ -247,9 +247,14 @@ def test_delete_recovers_multiple_legacy_identity_collisions(capability_client):
     assert path.read_bytes() == before
     for removed in ["unrelated", "legacy-peer", "pair-two-b"]:
         before_raw = json.loads(path.read_text())
+        # Every writer now persists the shared `mcpLifecycle` block in the same
+        # atomic write (see mcp/commit.py); compare the config it did not touch.
+        before_raw.pop("mcpLifecycle", None)
         assert client.delete(f"/api/mcp/config/servers/{removed}").status_code == 200
         del before_raw["mcpServers"][removed]
-        assert json.loads(path.read_text()) == before_raw
+        after_raw = json.loads(path.read_text())
+        after_raw.pop("mcpLifecycle", None)
+        assert after_raw == before_raw
         items = client.get("/api/capabilities/installations/mcp").json()["items"]
         ambiguous = [item for item in items if not item["selectable"]]
         assert len(ambiguous) == {"unrelated": 4, "legacy-peer": 2, "pair-two-b": 0}[removed]
