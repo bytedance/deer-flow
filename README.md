@@ -1534,6 +1534,12 @@ sandbox egress. PPT slides are generated sequentially because each references
 the previous slide. Generation scripts exit nonzero on failure; composition
 rejects missing or mismatched slide images. The controlled image tool also works
 with LocalSandbox's PowerShell or cmd.exe fallback on Windows hosts.
+The PPT skill records verified slide progress in `/mnt/user-data/workspace`.
+If the image model changes during generation, it stops and offers to continue
+the remaining slides in a new request or regenerate the deck. A follow-up
+checks the saved plan and images before resuming; composition requires all
+recorded slides to be present and unchanged. The new request acquires a sandbox
+for the currently selected image model.
 
 #### Exporting Custom Skills
 
