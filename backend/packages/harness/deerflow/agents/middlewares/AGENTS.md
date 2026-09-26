@@ -12,6 +12,9 @@ Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders)
 Delegation verdicts are untrusted: revalidate persisted values, ignore malformed
 ones, and treat completed work as reusable evidence rather than acceptance.
 
+DurableContext renders the active `goal` objective (not its counters) first
+in its data block, so compaction cannot drop the goal.
+
 On new user turns, DurableContext cancels earlier-run unanswered delegations.
 It preserves resumes, same-run continuations, and entries without `run_id`.
 Any reply prevents cancellation; legacy replies without status metadata may

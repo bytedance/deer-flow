@@ -214,6 +214,7 @@ The middleware intelligently preserves message context:
   [Generated summary text]
   </durable_context_data>
   ```
+- **Active goal**: When the thread has an active `/goal`, its objective is rendered first in the same data message on every model call, so compaction cannot take the goal away with the message that stated it. Only the objective is rendered, not the evaluator's counters, so the block changes only when the goal is set or cleared.
 
 ## Best Practices
 
@@ -340,7 +341,7 @@ middlewares such as title generation, memory queuing, and clarification:
 - Summarization configuration is loaded from `config.yaml`
 - Generated summaries are stored in `ThreadState.summary_text`, not as regular `messages`
 - The message reducer removes compacted raw messages while the checkpointer persists `summary_text`
-- DurableContextMiddleware projects `summary_text` back into later model calls as hidden durable context data
+- DurableContextMiddleware projects `summary_text` and the active `goal` objective back into later model calls as hidden durable context data
 
 ## Example Configurations
 
