@@ -753,6 +753,32 @@ class TestStream:
         assert any(event.data.get("additional_kwargs", {}).get("token_usage_attribution", {}).get("kind") == "final_answer" for event in ai_events)
 
     @pytest.mark.parametrize("streamed", [True, False])
+    def test_stream_carries_llm_error_fallback_flag_to_headless_cli(self, client, streamed):
+        """``deerflow --print`` / ``--json`` read the fallback flag from stream events to exit non-zero."""
+        from deerflow.tui.cli import _RunOutcome
+
+        fallback = AIMessage(
+            content="The configured LLM provider rejected the request because authentication or access is invalid.",
+            id="ai-1",
+            additional_kwargs={"deerflow_error_fallback": True, "error_type": "AuthenticationError", "error_reason": "auth"},
+        )
+        chunks = [("values", {"messages": [HumanMessage(content="hi", id="h-1"), fallback]})]
+        if streamed:
+            chunks.insert(0, ("messages", (AIMessageChunk(content=fallback.content, id="ai-1"), {})))
+        agent = _make_agent_mock(chunks)
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            outcome = _RunOutcome()
+            for event in client.stream("hi", thread_id="t-stream-fallback"):
+                outcome.observe(event)
+
+        assert outcome.answer() == fallback.content
+        assert outcome.error_text() == "LLM request failed (error_type=AuthenticationError, error_reason=auth)"
+
+    @pytest.mark.parametrize("streamed", [True, False])
     def test_stream_emits_text_a_later_node_appends_to_a_sent_ai_message(self, client, streamed):
         """A guard's ``after_model`` replaces the message under the same id after it was sent."""
         call = {"name": "bash", "args": {"command": "ls"}, "id": "call-1"}
