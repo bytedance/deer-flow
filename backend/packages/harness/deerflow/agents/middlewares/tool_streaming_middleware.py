@@ -5,6 +5,14 @@ execution to emit ``tool_output_chunk`` lifecycle events through LangGraph's
 ``stream_mode="custom"`` channel. The frontend renders execution status while
 the canonical ToolMessage remains the source of the complete result.
 
+Each lifecycle payload is dual-emitted through
+``deerflow.utils.custom_events.aemit_custom_event``: the stream writer feeds
+``stream_mode="custom"`` consumers (Gateway / Web UI), and the callback
+dispatch additionally reaches LangChain callback consumers such as
+``astream_events(version="v2")``.  Both halves are required — under
+``astream_events`` the runtime hands out a no-op writer, so a writer-only
+emission reaches nobody at all.
+
 Sync tools (``wrap_tool_call``) are passed through unchanged — streaming is
 only meaningful for async paths where the event loop can interleave chunk
 emission with tool execution.
@@ -37,6 +45,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.config.tool_streaming_config import ToolStreamingConfig
+from deerflow.utils.custom_events import aemit_custom_event
 
 logger = logging.getLogger(__name__)
 
@@ -146,10 +155,13 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
         is re-raised so ``ToolErrorHandlingMiddleware`` (outer) can convert it
         to an error ToolMessage.
 
-    Safe fallback: when the stream writer is unavailable (no ``custom`` mode in
-    the ``stream_mode`` list, or called outside a graph execution context), the
-    middleware silently degrades to a pass-through — tool execution is
-    unaffected.
+    Every lifecycle chunk is emitted through ``aemit_custom_event`` so the
+    stream-writer and LangChain-callback halves of the custom-event contract
+    (see ``backend/packages/harness/deerflow/AGENTS.md``) both fire.
+
+    Safe fallback: when the stream writer is unavailable (called outside a graph
+    execution context), the middleware silently degrades to a pass-through —
+    tool execution is unaffected.
     """
 
     def __init__(self, *, config: ToolStreamingConfig | None = None) -> None:
@@ -199,7 +211,9 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
 
         # Emit start-of-execution chunk so the frontend knows a tool is running.
         try:
-            writer(_build_start_chunk(tool_call_id, tool_name))
+            await aemit_custom_event(_build_start_chunk(tool_call_id, tool_name), writer=writer)
+        except GraphBubbleUp:
+            raise
         except Exception:
             logger.debug("Failed to emit tool start chunk for %s/%s", tool_name, tool_call_id, exc_info=True)
 
@@ -216,7 +230,9 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
             if len(error_text) > 500:
                 error_text = error_text[:497] + "..."
             try:
-                writer(_build_error_chunk(tool_call_id, tool_name, error_text))
+                await aemit_custom_event(_build_error_chunk(tool_call_id, tool_name, error_text), writer=writer)
+            except GraphBubbleUp:
+                raise
             except Exception:
                 logger.debug("Failed to emit tool error chunk for %s/%s", tool_name, tool_call_id, exc_info=True)
             raise
@@ -226,7 +242,9 @@ class ToolStreamingMiddleware(AgentMiddleware[AgentState]):
         # message stream; re-sending it in full here doubles the payload.
         content = _extract_content(result)
         try:
-            writer(_build_final_chunk(tool_call_id, tool_name, content))
+            await aemit_custom_event(_build_final_chunk(tool_call_id, tool_name, content), writer=writer)
+        except GraphBubbleUp:
+            raise
         except Exception:
             logger.debug("Failed to emit tool final chunk for %s/%s", tool_name, tool_call_id, exc_info=True)
 

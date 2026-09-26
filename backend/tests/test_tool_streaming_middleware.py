@@ -400,6 +400,73 @@ class TestWriterReceivesDictFormat:
 
 
 # ---------------------------------------------------------------------------
+# Dual emission: writer AND callback dispatch from a single chunk
+# ---------------------------------------------------------------------------
+
+
+class TestDualEmission:
+    """Each lifecycle chunk must go out on both halves of the custom-event
+    contract (``backend/packages/harness/deerflow/AGENTS.md``): the stream
+    writer, and the callback dispatcher that ``astream_events`` reads."""
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_chunks_also_reach_callback_dispatch(self, monkeypatch):
+        from deerflow.utils import custom_events as custom_events_module
+
+        dispatched: list[tuple[str, dict]] = []
+
+        async def _record(name: str, data: dict | None = None, **_kwargs) -> None:
+            dispatched.append((name, data))  # type: ignore[arg-type]
+
+        monkeypatch.setattr(custom_events_module, "adispatch_custom_event", _record)
+
+        writer = _writer_mock()
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.tool_streaming_middleware._get_stream_writer",
+            lambda: writer,
+        )
+
+        mw = ToolStreamingMiddleware(config=_make_config(enabled=True))
+        request = _make_tool_request(tool_name="bash", tool_call_id="tc-dual")
+        msg = _make_tool_message(content="dual output", tool_call_id="tc-dual")
+
+        await mw.awrap_tool_call(request, AsyncMock(return_value=msg))
+
+        assert writer.call_count == 2
+        assert [name for name, _ in dispatched] == [TOOL_OUTPUT_CHUNK_EVENT] * 2
+        # The callback payload is the same object the writer received, so the
+        # two channels cannot drift apart.
+        assert [data for _, data in dispatched] == [call[0][0] for call in writer.call_args_list]
+
+    @pytest.mark.asyncio
+    async def test_error_chunk_also_reaches_callback_dispatch(self, monkeypatch):
+        from deerflow.utils import custom_events as custom_events_module
+
+        dispatched: list[tuple[str, dict]] = []
+
+        async def _record(name: str, data: dict | None = None, **_kwargs) -> None:
+            dispatched.append((name, data))  # type: ignore[arg-type]
+
+        monkeypatch.setattr(custom_events_module, "adispatch_custom_event", _record)
+
+        writer = _writer_mock()
+        monkeypatch.setattr(
+            "deerflow.agents.middlewares.tool_streaming_middleware._get_stream_writer",
+            lambda: writer,
+        )
+
+        mw = ToolStreamingMiddleware(config=_make_config(enabled=True))
+        request = _make_tool_request(tool_name="bash", tool_call_id="tc-dual-err")
+
+        with pytest.raises(RuntimeError, match="command failed"):
+            await mw.awrap_tool_call(request, AsyncMock(side_effect=RuntimeError("command failed")))
+
+        assert [name for name, _ in dispatched] == [TOOL_OUTPUT_CHUNK_EVENT] * 2
+        assert dispatched[1][1]["error"] is True
+        assert dispatched[1][1]["is_final"] is True
+
+
+# ---------------------------------------------------------------------------
 # Graph-to-stream regression: real LangGraph custom channel (no writer mock)
 # ---------------------------------------------------------------------------
 
@@ -475,6 +542,105 @@ class TestGraphToCustomStream:
         assert error_chunk["is_final"] is True
         assert error_chunk["error"] is True
         assert "command failed" in error_chunk["chunk"]
+
+
+# ---------------------------------------------------------------------------
+# Callback-channel regression: astream_events(version="v2")
+# ---------------------------------------------------------------------------
+
+
+class TestGraphToCallbackStream:
+    """Drive the middleware inside a real compiled LangGraph and consume
+    ``astream_events(version="v2")``.
+
+    ``TestGraphToCustomStream`` above only reads the ``stream_mode="custom"``
+    channel, which the middleware feeds through the ``StreamWriter`` alone.
+    Under ``astream_events`` LangGraph installs a *no-op* writer
+    (``Runtime.stream_writer`` defaults to ``_no_op_stream_writer``), so that
+    channel reaches nobody — the lifecycle payloads have to be dual-emitted
+    through ``aemit_custom_event``'s callback dispatch to show up here at all.
+    Both halves are asserted below, because only keeping one of them silently
+    breaks a consumer class.
+    """
+
+    @staticmethod
+    def _compile_single_node_graph(node):
+        from typing import TypedDict
+
+        from langgraph.graph import END, START, StateGraph
+
+        class _State(TypedDict):
+            done: bool
+
+        graph = StateGraph(_State)
+        graph.add_node("run_tool", node)
+        graph.add_edge(START, "run_tool")
+        graph.add_edge("run_tool", END)
+        return graph.compile()
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_chunks_reach_astream_events_v2(self):
+        mw = ToolStreamingMiddleware(config=_make_config(enabled=True))
+        request = _make_tool_request(tool_name="bash", tool_call_id="tc-events")
+        msg = _make_tool_message(content="streamed output", tool_call_id="tc-events")
+
+        async def _node(state):
+            await mw.awrap_tool_call(request, AsyncMock(return_value=msg))
+            return {"done": True}
+
+        compiled = self._compile_single_node_graph(_node)
+        events = [event async for event in compiled.astream_events({"done": False}, version="v2") if event["event"] == "on_custom_event"]
+
+        assert len(events) == 2, f"expected start + final callback events, got: {events!r}"
+        for event in events:
+            assert event["name"] == TOOL_OUTPUT_CHUNK_EVENT
+            assert event["data"]["type"] == TOOL_OUTPUT_CHUNK_EVENT
+            assert event["data"]["tool_call_id"] == "tc-events"
+
+        assert events[0]["data"]["is_partial"] is True
+        assert events[0]["data"]["is_final"] is False
+        assert events[1]["data"]["is_partial"] is False
+        assert events[1]["data"]["is_final"] is True
+        assert events[1]["data"]["chunk"] == "streamed output"
+
+    @pytest.mark.asyncio
+    async def test_lifecycle_chunks_reach_both_channels(self):
+        """One emission must feed the writer and the callback dispatcher —
+        neither channel may be satisfied at the other's expense."""
+        mw = ToolStreamingMiddleware(config=_make_config(enabled=True))
+        request = _make_tool_request(tool_name="bash", tool_call_id="tc-both")
+        msg = _make_tool_message(content="dual output", tool_call_id="tc-both")
+
+        async def _node(state):
+            await mw.awrap_tool_call(request, AsyncMock(return_value=msg))
+            return {"done": True}
+
+        compiled = self._compile_single_node_graph(_node)
+        custom_chunks = [chunk async for chunk in compiled.astream({"done": False}, stream_mode="custom")]
+        callback_events = [event["data"] async for event in compiled.astream_events({"done": False}, version="v2") if event["event"] == "on_custom_event"]
+
+        assert custom_chunks == callback_events
+        assert [chunk["is_final"] for chunk in custom_chunks] == [False, True]
+
+    @pytest.mark.asyncio
+    async def test_error_chunk_reaches_astream_events_v2(self):
+        mw = ToolStreamingMiddleware(config=_make_config(enabled=True))
+        request = _make_tool_request(tool_name="bash", tool_call_id="tc-events-err")
+
+        async def _node(state):
+            with pytest.raises(RuntimeError, match="command failed"):
+                await mw.awrap_tool_call(request, AsyncMock(side_effect=RuntimeError("command failed")))
+            return {"done": True}
+
+        compiled = self._compile_single_node_graph(_node)
+        events = [event async for event in compiled.astream_events({"done": False}, version="v2") if event["event"] == "on_custom_event"]
+
+        assert len(events) == 2, f"expected start + error callback events, got: {events!r}"
+        error_data = events[1]["data"]
+        assert error_data["type"] == TOOL_OUTPUT_CHUNK_EVENT
+        assert error_data["is_final"] is True
+        assert error_data["error"] is True
+        assert "command failed" in error_data["chunk"]
 
 
 # ---------------------------------------------------------------------------
