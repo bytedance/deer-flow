@@ -125,6 +125,13 @@ def generate_image_tool(
 
         if source == "sandbox_environment":
             if isinstance(sandbox, AioSandbox):
+                if getattr(sandbox, "_deerflow_managed_image_local", False):
+                    # A held local container may have been created for a web
+                    # profile before it was disabled. Its derived ID survives
+                    # rebinding even if the current revision marker does not.
+                    base_id = getattr(sandbox, "_deerflow_base_identity", None)
+                    if not base_id or sandbox.id != base_id:
+                        return "Error: IMAGE_PROFILE_CHANGED. The image model changed during this run; retry after the active sandbox is replaced."
                 # Legacy AIO containers receive sandbox.environment at creation.
                 # Reuse that environment through the old shell API so an image
                 # profile from config.yaml does not require /v1/bash/exec.
