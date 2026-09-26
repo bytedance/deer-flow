@@ -105,20 +105,41 @@ so that marker never appears: the index resolves to `None`, the baseline stays
 empty, and on a populated thread the whole prior turn is re-emitted as new deltas
 while its `usage_metadata` is added to this resume's total.
 
-`_resume_baseline_messages` therefore reads the parked checkpoint directly when
-`resume` is set. It is best effort — a failed read costs a noisy stream, not the
-resume.
+`_resume_baseline_messages` therefore reads the parked checkpoint when `resume` is
+set, through `CheckpointStateAccessor` rather than off the raw saver. The raw read
+only works in `full` mode: in `delta` mode a non-snapshot checkpoint omits
+`messages` from `channel_values` entirely (the writes live on ancestors), and a
+snapshot checkpoint holds a `_DeltaSnapshot` — a single-field `NamedTuple`, so a
+bare `Sequence` check admits it as a bogus one-element baseline. The accessor
+materializes through the graph's channel table, so both modes answer the same
+question. It is best effort — a failed read costs a noisy stream, not the resume.
 
 **The trailing AI message is held out of the history set but still added to the
 usage ledger**, and the split is the subtle part — the two sets answer different
 questions.
 
 It must not be history: it carries the gated tool calls, and `edit` rewrites its
-args under the *same id*. The baseline skip is a `continue` ahead of the "same id,
-different object" branch, and that branch re-emits appended *text* only, never
-tool calls, so suppressing this id would silently drop the human's edit.
-Re-emitting it costs nothing, because a `messages-tuple` event merges into the
-message carrying that id — which is precisely how an edit reaches the client.
+args under the *same id*. Re-emitting it costs nothing, because a `messages-tuple`
+event merges into the message carrying that id — which is precisely how an edit
+reaches the client.
+
+That merge only works because the replacement path emits the change. LangGraph
+emits the parked `values` state **before** replaying the interrupted node, so the
+client sees the pre-edit args first and the message enters `seen_messages`; the
+rewrite then arrives under the same id and lands in the "same id, different
+object" branch. That branch historically re-emitted appended *text* and metadata
+only, so an edit from `ls` to `ls -la` left the stream reporting `ls` while the
+tools node ran `ls -la`. It now compares serialized `tool_calls` against
+`sent_tool_calls_by_id` and re-emits when they differ — keyed on an actual change,
+so an `approve` (which replays the node without touching the args) stays quiet
+instead of duplicating the call.
+
+The comparison and the re-emission are both over the message's **whole** call
+list. `tool_calls` on the wire is never a per-call delta, and consumers merge the
+list onto the message by id, so a multi-call message with one edited call must
+carry its untouched siblings too — emitting only the changed call would remove
+them from the client's view. Pinned by
+`test_a_partial_edit_re_emits_the_whole_call_list`.
 
 Its `usage_metadata` is the opposite case: those tokens were spent by the model
 call that produced the gated request, on the turn that parked, and were counted
@@ -126,9 +147,12 @@ there. Counting them again would bill the resume for the park's model call. So t
 id goes into `counted_usage_ids` regardless.
 
 Pinned by `tests/test_client_tool_approval.py::TestResumeDoesNotReplayThePriorTurn`
-— `test_an_edited_gated_call_still_reaches_the_client` for the history exclusion,
-`test_the_gated_calls_own_usage_is_not_counted_again` for the usage inclusion, and
-`test_an_ordinary_turn_still_uses_its_run_id_marker` for the unchanged path.
+— `test_an_edited_gated_call_still_reaches_the_client` (both snapshots, since the
+edited one alone cannot show the bug) and `test_an_unchanged_gated_call_is_not_re_emitted`
+for the replacement branch, `test_the_gated_calls_own_usage_is_not_counted_again`
+for the usage inclusion, and `test_an_ordinary_turn_still_uses_its_run_id_marker`
+for the unchanged path. `tests/test_client_resume_baseline_materializes.py` covers
+both persisted checkpoint shapes with real delta-mode graphs.
 
 ### The resume payload is validated, not trusted
 
@@ -432,6 +456,48 @@ Gateway resumes: before that no HTTP run could park, so "approve, then hit a
 second gated call" could not happen. Pinned by
 `tests/test_run_duration_preserves_park.py`, which drives a real compiled graph
 through park → approve → second park against an `InMemorySaver`.
+
+The duration writer is not the first writer a parked run reaches. Run
+finalization walks `_stream_once` → `_prepare_goal_continuation_input` → … →
+`_persist_run_duration`, and on a thread with an **active goal** the goal path
+writes first: every one of its write points — five `_persist` calls plus the
+satisfied-goal clear — funnels into `write_thread_goal`, whose `aput` creates a
+new head and drops the park the same way. The trap is that
+the check which *detects* the park is what triggers the write —
+`_has_durable_goal_turn_receipt` returns false while pending writes exist, which
+routes into `_persist(stand_down_reason="no_durable_end_of_turn")`. So
+`_prepare_goal_continuation_input` returns early on a pending interrupt, ahead of
+that receipt check.
+
+Skipping needs no compensation: the receipt reads the same `pending_writes`, so
+answering the park restores ordinary evaluation on the next turn, and the goal is
+left byte-identical rather than stood down. Compare `_ends_on_human_input_request`,
+which *does* persist a stand-down for an unanswered question — that path is not
+itself the destroyer. Pinned by
+`tests/test_goal_finalization_preserves_park.py`, including the round trip that
+proves the goal is evaluated again once the park is answered.
+
+The guard cannot misfire on the other human-in-the-loop path: tool approval owns
+the only `interrupt()` call in the harness (`human_in_the_loop.py`), so
+`__interrupt__` in `pending_writes` means a gated tool and nothing else.
+`ask_clarification` and the sandbox network prompt park through a ToolMessage
+artifact instead, which is why they need `_ends_on_human_input_request` — the two
+mechanisms do not overlap.
+
+The guard reads the raw pending write rather than `snapshot.tasks[].interrupts`,
+which is one cheap tuple read instead of a full state load. The tradeoff is that
+`_rollback_to_pre_run_checkpoint` can leave an *orphaned* `__interrupt__` — it
+replays captured `pending_writes` onto the restored head, where no live task owns
+them, so the client sees no pending interrupt while the write is still there. The
+guard then defers one goal evaluation for a park nobody can answer. Bounded and
+self-clearing (any later turn empties the writes), and the orphaning belongs to
+the rollback restore rather than to this read.
+
+Threads with no active goal survive only incidentally: `read_thread_goal` returns
+`None` and the path exits before any write. `_ensure_interrupted_title` also
+writes a head checkpoint, but only for `RunStatus.interrupted`, which a park never
+stages — a park that is later *cancelled* does reach it, and dropping the pending
+write is then the correct semantics.
 
 `interrupts` is added to a task only when one is pending, so an ordinary
 in-flight task keeps the `{id, name}` shape older clients already parse.

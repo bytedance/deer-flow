@@ -626,26 +626,38 @@ class DeerFlowClient:
             return "\n".join(pieces) if pieces else ""
         return str(content)
 
-    @staticmethod
-    def _resume_baseline_messages(checkpointer: Any, checkpoint_config: dict[str, Any]) -> list[Any]:
+    def _resume_baseline_messages(self, checkpointer: Any, checkpoint_config: dict[str, Any]) -> list[Any]:
         """Messages already in the checkpoint a resume continues from.
 
         A resume needs this because it passes ``Command(resume=...)`` and appends
         no ``HumanMessage``, so the ``run_id`` marker that normally separates this
         turn from history never appears in the snapshot.
 
+        Read through :class:`CheckpointStateAccessor` rather than off the raw
+        saver: in ``delta`` mode a non-snapshot checkpoint omits ``messages`` from
+        ``channel_values`` altogether, and a snapshot checkpoint holds a
+        ``_DeltaSnapshot`` wrapper instead of a message sequence. The accessor
+        materializes through the graph's channel table, so both modes answer the
+        same question.
+
         Best effort: without a baseline the stream is noisy, so a failure here
         must not fail the resume.
         """
-        if checkpointer is None:
+        if checkpointer is None or self._agent is None:
             return []
         try:
-            snapshot = _run_async_from_sync(checkpointer.aget_tuple(checkpoint_config))
-            messages = (getattr(snapshot, "checkpoint", None) or {}).get("channel_values", {}).get("messages")
+            accessor = CheckpointStateAccessor.bind(self._agent, checkpointer, mode=self._checkpoint_channel_mode)
+            snapshot = _run_async_from_sync(accessor.aget(checkpoint_config))
+            values = getattr(snapshot, "values", None)
+            messages = values.get("messages") if isinstance(values, dict) else None
         except Exception:
             logger.debug("Could not read a resume baseline for thread %s", checkpoint_config, exc_info=True)
             return []
-        return list(messages) if isinstance(messages, Sequence) and not isinstance(messages, (str, bytes)) else []
+        if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes)):
+            return []
+        # Materialization yields real messages; anything else is a shape we do
+        # not understand and must not seed ids from.
+        return [message for message in messages if hasattr(message, "content")]
 
     # ------------------------------------------------------------------
     # Public API — threads
@@ -1085,6 +1097,12 @@ class DeerFlowClient:
         # AI text already emitted per id. A replacement that appends to it (a
         # guard's stop notice) only needs the part that was added.
         sent_text_by_id: dict[str, str] = {}
+        # Tool calls already emitted per id, serialized for comparison. A tool
+        # approval ``edit`` rewrites a message's arguments under its own id, and
+        # a resume replays the parked snapshot before the rewritten one, so the
+        # replacement has to be recognized and re-emitted rather than treated as
+        # a text-only follow-up.
+        sent_tool_calls_by_id: dict[str, list[dict[str, Any]]] = {}
         # Cross-mode handoff: ids already streamed via LangGraph ``messages``
         # mode so the ``values`` path skips re-synthesis of the same message.
         streamed_ids: set[str] = set()
@@ -1109,13 +1127,13 @@ class DeerFlowClient:
         # still counted in ``counted_usage_ids``, because those two answer
         # different questions. It carries the gated tool calls and ``edit``
         # rewrites its args under the same id, so suppressing it as history would
-        # drop the human's edit — the skip is a ``continue`` ahead of the "same
-        # id, replaced" branch, and that branch re-emits appended text only,
-        # never tool calls. Re-emitting it is harmless: clients merge a
+        # drop the human's edit. Re-emitting it is harmless: clients merge a
         # ``messages-tuple`` event into the message with that id, which is how an
-        # edit reaches them at all. Its ``usage_metadata`` is another matter — the
-        # tokens were spent on the turn that parked and were counted there, so
-        # counting them again would bill this resume for the park's model call.
+        # edit reaches them at all — and the "same id, replaced" branch below
+        # re-emits changed tool calls so the rewrite is not lost either. Its
+        # ``usage_metadata`` is another matter — the tokens were spent on the turn
+        # that parked and were counted there, so counting them again would bill
+        # this resume for the park's model call.
         if resume is not None:
             baseline = self._resume_baseline_messages(checkpointer, checkpoint_config)
             reviewable = next((index for index in range(len(baseline) - 1, -1, -1) if isinstance(baseline[index], AIMessage)), None)
@@ -1221,6 +1239,7 @@ class DeerFlowClient:
                     elif msg_chunk.tool_calls:
                         if msg_id:
                             streamed_ids.add(msg_id)
+                            sent_tool_calls_by_id[msg_id] = self._serialize_tool_calls(msg_chunk.tool_calls)
                         additional_kwargs_delta = None if sent_additional_kwargs else _unsent_additional_kwargs(msg_id, additional_kwargs)
                         yield self._ai_tool_calls_event(
                             msg_id,
@@ -1265,6 +1284,18 @@ class DeerFlowClient:
                         text = self._extract_text(msg.content)
                         sent_text = sent_text_by_id.get(msg_id, "")
                         additional_kwargs_delta = _unsent_additional_kwargs(msg_id, self._serialize_additional_kwargs(msg))
+                        # An approval ``edit`` replaces this message's tool calls
+                        # under the same ids. Without this the stream would keep
+                        # reporting the pre-review arguments while the tools node
+                        # runs the edited ones. The comparison is over the whole
+                        # list because the event carries the whole list: clients
+                        # merge it onto the message by id, so emitting only the
+                        # changed call would drop its siblings.
+                        tool_calls = self._serialize_tool_calls(msg.tool_calls) if msg.tool_calls else []
+                        if tool_calls and tool_calls != sent_tool_calls_by_id.get(msg_id):
+                            sent_tool_calls_by_id[msg_id] = tool_calls
+                            yield self._ai_tool_calls_event(msg_id, msg.tool_calls, additional_kwargs_delta)
+                            additional_kwargs_delta = None
                         if len(text) > len(sent_text) and text.startswith(sent_text):
                             sent_text_by_id[msg_id] = text
                             yield self._ai_text_event(msg_id, text[len(sent_text) :], None, additional_kwargs_delta)
@@ -1283,6 +1314,7 @@ class DeerFlowClient:
                         additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
                         if msg_id in pending_tool_call_ids and msg.tool_calls:
                             pending_tool_call_ids.discard(msg_id)
+                            sent_tool_calls_by_id[msg_id] = self._serialize_tool_calls(msg.tool_calls)
                             yield self._ai_tool_calls_event(msg_id, msg.tool_calls, additional_kwargs_delta)
                         elif additional_kwargs_delta:
                             # Metadata-only follow-up: ``messages-tuple`` has no
@@ -1299,6 +1331,8 @@ class DeerFlowClient:
 
                     if msg.tool_calls:
                         additional_kwargs_delta = _unsent_additional_kwargs(msg_id, additional_kwargs)
+                        if msg_id:
+                            sent_tool_calls_by_id[msg_id] = self._serialize_tool_calls(msg.tool_calls)
                         yield self._ai_tool_calls_event(
                             msg_id,
                             msg.tool_calls,

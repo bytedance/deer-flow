@@ -264,22 +264,81 @@ class TestResumeDoesNotReplayThePriorTurn:
     def test_an_edited_gated_call_still_reaches_the_client(self, monkeypatch):
         """The gated message is rewritten under its own id, so it is not history.
 
-        ``edit`` keeps the call id and changes only the args. The baseline skip
-        is a ``continue`` placed *before* the "same id, different object" branch,
-        and that branch only re-emits appended *text* anyway — so seeding the
-        gated message's id would silently drop the human's edit.
+        LangGraph emits the parked ``values`` state *before* replaying the
+        interrupted node, so the client sees the pre-edit args first and only
+        then the rewritten ones — under the same message and call id. Both
+        snapshots are supplied here because one alone cannot show the bug: with
+        only the edited snapshot the message is new, takes the full emission
+        path, and the edit trivially arrives.
         """
         prior = self._prior_turn()
-        edited = self._gated_call({"command": "ls -la"})
 
         events = self._events(
             monkeypatch,
-            [("values", {"messages": [*prior, edited]})],
+            [
+                ("values", {"messages": [*prior, self._gated_call({"command": "ls"})]}),
+                ("values", {"messages": [*prior, self._gated_call({"command": "ls -la"})]}),
+            ],
             checkpoint_messages=[*prior, self._gated_call({"command": "ls"})],
         )
 
         tool_calls = [call for event in events if event.type == "messages-tuple" for call in (event.data.get("tool_calls") or ())]
-        assert [call["args"] for call in tool_calls] == [{"command": "ls -la"}]
+        assert [call["args"] for call in tool_calls] == [{"command": "ls"}, {"command": "ls -la"}]
+
+    def test_an_unchanged_gated_call_is_not_re_emitted(self, monkeypatch):
+        """An ``approve`` replays the node without touching the args.
+
+        The replacement branch must key off an actual change, or every resume
+        emits a duplicate tool call that consumers cannot tell from a new one.
+        """
+        prior = self._prior_turn()
+
+        events = self._events(
+            monkeypatch,
+            [
+                ("values", {"messages": [*prior, self._gated_call({"command": "ls"})]}),
+                ("values", {"messages": [*prior, self._gated_call({"command": "ls"})]}),
+            ],
+            checkpoint_messages=[*prior, self._gated_call({"command": "ls"})],
+        )
+
+        tool_calls = [call for event in events if event.type == "messages-tuple" for call in (event.data.get("tool_calls") or ())]
+        assert [call["args"] for call in tool_calls] == [{"command": "ls"}]
+
+    def test_a_partial_edit_re_emits_the_whole_call_list(self, monkeypatch):
+        """One edited call among several still carries its siblings.
+
+        ``tool_calls`` on the wire is always a message's complete list, never a
+        per-call delta, and consumers merge it onto the message by id. Emitting
+        only the changed call would therefore *remove* the untouched ones from
+        the client's view of that message.
+        """
+        prior = self._prior_turn()
+
+        def multi(command):
+            return AIMessage(
+                content="",
+                id="ai-multi",
+                tool_calls=[
+                    {"name": "bash_tool", "args": {"command": command}, "id": "call-a"},
+                    {"name": "write_file", "args": {"path": "/tmp/x"}, "id": "call-b"},
+                ],
+            )
+
+        events = self._events(
+            monkeypatch,
+            [
+                ("values", {"messages": [*prior, multi("ls")]}),
+                ("values", {"messages": [*prior, multi("ls -la")]}),
+            ],
+            checkpoint_messages=[*prior, multi("ls")],
+        )
+
+        emitted = [event.data["tool_calls"] for event in events if event.type == "messages-tuple" and event.data.get("tool_calls")]
+        assert [[(call["id"], call["args"]) for call in batch] for batch in emitted] == [
+            [("call-a", {"command": "ls"}), ("call-b", {"path": "/tmp/x"})],
+            [("call-a", {"command": "ls -la"}), ("call-b", {"path": "/tmp/x"})],
+        ]
 
     def test_the_re_emitted_call_keeps_its_ids_so_consumers_can_merge(self, monkeypatch):
         """Re-emission is safe only because the ids are stable.
@@ -295,13 +354,16 @@ class TestResumeDoesNotReplayThePriorTurn:
 
         events = self._events(
             monkeypatch,
-            [("values", {"messages": [*prior, self._gated_call({"command": "ls -la"})]})],
+            [
+                ("values", {"messages": [*prior, self._gated_call({"command": "ls"})]}),
+                ("values", {"messages": [*prior, self._gated_call({"command": "ls -la"})]}),
+            ],
             checkpoint_messages=[*prior, self._gated_call({"command": "ls"})],
         )
 
         ai_events = [event.data for event in events if event.type == "messages-tuple" and event.data.get("type") == "ai"]
-        assert [event["id"] for event in ai_events] == ["ai-gated"]
-        assert [call["id"] for event in ai_events for call in (event.get("tool_calls") or ())] == ["call-gated"]
+        assert {event["id"] for event in ai_events} == {"ai-gated"}
+        assert {call["id"] for event in ai_events for call in (event.get("tool_calls") or ())} == {"call-gated"}
 
     def test_the_gated_calls_own_usage_is_not_counted_again(self, monkeypatch):
         """Held out of history, but not out of the usage ledger.

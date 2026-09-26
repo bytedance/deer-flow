@@ -2056,6 +2056,16 @@ async def _prepare_goal_continuation_input(
         )
         if checkpoint_tuple is None:
             return None
+        if _has_pending_interrupt(checkpoint_tuple):
+            # A park is not a finished turn. Every write below goes through
+            # ``write_thread_goal``, whose new head checkpoint cannot carry
+            # ``pending_writes`` (keyed by checkpoint id), so evaluating here
+            # destroys the park. This must precede
+            # ``_has_durable_goal_turn_receipt``, which reads the same pending
+            # writes and then *persists* that conclusion. Answering the park
+            # restores normal evaluation, so nothing is owed.
+            # See "A park is not a finished turn" in ``docs/TOOL_APPROVAL.md``.
+            return None
         checkpoint_id_before = _checkpoint_id(checkpoint_tuple)
         messages = await _materialized_checkpoint_messages(accessor, thread_id)
         conversation_signature_before = visible_conversation_signature(messages)
