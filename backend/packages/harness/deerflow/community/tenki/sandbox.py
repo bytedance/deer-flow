@@ -32,7 +32,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
 from deerflow.sandbox.remote_search import parse_remote_search_output, remote_search_command
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
-from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
+from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -417,7 +417,7 @@ class TenkiSandbox(Sandbox):
             # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)):
                 continue
-            if should_ignore_path(entry):
+            if should_ignore_path_under_root(entry, root):
                 continue
             rel_path = entry[len(root) :].lstrip("/")
             if not rel_path:
@@ -478,7 +478,7 @@ class TenkiSandbox(Sandbox):
                 line_number = int(line_no_str)
             except ValueError:
                 continue
-            if should_ignore_path(file_path):
+            if should_ignore_path_under_root(file_path, root):
                 continue
             if glob is not None:
                 # Match the caller's real directory scope: a pattern like

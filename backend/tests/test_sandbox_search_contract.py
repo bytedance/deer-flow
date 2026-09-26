@@ -137,6 +137,24 @@ def tree(tmp_path):
     return root
 
 
+@pytest.fixture
+def ignored_name_tree(tmp_path):
+    """A tree whose root *and* one nested directory carry an ignored name.
+
+    ``build`` is in ``IGNORE_PATTERNS``; ``node_modules`` is ignored one level
+    below it. ``list_dir`` already scopes ignore patterns to the listing root,
+    so an ignored name may not hide the root that was explicitly requested,
+    while an ignored name inside the tree keeps hiding its descendants.
+    """
+    root = tmp_path / "build"
+    (root / "node_modules" / "dep").mkdir(parents=True)
+    (root / "workspace").mkdir()
+    (root / "notes.txt").write_text("header\nneedle build\n", encoding="utf-8")
+    (root / "workspace" / "report.txt").write_text("needle nested\n", encoding="utf-8")
+    (root / "node_modules" / "dep" / "lib.js").write_text("needle hidden\n", encoding="utf-8")
+    return root
+
+
 def _relative_paths(paths, root):
     # Directory suffixes and inclusion of the requested root are legitimate
     # provider presentation differences; names and descendants must agree.
@@ -164,6 +182,30 @@ def test_glob_preserves_paths_and_ignores_descendants(provider, tree):
 def test_glob_can_include_directories(provider, tree):
     matches, truncated = provider.sandbox.glob(str(tree), "**/nested", include_dirs=True)
     assert _relative_paths(matches, tree) == {"nested"}
+    assert truncated is False
+
+
+def test_search_root_at_an_ignored_name_keeps_its_contents(provider, ignored_name_tree):
+    assert _relative_paths(provider.sandbox.list_dir(str(ignored_name_tree)), ignored_name_tree) == {"notes.txt", "workspace", "workspace/report.txt"}
+    matches, truncated = provider.sandbox.glob(str(ignored_name_tree), "**/*.txt")
+    assert _relative_paths(matches, ignored_name_tree) == {"notes.txt", "workspace/report.txt"}
+    assert truncated is False
+
+
+def test_search_root_below_an_ignored_name_keeps_its_contents(provider, ignored_name_tree):
+    root = ignored_name_tree / "workspace"
+    matches, truncated = provider.sandbox.glob(str(root), "**/*.txt")
+    assert _relative_paths(matches, root) == {"report.txt"}
+    assert truncated is False
+
+
+def test_search_root_at_an_ignored_name_still_hides_ignored_descendants(provider, ignored_name_tree):
+    assert provider.sandbox.glob(str(ignored_name_tree), "**/*.js") == ([], False)
+    matches, truncated = provider.sandbox.grep(str(ignored_name_tree), "needle")
+    assert {(Path(m.path).relative_to(ignored_name_tree).as_posix(), m.line_number) for m in matches} == {
+        ("notes.txt", 2),
+        ("workspace/report.txt", 1),
+    }
     assert truncated is False
 
 

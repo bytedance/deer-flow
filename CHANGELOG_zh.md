@@ -1199,6 +1199,12 @@
   器现在通过共享的 `file_signature.read_config_with_signature()`
   helper 只读取一次，并对返回的字节精确签名；竞态编辑最多
   只多付出一次重载。([#5848])
+- **沙箱：** `glob` 与 `grep` 不再在搜索根目录（或其任一祖先目录）命中忽略模式（如 `build`、
+  `dist`、`logs`、`node_modules`、`coverage`、`target`）时返回空结果。此前各远端沙箱把
+  `should_ignore_path` 用在**绝对路径**上，而该函数会检查路径的每一段，于是树上任意位置的忽略名
+  都会把整份结果隐藏，智能体刚 `ls` 出来的目录却被搜索告知“无匹配”。现在忽略模式按**搜索根的
+  相对路径**生效，与 `list_dir` 已有的做法一致：忽略名依然隐藏自己的子孙目录，但以被忽略目录
+  为根、或位于被忽略祖先之下的搜索会正常返回其内容。([#5667])
 
 ### 安全
 
@@ -5113,6 +5119,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5662]: https://github.com/bytedance/deer-flow/pull/5662
 [#5663]: https://github.com/bytedance/deer-flow/pull/5663
 [#5664]: https://github.com/bytedance/deer-flow/pull/5664
+[#5667]: https://github.com/bytedance/deer-flow/pull/5667
 [#5669]: https://github.com/bytedance/deer-flow/pull/5669
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
 [#5676]: https://github.com/bytedance/deer-flow/pull/5676
