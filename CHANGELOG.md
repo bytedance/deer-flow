@@ -331,6 +331,17 @@ This release closes that milestone with **181 merged pull requests**.
   `/proc/net/if_inet6` is absent since #2027, and the Helm chart mirrors it;
   the production compose file was the one launcher still without the guard.
   It now uses the same launcher, and starts nginx with `exec` so it is PID 1. ([#5900])
+- **deploy:** `make up` / `scripts/deploy.sh` now honors `BETTER_AUTH_SECRET`
+  and `DEER_FLOW_INTERNAL_AUTH_TOKEN` written to the repo-root `.env`. The
+  script only checked the shell before reloading a persisted secret or
+  generating a new one and exporting it, and Compose interpolation lets shell
+  variables outrank `--env-file`, so the value the deployment docs tell
+  operators to put in `.env` was silently replaced: sessions were signed with
+  a secret the operator never chose, and Gateway workers running outside the
+  stack with the configured token got `401`. A `.env`-provided secret is now
+  left for Compose to read itself (shell → `.env` → persisted file →
+  generated), while an exported-but-empty shell variable still triggers
+  generation because Compose would otherwise pass the empty value through.
 - **skills:** `skill_manage(action="remove_file")` and `write_file` now work on
   binary support files, and reject directories cleanly. A `.skill` archive may
   carry `assets/logo.png` (the installer only rejects *executable* binaries),

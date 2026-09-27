@@ -334,6 +334,13 @@
   会在 `/proc/net/if_inet6` 不存在时去掉 IPv6 监听，Helm chart 也做了同样处理；生产用 compose
   文件是唯一还没有这层保护的启动器。现在它使用相同的启动脚本，并以 `exec` 启动 nginx 使其成为
   PID 1。([#5900])
+- **部署：** `make up` / `scripts/deploy.sh` 现在会采用写在仓库根目录 `.env` 中的
+  `BETTER_AUTH_SECRET` 与 `DEER_FLOW_INTERNAL_AUTH_TOKEN`。此前脚本只检查 shell 环境，随后
+  就重新加载已持久化的密钥或生成新密钥并 export；而 Compose 插值时 shell 变量优先于
+  `--env-file`，于是部署文档让运维写进 `.env` 的值被悄悄替换：会话用的是运维从未选择的密钥，
+  在栈外运行、持有配置 token 的 Gateway worker 则收到 `401`。现在 `.env` 提供的密钥交由
+  Compose 自行读取（优先级 shell → `.env` → 持久化文件 → 新生成），而已 export 但为空的
+  shell 变量仍会触发生成，因为 Compose 否则会把空值直接传下去。
 - **技能：** `skill_manage(action="remove_file")` 与 `write_file` 现在可以处理二进制支持文件，
   并会干净地拒绝目录。`.skill` 压缩包可以包含 `assets/logo.png`（安装器只拒绝*可执行*二进制），
   但这两个操作在改动文件之前会先把原有内容按 UTF-8 文本读出（仅用于历史记录），于是二进制

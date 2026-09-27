@@ -167,12 +167,25 @@ else
 fi
 
 
+# Compose interpolates ${BETTER_AUTH_SECRET} and ${DEER_FLOW_INTERNAL_AUTH_TOKEN}
+# from the shell environment first and --env-file second. A secret the operator
+# wrote to $ENV_FILE therefore only reaches the stack while this script does not
+# export a competing value: generating or reloading one here would silently
+# replace it. Leave a dotenv-provided secret unexported so compose parses it
+# from $ENV_FILE itself, and only fall back to the persisted/generated one
+# when neither the shell nor $ENV_FILE provides it.
+dotenv_provides_secret() {
+    [ -n "$(read_dotenv_value "$1")" ]
+}
+
 # ── BETTER_AUTH_SECRET ───────────────────────────────────────────────────────
 # Required by Next.js in production. Generated once and persisted so auth
 # sessions survive container restarts.
 
 _secret_file="$DEER_FLOW_HOME/.better-auth-secret"
-if [ -z "$BETTER_AUTH_SECRET" ]; then
+if [ -z "$BETTER_AUTH_SECRET" ] && dotenv_provides_secret BETTER_AUTH_SECRET; then
+    echo -e "${GREEN}✓ BETTER_AUTH_SECRET loaded from $ENV_FILE${NC}"
+elif [ -z "$BETTER_AUTH_SECRET" ]; then
     if [ -f "$_secret_file" ]; then
         export BETTER_AUTH_SECRET
         BETTER_AUTH_SECRET="$(cat "$_secret_file")"
@@ -204,7 +217,9 @@ fi
 # APIs even when the request is handled by a different Uvicorn worker.
 
 _internal_auth_token_file="$DEER_FLOW_HOME/.internal-auth-token"
-if  [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
+if [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ] && dotenv_provides_secret DEER_FLOW_INTERNAL_AUTH_TOKEN; then
+    echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN loaded from $ENV_FILE${NC}"
+elif [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
     if [ -f "$_internal_auth_token_file" ]; then
         export DEER_FLOW_INTERNAL_AUTH_TOKEN
         DEER_FLOW_INTERNAL_AUTH_TOKEN="$(cat "$_internal_auth_token_file")"
