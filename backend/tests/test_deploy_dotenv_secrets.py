@@ -8,8 +8,9 @@ at -- was silently replaced by the auto-generated one.
 
 Whether ``.env`` provides a value is Compose's call, not a ``KEY=VALUE`` grep:
 Compose accepts ``KEY: VALUE`` lines and interpolates ``${VAR}`` inside values.
-The script therefore asks ``docker compose config --environment`` and only
-falls back to the plain reader when the client predates that flag.
+The script therefore renders a stub project whose one environment entry is
+``${KEY}`` through ``docker compose config`` and reads the value back -- a
+probe every Compose v2 client can answer.
 """
 
 from __future__ import annotations
@@ -37,20 +38,27 @@ PERSISTED_FILE = {
 }
 GENERATED = re.compile(r"set:[A-Za-z0-9_\-]{32,}")
 
-# The fake docker answers `compose ... config --environment` with a canned
-# resolved environment (what real Compose would print for the .env under
-# test), or with FAKE_COMPOSE_CONFIG_RC to imitate a client without the flag.
-# Every other invocation stands in for `compose build` and records, per
-# secret, whether the variable reached its environment and with which value:
-# "set:<value>" is what Compose would take from the shell, "" means Compose
-# falls through to --env-file.
+# The fake docker answers `compose ... config` the way Compose renders the
+# script's stub project: it reads the `${KEY}` reference off stdin, looks the
+# key up in a canned resolved environment (what real Compose would compute for
+# the .env under test) and prints the environment entry, `""` when the key is
+# empty or missing -- or fails with FAKE_COMPOSE_CONFIG_RC. Every other
+# invocation stands in for `compose build` and records, per secret, whether
+# the variable reached its environment and with which value: "set:<value>" is
+# what Compose would take from the shell, "" means Compose falls through to
+# --env-file.
 _FAKE_DOCKER = """#!/usr/bin/env sh
 case " $* " in
   *" config "*)
     for arg in "$@"; do printf "%s\\n" "$arg"; done > "$CAPTURE_CONFIG_ARGS"
-    if [ -n "${REAL_DOCKER:-}" ]; then exec "$REAL_DOCKER" "$@"; fi
-    [ "${FAKE_COMPOSE_CONFIG_RC:-0}" = 0 ] || exit "$FAKE_COMPOSE_CONFIG_RC"
-    [ -z "${FAKE_COMPOSE_ENVIRONMENT:-}" ] || cat "$FAKE_COMPOSE_ENVIRONMENT"
+    cat > "$CAPTURE_CONFIG_STDIN"
+    if [ -n "${REAL_DOCKER:-}" ]; then exec "$REAL_DOCKER" "$@" < "$CAPTURE_CONFIG_STDIN"; fi
+    if [ "${FAKE_COMPOSE_CONFIG_RC:-0}" != 0 ]; then echo "fake compose: cannot load project" >&2; exit "$FAKE_COMPOSE_CONFIG_RC"; fi
+    key="$(sed -n 's/.*\\${\\([A-Za-z_][A-Za-z0-9_]*\\)}.*/\\1/p' "$CAPTURE_CONFIG_STDIN" | head -n 1)"
+    value=""
+    [ -z "${FAKE_COMPOSE_ENVIRONMENT:-}" ] || value="$(sed -n "s/^${key}=//p" "$FAKE_COMPOSE_ENVIRONMENT" | head -n 1)"
+    [ -n "$value" ] || value='""'
+    printf 'name: probe\\nservices:\\n  probe:\\n    environment:\\n      DEER_FLOW_PROBE_VALUE: %s\\n    image: scratch\\n' "$value"
     exit 0
     ;;
 esac
@@ -81,11 +89,13 @@ def _run_deploy_build(
     compose_config_rc: int = 0,
     real_docker: str | None = None,
     shell_env: dict[str, str] | None = None,
+    check: bool = True,
 ):
     """Run ``deploy.sh build`` against the fake docker and return what it observed."""
     capture_secrets = tmp_path / "secrets.txt"
     capture_args = tmp_path / "docker_args.txt"
     capture_config_args = tmp_path / "config_args.txt"
+    capture_config_stdin = tmp_path / "config_stdin.yaml"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     docker = bin_dir / "docker"
@@ -99,6 +109,7 @@ def _run_deploy_build(
     env["CAPTURE_SECRETS"] = str(capture_secrets)
     env["CAPTURE_DOCKER_ARGS"] = str(capture_args)
     env["CAPTURE_CONFIG_ARGS"] = str(capture_config_args)
+    env["CAPTURE_CONFIG_STDIN"] = str(capture_config_stdin)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     if compose_environment is not None:
         canned = tmp_path / "compose_environment.txt"
@@ -114,14 +125,17 @@ def _run_deploy_build(
         [BASH, str(worktree / "scripts" / "deploy.sh"), "build"],
         cwd=worktree,
         env=env,
-        check=True,
+        check=check,
         text=True,
         capture_output=True,
     )
-    observed = dict(line.split("=", 1) for line in capture_secrets.read_text(encoding="utf-8").splitlines())
-    args = capture_args.read_text(encoding="utf-8").splitlines()
+    observed = {}
+    if capture_secrets.exists():
+        observed = dict(line.split("=", 1) for line in capture_secrets.read_text(encoding="utf-8").splitlines())
+    args = capture_args.read_text(encoding="utf-8").splitlines() if capture_args.exists() else []
     config_args = capture_config_args.read_text(encoding="utf-8").splitlines() if capture_config_args.exists() else []
-    return result, observed, args, config_args, Path(env["DEER_FLOW_HOME"])
+    config_stdin = capture_config_stdin.read_text(encoding="utf-8") if capture_config_stdin.exists() else ""
+    return result, observed, args, config_args, config_stdin, Path(env["DEER_FLOW_HOME"])
 
 
 def _other(key: str) -> str:
@@ -131,15 +145,15 @@ def _other(key: str) -> str:
 # ── The script asks Compose, and trusts its answer ──────────────────────────
 
 
-def test_deploy_asks_compose_for_the_environment_it_will_interpolate(tmp_path):
-    """The probe uses the same --env-file as the real compose command."""
+def test_deploy_asks_compose_to_interpolate_the_secret_like_the_real_project(tmp_path):
+    """The probe renders ``${KEY}`` with the same --env-file and project directory as the real command."""
     worktree = _worktree(tmp_path)
     (worktree / ".env").write_text("BETTER_AUTH_SECRET=from-dotenv\n", encoding="utf-8")
 
-    _, _, args, config_args, _ = _run_deploy_build(tmp_path, worktree, compose_environment={"BETTER_AUTH_SECRET": "from-dotenv"})
+    _, _, args, config_args, config_stdin, _ = _run_deploy_build(tmp_path, worktree, compose_environment={"BETTER_AUTH_SECRET": "from-dotenv", "DEER_FLOW_INTERNAL_AUTH_TOKEN": "x"})
 
     assert config_args[:1] == ["compose"]
-    assert "config" in config_args and "--environment" in config_args
+    assert "config" in config_args
     assert "--env-file" in config_args
     assert config_args[config_args.index("--env-file") + 1] == args[args.index("--env-file") + 1]
     # The probe resolves the default .env from the same project directory as
@@ -147,6 +161,11 @@ def test_deploy_asks_compose_for_the_environment_it_will_interpolate(tmp_path):
     assert "--project-directory" in config_args
     probe_dir = config_args[config_args.index("--project-directory") + 1]
     assert Path(probe_dir).resolve() == Path(args[args.index("-f") + 1]).resolve().parent
+    # The stub project on stdin is what gets interpolated: it must reference
+    # the secret and nothing from the real compose file.
+    assert config_args[config_args.index("-f") + 1] == "-"
+    assert "${DEER_FLOW_INTERNAL_AUTH_TOKEN}" in config_stdin
+    assert "docker-compose.yaml" not in config_stdin
 
 
 @pytest.mark.parametrize("key", SECRETS)
@@ -160,7 +179,7 @@ def test_deploy_leaves_a_compose_resolved_secret_for_compose_instead_of_generati
     worktree = _worktree(tmp_path)
     (worktree / ".env").write_text("OTHER=dotenv\n" + dotenv_line.format(key=key) + "\n", encoding="utf-8")
 
-    result, observed, args, _, home = _run_deploy_build(tmp_path, worktree, compose_environment={key: "from-dotenv"})
+    result, observed, args, _, _, home = _run_deploy_build(tmp_path, worktree, compose_environment={key: "from-dotenv"})
 
     # Compose reads the dotenv itself; an exported copy would outrank it.
     assert "--env-file" in args
@@ -176,7 +195,7 @@ def test_deploy_generates_when_compose_resolves_the_dotenv_value_to_empty(tmp_pa
     worktree = _worktree(tmp_path)
     (worktree / ".env").write_text(f"{key}=${{UNSET_DEPLOY_SECRET}}\n", encoding="utf-8")
 
-    _, observed, _, _, home = _run_deploy_build(tmp_path, worktree, compose_environment={key: "", _other(key): "x"})
+    _, observed, _, _, _, home = _run_deploy_build(tmp_path, worktree, compose_environment={key: "", _other(key): "x"})
 
     assert GENERATED.fullmatch(observed[key]), observed[key]
     assert (home / PERSISTED_FILE[key]).exists()
@@ -191,7 +210,7 @@ def test_deploy_prefers_dotenv_secret_over_the_persisted_generated_one(tmp_path,
     home.mkdir()
     (home / PERSISTED_FILE[key]).write_text("from-persisted-file\n", encoding="utf-8")
 
-    _, observed, _, _, _ = _run_deploy_build(tmp_path, worktree, compose_environment={key: "from-dotenv"})
+    _, observed, _, _, _, _ = _run_deploy_build(tmp_path, worktree, compose_environment={key: "from-dotenv"})
 
     assert observed[key] == "", f"the persisted secret shadowed the .env value: {observed[key]!r}"
 
@@ -202,7 +221,7 @@ def test_deploy_still_generates_and_persists_a_secret_when_dotenv_has_none(tmp_p
     worktree = _worktree(tmp_path)
     (worktree / ".env").write_text(f"{_other(key)}=x\nPORT=2026\n", encoding="utf-8")
 
-    _, observed, _, _, home = _run_deploy_build(tmp_path, worktree, compose_environment={_other(key): "x", "PORT": "2026"})
+    _, observed, _, _, _, home = _run_deploy_build(tmp_path, worktree, compose_environment={_other(key): "x", "PORT": "2026"})
 
     assert GENERATED.fullmatch(observed[key]), observed[key]
     generated = observed[key].removeprefix("set:")
@@ -217,7 +236,7 @@ def test_deploy_keeps_shell_export_ahead_of_dotenv(tmp_path, key):
     worktree = _worktree(tmp_path)
     (worktree / ".env").write_text(f"{key}=from-dotenv\n", encoding="utf-8")
 
-    _, observed, _, _, home = _run_deploy_build(tmp_path, worktree, compose_environment={key: "from-shell"}, shell_env={key: "from-shell"})
+    _, observed, _, _, _, home = _run_deploy_build(tmp_path, worktree, compose_environment={key: "from-shell"}, shell_env={key: "from-shell"})
 
     assert observed[key] == "set:from-shell"
     assert not (home / PERSISTED_FILE[key]).exists()
@@ -227,70 +246,95 @@ def test_deploy_keeps_shell_export_ahead_of_dotenv(tmp_path, key):
 def test_deploy_treats_an_empty_shell_export_as_missing_not_as_dotenv_provided(tmp_path, key):
     """Compose lets an exported-but-empty shell variable outrank .env.
 
-    Compose reports that as ``KEY=``; leaving it alone would hand the stack an
+    Compose renders that as ``""``; leaving it alone would hand the stack an
     empty secret, so the script must still generate one (and export it).
     """
     worktree = _worktree(tmp_path)
     (worktree / ".env").write_text(f"{key}=from-dotenv\n", encoding="utf-8")
 
-    _, observed, _, _, home = _run_deploy_build(tmp_path, worktree, compose_environment={key: ""}, shell_env={key: ""})
+    _, observed, _, _, _, home = _run_deploy_build(tmp_path, worktree, compose_environment={key: ""}, shell_env={key: ""})
 
     assert GENERATED.fullmatch(observed[key]), observed[key]
     assert (home / PERSISTED_FILE[key]).exists()
 
 
-# ── Compose clients without `config --environment` (< 2.28) ─────────────────
-
-
-@pytest.mark.parametrize("key", SECRETS)
-def test_deploy_falls_back_to_the_plain_dotenv_reader_when_compose_cannot_report_its_environment(tmp_path, key):
-    """An older client still gets the KEY=VALUE reader rather than shadowing .env."""
+def test_deploy_stops_when_compose_cannot_interpolate_instead_of_guessing(tmp_path):
+    """A failing probe must not silently fall through to a generated, shadowing secret."""
     worktree = _worktree(tmp_path)
-    (worktree / ".env").write_text(f"{key}=from-dotenv\n", encoding="utf-8")
+    (worktree / ".env").write_text("BETTER_AUTH_SECRET=from-dotenv\n", encoding="utf-8")
 
-    _, observed, _, config_args, home = _run_deploy_build(tmp_path, worktree, compose_config_rc=125)
+    result, observed, args, config_args, _, home = _run_deploy_build(tmp_path, worktree, compose_config_rc=15, check=False)
 
-    assert config_args, "the script must have tried Compose first"
-    assert observed[key] == "", f"{key} exported into the compose environment: {observed[key]!r}"
-    assert not (home / PERSISTED_FILE[key]).exists()
-
-
-def test_deploy_fallback_reader_generates_when_dotenv_lacks_the_key(tmp_path):
-    worktree = _worktree(tmp_path)
-    (worktree / ".env").write_text("PORT=2026\n", encoding="utf-8")
-
-    _, observed, _, _, _ = _run_deploy_build(tmp_path, worktree, compose_config_rc=125)
-
-    for key in SECRETS:
-        assert GENERATED.fullmatch(observed[key]), observed[key]
+    assert config_args, "the script must have asked Compose"
+    assert result.returncode != 0
+    assert "could not resolve BETTER_AUTH_SECRET" in result.stderr
+    assert "fake compose: cannot load project" in result.stderr
+    assert not args, "no build was attempted"
+    assert not observed
+    assert not (home / PERSISTED_FILE["BETTER_AUTH_SECRET"]).exists()
 
 
-# ── Against the real Compose client, when one is installed ──────────────────
+# ── Against real Compose clients, when installed ────────────────────────────
 
 
-def _real_compose_with_environment_flag() -> str | None:
+def _compose_clients() -> list[tuple[str, str]]:
+    """The `docker` CLI plus any standalone binaries named in DEER_FLOW_TEST_COMPOSE_BINARIES."""
+    clients: list[tuple[str, str]] = []
     docker = shutil.which("docker")
-    if docker is None:
-        return None
+    if docker and _renders_stub_project([docker, "compose"]):
+        clients.append(("docker", docker))
+    for binary in filter(None, os.environ.get("DEER_FLOW_TEST_COMPOSE_BINARIES", "").split(os.pathsep)):
+        if _renders_stub_project([binary]):
+            clients.append((Path(binary).name, binary))
+    return clients
+
+
+def _renders_stub_project(command: list[str]) -> bool:
     try:
         probe = subprocess.run(
-            [docker, "compose", "-f", "-", "config", "--environment"],
-            input="services: {}\n",
+            [*command, "-f", "-", "config"],
+            input="services:\n  probe:\n    image: scratch\n",
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
-    return docker if probe.returncode == 0 else None
+        return False
+    return probe.returncode == 0
 
 
-REAL_DOCKER = _real_compose_with_environment_flag()
-needs_real_compose = pytest.mark.skipif(REAL_DOCKER is None, reason="needs a docker compose client with `config --environment` (Compose >= 2.28)")
+COMPOSE_CLIENTS = _compose_clients()
+real_compose = pytest.mark.parametrize(
+    "client",
+    [pytest.param(path, id=name) for name, path in COMPOSE_CLIENTS] or [pytest.param(None, id="none", marks=pytest.mark.skip(reason="no docker compose client installed"))],
+)
 
 
-@needs_real_compose
+@pytest.fixture
+def real_docker(client: str, tmp_path: Path) -> str:
+    """A `docker`-shaped entry point for the client: the CLI itself, or a shim that drops the `compose` word for a standalone binary."""
+    if Path(client).name == "docker":
+        return client
+    shim = tmp_path / "compose-shim" / "docker"
+    shim.parent.mkdir()
+    shim.write_text(f'#!/usr/bin/env sh\n[ "$1" = compose ] && shift\nexec "{client}" "$@"\n', encoding="utf-8")
+    shim.chmod(0o755)
+    return str(shim)
+
+
+def _resolved_by(real_docker: str, dotenv: Path, key: str) -> str:
+    rendered = subprocess.run(
+        [real_docker, "compose", "--env-file", str(dotenv), "-f", "-", "config"],
+        input=f"services:\n  probe:\n    image: scratch\n    environment:\n      DEER_FLOW_PROBE_VALUE: ${{{key}}}\n",
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return re.search(r"^\s*DEER_FLOW_PROBE_VALUE: (.*)$", rendered, re.M).group(1)
+
+
+@real_compose
 @pytest.mark.parametrize("key", SECRETS)
 @pytest.mark.parametrize(
     ("dotenv_line", "expected"),
@@ -302,44 +346,37 @@ needs_real_compose = pytest.mark.skipif(REAL_DOCKER is None, reason="needs a doc
     ],
     ids=["equals", "colon", "quoted-interpolated", "default-expansion"],
 )
-def test_real_compose_dotenv_forms_are_left_for_compose(tmp_path, key, dotenv_line, expected):
+def test_real_compose_dotenv_forms_are_left_for_compose(tmp_path, real_docker, key, dotenv_line, expected):
     """Every spelling Compose accepts counts as provided, and Compose sees the operator's value."""
     worktree = _worktree(tmp_path)
     (worktree / ".env").write_text("OTHER=dotenv\n" + dotenv_line.format(key=key) + "\n", encoding="utf-8")
 
-    _, observed, _, _, home = _run_deploy_build(tmp_path, worktree, real_docker=REAL_DOCKER)
+    _, observed, _, _, _, home = _run_deploy_build(tmp_path, worktree, real_docker=real_docker)
 
     assert observed[key] == "", f"{key} exported into the compose environment: {observed[key]!r}"
     assert not (home / PERSISTED_FILE[key]).exists()
-    resolved = subprocess.run(
-        [REAL_DOCKER, "compose", "--env-file", str(worktree / ".env"), "-f", "-", "config", "--environment"],
-        input="services: {}\n",
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.splitlines()
-    assert f"{key}={expected}" in resolved
+    assert _resolved_by(real_docker, worktree / ".env", key) == expected
 
 
-@needs_real_compose
+@real_compose
 @pytest.mark.parametrize("key", SECRETS)
-def test_real_compose_unset_interpolation_in_dotenv_still_gets_a_generated_secret(tmp_path, key):
+def test_real_compose_unset_interpolation_in_dotenv_still_gets_a_generated_secret(tmp_path, real_docker, key):
     """``KEY=${UNSET}`` is empty to Compose, so the script must generate."""
     worktree = _worktree(tmp_path)
     (worktree / ".env").write_text(f"{key}=${{UNSET_DEPLOY_SECRET}}\n", encoding="utf-8")
 
-    _, observed, _, _, home = _run_deploy_build(tmp_path, worktree, real_docker=REAL_DOCKER)
+    _, observed, _, _, _, home = _run_deploy_build(tmp_path, worktree, real_docker=real_docker)
 
     assert GENERATED.fullmatch(observed[key]), observed[key]
     assert (home / PERSISTED_FILE[key]).exists()
 
 
-@needs_real_compose
+@real_compose
 @pytest.mark.parametrize("key", SECRETS)
-def test_real_compose_empty_shell_export_still_gets_a_generated_secret(tmp_path, key):
+def test_real_compose_empty_shell_export_still_gets_a_generated_secret(tmp_path, real_docker, key):
     worktree = _worktree(tmp_path)
     (worktree / ".env").write_text(f"{key}=from-dotenv\n", encoding="utf-8")
 
-    _, observed, _, _, _ = _run_deploy_build(tmp_path, worktree, real_docker=REAL_DOCKER, shell_env={key: ""})
+    _, observed, _, _, _, _ = _run_deploy_build(tmp_path, worktree, real_docker=real_docker, shell_env={key: ""})
 
     assert GENERATED.fullmatch(observed[key]), observed[key]

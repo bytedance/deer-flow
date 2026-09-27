@@ -178,28 +178,29 @@ fi
 # "Provided" has to mean what Compose will see, not what a KEY=VALUE grep
 # finds: Compose also accepts `KEY: VALUE` lines and interpolates `${VAR}`
 # inside values, so `TOKEN: abc` is set and `TOKEN=${UNSET}` is empty. Ask
-# Compose for its resolved interpolation environment (`config --environment`,
-# Compose >= 2.28) with the same --env-file, against a stub project so the
-# probe does not depend on the real compose file loading. Older Compose
-# clients fall back to the plain KEY=VALUE reader used for the summary.
-compose_env_value() {
+# Compose itself: render a stub project whose only environment entry is
+# `${KEY}`, with the same --env-file and project directory as the real
+# command, and read the interpolated value back. This works on every Compose
+# v2 (unlike `config --environment`, which needs 2.28), needs no daemon, and
+# cannot fail on the real compose file before the secrets are decided. An
+# empty or unset variable renders as `""`.
+compose_interpolated_value() {
     local key="$1"
-    if [ -z "${_compose_env_probe+x}" ]; then
-        if _compose_env="$(printf 'services: {}\n' | docker compose "${COMPOSE_ENV_FILE_ARGS[@]}" --project-directory "$DOCKER_DIR" -f - config --environment 2>/dev/null)"; then
-            _compose_env_probe=resolved
-        else
-            _compose_env_probe=unsupported
-        fi
+    local rendered=""
+    if ! rendered="$(printf 'services:\n  probe:\n    image: scratch\n    environment:\n      DEER_FLOW_PROBE_VALUE: ${%s}\n' "$key" \
+        | docker compose "${COMPOSE_ENV_FILE_ARGS[@]}" --project-directory "$DOCKER_DIR" -f - config 2>&1)"; then
+        echo -e "${RED}✗ docker compose could not resolve $key from the environment and $ENV_FILE:${NC}" >&2
+        printf '%s\n' "$rendered" >&2
+        exit 1
     fi
-    if [ "$_compose_env_probe" = resolved ]; then
-        printf '%s\n' "$_compose_env" | sed -n "s/^${key}=//p" | head -n 1
-    else
-        read_dotenv_value "$key"
-    fi
+    printf '%s\n' "$rendered" | sed -n 's/^[[:space:]]*DEER_FLOW_PROBE_VALUE: //p' | head -n 1
 }
 
 dotenv_provides_secret() {
-    [ -n "$(compose_env_value "$1")" ]
+    local value=""
+    # The probe runs in a subshell, so its exit 1 must be re-raised here.
+    value="$(compose_interpolated_value "$1")" || exit 1
+    [ -n "$value" ] && [ "$value" != '""' ]
 }
 
 # ── BETTER_AUTH_SECRET ───────────────────────────────────────────────────────
