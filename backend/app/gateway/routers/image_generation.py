@@ -15,10 +15,12 @@ from deerflow.config.image_generation import (
     ImageGenerationDefaultStore,
     ManagedImageGenerationProfile,
     ManagedImageGenerationProfileStore,
+    ServerImageProbeStore,
     image_profile_choice_needed,
+    image_profile_container_identity,
     image_profile_identity,
-    legacy_image_profile,
     resolve_image_generation_profile,
+    resolve_server_image_profile,
     saved_image_generation_source,
 )
 
@@ -35,6 +37,11 @@ class SaveImageProfileRequest(BaseModel):
 class TestImageProfileRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_revision: str
+
+
+class TestServerImageProfileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_identity: str
 
 
 class SetImageDefaultRequest(BaseModel):
@@ -58,15 +65,16 @@ def _empty_status(status: ImageConnectionStatus) -> dict:
 
 def _status() -> dict:
     try:
-        profile, source, managed = resolve_image_generation_profile(get_app_config().sandbox.environment)
+        profile, source, managed = resolve_image_generation_profile(get_app_config().image_generation_environment)
     except (ImageConfigurationError, ValueError):
         return _empty_status(ImageConnectionStatus.INVALID_CONFIG)
     if profile is None:
         return _empty_status(ImageConnectionStatus.NOT_CONFIGURED)
     configured = profile.usable()
-    generation = configured and bool(managed and managed.verified_generation)
-    edit = configured and bool(managed and managed.verified_edit)
-    failed_results = {managed.last_generation_result, managed.last_edit_result} if managed else set()
+    results = ServerImageProbeStore().results(profile) if source == "sandbox_environment" else {}
+    generation = configured and (bool(managed and managed.verified_generation) or results.get("generation") == "success")
+    edit = configured and (bool(managed and managed.verified_edit) or results.get("edit") == "success")
+    failed_results = {managed.last_generation_result, managed.last_edit_result} if managed else set(results.values())
     if not configured or "authentication_failed" in failed_results or "provider_rejected" in failed_results:
         status = ImageConnectionStatus.INVALID_CONFIG
     elif "unreachable" in failed_results:
@@ -96,20 +104,21 @@ def _list_profiles() -> dict:
     stored_profiles = ManagedImageGenerationProfileStore().list()
     profiles = [{**item.public(), "identity": image_profile_identity(item)} for item in stored_profiles]
     try:
-        legacy = legacy_image_profile(get_app_config().sandbox.environment)
+        legacy = resolve_server_image_profile(get_app_config())
     except (ImageConfigurationError, ValueError):
         legacy = None
     status = _status()
     current_default = ImageGenerationDefaultStore().read()
     status["default_revision"] = current_default.revision if current_default else None
-    status["default_active"] = current_default is not None and saved_image_generation_source(get_app_config().sandbox.environment) == current_default.source
-    choice_required = legacy is not None and image_profile_choice_needed(get_app_config().sandbox.environment)
+    status["default_active"] = current_default is not None and saved_image_generation_source(get_app_config().image_generation_environment) == current_default.source
+    choice_required = legacy is not None and image_profile_choice_needed(get_app_config().image_generation_environment)
     status["choice_required"] = choice_required
     managed_selected = status["source"] == "managed"
     for item in profiles:
         item["selected"] = managed_selected and item["enabled"] and not choice_required
         item["conflict"] = item["enabled"] and choice_required
     if legacy is not None:
+        results = ServerImageProbeStore().results(legacy)
         profiles.insert(
             0,
             {
@@ -124,8 +133,10 @@ def _list_profiles() -> dict:
                 "enabled": not any(item["enabled"] for item in profiles),
                 "selected": status["source"] == "sandbox_environment" and not choice_required,
                 "conflict": choice_required,
-                "verified_generation": False,
-                "verified_edit": False,
+                "verified_generation": results.get("generation") == "success",
+                "verified_edit": results.get("edit") == "success",
+                "last_generation_result": results.get("generation"),
+                "last_edit_result": results.get("edit"),
             },
         )
     return {"profiles": profiles, "status": status}
@@ -137,7 +148,7 @@ def _set_default(body: SetImageDefaultRequest) -> dict:
             body.source,
             target_identity=body.target_identity,
             expected_revision=body.expected_revision,
-            environment=get_app_config().sandbox.environment,
+            environment=get_app_config().image_generation_environment,
         )
         return {"revision": saved.revision}
     except FileExistsError:
@@ -167,7 +178,7 @@ def _save(body: SaveImageProfileRequest) -> dict:
     try:
         store = ManagedImageGenerationProfileStore()
         try:
-            legacy = legacy_image_profile(get_app_config().sandbox.environment)
+            legacy = resolve_server_image_profile(get_app_config())
             server_model = f"{legacy.provider.value}:{legacy.model}" if legacy is not None else None
         except (ImageConfigurationError, ValueError):
             legacy = None
@@ -211,6 +222,32 @@ def _test(name: str, body: TestImageProfileRequest, operation: Literal["generati
         except (ValueError, OSError):
             raise HTTPException(503, "Image profile storage is unavailable") from None
     return {"ok": result == "success", "message": result}
+
+
+def _test_server(body: TestServerImageProfileRequest, operation: Literal["generation", "edit"]) -> dict:
+    try:
+        profile = resolve_server_image_profile(get_app_config())
+        if profile is None:
+            raise HTTPException(404, "Server image profile is not configured")
+        if image_profile_identity(profile) != body.expected_identity:
+            raise HTTPException(409, "Server image profile changed; reload before testing")
+        result = probe_image_profile(profile, operation)
+        current = resolve_server_image_profile(get_app_config())
+        if current is None or image_profile_container_identity(current) != image_profile_container_identity(profile):
+            raise HTTPException(409, "Server image profile changed during the test; reload before retrying")
+        if result not in {"missing_api_key", "invalid_operation"}:
+            ServerImageProbeStore().record(profile, operation, result)
+        return {"ok": result == "success", "message": result}
+    except HTTPException:
+        raise
+    except (ImageConfigurationError, ValueError, OSError):
+        raise HTTPException(503, "Server image profile is unavailable") from None
+
+
+@router.post("/server/test/{operation}")
+async def test_server_image_profile(request: Request, operation: Literal["generation", "edit"], body: TestServerImageProfileRequest):
+    await require_admin_user(request, detail=_ADMIN)
+    return await asyncio.to_thread(_test_server, body, operation)
 
 
 @router.post("/profiles/{name}/test/{operation}")

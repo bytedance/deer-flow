@@ -16,6 +16,7 @@ import {
   saveImageProfile,
   setDefaultImageProfile,
   testImageProfile,
+  testServerImageProfile,
   type ImageProfile,
 } from "@/core/models/image-management";
 
@@ -29,6 +30,7 @@ rs.mock("@/core/models/image-management", () => ({
   saveImageProfile: rs.fn(),
   setDefaultImageProfile: rs.fn(),
   testImageProfile: rs.fn(),
+  testServerImageProfile: rs.fn(),
 }));
 
 const profile: ImageProfile = {
@@ -70,6 +72,47 @@ beforeEach(() => {
     ok: true,
     message: "success",
   });
+  rs.mocked(testServerImageProfile).mockResolvedValue({
+    ok: true,
+    message: "success",
+  });
+});
+
+test("tests a read-only server profile without treating it as a managed catalog entry", async () => {
+  rs.mocked(loadImageProfiles).mockResolvedValue({
+    profiles: [
+      {
+        ...profile,
+        name: "server-config",
+        display_name: "Server configuration",
+        source: "config",
+        identity: "server-identity",
+        revision: undefined,
+        selected: true,
+      },
+    ],
+    status: {
+      status: "configured_unverified",
+      source: "sandbox_environment",
+      provider: "openai",
+      model: "image-model",
+      has_api_key: true,
+      supports_generation: false,
+      supports_edit: false,
+    },
+  });
+  mount();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Test generation" }),
+  );
+  await waitFor(() =>
+    expect(testServerImageProfile).toHaveBeenCalledWith(
+      "server-identity",
+      "generation",
+    ),
+  );
+  expect(testImageProfile).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
 });
 
 test("shows which image profile is selected when server and web profiles coexist", async () => {

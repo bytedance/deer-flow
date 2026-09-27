@@ -1655,6 +1655,17 @@ uploads:
 # or BoxLite micro-VM sandbox
 # Option 1: Local Sandbox (Default)
 # Executes commands directly on the host machine
+# Optional server-owned image model, separate from chat models and web profiles.
+# Configure one provider here. It appears as a read-only, testable choice in
+# Settings > Models > Image models; a web profile may coexist with it.
+# Do not also set image provider variables in sandbox.environment.
+# image_generation:
+#   provider: openai               # openai, gemini, or minimax
+#   model: gpt-image-1
+#   base_url: https://api.openai.com/v1  # Required for openai
+#   api_key: $IMAGE_GENERATION_API_KEY
+#   size: 1024x1024               # Optional; OpenAI-compatible provider only
+
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
   # Host bash execution is disabled by default because LocalSandboxProvider is
@@ -1781,7 +1792,7 @@ sandbox:
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
 #   #   DATABASE_URL: $DATABASE_URL  # Reads from host's DATABASE_URL env var
-#   #   # Required when using the OpenAI-compatible image-generation provider:
+#   #   # Legacy image configuration, used only without top-level image_generation:
 #   #   IMAGE_GENERATION_PROVIDER: $IMAGE_GENERATION_PROVIDER
 #   #   IMAGE_GENERATION_API_KEY: $IMAGE_GENERATION_API_KEY
 #   #   IMAGE_GENERATION_BASE_URL: $IMAGE_GENERATION_BASE_URL
