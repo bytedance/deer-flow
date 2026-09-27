@@ -1189,6 +1189,9 @@ subagents cannot answer a chat choice. When both image sources are usable and
 no saved default applies, these runs use the server-configured model. A valid
 saved default still takes precedence. The source is selected before sandbox
 acquisition, and `check_image_generation` reports the model the run will use.
+In an interactive IM channel, the person who requested the image can answer
+the model-choice question with `1`, `2`, or the exact option label. Answers to
+an old question or from another sender are treated as ordinary messages.
 For a server-owned model, use the typed top-level `image_generation` block in
 `config.yaml`:
 
