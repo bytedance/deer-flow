@@ -58,7 +58,9 @@ Run status `unmet` identifies a finished occurrence whose scheduled goal was not
 ## Architecture
 
 The administrator-only Models settings page also renders an image provider
-section. It calls `/api/image-generation/profiles`, stores no API key in browser
+section when `/api/features.image_generation_management.enabled` is true.
+The feature query is disabled for non-admins and static website builds. It calls
+`/api/image-generation/profiles`, stores no API key in browser
 state after save, and shows separate generation and reference-edit test
 results. The server entry is read-only but has generation and edit test actions
 through `/api/image-generation/server/test/{operation}`. Admins set the server or enabled web profile as the persisted image
