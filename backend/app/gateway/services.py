@@ -2286,9 +2286,9 @@ async def launch_mcp_task_notification_run(
                 require_existing_thread=True,
             )
     except HTTPException as exc:
-        if exc.status_code == 409:
+        if exc.status_code == 409 and isinstance(exc.__cause__, ConflictError):
             raise ConflictError(str(exc.detail)) from exc
-        if exc.status_code == 404:
+        if exc.status_code in {400, 401, 403, 404, 409, 422, 501}:
             raise PermanentNotificationError(str(exc.detail)) from exc
         raise
     return {"run_id": record.run_id, "thread_id": record.thread_id}
