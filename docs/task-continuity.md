@@ -19,12 +19,15 @@ or additional model call is required by the feature itself.
 The standard lead-agent builders (including custom-agent bootstrap) and
 `DeerFlowClient` expose three tools through the existing authorization filter:
 
-- `task_note`: save, replace or delete a named task note. Keep up to eight notes,
-  each with 750 characters and four optional source IDs. A full notebook rejects
-  new keys until an existing key is replaced or deleted. If parallel updates
-  jointly exceed capacity, the reducer retains the last eight insertion-ordered
-  keys; inspect the next injected notebook for the retained entries. Source IDs are checked
-  for availability, not semantic support; all notes remain model reports.
+- `task_note`：保存、替换或删除命名笔记，最多八条，每条最多 750 字符和四个来源 ID。
+  并行新增按模型响应中的工具调用顺序为不同的新 key 预留剩余名额，重复 key 共用名额；
+  超出名额返回 `note_capacity`，不会因容量不足而挤掉原有笔记或先报告 `saved` 再丢弃写入。
+  已有 key 在满容量时仍可替换，空内容仍表示删除；同一 key 的多次合法写入保留既有的
+  按调用顺序合并、后写覆盖前写语义，包括显式删除。
+  预留以批次开始时的笔记状态为准：同批删除释放的空间，以及校验失败或被策略拒绝的
+  调用未使用的预留，在下一批重新计算。收到容量错误时可替换已有 key，或待当前批次
+  完成后重试。这样无需预测并行调用能否成功，也无需串行化其他工具。
+  来源 ID 仅验证可读取性，不验证语义支持；所有笔记仍是模型报告。
 - `history_search`: keyword search over the current messages and compacted source
   batches reachable from the current checkpoint. English words and Chinese
   character bigrams are supported. Returns up to eight 600-character excerpts.
@@ -111,6 +114,10 @@ compose these middleware/tools; automatic installation is limited to the standar
 lead builders and `DeerFlowClient`.
 
 ## Evidence
+
+`backend/tests/test_task_note_capacity.py` 使用确定性模型驱动真实 `create_agent` 图、
+生产 `task_note` 和 `ThreadState`，验证同步/异步并行容量、回执、full/delta checkpoint、
+逆序完成、重复 key、删除后重试和任务隔离；不依赖真实模型 API。
 
 [The historical experiment package](experiments/task-continuity-20260912/README.md)
 contains the original A/B/C/D protocol, scripts and results. Those numbers describe
