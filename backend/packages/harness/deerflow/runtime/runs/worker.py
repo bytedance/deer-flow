@@ -891,61 +891,111 @@ async def run_agent(
     subagent_events: _SubagentEventBuffer | None = None
     started = False
 
-    cancellation_finalized = False
+    # Cancellation ownership: the first side-effectful cancel records the
+    # action and creates the single owned restore child; every later call joins
+    # that child instead of starting another restore. None of this is marked
+    # done before the operation actually reaches a terminal outcome.
+    cancellation_action: str | None = None
+    cancellation_restore_task: asyncio.Task[bool] | None = None
+
+    async def _owned_cancellation_restore() -> bool:
+        """Own the run's single checkpoint restore.
+
+        This child is the only place a rollback restore executes. Its own
+        cancellation or failure is never reported as a completed restore.
+        """
+        nonlocal checkpoint_rollback_completed
+        try:
+            restored = await _rollback_to_pre_run_checkpoint(
+                accessor=accessor,
+                checkpointer=checkpointer,
+                thread_id=thread_id,
+                run_id=run_id,
+                rollback_point=rollback_point,
+                snapshot_capture_failed=snapshot_capture_failed,
+            )
+        except asyncio.CancelledError:
+            logger.warning(
+                "Run %s cancellation rollback was cancelled before it completed",
+                run_id,
+            )
+            raise
+        except BaseException:
+            logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
+            return False
+        checkpoint_rollback_completed = bool(restored)
+        if restored:
+            logger.info(
+                "Run %s rolled back to pre-run checkpoint %s",
+                run_id,
+                pre_run_checkpoint_id,
+            )
+        return bool(restored)
+
+    async def _join_owned_restore(task: asyncio.Task[bool]) -> bool:
+        """Join the owned restore without cancelling it or losing its outcome.
+
+        A repeated host cancellation stops this wait but must not abandon the
+        restore: the child reaches a terminal outcome first and the received
+        cancellation is re-raised afterwards. A cancelled or failed child is
+        reported as a failure, never as a completed rollback.
+        """
+        current = asyncio.current_task()
+        delivered = 0
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            delivered += 1
+        while not task.done():
+            try:
+                await asyncio.wait({task})
+            except asyncio.CancelledError:
+                delivered += 1
+        try:
+            restored = task.result()
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            if current is not None:
+                for _ in range(delivered):
+                    current.uncancel()
+            raise
+        if delivered:
+            raise asyncio.CancelledError
+        return restored
 
     async def _finish_cancellation(
         action: str,
         *,
         restore_checkpoint: bool = True,
     ) -> None:
-        nonlocal checkpoint_rollback_completed, cancellation_finalized
-        if cancellation_finalized:
-            # The durable cancel action stays visible to every later CAS, so a
-            # second call would repeat the rollback checkpoint/delete.
-            logger.info(
-                "Run %s cancellation (action=%s) was already finalized; skipping the repeat",
-                run_id,
-                action,
-            )
+        nonlocal cancellation_action, cancellation_restore_task
+        if cancellation_action is None:
+            cancellation_action = action
+            await run_manager.set_finalizing(run_id, True)
+            if action == "rollback":
+                await run_manager.set_status(
+                    run_id,
+                    RunStatus.error,
+                    error="Rolled back by user",
+                    **terminal_status_kwargs,
+                )
+            else:
+                await run_manager.set_status(
+                    run_id,
+                    RunStatus.interrupted,
+                    **terminal_status_kwargs,
+                )
+                logger.info("Run %s was cancelled", run_id)
+
+        if action != "rollback" or not restore_checkpoint:
+            # An interrupt has no restore, and a path that has not started one
+            # must not consume the rollback a later safe boundary can still do.
             return
-        cancellation_finalized = True
-        await run_manager.set_finalizing(run_id, True)
-        if action == "rollback":
-            await run_manager.set_status(
-                run_id,
-                RunStatus.error,
-                error="Rolled back by user",
-                **terminal_status_kwargs,
-            )
-            if not restore_checkpoint:
-                return
-            try:
-                checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
-                    accessor=accessor,
-                    checkpointer=checkpointer,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    rollback_point=rollback_point,
-                    snapshot_capture_failed=snapshot_capture_failed,
-                )
-                logger.info(
-                    "Run %s rolled back to pre-run checkpoint %s",
-                    run_id,
-                    pre_run_checkpoint_id,
-                )
-            except Exception:
-                logger.warning(
-                    "Run %s cancellation rollback failed",
-                    run_id,
-                    exc_info=True,
-                )
-        else:
-            await run_manager.set_status(
-                run_id,
-                RunStatus.interrupted,
-                **terminal_status_kwargs,
-            )
-            logger.info("Run %s was cancelled", run_id)
+
+        if cancellation_restore_task is None:
+            cancellation_restore_task = asyncio.create_task(_owned_cancellation_restore())
+        await _join_owned_restore(cancellation_restore_task)
 
     try:
         normalized_stream_modes = normalize_stream_modes(stream_modes)
@@ -1460,7 +1510,18 @@ async def run_agent(
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
 
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as exc:
+        current = asyncio.current_task()
+        if current is not None and current.cancelling() > 0:
+            # A genuine host cancellation is preserved and re-raised only after
+            # the terminal bookkeeping (and any owned rollback) reaches a safe
+            # boundary. A ``CancelledError`` raised by a dependency while this
+            # task is not being cancelled is not the caller's request and keeps
+            # its previous handling. Deliberately not
+            # ``_defer_finalization_interrupt``: that helper clears every pending
+            # ``task.cancelling()`` count.
+            if deferred_finalization_interrupt is None:
+                deferred_finalization_interrupt = exc
         await _finish_cancellation(record.abort_action)
 
     except Exception as exc:

@@ -160,7 +160,10 @@ async def test_run_agent_releases_execution_lease_when_cancelled():
         )
         await asyncio.wait_for(lease_bound.wait(), timeout=1)
         task.cancel()
-        await task
+        # The host cancellation is re-raised only after the worker reached a safe
+        # terminal boundary; the cleanup assertions below still have to hold.
+        with pytest.raises(asyncio.CancelledError):
+            await task
         await asyncio.sleep(0)
 
         assert len(owner_ids) == 1
@@ -216,7 +219,9 @@ async def test_run_agent_cleans_up_when_mcp_task_projection_is_cancelled():
     await asyncio.wait_for(projection_started.wait(), timeout=1)
 
     run_task.cancel("MCP projection interrupted")
-    await run_task
+    # Cancellation propagates after the bounded cleanup, not before it.
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
     await asyncio.sleep(0)
 
     agent_factory.assert_not_called()
@@ -3372,7 +3377,10 @@ async def test_interrupted_title_does_not_overwrite_checkpoint_from_admitted_rep
         checkpointer.latest_checkpoint = copy.deepcopy(replacement_checkpoint)
         checkpointer.latest_metadata = {"source": "loop", "step": 2}
         checkpointer.replacement_checkpoint_written.set()
-        await old_task
+        # The interrupt strategy cancels the older run; a cancelled worker now
+        # surfaces that host cancellation after its safe terminal boundary.
+        with suppress(asyncio.CancelledError):
+            await old_task
     finally:
         checkpointer.replacement_checkpoint_written.set()
         if not old_task.done():
@@ -3434,7 +3442,10 @@ async def test_replacement_run_waits_for_prior_finalizing_run():
 
         await run_manager.set_finalizing(old_record.run_id, False)
         await asyncio.wait_for(replacement_started.wait(), timeout=1.0)
-        await task
+        # A cancelled worker now surfaces its host cancellation after the safe
+        # terminal boundary instead of ending as if it had completed normally.
+        with suppress(asyncio.CancelledError):
+            await task
     finally:
         await run_manager.set_finalizing(old_record.run_id, False)
         if not task.done():
@@ -4041,3 +4052,207 @@ async def test_worker_discards_buffered_journal_events_after_ownership_loss(monk
     assert journals[0]._closed is True
     assert journals[0]._store is None
     assert journals[0]._buffer == []
+
+
+@pytest.mark.anyio
+async def test_rollback_cancelled_during_delta_checkpoint_read_is_joined(monkeypatch):
+    """A second cancellation must not abandon an in-flight rollback restore.
+
+    Delta rollback first reads the current head (``accessor.aget``) and then
+    writes the captured pre-run state back. Cancelling the foreground again while
+    that read is in flight must not end the run as if the restore had completed:
+    the owned restore has to finish, and the end frame must follow it.
+    """
+    checkpointer = InMemorySaver()
+
+    async def _step(state: dict[str, Any]) -> dict[str, Any]:
+        n = len(state.get("messages") or [])
+        return {"messages": [HumanMessage(content=f"turn-{n}")]}
+
+    builder = StateGraph(_ExtensionDeltaState)
+    builder.add_node("step", _step)
+    builder.set_entry_point("step")
+    builder.set_finish_point("step")
+    graph = builder.compile(checkpointer=checkpointer)
+
+    thread_config = {"configurable": {"thread_id": "thread-1"}}
+    await graph.ainvoke({}, thread_config)
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
+    rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
+    assert rollback_point is not None
+    await graph.ainvoke({}, thread_config)
+
+    run_manager = RunManager()
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+
+    read_started = asyncio.Event()
+    release_read = asyncio.Event()
+    original_aget = CheckpointStateAccessor.aget
+
+    async def gated_aget(self, config):
+        if record.abort_event.is_set():
+            read_started.set()
+            await release_read.wait()
+        return await original_aget(self, config)
+
+    monkeypatch.setattr(CheckpointStateAccessor, "aget", gated_aget)
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": [HumanMessage(content="turn-0")]},
+                config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "checkpoint-1"}},
+                parent_config=None,
+                metadata={},
+                next=(),
+                tasks=(),
+                created_at=None,
+            )
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            # The user asked for a rollback; the worker's cancel path owns the
+            # restore from here.
+            record.abort_action = "rollback"
+            record.abort_event.set()
+            yield {"messages": []}
+
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=checkpointer, checkpoint_channel_mode="delta"),
+            agent_factory=lambda *, config: DummyAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    try:
+        await asyncio.wait_for(read_started.wait(), timeout=5)
+
+        # A second cancellation while the owned restore is reading the head.
+        task.cancel()
+        await asyncio.sleep(0.05)
+
+        # The restore has not completed, so the run must not publish its end yet.
+        assert bridge.publish_end.await_count == 0
+
+        release_read.set()
+        # The owned restore has to complete even though the foreground was
+        # cancelled again; the original cancellation propagates afterwards.
+        await asyncio.gather(task, return_exceptions=True)
+    finally:
+        release_read.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    latest = await accessor.aget(thread_config)
+    assert [message.content for message in latest.values["messages"]] == ["turn-0"]
+    assert task.cancelled() is True
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("mode", "state_schema"),
+    [("full", _ExtensionFullState), ("delta", _ExtensionDeltaState)],
+)
+async def test_rollback_repeated_cancellation_during_restore_write_is_joined(mode, state_schema, monkeypatch):
+    """Repeated host cancellations during the restore write join one restore.
+
+    The owned restore must reach a real outcome, the older handled cancellation
+    count must survive (no ``uncancel-all``), and the end frame must follow the
+    completed restore instead of the first cancellation.
+    """
+    checkpointer = InMemorySaver()
+
+    async def _step(state: dict[str, Any]) -> dict[str, Any]:
+        n = len(state.get("messages") or [])
+        return {"messages": [HumanMessage(content=f"turn-{n}")]}
+
+    builder = StateGraph(state_schema)
+    builder.add_node("step", _step)
+    builder.set_entry_point("step")
+    builder.set_finish_point("step")
+    graph = builder.compile(checkpointer=checkpointer)
+
+    thread_config = {"configurable": {"thread_id": "thread-1"}}
+    await graph.ainvoke({}, thread_config)
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode=mode)
+    rollback_point = await _capture_rollback_point(accessor, checkpointer, thread_config)
+    assert rollback_point is not None
+    await graph.ainvoke({}, thread_config)
+
+    run_manager = RunManager()
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+
+    write_started = asyncio.Event()
+    release_write = asyncio.Event()
+    original_aupdate = CheckpointStateAccessor.aupdate
+
+    async def gated_aupdate(self, *args, **kwargs):
+        if record.abort_event.is_set():
+            write_started.set()
+            await release_write.wait()
+        return await original_aupdate(self, *args, **kwargs)
+
+    monkeypatch.setattr(CheckpointStateAccessor, "aupdate", gated_aupdate)
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": [HumanMessage(content="turn-0")]},
+                config={"configurable": {"thread_id": "thread-1", "checkpoint_ns": "", "checkpoint_id": "checkpoint-1"}},
+                parent_config=None,
+                metadata={},
+                next=(),
+                tasks=(),
+                created_at=None,
+            )
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            record.abort_action = "rollback"
+            record.abort_event.set()
+            yield {"messages": []}
+
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=checkpointer, checkpoint_channel_mode=mode),
+            agent_factory=lambda *, config: DummyAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    try:
+        await asyncio.wait_for(write_started.wait(), timeout=5)
+
+        # Two further cancellations while the owned write is in flight.
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+
+        assert bridge.publish_end.await_count == 0
+        # The already-handled requests are preserved, not cleared.
+        assert task.cancelling() >= 1
+
+        release_write.set()
+        await asyncio.gather(task, return_exceptions=True)
+    finally:
+        release_write.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert task.cancelled() is True
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    latest = await accessor.aget(thread_config)
+    assert [message.content for message in latest.values["messages"]] == ["turn-0"]
