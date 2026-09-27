@@ -333,7 +333,7 @@ This release closes that milestone with **181 merged pull requests**.
   three maintained configs (Docker, `make dev`, Helm) now give
   `/api/projects/{id}/documents` its own location with the thread-uploads
   settings (100M ceiling, streamed request body) and the read timeout the
-  catch-all already granted; the catch-all itself keeps nginx's defaults.
+  catch-all already granted; the catch-all itself keeps nginx's defaults. ([#5934])
 - **docker:** The production stack (`make up` / `scripts/deploy.sh`) now starts
   on hosts with IPv6 disabled. `docker/nginx/nginx.conf` also listens on
   `[::]:2026`; on a kernel booted with `ipv6.disable=1` that listen makes nginx
@@ -6167,4 +6167,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5893]: https://github.com/bytedance/deer-flow/pull/5893
 [#5900]: https://github.com/bytedance/deer-flow/pull/5900
 [#5928]: https://github.com/bytedance/deer-flow/pull/5928
+[#5934]: https://github.com/bytedance/deer-flow/pull/5934
 
