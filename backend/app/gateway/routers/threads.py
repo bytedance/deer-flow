@@ -48,7 +48,7 @@ from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
 from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
-from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api, serialize_interrupts, serialize_tasks_for_api
+from deerflow.runtime import ThreadOperationKind, interrupts_by_task, serialize_channel_values_for_api, serialize_tasks_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
 from deerflow.runtime.context_compaction import (
@@ -643,20 +643,6 @@ async def _fetch_raw_pending_writes(checkpointer: Any, config: dict[str, Any]) -
     if raw_tuple is None:
         return []
     return list(getattr(raw_tuple, "pending_writes", ()) or ())
-
-
-def _interrupts_by_task(snapshot: Any) -> dict[str, list[dict[str, Any]]]:
-    """Map task id -> pending interrupts, the LangGraph SDK's ``Thread.interrupts`` shape.
-
-    A parked run keeps its payload only on ``snapshot.tasks``; the checkpoint's
-    channel values do not carry ``__interrupt__``. Tasks without an interrupt
-    are omitted so an ordinary in-flight run stays an empty mapping.
-    """
-    mapping: dict[str, list[dict[str, Any]]] = {}
-    for task in getattr(snapshot, "tasks", None) or ():
-        if interrupts := serialize_interrupts(getattr(task, "interrupts", None)):
-            mapping[str(getattr(task, "id", ""))] = interrupts
-    return mapping
 
 
 def _derive_thread_status(snapshot: Any, pending_writes: list[Any], *, fallback_status: str = "idle") -> str:
@@ -1343,7 +1329,7 @@ async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
         updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
         values=serialize_channel_values_for_api(snapshot.values),
-        interrupts=_interrupts_by_task(snapshot),
+        interrupts=interrupts_by_task(snapshot),
     )
 
 

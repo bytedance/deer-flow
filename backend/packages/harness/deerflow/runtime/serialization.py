@@ -172,6 +172,49 @@ def serialize_tasks_for_api(raw_tasks: Any) -> list[dict[str, Any]]:
     return tasks
 
 
+def interrupts_by_task(snapshot: Any) -> dict[str, list[dict[str, Any]]]:
+    """Map task id -> pending interrupts, the LangGraph SDK's ``interrupts`` shape.
+
+    A parked run keeps its payload only on ``snapshot.tasks``; the checkpoint's
+    channel values do not carry ``__interrupt__``. Tasks without an interrupt
+    are omitted so an ordinary in-flight run stays an empty mapping.
+    """
+    mapping: dict[str, list[dict[str, Any]]] = {}
+    for task in getattr(snapshot, "tasks", None) or ():
+        if interrupts := serialize_interrupts(getattr(task, "interrupts", None)):
+            mapping[str(getattr(task, "id", ""))] = interrupts
+    return mapping
+
+
+#: Wait-response status for a run parked on tool approval. Deliberately not
+#: ``RunStatus.interrupted``, which the *cancellation* path persists: the wait
+#: endpoints' fallback branch returns that durable status, so one value would
+#: have to mean both "resume this" and "this is over".
+WAIT_STATUS_AWAITING_APPROVAL = "interrupted_for_approval"
+
+
+def project_snapshot_for_wait(snapshot: Any) -> dict[str, Any]:
+    """Project a finished run's snapshot for a blocking ``/wait`` response.
+
+    ``interrupt()`` exits the graph normally, so a run parked on tool approval
+    is indistinguishable from a completion at ``snapshot.values`` alone — a
+    resume that parks again would return a mid-turn approval request as the
+    run's final answer. When interrupts are pending, wrap the values in a
+    :data:`WAIT_STATUS_AWAITING_APPROVAL` envelope carrying the payload;
+    otherwise return the bare values object that clients already parse.
+    """
+    values = serialize_channel_values_for_api(snapshot.values)
+    interrupts = interrupts_by_task(snapshot)
+    if not interrupts:
+        return values
+    return {
+        "status": WAIT_STATUS_AWAITING_APPROVAL,
+        "interrupts": interrupts,
+        "tasks": serialize_tasks_for_api(getattr(snapshot, "tasks", None)),
+        "values": values,
+    }
+
+
 def serialize_messages_tuple(obj: Any) -> Any:
     """Serialize a messages-mode tuple ``(chunk, metadata)``."""
     if isinstance(obj, tuple) and len(obj) == 2:

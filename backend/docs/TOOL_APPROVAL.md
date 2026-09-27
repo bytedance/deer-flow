@@ -1,18 +1,14 @@
 # Tool-execution approval (human in the loop)
 
 Read this guide before changing tool approval, its middleware ordering, or the
-REST/stream surfaces that carry a pending approval. It is the depth for entry 37
-of the
+REST/stream surfaces that carry a pending approval. It is the depth for
+`DeerFlowHumanInTheLoopMiddleware` in the
 [middlewares guide](../packages/harness/deerflow/agents/middlewares/AGENTS.md),
-which only names the middleware and links here. Neither guide has room for more
-than a pointer, against two different `scripts/check_agent_guidance.py` limits:
-that middleware chain runs close to the hard *chain* budget of 98304 bytes
-(inherited from four ancestors — adding entry 37 is what pushed it over, and
-entry 38's depth had to move to [Clarification](CLARIFICATION.md) to make room),
-and `app/gateway/AGENTS.md` sits 26 bytes under the hard *per-file* one (49126
-of 49152). Anything that would
-have gone in those guides belongs here, and the middleware's own docstrings
-carry the load-bearing invariants.
+which only names the middleware and links here. Both that guide's chain and
+`app/gateway/AGENTS.md` sit near their `scripts/check_agent_guidance.py` limits,
+so neither has room for more than a pointer: anything that would have gone in
+them belongs here, and the middleware's own docstrings carry the load-bearing
+invariants.
 
 A `tools[]` entry may add `interrupt_on` to gate that tool behind a real
 LangGraph `interrupt()`. The run parks in the checkpoint as a pending task and
@@ -61,6 +57,55 @@ and the TUI's own run sites (`tui/app.py::_stream_worker` for the interactive ap
 `tui/cli.py` for the `--print` / `--json` one-shots). A new client that grows an
 approval surface removes its own downgrade; a new client without one must add it.
 Pinned by `tests/test_tool_approval_client_downgrade.py`.
+
+### A convenience wrapper cannot report a park
+
+`DeerFlowClient.chat()` returns accumulated AI text and has no channel for an
+`interrupt` event, so a park would return partial text — an empty string on a
+tool-only turn — while the checkpoint sat waiting for a resume the caller had no
+reason to suspect. It therefore raises `ToolApprovalRequired`, carrying the
+interrupt entries, the `thread_id` that `resume()` needs, and the text gathered
+before the park.
+
+Raising rather than returning keeps the `-> str` contract intact: a park is not a
+completed turn, so there is no correct string to return for one. The single
+production caller (`tui/cli.py::_run_print`) already sends
+`disable_tool_approval`, so it cannot reach this branch; callers that want to
+handle a park inline use `stream()`, which surfaces the event directly. Pinned by
+`tests/test_client_tool_approval.py::TestChatDoesNotSwallowAPark`.
+
+### A waited run that re-parks is not a completion
+
+`POST /runs/wait` and `POST /threads/{id}/runs/wait` block until the run finishes
+and then return `snapshot.values`. Because `interrupt()` exits the graph
+*normally* (see "A park is not a finished turn"), a run that parked is
+indistinguishable from a finished one at that point — and the payload lives
+exclusively on `snapshot.tasks`, never in channel values. The response therefore
+carried neither the approval request nor any sign the turn was unfinished, so a
+caller could treat a mid-turn approval as the final result.
+
+This is reachable because keeping approval enabled for `Command(resume=...)` is
+load-bearing (see "Never downgrade a resume"): a resumed graph can reach a second
+gated tool and park again. Both endpoints therefore project through
+`deerflow.runtime.serialization::project_snapshot_for_wait`, which returns
+values unchanged for an ordinary completion and otherwise an explicit
+`status="interrupted_for_approval"` response carrying `interrupts` (task id →
+entries, the same shape and shared serializer as `GET /threads/{id}`), the full
+`tasks` projection, and the values so far — a park is unfinished, not empty. One
+shared helper so the two endpoints cannot drift. Pinned by
+`tests/test_wait_endpoints_surface_a_park.py`.
+
+**That status is deliberately not `interrupted`.** These endpoints have a second
+return branch — `{"status": record.status.value, "error": ...}` for a run this
+worker cannot wait on — and `RunStatus.interrupted` is what the *cancellation*
+path persists. Both branches are reachable from one request, since the
+projection only runs when the snapshot carries a `checkpoint_id`, so reusing
+`interrupted` would make one string mean both "post `Command(resume=...)`" and
+"this run is over", distinguishable only by probing for an `interrupts` key.
+`WAIT_STATUS_AWAITING_APPROVAL` is exported so the value has one definition, and
+`TestAParkIsDistinctFromACancellation` asserts it against every `RunStatus`
+member rather than against a hardcoded string, so a future status cannot
+silently collide with it.
 
 ### Never downgrade a resume
 
@@ -169,13 +214,53 @@ wherever Python happened to complain. Pinned by `TestResumePayloadShape`.
 ## Middleware placement
 
 `DeerFlowHumanInTheLoopMiddleware` subclasses LangChain's
-`HumanInTheLoopMiddleware` and is appended **before** `ClarificationMiddleware`
-precisely so it *dispatches after* it — LangChain runs `after_model` in reverse
-registration order. Clarification drops the sibling tool calls of a
+`HumanInTheLoopMiddleware`. LangChain runs `after_model` in **reverse**
+registration order, so appending earlier means dispatching later: approval is
+appended ahead of every AI-only suppression guard and of
+`ClarificationMiddleware` precisely so it dispatches **after** the guards and
+**before** clarification. It is applied to the lead agent only; subagents are not
+gated. Pinned by `tests/test_hitl_middleware_order.py` (positions) and
+`tests/test_approval_suppression_order.py` (the behaviour those positions buy).
+
+Each end of that range is load-bearing for its own reason.
+
+**Clarification must prune first.** It drops the sibling tool calls of a
 clarification request, and reviewing them first would ask the human about calls
-that are about to be discarded. Pinned by
-`tests/test_hitl_middleware_order.py`. It is applied to the lead agent only;
-subagents are not gated.
+that are about to be discarded.
+
+**The suppression guards must run first.** `SafetyFinishReason`,
+`ModelLengthFinishReason`, `TerminalResponse`, `TokenBudget`, `LoopDetection` and
+`SubagentLimit` all bail on "the last message is not an `AIMessage`" (some spell
+it `type != "ai"`). A `reject` or `respond` decision appends a synthetic
+`ToolMessage`, so with approval dispatching first, every one of those guards
+silently skips itself — while LangChain's `model_to_tools` router searches
+*backward* for the AI message and dispatches its unanswered sibling calls
+anyway. A safety-terminated response holding a gated `bash_tool` plus an ungated
+`write_file` would therefore execute `write_file` after the human rejected
+`bash_tool`, defeating the provider-termination rule that suppresses the whole
+batch. Running the guards first also means a suppressed batch arrives at approval
+with empty `tool_calls`, so `_last_reviewable_ai_message` returns `None` and the
+human is never asked about calls that are already cancelled.
+
+Note that the park trip itself never reaches the guards at all: `interrupt()`
+raises `GraphInterrupt`, which exits the graph before any later `after_model`
+node runs. For `approve`/`edit` (no synthetic `ToolMessage`) the guards catch up
+on the resume trip; for `reject`/`respond` they only ever get their turn because
+of this ordering.
+
+So the valid slot is a **range**, not a single point: appended after
+`SystemMessageCoalescingMiddleware` (so every guard dispatches first) and before
+`ClarificationMiddleware` (so clarification prunes first). Approval sits at the
+guard end of that range, the widest guard coverage available; appending it later
+reopens the sibling-execution hole above.
+
+Four middlewares do dispatch *after* approval, and none of them is a suppression
+guard. `TitleMiddleware` counts user/AI messages rather than inspecting the tail.
+`TodoListMiddleware` searches backward for the AI message, matching the router.
+`DurableContextMiddleware` scans the whole list. `TokenUsageMiddleware` does skip
+its AI-step attribution when the tail is a `ToolMessage`, but its subagent
+token write-back still runs, and the attribution stamp is idempotent, so it lands
+on the next model call — a one-turn accounting delay, not an escaped tool call.
 
 New `build_middlewares` call sites must forward `tools=final_tools`, or `edit`
 loses its args schema and falls back to raw-JSON edits.
@@ -400,10 +485,13 @@ A parked run keeps its payload on `snapshot.tasks` only. LangGraph records
 carry it and no REST reader can find it in `values`; `Interrupt` also uses
 `__slots__`, so it is not dict-like and must be projected field by field.
 
-One helper pair in `deerflow.runtime` — `serialize_interrupts` and
-`serialize_tasks_for_api` — is the single source of truth for that projection,
-shared by every surface so a client reconciling a resumed stream against a
-refetched snapshot sees one shape:
+`deerflow.runtime.serialization` is the single source of truth for that
+projection, shared by every surface so a client reconciling a resumed stream
+against a refetched snapshot sees one shape. `serialize_interrupts` and
+`serialize_tasks_for_api` do the field-by-field work; `interrupts_by_task`
+aggregates the former into the SDK's task-id mapping (used by both
+`GET /threads/{id}` and the wait endpoints), and `project_snapshot_for_wait`
+wraps it in the `status="interrupted"` envelope:
 
 | Surface | Where the payload appears |
 | --- | --- |
@@ -412,6 +500,7 @@ refetched snapshot sees one shape:
 | `GET /threads/{id}` | `interrupts`, the SDK's task-id -> interrupts mapping |
 | `GET`/`POST /threads/{id}/state` | `tasks[].interrupts` |
 | `POST /threads/{id}/history` | `tasks[].interrupts` |
+| `POST /runs/wait`, `POST /threads/{id}/runs/wait` | `interrupts` + `tasks[].interrupts` under `status="interrupted_for_approval"` (see "A waited run that re-parks is not a completion") |
 
 The browser row is the one surface that is not a projection of `snapshot.tasks`.
 LangGraph's `output_writes` emits the pending interrupt on the `updates` mode as

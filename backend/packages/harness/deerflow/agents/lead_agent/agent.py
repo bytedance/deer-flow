@@ -705,6 +705,17 @@ def build_middlewares(
 
     middlewares.append(SystemMessageCoalescingMiddleware())
 
+    # Tool approval must be appended between SystemMessageCoalescing and the
+    # suppression guards below: ``after_model`` dispatches the list in REVERSE,
+    # so this slot runs approval after every guard but before Clarification.
+    # Both ends matter — see docs/TOOL_APPROVAL.md "Middleware placement".
+    # Registered unconditionally; clients that cannot answer a park send
+    # ``disable_tool_approval`` per run instead. Pinned by
+    # tests/test_hitl_middleware_order.py and test_approval_suppression_order.py.
+    interrupt_middleware = create_interrupt_middleware(resolved_app_config, tools=tools)
+    if interrupt_middleware:
+        middlewares.append(interrupt_middleware)
+
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
     effective_max_subagents_per_run: int | None = None
@@ -757,24 +768,6 @@ def build_middlewares(
     safety_config = resolved_app_config.safety_finish_reason
     if safety_config.enabled:
         middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
-
-    # Tool approval must sit BEFORE ClarificationMiddleware in this list.
-    # ``after_model`` dispatch runs the list in reverse, so appending earlier
-    # means running later: Clarification first, then tool approval. That order
-    # matters because Clarification drops the sibling tool calls of a
-    # clarification request; approving them first would ask the human to review
-    # calls that are about to be discarded.
-    #
-    # Registered unconditionally: a park is only answerable by a client that can
-    # read ``__interrupt__`` and post ``Command(resume={"decisions": [...]})``, so
-    # the clients that cannot do that opt out per run instead — Gateway HTTP runs
-    # and the TUI both send ``disable_tool_approval``, which auto-approves here.
-    # Gating the registration itself would make ``tools[].interrupt_on`` and
-    # ``DeerFlowClient.resume()`` unreachable for every caller, including the
-    # embedded clients that do implement the resume protocol.
-    interrupt_middleware = create_interrupt_middleware(resolved_app_config, tools=tools)
-    if interrupt_middleware:
-        middlewares.append(interrupt_middleware)
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())

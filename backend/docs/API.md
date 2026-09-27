@@ -216,6 +216,18 @@ projection under `interrupts`, keyed by task id, and `POST
 posting a `Command(resume={"decisions": [...]})` input. See
 [TOOL_APPROVAL.md](TOOL_APPROVAL.md).
 
+The two blocking endpoints carry it as well. `interrupt()` exits the graph
+normally, so a park is indistinguishable from a completion at the checkpoint's
+`values` — a resume that parks again would otherwise return a mid-turn approval
+request as this run's final answer. `POST /api/runs/wait` and `POST
+/api/threads/{thread_id}/runs/wait` therefore return `{"status":
+"interrupted_for_approval", "interrupts": {...}, "tasks": [...], "values":
+{...}}` when the snapshot still holds pending interrupts, and the bare `values`
+object otherwise. `interrupts` uses the same task-id keying as `GET
+/api/threads/{thread_id}`. That status is distinct from the durable
+`"interrupted"` these endpoints return for a cancelled run: the first means post
+`Command(resume={"decisions": [...]})`, the second means the run is over.
+
 ### Runs
 
 #### Create Run

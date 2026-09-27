@@ -18,6 +18,7 @@ from app.gateway.routers import thread_runs
 from app.gateway.run_models import RunCreateRequest
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.runtime import DisconnectMode, RunManager, RunRecord, RunStatus
+from deerflow.runtime import serialization as runtime_serialization
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -220,7 +221,7 @@ def test_wait_reused_store_only_run_does_not_return_stale_checkpoint(monkeypatch
         "build_checkpoint_state_accessor",
         lambda *args, **kwargs: (SimpleNamespace(aget=fake_aget), {}),
     )
-    monkeypatch.setattr(thread_runs, "serialize_channel_values_for_api", lambda values: values)
+    monkeypatch.setattr(runtime_serialization, "serialize_channel_values_for_api", lambda values: values)
 
     app = make_authed_test_app(user_factory=lambda: _user("alice@example.com"))
     app.include_router(thread_runs.router)
@@ -267,7 +268,7 @@ def test_wait_reused_completed_run_does_not_return_later_checkpoint(monkeypatch)
         "build_checkpoint_state_accessor",
         lambda *args, **kwargs: (SimpleNamespace(aget=fake_aget), {}),
     )
-    monkeypatch.setattr(thread_runs, "serialize_channel_values_for_api", lambda values: values)
+    monkeypatch.setattr(runtime_serialization, "serialize_channel_values_for_api", lambda values: values)
 
     app = make_authed_test_app(user_factory=lambda: _user("alice@example.com"))
     app.include_router(thread_runs.router)
@@ -325,7 +326,7 @@ async def test_wait_original_request_keeps_checkpoint_when_retry_overlaps():
             "build_checkpoint_state_accessor",
             lambda *args, **kwargs: (SimpleNamespace(aget=fake_aget), {}),
         ),
-        patch.object(thread_runs, "serialize_channel_values_for_api", lambda values: values),
+        patch.object(runtime_serialization, "serialize_channel_values_for_api", lambda values: values),
     ):
         wait_task = asyncio.create_task(
             call_unwrapped(
@@ -774,7 +775,7 @@ async def test_wait_retry_after_later_run_does_not_return_later_checkpoint(monke
         "build_checkpoint_state_accessor",
         lambda *args, **kwargs: (SimpleNamespace(aget=fake_aget), {}),
     )
-    monkeypatch.setattr(thread_runs, "serialize_channel_values_for_api", lambda values: values)
+    monkeypatch.setattr(runtime_serialization, "serialize_channel_values_for_api", lambda values: values)
 
     app = make_authed_test_app(user_factory=lambda: _user("alice@example.com"))
     app.include_router(thread_runs.router)

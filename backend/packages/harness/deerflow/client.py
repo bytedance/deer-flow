@@ -151,6 +151,39 @@ class StreamEvent:
     data: dict[str, Any] = field(default_factory=dict)
 
 
+class ToolApprovalRequired(RuntimeError):
+    """Raised by :meth:`DeerFlowClient.chat` when the run parked for approval.
+
+    ``chat()`` returns accumulated AI text and has no channel for an
+    ``interrupt`` event, so a park would otherwise return partial text — an
+    empty string on a tool-only turn — while the checkpoint waits for
+    :meth:`DeerFlowClient.resume`. Callers that want to handle a park inline
+    should use :meth:`DeerFlowClient.stream`, which surfaces the event directly.
+
+    Attributes:
+        interrupts: The ``{"id", "value"}`` entries from the ``interrupt``
+            event, in order. Feed the payload's action requests to ``resume()``.
+        thread_id: The parked thread, which ``resume()`` requires. ``None`` only
+            when the caller let ``chat()`` generate one and it could not be
+            recovered.
+        partial_text: AI text accumulated before the park, kept so it is not
+            lost with the raise.
+    """
+
+    def __init__(
+        self,
+        interrupts: list[dict[str, Any]],
+        *,
+        thread_id: str | None = None,
+        partial_text: str = "",
+    ) -> None:
+        self.interrupts = interrupts
+        self.thread_id = thread_id
+        self.partial_text = partial_text
+        count = len(interrupts)
+        super().__init__(f"The run parked on {count} tool-approval request(s) and cannot complete as a chat() response. Answer it with resume(decisions, thread_id={thread_id!r}), or use stream() to handle the interrupt event inline.")
+
+
 class DeerFlowClient:
     """Embedded Python client for DeerFlow agent system.
 
@@ -547,6 +580,14 @@ class DeerFlowClient:
             "name": msg.name,
             "tool_call_id": msg.tool_call_id,
             "id": msg.id,
+            # ``status`` is the only thing separating a tool-approval ``reject``
+            # (``"error"``) from a ``respond`` (``"success"``): both are synthetic
+            # ToolMessages the human produced without the tool running. Dropping
+            # it made the two indistinguishable here, and consumers that default
+            # a missing status to success — the TUI translator does — rendered a
+            # rejected call as ``ok``. Forwarded verbatim so this stream, the
+            # values snapshot, and the model all read the same verdict.
+            "status": getattr(msg, "status", None) or "success",
         }
         if (artifact := getattr(msg, "artifact", None)) is not None:
             data["artifact"] = artifact
@@ -571,6 +612,9 @@ class DeerFlowClient:
                 "name": getattr(msg, "name", None),
                 "tool_call_id": getattr(msg, "tool_call_id", None),
                 "id": getattr(msg, "id", None),
+                # See ``_tool_message_event``: a rejected call is only
+                # distinguishable from a human-answered one by this field.
+                "status": getattr(msg, "status", None) or "success",
             }
             if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
                 d["additional_kwargs"] = additional_kwargs
@@ -1392,12 +1436,29 @@ class DeerFlowClient:
         Returns:
             The accumulated text of the last AI message, or empty string
             if no AI text was produced.
+
+        Raises:
+            ToolApprovalRequired: If the run parked on a tool-approval
+                interrupt. A park is not a completed turn, and this wrapper has
+                no way to report one in its return value — see the exception's
+                own docstring. Only reachable with ``tools[].interrupt_on``
+                configured and ``disable_tool_approval`` unset.
         """
         # Per-id delta lists joined once at the end — avoids the O(n²) cost
         # of repeated ``str + str`` on a growing buffer for long responses.
         chunks: dict[str, list[str]] = {}
         last_id: str = ""
         for event in self.stream(message, thread_id=thread_id, **kwargs):
+            if event.type == "interrupt":
+                # Raised rather than returned: the run is still parked, so any
+                # text gathered so far is a fragment of an unfinished turn, and
+                # returning it would present the park as the final answer. The
+                # fragment travels on the exception instead of being discarded.
+                raise ToolApprovalRequired(
+                    list(event.data.get("interrupts") or ()),
+                    thread_id=thread_id,
+                    partial_text="".join(chunks.get(last_id, ())),
+                )
             if event.type == "messages-tuple" and event.data.get("type") == "ai":
                 msg_id = event.data.get("id") or ""
                 delta = event.data.get("content", "")

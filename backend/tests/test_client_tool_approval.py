@@ -8,7 +8,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langgraph.types import Interrupt
 
 from deerflow.agents.middlewares.human_in_the_loop import DISABLE_TOOL_APPROVAL_KEY
-from deerflow.client import DeerFlowClient
+from deerflow.client import DeerFlowClient, StreamEvent, ToolApprovalRequired
 
 
 class TestStreamEventType:
@@ -57,6 +57,139 @@ class TestInterruptEventsReachCallers:
         events = self._events(monkeypatch, {"messages": []})
 
         assert [event for event in events if event.type == "interrupt"] == []
+
+
+class TestChatDoesNotSwallowAPark:
+    """``chat()`` must not present a parked run as a finished answer.
+
+    It accumulates AI ``messages-tuple`` text and ignores every other event, so
+    a park returned partial text — usually ``""`` on a tool-only turn — while the
+    checkpoint sat waiting for ``resume()``, with nothing telling the caller so.
+    ``stream()`` callers already see the ``interrupt`` event; the convenience
+    wrapper has no channel for it, hence the exception.
+    """
+
+    @staticmethod
+    def _client(monkeypatch, events):
+        client = DeerFlowClient.__new__(DeerFlowClient)
+        monkeypatch.setattr(client, "stream", lambda *a, **k: iter(events))
+        return client
+
+    PAYLOAD = {"action_requests": [{"name": "bash_tool", "args": {"command": "ls"}}]}
+
+    def _parked_events(self, *, text: str = ""):
+        events = []
+        if text:
+            events.append(StreamEvent(type="messages-tuple", data={"type": "ai", "id": "ai-1", "content": text}))
+        events.append(StreamEvent(type="interrupt", data={"interrupts": [{"id": "int-1", "value": self.PAYLOAD}]}))
+        return events
+
+    def test_a_tool_only_park_raises_instead_of_returning_empty_text(self, monkeypatch):
+        client = self._client(monkeypatch, self._parked_events())
+
+        with pytest.raises(ToolApprovalRequired):
+            client.chat("run ls", thread_id="t-1")
+
+    def test_a_park_after_partial_text_still_raises(self, monkeypatch):
+        """Partial text is exactly the case that looked like a complete answer."""
+        client = self._client(monkeypatch, self._parked_events(text="Let me check"))
+
+        with pytest.raises(ToolApprovalRequired):
+            client.chat("run ls", thread_id="t-1")
+
+    def test_the_error_carries_what_resume_needs(self, monkeypatch):
+        client = self._client(monkeypatch, self._parked_events(text="Let me check"))
+
+        with pytest.raises(ToolApprovalRequired) as excinfo:
+            client.chat("run ls", thread_id="t-1")
+
+        error = excinfo.value
+        assert error.thread_id == "t-1"
+        assert [entry["id"] for entry in error.interrupts] == ["int-1"]
+        assert error.interrupts[0]["value"] == self.PAYLOAD
+        # The text produced before the park is not thrown away.
+        assert error.partial_text == "Let me check"
+
+    def test_the_error_names_resume_so_the_caller_knows_the_next_step(self, monkeypatch):
+        client = self._client(monkeypatch, self._parked_events())
+
+        with pytest.raises(ToolApprovalRequired, match="resume"):
+            client.chat("run ls", thread_id="t-1")
+
+    def test_an_ordinary_turn_still_returns_its_text(self, monkeypatch):
+        """The park branch must not disturb the normal contract."""
+        client = self._client(
+            monkeypatch,
+            [
+                StreamEvent(type="messages-tuple", data={"type": "ai", "id": "ai-1", "content": "Hello"}),
+                StreamEvent(type="messages-tuple", data={"type": "ai", "id": "ai-1", "content": " there"}),
+                StreamEvent(type="end", data={}),
+            ],
+        )
+
+        assert client.chat("hi", thread_id="t-1") == "Hello there"
+
+    def test_a_tool_only_turn_that_did_not_park_still_returns_empty(self, monkeypatch):
+        """An empty answer is only a bug when a park caused it."""
+        client = self._client(monkeypatch, [StreamEvent(type="end", data={})])
+
+        assert client.chat("hi", thread_id="t-1") == ""
+
+
+class TestRejectionSurvivesSerialization:
+    """A rejected call must not look like a successful one on embedded streams.
+
+    Upstream's ``_process_decision`` distinguishes the two synthetic results
+    purely by ``ToolMessage.status``: ``reject`` builds ``status="error"``,
+    ``respond`` builds ``status="success"``. Both client serialization paths
+    dropped that field, so the two decisions were indistinguishable — the TUI
+    translator reads ``status``/``is_error`` and defaults a missing value to
+    success, rendering a human-rejected call as ``ok``.
+
+    ``status`` is forwarded verbatim rather than reinterpreted, so the embedded
+    stream, the values snapshot, and what the model itself receives all agree.
+    """
+
+    @staticmethod
+    def _rejected():
+        return ToolMessage(content="User rejected the tool call.", id="tm-r", name="bash_tool", tool_call_id="call-1", status="error")
+
+    @staticmethod
+    def _responded():
+        return ToolMessage(content="Answered on the tool's behalf.", id="tm-s", name="bash_tool", tool_call_id="call-1", status="success")
+
+    def test_a_rejection_is_an_error_on_the_message_stream(self):
+        assert DeerFlowClient._tool_message_event(self._rejected()).data["status"] == "error"
+
+    def test_a_response_is_a_success_on_the_message_stream(self):
+        assert DeerFlowClient._tool_message_event(self._responded()).data["status"] == "success"
+
+    def test_a_rejection_is_an_error_in_the_values_snapshot(self):
+        assert DeerFlowClient._serialize_message(self._rejected())["status"] == "error"
+
+    def test_a_response_is_a_success_in_the_values_snapshot(self):
+        assert DeerFlowClient._serialize_message(self._responded())["status"] == "success"
+
+    def test_the_two_decisions_are_distinguishable(self):
+        """The bug itself: both paths must separate reject from respond."""
+        for project in (lambda msg: DeerFlowClient._tool_message_event(msg).data, DeerFlowClient._serialize_message):
+            assert project(self._rejected())["status"] != project(self._responded())["status"]
+
+    def test_the_tui_renders_a_rejection_as_an_error(self):
+        """End of the chain: the translator this field exists to feed."""
+        from deerflow.tui.runtime import translate
+
+        event = DeerFlowClient._tool_message_event(self._rejected())
+        results = [action for action in translate(event) if type(action).__name__ == "ToolResult"]
+
+        assert [action.is_error for action in results] == [True]
+
+    def test_an_ordinary_tool_result_still_carries_its_status(self):
+        """Not approval-specific: every ToolMessage has this native field."""
+        ok = ToolMessage(content="out", id="tm-1", name="ls", tool_call_id="call-1")
+
+        assert DeerFlowClient._tool_message_event(ok).data["status"] == "success"
+        assert DeerFlowClient._serialize_message(ok)["status"] == "success"
 
 
 class TestResumeValidation:
