@@ -55,6 +55,7 @@ import hmac
 import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 from typing import override
@@ -370,11 +371,11 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
                 continue
             if not changed_msg:
                 continue
-            messages[index] = HumanMessage(
-                content=content,
-                id=msg.id,
-                name=msg.name,
-                additional_kwargs=dict(msg.additional_kwargs or {}),
+            messages[index] = msg.model_copy(
+                update={
+                    "content": deepcopy(content),
+                    "additional_kwargs": dict(msg.additional_kwargs or {}),
+                },
             )
             changed = True
         updates = {}
