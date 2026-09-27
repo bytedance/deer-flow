@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 from langchain.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
@@ -320,6 +322,78 @@ def test_legacy_when_thinking_disabled_template_deep_merges_like_the_enable_temp
     assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": expected_type}}
 
 
+@pytest.mark.parametrize(
+    "templates",
+    [
+        {"when_thinking_disabled": {"extra_body": {"thinking": {"type": "disabled"}}}},
+        {"when_thinking_enabled": {"extra_body": {"thinking": {"type": "enabled"}}}},
+    ],
+    ids=["operator-disable-template", "synthesized-disable"],
+)
+def test_disable_cannot_clear_enable_only_keys_kept_in_the_base_extra_body(monkeypatch, templates):
+    """Stated migration rule: keys are never removed, so a base
+    ``extra_body.thinking: {type: enabled, budget_tokens: N}`` reaches the provider as
+    ``{type: disabled, budget_tokens: N}`` when thinking is off. The synthesized disable payload
+    (and the contract path) already behaved this way on ``main``; the operator-provided legacy
+    disable template now does too. Enable-only keys belong in ``when_thinking_enabled`` — the
+    changelog, ``models/AGENTS.md`` and ``configuration.mdx`` say so, and this test keeps the
+    behaviour deliberate rather than accidental."""
+    model = ModelConfig(
+        name="legacy-anthropic-proxy",
+        display_name="legacy-anthropic-proxy",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="claude",
+        supports_thinking=True,
+        extra_body={"thinking": {"type": "enabled", "budget_tokens": 4096}},
+        **templates,
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-anthropic-proxy", thinking_enabled=False)
+
+    assert captured["extra_body"]["thinking"] == {"type": "disabled", "budget_tokens": 4096}
+
+
+def _mapping_ids(value: object) -> set[int]:
+    """Identities of every mapping reachable from *value*, for alias checks."""
+    if not isinstance(value, dict):
+        return set()
+    ids = {id(value)}
+    for nested in value.values():
+        ids |= _mapping_ids(nested)
+    return ids
+
+
+@pytest.mark.parametrize(
+    "base_extra_body, template_extra_body",
+    [
+        ({"top_k": 20}, {"chat_template_kwargs": {"thinking": True}}),
+        (None, {"chat_template_kwargs": {"thinking": True}}),
+        ({"top_k": 20}, {"thinking": {"type": "enabled", "options": {"budget_tokens": 1024}}}),
+    ],
+    ids=["template-adds-a-nested-mapping", "profile-has-no-extra_body", "template-adds-two-levels"],
+)
+def test_thinking_templates_are_copied_not_aliased_into_constructor_kwargs(monkeypatch, base_extra_body, template_extra_body):
+    """Wherever the base lacked a key, the merge used to store the template's own mapping by
+    reference, so the constructor kwargs (and any later in-place adjustment, such as the vLLM
+    switch mirroring) pointed at the cached ``ModelConfig``. Every mapping a template
+    contributes, at every depth, must be a copy, and the profile must be unchanged after the
+    build."""
+    template = {"extra_body": template_extra_body}
+    model = _legacy_model_with_base_extra_body(when_thinking_enabled=template, extra_body=base_extra_body)
+    pristine = copy.deepcopy(model.when_thinking_enabled)
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {**(base_extra_body or {}), **template_extra_body}
+    assert _mapping_ids(captured["extra_body"]) & _mapping_ids(model.when_thinking_enabled) == set()
+    assert model.when_thinking_enabled == pristine
+
+
 def test_legacy_templates_only_add_or_override_nested_keys_never_remove_them(monkeypatch):
     """The flip side of deep-merging: a template cannot drop a base key by omitting it.
     OpenRouter-style ``reasoning: {exclude: true}`` in the profile survives a template that
@@ -431,9 +505,12 @@ def test_vllm_switch_spelled_by_the_template_wins_over_the_profile_alias(monkeyp
     provider maps the alias only when ``enable_thinking`` is absent. A profile that spells the
     switch differently from its template must not be able to pin the switch after the merge:
     the template's (or synthesized) spelling decides, in both directions, on both paths."""
+    from deerflow.models.vllm_provider import VllmChatModel
+
     model = _vllm_switch_profile(base_key=base_key, template_key=template_key, base_value=not thinking_enabled, reasoning=reasoning)
     captured: dict = {}
-    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+    # Resolve the REAL provider class, so a future class-gated merge is exercised as vLLM.
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(VllmChatModel, captured))
 
     factory_module.create_chat_model(name="qwen", thinking_enabled=thinking_enabled)
 
@@ -452,9 +529,12 @@ def test_vllm_switch_is_mirrored_onto_the_profile_spelling_for_classes_that_do_n
     remove the only key such a server reads (a base ``enable_thinking: false`` beside a template
     ``thinking: false`` would leave Qwen3 defaulting to *on*). So the template's value is mirrored
     onto the profile's spelling instead: both keys carry the template's intent, raw."""
+    from langchain_openai import ChatOpenAI
+
     model = _vllm_switch_profile(base_key=base_key, template_key=template_key, base_value=not thinking_enabled, reasoning=reasoning, use="langchain_openai:ChatOpenAI")
     captured: dict = {}
-    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+    # Resolve the REAL ChatOpenAI (not a stand-in), so a merge gated on the vLLM class would fail here.
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(ChatOpenAI, captured))
 
     factory_module.create_chat_model(name="qwen", thinking_enabled=thinking_enabled)
 

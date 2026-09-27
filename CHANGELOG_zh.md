@@ -373,7 +373,12 @@
   与模板对开关的拼写不同（`chat_template_kwargs.enable_thinking: false` 并列旧别名
   `thinking: true`）时，模板的值会镜像到档案的拼写上，因此 `VllmChatModel` 与普通的 OpenAI 兼容
   类都会在服务端实际读取的那个键上发送模板的意图——旧路径与契约路径、开与关两个方向均如此。
-  非映射类型的模板值按原样转发。([#5894])
+  非映射类型的模板值按原样转发。迁移提示：由于键永不删除，`when_thinking_disabled` 模板不再能
+  清除档案基础 `extra_body` 里设置的键——基础 `extra_body.thinking: {type: enabled, budget_tokens: 4096}`
+  在关闭思考时会以 `{type: disabled, budget_tokens: 4096}` 发到 provider，Anthropic 风格的 API 会拒绝。
+  `budget_tokens` 之类仅在开启时有意义的键应放在 `when_thinking_enabled` 里，而不是基础 `extra_body`；
+  合成的禁用载荷与契约路径此前已是这一行为。模板在合并时会被深拷贝，因此构造参数不会与缓存的
+  档案共享对象。([#5894])
 - **项目：** 会话文件视图不再为尚无标题的成员会话显示空标题。会话的 `display_name` 在标题
   生成运行之前（或从未运行时）在接口上为 `null`，但文件分组类型将其声明为必填字符串并原样
   渲染，因此在首次回复之前上传的文件会挂在一行空白之下。这类分组现在显示为“未命名”，与

@@ -393,7 +393,16 @@ This release closes that milestone with **181 merged pull requests**.
   spelling, so `VllmChatModel` and plain OpenAI-compatible classes alike send
   the template's intent under whichever key the server reads — on both the
   legacy and the contract path, in both directions. Non-mapping template
-  values are forwarded unchanged. ([#5894])
+  values are forwarded unchanged. Migration note: because keys are never
+  removed, a `when_thinking_disabled` template can no longer clear a key the
+  profile's base `extra_body` sets — a base
+  `extra_body.thinking: {type: enabled, budget_tokens: 4096}` now reaches the
+  provider as `{type: disabled, budget_tokens: 4096}` when thinking is off,
+  which Anthropic-style APIs reject. Enable-only keys such as `budget_tokens`
+  belong in `when_thinking_enabled`, not in the base `extra_body`; the
+  synthesized disable payloads and the contract path already behaved this
+  way. Templates are also deep-copied as they are merged, so constructor
+  kwargs never alias the cached profile. ([#5894])
 - **projects:** The conversation-files view no longer shows an empty heading
   for a member thread that has no title yet. A thread's `display_name` is
   `null` on the wire until title generation has run (or if it never does), but
