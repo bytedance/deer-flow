@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, convert_to_messages
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -42,16 +42,133 @@ def image_choice(tmp_path, monkeypatch):
     return store, saved, environment
 
 
-def _choice_card():
+def _choice_card(context=None):
     middleware = ClarificationMiddleware()
     proposed = AIMessage(content="", tool_calls=[{"name": "generate_image", "args": {"prompt_file": "/mnt/user-data/prompt.txt"}, "id": "call-image"}])
-    patched = middleware.after_model({"messages": [proposed]}, Runtime(context={}))
+    patched = middleware.after_model({"messages": [proposed]}, Runtime(context=context or {}))
     assert patched is not None
     call = patched["messages"][0].tool_calls[0]
     assert call["name"] == "ask_clarification"
     assert "generate_image" not in str(patched["messages"][0].tool_calls)
     result = middleware._handle_clarification(SimpleNamespace(tool_call=call))
     return result.update["messages"][0]
+
+
+@pytest.mark.parametrize("channel_name", ["feishu", "wecom", "wechat"])
+def test_im_number_reply_selects_recorded_image_option(image_choice, channel_name):
+    from deerflow.agents.image_generation_choice import adapt_channel_image_choice_reply
+
+    _, _, environment = image_choice
+    context = {"channel_name": channel_name, "channel_user_id": "synthetic-user-a"}
+    card = _choice_card(context)
+    graph_input = {"messages": [HumanMessage(content="2")]}
+
+    adapted, source = adapt_channel_image_choice_reply(graph_input, (card,), environment, context)
+
+    assert source == "sandbox_environment"
+    assert adapted is not graph_input
+    answer = adapted["messages"][0]
+    assert answer.content == card.artifact["human_input"]["options"][1]["value"]
+    assert answer.additional_kwargs["human_input_response"]["request_id"] == card.id
+    assert answer.additional_kwargs["human_input_response"]["option_id"] == "option-2"
+    assert selected_image_source_from_reply(adapted, (card,), environment) == "sandbox_environment"
+
+
+def test_im_image_choice_accepts_exact_label(image_choice):
+    from deerflow.agents.image_generation_choice import adapt_channel_image_choice_reply
+
+    _, _, environment = image_choice
+    context = {"channel_name": "wecom", "channel_user_id": "synthetic-user-a"}
+    card = _choice_card(context)
+    label = card.artifact["human_input"]["options"][0]["value"]
+    adapted, source = adapt_channel_image_choice_reply({"messages": [HumanMessage(content=label)]}, (card,), environment, context)
+    assert source == "managed"
+    assert adapted["messages"][0].additional_kwargs["human_input_response"]["option_id"] == "option-1"
+
+
+@pytest.mark.parametrize("case", ["other_user", "other_channel", "old_card", "web_card", "unrelated_text", "changed_model", "already_structured", "attachment", "malformed_option", "wrong_request_id"])
+def test_im_image_choice_requires_current_owned_valid_card(image_choice, case):
+    from deerflow.agents.image_generation_choice import adapt_channel_image_choice_reply
+
+    _, _, environment = image_choice
+    context = {"channel_name": "feishu", "channel_user_id": "synthetic-user-a"}
+    card = _choice_card(context if case != "web_card" else {})
+    prior = (card,)
+    message = HumanMessage(content="2")
+    if case == "other_user":
+        context = {**context, "channel_user_id": "synthetic-user-b"}
+    elif case == "other_channel":
+        context = {**context, "channel_name": "wechat"}
+    elif case == "old_card":
+        prior = (card, HumanMessage(content="another turn"))
+    elif case == "unrelated_text":
+        message = HumanMessage(content="Please explain option 2")
+    elif case == "changed_model":
+        environment = {**environment, "GEMINI_IMAGE_MODEL": "later-model"}
+    elif case == "already_structured":
+        message = HumanMessage(content="2", additional_kwargs={"human_input_response": {"kind": "untrusted"}})
+    elif case == "attachment":
+        message = HumanMessage(content="2", additional_kwargs={"files": [{"path": "/mnt/user-data/uploads/example.png"}]})
+    elif case == "malformed_option":
+        card.artifact["human_input"]["options"][1]["value"] = None
+    elif case == "wrong_request_id":
+        card.artifact["human_input"]["request_id"] = "another-card"
+
+    graph_input = {"messages": [message]}
+    adapted, source = adapt_channel_image_choice_reply(graph_input, prior, environment, context)
+    assert adapted is graph_input
+    assert source is None
+
+
+@pytest.mark.asyncio
+async def test_im_answer_is_adapted_before_agent_stream(image_choice, monkeypatch):
+    from app.channels.manager import _human_input_message
+    from deerflow.config.image_generation import selected_image_generation_source
+    from deerflow.runtime.runs import worker
+    from deerflow.runtime.runs.manager import RunManager
+
+    _, _, environment = image_choice
+    context = {"channel_name": "wecom", "channel_user_id": "synthetic-user-a"}
+    card = _choice_card(context)
+    config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}})
+
+    async def capture(_accessor, _checkpointer, _config):
+        return worker.RollbackPoint(
+            config={"configurable": {"thread_id": "synthetic-thread", "checkpoint_ns": "", "checkpoint_id": "synthetic-checkpoint"}},
+            state_values={},
+            messages=(card,),
+            metadata={},
+            pending_writes=(),
+        )
+
+    async def compatible(*_args):
+        return None
+
+    monkeypatch.setattr(worker, "_capture_rollback_point", capture)
+    monkeypatch.setattr(worker, "aensure_checkpoint_mode_compatible", compatible)
+    captured = []
+
+    class Agent:
+        async def astream(self, graph_input, **_kwargs):
+            captured.append((graph_input["messages"][0], selected_image_generation_source()))
+            yield {"messages": []}
+
+    manager = RunManager()
+    record = await manager.create("synthetic-thread")
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    await worker.run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=worker.RunContext(checkpointer=SimpleNamespace(), app_config=config),
+        agent_factory=lambda *, config: Agent(),
+        graph_input={"messages": convert_to_messages([_human_input_message("2")])},
+        config={"context": context},
+    )
+
+    assert len(captured) == 1
+    assert captured[0][1] == "sandbox_environment"
+    assert captured[0][0].additional_kwargs["human_input_response"]["request_id"] == card.id
 
 
 def test_image_choice_card_uses_chinese_for_chinese_chat(image_choice):
@@ -313,6 +430,8 @@ async def test_real_agent_graph_replaces_image_tool_with_inline_choice(image_cho
     assert card.artifact["human_input"]["clarification_type"] == "image_model_choice"
     checkpoint = await agent.aget_state(run_config) if async_mode else agent.get_state(run_config)
     assert any(isinstance(item, ToolMessage) and item.id == card.id for item in checkpoint.values["messages"])
+    assert isinstance(checkpoint.values["messages"][-1], ToolMessage)
+    assert checkpoint.values["messages"][-1].id == card.id
 
 
 def test_aio_image_choice_acquires_another_identity_without_destroying_old_container(image_choice, monkeypatch):
