@@ -62,6 +62,24 @@ def test_image_choice_card_uses_chinese_for_chinese_chat(image_choice):
     assert args["options"][0].startswith("网页:")
 
 
+def test_server_first_web_profile_still_prompts_before_image_execution(image_choice, monkeypatch):
+    from deerflow.sandbox import tools as sandbox_tools
+    from deerflow.tools.builtins.image_generation_tool import generate_image_tool
+
+    store, saved, environment = image_choice
+    store.save(
+        saved.model_copy(update={"server_model_at_enable": "gemini:new-server-model"}),
+        expected_revision=saved.revision,
+    )
+    card = _choice_card()
+    assert card.artifact["human_input"]["clarification_type"] == "image_model_choice"
+
+    monkeypatch.setattr("deerflow.tools.builtins.image_generation_tool.get_app_config", lambda: AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}}))
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: pytest.fail("sandbox was acquired"))
+    result = generate_image_tool.func(SimpleNamespace(context={}, state={}), "/mnt/user-data/prompt.txt", "/mnt/user-data/outputs/image.png")
+    assert result.startswith("Error: IMAGE_PROFILE_CHOICE_REQUIRED")
+
+
 @pytest.mark.parametrize("option_id,expected", [("option-1", "managed"), ("option-2", "sandbox_environment")])
 def test_chat_card_selects_live_profile_without_running_image_tool(image_choice, option_id, expected):
     _, _, environment = image_choice
