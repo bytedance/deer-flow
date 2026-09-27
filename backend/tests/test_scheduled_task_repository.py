@@ -855,6 +855,51 @@ async def test_update_after_launch_protect_terminal_keeps_hook_result(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_update_coerces_serialized_timestamps_it_previously_returned(tmp_path):
+    """``update()`` is fed the dict it handed out: the PATCH route reuses an interval task's
+    ``next_run_at`` unchanged, which ``_row_to_dict`` had serialized to an ISO string. Every
+    timestamp column must be coerced back on the way in, as ``update_after_launch`` does."""
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    sf = get_session_factory()
+    assert sf is not None
+
+    repo = ScheduledTaskRepository(sf)
+    created = await repo.create(
+        task_id="task-update-serialized",
+        user_id="user-1",
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id="lead_agent",
+        title="serialized update",
+        prompt="p",
+        schedule_type="interval",
+        schedule_spec={"every_seconds": 3600},
+        timezone="UTC",
+        next_run_at=datetime(2026, 7, 2, 1, 0, tzinfo=UTC),
+    )
+    assert created["next_run_at"] == "2026-07-02T01:00:00+00:00"
+
+    updated = await repo.update(
+        "task-update-serialized",
+        user_id="user-1",
+        updates={
+            "title": "renamed",
+            "next_run_at": created["next_run_at"],  # the string form the router passes back
+            "last_run_at": "2026-07-01T01:00:00Z",  # the other accepted spelling
+            "lease_expires_at": "2026-07-02T01:05:00+00:00",
+        },
+    )
+
+    assert updated is not None
+    assert updated["title"] == "renamed"
+    assert updated["next_run_at"] == "2026-07-02T01:00:00+00:00"
+    assert updated["last_run_at"] == "2026-07-01T01:00:00+00:00"
+    assert updated["lease_expires_at"] == "2026-07-02T01:05:00+00:00"
+
+    await close_engine()
+
+
+@pytest.mark.asyncio
 async def test_update_after_launch_coerces_serialized_last_run_at(tmp_path):
     """Task rows returned by the repository serialize timestamps as ISO strings."""
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))

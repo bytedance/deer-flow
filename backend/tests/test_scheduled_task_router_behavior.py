@@ -461,6 +461,69 @@ async def test_update_rechecks_atomic_mutability_after_router_precheck(tmp_path)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cadence_changed", [False, True], ids=["same-cadence", "new-cadence"])
+async def test_update_interval_task_metadata_through_the_sql_repository(tmp_path, cadence_changed):
+    """The edit dialog always sends ``schedule_spec`` beside the changed field. For an interval
+    task whose cadence did not change the router keeps ``existing["next_run_at"]`` — which the
+    repository hands back serialized as an ISO string — and passes it straight to
+    ``repo.update``. The SQL store assigned it to a ``DateTime`` column untouched, so renaming an
+    interval task failed with a 500 on SQLite and Postgres alike; the in-memory stand-in the other
+    router tests use never noticed. Drive the real router against the real SQLite repository."""
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_thread_store = scheduled_tasks.get_thread_store
+    old_config = scheduled_tasks.get_config
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        repo = ScheduledTaskRepository(sf)
+        original_next_run_at = datetime(2030, 1, 1, 9, 0, tzinfo=UTC)
+        task = await repo.create(
+            task_id="task-router-interval-rename",
+            user_id="user-1",
+            thread_id=None,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="Hourly digest",
+            prompt="summarize",
+            schedule_type="interval",
+            schedule_spec={"every_seconds": 3600},
+            timezone="UTC",
+            next_run_at=original_next_run_at,
+        )
+        assert isinstance(task["next_run_at"], str)  # the serialized form the router reuses
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_thread_store = lambda _request: SimpleNamespace(check_access=AsyncMock(return_value=True))
+        scheduled_tasks.get_config = lambda: _Config()
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=SimpleNamespace(id="user-1"))
+
+        every_seconds = 7200 if cadence_changed else 3600
+        updated = await call_unwrapped(
+            scheduled_tasks.update_scheduled_task,
+            task_id=task["id"],
+            request=SimpleNamespace(),
+            body=scheduled_tasks.ScheduledTaskUpdateRequest(title="Hourly digest (renamed)", schedule_spec={"every_seconds": every_seconds}),
+        )
+
+        assert updated["title"] == "Hourly digest (renamed)"
+        assert updated["schedule_spec"] == {"every_seconds": every_seconds}
+        stored = await repo.get(task["id"], user_id="user-1")
+        assert stored is not None and stored["title"] == "Hourly digest (renamed)"
+        stored_next_run_at = datetime.fromisoformat(stored["next_run_at"].replace("Z", "+00:00"))
+        if cadence_changed:
+            assert stored_next_run_at != original_next_run_at  # recomputed from the new cadence
+        else:
+            assert stored_next_run_at == original_next_run_at  # a pure rename keeps the next occurrence
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_thread_store = old_thread_store
+        scheduled_tasks.get_config = old_config
+        scheduled_tasks.get_optional_user_from_request = old_user
+        await close_engine()
+
+
+@pytest.mark.asyncio
 async def test_delete_scheduled_task_deletes_repo_row():
     repo = _Repo()
     task = await repo.create(
