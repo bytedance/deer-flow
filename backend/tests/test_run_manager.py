@@ -2126,10 +2126,14 @@ async def test_expired_lease_does_not_fence_own_inflight_terminal_cas():
         await asyncio.wait_for(committed.wait(), timeout=5)
         record.lease_expires_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
 
-        await manager._renew_leases()
+        renewal = asyncio.create_task(manager._renew_leases())
+        # The proof lands inside the acknowledgement budget, so the run is not
+        # fenced even though its lease had already expired.
+        await asyncio.sleep(0.05)
+        release.set()
+        await asyncio.wait_for(renewal, timeout=5)
 
         assert record.ownership_lost is False
-        release.set()
         await asyncio.wait_for(cas, timeout=5)
         assert record.terminal_committed is True
         assert record.status == RunStatus.success
@@ -2217,3 +2221,171 @@ async def test_cancel_action_is_signalled_while_another_renewal_is_blocked():
             *(record.task for record in (record_a, record_b) if record.task is not None),
             return_exceptions=True,
         )
+
+
+@pytest.mark.anyio
+async def test_shutdown_does_not_bypass_durable_cancel_action():
+    """Shutdown must not write ``interrupted`` over an accepted durable rollback.
+
+    The trailing drain persisted ``interrupted`` with a plain ``update_status``,
+    which does not consult the durable ``cancel_action`` and therefore bypasses
+    the terminal CAS the worker is supposed to own.
+    """
+    store = MemoryRunStore()
+    manager, _ = _ownership_manager(store)
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    assert await store.request_cancel(record.run_id, action="rollback") == "rollback"
+    try:
+        await manager.shutdown(timeout=1.0)
+
+        row = await store.get(record.run_id)
+        assert row["status"] != "interrupted"
+        assert row["cancel_action"] == "rollback"
+    finally:
+        if record.task is not None:
+            record.task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_concurrent_terminal_writes_keep_both_commit_proofs():
+    """Two in-flight terminal writes for one run must both stay joinable.
+
+    A single per-run proof slot lets the second write overwrite the first, so a
+    renewal can join the wrong attempt and fence a run whose own commit landed.
+    """
+    first_entered = asyncio.Event()
+    second_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class TwoWritesStore(MemoryRunStore):
+        armed = False
+
+        async def finalize_if_not_cancelled(self, run_id, *, status, error=None, stop_reason=None):
+            if self.armed:
+                first_entered.set()
+                await release.wait()
+            return await super().finalize_if_not_cancelled(
+                run_id,
+                status=status,
+                error=error,
+                stop_reason=stop_reason,
+            )
+
+        async def update_status(self, run_id, status, *, error=None, stop_reason=None):
+            if self.armed:
+                second_entered.set()
+                await release.wait()
+            return await super().update_status(run_id, status, error=error, stop_reason=stop_reason)
+
+    store = TwoWritesStore()
+    manager, _ = _ownership_manager(store)
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    store.armed = True
+    cas = None
+    persist = None
+    try:
+        cas = asyncio.create_task(manager.set_status_if_not_cancelled(record.run_id, RunStatus.success))
+        await asyncio.wait_for(first_entered.wait(), timeout=5)
+        persist = asyncio.create_task(manager._persist_status(record, RunStatus.success))
+        await asyncio.wait_for(second_entered.wait(), timeout=5)
+
+        proofs = manager._terminal_commit_inflight.get(record.run_id)
+        if isinstance(proofs, asyncio.Future):
+            # Single-slot implementation: the second write overwrote the first.
+            assert False, "only one commit proof is tracked for two in-flight writes"
+        assert len(tuple(proofs or ())) == 2
+    finally:
+        release.set()
+        for pending in (cas, persist):
+            if pending is not None:
+                await asyncio.gather(pending, return_exceptions=True)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_expired_lease_fences_unconfirmed_terminal_cas(monkeypatch):
+    """An unconfirmed in-flight CAS must not block expiry fencing forever.
+
+    When the CAS has not written anything and the lease is already expired, the
+    worker cannot prove its own commit, so the run has to fail closed instead of
+    waiting on that attempt indefinitely.
+    """
+    import deerflow.runtime.runs.manager as manager_module
+
+    monkeypatch.setattr(manager_module, "_TERMINAL_COMMIT_ACK_TIMEOUT_SECONDS", 0.05, raising=False)
+
+    entered = asyncio.Event()
+    never = asyncio.Event()
+
+    class StuckCasStore(MemoryRunStore):
+        async def finalize_if_not_cancelled(self, run_id, *, status, error=None, stop_reason=None):
+            entered.set()
+            await never.wait()  # never commits, never returns
+            return await super().finalize_if_not_cancelled(
+                run_id,
+                status=status,
+                error=error,
+                stop_reason=stop_reason,
+            )
+
+    store = StuckCasStore()
+    manager, _ = _ownership_manager(store)
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    cas = None
+    try:
+        cas = asyncio.create_task(manager.set_status_if_not_cancelled(record.run_id, RunStatus.success))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        record.lease_expires_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+
+        await manager._renew_leases()
+
+        assert record.ownership_lost is True
+        assert record.terminal_committed is False
+    finally:
+        never.set()
+        if cas is not None:
+            await asyncio.gather(cas, return_exceptions=True)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_renewal_success_after_the_confirmed_deadline_is_not_adopted():
+    """A renewal that returns success after the old deadline must not be adopted."""
+    release = asyncio.Event()
+    entered = asyncio.Event()
+
+    class LateSuccessStore(MemoryRunStore):
+        armed = False
+
+        async def update_lease(self, run_id, *, owner_worker_id, lease_expires_at):
+            if self.armed:
+                entered.set()
+                await release.wait()
+            return await super().update_lease(
+                run_id,
+                owner_worker_id=owner_worker_id,
+                lease_expires_at=lease_expires_at,
+            )
+
+    store = LateSuccessStore()
+    manager, _ = _ownership_manager(store)
+    record, task = await _live_record(manager, store, status=RunStatus.success, lease_seconds=1)
+    store.armed = True
+    before = record.lease_expires_at
+    try:
+        renewal = asyncio.create_task(manager._renew_leases())
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        # Let the confirmed deadline pass before the renewal returns success.
+        await asyncio.sleep(1.1)
+        release.set()
+        await asyncio.wait_for(renewal, timeout=5)
+
+        assert record.ownership_lost is True
+        assert record.lease_expires_at == before
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

@@ -36,6 +36,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# How long an expired/rejected lease waits for this worker's own in-flight
+# terminal CAS to prove a commit before the run fails closed.
+_TERMINAL_COMMIT_ACK_TIMEOUT_SECONDS = 1.0
+
 # Supervised lease calls that miss their deadline are cancelled but must stay
 # observed until they reach a terminal outcome; their late result is never
 # adopted by the caller.
@@ -300,7 +304,7 @@ class RunManager:
         # Process-local proof that this worker's own terminal CAS is in
         # flight for a run, so a racing renewal can join the real commit
         # attempt instead of inferring one from a store re-read.
-        self._terminal_commit_inflight: dict[str, asyncio.Future[bool]] = {}
+        self._terminal_commit_inflight: dict[str, set[asyncio.Future[bool]]] = {}
         self._lock = asyncio.Lock()
         self._store = store
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
@@ -447,7 +451,7 @@ class RunManager:
             return True
         row_recovery_payload = self._store_put_payload(record, error=error, stop_reason=stop_reason)
         inflight = asyncio.get_running_loop().create_future()
-        self._terminal_commit_inflight[record.run_id] = inflight
+        self._terminal_commit_inflight.setdefault(record.run_id, set()).add(inflight)
         try:
             updated = await self._call_store_with_retry(
                 "update_status",
@@ -505,8 +509,11 @@ class RunManager:
             logger.warning("Failed to persist status update for run %s", record.run_id, exc_info=True)
             return False
         finally:
-            if self._terminal_commit_inflight.get(record.run_id) is inflight:
-                self._terminal_commit_inflight.pop(record.run_id, None)
+            inflights = self._terminal_commit_inflight.get(record.run_id)
+            if inflights is not None:
+                inflights.discard(inflight)
+                if not inflights:
+                    self._terminal_commit_inflight.pop(record.run_id, None)
             if not inflight.done():
                 inflight.set_result(record.terminal_committed)
 
@@ -1128,7 +1135,7 @@ class RunManager:
             return None
 
         inflight = asyncio.get_running_loop().create_future()
-        self._terminal_commit_inflight[run_id] = inflight
+        self._terminal_commit_inflight.setdefault(run_id, set()).add(inflight)
         try:
             try:
                 result = await self._call_store_with_retry(
@@ -1178,8 +1185,11 @@ class RunManager:
         finally:
             async with self._lock:
                 inflight_record = self._runs.get(run_id)
-            if self._terminal_commit_inflight.get(run_id) is inflight:
-                self._terminal_commit_inflight.pop(run_id, None)
+            inflights = self._terminal_commit_inflight.get(run_id)
+            if inflights is not None:
+                inflights.discard(inflight)
+                if not inflights:
+                    self._terminal_commit_inflight.pop(run_id, None)
             if not inflight.done():
                 inflight.set_result(bool(inflight_record is not None and inflight_record.terminal_committed))
 
@@ -2282,6 +2292,52 @@ class RunManager:
             return False, None
         return True, task.result()
 
+    async def _await_own_terminal_commit(
+        self,
+        inflights: tuple[asyncio.Future[bool], ...],
+        *,
+        budget: float,
+    ) -> bool:
+        """Return True only when this worker's own in-flight CAS proves a commit.
+
+        The wait is bounded: an attempt that never writes anything must not block
+        expiry fencing indefinitely, so the caller fails closed once the budget
+        expires without a positive, attributable result.
+        """
+        if not inflights or budget <= 0:
+            return False
+        done, _ = await asyncio.wait(inflights, timeout=budget)
+        for future in done:
+            if future.cancelled() or future.exception() is not None:
+                continue
+            if future.result():
+                return True
+        return False
+
+    def _own_terminal_commit_attempts(self, run_id: str) -> tuple[asyncio.Future[bool], ...]:
+        return tuple(self._terminal_commit_inflight.get(run_id) or ())
+
+    async def _persist_shutdown_interrupt(self, record: RunRecord) -> bool:
+        """Persist a shutdown interrupt without bypassing the durable cancel CAS.
+
+        A plain ``update_status`` would overwrite an accepted durable
+        ``cancel_action``; route through the same CAS the terminal path uses and
+        leave the run to its owner when a durable cancel already won. Without
+        heartbeat ownership there is no durable cancel to protect, so the
+        previous path stays (it also reports a failed persist).
+        """
+        if not self.heartbeat_enabled or self._store is None:
+            return await self._persist_status(record, RunStatus.interrupted)
+        cancel_action = await self.set_status_if_not_cancelled(record.run_id, RunStatus.interrupted)
+        if cancel_action is not None:
+            logger.info(
+                "Run %s kept its accepted durable cancel action %s during the shutdown drain",
+                record.run_id,
+                cancel_action,
+            )
+            return True
+        return record.status == RunStatus.interrupted
+
     async def _renew_one_lease(self, run_id: str, record: RunRecord) -> tuple[str, str] | None:
         """Renew one run's lease inside its own last-confirmed deadline.
 
@@ -2291,10 +2347,11 @@ class RunManager:
         """
         confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
         if confirmed_deadline is None or confirmed_deadline <= datetime.now(UTC):
-            if self._terminal_commit_inflight.get(run_id) is not None:
-                # This worker's own terminal CAS is deciding the outcome; do not
-                # fence a run whose commit may be about to land. The CAS itself
-                # marks ownership lost when it cannot confirm.
+            if await self._await_own_terminal_commit(
+                self._own_terminal_commit_attempts(run_id),
+                budget=_TERMINAL_COMMIT_ACK_TIMEOUT_SECONDS,
+            ):
+                # This worker's own CAS proved the commit within the budget.
                 return None
             await self._fence_expired_lease(
                 record,
@@ -2332,10 +2389,13 @@ class RunManager:
             return None
 
         if not completed:
-            # The attempt missed its own deadline: fail closed rather than adopt
-            # a result that arrived late, unless this worker's own terminal CAS
-            # is still deciding.
-            if self._terminal_commit_inflight.get(run_id) is not None:
+            # The attempt missed its own deadline: never adopt the late result.
+            # Only this worker's own CAS proving a commit within the budget keeps
+            # the run alive; otherwise it fails closed.
+            if await self._await_own_terminal_commit(
+                self._own_terminal_commit_attempts(run_id),
+                budget=_TERMINAL_COMMIT_ACK_TIMEOUT_SECONDS,
+            ):
                 return None
             await self._fence_expired_lease(
                 record,
@@ -2595,7 +2655,7 @@ class RunManager:
             else:
                 try:
                     results = await asyncio.wait_for(
-                        asyncio.gather(*(self._persist_status(record, RunStatus.interrupted) for record in to_persist), return_exceptions=True),
+                        asyncio.gather(*(self._persist_shutdown_interrupt(record) for record in to_persist), return_exceptions=True),
                         timeout=remaining,
                     )
                 except TimeoutError:
