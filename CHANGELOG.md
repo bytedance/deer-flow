@@ -333,7 +333,7 @@ This release closes that milestone with **181 merged pull requests**.
   strict Blockbuster gate raised `BlockingError` on them and, in production,
   a large or slow skills tree stalled every other request on the worker for
   the duration of the scan. All three now offload the load with
-  `asyncio.to_thread` through one shared helper.
+  `asyncio.to_thread` through one shared helper. ([#5945])
 - **gateway:** `GET` and `PUT /api/user-profile` no longer run their
   filesystem work on the event loop. Both handlers resolved the per-user
   `USER.md` path (which builds absolute paths on every call), stat'ed, read,
@@ -6189,4 +6189,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5928]: https://github.com/bytedance/deer-flow/pull/5928
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934
 [#5935]: https://github.com/bytedance/deer-flow/pull/5935
+[#5945]: https://github.com/bytedance/deer-flow/pull/5945
 
