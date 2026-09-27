@@ -331,7 +331,7 @@ This release closes that milestone with **181 merged pull requests**.
   `asyncio.to_thread`. Under the strict Blockbuster gate the pair raised
   `BlockingError`; in production a slow disk stalled every other request on
   the worker for the duration. Both handlers now offload the whole
-  resolve-stat-read / resolve-mkdir-write sequence.
+  resolve-stat-read / resolve-mkdir-write sequence. ([#5935])
 - **docker:** Project-document uploads larger than 1 MB no longer fail with a
   bare nginx `413` through the unified entry point. `POST
   /api/projects/{id}/documents` is a multipart upload that Gateway accepts up
@@ -6177,4 +6177,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5900]: https://github.com/bytedance/deer-flow/pull/5900
 [#5928]: https://github.com/bytedance/deer-flow/pull/5928
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934
+[#5935]: https://github.com/bytedance/deer-flow/pull/5935
 
