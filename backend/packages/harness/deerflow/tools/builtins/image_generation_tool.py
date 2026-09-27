@@ -1,5 +1,6 @@
 """Controlled image-generation entry point for managed provider credentials."""
 
+import asyncio
 import base64
 import json
 import posixpath
@@ -8,7 +9,14 @@ import uuid
 from langchain.tools import tool
 
 from deerflow.config.app_config import get_app_config
-from deerflow.config.image_generation import ImageConfigurationError, resolve_image_generation_profile
+from deerflow.config.image_generation import (
+    ImageConfigurationError,
+    effective_image_generation_source,
+    image_profile_choice_needed,
+    legacy_image_storage_identity,
+    resolve_image_generation_profile,
+    selected_image_generation_source,
+)
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.tools.types import Runtime
@@ -60,6 +68,8 @@ def _python_script_command(args: list[str], marker: str) -> str:
 def check_image_generation_tool() -> str:
     """Check whether an image provider is configured before planning image or PPT work."""
     try:
+        if selected_image_generation_source() is None and image_profile_choice_needed(get_app_config().sandbox.environment):
+            return "Two image models are configured. A generate_image call will ask the user to choose one in chat."
         profile, source, managed = resolve_image_generation_profile(get_app_config().sandbox.environment)
         if profile is None:
             return "Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in Settings > Models > Image models."
@@ -105,6 +115,8 @@ def generate_image_tool(
     env: dict[str, str] = {}
     try:
         # Resolve before acquiring a sandbox or touching a provider API.
+        if selected_image_generation_source() is None and image_profile_choice_needed(get_app_config().sandbox.environment):
+            return "Error: IMAGE_PROFILE_CHOICE_REQUIRED. Choose the web or server image model in chat before generation."
         profile, source, managed = resolve_image_generation_profile(get_app_config().sandbox.environment)
         if profile is None:
             return "Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in Settings > Models > Image models."
@@ -125,7 +137,11 @@ def generate_image_tool(
 
         if source == "sandbox_environment":
             if isinstance(sandbox, AioSandbox):
-                if getattr(sandbox, "_deerflow_managed_image_local", False):
+                if effective_image_generation_source(get_app_config().sandbox.environment) == "sandbox_environment":
+                    expected_identity = legacy_image_storage_identity(get_app_config().sandbox.environment)
+                    if expected_identity is None or getattr(sandbox, "_deerflow_server_image_storage_identity", None) != expected_identity:
+                        return "Error: IMAGE_PROFILE_CHANGED. The selected server image model is not bound to this sandbox; retry in a new turn."
+                elif getattr(sandbox, "_deerflow_managed_image_local", False):
                     # A held local container may have been created for a web
                     # profile before it was disabled. Its derived ID survives
                     # rebinding even if the current revision marker does not.
@@ -186,14 +202,21 @@ async def _generate_image_async(runtime: Runtime, prompt_file: str, output_file:
     from deerflow.sandbox.tools import _run_sync_tool_after_async_sandbox_init
 
     # Return before the helper acquires a sandbox when configuration is absent.
-    try:
-        profile, _, _ = resolve_image_generation_profile(get_app_config().sandbox.environment)
-        if profile is None:
-            return "Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in Settings > Models > Image models."
-        if not profile.usable():
-            return "Error: IMAGE_PROVIDER_INVALID_CONFIG. The selected image model has no API key."
-    except (ImageConfigurationError, ValueError, OSError):
-        return "Error: IMAGE_PROVIDER_INVALID_CONFIG. Check Settings > Models > Image models."
+    def preflight() -> str | None:
+        try:
+            if selected_image_generation_source() is None and image_profile_choice_needed(get_app_config().sandbox.environment):
+                return "Error: IMAGE_PROFILE_CHOICE_REQUIRED. Choose the web or server image model in chat before generation."
+            profile, _, _ = resolve_image_generation_profile(get_app_config().sandbox.environment)
+            if profile is None:
+                return "Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in Settings > Models > Image models."
+            if not profile.usable():
+                return "Error: IMAGE_PROVIDER_INVALID_CONFIG. The selected image model has no API key."
+        except (ImageConfigurationError, ValueError, OSError):
+            return "Error: IMAGE_PROVIDER_INVALID_CONFIG. Check Settings > Models > Image models."
+        return None
+
+    if error := await asyncio.to_thread(preflight):
+        return error
 
     # The shared helper uses the provider's async acquire path and runs the
     # synchronous command on a worker thread after authorization.

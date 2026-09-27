@@ -1764,7 +1764,7 @@ export const enUS: Translations = {
     imageModels: {
       title: "Image models",
       description:
-        "Configure the image provider used for image and PowerPoint generation. Image models are separate from chat models. A saved profile takes priority over sandbox environment variables. Tests call the provider and may incur charges.",
+        "Choose a default image model for new chats and image requests. Image models are separate from chat models. If a model or endpoint changes, you will choose again in chat. Tests call the provider and may incur charges.",
       add: "Add image model",
       reload: "Reload",
       loading: "Loading image models…",
@@ -1779,6 +1779,15 @@ export const enUS: Translations = {
         unreachable: "Provider unreachable",
       },
       serverConfig: "Server configuration · read-only",
+      selected: "Used for new image requests",
+      notSelected: "Not used for new image requests",
+      chooseInChat: "Choose in chat before generating an image",
+      overridesServer: "Overrides server configuration",
+      setDefault: "Set as default",
+      setDefaultLabel: (name) => `Use ${name} as default`,
+      defaultTag: "DEFAULT",
+      defaultTagLabel: (name) => `Default image model: ${name}`,
+      defaultSaved: "Default image model updated",
       enabled: "Enabled",
       disabled: "Disabled",
       edit: "Edit",
@@ -1794,7 +1803,7 @@ export const enUS: Translations = {
       testEdit: "Test reference editing",
       working: "Working…",
       formDescription:
-        "Save a provider and test generation and reference editing separately. An enabled profile overrides sandbox environment variables for new image requests.",
+        "Save a provider and test generation and reference editing separately. A web profile becomes the default for the current server model.",
       name: "Unique name",
       displayName: "Display name",
       provider: "Provider",

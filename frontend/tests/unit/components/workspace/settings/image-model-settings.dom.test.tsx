@@ -14,6 +14,7 @@ import type * as ImageManagement from "@/core/models/image-management";
 import {
   loadImageProfiles,
   saveImageProfile,
+  setDefaultImageProfile,
   testImageProfile,
   type ImageProfile,
 } from "@/core/models/image-management";
@@ -26,6 +27,7 @@ rs.mock("@/core/models/image-management", () => ({
   ...rs.requireActual<typeof ImageManagement>("@/core/models/image-management"),
   loadImageProfiles: rs.fn(),
   saveImageProfile: rs.fn(),
+  setDefaultImageProfile: rs.fn(),
   testImageProfile: rs.fn(),
 }));
 
@@ -38,6 +40,9 @@ const profile: ImageProfile = {
   size: null,
   enabled: true,
   source: "managed",
+  identity: "web-identity",
+  selected: true,
+  conflict: false,
   has_api_key: true,
   revision: "v1",
   verified_generation: false,
@@ -58,10 +63,203 @@ beforeEach(() => {
     },
   });
   rs.mocked(saveImageProfile).mockResolvedValue(profile);
+  rs.mocked(setDefaultImageProfile).mockResolvedValue({
+    revision: "saved-default",
+  });
   rs.mocked(testImageProfile).mockResolvedValue({
     ok: true,
     message: "success",
   });
+});
+
+test("shows which image profile is selected when server and web profiles coexist", async () => {
+  rs.mocked(loadImageProfiles).mockResolvedValue({
+    profiles: [
+      {
+        ...profile,
+        conflict: false,
+      },
+      {
+        ...profile,
+        name: "server-config",
+        display_name: "Server configuration",
+        source: "config",
+        provider: "gemini",
+        model: "server-image",
+        revision: undefined,
+        selected: false,
+        conflict: false,
+      },
+    ],
+    status: {
+      status: "configured_unverified",
+      source: "managed",
+      provider: "openai",
+      model: "image-model",
+      has_api_key: true,
+      supports_generation: false,
+      supports_edit: false,
+    },
+  });
+
+  mount();
+
+  expect(await screen.findByText(/Used for new image requests/)).toBeTruthy();
+  expect(screen.getByText(/Overrides server configuration/)).toBeTruthy();
+  expect(screen.getByText("Not used for new image requests")).toBeTruthy();
+});
+
+test("shows an inline-chat choice when a new server image model conflicts", async () => {
+  rs.mocked(loadImageProfiles).mockResolvedValue({
+    profiles: [
+      { ...profile, selected: false, conflict: true },
+      {
+        ...profile,
+        name: "server-config",
+        display_name: "Server configuration",
+        source: "config",
+        provider: "gemini",
+        model: "server-image",
+        revision: undefined,
+        selected: false,
+        conflict: true,
+      },
+    ],
+    status: {
+      status: "configured_unverified",
+      source: "managed",
+      provider: "openai",
+      model: "image-model",
+      has_api_key: true,
+      supports_generation: false,
+      supports_edit: false,
+      choice_required: true,
+    },
+  });
+
+  mount();
+  expect(
+    (await screen.findAllByText("Choose in chat before generating an image"))
+      .length,
+  ).toBeGreaterThan(0);
+  expect(screen.queryByText("Used for new image requests")).toBeNull();
+});
+
+test("setting the server model as default marks its card and persists the choice", async () => {
+  const server: ImageProfile = {
+    ...profile,
+    name: "server-config",
+    display_name: "Server configuration",
+    source: "config",
+    identity: "server-identity",
+    provider: "gemini",
+    model: "server-image",
+    revision: undefined,
+    selected: false,
+    conflict: true,
+  };
+  const status = {
+    status: "configured_unverified" as const,
+    source: "managed" as const,
+    provider: "openai" as const,
+    model: "image-model",
+    has_api_key: true,
+    supports_generation: false,
+    supports_edit: false,
+    choice_required: true,
+    default_revision: null,
+  };
+  rs.mocked(loadImageProfiles)
+    .mockResolvedValueOnce({
+      profiles: [{ ...profile, selected: false, conflict: true }, server],
+      status,
+    })
+    .mockResolvedValue({
+      profiles: [
+        { ...profile, selected: false, conflict: false },
+        { ...server, selected: true, conflict: false },
+      ],
+      status: {
+        ...status,
+        source: "sandbox_environment",
+        choice_required: false,
+        default_revision: "saved-default",
+        default_active: true,
+      },
+    });
+
+  mount();
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Use Server configuration as default",
+    }),
+  );
+  await waitFor(() =>
+    expect(setDefaultImageProfile).toHaveBeenCalledWith(
+      "sandbox_environment",
+      "server-identity",
+      null,
+    ),
+  );
+  expect(
+    await screen.findByLabelText("Default image model: Server configuration"),
+  ).toBeTruthy();
+  expect(
+    screen.queryByRole("button", {
+      name: "Use Server configuration as default",
+    }),
+  ).toBeNull();
+  expect(
+    screen.queryByText("Choose in chat before generating an image"),
+  ).toBeNull();
+});
+
+test("can switch the saved default back to the enabled web model", async () => {
+  rs.mocked(loadImageProfiles).mockResolvedValue({
+    profiles: [
+      {
+        ...profile,
+        selected: false,
+        conflict: false,
+        identity: "web-identity",
+      },
+    ],
+    status: {
+      status: "configured_unverified",
+      source: "sandbox_environment",
+      provider: "gemini",
+      model: "server-image",
+      has_api_key: true,
+      supports_generation: false,
+      supports_edit: false,
+      default_revision: "old-default",
+    },
+  });
+  mount();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Use Image One as default" }),
+  );
+  await waitFor(() =>
+    expect(setDefaultImageProfile).toHaveBeenCalledWith(
+      "managed",
+      "web-identity",
+      "old-default",
+    ),
+  );
+});
+
+test("can persist a web model that was selected automatically", async () => {
+  mount();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Use Image One as default" }),
+  );
+  await waitFor(() =>
+    expect(setDefaultImageProfile).toHaveBeenCalledWith(
+      "managed",
+      "web-identity",
+      null,
+    ),
+  );
 });
 
 afterEach(() => {

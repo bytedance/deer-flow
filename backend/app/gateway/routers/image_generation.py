@@ -12,10 +12,14 @@ from deerflow.config.app_config import get_app_config
 from deerflow.config.image_generation import (
     ImageConfigurationError,
     ImageConnectionStatus,
+    ImageGenerationDefaultStore,
     ManagedImageGenerationProfile,
     ManagedImageGenerationProfileStore,
+    image_profile_choice_needed,
+    image_profile_identity,
     legacy_image_profile,
     resolve_image_generation_profile,
+    saved_image_generation_source,
 )
 
 router = APIRouter(prefix="/api/image-generation", tags=["image-generation"])
@@ -31,6 +35,13 @@ class SaveImageProfileRequest(BaseModel):
 class TestImageProfileRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_revision: str
+
+
+class SetImageDefaultRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: Literal["managed", "sandbox_environment"]
+    target_identity: str
+    expected_revision: str | None = None
 
 
 def _empty_status(status: ImageConnectionStatus) -> dict:
@@ -82,11 +93,22 @@ async def image_generation_status(request: Request):
 
 
 def _list_profiles() -> dict:
-    profiles = [item.public() for item in ManagedImageGenerationProfileStore().list()]
+    stored_profiles = ManagedImageGenerationProfileStore().list()
+    profiles = [{**item.public(), "identity": image_profile_identity(item)} for item in stored_profiles]
     try:
         legacy = legacy_image_profile(get_app_config().sandbox.environment)
     except (ImageConfigurationError, ValueError):
         legacy = None
+    status = _status()
+    current_default = ImageGenerationDefaultStore().read()
+    status["default_revision"] = current_default.revision if current_default else None
+    status["default_active"] = current_default is not None and saved_image_generation_source(get_app_config().sandbox.environment) == current_default.source
+    choice_required = legacy is not None and image_profile_choice_needed(get_app_config().sandbox.environment)
+    status["choice_required"] = choice_required
+    managed_selected = status["source"] == "managed"
+    for item in profiles:
+        item["selected"] = managed_selected and item["enabled"] and not choice_required
+        item["conflict"] = item["enabled"] and choice_required
     if legacy is not None:
         profiles.insert(
             0,
@@ -96,14 +118,40 @@ def _list_profiles() -> dict:
                 "source": "config",
                 "provider": legacy.provider.value,
                 "model": legacy.model,
+                "identity": image_profile_identity(legacy),
                 "base_url": legacy.base_url,
                 "has_api_key": legacy.usable(),
                 "enabled": not any(item["enabled"] for item in profiles),
+                "selected": status["source"] == "sandbox_environment" and not choice_required,
+                "conflict": choice_required,
                 "verified_generation": False,
                 "verified_edit": False,
             },
         )
-    return {"profiles": profiles, "status": _status()}
+    return {"profiles": profiles, "status": status}
+
+
+def _set_default(body: SetImageDefaultRequest) -> dict:
+    try:
+        saved = ImageGenerationDefaultStore().save(
+            body.source,
+            target_identity=body.target_identity,
+            expected_revision=body.expected_revision,
+            environment=get_app_config().sandbox.environment,
+        )
+        return {"revision": saved.revision}
+    except FileExistsError:
+        raise HTTPException(409, "Image model default changed; reload before saving") from None
+    except ImageConfigurationError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except (ValueError, OSError):
+        raise HTTPException(503, "Image model default is unavailable") from None
+
+
+@router.put("/profiles/default")
+async def set_image_default(request: Request, body: SetImageDefaultRequest):
+    await require_admin_user(request, detail=_ADMIN)
+    return await asyncio.to_thread(_set_default, body)
 
 
 @router.get("/profiles")
@@ -117,7 +165,17 @@ async def list_image_profiles(request: Request):
 
 def _save(body: SaveImageProfileRequest) -> dict:
     try:
-        return ManagedImageGenerationProfileStore().save(body.config, expected_revision=body.expected_revision).public()
+        store = ManagedImageGenerationProfileStore()
+        try:
+            legacy = legacy_image_profile(get_app_config().sandbox.environment)
+            server_model = f"{legacy.provider.value}:{legacy.model}" if legacy is not None else None
+        except (ImageConfigurationError, ValueError):
+            legacy = None
+            server_model = None
+        if legacy is not None and legacy.model == body.config.model and not any(item.name == body.config.name for item in store.list()):
+            raise HTTPException(409, "This image model ID is already configured by the server")
+        profile = body.config.model_copy(update={"server_model_at_enable": server_model})
+        return store.save(profile, expected_revision=body.expected_revision).public()
     except FileNotFoundError:
         raise HTTPException(404, "Image profile no longer exists") from None
     except FileExistsError:

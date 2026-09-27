@@ -67,7 +67,9 @@ Chat pages pass `useThreadScheduledTaskEvents` data to `MessageList` (`scheduled
 The administrator-only Models settings page also renders an image provider
 section. It calls `/api/image-generation/profiles`, stores no API key in browser
 state after save, and shows separate generation and reference-edit test
-results. The saved profile applies to new image tool calls without refreshing
+results. Admins set the server or enabled web profile as the persisted image
+default through `/api/image-generation/profiles/default`; the selected card has
+a visible corner tag. The saved profile applies to new image tool calls without refreshing
 the frontend or restarting a sandbox. The API projects a dedicated image
 readiness status; it is separate from chat-model and channel connection types.
 

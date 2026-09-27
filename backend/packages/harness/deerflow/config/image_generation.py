@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from enum import StrEnum
 from typing import Literal
 from urllib.parse import urlsplit
@@ -102,16 +107,33 @@ class ManagedImageGenerationProfile(ImageGenerationProfile):
     verified_edit: bool = False
     last_generation_result: str | None = None
     last_edit_result: str | None = None
+    # Server-owned snapshot when this web profile was saved. A new server
+    # model introduced later requires an explicit per-run choice.
+    server_model_at_enable: str | None = None
 
     def public(self) -> dict:
         return {
-            **self.model_dump(mode="json", exclude={"api_key"}),
+            **self.model_dump(mode="json", exclude={"api_key", "server_model_at_enable"}),
             "has_api_key": self.usable(),
             "source": "managed",
         }
 
 
 _lock = threading.RLock()
+_selected_image_source: ContextVar[Literal["managed", "sandbox_environment"] | None] = ContextVar("selected_image_source", default=None)
+
+
+@contextmanager
+def bind_image_generation_source(source: Literal["managed", "sandbox_environment"] | None) -> Iterator[None]:
+    token = _selected_image_source.set(source)
+    try:
+        yield
+    finally:
+        _selected_image_source.reset(token)
+
+
+def selected_image_generation_source() -> Literal["managed", "sandbox_environment"] | None:
+    return _selected_image_source.get()
 
 
 class ManagedImageGenerationProfileStore:
@@ -198,6 +220,71 @@ class ManagedImageGenerationProfileStore:
         )
 
 
+class ImageGenerationDefault(BaseModel):
+    source: Literal["managed", "sandbox_environment"]
+    target_identity: str
+    peer_identity: str | None
+    revision: str
+
+
+def image_profile_identity(profile: ImageGenerationProfile) -> str:
+    """Identify a model and endpoint without including its credential."""
+    settings = [profile.provider.value, profile.model, profile.base_url, profile.size]
+    if isinstance(profile, ManagedImageGenerationProfile):
+        settings.insert(0, profile.name)
+    return hashlib.sha256(json.dumps(settings, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+
+
+class ImageGenerationDefaultStore:
+    """Persist an admin-selected default separately from encrypted credentials."""
+
+    def __init__(self):
+        self.path = runtime_home() / "managed-image-profiles" / "default.json"
+
+    def read(self) -> ImageGenerationDefault | None:
+        if not self.path.exists():
+            return None
+        try:
+            return ImageGenerationDefault.model_validate_json(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise ValueError("Cannot read the image model default") from None
+
+    def save(
+        self,
+        source: Literal["managed", "sandbox_environment"],
+        *,
+        target_identity: str,
+        expected_revision: str | None,
+        environment: dict[str, str],
+    ) -> ImageGenerationDefault:
+        with _lock, extensions_config_file_lock(self.path):
+            current = self.read()
+            if (current.revision if current else None) != expected_revision:
+                raise FileExistsError("Image model default changed; reload before saving")
+            managed = [item for item in ManagedImageGenerationProfileStore().list() if item.enabled]
+            if len(managed) > 1:
+                raise ImageConfigurationError("Multiple image profiles are enabled")
+            web = managed[0] if managed else None
+            try:
+                server = legacy_image_profile(environment)
+            except ValueError:
+                if source == "sandbox_environment":
+                    raise
+                server = None
+            target = web if source == "managed" else server
+            peer = server if source == "managed" else web
+            if target is None or not target.usable() or image_profile_identity(target) != target_identity:
+                raise ImageConfigurationError("Image model changed; reload before setting the default")
+            saved = ImageGenerationDefault(
+                source=source,
+                target_identity=target_identity,
+                peer_identity=image_profile_identity(peer) if peer is not None and peer.usable() else None,
+                revision=uuid4().hex,
+            )
+            EncryptedCatalog.write_bytes(self.path, saved.model_dump_json().encode("utf-8"))
+            return saved
+
+
 def _legacy_environment(raw: dict[str, str]) -> dict[str, str]:
     return {key: os.environ.get(value[1:], "") if isinstance(value, str) and value.startswith("$") else str(value) for key, value in raw.items()}
 
@@ -250,13 +337,84 @@ def legacy_image_profile(raw_environment: dict[str, str]) -> ImageGenerationProf
     )
 
 
+def legacy_image_model_identity(raw_environment: dict[str, str]) -> str | None:
+    profile = legacy_image_profile(raw_environment)
+    return f"{profile.provider.value}:{profile.model}" if profile is not None else None
+
+
+def legacy_image_storage_identity(raw_environment: dict[str, str]) -> str | None:
+    """Identify server image settings without putting the API key in a sandbox id."""
+    profile = legacy_image_profile(raw_environment)
+    if profile is None:
+        return None
+    return image_profile_identity(profile)
+
+
+def _saved_default_source(managed: ManagedImageGenerationProfile | None, legacy: ImageGenerationProfile | None) -> Literal["managed", "sandbox_environment"] | None:
+    selection = ImageGenerationDefaultStore().read()
+    if selection is None:
+        return None
+    target = managed if selection.source == "managed" else legacy
+    peer = legacy if selection.source == "managed" else managed
+    if target is None or not target.usable() or image_profile_identity(target) != selection.target_identity:
+        return None
+    peer_identity = image_profile_identity(peer) if peer is not None and peer.usable() else None
+    return selection.source if peer_identity == selection.peer_identity else None
+
+
+def saved_image_generation_source(raw_environment: dict[str, str]) -> Literal["managed", "sandbox_environment"] | None:
+    """Return the saved admin default only while its model context still matches."""
+    managed = [item for item in ManagedImageGenerationProfileStore().list() if item.enabled]
+    if len(managed) > 1:
+        raise ImageConfigurationError("Multiple image profiles are enabled")
+    try:
+        legacy = legacy_image_profile(raw_environment)
+    except ValueError:
+        if not managed:
+            raise
+        legacy = None
+    return _saved_default_source(managed[0] if managed else None, legacy)
+
+
+def effective_image_generation_source(raw_environment: dict[str, str]) -> Literal["managed", "sandbox_environment"] | None:
+    """Return an explicit chat choice or a still-valid saved admin default."""
+    return _selected_image_source.get() or saved_image_generation_source(raw_environment)
+
+
+def image_profile_choice_needed(raw_environment: dict[str, str]) -> bool:
+    managed = [item for item in ManagedImageGenerationProfileStore().list() if item.enabled]
+    if len(managed) > 1:
+        raise ImageConfigurationError("Multiple image profiles are enabled")
+    if not managed:
+        return False
+    try:
+        legacy = legacy_image_profile(raw_environment)
+    except ValueError:
+        legacy = None
+    if legacy is None or not legacy.usable() or not managed[0].usable() or (legacy.provider, legacy.model) == (managed[0].provider, managed[0].model):
+        return False
+    if _saved_default_source(managed[0], legacy) is not None:
+        return False
+    if ImageGenerationDefaultStore().read() is not None:
+        return True
+    return managed[0].server_model_at_enable != f"{legacy.provider.value}:{legacy.model}"
+
+
 def resolve_image_generation_profile(
     raw_environment: dict[str, str],
 ) -> tuple[ImageGenerationProfile | None, str | None, ManagedImageGenerationProfile | None]:
     managed = [item for item in ManagedImageGenerationProfileStore().list() if item.enabled]
     if len(managed) > 1:
         raise ImageConfigurationError("Multiple image profiles are enabled")
+    try:
+        legacy = legacy_image_profile(raw_environment)
+    except ValueError:
+        if not managed or _selected_image_source.get() == "sandbox_environment":
+            raise
+        legacy = None
+    source = _selected_image_source.get() or _saved_default_source(managed[0] if managed else None, legacy)
+    if source == "sandbox_environment":
+        return legacy, "sandbox_environment" if legacy else None, None
     if managed:
         return managed[0], "managed", managed[0]
-    legacy = legacy_image_profile(raw_environment)
     return legacy, "sandbox_environment" if legacy else None, None

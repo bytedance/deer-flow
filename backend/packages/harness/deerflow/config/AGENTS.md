@@ -12,10 +12,16 @@ derived companions can cross the limit later.
 Managed image profiles use `image_generation.py` and the same encrypted JSON
 catalog primitive as managed chat models. The image catalog lives at
 `runtime_home()/managed-image-profiles/catalog.enc` with an adjacent `key`, not
-in SQL or `config.yaml`. One profile may be enabled; its revision fences
+in SQL or `config.yaml`. The admin-selected default lives in the adjacent
+`default.json` and contains source/model identities but no credentials. Both
+files need backup. One profile may be enabled; its revision fences
 updates and capability test results. An enabled managed image profile takes
-priority over legacy `sandbox.environment` image variables on each controlled
-image request. Disabled profiles do not shadow legacy variables. The
+priority over legacy `sandbox.environment` image variables unless the server
+model changes after the web profile is saved. That conflict requires a chat
+choice before image execution; the response is checked against the recorded
+card and current profile revision. A valid saved default selects either source
+across runs; changes to either model or endpoint invalidate it and require a
+new chat choice. Disabled profiles do not shadow legacy variables. The
 `ImageConnectionStatus` enum is specific to image readiness: the existing IM
 channel connection state does not represent generation versus reference edit.
 Legacy AIO image variables are inherited at container creation and do not
