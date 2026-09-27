@@ -4882,3 +4882,47 @@ async def test_rollback_cancellation_during_restored_values_publish_still_ends_s
     # The end frame is still published and the run keeps its error outcome.
     bridge.publish_end.assert_awaited_once_with(record.run_id)
     assert record.status == RunStatus.error
+
+
+@pytest.mark.anyio
+async def test_prestart_cancellation_does_not_consume_a_future_restore(monkeypatch):
+    """A cancel before the run started must not create or consume the restore.
+
+    The pre-start path calls ``_finish_cancellation(..., restore_checkpoint=False)``
+    so a rollback accepted before the run begins keeps its restore available for a
+    later, valid boundary instead of being consumed here.
+    """
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+    # The durable row is already running, so this worker will not start the run.
+    await run_store.update_status(record.run_id, "running")
+    record.abort_action = "rollback"
+    record.abort_event.set()
+
+    rollback = AsyncMock(return_value=True)
+    publish_values = AsyncMock()
+    monkeypatch.setattr("deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint", rollback)
+    monkeypatch.setattr("deerflow.runtime.runs.worker._publish_restored_checkpoint_values", publish_values)
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    agent_factory = MagicMock(side_effect=AssertionError("agent must not be built for a non-started run"))
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=agent_factory,
+        graph_input={},
+        config={},
+    )
+
+    # No restore ran, so a later valid boundary still owns the rollback.
+    assert rollback.await_count == 0
+    assert publish_values.await_count == 0
+    assert agent_factory.call_count == 0
+    assert record.status == RunStatus.error

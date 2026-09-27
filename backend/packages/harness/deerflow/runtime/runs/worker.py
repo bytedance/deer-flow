@@ -992,6 +992,11 @@ async def run_agent(
         new restore; restored ``values`` are published at most once.
         """
         nonlocal checkpoint_rollback_completed, deferred_finalization_interrupt, restored_values_published
+        if not started:
+            # The run never started, so there is nothing to restore. Consuming the
+            # rollback intent here would reset (or delete) a thread the replay
+            # never touched and would strand a later valid restore.
+            return
         if record.ownership_lost:
             return
         if not _is_edit_replay_run(record) or record.status == RunStatus.success:
