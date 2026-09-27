@@ -1857,3 +1857,30 @@ async def test_late_progress_snapshot_cannot_overwrite_an_acknowledged_terminal_
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_renewal_rejected_after_own_terminal_row_committed_does_not_fence():
+    """A rejection that races our own terminal commit must not fence our run.
+
+    The durable CAS can commit this worker's terminal row before the local
+    acknowledgement is published. Fencing on that rejection would mark our own
+    completed run as taken over.
+    """
+    store = LostLeaseRunStore()
+    manager, _ = _ownership_manager(store)
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    try:
+        # Our own terminal CAS already committed the row; the acknowledgement is
+        # still pending when the renewal is rejected.
+        await store.update_status(record.run_id, "success")
+        record.terminal_committed = False
+
+        await manager._renew_leases()
+
+        assert record.terminal_committed is True
+        assert record.ownership_lost is False
+        assert (await store.get(record.run_id))["status"] == "success"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

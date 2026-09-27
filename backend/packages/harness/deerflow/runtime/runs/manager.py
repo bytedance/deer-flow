@@ -2265,6 +2265,25 @@ class RunManager:
                     async with self._lock:
                         still_active = self._runs.get(run_id) is record and self._needs_lease(record)
                     if still_active:
+                        # Our own terminal CAS may have committed this worker's
+                        # row while the renewal was in flight, with the local
+                        # acknowledgement not yet published. Yield once so that
+                        # writer can land, then adopt a durable terminal row that
+                        # already holds this worker's staged outcome instead of
+                        # fencing our own completed run.
+                        await asyncio.sleep(0)
+                        async with self._lock:
+                            still_active = self._runs.get(run_id) is record and self._needs_lease(record)
+                        if still_active and record.status not in (RunStatus.pending, RunStatus.running):
+                            try:
+                                existing_row = await self._store.get(run_id)
+                            except Exception:
+                                existing_row = None
+                            if existing_row is not None and existing_row.get("status") == record.status.value and existing_row.get("owner_worker_id") == self._worker_id:
+                                async with self._lock:
+                                    record.terminal_committed = True
+                                still_active = False
+                    if still_active:
                         logger.warning(
                             "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
                             run_id,
