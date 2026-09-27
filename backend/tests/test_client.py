@@ -4978,3 +4978,86 @@ class TestBugAgentInvalidationInconsistency:
 
         assert client._agent is None
         assert client._agent_config_key is None
+
+
+class TestProgressEvalRedaction:
+    """The embedded client shares the worker's stream redaction boundary.
+
+    With progress scoring enabled, the agent's middleware emits in-band
+    ``deerflow-progress`` evaluation blocks; the Gateway worker redacts them
+    at its stream boundary, and this client must do the same so ``stream()``
+    events (and ``chat()``, which concatenates them) never expose the
+    evaluation JSON to SDK users.
+    """
+
+    @staticmethod
+    def _fenced_graph():
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from langchain_core.tools import tool
+
+        from deerflow.agents.middlewares.progress_scoring_middleware import ProgressScoringMiddleware
+
+        class _ToolCallingFakeModel(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        @tool
+        def bash(command: str) -> str:
+            """Run a command."""
+            return "ok"
+
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        responses = [
+            AIMessage(content="checking", id="ai-1", tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": "call-1"}]),
+            AIMessage(content=f"The answer.\n```deerflow-progress\n{payload}\n```", id="ai-2"),
+        ]
+        return create_agent(
+            model=_ToolCallingFakeModel(responses=responses),
+            tools=[bash],
+            middleware=[ProgressScoringMiddleware()],
+            state_schema=ThreadState,
+        )
+
+    def test_chat_redacts_evaluation_block_when_enabled(self, client, mock_app_config):
+        from deerflow.config.progress_scoring_config import ProgressScoringConfig
+
+        mock_app_config.progress_scoring = ProgressScoringConfig(enabled=True)
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", self._fenced_graph()),
+        ):
+            result = client.chat("q", thread_id="t-eval-on")
+
+        assert "The answer." in result
+        assert "deerflow-progress" not in result
+
+    def test_stream_events_redact_evaluation_block_when_enabled(self, client, mock_app_config):
+        from deerflow.config.progress_scoring_config import ProgressScoringConfig
+
+        mock_app_config.progress_scoring = ProgressScoringConfig(enabled=True)
+        ai_texts: list[str] = []
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", self._fenced_graph()),
+        ):
+            for event in client.stream("q", thread_id="t-eval-stream"):
+                if event.type == "messages-tuple" and event.data.get("type") == "ai":
+                    ai_texts.append(event.data.get("content", ""))
+
+        assert "deerflow-progress" not in "".join(ai_texts)
+        assert "The answer." in "".join(ai_texts)
+
+    def test_messages_pass_through_when_progress_scoring_disabled(self, client, mock_app_config):
+        # Flag off: the client forwards messages chunks verbatim — no
+        # behavior change for runs that never opted into the protocol.
+        from deerflow.config.progress_scoring_config import ProgressScoringConfig
+
+        mock_app_config.progress_scoring = ProgressScoringConfig(enabled=False)
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", self._fenced_graph()),
+        ):
+            result = client.chat("q", thread_id="t-eval-off")
+
+        assert "deerflow-progress" in result

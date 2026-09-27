@@ -35,6 +35,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import _authorize_model_name, build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
+from deerflow.agents.middlewares.progress_eval_protocol import ProgressEvalStreamRedactor
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
@@ -110,6 +111,28 @@ def _stream_with_sandbox_lease_cleanup(items: Iterator[Any], context: dict[str, 
             release_sandbox_execution_lease(context)
         except Exception:
             logger.warning("Failed to release embedded sandbox execution lease", exc_info=True)
+
+
+def _redact_progress_eval_items(items: Iterator[Any], redactor: ProgressEvalStreamRedactor | None) -> Iterator[Any]:
+    """Redact in-band progress-evaluation blocks from messages-mode items.
+
+    The Gateway worker redacts the fenced protocol payload at its own stream
+    boundary before the bridge; this filter gives the embedded client the
+    same boundary so ``stream()`` events (and ``chat()``, which concatenates
+    them) never expose the evaluation JSON. Non-messages items pass through
+    untouched, and the stream tail flushes the redactor's held-back text.
+    """
+    if redactor is None:
+        yield from items
+        return
+    for item in items:
+        if isinstance(item, tuple) and len(item) == 2 and str(item[0]) == "messages":
+            for redacted_chunk in redactor.push(item[1]):
+                yield ("messages", redacted_chunk)
+        else:
+            yield item
+    for redacted_chunk in redactor.finish():
+        yield ("messages", redacted_chunk)
 
 
 def _run_async_from_sync(coro):
@@ -1062,7 +1085,16 @@ class DeerFlowClient:
             context=context,
             stream_mode=["values", "messages", "custom"],
         )
-        for item in _stream_with_sandbox_lease_cleanup(agent_items, context):
+        # Embedded counterpart of the Gateway worker's stream redaction: when
+        # progress scoring is enabled, the agent's middleware emits in-band
+        # evaluation blocks and this client forwards raw ``messages`` chunks
+        # (chat() concatenates them), so the same shared redactor filters
+        # them here.
+        progress_eval_redactor = ProgressEvalStreamRedactor() if bool(getattr(getattr(self._app_config, "progress_scoring", None), "enabled", False)) else None
+        for item in _redact_progress_eval_items(
+            _stream_with_sandbox_lease_cleanup(agent_items, context),
+            progress_eval_redactor,
+        ):
             if isinstance(item, tuple) and len(item) == 2:
                 mode, chunk = item
                 mode = str(mode)

@@ -49,6 +49,14 @@ def strip_progress_eval_blocks(content: str | list | None) -> str | list | None:
     the content consisted solely of the block, so a block-only response can
     never fall back to leaking the block. Text blocks that become empty after
     stripping are dropped.
+
+    List content is stripped as one logical text stream: the text blocks are
+    joined with newlines — exactly what ``parse_step_evaluation`` matches
+    against — the removals are computed on that joined text, and the surviving
+    characters are mapped back onto the original blocks. A fence whose
+    opening sits in one text block and whose closing sits in another
+    therefore strips whenever it parses, instead of leaking into checkpoint
+    state, journal events, and reloaded history.
     """
     if isinstance(content, str):
         stripped = _EVAL_BLOCK_RE.sub("", content)
@@ -57,30 +65,63 @@ def strip_progress_eval_blocks(content: str | list | None) -> str | list | None:
         return stripped.strip()
 
     if isinstance(content, list):
-        new_blocks: list = []
-        changed = False
-        for block in content:
-            if isinstance(block, dict) and isinstance(block.get("text"), str):
-                stripped = _EVAL_BLOCK_RE.sub("", block["text"])
-                if stripped != block["text"]:
-                    changed = True
-                    if stripped.strip():
-                        new_blocks.append({**block, "text": stripped})
-                    continue
-                new_blocks.append(block)
-            elif isinstance(block, str):
-                stripped = _EVAL_BLOCK_RE.sub("", block)
-                if stripped != block:
-                    changed = True
-                    if stripped.strip():
-                        new_blocks.append(stripped)
-                    continue
-                new_blocks.append(block)
-            else:
-                new_blocks.append(block)
-        return new_blocks if changed else content
+        stripped = _strip_list_content(content)
+        return content if stripped is None else stripped
 
     return content
+
+
+def _strip_list_content(content: list) -> list | None:
+    """Strip blocks from list content as one joined text stream.
+
+    Returns the rebuilt block list, or ``None`` when nothing matched (the
+    caller then keeps the original object). The join uses newlines to mirror
+    ``parse_step_evaluation``'s flattening, so a fence spanning block
+    boundaries is removed exactly when the middleware parsed it.
+    """
+    texts: list[str] = []
+    spans: list[tuple[int, int, int]] = []  # (block index, start, end) in the joined text
+    offset = 0
+    for index, block in enumerate(content):
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            text = block["text"]
+        elif isinstance(block, str):
+            text = block
+        else:
+            continue
+        if texts:
+            offset += 1  # the newline separator _content_to_text-style joins insert
+        spans.append((index, offset, offset + len(text)))
+        texts.append(text)
+        offset += len(text)
+    if not texts:
+        return None
+
+    joined = "\n".join(texts)
+    removals = [match.span() for match in _EVAL_BLOCK_RE.finditer(joined)]
+    if not removals:
+        return None
+
+    removed = bytearray(len(joined))
+    for start, end in removals:
+        removed[start:end] = b"\x01" * (end - start)
+
+    new_blocks: list = list(content)
+    changed = False
+    for span_index, (block_index, start, end) in enumerate(spans):
+        new_text = "".join(joined[pos] for pos in range(start, end) if not removed[pos])
+        original = texts[span_index]
+        block = content[block_index]
+        if new_text == original:
+            continue
+        changed = True
+        if new_text.strip():
+            new_blocks[block_index] = {**block, "text": new_text} if isinstance(block, dict) else new_text
+        else:
+            new_blocks[block_index] = None
+    if not changed:
+        return None
+    return [block for block in new_blocks if block is not None]
 
 
 def redacted_message_copy(message: AIMessage) -> AIMessage:
@@ -263,7 +304,14 @@ class ProgressEvalStreamRedactor:
         return [emit] if emit else []
 
     def _flush_message(self) -> list[Any]:
-        """Emit the previous message's held-back text, if any, as one chunk."""
+        """Emit the previous message's held-back text, if any, as one chunk.
+
+        The flush chunk is text-only: the last streamed chunk already
+        delivered its usage / response metadata (a fully-dropped chunk is
+        emitted with emptied content, not skipped), so copying that metadata
+        onto the flush would double-count token totals in clients that add
+        usage while concatenating AI chunks.
+        """
         outputs: list = []
         if self._last_message is not None:
             if self._inside:
@@ -273,7 +321,7 @@ class ProgressEvalStreamRedactor:
             else:
                 leftover = self._carry
             if leftover:
-                outputs.append(self._copy_chunk(self._last_message, self._last_metadata, leftover))
+                outputs.append(self._copy_text_only_chunk(self._last_message, self._last_metadata, leftover))
         self._inside = False
         self._carry = ""
         self._held = ""
@@ -288,3 +336,29 @@ class ProgressEvalStreamRedactor:
         if callable(model_copy):
             return (model_copy(update={"content": content}), metadata)
         return (message, metadata)
+
+    @staticmethod
+    def _copy_text_only_chunk(message: AIMessage, metadata: Any, text: str) -> tuple:
+        """Copy *message* into a flush chunk stripped of one-shot metadata.
+
+        Identity (``id``) and the text survive; usage, response metadata,
+        additional kwargs, and tool-call state do not — they were already
+        delivered with the chunk they arrived on.
+        """
+        model_copy = getattr(message, "model_copy", None)
+        if not callable(model_copy):
+            return (message, metadata)
+        return (
+            model_copy(
+                update={
+                    "content": text,
+                    "additional_kwargs": {},
+                    "invalid_tool_calls": [],
+                    "response_metadata": {},
+                    "tool_call_chunks": [],
+                    "tool_calls": [],
+                    "usage_metadata": None,
+                }
+            ),
+            metadata,
+        )

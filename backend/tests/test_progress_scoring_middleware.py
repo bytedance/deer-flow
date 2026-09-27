@@ -739,3 +739,157 @@ class TestProtocolCompliance:
         assert "eval_noncompliance" not in self._actions(recorder)
         mw.after_model(_turn_state(eval_payload=None), runtime)
         assert self._actions(recorder).count("eval_noncompliance") == 1
+
+
+class TestListContentCrossBlockStripping:
+    """strip_progress_eval_blocks must match parse's flattened view (P1)."""
+
+    def test_split_fence_across_text_blocks_is_stripped(self):
+        # parse_step_evaluation flattens list text with newline joins, so
+        # this shape parses — and must therefore also be stripped from
+        # checkpoint state, journal events, and reloaded history.
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        content = [
+            {"type": "text", "text": "real reply"},
+            {"type": "text", "text": f"```{PROGRESS_EVAL_TAG}\n{payload}\n"},
+            {"type": "text", "text": "```"},
+        ]
+        assert parse_step_evaluation(content) is not None
+        stripped = strip_progress_eval_blocks(content)
+        assert stripped == [{"type": "text", "text": "real reply"}]
+
+    def test_split_fence_with_trailing_text_keeps_the_tail(self):
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        content = [
+            {"type": "text", "text": f"```{PROGRESS_EVAL_TAG}\n{payload}\n"},
+            {"type": "text", "text": "``` and more"},
+        ]
+        stripped = strip_progress_eval_blocks(content)
+        assert stripped == [{"type": "text", "text": " and more"}]
+
+    def test_fence_wholly_inside_one_block_still_strips(self):
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        content = [
+            {"type": "text", "text": "real reply"},
+            {"type": "text", "text": _eval_block(payload)},
+        ]
+        stripped = strip_progress_eval_blocks(content)
+        assert stripped == [{"type": "text", "text": "real reply"}]
+
+    def test_block_only_list_content_becomes_empty(self):
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        content = [
+            {"type": "text", "text": f"```{PROGRESS_EVAL_TAG}\n{payload}\n"},
+            {"type": "text", "text": "```"},
+        ]
+        assert strip_progress_eval_blocks(content) == []
+
+    def test_non_text_blocks_are_untouched_and_fence_still_stripped(self):
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        image = {"type": "image_url", "image_url": {"url": "x"}}
+        content = [
+            image,
+            {"type": "text", "text": f"```{PROGRESS_EVAL_TAG}\n{payload}\n```"},
+        ]
+        stripped = strip_progress_eval_blocks(content)
+        assert stripped == [image]
+
+
+class TestTerminalResponseOrdering:
+    """Sanitization must run before the terminal empty-response guard (P2)."""
+
+    def test_eval_only_post_tool_response_recovers_via_terminal_fallback(self):
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from langchain_core.tools import tool
+
+        from deerflow.agents.middlewares.terminal_response_middleware import TerminalResponseMiddleware
+
+        class _ToolCallingFakeModel(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        @tool
+        def bash(command: str) -> str:
+            """Run a command."""
+            return "ok"
+
+        payload = '{"tool_usefulness": 0, "task_progress": 0}'
+        responses = [
+            AIMessage(content="checking", id="ai-1", tool_calls=[{"name": "bash", "args": {"command": "ls"}, "id": "call-1"}]),
+            AIMessage(content=_eval_block(payload), id="ai-2"),
+        ]
+        # Registration order mirrors the lead chain: TerminalResponse first,
+        # progress scoring after — after_model dispatches in reverse, so the
+        # strip runs before the terminal guard inspects the response.
+        graph = create_agent(
+            model=_ToolCallingFakeModel(responses=responses),
+            tools=[bash],
+            middleware=[TerminalResponseMiddleware(), ProgressScoringMiddleware()],
+        )
+
+        result = graph.invoke({"messages": [HumanMessage(content="q")]}, config={"recursion_limit": 12})
+        last = result["messages"][-1]
+
+        assert "deerflow-progress" not in str(last.content)
+        # The guard saw the sanitized (empty) post-tool response and replaced
+        # it with a visible fallback instead of a silent empty success.
+        assert last.additional_kwargs.get("deerflow_error_fallback") is True
+        assert "no final response" in str(last.content)
+
+
+class TestFlushChunkMetadata:
+    @staticmethod
+    def _chunk(text, *, mid="msg-1", usage=None):
+        msg = AIMessageChunk(content=text, id=mid)
+        if usage is not None:
+            msg = msg.model_copy(update={"usage_metadata": usage})
+        return (msg, {"langgraph_node": "model"})
+
+    def test_flush_chunk_carries_no_delivered_usage(self):
+        # P2 review: ordinary markdown leaves a partial fence prefix
+        # buffered, then a usage-only terminal chunk delivers the usage
+        # once; the flushed remainder must not re-deliver it.
+        redactor = ProgressEvalStreamRedactor()
+        usage = {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+        redactor.push(self._chunk("see ```dee"))
+        outputs = redactor.push(self._chunk("", usage=usage))
+        # The usage-only chunk is emitted (emptied content, usage kept) —
+        # exactly one delivery.
+        assert outputs[0][0].usage_metadata == usage
+        leftovers = redactor.finish()
+        assert len(leftovers) == 1
+        flushed = leftovers[0][0]
+        assert flushed.content == "```dee"
+        assert flushed.usage_metadata is None
+        assert flushed.response_metadata == {}
+
+
+class TestProvenance:
+    def test_injected_protocol_message_carries_middleware_provenance(self):
+        # The middleware contract requires injected messages to carry
+        # provenance metadata: inner extension middleware observing the
+        # augmented request (progress scoring wraps outside them) must
+        # classify the protocol instructions as middleware-injected content,
+        # not unprovenanced human input.
+        from deerflow_extension_api import ContentKind, read_provenance
+
+        mw = ProgressScoringMiddleware()
+        runtime = _make_runtime()
+        captured, handler = _capture_handler()
+        mw.wrap_model_call(_make_request([HumanMessage(content="hi")], runtime), handler)
+        injected = captured[0].messages[-1]
+
+        provenance = read_provenance(injected)
+        assert provenance is not None
+        assert provenance.content_kind == ContentKind.MIDDLEWARE_INJECTION
+        assert provenance.producer_kind == "progress_scoring"
+        assert injected.additional_kwargs.get("hide_from_ui") is True
+
+
+class TestConfigBoundaries:
+    def test_repetition_threshold_of_one_is_rejected(self):
+        # 1 - distinct/total is strictly below 1 for any non-empty window and
+        # the policy compares strictly, so 1.0 could never fire.
+        with pytest.raises(ValueError):
+            ProgressScoringConfig(repetition_threshold=1.0)

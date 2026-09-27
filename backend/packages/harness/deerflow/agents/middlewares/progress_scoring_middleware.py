@@ -53,14 +53,17 @@ Division of labor with the existing guards:
 
 The evaluation block is hidden at every boundary, not just in graph state:
 ``after_model`` parses and strips it from the persisted AIMessage; the run
-journal strips it from ``llm.ai.response`` events; and
+journal strips it from ``llm.ai.response`` events and the run summary; and
 :class:`ProgressEvalStreamRedactor` (wired into the run worker's live
-``messages`` stream) removes it from token chunks, which are published before
-``after_model`` ever runs. The injected protocol instructions themselves ride
-on a transient ``hide_from_ui`` HumanMessage, so the journal's first-human-
-input scan cannot mistake them for the user's request. The presentation-side
-redaction is gated on the feature flag: a literal fence a user asked the model
-to quote must not be redacted with the feature disabled.
+``messages`` stream *and* the embedded client's stream) removes it from
+token chunks, which are published before ``after_model`` ever runs. The
+injected protocol instructions themselves ride on a transient
+``hide_from_ui`` HumanMessage stamped with middleware provenance, so the
+journal's first-human-input scan cannot mistake them for the user's request
+and inner extension middleware classifies them as injected content. The
+presentation-side redaction is gated on the feature flag: a literal fence a
+user asked the model to quote must not be redacted with the feature
+disabled.
 
 A model that stops emitting the block cannot silently disable the guard:
 after ``noncompliance_threshold`` consecutive tool-result steps without a
@@ -89,6 +92,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, override
 
+from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
@@ -724,7 +728,10 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
         backward scan for the first persistable user message cannot mistake
         this synthetic prompt for the run's human input (it is appended last,
         so without the marker it would always win that scan on the first
-        lead-agent call).
+        lead-agent call). It also carries the provenance stamp the middleware
+        contract requires for injected messages, so inner extension
+        middleware observing the augmented request classifies it as
+        middleware-injected content rather than unprovenanced human input.
         """
         parts = [_INSTRUCTION_TEXT]
         if hint:
@@ -734,7 +741,10 @@ class ProgressScoringMiddleware(AgentMiddleware[AgentState]):
             HumanMessage(
                 content="\n\n".join(parts),
                 name="progress_scoring",
-                additional_kwargs={"hide_from_ui": True},
+                additional_kwargs={
+                    "hide_from_ui": True,
+                    **provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "progress_scoring"),
+                },
             ),
         ]
         return request.override(messages=new_messages)

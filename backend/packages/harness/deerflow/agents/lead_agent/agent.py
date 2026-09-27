@@ -703,15 +703,6 @@ def build_middlewares(
     if loop_detection_config.enabled:
         middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
 
-    # ProgressScoringMiddleware — LLM-scored progress-aware loop detection
-    # (#2805 MVP, experimental). Replan-first companion to the hard-stop
-    # guards above; enabled only via config.yaml -> progress_scoring.enabled.
-    progress_scoring_config = resolved_app_config.progress_scoring
-    if progress_scoring_config.enabled:
-        from deerflow.agents.middlewares.progress_scoring_middleware import ProgressScoringMiddleware
-
-        middlewares.append(ProgressScoringMiddleware.from_config(progress_scoring_config))
-
     # TokenBudgetMiddleware - enforce per-run token limits
     token_budget_config = resolved_app_config.token_budget
     if token_budget_config.enabled:
@@ -731,6 +722,20 @@ def build_middlewares(
     # empty stop. Keep a terminal fallback for post-tool responses that still have
     # no user-visible text, without adding a graph-level recovery turn.
     middlewares.append(TerminalResponseMiddleware())
+
+    # ProgressScoringMiddleware — LLM-scored progress-aware loop detection
+    # (#2805 MVP, experimental). Replan-first companion to the hard-stop
+    # guards above; enabled only via config.yaml -> progress_scoring.enabled.
+    # Registered AFTER TerminalResponseMiddleware on purpose: after_model
+    # hooks dispatch in reverse registration order, so this must execute
+    # before the terminal guard — an evaluation-block-only response strips
+    # to empty here, and the guard must see that empty (and recover) rather
+    # than accepting the raw, non-empty protocol payload.
+    progress_scoring_config = resolved_app_config.progress_scoring
+    if progress_scoring_config.enabled:
+        from deerflow.agents.middlewares.progress_scoring_middleware import ProgressScoringMiddleware
+
+        middlewares.append(ProgressScoringMiddleware.from_config(progress_scoring_config))
 
     # A provider may also cap the final assistant response at the model output
     # limit. Detector-matched caps stamp stop_reason=model_length_capped,

@@ -43,11 +43,13 @@ class ProgressScoringConfig(BaseModel):
     repetition_threshold: float = Field(
         default=0.6,
         gt=0.0,
-        le=1.0,
+        lt=1.0,
         description=(
             "Share of repeated tool-call keys or result hashes in the window that counts as high repetition. "
             "Default 0.6 so an exactly-repeating window fires on its third step, level with loop_detection.warn_threshold "
-            "and before loop_detection.hard_limit — the replan hint must precede any forced stop."
+            "and before loop_detection.hard_limit — the replan hint must precede any forced stop. Must stay below 1.0: "
+            "the repeated share is 1 - distinct/total, strictly below 1 for any non-empty window, and the policy "
+            "compares strictly, so 1.0 would disable both repetition triggers entirely."
         ),
     )
     noncompliance_threshold: int = Field(
