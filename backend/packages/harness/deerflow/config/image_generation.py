@@ -452,6 +452,14 @@ def effective_image_generation_source(raw_environment: dict[str, str]) -> Litera
     return selected_image_generation_source() or saved_image_generation_source(raw_environment)
 
 
+def image_generation_source_for_run(raw_environment: dict[str, str], *, allows_clarification: bool) -> Literal["managed", "sandbox_environment"] | None:
+    """Use the server image model when an unattended run cannot resolve a choice."""
+    source = effective_image_generation_source(raw_environment)
+    if source is not None or allows_clarification:
+        return source
+    return "sandbox_environment" if image_profile_choice_needed(raw_environment) else None
+
+
 def image_profile_choice_needed(raw_environment: dict[str, str]) -> bool:
     if not managed_image_profiles_enabled():
         return False

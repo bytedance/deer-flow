@@ -1,6 +1,8 @@
 """Offline image-model chat choice regression with synthetic profiles only."""
 
+import re
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain.agents import create_agent
@@ -78,6 +80,140 @@ def test_server_first_web_profile_still_prompts_before_image_execution(image_cho
     monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: pytest.fail("sandbox was acquired"))
     result = generate_image_tool.func(SimpleNamespace(context={}, state={}), "/mnt/user-data/prompt.txt", "/mnt/user-data/outputs/image.png")
     assert result.startswith("Error: IMAGE_PROFILE_CHOICE_REQUIRED")
+
+
+@pytest.mark.parametrize("context", [{"non_interactive": True}, {"channel_name": "github"}, {"is_subagent": True}])
+def test_unattended_image_call_uses_server_before_sandbox_acquisition(image_choice, monkeypatch, context):
+    from deerflow.community.aio_sandbox import aio_sandbox_provider as provider_module
+    from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
+    from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
+    from deerflow.config.image_generation import legacy_image_storage_identity, selected_image_generation_source
+    from deerflow.sandbox import tools as sandbox_tools
+    from deerflow.tools.builtins import image_generation_tool as image_tool
+
+    _, _, environment = image_choice
+    config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}})
+    monkeypatch.setattr(image_tool, "get_app_config", lambda: config)
+    monkeypatch.setattr(provider_module, "get_app_config", lambda: config)
+    provider = object.__new__(AioSandboxProvider)
+    provider._backend = object.__new__(LocalContainerBackend)
+    monkeypatch.setattr(provider, "_base_sandbox_id_for_thread", lambda *_args: "base-thread")
+    selected = []
+
+    def acquire(_runtime):
+        selected.append((selected_image_generation_source(), provider._sandbox_id_for_thread("thread-a", "user-a")))
+        return object()
+
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", acquire)
+    monkeypatch.setattr(sandbox_tools, "is_local_sandbox", lambda _runtime: False)
+    monkeypatch.setattr(sandbox_tools, "_execute_bash_command", lambda _sandbox, command, **_kwargs: re.search(r"__DEERFLOW_IMAGE_OK_[a-f0-9]+__", command).group())
+
+    runtime = SimpleNamespace(context=context, state={})
+    result = image_tool.generate_image_tool.func(runtime, "/mnt/user-data/workspace/prompt.txt", "/mnt/user-data/outputs/image.png")
+    assert result.startswith("Successfully generated")
+    assert selected == [("sandbox_environment", provider._image_config_sandbox_id("base-thread", legacy_image_storage_identity(environment)))]
+    assert selected_image_generation_source() is None
+
+
+@pytest.mark.parametrize("context", [{"non_interactive": True}, {"channel_name": "github"}])
+def test_unattended_runs_skip_chat_card_and_report_server_source(image_choice, monkeypatch, context):
+    from deerflow.tools.builtins import image_generation_tool as image_tool
+
+    _, _, environment = image_choice
+    proposed = AIMessage(content="", tool_calls=[{"name": "generate_image", "args": {}, "id": "call-image"}])
+    assert ClarificationMiddleware().after_model({"messages": [proposed]}, Runtime(context=context)) is None
+
+    config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}})
+    monkeypatch.setattr(image_tool, "get_app_config", lambda: config)
+    assert image_tool.check_image_generation_tool.args == {}
+    status = image_tool.check_image_generation_tool.func(SimpleNamespace(context=context))
+    assert "gemini/new-server-model" in status
+    assert "choose one in chat" not in status
+
+
+def test_graph_injects_runtime_into_unattended_image_status_tool(image_choice, monkeypatch):
+    from deerflow.tools.builtins import image_generation_tool as image_tool
+
+    _, _, environment = image_choice
+    monkeypatch.setattr(image_tool, "get_app_config", lambda: AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}}))
+
+    class Model(BaseChatModel):
+        calls: int = 0
+
+        @property
+        def _llm_type(self):
+            return "synthetic-image-status"
+
+        def bind_tools(self, _tools, **_kwargs):
+            return self
+
+        def _generate(self, _messages, stop=None, run_manager=None, **_kwargs):
+            self.calls += 1
+            message = AIMessage(content="", tool_calls=[{"name": "check_image_generation", "args": {}, "id": "check-image"}]) if self.calls == 1 else AIMessage(content="Done")
+            return ChatResult(generations=[ChatGeneration(message=message)])
+
+    agent = create_agent(model=Model(), tools=[image_tool.check_image_generation_tool])
+    result = agent.invoke({"messages": [HumanMessage(content="Create an image")]}, context={"non_interactive": True})
+    status = next(item for item in result["messages"] if isinstance(item, ToolMessage))
+    assert "gemini/new-server-model" in str(status.content)
+    assert "choose one in chat" not in str(status.content)
+
+
+@pytest.mark.asyncio
+async def test_unattended_async_image_call_binds_server_before_sandbox_helper(image_choice, monkeypatch):
+    from deerflow.config.image_generation import selected_image_generation_source
+    from deerflow.sandbox import tools as sandbox_tools
+    from deerflow.tools.builtins import image_generation_tool as image_tool
+
+    _, _, environment = image_choice
+    monkeypatch.setattr(image_tool, "get_app_config", lambda: AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}}))
+
+    async def acquire_then_run(*_args):
+        assert selected_image_generation_source() == "sandbox_environment"
+        return "synthetic-success"
+
+    monkeypatch.setattr(sandbox_tools, "_run_sync_tool_after_async_sandbox_init", acquire_then_run)
+    result = await image_tool.generate_image_tool.coroutine(SimpleNamespace(context={"non_interactive": True}, state={}), "/mnt/user-data/workspace/prompt.txt", "/mnt/user-data/outputs/image.png")
+    assert result == "synthetic-success"
+    assert selected_image_generation_source() is None
+
+
+@pytest.mark.asyncio
+async def test_scheduled_run_binds_server_image_source_before_agent_stream(image_choice, monkeypatch):
+    from deerflow.community.aio_sandbox import aio_sandbox_provider as provider_module
+    from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
+    from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
+    from deerflow.config.image_generation import legacy_image_storage_identity, selected_image_generation_source
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.worker import RunContext, run_agent
+
+    _, _, environment = image_choice
+    config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}})
+    monkeypatch.setattr(provider_module, "get_app_config", lambda: config)
+    provider = object.__new__(AioSandboxProvider)
+    provider._backend = object.__new__(LocalContainerBackend)
+    monkeypatch.setattr(provider, "_base_sandbox_id_for_thread", lambda *_args: "base-thread")
+    captured = []
+
+    class Agent:
+        async def astream(self, _input, **_kwargs):
+            captured.append((selected_image_generation_source(), provider._sandbox_id_for_thread("thread-a", "user-a")))
+            yield {"messages": []}
+
+    manager = RunManager()
+    record = await manager.create("thread-a")
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None, app_config=config),
+        agent_factory=lambda *, config: Agent(),
+        graph_input={},
+        config={"context": {"non_interactive": True}},
+    )
+    assert captured == [("sandbox_environment", provider._image_config_sandbox_id("base-thread", legacy_image_storage_identity(environment)))]
+    assert selected_image_generation_source() is None
 
 
 @pytest.mark.parametrize("option_id,expected", [("option-1", "managed"), ("option-2", "sandbox_environment")])
