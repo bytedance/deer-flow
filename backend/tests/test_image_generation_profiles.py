@@ -234,6 +234,49 @@ def test_saved_default_can_switch_between_two_openai_model_ids(store):
     assert resolve_image_generation_profile(environment)[0].model == "qwen-image-3.0"
 
 
+def test_web_edit_matching_server_model_at_other_endpoint_requires_new_choice(store, monkeypatch):
+    from app.gateway.routers import image_generation as router
+    from deerflow.config.image_generation import ImageGenerationDefaultStore, image_profile_choice_needed, legacy_image_storage_identity, saved_image_generation_source
+    from deerflow.sandbox import tools as sandbox_tools
+    from deerflow.tools.builtins import image_generation_tool as image_tool
+
+    environment = {
+        "IMAGE_GENERATION_PROVIDER": "openai",
+        "IMAGE_GENERATION_API_KEY": "synthetic-server-key",
+        "IMAGE_GENERATION_BASE_URL": "https://endpoint-a.example/v1",
+        "IMAGE_GENERATION_MODEL": "model-b",
+    }
+    config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}})
+    monkeypatch.setattr(router, "get_app_config", lambda: config)
+    monkeypatch.setattr(image_tool, "get_app_config", lambda: config)
+    web = store.save(profile(model="model-c", base_url="https://endpoint-b.example/v1"), expected_revision=None)
+    ImageGenerationDefaultStore().save(
+        "sandbox_environment",
+        target_identity=legacy_image_storage_identity(environment),
+        expected_revision=None,
+        environment=environment,
+    )
+    assert saved_image_generation_source(environment) == "sandbox_environment"
+
+    updated = router._save(
+        router.SaveImageProfileRequest(
+            config=profile(model="model-b", base_url="https://endpoint-b.example/v1", api_key=None),
+            expected_revision=web.revision,
+        )
+    )
+    assert updated["model"] == "model-b"
+    assert saved_image_generation_source(environment) is None
+    assert image_profile_choice_needed(environment) is True
+    listed = router._list_profiles()
+    assert listed["status"]["choice_required"] is True
+    assert {item["source"] for item in listed["profiles"]} == {"config", "managed"}
+    assert all(item["conflict"] for item in listed["profiles"])
+
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: pytest.fail("sandbox was acquired"))
+    result = image_tool.generate_image_tool.func(SimpleNamespace(context={}, state={}), "/mnt/user-data/prompt.txt", "/mnt/user-data/outputs/image.png")
+    assert result.startswith("Error: IMAGE_PROFILE_CHOICE_REQUIRED")
+
+
 def test_admin_save_rejects_duplicate_server_model_id(store, monkeypatch):
     from app.gateway.routers import image_generation as router
 
