@@ -11,6 +11,12 @@ FIFOs remain rejected.
 
 **Context**: Capture after validation, before setup. Keep genuine replies, even hidden clarifications; exclude framework state and unpaired calls. Mark unserializable media as omitted.
 
+Native document snapshots neutralize reserved tags and user-input boundary markers in
+`title`, `context`, text-source `data`, content-source text, and citation prose before
+capture. Hidden snapshot messages skip input sanitization; preserve native block
+structure, citation references, and opaque base64/URL/image sources without decoding
+or rewriting them.
+
 `task` preserves the host incarnation, including null/missing/invalid values; never recapture it.
 
 **Direct runtime shutdown**: `SubagentRuntime.stop()` holds its lifecycle lock until service shutdown finishes. Drain without a timeout so owned work cannot detach; propagate the first caller cancellation, chaining any service failure. Cover terminal outcomes and repeated cancellation in `tests/test_subagent_runtime.py`.
