@@ -140,11 +140,7 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
         # registration rides along in the same update, and settling the scan as
         # "quiet" on a transient miss would lose the consumption mark forever.
         registry_items: list[Any] = [*(state.get("tool_artifacts") or []), *(pending_entries or [])]
-        if not registry_items:
-            return None
         handle_map: dict[str, ArtifactEntry] = {entry["handle"]: cast(ArtifactEntry, entry) for entry in registry_items if isinstance(entry, dict)}
-        if not handle_map:
-            return None
 
         messages = state.get("messages") or []
         consumed_updates: list[ArtifactEntry] = []
@@ -179,9 +175,13 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
                     updated: dict[str, Any] = {**entry, "consumed_by": [*consumed, tool_call_id]}
                     consumed_updates.append(cast(ArtifactEntry, updated))
                     handle_map[handle] = consumed_updates[-1]
-                if not had_unresolved:
-                    processed.add(quiet_key)
-                    newly_processed.append(quiet_key)
+                # A missing entry may arrive in the next capture round. Retry
+                # once, then settle permanently missing/evicted handles. Both
+                # attempts are checkpointed, so restarts cannot reset the bound.
+                retry_key = "retry:" + quiet_key
+                settled_key = quiet_key if not had_unresolved or retry_key in processed else retry_key
+                processed.add(settled_key)
+                newly_processed.append(settled_key)
 
         update: dict[str, Any] = {}
         if consumed_updates:

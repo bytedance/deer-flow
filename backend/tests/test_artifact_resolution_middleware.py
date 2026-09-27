@@ -92,23 +92,22 @@ class TestResolution:
 
         assert seen["args"]["files"][0]["path"] == "/mnt/user-data/outputs/report.md"
 
-    def test_unknown_handle_left_untouched(self):
+    def test_unknown_handle_returns_error(self):
         middleware = ArtifactResolutionMiddleware()
         request = _request(
             {"name": "read_file", "args": {"path": "art_00000000"}, "id": "call_2", "type": "tool_call"},
             [_artifact("thread_1", 0, "/mnt/user-data/outputs/report.md")],
         )
-        seen = {}
 
         def handler(req):
-            seen["args"] = req.tool_call["args"]
-            return ToolMessage(content="ok", tool_call_id="call_2")
+            raise AssertionError("Unknown handle must not reach the tool")
 
-        middleware.wrap_tool_call(request, handler)
+        result = middleware.wrap_tool_call(request, handler)
+        assert result.status == "error"
+        assert "art_00000000" in result.content
+        assert request.tool_call["args"] == {"path": "art_00000000"}
 
-        assert seen["args"] == {"path": "art_00000000"}
-
-    def test_no_artifacts_skips_resolution(self):
+    def test_empty_registry_rejects_handles_but_preserves_concrete_args(self):
         middleware = ArtifactResolutionMiddleware()
         request = _request({"name": "read_file", "args": {"path": "art_00000000"}, "id": "call_2", "type": "tool_call"}, [])
         called = []
@@ -118,9 +117,10 @@ class TestResolution:
             return ToolMessage(content="ok", tool_call_id="call_2")
 
         result = middleware.wrap_tool_call(request, handler)
-
-        assert called[0] is request
-        assert result.content == "ok"
+        assert not called and result.status == "error"
+        concrete = _request({"name": "read_file", "args": {"path": "/tmp/a.txt"}, "id": "call_2"}, [])
+        assert middleware.wrap_tool_call(concrete, handler).content == "ok"
+        assert called == [concrete]
 
     def test_disabled_config_skips_resolution(self):
         middleware = ArtifactResolutionMiddleware(config=ToolArtifactConfig(resolve_handles_in_args=False))

@@ -305,8 +305,8 @@ def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatc
 
 
 def test_artifact_middlewares_ordering_in_runtime_chain(monkeypatch: pytest.MonkeyPatch):
-    # ArtifactResolutionMiddleware must sit inner of ToolProgressMiddleware and
-    # outer of ToolErrorHandlingMiddleware (resolved args reach the tool).
+    # Resolution precedes authorization, auditing and write/progress gates;
+    # all policy layers inspect the same concrete arguments as the tool.
     # ArtifactCaptureMiddleware is position-independent in the wrap chain — it
     # is a `before_model` hook reading state messages, not a tool wrapper — so
     # the assertion below only pins its assembly slot, not a behavioral
@@ -342,6 +342,9 @@ def test_artifact_middlewares_ordering_in_runtime_chain(monkeypatch: pytest.Monk
     capture_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ArtifactCaptureMiddleware))
     error_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware))
     assert resolution_idx < error_idx < capture_idx, f"expected resolution < error < capture, got: {names}"
+    for name in ("FakeSandboxAuditMiddleware", "ReadBeforeWriteMiddleware", "ToolProgressMiddleware"):
+        gate_idx = next(i for i, m in enumerate(middlewares) if type(m).__name__ == name)
+        assert resolution_idx < gate_idx, names
 
 
 def test_artifact_capture_absent_when_disabled(monkeypatch: pytest.MonkeyPatch):

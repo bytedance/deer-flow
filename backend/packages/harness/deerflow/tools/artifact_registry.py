@@ -17,6 +17,7 @@ import json
 import re
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from langchain_core.messages import ToolMessage
 
@@ -49,18 +50,34 @@ _REF_TRAILING_NOISE_CHARS = ".,;:)]}\"'`"
 # `data:`/`blob:` URIs can carry arbitrarily large embedded payloads (MCP
 # embedded resources) that must never enter thread state, tool args, or crowd
 # out the render budget; other schemes are equally unresolvable downstream.
-_ACCEPTED_URL_SHAPES = ("http://", "https://", "/")
-_REJECTED_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
 
 _ARTIFACT_RENDER_CHAR_BUDGET = 3000
+_STRUCTURED_DATA_MAX_BYTES = 4096
+_STRUCTURED_MAX_NODES = 1024
+_STRUCTURED_MAX_DEPTH = 32
+_WINDOWS_ABSOLUTE_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 def _is_referenceable_url(url: str) -> bool:
     """Accept http(s) URLs and absolute paths; reject any other URI scheme
     (including protocol-relative `//host` forms)."""
-    if url.startswith("//"):
+    if not url or len(url) > _STRUCTURED_DATA_MAX_BYTES or url.startswith("//"):
         return False
-    return not _REJECTED_SCHEME_RE.match(url) or url.startswith(_ACCEPTED_URL_SHAPES)
+    try:
+        if len(url.encode("utf-8")) > _STRUCTURED_DATA_MAX_BYTES:
+            return False
+    except UnicodeError:
+        return False
+    if url.startswith(("http://", "https://")):
+        try:
+            return bool(urlsplit(url).netloc) and not any(char.isspace() for char in url)
+        except ValueError:
+            return False
+    return url.startswith("/") or bool(_WINDOWS_ABSOLUTE_PATH_RE.match(url))
+
+
+def _is_referenceable_task_id(value: str) -> bool:
+    return bool(value) and len(value) <= 256 and not value.startswith(("data:", "blob:", "//")) and not any(char.isspace() for char in value)
 
 
 def generate_handle(thread_id: str, tool_call_id: str, call_index: int, ref_ordinal: int = 0, *, occurrence_id: str | None = None) -> str:
@@ -115,7 +132,7 @@ def _detect_refs_in_text(text: str) -> list[dict[str, str]]:
     seen: set[str] = set()
     for match in _SANDBOX_PATH_PATTERN.finditer(text):
         raw = match.group(0).rstrip(_REF_TRAILING_NOISE_CHARS)
-        if raw in seen:
+        if raw in seen or not _is_referenceable_url(raw):
             continue
         seen.add(raw)
         refs.append(
@@ -127,7 +144,7 @@ def _detect_refs_in_text(text: str) -> list[dict[str, str]]:
         )
     for match in _REMOTE_FILE_URL_PATTERN.finditer(text):
         raw = match.group(0).rstrip(_REF_TRAILING_NOISE_CHARS)
-        if raw in seen:
+        if raw in seen or not _is_referenceable_url(raw):
             continue
         seen.add(raw)
         refs.append(
@@ -140,28 +157,76 @@ def _detect_refs_in_text(text: str) -> list[dict[str, str]]:
     return refs
 
 
-def _collect_structured_refs(value: Any, found: list[tuple[str, str]]) -> None:
-    """Recursively collect ``(key, string_value)`` pairs under known ref keys."""
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if isinstance(key, str) and (key in _STRUCTURED_REF_KEYS or key in _STRUCTURED_TASK_KEYS):
-                if isinstance(item, str):
-                    found.append((key, item))
-                elif isinstance(item, list):
-                    for element in item:
-                        if isinstance(element, str):
-                            found.append((key, element))
-                        else:
-                            _collect_structured_refs(element, found)
+def _collect_structured_refs(value: Any, found: list[tuple[str, str]]) -> bool:
+    """Collect reference keys with a bounded traversal; reject oversized shapes."""
+    pending = [(None, value, 0)]
+    visited = 0
+    while pending:
+        key, item, depth = pending.pop()
+        visited += 1
+        if visited > _STRUCTURED_MAX_NODES or depth > _STRUCTURED_MAX_DEPTH:
+            return False
+        if isinstance(item, (dict, list)) and len(item) + visited + len(pending) > _STRUCTURED_MAX_NODES:
+            return False
+        if isinstance(item, dict):
+            pending.extend((child_key, child, depth + 1) for child_key, child in reversed(item.items()))
+        elif isinstance(item, list):
+            pending.extend((key, child, depth + 1) for child in reversed(item))
+        elif isinstance(item, str) and (key in _STRUCTURED_REF_KEYS or key in _STRUCTURED_TASK_KEYS):
+            found.append((key, item))
+    return True
+
+
+def _serialize_bounded_data(value: Any) -> str | None:
+    """Keep complete JSON only when its shape and UTF-8 size fit the budget.
+
+    Preflight strings and collection sizes before encoding, so an enormous
+    unknown MCP payload cannot trigger unbounded json.dumps on the agent loop.
+    """
+    if not value:
+        return None
+    pending = [(value, 0)]
+    visited = 0
+    estimated_bytes = 0
+    while pending:
+        item, depth = pending.pop()
+        visited += 1
+        if visited > _STRUCTURED_MAX_NODES or depth > _STRUCTURED_MAX_DEPTH:
+            return None
+        if isinstance(item, str):
+            if len(item) > _STRUCTURED_DATA_MAX_BYTES:
+                return None
+            try:
+                estimated_bytes += len(item.encode("utf-8")) + 2
+            except UnicodeError:
+                return None
+        elif isinstance(item, (dict, list)):
+            if len(item) + visited + len(pending) > _STRUCTURED_MAX_NODES:
+                return None
+            estimated_bytes += 2 + len(item)
+            if isinstance(item, dict):
+                if any(not isinstance(key, str) for key in item):
+                    return None
+                pending.extend((child, depth + 1) for child in item.values())
+                pending.extend((key, depth + 1) for key in item)
             else:
-                _collect_structured_refs(item, found)
-    elif isinstance(value, list):
-        for item in value:
-            _collect_structured_refs(item, found)
+                pending.extend((child, depth + 1) for child in item)
+        elif isinstance(item, int):
+            if item.bit_length() > _STRUCTURED_DATA_MAX_BYTES:
+                return None
+        elif item is not None and not isinstance(item, float):
+            return None
+        if estimated_bytes > _STRUCTURED_DATA_MAX_BYTES:
+            return None
+    try:
+        encoded = json.dumps(value, ensure_ascii=False)
+        return encoded if len(encoded.encode("utf-8")) <= _STRUCTURED_DATA_MAX_BYTES else None
+    except (ValueError, TypeError, UnicodeError):
+        return None
 
 
 def _display_name_for_ref(ref: str) -> str:
-    return ref.split("/")[-1] or ref
+    return ref.replace("\\", "/").split("/")[-1] or ref
 
 
 class _EntrySink:
@@ -207,7 +272,8 @@ def extract_artifacts_from_result(
     1. ``ToolMessage.artifact["structured_content"]`` (MCP ``structuredContent``):
        string values under known keys (``file``/``path``/``url``/``task_id``/...)
        become concrete ``file``/``task`` entries; when no known key matches, the
-       whole payload becomes one untruncated JSON ``data`` entry.
+       whole payload becomes a complete JSON ``data`` entry only within the
+       4096-byte, 1024-node and 32-level limits. Empty/oversized payloads are skipped.
     2. ``content`` blocks of type ``file`` / ``image`` with a URL source become
        ``file`` / ``image`` entries.
     3. ``content`` text blocks and plain-string results are scanned
@@ -229,28 +295,18 @@ def extract_artifacts_from_result(
     artifact = result.artifact
     if artifact is not None and isinstance(artifact, dict):
         structured = artifact.get("structured_content")
-        if structured is not None:
+        if structured:
             found: list[tuple[str, str]] = []
-            _collect_structured_refs(structured, found)
-            if found:
+            if _collect_structured_refs(structured, found):
                 for key, value in found:
-                    if not _is_referenceable_url(value):
+                    is_task = key in _STRUCTURED_TASK_KEYS
+                    if not (_is_referenceable_task_id(value) if is_task else _is_referenceable_url(value)):
                         continue
-                    entries.append(
-                        sink.add(
-                            artifact_type="task" if key in _STRUCTURED_TASK_KEYS else "file",
-                            display_name=_display_name_for_ref(value),
-                            real_ref=value,
-                        )
-                    )
-            else:
-                entries.append(
-                    sink.add(
-                        artifact_type="data",
-                        display_name=f"{tool_name} structured result",
-                        real_ref=json.dumps(structured, ensure_ascii=False),
-                    )
-                )
+                    entries.append(sink.add(artifact_type="task" if is_task else "file", display_name=_display_name_for_ref(value), real_ref=value))
+                if not entries and not any(value.startswith(("data:", "blob:")) for _, value in found):
+                    encoded = _serialize_bounded_data(structured)
+                    if encoded is not None:
+                        entries.append(sink.add(artifact_type="data", display_name=f"{tool_name} structured result", real_ref=encoded))
 
     content = result.content
     if isinstance(content, str):
@@ -275,7 +331,7 @@ def extract_artifacts_from_result(
                 entries.append(
                     sink.add(
                         artifact_type="file" if block_type == "file" else "image",
-                        display_name=url.split("/")[-1] or url,
+                        display_name=_display_name_for_ref(url),
                         real_ref=url,
                         mime_type=source.get("mime_type") if isinstance(source.get("mime_type"), str) else None,
                     )
@@ -307,6 +363,11 @@ def render_artifact_registry(entries: list[ArtifactEntry], *, max_chars: int = _
         "## Available artifact handles",
         "These are persistent handles for tool-produced artifacts. Reference them by handle in tool arguments; they resolve automatically.",
     ]
+    lines.append("Handles are local to this agent; task subagents do not share this registry. Return concrete references in delegated reports, not local handles.")
+    omitted_marker = f"... {len(entries)} more artifact handles not shown"
+    if len("\n".join([*lines, omitted_marker])) > max_chars:
+        return omitted_marker[: max(0, max_chars)]
+    shown = 0
     for entry in reversed(entries):
         handle = escape(entry.get("handle", ""))
         artifact_type = escape(entry.get("artifact_type", ""))
@@ -317,7 +378,13 @@ def render_artifact_registry(entries: list[ArtifactEntry], *, max_chars: int = _
         mime_suffix = f" ({escape(str(mime))})" if mime else ""
         tool_name = escape(entry.get("tool_name", ""))
         line = f"- `{handle}` -> {artifact_type}: {display_name}{mime_suffix} [{status}] (from {tool_name})"
-        if len("\n".join([*lines, line])) > max_chars:
+        remaining = len(entries) - shown - 1
+        marker = f"... {remaining} more artifact handles not shown"
+        candidate = [*lines, line, *([marker] if remaining else [])]
+        if len("\n".join(candidate)) > max_chars:
             break
         lines.append(line)
+        shown += 1
+    if shown < len(entries):
+        lines.append(f"... {len(entries) - shown} more artifact handles not shown")
     return "\n".join(lines)

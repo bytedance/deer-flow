@@ -280,6 +280,13 @@ def _build_runtime_middlewares(
 
         tail.append(ToolReceiptMiddleware(render_mode=receipts_render_mode))
 
+    # Resolve handles before any policy inspects arguments. Receipts enclose
+    # this layer too, so unknown-handle errors remain part of the ledger.
+    if app_config.tool_artifacts.enabled and app_config.tool_artifacts.resolve_handles_in_args:
+        from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+
+        tail.append(ArtifactResolutionMiddleware(config=app_config.tool_artifacts))
+
     # Authorization uses the existing GuardrailMiddleware so execution-time
     # deny, audit, and fail-closed handling stay in one proven implementation.
     # It is appended before an explicit guardrail provider, making authorization
@@ -354,16 +361,6 @@ def _build_runtime_middlewares(
         from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
 
         tail.append(ToolProgressMiddleware.from_config(tool_progress_config))
-
-    # Artifact handle resolution runs inner of ToolProgressMiddleware so blocked
-    # or failing tools never resolve handles unnecessarily, and outer of
-    # ToolErrorHandlingMiddleware so the resolved args are what actually reaches
-    # the tool. It mutates only the tool-call args (resolving `art_xxxxxxxx`
-    # handles to real references), never the message history.
-    if app_config.tool_artifacts.enabled and app_config.tool_artifacts.resolve_handles_in_args:
-        from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
-
-        tail.append(ArtifactResolutionMiddleware(config=app_config.tool_artifacts))
 
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
     # Artifact capture is a `before_model` hook that reads state messages, so

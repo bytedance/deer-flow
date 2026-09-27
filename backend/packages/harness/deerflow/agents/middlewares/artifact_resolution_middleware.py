@@ -4,7 +4,8 @@ The model references artifacts by short handles (``art_xxxxxxxx``). Before a
 tool executes, this middleware replaces those handles in the tool-call arguments
 with the real reference (path, URL, task id) recorded in
 ``ThreadState.tool_artifacts``. Handles may appear bare, inside backticks, or
-embedded in a longer string; unknown handles are left untouched.
+embedded in a longer string. Unknown or expired handles return a structured
+error without executing the tool.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result
 from deerflow.config.tool_artifact_config import ToolArtifactConfig
 
 _HANDLE_PATTERN = r"(?:`(art_[0-9a-f]{8})`|(?<!\w)(art_[0-9a-f]{8})(?!\w))"
@@ -41,7 +43,7 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
         if not (self._config.enabled and self._config.resolve_handles_in_args):
             return handler(request)
         resolved = self._resolve_request(request)
-        return handler(resolved)
+        return resolved if isinstance(resolved, ToolMessage) else handler(resolved)
 
     @override
     async def awrap_tool_call(
@@ -52,9 +54,9 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
         if not (self._config.enabled and self._config.resolve_handles_in_args):
             return await handler(request)
         resolved = self._resolve_request(request)
-        return await handler(resolved)
+        return resolved if isinstance(resolved, ToolMessage) else await handler(resolved)
 
-    def _resolve_request(self, request: ToolCallRequest) -> ToolCallRequest:
+    def _resolve_request(self, request: ToolCallRequest) -> ToolCallRequest | ToolMessage:
         args = request.tool_call.get("args")
         if not isinstance(args, dict):
             return request
@@ -63,16 +65,39 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
         artifacts = state.get("tool_artifacts") or []
         handle_map: dict[str, str] = {}
         for entry in artifacts:
-            if isinstance(entry, dict) and entry.get("handle"):
-                handle_map[str(entry["handle"])] = str(entry.get("real_ref") or "")
+            if isinstance(entry, dict) and entry.get("handle") and isinstance(entry.get("real_ref"), str) and entry["real_ref"]:
+                handle_map[str(entry["handle"])] = entry["real_ref"]
 
-        if not handle_map:
-            return request
+        unknown = self._unknown_handles(args, handle_map)
+        if unknown:
+            missing = ", ".join(sorted(unknown)[:10])
+            if len(unknown) > 10:
+                missing += f" (and {len(unknown) - 10} more)"
+            available = [h for h in handle_map if re.fullmatch(r"art_[0-9a-f]{8}", h)]
+            current = ", ".join(available[-10:]) or "none"
+            message = ToolMessage(
+                content=(
+                    f"Error: Unknown or expired artifact handle(s): {missing}. Handles are local to this agent. Current handles (up to 10): {current}. Use a current handle or obtain a new concrete reference; do not guess a replacement."
+                ),
+                name=str(request.tool_call.get("name") or "unknown"),
+                tool_call_id=str(request.tool_call.get("id") or "missing_tool_call_id"),
+                status="error",
+            )
+            return normalize_tool_result(message, tool_call_id=message.tool_call_id)
 
         resolved_args = self._resolve_value(args, handle_map)
         if resolved_args == args:
             return request
         return request.override(tool_call={**request.tool_call, "args": resolved_args})
+
+    def _unknown_handles(self, value, handle_map: dict[str, str]) -> set[str]:
+        if isinstance(value, str):
+            return {handle for match in self._handle_re.finditer(value) if (handle := match.group(1) or match.group(2)) not in handle_map}
+        if isinstance(value, dict):
+            value = list(value.values())
+        if isinstance(value, list):
+            return set().union(*(self._unknown_handles(item, handle_map) for item in value))
+        return set()
 
     def _resolve_value(self, value, handle_map: dict[str, str]):
         if isinstance(value, str):
