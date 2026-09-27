@@ -553,7 +553,10 @@ An optional, disabled `research_audit` stdio entry provides report coverage,
 provenance, and citation-integrity checks through a commit-pinned open-source
 MCP server. Pair it with the `research-report-audit` public skill only when a
 user explicitly requests an audited report. The skill saves the structured
-result as `<report-stem>.audit.json` and always delivers the report: failed
+result as `<report-stem>.audit.json`. Coverage counts assign each examined item
+to one primary claim or to `unjudged`; shared sources remain cited under every
+claim they support without inflating the examined-item tally. The skill always
+delivers the report: failed
 audits are labeled `FAIL`, unavailable tooling is `UNAUDITED`, and uncertain
 network verification is `DEGRADED`. This is an opt-in model-driven workflow,
 not an automatic post-run hook. `PASS` and per-claim `verified` labels do not

@@ -19,28 +19,38 @@ hook for every report.
 
 ## Build The Audit Input
 
-Construct one `audit-input-v1` JSON object in memory:
+Construct one `audit-input-v1` JSON object in memory from the actual research
+record. This synthetic example assigns paper `p1` primarily to `c1` for coverage
+accounting, while retaining its support for both claims:
 
     {
-      "title": "Report title",
+      "title": "Synthetic overlapping-claims example",
       "source_of_set": {
-        "method": "api | script | filesystem | html-page",
-        "description": "How and when the complete candidate set was obtained"
+        "method": "script",
+        "description": "A synthetic collection script returned one candidate paper, p1"
       },
-      "coverage": { "examined": 0, "total": 0 },
-      "clusters": [{ "name": "cluster", "count": 0 }],
-      "filters": [{ "criteria": "documented rule", "removed": 0 }],
+      "coverage": { "examined": 1, "total": 1 },
+      "clusters": [],
+      "filters": [],
       "claims": [
         {
           "id": "c1",
           "count": 1,
-          "text": "Atomic report claim",
+          "text": "Paper p1 describes method A.",
           "sources": [
-            { "name": "source name", "url": "https://example.com" }
+            { "name": "p1", "url": "https://example.com/papers/p1" }
+          ]
+        },
+        {
+          "id": "c2",
+          "count": 0,
+          "text": "Paper p1 evaluates on dataset B.",
+          "sources": [
+            { "name": "p1", "url": "https://example.com/papers/p1" }
           ]
         }
       ],
-      "unjudged": ["stable item identifier"]
+      "unjudged": []
     }
 
 Apply these evidence rules:
@@ -49,8 +59,20 @@ Apply these evidence rules:
   make a gate pass. If the complete-set size is unknown, say that the report
   cannot establish coverage and preserve the missing fact in the delivered
   audit status.
-- `claims[].count` accounts for examined items covered by that claim. Counts
-  plus `unjudged` must reconcile to `coverage.examined` without double-counting.
+- Keep a ledger in the collection notes mapping each examined item's stable
+  identifier to exactly one primary claim ID or to `unjudged`, never both.
+  If an item supports several claims, use the first supported claim in report
+  order as its primary assignment and record that choice in the ledger.
+- `claims[].count` is the number of items primarily assigned to that claim,
+  not its supporting-item or citation count. Set it explicitly, including `0`
+  for a claim whose supporting items are all assigned elsewhere. Preserve
+  every claim and its supporting `sources`, even when its primary count is zero;
+  zero does not mean unsupported. Do not use these counts to describe evidence
+  strength or source independence.
+- Derive counts from the ledger so `sum(claims[].count) + len(unjudged)` equals
+  `coverage.examined`. Each unjudged identifier appears once and is excluded
+  from all primary claim counts. The example reconciles as `1 + 0 + 0 = 1`;
+  assigning `count: 1` to both claims would count paper `p1` twice.
 - `clusters` are optional, but declared cluster counts must sum to the examined
   count. Do not create artificial clusters merely to satisfy the equation.
 - Record excluded candidates in `filters`. Record examined items that could not

@@ -140,6 +140,16 @@ structured `audit-input-v1` from the research record, calls the tool no more
 than twice, and writes the returned `audit-output-v1` beside the report as
 `<report-stem>.audit.json`.
 
+For coverage accounting, the Skill records each examined item's stable ID in
+the collection notes under exactly one primary claim or under `unjudged`.
+When an item supports multiple claims, the first supported claim in report
+order is its primary assignment. `claims[].count` counts these disjoint primary
+assignments, not all supporting items or citations. All claims retain their
+supporting sources, including a claim with `count: 0` because its supporting
+items are assigned elsewhere. Thus one paper supporting two claims contributes
+counts `1` and `0`, while both claims cite that paper. The primary counts plus
+the number of unique unjudged items must equal `coverage.examined`.
+
 This integration is model-driven and opt-in. It is not a Gateway task-lifecycle
 hook and does not guarantee that every report is audited. A valid audit verdict
 of `FAIL` is returned as structured business output, not an MCP error. If the

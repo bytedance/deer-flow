@@ -85,6 +85,33 @@ def test_research_report_audit_skill_pins_workflow_contract() -> None:
     assert "DEGRADED" in text
 
 
+def _skill_example() -> dict:
+    text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    start = text.index("\n    {") + len("\n    ")
+    return json.JSONDecoder().raw_decode(text, start)[0]
+
+
+def test_audit_example_reconciles_examined_items() -> None:
+    report = _skill_example()
+    examined = report["coverage"]["examined"]
+    assert 0 < examined <= report["coverage"]["total"]
+    assert all(type(claim["count"]) is int and claim["count"] >= 0 for claim in report["claims"])
+    assert sum(claim["count"] for claim in report["claims"]) + len(report["unjudged"]) == examined
+
+
+def test_audit_example_preserves_overlapping_claim_support() -> None:
+    report = _skill_example()
+    primary, secondary = report["claims"]
+    assert report["coverage"] == {"examined": 1, "total": 1}
+    assert report["unjudged"] == []
+    assert primary["id"] != secondary["id"]
+    assert primary["text"] != secondary["text"]
+    assert (primary["count"], secondary["count"]) == (1, 0)
+    assert len(primary["sources"]) == 1
+    assert primary["sources"] == secondary["sources"]
+    assert primary["sources"][0]["url"]
+
+
 @pytest.mark.parametrize("message", ["Write a report on solar power", "请写一份行业报告", "Add citations to this paragraph"])
 def test_research_audit_does_not_auto_promote_for_ordinary_requests(message: str) -> None:
     @as_tool
