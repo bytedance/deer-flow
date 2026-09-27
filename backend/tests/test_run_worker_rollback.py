@@ -4590,7 +4590,12 @@ async def test_edit_replay_journal_unknown_restores_checkpoint_content(mode, sta
         "thread-1",
         metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
     )
-    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    order: list[str] = []
+    bridge = SimpleNamespace(
+        publish=AsyncMock(side_effect=lambda _run_id, event_type, _payload=None: order.append(f"publish:{event_type}")),
+        publish_end=AsyncMock(side_effect=lambda _run_id: order.append("publish_end")),
+        cleanup=AsyncMock(),
+    )
     event_store = FailingBatchStore()
 
     class JournalingAgent:
@@ -4622,6 +4627,9 @@ async def test_edit_replay_journal_unknown_restores_checkpoint_content(mode, sta
     assert record.status == RunStatus.error
     delivery = [event for event in await event_store.list_events("thread-1", record.run_id) if event["event_type"] == "run.delivery"]
     assert delivery == []
+    # The restored values frame must precede the end frame.
+    assert "publish:values" in order
+    assert order.index("publish:values") < order.index("publish_end")
 
 
 @pytest.mark.anyio
