@@ -631,6 +631,8 @@ Text results retain their original representation, including large numeric IDs a
 Copy actions copy only the displayed preview. This is a frontend view of data
 already received by the browser, without an additional secret-redaction layer.
 
+Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Detected file URLs preserve their query strings and fragments. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
+
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 Durable HTTP/SSE task status and cancellation calls select configured `user_auth` credentials using the persisted task owner, including after restart; per-request secrets are not retained for background calls. If a request-scoped credential overrides submit authentication, both credentials must authorize access to the same remote task.
@@ -982,7 +984,7 @@ If you are using a self-hosted Langfuse instance, set `LANGFUSE_BASE_URL` to you
 - `session_id` = LangGraph `thread_id` — groups every trace of the same conversation
 - `user_id` = effective user from `get_effective_user_id()` (falls back to `default` in no-auth mode)
 - `trace_name` = assistant id (defaults to `lead-agent`)
-- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (omitted when not set)
+- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (built-in Gateway lead-agent and embedded client runs tag the selected model after default or fallback resolution; custom graph factories may only provide the requested model; the environment tag is omitted when unset)
 - `metadata.deerflow_trace_id` = DeerFlow request correlation id, matching `X-Trace-Id` when request trace correlation is enabled
 
 These are injected into `RunnableConfig.metadata` at the graph invocation root for both the gateway path (`runtime/runs/worker.py::run_agent`) and the embedded path (`client.py::DeerFlowClient.stream`), so any LangChain-compatible callback can read them. Set `DEER_FLOW_ENV` (or `ENVIRONMENT`) to tag traces by deployment environment.
@@ -1073,6 +1075,8 @@ Skills are loaded progressively — only when the task needs them, not all at on
 When deferred skill discovery is enabled, `describe_skill` ranks installed skills by bounded, Unicode-normalized intent-term coverage across names and descriptions. Natural multi-term requests can therefore find a relevant skill without requiring one exact phrase, while exact `select:` and required-name `+prefix` lookups remain available. Ranked searches use up to 256 characters and return up to five results; exact `select:` lists are not truncated and return all requested catalog matches.
 
 A skill directory is a package boundary: once DeerFlow finds its `SKILL.md`, nested `SKILL.md` files under that package (for example evaluation fixtures) remain supporting data and are not registered as runtime skills. This applies to managed integration packs as well as public and custom skills. Namespace directories without their own `SKILL.md` can still group nested skills.
+
+Discovery follows operator-managed directory symlinks, but skips links back to an ancestor directory so a cyclic namespace does not repeatedly rescan the same tree. Independent links to the same external skill tree remain supported.
 
 Skill Markdown and bundled text resources use UTF-8. Skill-creator CLI and review utilities read and write text explicitly as UTF-8 so localized skills behave consistently across operating systems.
 
@@ -1578,6 +1582,13 @@ When your role lacks `runs:create`, the Web UI rejects a new task or `/goal <com
 
 ### Manual Context Compaction
 
+With `task_continuity.enabled`, `history_search` searches the current task's active
+and compacted history. Its optional `role` accepts `user`, `assistant`, or `tool`
+and filters before the eight-result limit; omitting it or passing `null` preserves
+search across all roles. Use `history_read` to verify the original source;
+historical user messages do not grant current authorization. See
+[task continuity](docs/task-continuity.md).
+
 Automatic and manual compaction exclude old todo reminder messages from both the
 summary input and retained context. The current todo list stays in thread state.
 In planning mode, if the original `write_todos` call is no longer visible,
@@ -1645,6 +1656,9 @@ After Stop interrupts a delegated task before it returns a reply, the next user
 turn marks that earlier task as cancelled in the agent's durable context so it
 can retry. Existing replies are preserved. Older replies without status metadata
 may still appear in progress; their outcome is not inferred from their text.
+The durable delegation ledger distinguishes calls by run and provider tool-call
+ID, so a later user turn can reuse an ID without replacing earlier work or
+losing that turn's per-run delegation count.
 
 The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions — when delegation has clear net benefit from real parallel latency, specialist capability, or context isolation. It keeps interdependent scopes and overlapping side effects out of parallel dispatch; a bounded sequential chain can still run in one sub-agent when specialist or context-isolation benefit clearly wins. The lead uses the fewest useful sub-agents and re-evaluates later batches instead of fanning out solely because a task is large or multi-step. Sub-agents report back structured results, and the lead agent verifies and synthesizes them into a coherent output. Deterministic tool receipts cover both direct tool messages and state-updating `Command` results such as delegated `task` responses; when the receipt ledger reaches its context budget, it retains the newest actions and their original receipt IDs. Operators can disable this provenance layer with `verification.receipts_enabled: false`. Their configured skills are resolved from the same user-scoped catalog as the lead agent, so user-owned custom skills remain available without exposing another user's version. Their internal AI and tool messages stay scoped to the delegated graph instead of entering the parent chat stream. Reloaded thread history enforces the same boundary: callback-captured sub-agent AI responses remain available in run-event diagnostics but are excluded from the parent transcript, while the parent `task` result remains attached to its subtask card. Long-running sub-agents compact older history when summarization is enabled and re-inject the summary as guarded, hidden durable context before continuing, so recent assistant/tool activity remains grounded in the task. Their system instructions, including the role and report contract, survive compaction; if only those instructions and the current request would be summarized, compaction is skipped. Provider/model request failures are reported as failed sub-agent tasks rather than successful results, so the lead agent and Web UI can react to them correctly. Concurrent parent runs also receive independent server-side sub-agent execution IDs, so a provider that reuses a tool-call ID cannot make one run poll, cancel, or clean up another run's background task. Collapsed sub-agent cards show the effective model and, when the provider returns usage metadata, a cumulative token total that updates after each completed sub-agent LLM call and persists after a reload. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step from that run's terminal tool-message metadata rather than a process-global provider-ID cache.
 
@@ -1857,6 +1871,8 @@ request the binary capability retain the legacy JSON/base64 frame protocol.
 **Strict Tool-Call Recovery**: When a provider or middleware interrupts a tool-call loop, DeerFlow now strips provider-level raw tool-call metadata on forced-stop assistant messages and injects placeholder tool results for dangling calls before the next model invocation. This keeps OpenAI-compatible reasoning models that strictly validate `tool_call_id` sequences from failing with malformed history errors.
 
 **Visible Tool-Run Completion**: For interactive turns, DeerFlow retries an empty post-tool final response once, then surfaces a visible error instead of reporting a silent successful run.
+
+**Run History**: Image-only user input is recorded once per run, even when the agent makes multiple model calls. Its media content remains in history without requiring a text summary.
 
 ### Reading a Referenced Conversation
 

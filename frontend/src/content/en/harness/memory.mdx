@@ -38,6 +38,172 @@ Memory has two operation modes:
 
 In tool mode, the four `memory_*` tool names are reserved. If an MCP server or custom tool already uses `memory_search`, `memory_add`, `memory_update`, or `memory_delete`, the existing tool keeps that name and the colliding memory tool is skipped with a warning.
 
+## Memory Manager: the pluggable memory manager
+
+At the core of the memory feature is a **backend-neutral `MemoryManager`** (defined in `backend/packages/harness/deerflow/agents/memory/manager.py`). It abstracts *what memory can do* into a stable contract, while *where memory lives and how it is extracted and retrieved* is left to swappable backends.
+
+### Design philosophy
+
+The design goal is a single sentence: **swapping the memory backend requires zero changes anywhere else in DeerFlow**.
+
+- **The contract says what, not how.** `get_context()` only has to return injection-ready text — whether that comes from a local file load or a remote retrieval call is the backend's own business. The contract does not even assume memory is a set of "facts".
+- **Tiered by implementation cost.** Only two methods are mandatory (write via `add`, read-and-inject via `get_context`); every other management operation (search, clear, import, fact CRUD, etc.) ships with a default "unsupported" implementation, so a backend exposes exactly as much capability as it implements.
+- **Fail loud, never silently.** Memory is persistent data. A misconfigured backend or a corrupted file raises directly (e.g. `ValueError` at build time, HTTP 409 on write conflicts) instead of quietly falling back to another store — which would silently write your data to the wrong place.
+- **Host and backend decoupled.** Host capabilities (Langfuse spans, the default LLM, extraction metrics) are injected as hooks that backends consume as needed, so the backend package itself never depends on a DeerFlow-specific concept and can be shipped independently.
+
+The `MemoryManager` contract at a glance:
+
+| Tier | Methods | Purpose |
+| --- | --- | --- |
+| Mandatory | `add` / `get_context` | Queue conversations for write (debounced) / return injection-ready memory text |
+| Management ops | `search`, `get_memory`, `clear_memory`, `import_memory`, `create_fact` / `update_fact` / `delete_fact`, `add_nowait`, `cancel_by_agent`, `shutdown_flush` | Search & inspect, clear & import, fact CRUD for tool mode, emergency flush before summarization, cancel pending extraction, bounded drain on graceful shutdown |
+| Optional hooks | `warm`, `reload_memory`, `on_pre_compress` / `on_turn_start`, plus async variants | Startup warm-up, cache reload, future extension points |
+
+### How to use it
+
+Select a backend via `memory.manager_class` in `config.yaml`; backend-private settings all live under `memory.backend_config`:
+
+```yaml
+memory:
+  enabled: true
+  mode: middleware          # middleware (default) | tool (model calls memory_* tools directly)
+  manager_class: deermem    # backend selector: deermem | mem0 | honcho | openviking | noop
+  backend_config: {}        # this backend's own knobs, interpreted by the backend
+```
+
+Built-in backends compared:
+
+| `manager_class` | Type | Positioning |
+| --- | --- | --- |
+| `deermem` | Local (default) | The bundled full memory implementation: Markdown fact storage, summaries, full-text retrieval, and fact lifecycle management |
+| `openviking` | Remote | Connects to an independent OpenViking memory server, recalling through the official `langchain-openviking` adapter |
+| `mem0` / `honcho` | Remote | Adapters for the Mem0 / Honcho memory products |
+| `noop` | Local | Empty implementation: memory call sites stay, nothing happens |
+
+Two things to know:
+
+- **Tool mode requires search support.** `mode: tool` needs the `memory_search` tool, so the backend must implement `search()`; a backend without it fails at startup rather than silently returning empty results at runtime.
+- **Custom backends are drop-in.** Create a package under `deerflow/agents/memory/backends/<name>/` exposing `MANAGER_CLASS = <your MemoryManager subclass>`, set `manager_class: <name>`, done. Dotted import paths (`pkg.mod:Cls`) also work.
+
+### How deermem is integrated
+
+deermem is the default backend and implements the full contract:
+
+- The factory `get_memory_manager()` reads `manager_class: deermem` and passes `backend_config` plus a set of **host hooks** (Langfuse tracing callbacks, the default extraction LLM, hidden-message filtering, extraction metrics) to `DeerMem.from_config()`, which assembles the instance.
+- Storage is bucketed per `(user, agent)`: `memory.json` holds only shared summaries and revision metadata, every fact is its own Markdown file (with YAML front matter), and a SQLite FTS5 full-text index backs `memory_search`.
+- Writes are queued by `MemoryMiddleware` calling `add()` after each turn (debounced and batched); summarization triggers an `add_nowait()` emergency flush so compacted content is never lost.
+- On top of that sit opt-in fact-governance capabilities: write-side near-duplicate merging (`fact_dedup_enabled`), staleness review (`staleness_review_enabled`), consolidation (`consolidation_enabled`), capacity eviction policy (`fact_eviction_policy: hybrid-v1`), and relevance-aware retrieval (`retrieval_relevance_enabled`).
+
+### How openviking is integrated
+
+OpenViking is a remote memory backend with a crisp responsibility split: **DeerFlow owns capture timing, the recall query, and the transcript cursor; the `langchain-openviking` package owns transport, message conversion, batching, and Session commits.**
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: true
+  manager_class: openviking
+  mode: middleware           # middleware mode is recommended
+  backend_config:
+    base_url: http://openviking:1933
+    owner_user_id: default   # use default when auth is disabled
+    api_key_env: OPENVIKING_API_KEY
+    failure_policy:
+      read: fail_open        # read failure returns empty results (fail_closed aborts)
+      write: log_and_drop
+    retrieval:
+      top_k: 8
+      score_threshold: 0.25
+      max_injection_chars: 12000
+```
+
+Integration notes:
+
+- **One API key is bound to one DeerFlow owner**; accessing another owner is rejected. Keep the USER key in the server environment (`api_key_env`), never in `config.yaml`.
+- **One DeerFlow thread maps to one stable OpenViking Session**; bounded hash-only cursors live under `{storage_path}/openviking/sessions/`.
+- This version supports one user with one key in middleware mode; multi-user key provisioning is out of scope. See `docs/OPENVIKING.md` for the full boundary and startup guide.
+
+## Implementing your own memory backend
+
+Hooking up your own memory system (a database, an internal service, or a new product) takes four steps — nothing else in DeerFlow changes.
+
+### Step 1: Create the backend package
+
+Create a new directory named after your backend under `backend/packages/harness/deerflow/agents/memory/backends/`. As long as its `__init__.py` exposes a `MANAGER_CLASS` attribute (a `MemoryManager` subclass), the factory discovers and registers it automatically — the folder name is the `manager_class` value in config.
+
+### Step 2: Implement the contract
+
+Create `mybackend/manager.py`:
+
+```python
+from deerflow.agents.memory.manager import MemoryManager
+
+
+class MyMemoryManager(MemoryManager):
+    # Declare search support (True only if you actually override search();
+    # a mismatch between the flag and the implementation fails at
+    # instantiation, so the two can never drift apart)
+    supports_search = True
+
+    @classmethod
+    def from_config(cls, backend_config, *, mode="middleware", **host_hooks):
+        # backend_config: the dict from memory.backend_config, yours to interpret
+        # host_hooks: optional host-provided capabilities (see below); ignore if unused
+        return cls(backend_config=backend_config, mode=mode)
+
+    def add(self, thread_id, messages, *, agent_name=None, user_id=None, trace_id=None):
+        """Mandatory: queue conversations for write (filtering/extraction is your private concern)."""
+
+    def get_context(self, user_id, *, agent_name=None, thread_id=None, query=None):
+        """Mandatory: return injection-ready text (how you retrieve and format is up to you)."""
+
+    def search(self, query, top_k=5, *, user_id=None, agent_name=None, category=None):
+        """Optional: return facts ranked by relevance (required for tool mode)."""
+```
+
+Only `from_config` + `add` + `get_context` are mandatory. Everything else is opt-in with sensible defaults:
+
+| Capability you want | Method to override | Notes |
+| --- | --- | --- |
+| Tool mode (`memory_search` etc.) | `search()`, and set `supports_search = True` | Flag/implementation consistency is enforced at instantiation |
+| Inspect / clear / import memory | `get_memory()` / `clear_memory()` / `import_memory()` | Unimplemented ops raise "not supported" |
+| Fact-level CRUD | `create_fact()` / `update_fact()` / `delete_fact()` | Backs `memory_add` / `memory_update` / `memory_delete` in tool mode |
+| Startup warm-up (indexing, encoders, …) | `warm()`, returning `True` / `False` / `None` | `None` means nothing to warm; the log says "skipped" honestly |
+| Releasing connections and other resources | `close()` | Called on graceful shutdown |
+| Cache reload | `reload_memory()` | For caching backends after out-of-band edits |
+
+### Step 3: Declare failure and conflict semantics
+
+- Read-failure policy is declared via `read_failures_are_fatal_for_config()`: permissive by default (failures return empty text); setting `backend_config.failure_policy.read: fail_closed` makes callers abort instead of degrading.
+- Raise `MemoryConflictError` for lost write races (the Gateway maps it to HTTP 409) and `MemoryCorruptionError` for unreadable storage (HTTP 500). Never rely on exception-text matching.
+
+### Step 4: Enable it
+
+```yaml
+memory:
+  manager_class: mybackend   # i.e. backends/<folder name>
+```
+
+You can also skip the `backends/` directory and use a dotted path directly: `manager_class: mypackage.mymodule:MyMemoryManager`. Either way, a resolution failure raises `ValueError` at startup — no silent fallback.
+
+### Available host hooks
+
+`from_config` receives a set of host-default capabilities in `**host_hooks` — consume what you need:
+
+| Hook | What it does |
+| --- | --- |
+| `callbacks` | A `MemoryCallbacks` instance: fired around your LLM calls; the default surfaces memory extraction as a dedicated Langfuse span |
+| `host_llm_factory` | Host default model factory: use it for zero-config extraction when your backend has no dedicated model |
+| `should_keep_hidden_message` | Hidden-message filter: by default only messages carrying a human clarification response enter memory |
+| `trace_context_manager` | Trace context manager |
+| `extraction_callback` | Extraction metrics callback (token usage, confidence filtering, rejection rates) |
+
+Consuming none of them is perfectly legal (the `noop` backend uses none).
+
+### Testing conventions
+
+Backend-specific tests follow the naming convention `backend/tests/test_<backend>_memory_backend.py`; the existing deermem / mem0 / honcho / openviking tests are good templates.
+
 ## Configuration
 
 ```yaml
@@ -144,6 +310,8 @@ By default, memory files are stored under the backend base directory:
 You can change the storage path with the `storage_path` field. Relative paths are resolved against the base directory. Use an absolute path to store memory in a custom location.
 
 ## Custom storage backend
+
+> This section is about **replacing DeerMem's internal storage layer** (lighter-weight — only changes *where* data lives). To hook up a fully independent memory system, see [Implementing your own memory backend](#implementing-your-own-memory-backend) above.
 
 The `storage_class` field allows you to replace the default file-based storage with a custom implementation. Any class that extends `MemoryStorage` (`deerflow.agents.memory.backends.deermem.deermem.core.storage`) and implements `load()`, `reload()`, and `save()` methods can be used:
 

@@ -63,6 +63,12 @@ the same policy first so run metadata reports the effective values. Design note:
 - `ClaudeChatModel.model_post_init` calls `load_claude_code_credential()` for every instance, and `create_chat_model` builds fresh instances per run (lead agent, title, summarization, subagents)
 - `$CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` is a one-shot handoff: a pipe returns EOF and a file keeps its advanced offset. `_read_secret_from_file_descriptor` therefore caches a non-empty secret per `(env_var, fd)` under a lock held across the read. Do not drop the cache or the lock — later instances would get no credential, and the Anthropic SDK raises `TypeError: Could not resolve authentication method` before sending. Empty reads and `OSError` are not cached. The key is the descriptor number on purpose — a closed handoff keeps serving its token, and a secret placed on a recycled number in-process is not re-read unless the cache is cleared. The cache is per process, so a new process (e.g. a uvicorn `--reload` worker) cannot recover a drained descriptor. Pinned by `tests/test_credential_loader.py`, including a two-instance `ClaudeChatModel` test
 
+### Claude Prompt Caching (`packages/harness/deerflow/models/claude_provider.py`)
+
+- The request payload shares objects with the caller: langchain-anthropic forwards Claude-native blocks (an image or document with a `source`, search results) and list-form system blocks by reference, and a reused tool binding passes its own tool dicts (the lead agent re-binds per call, so its tool dicts are fresh). Writing `cache_control` in place checkpointed the markers with the thread's messages, and the stale ones pushed every later request past the 4-breakpoint limit
+- Every request goes through `_strip_cache_control`, with caching on or off, so markers stored by older checkpoints never reach the API. It copies a marked block without its marker and replaces the system, message, content and tool lists and every message dict with copies; langchain-anthropic already builds fresh message dicts and content lists, so that part is defensive
+- `_apply_prompt_caching` must call `_strip_cache_control` first: it then replaces slots in those payload-owned lists with marked copies and writes `msg["content"]` on copied message dicts, placing at most four breakpoints. Pinned by `tests/test_claude_provider_prompt_caching.py`
+
 ### vLLM Provider (`packages/harness/deerflow/models/vllm_provider.py`)
 
 - `VllmChatModel` subclasses `langchain_openai:ChatOpenAI` for vLLM 0.19.0 OpenAI-compatible endpoints

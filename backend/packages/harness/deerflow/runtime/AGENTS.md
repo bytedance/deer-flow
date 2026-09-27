@@ -26,6 +26,11 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Message sequence placement:** Keep backend and frontend message identity rules aligned. Details: `backend/docs/runtime-guidance-details.md`.
 
+**Human-input capture** (`runtime/journal.py`): track capture separately from
+the optional display summary. Image-only input has no text but must still stop
+the batch scan and later model calls from appending another human-input event.
+`tests/test_run_journal.py` covers callback and full/delta graph paths.
+
 **LLM response callback coalescing** (`runtime/journal.py`): a provider may fire
 `on_llm_end` twice for one LangChain run id, first without usage (or with all token
 counts zero) and immediately again with usage populated. The first callback's generation
