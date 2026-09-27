@@ -155,6 +155,39 @@ def test_tool_assembly_combines_platform_and_only_current_owner(personal_client,
             reset_current_user(identity)
 
 
+def test_deployment_name_collision_does_not_publish_a_personal_tool(personal_client, monkeypatch, tmp_path):
+    from langchain_core.tools import StructuredTool
+
+    from deerflow.tools.mcp_metadata import tag_mcp_tool
+    from deerflow.tools.tools import get_available_tools
+
+    assert create(personal_client, "alice").status_code == 200
+    name = next(iter(load_user_mcp_config("alice").mcp_servers))
+    path = tmp_path / "deployment.json"
+    path.write_text(json.dumps({"mcpServers": {name: {"type": "http", "url": "https://example.com/platform"}}}))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(path))
+    platform = tag_mcp_tool(StructuredTool.from_function(lambda: "platform", name=name + "_test", description="Shared tool"), server_name=name)
+    monkeypatch.setattr("deerflow.mcp.cache.get_cached_mcp_tools", lambda: [platform])
+
+    async def discover(config, **kwargs):
+        async def personal():
+            return "personal"
+
+        return [tag_mcp_tool(StructuredTool.from_function(coroutine=personal, name=name + "_test", description="Personal tool"), server_name=name)]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", discover)
+    config = SimpleNamespace(tools=[], models=[], get_model_config=lambda _: None)
+    identity = set_current_user(SimpleNamespace(id="alice"))
+    try:
+        tools = get_available_tools(app_config=config)
+        assert [tool for tool in tools if tool.name == name + "_test"] == [platform]
+        personal_id = read_user_mcp_config("alice")["mcpServers"]["github"]["capability"]["id"]
+        selected = get_available_tools(app_config=config, mcp_plugins=[personal_id])
+        assert not any(tool.name == name + "_test" for tool in selected)
+    finally:
+        reset_current_user(identity)
+
+
 def test_untrusted_users_cannot_launch_packages_or_connect_to_private_hosts(personal_client, monkeypatch):
     client = personal_client
     response = client.post("/api/mcp/personal/config/servers", headers={"test-user": "alice", "test-role": "user"}, json={"mcp_servers": {"shell": {"type": "stdio", "command": "npx", "args": ["untrusted-package"]}}})
@@ -257,12 +290,17 @@ async def test_background_calls_resolve_only_persisted_task_owner(personal_clien
 
     monkeypatch.setattr(McpTaskToolCaller, "_call_configured_tool", invoke)
     caller = McpTaskToolCaller(ExtensionsConfig())
-    await caller.call_tool(server_name=name, tool_name="status", arguments={}, user_id="alice", thread_id="thread")
+    await caller.call_tool(server_name=name, tool_name="status", arguments={}, user_id="alice", thread_id="thread", connection_scope="personal")
     with pytest.raises(LookupError, match="Personal MCP"):
-        await caller.call_tool(server_name=name, tool_name="status", arguments={}, user_id="bob", thread_id="thread")
+        await caller.call_tool(server_name=name, tool_name="status", arguments={}, user_id="bob", thread_id="thread", connection_scope="personal")
     assert received == ["Bearer alice"]
 
-    # A legacy deployment name resembling our namespace remains a shared tool.
+    # The same deployment name must not steal an existing personal task after
+    # the Gateway restarts with that deployment entry in its startup snapshot.
     deployment = McpTaskToolCaller(ExtensionsConfig.model_validate({"mcpServers": {name: {"type": "http", "url": "https://example.com/platform", "headers": {"Authorization": "platform"}}}}))
+    await deployment.call_tool(server_name=name, tool_name="status", arguments={}, user_id="alice", thread_id="thread", connection_scope="personal")
     await deployment.call_tool(server_name=name, tool_name="status", arguments={}, user_id="bob", thread_id="thread")
-    assert received == ["Bearer alice", "platform"]
+    assert received == ["Bearer alice", "Bearer alice", "platform"]
+    assert personal_client.patch("/api/mcp/personal/config", headers={"test-user": "alice"}, json={"server_name": "github", "enabled": False}).status_code == 200
+    with pytest.raises(LookupError, match="Personal MCP"):
+        await deployment.call_tool(server_name=name, tool_name="status", arguments={}, user_id="alice", thread_id="thread", connection_scope="personal")

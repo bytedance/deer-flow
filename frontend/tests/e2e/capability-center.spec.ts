@@ -323,7 +323,7 @@ test("plugin categories, setup guides, and installed state remain distinct", asy
     "研发与运维",
   ]) {
     await expect(
-      page.getByRole("heading", { name, exact: true }),
+      page.getByRole("heading", { name, exact: true }).first(),
     ).toBeVisible();
   }
   await screenshot(page, "capability-catalog-zh.png");
@@ -356,7 +356,7 @@ test("plugin categories, setup guides, and installed state remain distinct", asy
   await page.getByRole("tab", { name: "已安装", exact: true }).click();
   await expect(page.locator("article")).toHaveCount(0);
   await expect(
-    page.getByText("没有找到匹配的内容", { exact: true }),
+    page.getByText("没有找到匹配的内容", { exact: true }).first(),
   ).toBeVisible();
   await page.getByRole("textbox", { name: "搜索插件名称或用途" }).fill("");
   await expect(page.locator("article")).toHaveCount(5);

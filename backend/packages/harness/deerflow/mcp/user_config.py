@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +43,3 @@ def load_user_mcp_config(user_id: str) -> ExtensionsConfig:
         runtime_name = personal_server_name(user_id, name, definition)
         servers[runtime_name] = {**definition, "tool_name_prefix": True}
     return ExtensionsConfig.model_validate({"mcpServers": servers})
-
-
-def is_personal_server_name(name: str) -> bool:
-    return re.fullmatch(r"personal_[0-9a-f]{32}", name) is not None

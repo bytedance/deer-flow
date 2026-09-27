@@ -1,4 +1,8 @@
 const en = {
+  platformTitle: "Platform provided",
+  platformHint: "Shared capabilities managed through deployment configuration.",
+  personalTitle: "My plugins",
+  personalHint: "Your connections and settings are only used by your account.",
   install: "Configure plugin",
   name: "Connection name",
   url: "Server URL",
@@ -31,6 +35,10 @@ const en = {
   invalidUrl: "Enter an HTTP or HTTPS server URL.",
 };
 const zh: typeof en = {
+  platformTitle: "平台提供",
+  platformHint: "由平台统一配置，供所有用户使用。",
+  personalTitle: "我的插件",
+  personalHint: "连接和配置仅属于你的账号，其他用户无法使用。",
   install: "配置插件",
   name: "连接名称",
   url: "服务地址",

@@ -39,13 +39,14 @@ against raw artifact paths before encoding.
    pages; `resolveThreadContext` must neither
    enqueue account writes nor create a fallback thread override that masks a
    later server preference. The
-   Capability Center > Plugins MCP switch calls the targeted `PATCH /api/mcp/config`
+   Capability Center > My plugins MCP switch calls the targeted `PATCH /api/mcp/personal/config`
    mutation, disables switches until that mutation's success refetch completes,
    displays the backend error `detail` through a toast, and invalidates
    `["mcpConfig"]` only after success.
-   Server management uses targeted `POST /api/mcp/config/servers`,
-   `PUT /api/mcp/config/server`, and bodyless
-   `DELETE /api/mcp/config/servers/{server_name}` mutations. Delete names are
+   Personal server management uses targeted `POST /api/mcp/personal/config/servers`,
+   `PUT /api/mcp/personal/config/server`, and bodyless
+   `DELETE /api/mcp/personal/config/servers/{server_name}` mutations. The deployment
+   `/api/mcp/config` endpoints remain operator-only and are not used by this editor. Delete names are
    percent-encoded, including legacy empty and slash-containing names; every
    successful mutation invalidates `["mcpConfig"]` only after the response.
    Current-chat MCP background tasks use `core/background-tasks`: the header
@@ -197,4 +198,4 @@ binding; explicit page-local overrides survive new-thread route replacement and
 reset on conversation changes. Gateway supplies defaults for clients without a
 selector; frontend visibility must not become a runtime enforcement boundary.
 
-MCP editor requests use the personal configuration API. Query keys for personal MCP config and capability installations include the authenticated user ID; remount the editor when that ID changes. Deployment installations remain read-only in the directory.
+MCP editor requests use the personal configuration API. Query keys for personal MCP config and capability installations include the authenticated user ID; remount the editor when that ID changes. Deployment installations remain read-only under Platform provided, alongside deployment setup guides. My plugins contains personal configuration templates, Lark account authorization and the personal MCP editor; a deployment installation must not mark a personal template configured.

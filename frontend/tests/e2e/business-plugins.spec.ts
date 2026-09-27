@@ -157,6 +157,32 @@ test("ordinary users see shared connections read-only and configure their own cr
   await page.evaluate(() =>
     document.dispatchEvent(new Event("visibilitychange")),
   );
+  const platform = page.getByRole("region", {
+    name: "Platform provided",
+    exact: true,
+  });
+  const personal = page.getByRole("region", {
+    name: "My plugins",
+    exact: true,
+  });
+  await expect(
+    platform.getByRole("button", {
+      name: "Setup guide Firecrawl",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    platform.locator("article").filter({ hasText: "Team CRM" }),
+  ).toHaveCount(1);
+  await expect(
+    personal.locator("article").filter({ hasText: "Team CRM" }),
+  ).toHaveCount(0);
+  await expect(
+    personal.getByRole("button", { name: "Add MCP plugin" }),
+  ).toBeVisible();
+  await expect(
+    personal.locator("article").filter({ hasText: "HubSpot" }),
+  ).toContainText("Not configured");
   await expect(
     page.locator("article").filter({ hasText: "Team CRM" }),
   ).toHaveCount(1);

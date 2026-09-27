@@ -577,7 +577,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             OrdinaryMcpTaskDriver,
         )
         from deerflow.mcp.tasks.runtime import (
-            configured_task_toolset_count,
             set_mcp_task_config_snapshot,
             set_mcp_task_submitter,
             validate_mcp_task_runtime_configuration,
@@ -596,11 +595,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         if mcp_task_repo is not None:
             mcp_task_drivers = McpTaskDriverRegistry()
-            if configured_task_toolset_count(task_extensions_config):
-                mcp_task_drivers.register(
-                    ORDINARY_MCP_TASK_DRIVER,
-                    OrdinaryMcpTaskDriver(McpTaskToolCaller(task_extensions_config)),
-                )
+            mcp_task_drivers.register(
+                ORDINARY_MCP_TASK_DRIVER,
+                OrdinaryMcpTaskDriver(McpTaskToolCaller(task_extensions_config)),
+            )
             mcp_task_service = McpTaskService(
                 repository=mcp_task_repo,
                 drivers=mcp_task_drivers,

@@ -726,6 +726,7 @@ def _make_background_submit_tool(
     submit_tool: str,
     status_tool: str,
     cancel_tool: str,
+    connection_scope: str,
 ) -> BaseTool:
     background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
 
@@ -755,6 +756,7 @@ def _make_background_submit_tool(
                     "submit_tool": submit_tool,
                     "status_tool": status_tool,
                     "cancel_tool": cancel_tool,
+                    "connection_scope": connection_scope,
                 },
             ),
         )
@@ -780,6 +782,7 @@ def _configure_task_tools_for_server(
     server_name: str,
     server_config: McpServerConfig,
     tool_name_prefix: bool,
+    connection_scope: str = "deployment",
 ) -> list[BaseTool]:
     """Hide driver-only tools and replace submit with a durable wrapper."""
     if not server_config.task_toolsets:
@@ -829,6 +832,7 @@ def _configure_task_tools_for_server(
                 submit_tool=toolset.submit_tool,
                 status_tool=toolset.status_tool,
                 cancel_tool=toolset.cancel_tool,
+                connection_scope=connection_scope,
             )
         )
     return configured
@@ -1032,6 +1036,7 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
                     server_name=source_name,
                     server_config=server_cfg,
                     tool_name_prefix=tool_name_prefix,
+                    connection_scope="personal" if personal_user_id is not None else "deployment",
                 )
             wrapped_tools.extend(current_server_tools)
 

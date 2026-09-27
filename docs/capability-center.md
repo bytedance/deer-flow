@@ -56,7 +56,10 @@ enabled state and edits belong to the signed-in user, including administrators.
 They are stored under `.deer-flow/users/<user_id>/integrations/mcp.json` and
 remain masked in the editor. Existing deployment connections in
 `extensions_config.json` stay shared and are not copied to any personal account.
-Edit, toggle and delete the configured entry using the existing MCP controls.
+The page separates **Platform provided** (deployment setup guides and shared MCP
+entries) from **My plugins** (personal connections, configuration templates and
+Lark account authorization). Existing search and category filters apply to both.
+Edit, toggle and delete personal entries using the existing MCP controls.
 An Agent selects these connections through **Plugins and skills**, just like
 other MCP servers. New tool selection applies on the next run.
 

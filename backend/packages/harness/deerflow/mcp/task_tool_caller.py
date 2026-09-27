@@ -7,7 +7,7 @@ import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import get_paths
@@ -100,17 +100,19 @@ class McpTaskToolCaller:
         thread_id: str,
         thread_incarnation: str | None = None,
         request_scoped_headers: bool = False,
+        connection_scope: Literal["deployment", "personal"] = "deployment",
     ) -> Any:
         """Call a raw MCP tool.
 
         ``request_scoped_headers`` opts this call into the ``headers_from_context``
         interceptor. Only the durable *submit* may set it: submit is awaited
         inside the Agent run that carries the secrets, while status and cancel
-        run after that run ended.
+        run after that run ended. ``connection_scope`` is captured in the task
+        binding, so an equal deployment server name cannot change its owner.
         """
-        from deerflow.mcp.user_config import is_personal_server_name, load_user_mcp_config
+        if connection_scope == "personal":
+            from deerflow.mcp.user_config import load_user_mcp_config
 
-        if is_personal_server_name(server_name) and server_name not in self._extensions_config.mcp_servers:
             personal = await asyncio.to_thread(load_user_mcp_config, user_id)
             if server_name not in personal.get_enabled_mcp_servers():
                 raise LookupError("Personal MCP task connection is missing, disabled or changed")
@@ -124,6 +126,8 @@ class McpTaskToolCaller:
                 thread_incarnation=thread_incarnation,
                 request_scoped_headers=request_scoped_headers,
             )
+        if connection_scope != "deployment":
+            raise ValueError("Invalid MCP task connection scope")
         return await self._call_configured_tool(
             server_name=server_name,
             tool_name=tool_name,
