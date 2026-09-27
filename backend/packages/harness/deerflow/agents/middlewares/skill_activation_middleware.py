@@ -46,6 +46,15 @@ logger = logging.getLogger(__name__)
 _SLASH_SKILL_ACTIVATION_KEY = "slash_skill_activation"
 _SLASH_SKILL_ACTIVATION_TARGET_ID_KEY = "slash_skill_activation_target_id"
 
+# Async-prepass registry load already attempted and failed. Handed down so
+# the secret-binding resolution does not silently recover with a fresh load:
+# entry names resolved from a recovered registry would miss the (empty)
+# decision map and fall back to the synchronous provider API from the worker
+# thread — for a loop-affine provider a denial becomes a fail-open allow.
+# Entries bind nothing for that call instead (fail closed by construction).
+# Same marker pattern as SkillToolPolicyMiddleware._REGISTRY_LOAD_FAILED.
+_REGISTRY_LOAD_FAILED = object()
+
 # _SECRETS_BINDING_AUDIT_KEY: last audited binding (skill and secret names only,
 # never values) so unchanged bindings are not re-recorded each call.
 # The shared slash-source context contract holds the latest slash activation,
@@ -195,21 +204,32 @@ class SkillActivationMiddleware(AgentMiddleware):
                 entry_paths.append(path)
         return names, entry_paths
 
-    def _canonical_names_for_paths(self, paths: list[str]) -> list[str]:
-        """Canonical ``Skill.name`` for the entry paths (thread-only; disk I/O).
+    def _canonical_names_for_paths(self, paths: list[str]) -> tuple[list[str], dict[str, Skill] | object]:
+        """Canonical ``Skill.name`` for the entry paths plus the registry they
+        came from (thread-only; disk I/O).
 
-        Paths the registry cannot resolve yield no name — the entry consumers
-        (``_in_context_secret_sources``) skip those against the same registry
-        before any activation check, so no decision is needed for them.
+        Returns ``(names, registry)`` where *registry* is the snapshot the
+        names were resolved from — the async caller hands it to the secret
+        binding resolution so entries are resolved against the SAME snapshot
+        the decision map was keyed by (a map miss is then impossible by
+        construction, closing the sync-API fallback divergence). On storage
+        failure returns ``([], _REGISTRY_LOAD_FAILED)``: entries must bind
+        nothing rather than be re-resolved from a silently recovered fresh
+        load. Returns immediately for an empty list: this helper runs on
+        every authorization-enabled async model step, and an ordinary request
+        (no slash reference, no persisted entries, no supplied secrets) must
+        not pay a full skill-tree scan per LLM call.
         """
+        if not paths:
+            return [], None
         try:
             from deerflow.skills.container_registry import build_container_path_registry, canonical_skill_name
 
             registry = build_container_path_registry(self._storage())
         except Exception:
             logger.exception("Failed to load skills while collecting activation candidates")
-            return []
-        return [name for name in (canonical_skill_name(registry, path) for path in paths) if name is not None]
+            return [], _REGISTRY_LOAD_FAILED
+        return [name for name in (canonical_skill_name(registry, path) for path in paths) if name is not None], registry
 
     def release_policy_parameters(self) -> dict[str, object]:
         return {
@@ -466,12 +486,19 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         messages.insert(target_index, activation_msg)
         return request.override(messages=messages), activation
 
-    def _handle_model_request(self, request: ModelRequest, *, hook: str, activation_decisions: dict[str, bool] | None = None) -> tuple[ModelRequest | AIMessage, _Activation | None]:
+    def _handle_model_request(
+        self,
+        request: ModelRequest,
+        *,
+        hook: str,
+        activation_decisions: dict[str, bool] | None = None,
+        entry_registry: dict[str, Skill] | object | None = None,
+    ) -> tuple[ModelRequest | AIMessage, _Activation | None]:
         prepared, activation = self._prepare_model_request(request, hook=hook, activation_decisions=activation_decisions)
         if isinstance(prepared, AIMessage):
             return prepared, None
         effective = prepared if prepared is not None else request
-        self._resolve_secret_bindings(effective, activation, hook=hook, activation_decisions=activation_decisions)
+        self._resolve_secret_bindings(effective, activation, hook=hook, activation_decisions=activation_decisions, entry_registry=entry_registry)
         if activation is not None:
             record_skill_usage(getattr(request, "runtime", None), self._usage_snapshot(activation))
         return effective, activation
@@ -502,7 +529,15 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                     break
         return response
 
-    def _resolve_secret_bindings(self, request: ModelRequest, activation: _Activation | None, *, hook: str, activation_decisions: dict[str, bool] | None = None) -> None:
+    def _resolve_secret_bindings(
+        self,
+        request: ModelRequest,
+        activation: _Activation | None,
+        *,
+        hook: str,
+        activation_decisions: dict[str, bool] | None = None,
+        entry_registry: dict[str, Skill] | object | None = None,
+    ) -> None:
         """Recompute the per-run secret injection set (binding point A+, #3861/#3914).
 
         Sources, unioned on every model call:
@@ -547,15 +582,34 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request_secrets = extract_request_secrets(context)
         sources: list[tuple[str, tuple[SecretRequirement, ...]]] = []
         if request_secrets:
-            registry = self._load_skill_registry_by_path()
-            if registry is not None:
+            # Registry selection for this call:
+            # - a snapshot from the async prepass (``awrap_model_call``) — the
+            #   decision map was keyed by this snapshot's names, so resolving
+            #   the entry sources against it makes a map miss impossible by
+            #   construction (no silent divergence to the sync provider API);
+            # - ``_REGISTRY_LOAD_FAILED`` — the prepass already attempted the
+            #   load and failed. Entries must bind nothing (an empty registry
+            #   resolves no paths) rather than silently recover via a fresh
+            #   load whose names would miss the map. The slash source keeps
+            #   its validated-at-activation status: it does not consult the
+            #   decision map, so it resolves against a fresh registry;
+            # - ``None`` (sync chain / prepass not run) — the historical
+            #   fresh per-call load, re-read so an operator disabling a skill
+            #   revokes its binding on the very next model call.
+            if entry_registry is _REGISTRY_LOAD_FAILED:
+                slash_registry = self._load_skill_registry_by_path()
+                entry_registry_effective: dict[str, Skill] = {}
+            else:
+                slash_registry = entry_registry if entry_registry is not None else self._load_skill_registry_by_path()
+                entry_registry_effective = slash_registry if slash_registry is not None else {}
+            if slash_registry is not None:
                 # Slash source: exempt from the ``secrets-autonomous`` opt-out
                 # (explicit ceremony), but still enabled + allowlist checked.
                 slash_path = read_slash_skill_source_path(context, owner_token=self._slash_source_owner_token)
-                slash_skill = self._resolve_registry_skill(registry, slash_path, require_autonomous=False)
+                slash_skill = self._resolve_registry_skill(slash_registry, slash_path, require_autonomous=False)
                 if slash_skill is not None:
                     sources.append((slash_skill.name, tuple(slash_skill.required_secrets)))
-                sources.extend(self._in_context_secret_sources(request, registry, activation_decisions=activation_decisions))
+                sources.extend(self._in_context_secret_sources(request, entry_registry_effective, activation_decisions=activation_decisions))
 
         injected: dict[str, str] = {}
         bound_skills: set[str] = set()
@@ -735,13 +789,24 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         # are canonicalized through the registry in a worker thread first so
         # the decision map is keyed by declared Skill.name (the same names the
         # threaded handler's registry lookups produce), not directory names.
+        # The snapshot those names came from travels with the decisions: the
+        # secret-binding resolution reuses it for the entry sources, so a map
+        # miss is impossible by construction (and a failed load means entries
+        # bind nothing — no silent fresh-load recovery).
+        entry_registry: dict[str, Skill] | object | None = None
         if self._skill_authorization is not None:
             slash_names, entry_paths = self._candidate_activation_targets(request)
-            canonical_names = await asyncio.to_thread(self._canonical_names_for_paths, entry_paths)
+            canonical_names, entry_registry = await asyncio.to_thread(self._canonical_names_for_paths, entry_paths)
             activation_decisions = await self._collect_activation_decisions([*slash_names, *canonical_names])
         else:
             activation_decisions = None
-        prepared, activation = await asyncio.to_thread(self._handle_model_request, request, hook="awrap_model_call", activation_decisions=activation_decisions)
+        prepared, activation = await asyncio.to_thread(
+            self._handle_model_request,
+            request,
+            hook="awrap_model_call",
+            activation_decisions=activation_decisions,
+            entry_registry=entry_registry,
+        )
         if isinstance(prepared, AIMessage):
             return prepared
         return self._stamp_usage(await handler(prepared), activation)

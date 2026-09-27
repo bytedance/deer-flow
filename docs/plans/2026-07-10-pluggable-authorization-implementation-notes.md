@@ -886,6 +886,84 @@ Phase 1 最低验证要求：
   `ToolErrorHandlingMiddleware.user_id` 与两个 builder 的新参数默认 `None`；
   未解析路径回退路径名（与旧行为一致）；同步 hook 路径语义不变。
 
+### 2026-09-26 — PR #4541 review（willem-bd，P2×2）：预扫描失败传递与空路径零扫描
+
+- **背景：** 合入主线后的新一轮 review 指出规范名修复引入的两个缺口：①
+  `_resolve_policy_registry` 瞬时失败返回 `(None, [])`，worker 侧
+  `registry is None` 会重试存储——重试若成功，恢复出的技能名不在（空的）决策 map
+  里 → 回退 worker 线程的同步 `authorize()`：loop-affine provider 抛异常后
+  `fail_closed=false` 变成放行（被拒技能的 allowed-tools 保留），
+  `fail_closed=true` 变成误拒；② 授权开启时每个异步模型步都调用
+  `_canonical_names_for_paths`，空 `entry_paths` 也触发全量技能树扫描——普通请求
+  （无 slash、无条目、无 secrets）此前零注册表 I/O，大目录/NFS 下每步 LLM 前多一次
+  未缓存扫描。
+- **决策（失败传递）：** `_REGISTRY_LOAD_FAILED = object()` 三态哨兵（对齐同文件
+  `_MISSING_POLICY_DECISION` 先例）：`_resolve_policy_registry` 失败时返回哨兵，
+  `_active_skills_for_paths` 见哨兵直接 `([], True)`（与首次加载失败同一 fail-closed
+  builtins 处置），不再静默重试。失败步的 builtins 决策经 refresh_decision 缓存
+  仅作用于本步；下一步模型调用预扫描重试存储即可恢复，无粘性状态。哨兵分支先于
+  "No active skill references could be authorized" 告警返回——存储失败不产生该误导性
+  日志，异常日志（`_resolve_policy_registry` 内）是唯一信号。
+- **决策（空路径零扫描）：** `_canonical_names_for_paths` 开头 `if not paths:
+  return []`（单一 choke point，未来调用方自动受益）。普通异步模型步的存储调用数
+  归零（slash 解析在触达 storage 前返回 None；secrets 不存在则
+  `_resolve_secret_bindings` 不加载注册表）。
+- **否决方案：** 不在失败后立即重试恢复（reviewer 给的第二选项）——多一次全量扫描
+  且复杂度更高，保留失败与既有"首次加载失败"语义逐字一致；不在调用点条件跳过
+  `to_thread`（choke point 单点守卫才可被单点突变钉住）。
+- **证据：** `tests/test_skills_authorization.py` 50→52：
+  `test_async_policy_preserves_prepass_registry_failure`（首读失败、次读会成功的
+  flaky storage + `_AsyncOnlyProvider(denied)` + `fail_closed=False`：恰一次
+  storage 调用、零 provider 调用、builtins-only——旧行为下 worker 重试成功 →
+  同步回退 → fail-open 保留 `bash`）；`test_async_model_call_without_skill_refs_
+  skips_registry_scan`（storage 调用计数 == 0）。两项突变（哨兵还原为 None、
+  删除空路径守卫）逐一还原均有测试失败。
+- **兼容性：** 同步 hook（`registry is None` 自行加载）语义不变；`awrap_tool_call`
+  缓存命中路径不触达哨兵；授权禁用时两条新路径均不存在。
+
+### 2026-09-26（第二轮）— 第 4 实例收口：activation 秘密绑定改快照传递，类成员 grep 封闭
+
+- **背景：** 上一节修复落地后的严格自查复现出同一 bug 类的第 4 个实例：
+  `SkillActivationMiddleware.awrap_model_call` 的条目预扫描瞬时失败返回 `[]` 并继续，
+  线程内 `_resolve_secret_bindings` 在有 request secrets 时经
+  `_load_skill_registry_by_path` **另一次独立加载**恢复——条目解析出的名字不在（空）
+  决策 map → 回退 worker 线程同步 `authorize()` → `fail_closed=false` 时
+  aauthorize 拒绝的技能秘密被 fail-open 绑定（复现：两次加载、零 aauthorize、
+  被拒秘密已注入）。slash 路径经复现实证免疫（名字来自消息解析，不经存储，
+  预扫描失败也在 map 内）。
+- **决策（快照传递，对齐 policy 侧哨兵修复的形状）：**
+  `_canonical_names_for_paths` 返回 `(names, registry)`——名字与其来源快照一起返回；
+  快照经 `_handle_model_request` 穿到 `_resolve_secret_bindings`，条目来源解析**复用该
+  快照**：决策 map 的键 = 快照解析的名字，map miss 在构造上不可能（连"同一步两次
+  加载不一致"的理论窗口——预扫描成功后存储被并发改名——也一并关闭）。加载失败返回
+  `_REGISTRY_LOAD_FAILED` 哨兵：条目绑定归零（空注册表解析不出任何路径，构造保证），
+  **slash 来源不受株连**（它不查决策 map，在激活时已验证，属 run 级用户承诺，照常
+  走新鲜加载）。同步链不传快照、行为不变。附带收益：有 secrets 的异步步从两次
+  注册表扫描降为一次（快照复用），`_load_skill_registry_by_path` 的新鲜度契约
+  （"下一次模型调用即吊销"）仍然满足——快照取自本步开头。
+- **决策（类成员封闭 + 延期加固锚点）：** 全仓 grep 实证
+  `skill_activation_allowed(` 同步调用点恰 4 处：stamping 同步路径（合法）、
+  describe 同步实现（合法）、两个 `_activation_allowed`（activation / policy 中间件）
+  ——**异步可达的同步回退点有且仅有 2 个，本轮修复后全部关闭**。结构性加固
+  （决策 map 类型化为 async-batch 语义对象，"异步路径 map miss = fail-closed + 响亮
+  日志，绝不静默同步回退"由构造保证；per-step 注册表快照经 run context 全链共享）
+  作为后续工作延期——四实例证明调用方自觉已失效四次，但结构性重构会再开 N 轮
+  review，先以实例收口 + 成员封闭 + 本锚点记录推进合并。
+- **否决方案：** 不用"失败标志只关门条目"（上一轮初步规格）——标志只堵失败扇窗，
+  堵不住"预扫描成功但两次加载不一致"的窗口；快照传递同成本下把两类窗口都关成
+  构造不可能。不为空 `entry_paths` 跳过 `to_thread`（微秒级线程跳 vs 单点守卫的
+  突变可钉性，取后者；P3 有意放弃并记录）。
+- **证据：** `tests/test_skills_authorization.py` 52→54：
+  `test_async_secret_binding_preserves_prepass_failure`（两技能两调用：调用 2 预扫描
+  第 3 次加载失败——条目绑定归零且 slash 绑定存活；旧行为同步回退 fail-open 绑定
+  被拒的 ENTRY_KEY）、`test_async_secret_binding_resolves_entries_against_prepass_snapshot`
+  （第二次加载返回改名后的同路径技能：条目必须按快照名（allow）而非新鲜名（deny）
+  解析）。三突变逐一还原必红：M1 哨兵改新鲜恢复（prepass failure 测试红）、M2 哨兵
+  株连 slash（同测试红）、M3 条目绕过快照（snapshot 测试红）。
+- **兼容性：** 授权禁用或无条目路径时 `awrap_model_call` 传 `None`，
+  `_resolve_secret_bindings` 走历史新鲜加载，行为不变；同步链完全不变；
+  policy 中间件注册表参数以 `_RegistryArg` 别名收编退化联合类型。
+
 ### 新记录模板
 
 ```markdown

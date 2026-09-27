@@ -1975,6 +1975,331 @@ def test_async_secret_binding_canonicalizes_persisted_entry_paths(tmp_path, monk
     assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) == {"API_KEY": "secret-value"}
 
 
+def test_async_secret_binding_preserves_prepass_failure(tmp_path, monkeypatch):
+    """[P2 regression, 4th instance of the sync-fallback class] A transient
+    prepass registry failure must not let the secret-binding resolution
+    silently recover with a fresh load: entry names resolved from a recovered
+    registry would miss the (empty) decision map and fall back to the
+    synchronous provider API — for a loop-affine provider a denial becomes a
+    fail-open allow. Entries bind nothing for that call. The slash source is
+    a run-scoped commitment validated at activation and does NOT consult the
+    decision map — it must survive the entry prepass failure unharmed."""
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.middlewares import skill_activation_middleware as activation_module
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY
+
+    def _skill(name: str, secret: str):
+        from deerflow.skills.types import Skill as SkillObject
+        from deerflow.skills.types import SkillCategory
+
+        skill_dir = tmp_path / name
+        skill_dir.mkdir(exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(f"# {name}", encoding="utf-8")
+        skill = SkillObject(
+            name=name,
+            description="d",
+            license=None,
+            skill_dir=skill_dir,
+            skill_file=skill_dir / "SKILL.md",
+            relative_path=Path(name),
+            category=SkillCategory.CUSTOM,
+            enabled=True,
+        )
+        object.__setattr__(skill, "required_secrets", [SimpleNamespace(name=secret, optional=False)])
+        object.__setattr__(skill, "secrets_autonomous", True)
+        return skill
+
+    slash_skill = _skill("slash-skill", "SLASH_KEY")
+    entry_skill = _skill("entry-skill", "ENTRY_KEY")
+
+    # Load order under the snapshot design: #1 call-1 prepass (snapshot —
+    # the binding resolution reuses it, no extra load), #2 call-1 slash
+    # activation, #3 call-2 prepass (FAILS), #4 call-2 slash-source
+    # resolution against a fresh registry (recovers).
+    load_calls = {"count": 0}
+
+    def _flaky_load(*, enabled_only):
+        load_calls["count"] += 1
+        if load_calls["count"] == 3:
+            raise RuntimeError("transient registry failure")
+        return [slash_skill, entry_skill]
+
+    storage = SimpleNamespace(
+        load_skills=_flaky_load,
+        get_container_root=lambda: "/mnt/skills",
+        get_skills_root_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr(activation_module, "get_or_new_skill_storage", lambda **kw: storage)
+
+    provider = _AsyncOnlyProvider(denied_activate={"entry-skill"})
+    resolved = _resolved_skill_authorization(provider, fail_closed=False)
+    middleware = SkillActivationMiddleware(
+        available_skills={"slash-skill", "entry-skill"},
+        skill_authorization=resolved,
+        slash_source_owner_token="test-token",
+    )
+
+    entry_path = posixpath_normpath(entry_skill.get_container_file_path("/mnt/skills"))
+    run_context: dict = {"secrets": {"SLASH_KEY": "slash-value", "ENTRY_KEY": "entry-value"}}
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    async def _identity(prepared):
+        return prepared
+
+    # Call 1: user slash-activates /slash-skill with the entry already in
+    # skill_context. Prepass succeeds; the aauthorize-DENIED entry binds
+    # nothing, the slash source binds.
+    first = _Request(
+        messages=[HumanMessage(content="/slash-skill go")],
+        state={"skill_context": [{"name": "entry-skill", "path": entry_path}]},
+        runtime=SimpleNamespace(context=run_context),
+    )
+    asyncio.run(middleware.awrap_model_call(first, _identity))
+    assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) == {"SLASH_KEY": "slash-value"}
+
+    # Call 2 (tool loop): the entry prepass fails transiently (#4). The slash
+    # source must keep binding; the entry must bind nothing — a fresh-load
+    # recovery would fall back to the sync API and fail-open allow it.
+    second = _Request(
+        messages=[HumanMessage(content="continue")],
+        state={"skill_context": [{"name": "entry-skill", "path": entry_path}]},
+        runtime=SimpleNamespace(context=run_context),
+    )
+    asyncio.run(middleware.awrap_model_call(second, _identity))
+
+    assert load_calls["count"] == 4
+    assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) == {"SLASH_KEY": "slash-value"}, "entry must bind nothing after the prepass failure; the slash binding must survive it"
+
+
+def test_async_secret_binding_resolves_entries_against_prepass_snapshot(tmp_path, monkeypatch):
+    """[P2 regression] Entry sources must resolve against the SAME registry
+    snapshot the decision map was keyed by. If the resolution re-loaded the
+    registry instead, a mid-step storage change (rename/uninstall) could
+    resolve the path to a name absent from the map — the sync-API fallback
+    divergence again, now without any load failure at all."""
+    import asyncio
+    import dataclasses
+
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.middlewares import skill_activation_middleware as activation_module
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY
+    from deerflow.skills.types import Skill as SkillObject
+    from deerflow.skills.types import SkillCategory
+
+    skill_dir = tmp_path / "entry-skill"
+    skill_dir.mkdir(exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("# entry", encoding="utf-8")
+    skill = SkillObject(
+        name="entry-skill",
+        description="d",
+        license=None,
+        skill_dir=skill_dir,
+        skill_file=skill_dir / "SKILL.md",
+        relative_path=Path("entry-skill"),
+        category=SkillCategory.CUSTOM,
+        enabled=True,
+    )
+    object.__setattr__(skill, "required_secrets", [SimpleNamespace(name="ENTRY_KEY", optional=False)])
+    object.__setattr__(skill, "secrets_autonomous", True)
+    # What a FRESH load would return instead: the same container path now
+    # declaring a different name (mid-step rename).
+    renamed = dataclasses.replace(skill, name="renamed-skill")
+
+    load_calls = {"count": 0}
+
+    def _mutating_load(*, enabled_only):
+        load_calls["count"] += 1
+        return [skill if load_calls["count"] == 1 else renamed]
+
+    storage = SimpleNamespace(
+        load_skills=_mutating_load,
+        get_container_root=lambda: "/mnt/skills",
+        get_skills_root_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr(activation_module, "get_or_new_skill_storage", lambda **kw: storage)
+
+    # aauthorize allows "entry-skill" (the snapshot name) and denies
+    # "renamed-skill" (the fresh name); fail_closed so a wrong-name fallback
+    # fails closed and drops the binding.
+    provider = _AsyncOnlyProvider(denied_activate={"renamed-skill"})
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = SkillActivationMiddleware(
+        available_skills={"entry-skill", "renamed-skill"},
+        skill_authorization=resolved,
+        slash_source_owner_token="test-token",
+    )
+
+    entry_path = posixpath_normpath(skill.get_container_file_path("/mnt/skills"))
+    run_context: dict = {"secrets": {"ENTRY_KEY": "entry-value"}}
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    request = _Request(
+        messages=[HumanMessage(content="plain task")],
+        state={"skill_context": [{"name": "entry-skill", "path": entry_path}]},
+        runtime=SimpleNamespace(context=run_context),
+    )
+
+    async def _identity(prepared):
+        return prepared
+
+    asyncio.run(middleware.awrap_model_call(request, _identity))
+
+    assert provider.async_calls == ["entry-skill"]
+    assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) == {"ENTRY_KEY": "entry-value"}, "the entry must resolve against the prepass snapshot (allowed name), not a fresh load (denied name)"
+
+
+def test_async_policy_preserves_prepass_registry_failure(monkeypatch, tmp_path):
+    """[P2 regression] A transient prepass registry failure must be preserved:
+    the worker-side filter must not retry storage — a successful retry would
+    resolve skills missing from the (empty) decision map and fall back to the
+    synchronous provider API from the thread, turning a loop-affine provider's
+    denial into a fail-open allow (fail_closed=false keeps the denied skill's
+    allowed-tools) or falsely denying permitted skills (fail_closed=true)."""
+    import asyncio
+
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    from deerflow.skills.types import Skill as SkillObject
+    from deerflow.skills.types import SkillCategory
+
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir(exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("# x", encoding="utf-8")
+    skill = SkillObject(
+        name="demo-skill",
+        description="d",
+        license=None,
+        skill_dir=skill_dir,
+        skill_file=skill_dir / "SKILL.md",
+        relative_path=Path("demo-skill"),
+        category=SkillCategory.CUSTOM,
+        enabled=True,
+        allowed_tools=("bash",),
+    )
+    container_root = "/mnt/skills"
+    skill_path = posixpath_normpath(skill.get_container_file_path(container_root))
+
+    load_calls = {"count": 0}
+
+    def _flaky_load(*, enabled_only):
+        load_calls["count"] += 1
+        if load_calls["count"] == 1:
+            raise RuntimeError("transient registry failure")
+        return [skill]
+
+    monkeypatch.setattr(
+        SkillToolPolicyMiddleware,
+        "_storage",
+        lambda self: SimpleNamespace(
+            load_skills=_flaky_load,
+            get_container_root=lambda: container_root,
+        ),
+    )
+
+    # fail_closed=False is the dangerous direction: an accidental sync-API
+    # fallback raises inside skill_activation_allowed and fail-opens into an
+    # allow, retaining the aauthorize-denied skill's tools.
+    provider = _AsyncOnlyProvider(denied_activate={"demo-skill"})
+    resolved = _resolved_skill_authorization(provider, fail_closed=False)
+    middleware = SkillToolPolicyMiddleware(
+        available_skills={"demo-skill"},
+        slash_source_owner_token="test-token",
+        skill_authorization=resolved,
+    )
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    request = _Request(
+        state={"skill_context": [{"name": "demo-skill", "path": skill_path}]},
+        tools=[SimpleNamespace(name="bash"), SimpleNamespace(name="read_file")],
+        runtime=None,
+    )
+
+    async def _identity(prepared):
+        return prepared
+
+    filtered = asyncio.run(middleware.awrap_model_call(request, _identity))
+
+    kept = [getattr(t, "name", None) for t in filtered.tools]
+    # The prepass failure is preserved: exactly one storage attempt (no
+    # worker-side retry), no provider call at all, and the policy fails
+    # closed to framework-safe builtins — not the denied skill's "bash".
+    assert load_calls["count"] == 1
+    assert provider.async_calls == []
+    assert "bash" not in kept
+    assert "read_file" in kept
+
+
+def test_async_model_call_without_skill_refs_skips_registry_scan(tmp_path, monkeypatch):
+    """[P2 regression] An ordinary authorization-enabled async model step (no
+    slash reference, no persisted entries, no supplied secrets) must not pay
+    a full skill-tree scan — the previously passive path needed no registry
+    I/O, and large or NFS-backed catalogs would add an uncached load_skills
+    before every LLM call."""
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.middlewares import skill_activation_middleware as activation_module
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+
+    load_calls = {"count": 0}
+
+    def _counting_load(*, enabled_only):
+        load_calls["count"] += 1
+        return []
+
+    storage = SimpleNamespace(
+        load_skills=_counting_load,
+        get_container_root=lambda: "/mnt/skills",
+        get_skills_root_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr(activation_module, "get_or_new_skill_storage", lambda **kw: storage)
+
+    provider = _AsyncOnlyProvider()
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = SkillActivationMiddleware(
+        available_skills={"demo-skill"},
+        skill_authorization=resolved,
+        slash_source_owner_token="test-token",
+    )
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    request = _Request(messages=[HumanMessage(content="an ordinary task, no slash reference")], state={}, runtime=None)
+
+    async def _identity(prepared):
+        return prepared
+
+    asyncio.run(middleware.awrap_model_call(request, _identity))
+
+    assert load_calls["count"] == 0
+    assert provider.async_calls == []
+
+
 def posixpath_normpath(path: str) -> str:
     import posixpath
 

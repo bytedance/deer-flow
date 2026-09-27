@@ -34,6 +34,18 @@ _POLICY_SOURCE_SLASH = "slash"
 _POLICY_SOURCE_SKILL_CONTEXT = "skill_context"
 _POLICY_SOURCES = frozenset({_POLICY_SOURCE_PASSIVE, _POLICY_SOURCE_SLASH, _POLICY_SOURCE_SKILL_CONTEXT})
 _MISSING_POLICY_DECISION = object()
+# Async-prepass registry load already attempted and failed: the async hook must
+# not let the worker-side filter silently retry storage — a successful retry
+# would resolve skills whose names are absent from the (empty) decision map and
+# fall back to the synchronous provider API from the thread, which for a
+# loop-affine provider turns a denial into a fail-open allow. Tri-state marker
+# in the style of _MISSING_POLICY_DECISION.
+# Registry argument handed down the policy-resolution call chain: a loaded
+# snapshot (dict), the load-failure marker, or None ("load it here" — the
+# sync-path behavior).
+type _RegistryArg = dict[str, Skill] | object | None
+
+_REGISTRY_LOAD_FAILED = object()
 _TOOL_SEARCH_NAME = "tool_search"
 
 type _PolicySignature = tuple[str, tuple[str, ...]]
@@ -110,15 +122,19 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             decisions[name] = await skill_activation_allowed_async(self._skill_authorization, name)
         return decisions
 
-    def _resolve_policy_registry(self, paths: tuple[str, ...]) -> tuple[dict[str, Skill] | None, list[str]]:
+    def _resolve_policy_registry(self, paths: tuple[str, ...]) -> tuple[dict[str, Skill] | object, list[str]]:
         """Load the path-keyed registry and canonicalize the policy paths.
 
-        Blocking (skill-tree read): worker thread only. Returns the registry
-        (``None`` on storage failure — the caller then lets
-        ``_active_skills_for_paths`` reload and hit its own fail-closed
-        branch) plus the canonical ``Skill.name`` for every resolvable path.
-        Unresolvable paths yield no name: ``_active_skills_for_paths`` skips
-        them before the activation check, so no decision is needed for them.
+        Blocking (skill-tree read): worker thread only. Returns the registry,
+        the canonical ``Skill.name`` for every resolvable path, or — when the
+        load fails — the ``_REGISTRY_LOAD_FAILED`` marker with no names. The
+        marker preserves the failure: the async caller hands it down so
+        ``_active_skills_for_paths`` applies its fail-closed treatment instead
+        of retrying storage (a transient-failure retry that succeeds would
+        resolve skills missing from the decision map and fall back to the
+        synchronous provider API). Unresolvable paths yield no name:
+        ``_active_skills_for_paths`` skips them before the activation check,
+        so no decision is needed for them.
         """
         try:
             from deerflow.skills.container_registry import build_container_path_registry
@@ -126,7 +142,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             registry = build_container_path_registry(self._storage())
         except Exception:
             logger.exception("Failed to load active skills for allowed-tools policy")
-            return None, []
+            return _REGISTRY_LOAD_FAILED, []
         canonical: list[str] = []
         for path in paths:
             skill = registry.get(posixpath.normpath(path))
@@ -178,11 +194,18 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         paths: tuple[str, ...],
         *,
         activation_decisions: dict[str, bool] | None = None,
-        registry: dict[str, Skill] | None = None,
+        registry: _RegistryArg = None,
     ) -> tuple[list[Skill], bool]:
         if not paths:
             return [], False
 
+        if registry is _REGISTRY_LOAD_FAILED:
+            # The async prepass already attempted the load and failed. Do not
+            # retry here: a successful retry would resolve skills absent from
+            # the prepass-built decision map and silently fall back to the
+            # synchronous provider API from this worker thread. Preserve the
+            # failure with the same treatment as a first-load failure below.
+            return [], True
         if registry is None:
             try:
                 from deerflow.skills.container_registry import build_container_path_registry
@@ -228,7 +251,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         paths: tuple[str, ...],
         *,
         activation_decisions: dict[str, bool] | None = None,
-        registry: dict[str, Skill] | None = None,
+        registry: _RegistryArg = None,
     ) -> set[str] | None:
         active_skills, policy_failed = self._active_skills_for_paths(paths, activation_decisions=activation_decisions, registry=registry)
         if policy_failed:
@@ -285,7 +308,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         *,
         policy: _PolicySignature | None = None,
         activation_decisions: dict[str, bool] | None = None,
-        registry: dict[str, Skill] | None = None,
+        registry: _RegistryArg = None,
     ) -> set[str] | None:
         resolved_policy = self._active_policy(request) if policy is None else policy
         _, paths = resolved_policy
@@ -302,7 +325,7 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         policy: _PolicySignature | None = None,
         refresh_decision: bool = False,
         activation_decisions: dict[str, bool] | None = None,
-        registry: dict[str, Skill] | None = None,
+        registry: _RegistryArg = None,
     ) -> ModelRequest:
         resolved_policy = self._active_policy(request) if policy is None else policy
         _, paths = resolved_policy
