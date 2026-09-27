@@ -339,8 +339,11 @@
   就重新加载已持久化的密钥或生成新密钥并 export；而 Compose 插值时 shell 变量优先于
   `--env-file`，于是部署文档让运维写进 `.env` 的值被悄悄替换：会话用的是运维从未选择的密钥，
   在栈外运行、持有配置 token 的 Gateway worker 则收到 `401`。现在 `.env` 提供的密钥交由
-  Compose 自行读取（优先级 shell → `.env` → 持久化文件 → 新生成），而已 export 但为空的
-  shell 变量仍会触发生成，因为 Compose 否则会把空值直接传下去。([#5928])
+  Compose 自行读取（优先级 shell → `.env` → 持久化文件 → 新生成）。`.env` 是否提供了值由
+  Compose 自己解析出的环境（`docker compose config --environment`）决定，因此 `KEY: VALUE`
+  写法和值内的 `${VAR}` 插值都按 Compose 的规则计算；解析结果为空的值（例如已 export 但为空
+  的 shell 变量）仍会触发生成，因为 Compose 否则会把空值直接传下去。低于 2.28 的 Compose
+  客户端回退到简单的 `KEY=VALUE` 读取。([#5928])
 - **技能：** `skill_manage(action="remove_file")` 与 `write_file` 现在可以处理二进制支持文件，
   并会干净地拒绝目录。`.skill` 压缩包可以包含 `assets/logo.png`（安装器只拒绝*可执行*二进制），
   但这两个操作在改动文件之前会先把原有内容按 UTF-8 文本读出（仅用于历史记录），于是二进制

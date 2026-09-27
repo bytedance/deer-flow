@@ -44,11 +44,11 @@ cd "$REPO_ROOT"
 
 ENV_FILE="$REPO_ROOT/.env"
 DOCKER_DIR="$REPO_ROOT/docker"
+COMPOSE_ENV_FILE_ARGS=()
 if [ -f "$ENV_FILE" ]; then
-    COMPOSE_CMD=(docker compose --env-file "$ENV_FILE" -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
-else
-    COMPOSE_CMD=(docker compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+    COMPOSE_ENV_FILE_ARGS=(--env-file "$ENV_FILE")
 fi
+COMPOSE_CMD=(docker compose "${COMPOSE_ENV_FILE_ARGS[@]}" -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
 
 load_uv_extras_from_dotenv() {
     local line=""
@@ -174,8 +174,32 @@ fi
 # replace it. Leave a dotenv-provided secret unexported so compose parses it
 # from $ENV_FILE itself, and only fall back to the persisted/generated one
 # when neither the shell nor $ENV_FILE provides it.
+#
+# "Provided" has to mean what Compose will see, not what a KEY=VALUE grep
+# finds: Compose also accepts `KEY: VALUE` lines and interpolates `${VAR}`
+# inside values, so `TOKEN: abc` is set and `TOKEN=${UNSET}` is empty. Ask
+# Compose for its resolved interpolation environment (`config --environment`,
+# Compose >= 2.28) with the same --env-file, against a stub project so the
+# probe does not depend on the real compose file loading. Older Compose
+# clients fall back to the plain KEY=VALUE reader used for the summary.
+compose_env_value() {
+    local key="$1"
+    if [ -z "${_compose_env_probe+x}" ]; then
+        if _compose_env="$(printf 'services: {}\n' | docker compose "${COMPOSE_ENV_FILE_ARGS[@]}" --project-directory "$DOCKER_DIR" -f - config --environment 2>/dev/null)"; then
+            _compose_env_probe=resolved
+        else
+            _compose_env_probe=unsupported
+        fi
+    fi
+    if [ "$_compose_env_probe" = resolved ]; then
+        printf '%s\n' "$_compose_env" | sed -n "s/^${key}=//p" | head -n 1
+    else
+        read_dotenv_value "$key"
+    fi
+}
+
 dotenv_provides_secret() {
-    [ -n "$(read_dotenv_value "$1")" ]
+    [ -n "$(compose_env_value "$1")" ]
 }
 
 # ── BETTER_AUTH_SECRET ───────────────────────────────────────────────────────

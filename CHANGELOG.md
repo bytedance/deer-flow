@@ -340,8 +340,12 @@ This release closes that milestone with **181 merged pull requests**.
   a secret the operator never chose, and Gateway workers running outside the
   stack with the configured token got `401`. A `.env`-provided secret is now
   left for Compose to read itself (shell → `.env` → persisted file →
-  generated), while an exported-but-empty shell variable still triggers
-  generation because Compose would otherwise pass the empty value through. ([#5928])
+  generated). Whether `.env` provides one is decided by Compose's own resolved
+  environment (`docker compose config --environment`), so `KEY: VALUE` lines
+  and `${VAR}` interpolation count the way Compose counts them — a value that
+  resolves empty, like an exported-but-empty shell variable, still triggers
+  generation because Compose would otherwise pass the empty value through.
+  Compose clients older than 2.28 fall back to the plain `KEY=VALUE` reader. ([#5928])
 - **skills:** `skill_manage(action="remove_file")` and `write_file` now work on
   binary support files, and reject directories cleanly. A `.skill` archive may
   carry `assets/logo.png` (the installer only rejects *executable* binaries),

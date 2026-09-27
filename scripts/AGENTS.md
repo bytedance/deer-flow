@@ -24,10 +24,18 @@ success; failures print Compose status and recent Gateway logs.
 exported-but-empty variable still wins). So `BETTER_AUTH_SECRET` and
 `DEER_FLOW_INTERNAL_AUTH_TOKEN` resolve shell → `.env` → persisted file under
 `DEER_FLOW_HOME` → freshly generated, and a `.env`-provided value is left
-unexported so Compose parses it itself. Do not export a value the script read
-from `.env`: that shadows Compose's own dotenv parsing and re-creates the bug
-where `make up` replaced the operator's secret with a generated one.
-`backend/tests/test_deploy_dotenv_secrets.py` pins this order.
+unexported so Compose parses it itself. Whether `.env` provides one is
+Compose's answer, not a `KEY=VALUE` grep: Compose also accepts `KEY: VALUE`
+lines and interpolates `${VAR}` inside values, so the script asks
+`docker compose config --environment` (same `--env-file`, a stub project on
+stdin, project directory `docker/`) and treats a resolved-empty value as
+missing; clients older than Compose 2.28 lack that flag and fall back to
+`read_dotenv_value`, the plain reader the end-of-run summary uses. Do not
+export a value the script read from `.env`: that shadows Compose's own dotenv
+parsing and re-creates the bug where `make up` replaced the operator's secret
+with a generated one. `backend/tests/test_deploy_dotenv_secrets.py` pins the
+order, the probe, and the fallback; its real-Compose cases run wherever a
+Compose client is installed.
 
 Root `make install` runs pre-commit through uv, so uv's tool bin directory
 need not be on `PATH`.
