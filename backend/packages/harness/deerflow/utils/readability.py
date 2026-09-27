@@ -1,6 +1,7 @@
 import logging
 import re
 import subprocess
+from functools import lru_cache
 from html import escape, unescape
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse, uses_relative
@@ -8,6 +9,7 @@ from urllib.parse import urljoin, urlparse, uses_relative
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 from readabilipy import simple_json_from_html_string
+from readabilipy.simple_json import have_node
 
 logger = logging.getLogger(__name__)
 
@@ -150,24 +152,63 @@ class _DestinationRewriter(HTMLParser):
         return "".join(parts)
 
 
+@lru_cache(maxsize=1)
+def _readability_available() -> bool:
+    """Probe Readability.js availability once per process.
+
+    ``readabilipy``'s own check re-runs (and may re-attempt an ``npm
+    install`` into site-packages) on every extraction, which is wasteful
+    for environments where Node.js can never be found, such as Windows
+    hosts where ``npm`` is only resolvable as ``npm.cmd``.
+    """
+    try:
+        return bool(have_node())
+    except OSError:
+        # The availability probe must never break fetching.
+        return False
+
+
+_FALLBACK_DROP_TAGS = ("script", "style", "noscript", "template", "iframe", "svg", "nav", "footer", "aside", "form", "button")
+
+
+def _python_fallback_article_json(html: str) -> dict[str, str | None]:
+    """Link-preserving extraction used when Readability.js is unavailable.
+
+    ``readabilipy``'s pure-Python tree strips element attributes, erasing
+    the ``href``/``src`` destinations that ``_resolve_html_urls`` has just
+    resolved. This fallback keeps the resolved destinations so the
+    model-visible Markdown stays navigable on hosts where Readability.js
+    can never run (Windows, npm-less containers).
+    """
+    soup = BeautifulSoup(html, "html5lib")
+    for element in soup.find_all(_FALLBACK_DROP_TAGS):
+        element.decompose()
+    title = soup.title.get_text(strip=True) if soup.title else ""
+    root = soup.find("article") or soup.find("main") or soup.body or soup
+    return {"title": title, "date": None, "content": str(root)}
+
+
 class ReadabilityExtractor:
     def extract_article(self, html: str, *, url: str | None = None) -> Article:
         if url:
             html = _resolve_html_urls(html, url)
         try:
-            article = simple_json_from_html_string(html, use_readability=True)
+            if _readability_available():
+                article = simple_json_from_html_string(html, use_readability=True)
+            else:
+                article = _python_fallback_article_json(html)
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
             stderr = getattr(exc, "stderr", None)
             if isinstance(stderr, bytes):
                 stderr = stderr.decode(errors="replace")
             stderr_info = f"; stderr={stderr.strip()}" if isinstance(stderr, str) and stderr.strip() else ""
             logger.warning(
-                "Readability.js extraction failed with %s%s; falling back to pure-Python extraction",
+                "Readability.js extraction failed with %s%s; using the link-preserving Python fallback",
                 type(exc).__name__,
                 stderr_info,
                 exc_info=True,
             )
-            article = simple_json_from_html_string(html, use_readability=False)
+            article = _python_fallback_article_json(html)
 
         html_content = article.get("content")
         if not html_content or not str(html_content).strip():

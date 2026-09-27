@@ -85,7 +85,7 @@ def test_extract_article_uses_first_document_base(base, expected):
     assert f"[Next]({expected})" in article.to_markdown()
 
 
-def test_python_extraction_fallback_preserves_article_text(monkeypatch):
+def test_python_extraction_fallback_preserves_article_links(monkeypatch):
     import subprocess
 
     from deerflow.utils import readability
@@ -99,9 +99,24 @@ def test_python_extraction_fallback_preserves_article_text(monkeypatch):
 
     monkeypatch.setattr(readability, "simple_json_from_html_string", extract)
     article = ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a>'), url=PAGE_URL)
-    # The existing Python fallback strips link markup; preserve its text contract.
-    assert "Next" in article.to_markdown()
+    # When Readability.js is unavailable, the fallback must still keep the
+    # destinations that _resolve_html_urls resolved into the markup.
+    assert "[Next](https://example.com/next)" in article.to_markdown()
     assert "This article explains the documentation" in article.to_markdown()
+
+
+def test_unavailable_readabilityjs_fallback_preserves_resolved_destinations(monkeypatch):
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_available", lambda: False)
+    article = ReadabilityExtractor().extract_article(
+        _article('<a href="../next">Next</a> <img src="images/chart.png" alt="Chart">'),
+        url=PAGE_URL,
+    )
+    markdown = article.to_markdown()
+    assert "[Next](https://example.com/next)" in markdown
+    assert "![Chart](https://example.com/docs/images/chart.png)" in markdown
+    assert "# Guide" in markdown
 
 
 @pytest.mark.parametrize("base", ["http://[broken", "data:text/plain,invalid", "javascript:void(0)", "about:blank", "mailto:help@example.com", "blob:https://example.com/id"])
