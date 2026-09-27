@@ -613,6 +613,10 @@ class RunJournal(BaseCallbackHandler):
         # represents the user-visible run lifecycle.
         if parent_run_id is not None:
             return
+        # Gate before reconciling: the reconciliation mutates message counters
+        # and summaries directly, not only through ``_put``.
+        if not self._admit_owner_loop_append(context=f"chain end {run_id}"):
+            return
         self._reconcile_final_tool_messages(outputs)
         self._put(
             event_type=RUN_END_EVENT.event_type,
@@ -648,6 +652,8 @@ class RunJournal(BaseCallbackHandler):
         messages are fully structured here, it fires only on real LLM calls,
         and the content is never compressed by checkpoint trimming.
         """
+        if not self._admit_owner_loop_append(context=f"chat model start {run_id}"):
+            return
         rid = str(run_id)
         self._llm_start_times[rid] = time.monotonic()
         self._llm_call_index += 1
@@ -877,6 +883,8 @@ class RunJournal(BaseCallbackHandler):
         pagination and checkpoint compaction do not lose the menu's evidence.
         No event-store or other loop-bound work happens on this producer path.
         """
+        if not self._admit_owner_loop_append(context="skill usage snapshot"):
+            return
         with self._skill_usage_lock:
             if self._closed:
                 return
@@ -1120,6 +1128,11 @@ class RunJournal(BaseCallbackHandler):
         """
         self._commit_pending_llm_response()
         if not self._buffer:
+            return
+        if self._quarantine is not None:
+            # An UNKNOWN predecessor blocks every successor, including this
+            # fire-and-forget threshold path: starting a new batch here would let
+            # a successor land while its predecessor's outcome is unresolved.
             return
         # Skip if a flush is already in flight — avoids concurrent writes
         # to the same SQLite file from multiple fire-and-forget tasks.
@@ -1720,7 +1733,16 @@ class RunJournal(BaseCallbackHandler):
     async def flush(self) -> bool:
         """Flush remaining buffer; return True once every predecessor settled."""
         async with self._flush_lock:
-            settled = await self._flush_locked()
+            try:
+                settled = await self._flush_locked()
+            except asyncio.CancelledError as error:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling() > 0:
+                    # The caller asked for this cancellation; keep propagating.
+                    raise
+                # Otherwise the quarantine holds a store-originated
+                # cancellation: report it as the definite write failure it is.
+                raise RuntimeError(f"RunEventStore cancelled its own write for run {self.run_id}; the batch outcome is unknown and will not be replayed") from error
         if not settled:
             logger.warning(
                 "Journal flush for run %s did not settle within the drain deadline; pending_flushes=%d active_writes=%d detached_writes=%d",
@@ -2010,6 +2032,16 @@ class RunJournal(BaseCallbackHandler):
         snapshot is captured before the run-scoped state is dropped; on failure
         the journal is fenced without replaying the quarantined batch.
         """
+        if self._closed:
+            # The journal was released before this terminal finish (for example
+            # by ``close(flush=True)``): snapshotting the cleared state would
+            # report a committed success for events this owner never drained.
+            return JournalFinishResult(
+                disposition=JournalWriteDisposition.UNKNOWN,
+                snapshot=None,
+                failure=RuntimeError("journal was already closed before terminal finalization"),
+                caller_cancellation=None,
+            )
         try:
             # Seal first: every producer append admitted before this point is
             # already ahead of the owner-loop barrier, so the drain below covers

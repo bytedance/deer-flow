@@ -4557,6 +4557,12 @@ async def test_store_self_cancel_after_possible_commit_is_unknown_not_host_cance
         with pytest.raises(RuntimeError):
             await asyncio.wait_for(journal.flush_until_settled(), timeout=3.0)
         assert store.calls == [["A"]]
+
+        # A bounded flush reports the same definite failure: a store cancelling
+        # its own write is never surfaced as the caller's cancellation.
+        with pytest.raises(RuntimeError, match="cancelled its own write"):
+            await journal.flush()
+        assert store.calls == [["A"]]
     finally:
         store.release_all()
         await journal.close(flush=False)
@@ -4783,6 +4789,12 @@ async def test_delayed_threshold_wrapper_failure_reaches_finalizer():
     with pytest.raises(RuntimeError, match="threshold write failed"):
         await asyncio.wait_for(journal.flush_until_settled(), timeout=2.0)
     # The failed batch is never replayed.
+    assert store.calls == 1
+
+    # A quarantined predecessor also blocks the fire-and-forget threshold path,
+    # so a successor cannot overtake it and land alone in the feed.
+    journal._put(event_type="B", category="trace", content="b")
+    await asyncio.sleep(0.05)
     assert store.calls == 1
 
 
@@ -5175,9 +5187,44 @@ async def test_callbacks_after_seal_cannot_mutate_usage_events_or_artifacts():
         ),
         run_id=uuid4(),
     )
+    # ``on_chain_end`` reconciles a tool message and ``on_chat_model_start``
+    # captures the first prompt; both mutate completion data directly rather than
+    # only through ``_put``.
+    journal._remember_current_run_tool_calls(
+        AIMessage(content="", tool_calls=[{"id": "call-chain", "name": "present_files", "args": {}}]),
+        caller="lead_agent",
+    )
+    journal.on_chain_end(
+        {"messages": [ToolMessage("ok", tool_call_id="call-chain")]},
+        run_id=uuid4(),
+    )
+    journal.on_chat_model_start(
+        {},
+        [[HumanMessage("late prompt")]],
+        run_id=uuid4(),
+        tags=["lead_agent"],
+    )
+    journal.record_skill_usage({"name": "late-skill", "description": "late"})
 
     assert journal._buffer == buffer_before
     assert journal._pending_llm_response is pending_before
     assert journal.get_completion_data() == completion_before
     assert journal._produced_artifacts == artifacts_before
-    assert journal._post_seal_rejected >= 2
+    assert journal._skill_usages == {}
+    assert journal._post_seal_rejected >= 5
+
+
+@pytest.mark.anyio
+async def test_finish_after_close_does_not_claim_a_committed_snapshot():
+    """A journal released before finalization must not report a committed success."""
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-finish-closed", "t-finish-closed", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+    journal.set_first_human_message("hello")
+
+    await journal.close(flush=True)
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert result.disposition is not JournalWriteDisposition.COMMITTED
+    assert result.snapshot is None
+    assert result.failure is not None
