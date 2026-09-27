@@ -241,6 +241,7 @@ class TestLeadAgentAssembly:
         assert assembly.graph is not None
         assert assembly.graph["context_schema"] is dict
         assert assembly.descriptor.effective_model
+        assert assembly.effective_model == assembly.descriptor.effective_model
         assert assembly.descriptor.fingerprint
 
     def test_descriptor_hashes_the_same_scoped_prompt_passed_to_the_graph(self, monkeypatch):
@@ -338,6 +339,7 @@ class TestLeadAgentAssembly:
         self._isolate_from_the_ambient_config(monkeypatch)
         assembly = assemble_lead_agent({"configurable": {"thread_id": "t-3"}})
         assert assembly.descriptor is None
+        assert assembly.effective_model
 
 
 class TestFactoryConsumersUnwrapTheGraph:

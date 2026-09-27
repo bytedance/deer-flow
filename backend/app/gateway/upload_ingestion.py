@@ -198,7 +198,7 @@ class ThreadUploadIngestionService:
                 user_id=self._user_id,
                 app_config=self._config,
                 owner_prefix="gateway:upload",
-                release_on_last=False,
+                release_on_last=True,
             )
             self._sandbox = self._sandbox_lease.sandbox
             if not self._sandbox_lease.denied and self._sandbox is None:

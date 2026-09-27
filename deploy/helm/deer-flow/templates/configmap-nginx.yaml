@@ -160,6 +160,23 @@ data:
                 proxy_request_buffering off;
             }
 
+            # Project documents — multipart upload plus the promote/attach/content/
+            # delete routes. Without its own location the upload fell through to
+            # /api/ and nginx's 1m default returned 413 before Gateway saw it,
+            # although Gateway allows uploads.max_file_size (50 MiB by default).
+            # Same ceiling as uploads; the read timeout keeps what /api/ granted.
+            location ~ ^/api/projects/[^/]+/documents {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+                client_max_body_size 100M;
+                proxy_request_buffering off;
+                proxy_read_timeout 600s;
+            }
+
             location ~ ^/api/threads {
                 proxy_pass http://gateway_upstream;
                 proxy_http_version 1.1;

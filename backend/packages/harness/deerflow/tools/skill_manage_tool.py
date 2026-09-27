@@ -23,7 +23,7 @@ from deerflow.skills.security_static_scanner import (
     enforce_static_scan,
 )
 from deerflow.skills.storage import get_or_new_user_skill_storage
-from deerflow.skills.storage.skill_storage import SkillStorage
+from deerflow.skills.storage.skill_storage import SkillStorage, read_text_or_none
 from deerflow.skills.types import SKILL_MD_FILE
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
@@ -223,8 +223,12 @@ async def _skill_manage_impl(
             if path is None or content is None:
                 raise ValueError("path and content are required for write_file.")
             target = await _to_thread(skill_storage.ensure_safe_support_path, name, path)
+            if await _to_thread(target.is_dir):
+                raise ValueError(f"Supporting file path '{path}' is a directory, not a file.")
             exists = await _to_thread(target.exists)
-            prev_content = await _to_thread(target.read_text, encoding="utf-8") if exists else None
+            # A binary asset (e.g. from a .skill archive) has no previous *text*;
+            # the history record takes None rather than aborting the write.
+            prev_content = await _to_thread(read_text_or_none, target) if exists else None
             executable = "scripts/" in path or path.startswith("scripts/")
             static_findings = await _scan_static_candidate_or_raise(name, {path: content}, skill_storage)
             scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}", static_findings=static_findings)
