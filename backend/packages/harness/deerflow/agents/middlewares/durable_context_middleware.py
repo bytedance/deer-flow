@@ -32,6 +32,7 @@ from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.tools.artifact_registry import render_artifact_registry
 
 _DURABLE_CONTEXT_DATA_KEY = "durable_context_data"
 _SUMMARY_RENDER_CHAR_BUDGET = 6000
@@ -44,6 +45,10 @@ _AUTHORITY_CONTRACT = "\n".join(
     ]
 )
 _DELEGATION_STABLE_FIELDS = ("description", "subagent_type", "status", "run_id", "result_brief", "result_sha256", "result_ref")
+
+
+def _delegation_identity(entry: dict) -> tuple[str | None, str | None]:
+    return entry.get("run_id") or None, entry.get("id")
 
 
 def _normalize_skills_root(skills_container_path: str | None) -> str:
@@ -65,7 +70,7 @@ def _bound_text(text: str, cap: int) -> str:
     return f"{text[:head]}{omitted_marker}{text[-tail:]}"
 
 
-def _render_durable_context_data(summary_text: str | None, ledger: list, skills: list, task_notes: dict | None = None, task_history: dict | None = None) -> str:
+def _render_durable_context_data(summary_text: str | None, ledger: list, skills: list, task_notes: dict | None = None, task_history: dict | None = None, artifacts: list | None = None) -> str:
     data_parts: list[str] = []
     if summary_text:
         bounded_summary = _bound_text(str(summary_text), _SUMMARY_RENDER_CHAR_BUDGET)
@@ -79,6 +84,9 @@ def _render_durable_context_data(summary_text: str | None, ledger: list, skills:
     if skill_block:
         data_parts.append(skill_block)
 
+    artifact_block = render_artifact_registry(artifacts or [])
+    if artifact_block:
+        data_parts.append(artifact_block)
     if task_notes is not None:
         history = normalize_task_history(task_history)
         note_data = json.dumps({"notes": normalize_task_notes(task_notes), "history_status": history.get("status", "no_compaction_yet"), "omitted_records": history.get("omitted_records", 0)}, ensure_ascii=False)
@@ -93,10 +101,12 @@ def _retained_delegation_window(delegations: list[dict], existing: list[dict]) -
     if len(existing) < _DELEGATION_LEDGER_MAX_ENTRIES or not existing:
         return delegations
 
-    earliest_retained_id = existing[0].get("id") if isinstance(existing[0], dict) else None
-    if earliest_retained_id is not None:
+    earliest = existing[0] if isinstance(existing[0], dict) else None
+    if earliest is not None:
+        earliest_run_id, earliest_id = _delegation_identity(earliest)
         for index, entry in enumerate(delegations):
-            if entry.get("id") == earliest_retained_id:
+            entry_run_id, entry_id = _delegation_identity(entry)
+            if entry_id == earliest_id and (entry_run_id is None or entry_run_id == earliest_run_id):
                 return delegations[index:]
 
     return delegations[-_DELEGATION_LEDGER_MAX_ENTRIES:]
@@ -104,10 +114,12 @@ def _retained_delegation_window(delegations: list[dict], existing: list[dict]) -
 
 def _filter_changed_delegations(delegations: list[dict], existing: list[dict]) -> list[dict]:
     comparable_delegations = _retained_delegation_window(delegations, existing)
+    existing_by_identity = {_delegation_identity(entry): entry for entry in existing if isinstance(entry, dict)}
     existing_by_id = {entry.get("id"): entry for entry in existing if isinstance(entry, dict)}
     changed: list[dict] = []
     for entry in comparable_delegations:
-        previous = existing_by_id.get(entry.get("id"))
+        entry_run_id, entry_id = _delegation_identity(entry)
+        previous = existing_by_identity.get((entry_run_id, entry_id)) if entry_run_id is not None else existing_by_id.get(entry_id)
         if previous is None:
             changed.append(entry)
             continue
@@ -175,7 +187,7 @@ def _run_opening_human_index(messages: list[AnyMessage], run_id: str, pre_existi
     return None
 
 
-def _current_run_messages(messages: list[AnyMessage], run_id: str | None, pre_existing_message_ids: frozenset[str]) -> list[AnyMessage]:
+def _current_run_messages(messages: list[AnyMessage], run_id: str | None, pre_existing_message_ids: frozenset[str], opening_index: int | None) -> list[AnyMessage]:
     """Return the message tail where this invocation may have emitted tasks.
 
     The worker supplies the message ids that existed before this run, so a
@@ -184,13 +196,12 @@ def _current_run_messages(messages: list[AnyMessage], run_id: str | None, pre_ex
     """
     if run_id is None:
         return messages
-    index = _run_opening_human_index(messages, run_id, pre_existing_message_ids)
-    if index is not None:
-        return messages[index + 1 :]
+    if opening_index is not None:
+        return messages[opening_index + 1 :]
     return _messages_after_pre_existing_boundary(messages, pre_existing_message_ids)
 
 
-def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing: list[dict], run_id: str) -> list[dict]:
+def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing: list[dict], run_id: str, opening_index: int) -> list[dict]:
     """Mark delegations that an earlier run left in_progress without a result as cancelled.
 
     A ``task`` call waits for its subagent, so an entry that is still
@@ -198,33 +209,49 @@ def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing
     run that was stopped while the subagent ran. Nothing else will ever update
     it, and the ledger would keep telling the model not to delegate again.
 
-    Any recorded reply excludes this inference, including legacy ToolMessages
-    without subagent status metadata. Their outcome is unknown, not evidence
-    of cancellation. Conservatively leave those entries unchanged, even if
-    they remain in_progress: this repairs missing replies, not legacy results.
+    Any reply before the current run's opening HumanMessage excludes this
+    inference, including legacy ToolMessages without subagent status metadata.
+    A resumed run has no opening HumanMessage, so a saved reply cannot safely
+    be assigned to the preceding user's run. Preserve unmarked runs with a
+    matching reply even across repeated IDs; the reply's owner is ambiguous.
     Current task producers stamp metadata for extract_delegations to capture.
     """
-    answered = {str(message.tool_call_id) for message in messages if isinstance(message, ToolMessage) and message.tool_call_id}
-    return [{**entry, "status": "cancelled"} for entry in existing if isinstance(entry, dict) and entry.get("status") == "in_progress" and entry.get("run_id") not in (None, run_id) and entry.get("id") not in answered]
+    answered: set[tuple[str | None, str]] = set()
+    marked_run_ids: set[str] = set()
+    replied_ids: set[str] = set()
+    message_run_id: str | None = None
+    for message in messages[:opening_index]:
+        if isinstance(message, HumanMessage):
+            marker = message.additional_kwargs.get("run_id")
+            message_run_id = str(marker) if marker else None
+            if message_run_id is not None:
+                marked_run_ids.add(message_run_id)
+        elif isinstance(message, ToolMessage) and message.tool_call_id:
+            tool_call_id = str(message.tool_call_id)
+            answered.add((message_run_id, tool_call_id))
+            replied_ids.add(tool_call_id)
+
+    cancelled = []
+    for entry in existing:
+        if not isinstance(entry, dict) or entry.get("status") != "in_progress":
+            continue
+        entry_run_id = entry.get("run_id")
+        entry_id = entry.get("id")
+        if entry_run_id in (None, run_id) or (entry_run_id, entry_id) in answered or (None, entry_id) in answered:
+            continue
+        # Command(resume=...) can checkpoint a reply before ledger capture,
+        # without a HumanMessage carrying that run's id. Its owner is unknown.
+        if entry_run_id not in marked_run_ids and entry_id in replied_ids:
+            continue
+        cancelled.append({**entry, "status": "cancelled"})
+    return cancelled
 
 
-def _with_run_id(delegations: list[dict], run_id: str | None, existing: list[dict]) -> list[dict]:
-    """Tag only new delegation ids with the current run_id."""
+def _with_run_id(delegations: list[dict], run_id: str | None) -> list[dict]:
+    """Tag delegations from the current run's bounded message window."""
     if run_id is None:
         return delegations
-    existing_by_id = {entry.get("id"): entry for entry in existing if isinstance(entry, dict)}
-    tagged: list[dict] = []
-    for entry in delegations:
-        previous = existing_by_id.get(entry.get("id"))
-        if previous is not None:
-            previous_run_id = previous.get("run_id")
-            if previous_run_id:
-                tagged.append({**entry, "run_id": previous_run_id})
-            else:
-                tagged.append({key: value for key, value in entry.items() if key != "run_id"})
-            continue
-        tagged.append({**entry, "run_id": run_id})
-    return tagged
+    return [{**entry, "run_id": run_id} for entry in delegations]
 
 
 class DurableContextMiddleware(AgentMiddleware[AgentState]):
@@ -235,6 +262,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         *,
         skills_container_path: str | None = None,
         skill_file_read_tool_names: Collection[str] | None = None,
+        inject_tool_artifacts: bool = True,
         task_continuity_enabled: bool = False,
         pii_redaction_config: PiiRedactionConfig | None = None,
     ) -> None:
@@ -243,6 +271,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         self._pii_redaction_config = pii_redaction_config
         self._skills_root = _normalize_skills_root(skills_container_path)
         self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES if skill_file_read_tool_names is None else skill_file_read_tool_names)
+        self._inject_tool_artifacts = inject_tool_artifacts
 
     def release_policy_parameters(self) -> dict[str, object]:
         """Describe the normalized inputs that govern capture and injection."""
@@ -250,6 +279,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             "skills_container_path": self._skills_root,
             "skill_file_read_tool_names": sorted(self._skill_read_tool_names),
             "task_continuity_enabled": self._task_continuity_enabled,
+            "inject_tool_artifacts": self._inject_tool_artifacts,
             "pii_redaction_enabled": bool(self._pii_redaction_config and self._pii_redaction_config.enabled),
         }
 
@@ -272,14 +302,15 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
     def _capture_delegations(self, state: AgentState, runtime: Runtime | None) -> dict | None:
         run_id = _runtime_run_id(runtime)
         pre_existing_message_ids = _runtime_pre_existing_message_ids(runtime)
-        messages = _current_run_messages(state["messages"], run_id, pre_existing_message_ids)
+        opening_index = _run_opening_human_index(state["messages"], run_id, pre_existing_message_ids) if run_id is not None else None
+        messages = _current_run_messages(state["messages"], run_id, pre_existing_message_ids, opening_index)
         existing = state.get("delegations") or []
         delegations = _filter_changed_delegations(
-            _with_run_id(extract_delegations(messages), run_id, existing),
+            _with_run_id(extract_delegations(messages), run_id),
             existing,
         )
-        if run_id is not None and _run_opening_human_index(state["messages"], run_id, pre_existing_message_ids) is not None:
-            delegations = [*delegations, *_close_delegations_left_by_earlier_runs(state["messages"], existing, run_id)]
+        if run_id is not None and opening_index is not None:
+            delegations = [*delegations, *_close_delegations_left_by_earlier_runs(state["messages"], existing, run_id, opening_index)]
         if delegations:
             return {"delegations": delegations}
         return None
@@ -297,12 +328,23 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
 
     def _inject(self, request: ModelRequest) -> ModelRequest:
         state = request.state or {}
+        artifacts = []
+        if self._inject_tool_artifacts:
+            for entry in state.get("tool_artifacts") or []:
+                # Redact raw labels before HTML escaping; state and real_ref
+                # remain intact for server-side resolution. Handles are generated.
+                projected = dict(entry)
+                for field in ("display_name", "artifact_type", "tool_name", "mime_type"):
+                    if isinstance(projected.get(field), str):
+                        projected[field] = redact_text(projected[field], self._pii_redaction_config)
+                artifacts.append(projected)
         data_block = _render_durable_context_data(
             redact_text(state.get("summary_text"), self._pii_redaction_config),
             state.get("delegations") or [],
             state.get("skill_context") or [],
             (state.get("task_notes") or {}) if self._task_continuity_enabled else None,
             state.get("task_history") if self._task_continuity_enabled else None,
+            artifacts=artifacts,
         )
         if not data_block:
             return request

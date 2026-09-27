@@ -617,6 +617,20 @@ class TestAgentConstruction:
         assert messages[1].content == "Do the task"
 
     @pytest.mark.anyio
+    async def test_task_child_does_not_inherit_agent_local_artifact_registry(self, classes, base_config, monkeypatch):
+        """The documented MVP delegation boundary starts with a fresh registry."""
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], thread_id="parent-thread")
+        state, _, _ = await executor._build_initial_state("Process /mnt/user-data/outputs/report.md and return concrete references")
+        assert "tool_artifacts" not in state
+        assert "tool_artifact_processed" not in state
+        assert "/mnt/user-data/outputs/report.md" in state["messages"][-1].content
+
+    @pytest.mark.anyio
     async def test_build_initial_state_no_skills_only_system_prompt(
         self,
         classes,

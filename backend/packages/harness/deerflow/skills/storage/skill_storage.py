@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
@@ -15,6 +16,31 @@ from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory  # noqa: F
 logger = logging.getLogger(__name__)
 
 _SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def walk_skill_directories(root: Path) -> Iterable[tuple[str, list[str], list[str]]]:
+    """Follow directory links, but prune links back to the current ancestors.
+
+    Keep os.walk's mutable directory list so callers retain their namespace,
+    hidden-directory and package-boundary rules. Track only the current branch:
+    two independent aliases of an external skill tree must both be discoverable.
+    """
+    ancestors: list[tuple[Path, Path]] = []
+    for current_root, dir_names, file_names in os.walk(root, followlinks=True):
+        current_path = Path(current_root)
+        while ancestors and ancestors[-1][0] != current_path.parent:
+            ancestors.pop()
+        try:
+            resolved = current_path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            # The directory may have disappeared or its link changed mid-scan.
+            dir_names.clear()
+            continue
+        if any(resolved == real_path for _, real_path in ancestors):
+            dir_names.clear()
+            continue
+        ancestors.append((current_path, resolved))
+        yield current_root, dir_names, file_names
 
 
 def read_text_or_none(path: Path) -> str | None:
