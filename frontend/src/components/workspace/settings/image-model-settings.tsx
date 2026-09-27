@@ -20,6 +20,7 @@ import {
   imageProfileDraft,
   loadImageProfiles,
   saveImageProfile,
+  setDefaultImageProfile,
   testImageProfile,
   type ImageProfile,
   type ImageProfileDraft,
@@ -83,12 +84,31 @@ export function ImageModelSettings() {
     }
   }
 
+  async function setDefault(profile: ImageProfile) {
+    if (!profile.identity) return;
+    setBusy(`default:${profile.source}`);
+    try {
+      await setDefaultImageProfile(
+        profile.source === "config" ? "sandbox_environment" : "managed",
+        profile.identity,
+        catalog.data?.status.default_revision ?? null,
+      );
+      await refresh();
+      toast.success(text.defaultSaved);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : text.failed);
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <SettingsSection title={text.title} description={text.description}>
       <div className="space-y-4">
         {catalog.data && (
           <p role="status" className="text-sm">
             {text.status}: {text.statuses[catalog.data.status.status]}
+            {catalog.data.status.choice_required && ` · ${text.chooseInChat}`}
           </p>
         )}
         <div className="flex gap-2">
@@ -114,7 +134,7 @@ export function ImageModelSettings() {
             key={`${profile.source}:${profile.name}`}
             className="space-y-2 rounded-lg border p-4"
           >
-            <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="font-medium">
                   {profile.display_name || profile.name}
@@ -128,25 +148,70 @@ export function ImageModelSettings() {
                       : text.disabled}
                 </p>
               </div>
-              {profile.source === "managed" && (
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    variant="outline"
-                    disabled={!!busy}
-                    onClick={() => setEditing(profile)}
+              <div className="flex flex-col items-end gap-2">
+                {profile.selected && (
+                  <span
+                    aria-label={text.defaultTagLabel(
+                      profile.display_name || profile.name,
+                    )}
+                    className="-rotate-6 rounded-sm bg-emerald-600 px-3 py-1 text-xs font-semibold text-white shadow-sm dark:bg-emerald-500 dark:text-emerald-950"
                   >
-                    {text.edit}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={!!busy}
-                    onClick={() => void toggle(profile)}
-                  >
-                    {profile.enabled ? text.disable : text.enable}
-                  </Button>
+                    {text.defaultTag}
+                  </span>
+                )}
+                <div className="flex flex-wrap justify-end gap-2">
+                  {(!profile.selected ||
+                    !catalog.data?.status.default_active) && (
+                    <Button
+                      variant="outline"
+                      aria-label={text.setDefaultLabel(
+                        profile.display_name || profile.name,
+                      )}
+                      disabled={
+                        !!busy ||
+                        !profile.identity ||
+                        !profile.has_api_key ||
+                        (profile.source === "managed" && !profile.enabled)
+                      }
+                      onClick={() => void setDefault(profile)}
+                    >
+                      {text.setDefault}
+                    </Button>
+                  )}
+                  {profile.source === "managed" && (
+                    <>
+                      <Button
+                        variant="outline"
+                        disabled={!!busy}
+                        onClick={() => setEditing(profile)}
+                      >
+                        {text.edit}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        disabled={!!busy}
+                        onClick={() => void toggle(profile)}
+                      >
+                        {profile.enabled ? text.disable : text.enable}
+                      </Button>
+                    </>
+                  )}
                 </div>
-              )}
+              </div>
             </div>
+            <p className="text-muted-foreground text-sm">
+              {profile.conflict
+                ? text.chooseInChat
+                : profile.selected
+                  ? text.selected
+                  : text.notSelected}
+              {profile.source === "managed" &&
+                profile.selected &&
+                catalog.data?.profiles.some(
+                  (item) => item.source === "config",
+                ) &&
+                ` · ${text.overridesServer}`}
+            </p>
             <p className="text-muted-foreground text-sm">
               {profile.has_api_key ? text.keySaved : text.keyMissing} ·{" "}
               {profile.verified_generation

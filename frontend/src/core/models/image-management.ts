@@ -23,6 +23,9 @@ export type ImageProfileDraft = {
 
 export type ImageProfile = Omit<ImageProfileDraft, "api_key"> & {
   source: "managed" | "config";
+  identity?: string;
+  selected?: boolean;
+  conflict?: boolean;
   has_api_key: boolean;
   revision?: string;
   verified_generation: boolean;
@@ -39,6 +42,9 @@ export type ImageStatus = {
   has_api_key: boolean;
   supports_generation: boolean;
   supports_edit: boolean;
+  choice_required?: boolean;
+  default_revision?: string | null;
+  default_active?: boolean;
 };
 
 export type ImageCatalog = {
@@ -79,6 +85,17 @@ export const saveImageProfile = (
 ) =>
   request<ImageProfile>("/profiles", "PUT", {
     config,
+    expected_revision: expectedRevision,
+  });
+
+export const setDefaultImageProfile = (
+  source: "managed" | "sandbox_environment",
+  targetIdentity: string,
+  expectedRevision: string | null,
+) =>
+  request<{ revision: string }>("/profiles/default", "PUT", {
+    source,
+    target_identity: targetIdentity,
     expected_revision: expectedRevision,
   });
 
