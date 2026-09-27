@@ -323,6 +323,17 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **docker:** Project-document uploads larger than 1 MB no longer fail with a
+  bare nginx `413` through the unified entry point. `POST
+  /api/projects/{id}/documents` is a multipart upload that Gateway accepts up
+  to `uploads.max_file_size` (50 MiB by default), but no nginx location
+  matched it, so it fell through to the `/api/` catch-all and nginx's default
+  `client_max_body_size 1m` rejected the request before Gateway saw it — a
+  2 MB PDF was refused while the same file uploaded fine into a thread. All
+  three maintained configs (Docker, `make dev`, Helm) now give
+  `/api/projects/{id}/documents` its own location with the thread-uploads
+  settings (100M ceiling, streamed request body) and the read timeout the
+  catch-all already granted; the catch-all itself keeps nginx's defaults.
 - **docker:** The production stack (`make up` / `scripts/deploy.sh`) now starts
   on hosts with IPv6 disabled. `docker/nginx/nginx.conf` also listens on
   `[::]:2026`; on a kernel booted with `ipv6.disable=1` that listen makes nginx
