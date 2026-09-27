@@ -1811,7 +1811,7 @@ export const enUS: Translations = {
     imageModels: {
       title: "Image models",
       description:
-        "Choose a default image model for new chats and image requests. Image models are separate from chat models. If a model or endpoint changes, you will choose again in chat. Tests call the provider and may incur charges.",
+        "Choose a default image model for new chats and image requests. Image models are separate from chat models. When server and web models coexist without a valid saved default, choose in chat. A model or endpoint change invalidates a saved default. Tests call the provider and may incur charges.",
       add: "Add image model",
       reload: "Reload",
       loading: "Loading image models…",
@@ -1850,7 +1850,7 @@ export const enUS: Translations = {
       testEdit: "Test reference editing",
       working: "Working…",
       formDescription:
-        "Save a provider and test generation and reference editing separately. A web profile becomes the default for the current server model.",
+        "Save a provider and test generation and reference editing separately. If a server model is also configured, choose a default here or choose for each image request in chat.",
       name: "Unique name",
       displayName: "Display name",
       provider: "Provider",
