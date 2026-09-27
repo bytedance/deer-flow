@@ -891,12 +891,24 @@ async def run_agent(
     subagent_events: _SubagentEventBuffer | None = None
     started = False
 
+    cancellation_finalized = False
+
     async def _finish_cancellation(
         action: str,
         *,
         restore_checkpoint: bool = True,
     ) -> None:
-        nonlocal checkpoint_rollback_completed
+        nonlocal checkpoint_rollback_completed, cancellation_finalized
+        if cancellation_finalized:
+            # The durable cancel action stays visible to every later CAS, so a
+            # second call would repeat the rollback checkpoint/delete.
+            logger.info(
+                "Run %s cancellation (action=%s) was already finalized; skipping the repeat",
+                run_id,
+                action,
+            )
+            return
+        cancellation_finalized = True
         await run_manager.set_finalizing(run_id, True)
         if action == "rollback":
             await run_manager.set_status(

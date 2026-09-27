@@ -57,8 +57,10 @@ classified, never guessed. Returning normally is COMMITTED; raising
 proves the whole batch did not commit; every other exception and any
 store-originated `CancelledError` is UNKNOWN. The first unsafe outcome is
 quarantined out of the auto-flush buffer and blocks its successors: UNKNOWN is
-never replayed, and only a later explicit `flush_until_settled()` may retry a
-proven NOT_COMMITTED batch. `close()` never replays a quarantined batch, so no
+never replayed -- the quarantine also blocks the fire-and-forget threshold path,
+so a successor cannot land while its predecessor's outcome is unresolved -- and
+only a later explicit `flush_until_settled()` may retry a proven NOT_COMMITTED
+batch. `close()` never replays a quarantined batch, so no
 journal write starts after the terminal decision.
 
 `RunJournal.finish_for_terminal(still_owned=...)` runs one owned
@@ -67,12 +69,15 @@ returns `JournalFinishResult(disposition, snapshot, failure, caller_cancellation
 The seal takes the admission lock and then waits on an owner-loop barrier, so an
 append admitted before it is guaranteed to be in the drained tail while a later
 one is rejected and counted in `_post_seal_rejected` instead of being silently
-dropped by the detach guard. The state-mutating callbacks that touch token
-accumulators, pending response events or artifact statistics (`on_llm_end`,
-`on_tool_end`) take the same gate, so a post-seal callback cannot change the
-snapshot the drain is about to take. The snapshot exists only for COMMITTED, a joining
-caller's cancellation never changes the disposition, and a lease lost mid-drain
-fences *new* batches while the write already in flight is still observed. The
+dropped by the detach guard. Every state-mutating callback takes the same gate
+(`on_llm_end`, `on_tool_end`, `on_chain_end`, `on_chat_model_start`,
+`record_skill_usage`), so a post-seal callback cannot change the token
+accumulators, pending response events, message summaries or artifact statistics
+that the drain is about to snapshot. The snapshot exists only for COMMITTED (a finish on an
+already-released journal reports a non-committed failure instead of snapshotting
+cleared state), a joining caller's cancellation never changes the disposition,
+and a lease lost mid-drain fences *new* batches while the write already in flight
+is still observed. The
 worker consumes that result and must persist `snapshot.completion_data` for the
 terminal completion write: by then the journal has dropped its per-model usage and
 message summaries.
@@ -81,7 +86,8 @@ The worker's terminal status write always goes through
 `set_status_if_not_cancelled`, so a durable cancel observed during the drain beats
 a locally staged success instead of being persisted verbatim by
 `persist_current_status`; the receipt stays a fact record about the committed
-journal, not a verdict.
+journal, not a verdict. Cancellation finalization runs at most once per run, so a
+cancel already handled by the abort path cannot repeat a rollback checkpoint.
 
 `RunManager` keeps renewing a locally staged terminal run while its task is alive
 and its durable terminal row is unacknowledged (`RunRecord.terminal_committed`),
