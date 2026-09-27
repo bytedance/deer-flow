@@ -1588,25 +1588,30 @@ class RunJournal(BaseCallbackHandler):
             )
         return settled
 
-    async def _flush_until_settled_owned(self) -> bool:
+    async def _flush_until_settled_owned(self, *, retry_noncommitted: bool = True) -> bool:
         """Drain predecessors and buffer inside the task that owns the drain.
 
         The drain runs in its own task, so the joining caller's cancellation
         never reaches it and the only ``CancelledError`` that can arrive is the
         store cancelling its own write. That is a definite write failure (the
         caller never requested it), so it is converted into an ordinary failure
-        with the batch retained for retry instead of surfacing as caller
-        cancellation.
+        with the batch quarantined instead of surfacing as caller cancellation.
+
+        ``retry_noncommitted`` is set only by an explicit ``flush_until_settled``:
+        a ``close`` must never replay a batch after the terminal decision.
         """
         async with self._flush_lock:
             try:
-                return await self._flush_locked(settle_predecessors=True)
+                return await self._flush_locked(
+                    settle_predecessors=True,
+                    retry_noncommitted=retry_noncommitted,
+                )
             except asyncio.CancelledError as error:
                 current = asyncio.current_task()
                 if current is not None and current.cancelling() > 0:
                     # The owned drain itself was cancelled: keep propagating.
                     raise
-                raise RuntimeError(f"RunEventStore cancelled its own write for run {self.run_id}; the failed batch was returned to the buffer for retry") from error
+                raise RuntimeError(f"RunEventStore cancelled its own write for run {self.run_id}; the batch outcome is unknown and will not be replayed") from error
 
     async def flush_until_settled(self) -> bool:
         """Flush in order and return ``True`` only after every predecessor settled.
@@ -1622,14 +1627,22 @@ class RunJournal(BaseCallbackHandler):
         task = asyncio.create_task(self._flush_until_settled_owned())
         return await _await_owned_task(task)
 
-    async def _flush_locked(self, *, settle_predecessors: bool = False) -> bool:
+    async def _flush_locked(self, *, settle_predecessors: bool = False, retry_noncommitted: bool = False) -> bool:
         if self._closed:
             return True
-        if self._quarantine is not None:
-            # An UNKNOWN batch blocks every successor; a NOT_COMMITTED batch is
-            # only replayed by an explicitly requested later drain (see
-            # ``_rearm_noncommitted_retry``).
-            self._raise_quarantine()
+        quarantine = self._quarantine
+        if quarantine is not None:
+            if retry_noncommitted and quarantine.disposition is JournalWriteDisposition.NOT_COMMITTED:
+                # A store proved the whole batch did not commit, so exactly one
+                # explicitly requested settled drain may replay it. The batch is
+                # re-armed at the head of the buffer to keep FIFO with any
+                # successor that arrived while it was quarantined. An UNKNOWN
+                # batch is never re-armed, and a bounded ``flush()`` or a
+                # ``close()`` never takes this branch.
+                self._quarantine = None
+                self._buffer = quarantine.batch + self._buffer
+            else:
+                self._raise_quarantine()
         self._explicit_flush_in_progress = True
         try:
             self._commit_pending_llm_response()
@@ -1762,7 +1775,7 @@ class RunJournal(BaseCallbackHandler):
         attached, so a later ``close`` retries instead of discarding the tail of
         the run event stream.
         """
-        await self._flush_until_settled_owned()
+        await self._flush_until_settled_owned(retry_noncommitted=False)
         self._detach_runtime_dependencies()
 
     async def close(self, *, flush: bool = True) -> None:

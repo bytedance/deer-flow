@@ -1276,10 +1276,10 @@ async def test_close_flush_double_cancellation_and_concurrent_join(monkeypatch):
     drain_starts = 0
     original_owned_drain = journal._flush_until_settled_owned
 
-    async def counting_owned_drain():
+    async def counting_owned_drain(**kwargs):
         nonlocal drain_starts
         drain_starts += 1
-        return await original_owned_drain()
+        return await original_owned_drain(**kwargs)
 
     journal._flush_until_settled_owned = counting_owned_drain
 
@@ -4724,3 +4724,102 @@ async def test_owned_join_handled_old_cancel_count_is_untouched():
 
     assert results == ["done"]
     assert cancelling_after == [1]
+
+
+@pytest.mark.anyio
+async def test_detached_late_failure_is_reported_once_before_buffered_successor(monkeypatch):
+    """A late failure applied by the done callback still dominates the final drain."""
+    import deerflow.runtime.journal as journal_module
+
+    monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    store = GatedRunEventStore()
+    journal = RunJournal("r-late", "t-late", store, flush_threshold=100)
+    try:
+        journal._put(event_type="A", category="trace", content="a")
+        first_drain = asyncio.create_task(journal.flush())
+        await asyncio.wait_for(store.gate(0)[0].wait(), timeout=1.0)
+        await asyncio.wait_for(first_drain, timeout=2.0)
+        journal._put(event_type="B", category="trace", content="b")
+
+        store.commit_then_fail[0] = RuntimeError("late failure after possible commit")
+        store.release_all()
+        # Let the done callback apply the outcome before the final drain starts.
+        await asyncio.sleep(0.05)
+        assert journal._quarantine is not None
+
+        with pytest.raises(RuntimeError, match="late failure after possible commit"):
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=2.0)
+
+        # The failure is reported once: A is not replayed and B never overtakes it.
+        assert store.calls == [["A"]]
+        assert [event["event_type"] for event in journal._buffer] == ["B"]
+    finally:
+        store.release_all()
+        await journal.close(flush=False)
+
+
+@pytest.mark.anyio
+async def test_delayed_threshold_wrapper_failure_reaches_finalizer():
+    """A fire-and-forget threshold write failure is published, not only logged."""
+
+    class ThresholdFailingStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def put_batch(self, events):
+            self.calls += 1
+            raise RuntimeError("threshold write failed")
+
+    store = ThresholdFailingStore()
+    journal = RunJournal("r-threshold-wrapper", "t-threshold-wrapper", store, flush_threshold=1)
+    journal._put(event_type="A", category="trace", content="a")
+    await asyncio.sleep(0.05)
+
+    assert store.calls == 1
+    assert journal._quarantine is not None
+
+    with pytest.raises(RuntimeError, match="threshold write failed"):
+        await asyncio.wait_for(journal.flush_until_settled(), timeout=2.0)
+    # The failed batch is never replayed.
+    assert store.calls == 1
+
+
+@pytest.mark.anyio
+async def test_explicit_second_drain_can_retry_only_proven_noncommit():
+    """Only a proven non-commit is retried, and only by an explicit settled drain."""
+    from deerflow.runtime.events.store.base import RunEventWriteNotCommittedError
+
+    class MarkerThenSuccessStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+            self.persisted: list[str] = []
+
+        async def put_batch(self, events):
+            self.calls += 1
+            if self.calls == 1:
+                raise RunEventWriteNotCommittedError("transaction rolled back")
+            self.persisted.extend(event["event_type"] for event in events)
+            return await super().put_batch(events)
+
+    store = MarkerThenSuccessStore()
+    journal = RunJournal("r-marker", "t-marker", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+
+    with pytest.raises(RunEventWriteNotCommittedError, match="transaction rolled back"):
+        await journal.flush_until_settled()
+    assert store.calls == 1
+    assert journal._quarantine.disposition is JournalWriteDisposition.NOT_COMMITTED
+
+    # A bounded flush reports the quarantine but does not replay it.
+    with pytest.raises(RunEventWriteNotCommittedError):
+        await journal.flush()
+    assert store.calls == 1
+
+    # A later explicitly requested settled drain retries the proven non-commit.
+    assert (await journal.flush_until_settled()) is True
+    assert store.calls == 2
+    assert store.persisted == ["A"]
+    assert journal._quarantine is None
