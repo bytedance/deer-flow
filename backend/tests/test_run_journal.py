@@ -4823,3 +4823,120 @@ async def test_explicit_second_drain_can_retry_only_proven_noncommit():
     assert store.calls == 2
     assert store.persisted == ["A"]
     assert journal._quarantine is None
+
+
+@pytest.mark.anyio
+async def test_finish_committed_snapshot_survives_detach():
+    """A committed finish returns a snapshot and leaves no run-scoped references."""
+    import deerflow.runtime.journal as journal_module
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-finish", "t-finish", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+    journal.set_first_human_message("hello")
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert result.disposition is journal_module.JournalWriteDisposition.COMMITTED
+    assert result.failure is None
+    assert result.caller_cancellation is None
+    assert result.snapshot is not None
+    assert result.snapshot.feed_generation == 1
+    assert result.snapshot.completion_data["first_human_message"] == "hello"
+    assert result.snapshot.delivery_content["presented"] == 0
+
+    # The snapshot is usable after the run-scoped state is dropped.
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+    events = await store.list_events("t-finish", "r-finish")
+    assert [event["event_type"] for event in events] == ["A"]
+
+
+@pytest.mark.anyio
+async def test_finish_committed_even_when_joining_caller_cancelled():
+    """A committed drain and the caller's cancellation are reported separately."""
+    import deerflow.runtime.journal as journal_module
+
+    store = GatedRunEventStore()
+    journal = RunJournal("r-finish-cancel", "t-finish-cancel", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+
+    finish_task = asyncio.create_task(journal.finish_for_terminal())
+    await asyncio.wait_for(store.gate(0)[0].wait(), timeout=1.0)
+    finish_task.cancel()
+    await asyncio.sleep(0)
+    assert not finish_task.done()
+
+    store.release_all()
+    result = await asyncio.wait_for(finish_task, timeout=2.0)
+
+    assert result.disposition is journal_module.JournalWriteDisposition.COMMITTED
+    assert result.snapshot is not None
+    assert result.failure is None
+    assert isinstance(result.caller_cancellation, asyncio.CancelledError)
+    assert store.persisted == [["A"]]
+
+
+@pytest.mark.anyio
+async def test_finish_unknown_has_no_success_snapshot():
+    """An UNKNOWN write can never produce a committed terminal snapshot."""
+    import deerflow.runtime.journal as journal_module
+
+    class FailingStore(MemoryRunEventStore):
+        async def put_batch(self, events):
+            raise RuntimeError("store unavailable")
+
+    journal = RunJournal("r-finish-unknown", "t-finish-unknown", FailingStore(), flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert result.disposition is journal_module.JournalWriteDisposition.UNKNOWN
+    assert result.snapshot is None
+    assert isinstance(result.failure, RuntimeError)
+    assert str(result.failure) == "store unavailable"
+    assert journal._closed is True
+    assert journal._store is None
+
+
+@pytest.mark.anyio
+async def test_finish_not_committed_has_no_success_snapshot():
+    """A proven non-commit also refuses a success snapshot."""
+    import deerflow.runtime.journal as journal_module
+    from deerflow.runtime.events.store.base import RunEventWriteNotCommittedError
+
+    class MarkerStore(MemoryRunEventStore):
+        async def put_batch(self, events):
+            raise RunEventWriteNotCommittedError("rolled back")
+
+    journal = RunJournal("r-finish-marker", "t-finish-marker", MarkerStore(), flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert result.disposition is journal_module.JournalWriteDisposition.NOT_COMMITTED
+    assert result.snapshot is None
+    assert isinstance(result.failure, RunEventWriteNotCommittedError)
+
+
+@pytest.mark.anyio
+async def test_concurrent_finish_joins_single_owner():
+    """Every concurrent finish joins one owned finalization."""
+    store = GatedRunEventStore()
+    journal = RunJournal("r-finish-join", "t-finish-join", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+
+    first = asyncio.create_task(journal.finish_for_terminal())
+    await asyncio.wait_for(store.gate(0)[0].wait(), timeout=1.0)
+    second = asyncio.create_task(journal.finish_for_terminal())
+    await asyncio.sleep(0)
+    owner = journal._finish_owner_task
+    assert owner is not None
+    assert not owner.done()
+
+    store.release_all()
+    first_result, second_result = await asyncio.wait_for(asyncio.gather(first, second), timeout=2.0)
+
+    assert first_result.disposition is second_result.disposition
+    assert store.persisted == [["A"]]

@@ -136,6 +136,31 @@ class JournalWriteDisposition(StrEnum):
 
 
 @dataclass(frozen=True)
+class JournalFinalizationSnapshot:
+    """Immutable terminal facts captured after the journal sealed and settled."""
+
+    delivery_content: dict[str, Any]
+    completion_data: dict[str, Any]
+    feed_generation: int
+
+
+@dataclass(frozen=True)
+class JournalFinishResult:
+    """Terminal journal outcome, with the caller's cancellation kept separate.
+
+    ``snapshot`` is set only for a ``COMMITTED`` disposition. ``failure`` carries
+    the reason a non-committed batch refused terminal success. ``caller_cancellation``
+    records a cancellation delivered to the joining caller while the owned finish
+    ran; it never changes the disposition, so a successful drain stays successful.
+    """
+
+    disposition: JournalWriteDisposition
+    snapshot: JournalFinalizationSnapshot | None
+    failure: Exception | None
+    caller_cancellation: asyncio.CancelledError | None
+
+
+@dataclass(frozen=True)
 class _QuarantinedWrite:
     """The first write whose outcome cannot be turned into a safe retry.
 
@@ -448,6 +473,7 @@ class RunJournal(BaseCallbackHandler):
         self._quarantine: _QuarantinedWrite | None = None
         self._flush_lock = asyncio.Lock()
         self._close_owner_task: asyncio.Task[None] | None = None
+        self._finish_owner_task: asyncio.Task[JournalFinishResult] | None = None
         self._pending_progress_task: asyncio.Task[None] | None = None
         self._pending_progress_delayed = False
         self._progress_dirty = False
@@ -1839,6 +1865,86 @@ class RunJournal(BaseCallbackHandler):
                 await _await_cancelled_tasks(pending_flush_tasks)
         finally:
             self._detach_runtime_dependencies()
+
+    async def _finish_owned(self) -> JournalFinishResult:
+        """Own one terminal finalization: settle, snapshot, then detach.
+
+        The result is always returned, never raised, so the joining caller can
+        separate the journal outcome from its own cancellation. On success the
+        snapshot is captured before the run-scoped state is dropped; on failure
+        the journal is fenced without replaying the quarantined batch.
+        """
+        try:
+            settled = await self._flush_until_settled_owned(retry_noncommitted=True)
+        except BaseException as error:  # noqa: BLE001 - the outcome is reported, not raised
+            quarantine = self._quarantine
+            disposition = quarantine.disposition if quarantine is not None else JournalWriteDisposition.UNKNOWN
+            failure = quarantine.error if quarantine is not None else error
+            self._detach_runtime_dependencies()
+            return JournalFinishResult(
+                disposition=disposition,
+                snapshot=None,
+                failure=failure,
+                caller_cancellation=None,
+            )
+        if not settled:
+            self._detach_runtime_dependencies()
+            return JournalFinishResult(
+                disposition=JournalWriteDisposition.UNKNOWN,
+                snapshot=None,
+                failure=RuntimeError("journal did not settle before terminal receipt"),
+                caller_cancellation=None,
+            )
+        snapshot = JournalFinalizationSnapshot(
+            delivery_content=self.get_delivery_content(),
+            completion_data=self.get_completion_data(),
+            feed_generation=self._feed_generation,
+        )
+        self._detach_runtime_dependencies()
+        return JournalFinishResult(
+            disposition=JournalWriteDisposition.COMMITTED,
+            snapshot=snapshot,
+            failure=None,
+            caller_cancellation=None,
+        )
+
+    async def finish_for_terminal(self) -> JournalFinishResult:
+        """Return the authoritative terminal outcome of this journal.
+
+        One owned task performs the seal-free settled drain, the snapshot and the
+        write-free detach; every concurrent caller joins that same task. The
+        caller's cancellation stops this wait but is reported in the result
+        instead of being mapped onto the journal outcome, and it is left for the
+        caller to re-raise once it has acted on the result.
+        """
+        owner = self._finish_owner_task
+        if owner is None or owner.done():
+            owner = asyncio.create_task(self._finish_owned())
+            self._finish_owner_task = owner
+        caller_cancellation: asyncio.CancelledError | None = None
+        while not owner.done():
+            try:
+                await asyncio.wait({owner})
+            except asyncio.CancelledError as error:
+                if caller_cancellation is None:
+                    caller_cancellation = error
+        try:
+            result = owner.result()
+        except BaseException as error:  # noqa: BLE001 - never lose the terminal outcome
+            result = JournalFinishResult(
+                disposition=JournalWriteDisposition.UNKNOWN,
+                snapshot=None,
+                failure=error,
+                caller_cancellation=None,
+            )
+        if caller_cancellation is None:
+            return result
+        return JournalFinishResult(
+            disposition=result.disposition,
+            snapshot=result.snapshot,
+            failure=result.failure,
+            caller_cancellation=caller_cancellation,
+        )
 
     def _schedule_progress_flush(self) -> None:
         """Best-effort throttled progress snapshot for active run visibility."""
