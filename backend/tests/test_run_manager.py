@@ -1884,3 +1884,28 @@ async def test_renewal_rejected_after_own_terminal_row_committed_does_not_fence(
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_direct_cancel_signals_live_staged_terminal_without_heartbeat():
+    """A direct cancel must reach a live staged terminal, not wait for a heartbeat.
+
+    ``cancel()`` records the durable request, but its local branch only accepts
+    pending/running records, so a locally staged terminal returns "cancelled"
+    without signalling the running finalizer. Only a later heartbeat would
+    deliver it, which a blocked terminal drain may never reach.
+    """
+    manager, store = _ownership_manager()
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    try:
+        outcome = await manager.cancel(record.run_id, action="interrupt")
+
+        assert outcome is CancelOutcome.cancelled
+        assert record.abort_event.is_set() is True
+        assert task.cancelling() > 0 or task.cancelled()
+        # The durable row still belongs to this worker; the cancel must not
+        # bypass the journal receipt ordering by writing interrupted here.
+        assert (await store.get(record.run_id))["status"] == "running"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

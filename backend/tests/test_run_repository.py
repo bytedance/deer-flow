@@ -1416,3 +1416,40 @@ async def test_two_managers_keep_a_live_staged_terminal_finalizer_leased(tmp_pat
             await asyncio.gather(finalizer, return_exceptions=True)
     finally:
         await _cleanup()
+
+
+@pytest.mark.anyio
+async def test_sql_durable_rollback_wins_over_a_later_completion_cas(tmp_path):
+    """The first accepted durable cancel action survives a later completion CAS.
+
+    Real shared SQL store, two managers: a peer records ``rollback`` while the
+    owner still holds a running row, so the owner's later terminal CAS must
+    report the accepted action instead of finalizing as interrupted/success.
+    """
+    repo = await _make_repo(tmp_path)
+    try:
+        ownership = RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        )
+        owner = RunManager(store=repo, worker_id="owner", run_ownership_config=ownership)
+        peer = RunManager(store=repo, worker_id="peer", run_ownership_config=ownership)
+
+        record = await owner.create("thread-1")
+        assert await repo.start_run(record.run_id) is True
+
+        assert await peer._request_durable_cancel(record.run_id, action="rollback") == (
+            CancelOutcome.requested,
+            "rollback",
+        )
+
+        finalization = await repo.finalize_if_not_cancelled(record.run_id, status="interrupted")
+        assert finalization.finalized is False
+        assert finalization.cancel_action == "rollback"
+
+        row = await repo.get(record.run_id)
+        assert row["status"] == "running"
+        assert row["cancel_action"] == "rollback"
+    finally:
+        await _cleanup()

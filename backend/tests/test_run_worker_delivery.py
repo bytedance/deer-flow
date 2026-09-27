@@ -1633,3 +1633,58 @@ async def test_local_durable_cancel_rollback_finalizes_once(monkeypatch):
 
     assert len(rollback_calls) == 1
     assert (await run_store.get(record.run_id))["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_durable_rollback_beats_provisional_local_interrupt(monkeypatch):
+    """A provisional local interrupt must not outrank an accepted durable rollback.
+
+    Shutdown can mark a provisional ``interrupt`` locally while the store already
+    accepted ``rollback``. The final CAS proves which action won, so the local
+    outcome must be upgraded to the durable action and the restore must run once.
+    """
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+
+    event_store = MemoryRunEventStore()
+    run_store = MemoryRunStore()
+    run_manager = RunManager(
+        store=run_store,
+        run_ownership_config=RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        ),
+    )
+    record = await run_manager.create("thread-1")
+    # The durable store already accepted a rollback (peer or earlier request).
+    assert await run_store.request_cancel(record.run_id, action="rollback") == "rollback"
+
+    rollback_calls: list[dict] = []
+
+    async def spy_rollback(**kwargs):
+        rollback_calls.append(kwargs)
+        return True
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint", spy_rollback)
+
+    class CancelledAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            # Shutdown-style provisional intent: local interrupt only.
+            record.abort_action = "interrupt"
+            record.abort_event.set()
+            yield {"messages": []}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=event_store),
+        agent_factory=lambda *, config: CancelledAgent(),
+        graph_input={},
+        config={},
+    )
+
+    row = await run_store.get(record.run_id)
+    assert len(rollback_calls) == 1
+    assert row["status"] == "error"
+    assert row["error"] == "Rolled back by user"

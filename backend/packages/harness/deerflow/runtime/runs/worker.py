@@ -987,6 +987,18 @@ async def run_agent(
                     **terminal_status_kwargs,
                 )
                 logger.info("Run %s was cancelled", run_id)
+        elif action == "rollback" and cancellation_action != "rollback":
+            # A provisional local interrupt (for example a shutdown intent) must
+            # not outrank the action the store actually accepted: upgrade the
+            # local outcome before the single restore runs.
+            cancellation_action = action
+            await run_manager.set_finalizing(run_id, True)
+            await run_manager.set_status(
+                run_id,
+                RunStatus.error,
+                error="Rolled back by user",
+                **terminal_status_kwargs,
+            )
 
         if action != "rollback" or not restore_checkpoint:
             # An interrupt has no restore, and a path that has not started one

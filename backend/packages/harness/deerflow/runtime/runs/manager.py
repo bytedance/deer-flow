@@ -1409,21 +1409,34 @@ class RunManager:
             elif outcome != CancelOutcome.lease_valid_elsewhere:
                 return outcome
 
+        staged_signal_only = False
         async with self._lock:
             record = self._runs.get(run_id)
             if record is not None:
                 if record.status == RunStatus.interrupted or record.abort_event.is_set():
                     return CancelOutcome.cancelled
-                if record.status not in (RunStatus.pending, RunStatus.running):
+                task_active = record.task is not None and not record.task.done()
+                # A staged terminal status is still a live lifecycle. The durable
+                # cancel is already accepted, so signal the running finalizer
+                # immediately instead of waiting for the next heartbeat. The
+                # status is deliberately left alone here: the worker's terminal
+                # CAS still has to order the receipt against the durable action.
+                staged_signal_only = task_active and not record.terminal_committed and record.status in (RunStatus.success, RunStatus.error)
+                if record.status not in (RunStatus.pending, RunStatus.running) and not staged_signal_only:
                     return CancelOutcome.cancelled if durable_cancel_won else CancelOutcome.not_cancellable
                 record.abort_action = action
                 record.abort_event.set()
-                task_active = record.task is not None and not record.task.done()
                 record.finalizing = task_active
-                if task_active and record.status == RunStatus.running:
+                if task_active and record.status in (RunStatus.running, RunStatus.success, RunStatus.error):
                     record.task.cancel()
-                record.status = RunStatus.interrupted
-                record.updated_at = _now_iso()
+                if not staged_signal_only:
+                    record.status = RunStatus.interrupted
+                    record.updated_at = _now_iso()
+
+        if staged_signal_only:
+            # Signal only: the durable action is already recorded and the worker
+            # owns the ordering of the receipt and the terminal status.
+            return CancelOutcome.cancelled
 
         # Persist outside the lock so store calls don't block other mutations.
         if record is not None:
