@@ -326,9 +326,12 @@ def _evidence(**overrides: Any):
         "saved_skips_with_tokens": 300,
         "latency_samples": 300,
         "baseline_computable": 300,
-        # The heuristic saves nothing here, so the model's 300 saved calls are all
-        # incremental (an equal count is a FAIL, see the test below).
-        "baseline_saved_calls": 0,
+        # The paired comparison: the heuristic saves nothing here, so the model's 300
+        # saved calls are all incremental (an equal count is a FAIL, and a paired
+        # subset smaller than the scored skips is INSUFFICIENT — see the tests below).
+        "baseline_paired_skips": 300,
+        "baseline_model_saved_calls": 300,
+        "baseline_heuristic_saved_calls": 0,
     }
     base.update(overrides)
     return eval_script.Evidence(**base)
@@ -357,7 +360,7 @@ def test_every_gate_passes_on_a_clean_run():
         ({"reviewed_missed": 1}, None, "reviewed_skips_confirm_no_loss"),
         ({}, eval_script.Coverage(records=310, censored=10, malformed_lines=2), "censoring_disclosed"),
         ({"saved_calls": 0, "misses": 250}, None, "savings_recorded"),
-        ({"baseline_saved_calls": 300}, None, "baseline_incremental_savings"),
+        ({"baseline_heuristic_saved_calls": 300}, None, "baseline_incremental_savings"),
     ],
 )
 def test_a_failing_gate_is_reported_as_fail(overrides, coverage, expected):
@@ -378,7 +381,9 @@ def test_gates_report_insufficient_instead_of_passing_vacuously():
         saved_skips_with_tokens=0,
         latency_samples=0,
         baseline_computable=0,
-        baseline_saved_calls=0,
+        baseline_paired_skips=0,
+        baseline_model_saved_calls=0,
+        baseline_heuristic_saved_calls=0,
     )
     statuses = _gates(empty, eval_script.Coverage(records=0, censored=0, malformed_lines=0))
     assert set(statuses.values()) == {eval_script.INSUFFICIENT}
@@ -396,7 +401,9 @@ def test_gates_report_insufficient_instead_of_passing_vacuously():
         saved_skips_with_tokens=2,
         latency_samples=2,
         baseline_computable=2,
-        baseline_saved_calls=0,
+        baseline_paired_skips=2,
+        baseline_model_saved_calls=2,
+        baseline_heuristic_saved_calls=0,
     )
     statuses = _gates(thin, eval_script.Coverage(records=2, censored=0, malformed_lines=0))
     assert statuses["network_miss_rate"] == eval_script.INSUFFICIENT, "two clean skips cannot establish a 1% target: the exact upper bound is 0.78"
@@ -462,9 +469,25 @@ def test_the_baseline_gate_needs_a_gain_over_the_heuristic():
     """The heuristic is already in the stack, so a tie is not a reason to egress."""
     gate_id = "baseline_incremental_savings"
 
-    assert _gates(_evidence(baseline_saved_calls=300), _CLEAN_COVERAGE)[gate_id] == eval_script.FAIL, "the model saved exactly what the heuristic would have"
-    assert _gates(_evidence(baseline_saved_calls=299), _CLEAN_COVERAGE)[gate_id] == eval_script.PASS, "one incremental call is a gain"
-    assert _gates(_evidence(baseline_computable=0, baseline_saved_calls=0), _CLEAN_COVERAGE)[gate_id] == eval_script.INSUFFICIENT, "without the baseline field there is no comparison to make"
+    assert _gates(_evidence(baseline_heuristic_saved_calls=300), _CLEAN_COVERAGE)[gate_id] == eval_script.FAIL, "the model saved exactly what the heuristic would have"
+    assert _gates(_evidence(baseline_heuristic_saved_calls=299), _CLEAN_COVERAGE)[gate_id] == eval_script.PASS, "one incremental call is a gain"
+    unannotated = _evidence(baseline_computable=0, baseline_paired_skips=0, baseline_model_saved_calls=0, baseline_heuristic_saved_calls=0)
+    assert _gates(unannotated, _CLEAN_COVERAGE)[gate_id] == eval_script.INSUFFICIENT, "without the baseline field there is no comparison to make"
+
+
+def test_the_baseline_gate_refuses_a_comparison_over_a_subset_of_the_skips():
+    """A paired comparison that misses most scored skips is not evidence of a gain.
+
+    The two sides must be the same records: subtracting a subset's heuristic savings
+    from model savings over every scorable skip credits the model for batches the
+    baseline never saw.
+    """
+    gate_id = "baseline_incremental_savings"
+    partial = _evidence(baseline_paired_skips=1, baseline_model_saved_calls=1, baseline_heuristic_saved_calls=0)
+
+    assert _gates(partial, _CLEAN_COVERAGE)[gate_id] == eval_script.INSUFFICIENT, "1 paired skip cannot stand for 300"
+    detail = next(gate for gate in eval_script.evaluate_gates(partial, _CLEAN_COVERAGE) if gate.gate_id == gate_id).detail
+    assert "1 of 300" in detail
 
 
 # --- report assembly ------------------------------------------------------
@@ -548,6 +571,26 @@ def test_build_report_refuses_enforce_without_a_gain_over_the_heuristic():
     assert report["baseline_heuristic"]["saved_calls"] == 300
     gates = {gate["id"]: gate["status"] for gate in report["gates"]}
     assert gates["baseline_incremental_savings"] == eval_script.FAIL
+    assert report["gate_summary"]["enable_recommended"] is False
+
+
+def test_build_report_refuses_enforce_when_the_baseline_covers_only_a_subset():
+    """The reviewer's follow-up: 299 unannotated skips must not read as a 300-vs-1 gain.
+
+    Only one record carries ``trivial_only``, so the paired comparison is model=1
+    against heuristic=1 — no incremental saving. Comparing model savings over *all*
+    scorable skips against that subset's heuristic savings read 300-1=299 and enabled
+    ``enforce`` on records the baseline never saw.
+    """
+    strata = ("identity", "preference", "correction")
+    records = [_record(prescreen={"digest": f"d{i}"}, mutations_accepted=0, trivial_only=True if i == 0 else None, reviewed=True, review_outcome="none_worth_remembering", stratum=strata[i] if i < 3 else None) for i in range(300)]
+    report = eval_script.build_report(records, source="unannotated.jsonl")
+
+    assert report["model"]["saved_calls"] == 300
+    assert report["baseline_heuristic"]["saved_calls"] == 1, "the heuristic can only be scored on the one annotated skip"
+    assert report["baseline_heuristic"]["incremental_saved_calls"] == 0, "the paired comparison saves nothing"
+    gates = {gate["id"]: gate["status"] for gate in report["gates"]}
+    assert gates["baseline_incremental_savings"] == eval_script.INSUFFICIENT
     assert report["gate_summary"]["enable_recommended"] is False
 
 

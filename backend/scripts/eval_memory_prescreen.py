@@ -60,7 +60,11 @@ Method, and the things it deliberately refuses to do
   *and* the recorded tokens and p50/p95 verdict latency: recorded calls alone are
   not the evidence the gate asks for, so missing any of them is ``INSUFFICIENT``
   rather than a pass. A baseline that saves as many calls as the model — which the
-  shipped "everything trivial" sample does — is a ``FAIL``, not an enabling run.
+  shipped "everything trivial" sample does — is a ``FAIL``, not an enabling run, and
+  the comparison must cover the scored skips: both sides are the records the baseline
+  can actually score (``trivial_only`` plus a readable signals list), so a run that
+  annotates only a subset is ``INSUFFICIENT`` instead of crediting the model with
+  batches the heuristic never saw.
 * The miss-rate bound is the exact one-sided **Clopper-Pearson** interval,
   computed here from the regularized incomplete beta function by bisection. No
   normal approximation is used anywhere, and the gate reads the *bound*, not the
@@ -682,8 +686,14 @@ class Evidence:
     reviewed_missed: int
     saved_skips_with_tokens: int
     latency_samples: int
+    #: The no-network comparison, all three over the same records: the ones the
+    #: baseline can score (``trivial_only`` and a readable signals list). Counting
+    #: the model's savings over *all* scorable skips instead would credit it with
+    #: batches the baseline never saw.
     baseline_computable: int
-    baseline_saved_calls: int
+    baseline_paired_skips: int
+    baseline_model_saved_calls: int
+    baseline_heuristic_saved_calls: int
 
 
 @dataclass(frozen=True)
@@ -785,24 +795,37 @@ def evaluate_gates(evidence: Evidence, coverage: Coverage, thresholds: Threshold
             observed = f"tokens on {evidence.saved_skips_with_tokens} of them, {evidence.latency_samples} verdict latency sample(s), baseline on {evidence.baseline_computable} record(s)"
             gates.append(Gate("savings_recorded", PASS, f"{recorded}; {observed}"))
 
-    incremental = evidence.saved_calls - evidence.baseline_saved_calls
-    if evidence.baseline_computable == 0:
+    # Both sides of this comparison are the baseline-computable records, and the gate
+    # refuses to conclude from a subset of the scored skips: subtracting a subset's
+    # heuristic savings from model savings over all scorable skips would count every
+    # unannotated batch as imaginary incremental benefit.
+    paired = evidence.baseline_paired_skips
+    incremental = evidence.baseline_model_saved_calls - evidence.baseline_heuristic_saved_calls
+    if paired == 0:
         gates.append(
             Gate(
                 "baseline_incremental_savings",
                 INSUFFICIENT,
-                "the no-network baseline is not computable for any record (the collector must set trivial_only), so no gain over it can be shown",
+                "no scored skip carries the baseline annotation (the collector must set trivial_only and signals), so there is nothing to compare the model against",
+            )
+        )
+    elif paired < evidence.scored_skips:
+        gates.append(
+            Gate(
+                "baseline_incremental_savings",
+                INSUFFICIENT,
+                f"the baseline can score {paired} of {evidence.scored_skips} scored skip(s); the comparison must cover the scored skips, not the subset the annotation happens to reach",
             )
         )
     elif incremental <= 0:
-        saved_summary = f"the model saved {evidence.saved_calls} call(s) against the heuristic's {evidence.baseline_saved_calls}: {incremental:+d} incremental"
+        saved_summary = f"the model saved {evidence.baseline_model_saved_calls} call(s) against the heuristic's {evidence.baseline_heuristic_saved_calls} on the same {paired} scored skip(s): {incremental:+d} incremental"
         gates.append(Gate("baseline_incremental_savings", FAIL, f"{saved_summary}, so the egress buys nothing over the heuristic already in the stack"))
     else:
         gates.append(
             Gate(
                 "baseline_incremental_savings",
                 PASS,
-                f"the model saved {incremental} call(s) more than the no-network heuristic ({evidence.saved_calls} vs {evidence.baseline_saved_calls})",
+                f"the model saved {incremental} call(s) more than the no-network heuristic on the same {paired} scored skip(s) ({evidence.baseline_model_saved_calls} vs {evidence.baseline_heuristic_saved_calls})",
             )
         )
 
@@ -842,7 +865,9 @@ def build_report(
         saved_skips_with_tokens=sum(1 for record in saved if record.total_tokens is not None),
         latency_samples=sum(1 for record in network if record.duration_ms is not None),
         baseline_computable=baseline["computable"],
-        baseline_saved_calls=baseline["saved_calls"],
+        baseline_paired_skips=baseline["model"]["skips"],
+        baseline_model_saved_calls=baseline["model"]["saved_calls"],
+        baseline_heuristic_saved_calls=baseline["saved_calls"],
     )
     coverage = Coverage(records=len(records), censored=sum(1 for record in records if record.censored), malformed_lines=malformed_lines)
     gates = evaluate_gates(evidence, coverage, thresholds)

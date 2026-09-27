@@ -79,9 +79,12 @@ more skips rather than a smaller number to quote — zero misses on the identity
 preference / correction strata, at least 200 reviewed skips whose manual review
 confirms none was worth remembering, and the recorded savings evidence — calls and
 tokens saved, their p50/p95 verdict latency, and the no-network heuristic baseline
-on the same data, with a positive incremental saving over that baseline; if the
-heuristic already captures the savings (it saves as many calls as the model), the
-third-party call is not justified and the gate fails. `scripts/eval_memory_prescreen.py` reads
+on the same data, with a positive incremental saving over that baseline measured on
+the same records — the comparison must cover the scored skips, so a run that
+annotates only a subset is reported `INSUFFICIENT` rather than crediting the model
+for batches the heuristic never saw. If the heuristic already captures the savings
+(it saves as many calls as the model), the third-party call is not justified and the
+gate fails. `scripts/eval_memory_prescreen.py` reads
 shadow records and reports those populations and gates, and reports a gate that
 lacks evidence as `INSUFFICIENT` rather than passing it. `skip_threshold` (0.2)
 and `hint_threshold` (0.5) are provisional and unmeasured.
