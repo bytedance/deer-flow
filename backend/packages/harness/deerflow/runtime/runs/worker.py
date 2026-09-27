@@ -1529,6 +1529,13 @@ async def run_agent(
             # crash window where a terminal run could otherwise outlive its receipt.
             # A fenced worker leaves receipt recovery to the peer that claimed it.
             if not record.ownership_lost and journal is not None:
+                # A terminal finish detaches the journal, which clears the
+                # per-model usage and the message summaries. Capture the
+                # pre-detach statistics now: the committed snapshot below
+                # supersedes this, and a failed finish still persists real
+                # pre-terminal counts instead of the cleared values.
+                if completion_data is None:
+                    completion_data = journal.get_completion_data()
                 # The typed finish owns one settled drain and reports the journal
                 # outcome separately from this worker's cancellation, so a
                 # committed drain stays committed even when the worker task is
@@ -1547,6 +1554,8 @@ async def run_agent(
 
                 snapshot = finish_result.snapshot
                 if finish_result.disposition is JournalWriteDisposition.COMMITTED and snapshot is not None:
+                    # Authoritative terminal statistics, captured before detach.
+                    completion_data = dict(snapshot.completion_data)
                     if delivery_content is None:
                         if produced_output_paths is None:
                             produced_output_paths = await _produced_output_paths(
@@ -1596,7 +1605,11 @@ async def run_agent(
                     # Advance the final completion fields and timestamp without
                     # terminalizing the durable row. That active row continues to
                     # fence peer checkpoint writers through the duration write.
-                    completion_data = journal.get_completion_data()
+                    # ``completion_data`` was captured before the journal was
+                    # detached, so it still holds the model breakdown and the
+                    # message summaries.
+                    if completion_data is None:
+                        completion_data = journal.get_completion_data()
                     await run_manager.update_finalizing_progress(run_id, **completion_data)
                 except Exception:
                     logger.warning("Failed to persist finalizing run progress for %s (non-fatal)", run_id, exc_info=True)
@@ -1645,8 +1658,11 @@ async def run_agent(
 
             if not record.ownership_lost and journal is not None and persist_completion:
                 try:
-                    # Persist token usage + convenience fields to RunStore
-                    completion_data = completion_data or journal.get_completion_data()
+                    # Persist token usage + convenience fields to RunStore. The
+                    # journal is detached by now, so reuse the captured terminal
+                    # statistics rather than reading the cleared journal.
+                    if completion_data is None:
+                        completion_data = journal.get_completion_data()
                     await run_manager.update_run_completion(run_id, status=record.status.value, **completion_data)
                 except Exception:
                     logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)

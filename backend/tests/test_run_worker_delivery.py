@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, LLMResult
 from langgraph.types import Command
 
 from deerflow.config.app_config import AppConfig
@@ -1311,3 +1312,60 @@ async def test_worker_unknown_or_fenced_journal_never_publishes_success_or_recei
     assert event_store.calls == []
     assert await _delivery_events(event_store, "thread-1", record.run_id) == []
     assert record.ownership_lost is True
+
+
+@pytest.mark.anyio
+async def test_worker_persists_completion_snapshot_after_journal_detach():
+    """The terminal completion write must use the pre-detach snapshot.
+
+    ``finish_for_terminal`` clears the per-model usage and the message summaries
+    while detaching the journal, so a later ``journal.get_completion_data()``
+    returns empty values. Persisting those would drop the model breakdown and
+    the message summaries from the durable row even though the drain committed.
+    """
+    event_store = MemoryRunEventStore()
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+
+    class JournalingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            journal.record_external_llm_usage_records(
+                [
+                    {
+                        "source_run_id": "src-1",
+                        "caller": "lead_agent",
+                        "model_name": "model-x",
+                        "input_tokens": 7,
+                        "output_tokens": 5,
+                        "total_tokens": 12,
+                    }
+                ]
+            )
+            journal.set_first_human_message("hello")
+            journal.on_llm_end(
+                LLMResult(generations=[[ChatGeneration(message=AIMessage(content="world"))]]),
+                run_id=uuid4(),
+                parent_run_id=None,
+                tags=["lead_agent"],
+            )
+            yield {"messages": []}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=event_store),
+        agent_factory=lambda *, config: JournalingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    row = await run_store.get(record.run_id)
+    assert row["status"] == "success"
+    # Cumulative counters survive detach either way; the breakdown does not.
+    assert row["total_tokens"] == 12
+    assert row["token_usage_by_model"] == {"model-x": {"input_tokens": 7, "output_tokens": 5, "total_tokens": 12}}
+    assert row["first_human_message"] == "hello"
+    assert row["last_ai_message"] == "world"
