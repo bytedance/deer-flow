@@ -1680,3 +1680,136 @@ async def test_failed_create_or_reject_unindexes_run():
         await manager.create_or_reject("thread-a", multitask_strategy="reject")
     assert manager._runs == {}
     assert "thread-a" not in manager._runs_by_thread
+
+
+def _ownership_manager(store: MemoryRunStore | None = None) -> tuple[RunManager, MemoryRunStore]:
+    resolved = store or MemoryRunStore()
+    manager = RunManager(
+        store=resolved,
+        run_ownership_config=RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        ),
+    )
+    return manager, resolved
+
+
+async def _live_record(
+    manager: RunManager,
+    store: MemoryRunStore,
+    *,
+    status: RunStatus,
+    lease_seconds: int = 30,
+) -> tuple[Any, asyncio.Task]:
+    record = await manager.create("thread-1")
+    record.owner_worker_id = manager._worker_id
+    record.lease_expires_at = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
+    await store.update_status(record.run_id, "running")
+    await store.update_lease(
+        record.run_id,
+        owner_worker_id=manager._worker_id,
+        lease_expires_at=record.lease_expires_at,
+    )
+    record.status = status
+
+    async def hold() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise
+
+    task = asyncio.create_task(hold())
+    record.task = task
+    return record, task
+
+
+@pytest.mark.anyio
+async def test_staged_success_with_blocked_journal_continues_lease_renewal():
+    """A live task whose terminal status is only staged keeps renewing its lease."""
+    manager, store = _ownership_manager()
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    try:
+        before = record.lease_expires_at
+        assert (await store.get(record.run_id))["status"] == "running"
+
+        await manager._renew_leases()
+
+        assert record.lease_expires_at != before
+        assert record.ownership_lost is False
+        # The durable row is still this worker's; the staged success is not durable.
+        assert (await store.get(record.run_id))["status"] == "running"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_staged_success_renewal_rejected_fences_live_worker():
+    """Losing the lease fences a staged success before it can publish."""
+    store = LostLeaseRunStore()
+    manager, _ = _ownership_manager(store)
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    try:
+        await manager._renew_leases()
+
+        assert record.ownership_lost is True
+        assert record.status == RunStatus.error
+        assert task.cancelling() > 0 or task.cancelled()
+    finally:
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_durable_terminal_ack_stops_renewing_even_during_cleanup():
+    """Once the durable terminal row is acknowledged, cleanup stops renewing."""
+    manager, store = _ownership_manager()
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    try:
+        assert await manager.persist_current_status(record.run_id) is True
+        assert record.terminal_committed is True
+        assert (await store.get(record.run_id))["status"] == "success"
+
+        before = record.lease_expires_at
+        await manager._renew_leases()
+
+        assert record.lease_expires_at == before
+        assert record.ownership_lost is False
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_shutdown_includes_staged_terminal_live_task():
+    """Shutdown waits for and aborts a live staged-terminal task."""
+    manager, store = _ownership_manager()
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    try:
+        await manager.shutdown(timeout=1.0)
+
+        assert task.cancelling() > 0 or task.cancelled()
+        # The run never committed a terminal outcome, so shutdown records the abort.
+        assert (await store.get(record.run_id))["status"] == "interrupted"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_shutdown_keeps_acknowledged_terminal_status_during_cleanup():
+    """Shutdown must not rewrite a terminal status this worker already committed."""
+    manager, store = _ownership_manager()
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    try:
+        assert await manager.persist_current_status(record.run_id) is True
+        assert record.terminal_committed is True
+
+        await manager.shutdown(timeout=1.0)
+
+        assert task.cancelling() > 0 or task.cancelled()
+        assert record.status == RunStatus.success
+        assert (await store.get(record.run_id))["status"] == "success"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

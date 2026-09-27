@@ -224,6 +224,11 @@ class RunRecord:
     # further durable run/thread finalization because its lease ownership is
     # either known to be lost or could not be confirmed before expiry.
     ownership_lost: bool = False
+    # Process-local acknowledgement that this worker's terminal status reached
+    # the durable store. It is set only by a confirmed terminal write (never by
+    # a ``persist=False`` staging), and it is what lets ``_renew_leases`` stop
+    # renewing a run whose local task is still draining cleanup.
+    terminal_committed: bool = False
     stop_reason: str | None = None
     idempotency_key: str | None = None
     # True only on the caller that recovered an existing idempotent admission;
@@ -436,6 +441,7 @@ class RunManager:
                             record.run_id,
                             status.value,
                         )
+                        self._ack_terminal_commit(record, status)
                         return True
                     if existing_status == "error":
                         logger.warning(
@@ -457,11 +463,28 @@ class RunManager:
                             existing_status,
                         )
                     return False
-                return await self._persist_snapshot_to_store(record.run_id, row_recovery_payload)
+                if await self._persist_snapshot_to_store(record.run_id, row_recovery_payload):
+                    self._ack_terminal_commit(record, status)
+                    return True
+                return False
+            self._ack_terminal_commit(record, status)
             return True
         except Exception:
             logger.warning("Failed to persist status update for run %s", record.run_id, exc_info=True)
             return False
+
+    @staticmethod
+    def _is_terminal_status(status: RunStatus) -> bool:
+        return status in (RunStatus.success, RunStatus.error, RunStatus.interrupted)
+
+    def _ack_terminal_commit(self, record: RunRecord, status: RunStatus) -> None:
+        """Record that a terminal status reached the durable store.
+
+        Only called from a confirmed write: ``persist=False`` stages the status
+        locally and deliberately leaves the acknowledgement unset.
+        """
+        if self._is_terminal_status(status):
+            record.terminal_committed = True
 
     @staticmethod
     def _record_from_store(row: dict[str, Any]) -> RunRecord:
@@ -1097,6 +1120,13 @@ class RunManager:
                     record.abort_event.set()
             return result.cancel_action
 
+        if result.finalized:
+            # ``finalize_if_not_cancelled`` committed the terminal row itself, so
+            # the local ``persist=False`` staging above is already durable.
+            async with self._lock:
+                committed = self._runs.get(run_id)
+            if committed is not None:
+                self._ack_terminal_commit(committed, status)
         await self.set_status(
             run_id,
             status,
@@ -2125,6 +2155,20 @@ class RunManager:
             if cycle % 3 == 0:
                 self._schedule_orphan_reconciliation()
 
+    def _needs_lease(self, record: RunRecord) -> bool:
+        """Whether this worker must still hold a lease for a live local run.
+
+        A staged terminal status does not release ownership: until the durable
+        terminal row is acknowledged, the run still owns local resources and a
+        peer must not reclaim it. Once the durable terminal is committed, the
+        worker stops renewing even while its cleanup task is still alive.
+        """
+        if record.ownership_lost or record.terminal_committed:
+            return False
+        if record.owner_worker_id != self._worker_id:
+            return False
+        return record.task is None or not record.task.done()
+
     async def _renew_leases(self) -> None:
         """Renew locally-owned leases, failing closed at their deadlines.
 
@@ -2149,7 +2193,7 @@ class RunManager:
             # saturation, slow checkpoint hydrate on a fresh worker), peer
             # reconciliation will reclaim the run as an orphan and mark it
             # ``error`` even though this worker still intends to execute it.
-            active_runs = [(rid, record) for rid, record in self._runs.items() if record.status in (RunStatus.pending, RunStatus.running) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())]
+            active_runs = [(rid, record) for rid, record in self._runs.items() if self._needs_lease(record)]
 
         for run_id, record in active_runs:
             confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
@@ -2204,7 +2248,7 @@ class RunManager:
                     # we don't waste CPU or overwrite the takeover status on
                     # finalisation.
                     async with self._lock:
-                        still_active = self._runs.get(run_id) is record and record.status in (RunStatus.pending, RunStatus.running) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())
+                        still_active = self._runs.get(run_id) is record and self._needs_lease(record)
                     if still_active:
                         logger.warning(
                             "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
@@ -2212,15 +2256,21 @@ class RunManager:
                             record.status.value,
                             record.owner_worker_id,
                         )
+                        # A staged terminal status must not exempt the run from
+                        # fencing: the durable row is still this worker's until a
+                        # peer takes it, so losing the lease stops success
+                        # publication even though ``record.status`` is terminal.
                         await self._mark_ownership_lost(
                             record,
                             reason="The durable store rejected lease renewal for this worker.",
+                            require_active=False,
                         )
             except Exception:
                 if confirmed_deadline <= datetime.now(UTC):
                     await self._mark_ownership_lost(
                         record,
                         reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
+                        require_active=False,
                     )
                 else:
                     logger.warning(
@@ -2338,7 +2388,12 @@ class RunManager:
         deadline = loop.time() + timeout
 
         async with self._lock:
-            inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
+            # A staged terminal status is still a live resource user: its local
+            # task may be draining the journal or its finalizer. Select by the
+            # live task instead of the staged status so shutdown waits for it,
+            # and leave the durable outcome decision to the post-drain check
+            # below.
+            inflight = [record for record in self._runs.values() if record.task is not None and not record.task.done() and not record.ownership_lost]
             for record in inflight:
                 record.abort_action = "interrupt"
                 record.abort_event.set()
@@ -2366,6 +2421,14 @@ class RunManager:
                     # Completed on its own — retrieve any surfaced exception so it
                     # is not reported as "never retrieved", and keep its status.
                     task.exception()  # type: ignore[union-attr]  # done & not cancelled
+                    continue
+                if record.terminal_committed:
+                    # The durable row already holds this worker's terminal
+                    # outcome; shutdown must not rewrite it as interrupted.
+                    logger.info(
+                        "Run %s kept its acknowledged terminal status during shutdown drain",
+                        record.run_id,
+                    )
                     continue
                 if record.status in (RunStatus.pending, RunStatus.running):
                     record.status = RunStatus.interrupted
