@@ -64,12 +64,31 @@ class TestHonchoConfig:
 
     @pytest.mark.parametrize(
         ("value", "expected"),
-        [("false", False), ("0", False), ("off", False), ("no", False), ("FALSE", False), ("true", True), ("1", True), ("on", True), ("yes", True)],
+        [
+            ("false", False),
+            ("f", False),
+            ("F", False),
+            ("n", False),
+            ("no", False),
+            ("off", False),
+            ("0", False),
+            ("FALSE", False),
+            ("true", True),
+            ("t", True),
+            ("T", True),
+            ("y", True),
+            ("Y", True),
+            ("yes", True),
+            ("on", True),
+            ("1", True),
+        ],
     )
     def test_allow_insecure_http_from_environment(self, monkeypatch, tmp_path, value, expected):
         """``$VAR`` substitution yields the raw environment string, so the knob
         must be validated as a boolean: string truthiness turns ``"false"`` into
-        ``True`` and silently sends the API key over plaintext HTTP."""
+        ``True`` and silently sends the API key over plaintext HTTP. The
+        accepted literals are Pydantic's boolean vocabulary, so the documented
+        list is pinned here rather than in prose only."""
         monkeypatch.setenv("TEST_HONCHO_ALLOW_INSECURE", value)
         config_path = tmp_path / "config.yaml"
         config_path.write_text(

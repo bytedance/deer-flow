@@ -34,10 +34,11 @@ unless you explicitly set `allow_insecure_http: true` (local-development opt-in,
 same posture as the mem0 backend). Use HTTPS for any non-local deployment.
 
 `allow_insecure_http` also accepts an environment reference such as
-`allow_insecure_http: $HONCHO_ALLOW_INSECURE`. Boolean strings are
-case-insensitive: `false`, `0`, `off`, and `no` keep the opt-in off, while
-`true`, `1`, `on`, and `yes` enable it. Any other value is rejected when the
-backend loads its configuration, so a typo cannot silently enable the opt-in.
+`allow_insecure_http: $HONCHO_ALLOW_INSECURE`. The value is validated with
+Pydantic's boolean vocabulary, case-insensitively: `true`, `t`, `y`, `yes`,
+`on` and `1` enable the opt-in, while `false`, `f`, `n`, `no`, `off` and `0`
+keep it off. Any other value is rejected when the backend loads its
+configuration, so a typo cannot silently enable the opt-in.
 
 Config errors (bad URL, insecure key combination) fail fast at Gateway startup;
 connectivity is deliberately not probed, so a temporarily unreachable Honcho

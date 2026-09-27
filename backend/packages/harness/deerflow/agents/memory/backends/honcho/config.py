@@ -67,10 +67,12 @@ def _bool(cfg: dict[str, Any], key: str, default: bool) -> bool:
     the raw environment string, and a quoted YAML scalar stays a string, so a
     configured ``false`` can arrive as ``"false"``. Truthiness would read that
     as ``True`` -- for ``allow_insecure_http`` it silently opts into sending the
-    API key over plaintext HTTP. Validate the literal with the same vocabulary
-    the sandbox providers accept (see the tenki ``sticky`` knob) and name the
-    knob in the error, so a typo fails at config load instead of degrading to
-    ``True``.
+    API key over plaintext HTTP. ``TypeAdapter(bool)`` reads the literal with
+    Pydantic's boolean vocabulary instead (``true``/``t``/``y``/``yes``/``on``/
+    ``1`` and their false counterparts, case-insensitive), the same vocabulary
+    the sandbox providers accept (see the tenki ``sticky`` knob), and the knob
+    is named in the error, so a typo fails at config load instead of degrading
+    to ``True``.
     """
     value = cfg.get(key, default)
     if value is None:
