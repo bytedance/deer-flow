@@ -1,3 +1,10 @@
+### Image Source Selection
+
+Image source selection in `runtime/runs/worker.py` uses the run interaction
+policy before graph streaming. With both sources usable and no valid saved
+default, interactive runs leave the choice to the chat card; unattended runs
+bind the server source so AIO sandbox identity matches image execution.
+
 ### Stream Bridge Heartbeats
 
 Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.

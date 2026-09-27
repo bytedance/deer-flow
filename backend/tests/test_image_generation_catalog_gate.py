@@ -158,7 +158,7 @@ async def test_image_tool_configuration_errors_point_to_available_settings(isola
 
     args = (SimpleNamespace(), "/mnt/user-data/workspace/prompt.json", "/mnt/user-data/outputs/slide.png")
     results = (
-        image_tool.check_image_generation_tool.func(),
+        image_tool.check_image_generation_tool.func(SimpleNamespace(context={})),
         image_tool.generate_image_tool.func(*args),
         await image_tool.generate_image_tool.coroutine(*args),
     )
