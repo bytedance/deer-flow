@@ -8,7 +8,7 @@ from typing import Any, Literal
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from deerflow.agents.human_input import read_human_input_response
-from deerflow.config.image_generation import ManagedImageGenerationProfileStore, legacy_image_model_identity
+from deerflow.config.image_generation import ManagedImageGenerationProfileStore, legacy_image_storage_identity
 
 
 def selected_image_source_from_reply(
@@ -45,7 +45,8 @@ def selected_image_source_from_reply(
     managed = [item for item in ManagedImageGenerationProfileStore().list() if item.enabled]
     if len(managed) != 1 or managed[0].revision != marker.get("managed_revision"):
         return None
-    if legacy_image_model_identity(environment) != marker.get("server_model"):
+    server_identity = marker.get("server_profile_identity")
+    if not isinstance(server_identity, str) or not server_identity or legacy_image_storage_identity(environment) != server_identity:
         return None
     if response["option_id"] == "option-1":
         return "managed"
