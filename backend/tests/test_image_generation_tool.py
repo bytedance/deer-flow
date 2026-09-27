@@ -20,7 +20,14 @@ from deerflow.tools.builtins import image_generation_tool as image_tool
 
 
 def config():
-    return SimpleNamespace(
+    class FakeConfig(SimpleNamespace):
+        image_generation = None
+
+        @property
+        def image_generation_environment(self):
+            return self.sandbox.environment
+
+    return FakeConfig(
         sandbox=SimpleNamespace(environment={}, bash_command_timeout=600),
         skills=SimpleNamespace(container_path="/mnt/skills"),
     )
@@ -211,7 +218,7 @@ def test_legacy_aio_profile_uses_container_environment_without_bash_exec(monkeyp
     assert "synthetic-secret" not in failure
 
 
-def test_managed_container_rejects_legacy_fallback_after_profile_is_disabled(monkeypatch):
+def test_managed_container_rejects_legacy_fallback_after_profile_is_disabled(monkeypatch, tmp_path):
     from deerflow.community.aio_sandbox import aio_sandbox_provider as provider_module
     from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
     from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
@@ -229,6 +236,7 @@ def test_managed_container_rejects_legacy_fallback_after_profile_is_disabled(mon
         server_model_at_enable="gemini:gemini-image",
     )
     settings = config()
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     settings.sandbox.environment = {
         "IMAGE_GENERATION_PROVIDER": "gemini",
         "GEMINI_IMAGE_MODEL": "gemini-image",
@@ -432,14 +440,10 @@ def test_image_tool_runs_script_and_validates_output_against_local_fake_provider
             base_url=f"http://127.0.0.1:{server.server_port}/v1",
             api_key="synthetic-secret",
         )
-        monkeypatch.setattr(
-            image_tool,
-            "get_app_config",
-            lambda: SimpleNamespace(
-                sandbox=SimpleNamespace(environment={}, bash_command_timeout=20),
-                skills=SimpleNamespace(container_path=str(root / "skills"), get_skills_path=lambda: root / "skills"),
-            ),
-        )
+        settings = config()
+        settings.sandbox.bash_command_timeout = 20
+        settings.skills = SimpleNamespace(container_path=str(root / "skills"), get_skills_path=lambda: root / "skills")
+        monkeypatch.setattr(image_tool, "get_app_config", lambda: settings)
         monkeypatch.setattr(image_tool, "resolve_image_generation_profile", lambda _env: (profile, "managed", None))
         monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: object())
         monkeypatch.setattr(sandbox_tools, "is_local_sandbox", lambda _runtime: True)

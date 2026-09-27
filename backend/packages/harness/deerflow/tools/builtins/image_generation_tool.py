@@ -13,6 +13,7 @@ from deerflow.config.image_generation import (
     ImageConfigurationError,
     effective_image_generation_source,
     image_profile_choice_needed,
+    image_profile_container_identity,
     legacy_image_storage_identity,
     resolve_image_generation_profile,
     selected_image_generation_source,
@@ -68,9 +69,9 @@ def _python_script_command(args: list[str], marker: str) -> str:
 def check_image_generation_tool() -> str:
     """Check whether an image provider is configured before planning image or PPT work."""
     try:
-        if selected_image_generation_source() is None and image_profile_choice_needed(get_app_config().sandbox.environment):
+        if selected_image_generation_source() is None and image_profile_choice_needed(get_app_config().image_generation_environment):
             return "Two image models are configured. A generate_image call will ask the user to choose one in chat."
-        profile, source, managed = resolve_image_generation_profile(get_app_config().sandbox.environment)
+        profile, source, managed = resolve_image_generation_profile(get_app_config().image_generation_environment)
         if profile is None:
             return "Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in Settings > Models > Image models."
         if not profile.usable():
@@ -115,9 +116,9 @@ def generate_image_tool(
     env: dict[str, str] = {}
     try:
         # Resolve before acquiring a sandbox or touching a provider API.
-        if selected_image_generation_source() is None and image_profile_choice_needed(get_app_config().sandbox.environment):
+        if selected_image_generation_source() is None and image_profile_choice_needed(get_app_config().image_generation_environment):
             return "Error: IMAGE_PROFILE_CHOICE_REQUIRED. Choose the web or server image model in chat before generation."
-        profile, source, managed = resolve_image_generation_profile(get_app_config().sandbox.environment)
+        profile, source, managed = resolve_image_generation_profile(get_app_config().image_generation_environment)
         if profile is None:
             return "Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in Settings > Models > Image models."
         env = profile.command_environment()
@@ -137,8 +138,9 @@ def generate_image_tool(
 
         if source == "sandbox_environment":
             if isinstance(sandbox, AioSandbox):
-                if effective_image_generation_source(get_app_config().sandbox.environment) == "sandbox_environment":
-                    expected_identity = legacy_image_storage_identity(get_app_config().sandbox.environment)
+                config = get_app_config()
+                if effective_image_generation_source(config.image_generation_environment) == "sandbox_environment" or config.image_generation is not None:
+                    expected_identity = image_profile_container_identity(config.image_generation) if config.image_generation is not None else legacy_image_storage_identity(config.image_generation_environment)
                     if expected_identity is None or getattr(sandbox, "_deerflow_server_image_storage_identity", None) != expected_identity:
                         return "Error: IMAGE_PROFILE_CHANGED. The selected server image model is not bound to this sandbox; retry in a new turn."
                 elif getattr(sandbox, "_deerflow_managed_image_local", False):
@@ -148,10 +150,12 @@ def generate_image_tool(
                     base_id = getattr(sandbox, "_deerflow_base_identity", None)
                     if not base_id or sandbox.id != base_id:
                         return "Error: IMAGE_PROFILE_CHANGED. The image model changed during this run; retry after the active sandbox is replaced."
-                # Legacy AIO containers receive sandbox.environment at creation.
-                # Reuse that environment through the old shell API so an image
-                # profile from config.yaml does not require /v1/bash/exec.
-                command_env = None
+                if config.image_generation is not None and not getattr(sandbox, "_deerflow_managed_image_local", False):
+                    if not sandbox.supports_command_environment():
+                        return "Error: IMAGE_PROVIDER_INVALID_CONFIG. This remote sandbox cannot receive the selected server image credentials."
+                else:
+                    # Local typed and legacy AIO containers have startup credentials.
+                    command_env = None
         elif source == "managed" and isinstance(sandbox, AioSandbox) and getattr(sandbox, "_deerflow_managed_image_local", False):
             if managed is None or getattr(sandbox, "_deerflow_image_profile_revision", None) != managed.revision:
                 return "Error: IMAGE_PROFILE_CHANGED. The image model changed during this run; retry in a new turn."
@@ -204,9 +208,9 @@ async def _generate_image_async(runtime: Runtime, prompt_file: str, output_file:
     # Return before the helper acquires a sandbox when configuration is absent.
     def preflight() -> str | None:
         try:
-            if selected_image_generation_source() is None and image_profile_choice_needed(get_app_config().sandbox.environment):
+            if selected_image_generation_source() is None and image_profile_choice_needed(get_app_config().image_generation_environment):
                 return "Error: IMAGE_PROFILE_CHOICE_REQUIRED. Choose the web or server image model in chat before generation."
-            profile, _, _ = resolve_image_generation_profile(get_app_config().sandbox.environment)
+            profile, _, _ = resolve_image_generation_profile(get_app_config().image_generation_environment)
             if profile is None:
                 return "Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in Settings > Models > Image models."
             if not profile.usable():

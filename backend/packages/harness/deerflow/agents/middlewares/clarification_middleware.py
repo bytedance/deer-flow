@@ -595,7 +595,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         if not any(call.get("name") == "generate_image" for call in calls) or any(call.get("name") == ASK_CLARIFICATION_TOOL_NAME for call in calls):
             return None
         try:
-            environment = get_app_config().sandbox.environment
+            environment = get_app_config().image_generation_environment
             if not image_profile_choice_needed(environment):
                 return None
             managed = next(item for item in ManagedImageGenerationProfileStore().list() if item.enabled)
