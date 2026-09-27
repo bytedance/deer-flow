@@ -1603,14 +1603,35 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """Selected YAML image profile requiring local container startup env."""
         if not isinstance(getattr(self, "_backend", None), LocalContainerBackend):
             return None
-        from deerflow.config.image_generation import image_environment, resolve_image_generation_profile
+        from deerflow.config.image_generation import ImageConfigurationError, image_environment, resolve_image_generation_profile
 
-        config = get_app_config()
-        profile = getattr(config, "image_generation", None)
-        if profile is None or not profile.usable():
+        try:
+            config = get_app_config()
+            profile = getattr(config, "image_generation", None)
+            if profile is None or not profile.usable():
+                return None
+            _, source, _ = resolve_image_generation_profile(image_environment(config))
+        except (AttributeError, ImageConfigurationError, ValueError, OSError):
             return None
-        _, source, _ = resolve_image_generation_profile(image_environment(config))
         return profile if source == "sandbox_environment" else None
+
+    def _image_acquisition_context(self) -> tuple[bool, str | None]:
+        """Keep image settings from breaking acquisition for unrelated tools."""
+        from deerflow.config.image_generation import ImageConfigurationError, effective_image_generation_source, image_environment, image_profile_container_identity, legacy_image_storage_identity, resolve_image_generation_profile
+
+        try:
+            config = get_app_config()
+            environment = image_environment(config)
+            source = effective_image_generation_source(environment)
+            typed = getattr(config, "image_generation", None)
+            resolved_source = resolve_image_generation_profile(environment)[1] if source is not None or typed is not None else None
+            selected_server = source == "sandbox_environment" or (typed is not None and resolved_source == "sandbox_environment")
+            if not selected_server:
+                return source is not None, None
+            identity = image_profile_container_identity(typed) if typed is not None else legacy_image_storage_identity(environment)
+            return source is not None, identity
+        except (AttributeError, ImageConfigurationError, ValueError, OSError):
+            return False, None
 
     def _bind_image_profile_context(self, sandbox: AioSandbox, thread_id: str | None, user_id: str) -> None:
         """Record the exact profile generation represented by this container ID."""
@@ -1621,12 +1642,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         sandbox._deerflow_managed_image_local = isinstance(getattr(self, "_backend", None), LocalContainerBackend)
         profile = self._managed_image_profile()
         sandbox._deerflow_image_profile_revision = profile.revision if profile is not None and sandbox.id == self._image_profile_sandbox_id(base_id, profile.revision) else None
-        from deerflow.config.image_generation import effective_image_generation_source, image_environment, image_profile_container_identity, legacy_image_storage_identity, resolve_image_generation_profile
-
-        config = get_app_config()
-        environment = image_environment(config)
-        selected_server = effective_image_generation_source(environment) == "sandbox_environment" or (getattr(config, "image_generation", None) is not None and resolve_image_generation_profile(environment)[1] == "sandbox_environment")
-        server_identity = (image_profile_container_identity(config.image_generation) if getattr(config, "image_generation", None) is not None else legacy_image_storage_identity(environment)) if selected_server else None
+        _, server_identity = self._image_acquisition_context()
         sandbox._deerflow_server_image_storage_identity = server_identity if server_identity is not None and sandbox.id == self._image_config_sandbox_id(base_id, server_identity) else None
 
     def _base_sandbox_id_for_thread(self, thread_id: str | None, user_id: str | None) -> str:
@@ -1655,16 +1671,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def _sandbox_id_for_thread(self, thread_id: str | None, user_id: str | None) -> str:
         """Use a new container when the selected web image profile changes."""
         base_id = self._base_sandbox_id_for_thread(thread_id, user_id)
-        from deerflow.config.image_generation import effective_image_generation_source, image_environment, image_profile_container_identity, legacy_image_storage_identity, resolve_image_generation_profile
-
-        config = get_app_config()
-        environment = image_environment(config)
-        selected_server = effective_image_generation_source(environment) == "sandbox_environment" or (getattr(config, "image_generation", None) is not None and resolve_image_generation_profile(environment)[1] == "sandbox_environment")
-        if thread_id and selected_server:
-            server_identity = image_profile_container_identity(config.image_generation) if getattr(config, "image_generation", None) is not None else legacy_image_storage_identity(environment)
-            if server_identity is not None:
-                return self._image_config_sandbox_id(base_id, server_identity)
-        if not thread_id or (profile := self._managed_image_profile()) is None:
+        if not thread_id:
+            return base_id
+        _, server_identity = self._image_acquisition_context()
+        if server_identity is not None:
+            return self._image_config_sandbox_id(base_id, server_identity)
+        if (profile := self._managed_image_profile()) is None:
             return base_id
         return self._image_profile_sandbox_id(base_id, profile.revision)
 
@@ -2489,9 +2501,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
         replicas, total = self._replica_count()
         if total >= replicas:
-            from deerflow.config.image_generation import effective_image_generation_source, image_environment
-
-            protected_thread = self._thread_key(thread_id, effective_user_id) if thread_id and effective_image_generation_source(image_environment(get_app_config())) is not None else None
+            image_selected = self._image_acquisition_context()[0] if thread_id else False
+            protected_thread = self._thread_key(thread_id, effective_user_id) if image_selected else None
             evicted = self._evict_oldest_warm(protected_thread=protected_thread)
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
@@ -2589,9 +2600,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
         replicas, total = self._replica_count()
         if total >= replicas:
-            from deerflow.config.image_generation import effective_image_generation_source, image_environment
-
-            protected_thread = self._thread_key(thread_id, effective_user_id) if thread_id and effective_image_generation_source(image_environment(get_app_config())) is not None else None
+            image_selected = (await run_sync_lifecycle_operation(self._image_acquisition_context))[0] if thread_id else False
+            protected_thread = self._thread_key(thread_id, effective_user_id) if image_selected else None
             evicted = await run_sync_lifecycle_operation(self._evict_oldest_warm, protected_thread=protected_thread)
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 

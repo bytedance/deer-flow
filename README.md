@@ -1266,6 +1266,8 @@ model the run will use.
 In an interactive IM channel, the person who requested the image can answer
 the model-choice question with `1`, `2`, or the exact option label. Answers to
 an old question or from another sender are treated as ordinary messages.
+Image configuration errors stop image generation but do not block unrelated
+sandbox tools such as bash or file operations.
 For a server-owned model, use the typed top-level `image_generation` block in
 `config.yaml`:
 
