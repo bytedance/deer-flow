@@ -4561,3 +4561,75 @@ async def test_edit_replay_restore_skipped_when_ownership_lost(monkeypatch):
 
     assert rollback.await_count == 0
     assert publish_values.await_count == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("mode", "state_schema"),
+    [("full", _ExtensionFullState), ("delta", _ExtensionDeltaState)],
+)
+async def test_edit_replay_journal_unknown_restores_checkpoint_content(mode, state_schema, monkeypatch):
+    """Content-level matrix: a late journal UNKNOWN restores the real checkpoint.
+
+    Covers the (full, delta) x (graph success, journal UNKNOWN) combinations that
+    change the terminal side effects: the restored checkpoint must hold the
+    pre-run turn, the durable row must not claim success, and no receipt is
+    written for the unsettled journal.
+    """
+    checkpointer = InMemorySaver()
+
+    async def _step(state: dict[str, Any]) -> dict[str, Any]:
+        n = len(state.get("messages") or [])
+        return {"messages": [HumanMessage(content=f"turn-{n}")]}
+
+    builder = StateGraph(state_schema)
+    builder.add_node("step", _step)
+    builder.set_entry_point("step")
+    builder.set_finish_point("step")
+    graph = builder.compile(checkpointer=checkpointer)
+
+    thread_config = {"configurable": {"thread_id": "thread-1"}}
+    # Pre-run state the edit replay must be restored to.
+    await graph.ainvoke({}, thread_config)
+
+    class FailingBatchStore(MemoryRunEventStore):
+        async def put_batch(self, events):
+            raise RuntimeError("journal store unavailable")
+
+    run_manager = RunManager()
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    event_store = FailingBatchStore()
+
+    class JournalingAgent:
+        def __init__(self) -> None:
+            self.accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode=mode)
+
+        async def aget_state(self, config):
+            return await graph.aget_state(config)
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            # The edit replay itself advances the thread before its journal fails.
+            await graph.ainvoke({"messages": [HumanMessage(content="replayed")]}, thread_config)
+            journal = config["context"]["__run_journal"]
+            journal._put(event_type="test.step", category="steps", content={"index": 0})
+            yield {"messages": []}
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer, checkpoint_channel_mode=mode, event_store=event_store),
+        agent_factory=lambda *, config: JournalingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    latest = await graph.aget_state(thread_config)
+    assert [message.content for message in latest.values["messages"]] == ["turn-0"]
+    assert record.status == RunStatus.error
+    delivery = [event for event in await event_store.list_events("thread-1", record.run_id) if event["event_type"] == "run.delivery"]
+    assert delivery == []

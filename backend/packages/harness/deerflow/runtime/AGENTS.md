@@ -86,15 +86,44 @@ The worker's terminal status write always goes through
 `set_status_if_not_cancelled`, so a durable cancel observed during the drain beats
 a locally staged success instead of being persisted verbatim by
 `persist_current_status`; the receipt stays a fact record about the committed
-journal, not a verdict. Cancellation finalization runs at most once per run, so a
-cancel already handled by the abort path cannot repeat a rollback checkpoint.
+journal, not a verdict.
+
+Cancellation owns exactly one restore per run: `ensure_checkpoint_restored()`
+creates a single owned child that every later cancellation joins, a repeated host
+cancellation stops only the join, and a cancelled or failed child is never
+reported as a completed rollback. The child's outcome is applied before the first
+host cancellation is re-raised, so a cancelled worker surfaces its cancellation
+after the safe terminal boundary. A provisional local `interrupt` (for example a
+shutdown intent) never outranks the accepted action: when the terminal CAS proves
+`rollback` won, the local outcome is upgraded before the single restore runs.
+
+Edit-replay recovery is driven by the final outcome, not the pre-drain status
+check: `_ensure_edit_replay_restored()` runs from the early failure path and again
+from the final outcome barrier (after late journal/receipt downgrades, before the
+durable terminal row and `publish_end`), joins the same owned restore, and
+publishes restored `values` at most once. A worker that lost ownership starts no
+new restore.
 
 `RunManager` keeps renewing a locally staged terminal run while its task is alive
 and its durable terminal row is unacknowledged (`RunRecord.terminal_committed`),
-fences it with `require_active=False` when renewal is rejected, adopts a durable
-terminal row that already holds this worker's staged outcome, and includes live
+fences it with `require_active=False` when renewal is rejected, on expiry, or when
+a renewal returns after the last confirmed deadline, and includes live
 staged-terminal tasks in the shutdown drain. A durable cancel observed during
-renewal reaches a live staged-terminal finalizer.
+renewal — or received directly while a staged terminal is still live — reaches the
+running finalizer immediately instead of waiting for the next heartbeat.
+
+Each renewal attempt is bounded by that run's own last-confirmed deadline and runs
+concurrently with the others, so one uninterruptible store call cannot stall every
+other lease; attempts that miss the deadline are cancelled, retained for
+observation, and their late results are never adopted.
+
+Terminal acknowledgement is attributable: `terminal_committed` is set only by a
+write this worker performed (`finalize_if_not_cancelled` returning `finalized`, or
+a definite success from `_persist_status`/`_persist_snapshot_to_store`). A row that
+merely matches `status + owner_worker_id` is not proof — SQL orphan takeover writes
+`error` while keeping the previous owner id — so a store re-read never publishes
+the acknowledgement; a renewal racing this worker's own in-flight CAS joins that
+process-local attempt within the deadline and otherwise fails closed.
 
 Known limits: there is no store-level idempotency key or durable lease-token
 fencing yet, so a batch that may have committed cannot be replayed and an
