@@ -141,6 +141,8 @@ It is disabled by default; see the linked guide to enable it.
 
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
 
+   Self-hosted Browserless and Crawl4AI fetch backends must have outbound access to private, loopback, link-local, and cloud-metadata networks blocked before enabling `network_isolation_confirmed: true`; DeerFlow rejects private fetch backends by default because redirects and DNS resolution occur inside those services. Use `allow_private_addresses: true` only for intentional internal access.
+
    Run `make doctor` at any time to verify your setup and get actionable fix hints.
    If you are opening a GitHub issue about a local setup or runtime problem, run
    `make support-bundle`. The command prints reporter next steps, writes a

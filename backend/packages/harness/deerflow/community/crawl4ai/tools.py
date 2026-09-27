@@ -2,7 +2,7 @@ import logging
 
 from langchain.tools import tool
 
-from deerflow.community.url_safety import validate_public_http_url
+from deerflow.community.url_safety import validate_delegated_fetch_backend, validate_public_http_url
 from deerflow.config import get_app_config
 
 from .crawl4ai_client import Crawl4AiClient
@@ -103,6 +103,14 @@ async def web_fetch_tool(url: str) -> str:
         url_error = validate_public_http_url(url, allow_private_addresses=allow_private_addresses)
         if url_error:
             return url_error
+        backend_error = validate_delegated_fetch_backend(
+            str((cfg or {}).get("base_url") or DEFAULT_BASE_URL),
+            service_name="Crawl4AI",
+            allow_private_addresses=allow_private_addresses,
+            network_isolation_confirmed=_coerce_bool((cfg or {}).get("network_isolation_confirmed"), False),
+        )
+        if backend_error:
+            return backend_error
         filter_mode = _coerce_filter(cfg.get("filter") if cfg is not None else None)
         client = _build_client(cfg)
         markdown = await client.fetch_markdown(url, filter_mode=filter_mode)

@@ -1035,6 +1035,7 @@ tools:
   #   use: deerflow.community.browserless.tools:web_fetch_tool
   #   base_url: http://localhost:3032    # Browserless instance URL (default: :3032; Docker: http://browserless:3000)
   #   # token: $BROWSERLESS_TOKEN        # API token (required for Browserless Cloud; optional for self-hosted)
+  #   # network_isolation_confirmed: true # Required for a localhost/private backend: confirm its egress cannot reach private/metadata networks.
   #   timeout_s: 30                       # Request timeout in seconds
   #   # allow_private_addresses: false    # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
   #   # wait_for_event: "networkidle"    # Wait for a page event before returning (e.g. "load", "networkidle")
@@ -1065,6 +1066,7 @@ tools:
   #   use: deerflow.community.crawl4ai.tools:web_fetch_tool
   #   base_url: http://localhost:11235   # Crawl4AI server URL (Docker: http://crawl4ai:11235)
   #   token: $CRAWL4AI_TOKEN              # Bearer token; required by Crawl4AI >= 0.9
+  #   # network_isolation_confirmed: true  # Required for a localhost/private backend: confirm its egress cannot reach private/metadata networks.
   #   timeout: 30                         # Request timeout in seconds
   #   # allow_private_addresses: false     # SSRF guard: keep false in production. Set true ONLY for intentional internal targets.
   #   # filter: fit                       # Markdown filter: fit (default) | raw | bm25 | llm
@@ -1080,6 +1082,7 @@ tools:
   #   use: deerflow.community.browserless.tools:web_capture_tool
   #   base_url: http://localhost:3032       # Browserless instance URL (Docker: http://browserless:3000)
   #   # token: $BROWSERLESS_TOKEN           # Required for Browserless Cloud; optional for self-hosted
+  #   # network_isolation_confirmed: true   # Required for a localhost/private backend after isolating its egress from private/metadata networks.
   #   timeout_s: 30                         # Request timeout in seconds (`timeout` also accepted)
   #   output_format: png                    # png, jpeg, or webp
   #   full_page: true                       # Capture entire page instead of viewport only

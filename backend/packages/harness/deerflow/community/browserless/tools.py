@@ -12,7 +12,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from deerflow.community.url_safety import resolve_host_addresses as _resolve_host_addresses
-from deerflow.community.url_safety import validate_public_http_url
+from deerflow.community.url_safety import validate_delegated_fetch_backend, validate_public_http_url
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.tools.types import Runtime
@@ -89,6 +89,17 @@ def _get_browserless_client(tool_name: str = "web_fetch") -> BrowserlessClient:
         token = cfg.get("token", token)
         timeout_s = _resolve_timeout(cfg, timeout_s)
     return BrowserlessClient(base_url=base_url, token=token, timeout_s=timeout_s)
+
+
+def _validate_browserless_backend(cfg: dict, *, allow_private_addresses: bool) -> str | None:
+    """Require an explicit egress-isolation acknowledgement for private backends."""
+    return validate_delegated_fetch_backend(
+        str(cfg.get("base_url") or "http://localhost:3032"),
+        service_name="Browserless",
+        allow_private_addresses=allow_private_addresses,
+        network_isolation_confirmed=_as_bool(cfg.get("network_isolation_confirmed"), False),
+        resolver=_resolve_host_addresses,
+    )
 
 
 def _as_bool(value: object, default: bool) -> bool:
@@ -265,6 +276,10 @@ async def web_fetch_tool(url: str) -> str:
         if url_error:
             return url_error
 
+        backend_error = _validate_browserless_backend(cfg, allow_private_addresses=allow_private_addresses)
+        if backend_error:
+            return backend_error
+
         wait_for_event = ""
         wait_for_timeout_ms = 0
         wait_for_selector = ""
@@ -331,6 +346,10 @@ async def web_capture_tool(
         url_error = _validate_capture_url(url, allow_private_addresses=allow_private_addresses)
         if url_error:
             return _tool_message(url_error, tool_call_id)
+
+        backend_error = _validate_browserless_backend(cfg, allow_private_addresses=allow_private_addresses)
+        if backend_error:
+            return _tool_message(backend_error, tool_call_id)
 
         outputs_path = _thread_outputs_path(runtime)
         if isinstance(outputs_path, str):

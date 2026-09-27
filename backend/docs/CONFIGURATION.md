@@ -594,6 +594,7 @@ tools:
     use: deerflow.community.browserless.tools:web_capture_tool
     base_url: http://localhost:3032
     # token: $BROWSERLESS_TOKEN
+    network_isolation_confirmed: true  # Only after isolating Browserless egress
     output_format: png
     full_page: true
     viewport_width: 1280
@@ -607,6 +608,18 @@ default it refuses URLs that resolve to private, loopback, link-local, or
 cloud-metadata addresses; set `allow_private_addresses: true` only when you
 intentionally point the tool at an internal target.
 
+Browserless and Crawl4AI perform navigation, redirects, DNS resolution, and
+subresource loading outside the Gateway process. Consequently, validating only
+the submitted URL cannot stop a later redirect or DNS rebinding from reaching
+the deployment network. DeerFlow therefore refuses to delegate to a localhost,
+private, or otherwise unverifiable fetch backend by default. Before using a
+self-hosted Browserless or Crawl4AI instance, isolate that service's outbound
+network access from private, loopback, link-local, and cloud-metadata ranges,
+then set `network_isolation_confirmed: true` on the tool. Public SaaS endpoints
+do not require this acknowledgement. `allow_private_addresses: true` also
+bypasses the check and should be reserved for configurations intentionally
+accessing internal targets.
+
 Both `web_fetch` (Browserless provider) and `web_capture` need a running
 Browserless instance. You can point `base_url` at [Browserless Cloud](https://www.browserless.io/)
 (set `BROWSERLESS_TOKEN`) or run one locally with Docker:
@@ -618,6 +631,10 @@ Browserless instance. You can point `base_url` at [Browserless Cloud](https://ww
 # generated and requests without it are rejected — so set it explicitly.
 docker run -d --name browserless -p 3032:3000 -e "TOKEN=local-dev-token" ghcr.io/browserless/chromium
 ```
+
+The port mapping alone does not provide outbound isolation. Apply an egress
+policy appropriate to your container platform before setting
+`network_isolation_confirmed: true`.
 
 Then set the same token so the tool sends it (uncomment `token: $BROWSERLESS_TOKEN`
 in the config above):
