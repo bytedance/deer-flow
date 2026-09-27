@@ -1650,18 +1650,22 @@ async def run_agent(
                     # real worker outcome. Leaving a successful row inflight would
                     # let lease recovery rewrite it as an error with a synthetic
                     # zero receipt.
-                    if record.abort_event.is_set():
+                    # Always consult the durable cancel before persisting the
+                    # staged status: an accepted cancellation must beat a
+                    # locally staged success, and only
+                    # ``set_status_if_not_cancelled`` performs that CAS. A run
+                    # whose ``abort_event`` is set from a heartbeat-observed
+                    # cancel still carries the staged status here, so persisting
+                    # it verbatim could commit a cancelled run as success.
+                    cancel_action = await run_manager.set_status_if_not_cancelled(
+                        run_id,
+                        record.status,
+                        error=record.error,
+                        stop_reason=record.stop_reason,
+                    )
+                    if cancel_action is not None:
+                        await _finish_cancellation(cancel_action)
                         await run_manager.persist_current_status(run_id)
-                    else:
-                        cancel_action = await run_manager.set_status_if_not_cancelled(
-                            run_id,
-                            record.status,
-                            error=record.error,
-                            stop_reason=record.stop_reason,
-                        )
-                        if cancel_action is not None:
-                            await _finish_cancellation(cancel_action)
-                            await run_manager.persist_current_status(run_id)
                 except Exception:
                     logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
 

@@ -1467,3 +1467,117 @@ async def test_worker_losing_lease_mid_finish_observes_a_without_starting_b_or_s
     # The fenced worker publishes neither a receipt nor a durable success.
     assert event_store.receipt_attempted.is_set() is False
     assert (await run_store.get(record.run_id))["status"] != "success"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("action", "expected_status", "expected_error"),
+    [
+        ("interrupt", "interrupted", None),
+        ("rollback", "error", "Rolled back by user"),
+    ],
+)
+async def test_remote_cancel_during_staged_terminal_drain_blocks_success(
+    action,
+    expected_status,
+    expected_error,
+    monkeypatch,
+):
+    """An accepted durable cancel must beat a locally staged success.
+
+    The cancel arrives while the worker owns its terminal drain, so the staged
+    success is still on the record when the drain finishes. Persisting that
+    staged status verbatim would let an accepted cancellation be committed as a
+    success; the terminal write must consult the durable cancel first.
+    """
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+
+    class BlockingJournalStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.batches: list[list[str]] = []
+            self.batch_a_entered = asyncio.Event()
+            self.release_batch_a = asyncio.Event()
+            self.receipt_attempted = asyncio.Event()
+
+        async def put_batch(self, events):
+            self.batches.append([event["event_type"] for event in events])
+            if len(self.batches) == 1:
+                self.batch_a_entered.set()
+                await self.release_batch_a.wait()
+            return await super().put_batch(events)
+
+        async def put_if_absent(self, **kwargs):
+            self.receipt_attempted.set()
+            return await super().put_if_absent(**kwargs)
+
+    event_store = BlockingJournalStore()
+    run_store = MemoryRunStore()
+    run_manager = RunManager(
+        store=run_store,
+        run_ownership_config=RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        ),
+    )
+    record = await run_manager.create("thread-1")
+
+    class JournalingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            # The 20-event threshold makes A the first batch; five stay buffered.
+            for index in range(25):
+                journal._put(event_type=f"test.step.{index}", category="steps", content={"index": index})
+            yield {"messages": []}
+
+    barrier_entered = asyncio.Event()
+    real_finish = RunJournal.finish_for_terminal
+
+    async def spy_finish(journal, **kwargs):
+        barrier_entered.set()
+        return await real_finish(journal, **kwargs)
+
+    monkeypatch.setattr(RunJournal, "finish_for_terminal", spy_finish)
+
+    bridge = _make_bridge()
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=event_store),
+            agent_factory=lambda *, config: JournalingAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    record.task = task
+    try:
+        await asyncio.wait_for(event_store.batch_a_entered.wait(), timeout=2)
+        await asyncio.wait_for(barrier_entered.wait(), timeout=2)
+        # Staged success: local only, the durable row is still this worker's.
+        assert record.status == RunStatus.success
+        assert (await run_store.get(record.run_id))["status"] == "running"
+
+        # The cancel is accepted durably and then observed by the heartbeat.
+        assert await run_store.request_cancel(record.run_id, action=action) == action
+        await run_manager._renew_leases()
+        assert record.abort_event.is_set() is True
+
+        event_store.release_batch_a.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+    finally:
+        event_store.release_batch_a.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    row = await run_store.get(record.run_id)
+    assert row["status"] == expected_status
+    assert row["status"] != "success"
+    if expected_error is not None:
+        assert row["error"] == expected_error
+    assert record.abort_event.is_set() is True
+    # The receipt is a fact record about the committed journal, not a verdict:
+    # the cancel changes the terminal status, not whether the drain committed.
+    assert event_store.receipt_attempted.is_set() is True
