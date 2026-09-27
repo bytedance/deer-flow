@@ -9,6 +9,8 @@ tool calls so the model-context projection can mark them ``[consumed]``.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any, cast, override
 
@@ -31,18 +33,6 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
         super().__init__()
         self._config = config or ToolArtifactConfig()
         self._handle_re = re.compile(_HANDLE_PATTERN)
-        # Bounded memos (FIFO-evicted) so steady-state cost stays on the new
-        # message tail instead of a full-history rescan per model call:
-        # - _processed_results: extraction ran for this tool result, whatever it
-        #   yielded. Recording successes too is what makes sliding-window
-        #   evictions final — without it an evicted entry whose ToolMessage is
-        #   still in context would resurrect (re-extract -> re-register) every
-        #   round forever.
-        # - _quiet_calls: args scan for this tool call fully resolved (nothing
-        #   new to consume); settled calls are skipped entirely afterwards.
-        self._processed_results: dict[tuple[str, str, bool], None] = {}
-        self._quiet_calls: dict[tuple[str, str], None] = {}
-        self._MEMO_LIMIT = 4096
 
     @override
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -104,27 +94,22 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
         messages = state.get("messages") or []
         existing = state.get("tool_artifacts") or []
         existing_handles = {entry.get("handle") for entry in existing if isinstance(entry, dict)}
-        # Handles are deterministic per (thread_id, tool_call_id), so a message
-        # that already contributed entries can never yield anything new on a
-        # rescan — skip it before paying for extraction. Consumption updates
-        # preserve `tool_call_id`, so this stays accurate across rounds.
-        seen_call_ids = {entry.get("tool_call_id") for entry in existing if isinstance(entry, dict)}
-
+        processed = set(state.get("tool_artifact_processed") or [])
+        newly_processed: list[str] = []
+        occurrences: dict[str, int] = {}
         new_entries: list[ArtifactEntry] = []
         for message in messages:
             if not isinstance(message, ToolMessage):
                 continue
             tool_call_id = message.tool_call_id or ""
-            if tool_call_id and tool_call_id in seen_call_ids:
+            call_index = occurrences.get(tool_call_id, 0)
+            occurrences[tool_call_id] = call_index + 1
+            identity = self._occurrence_key("result", thread_id, message.id, tool_call_id, call_index)
+            if identity in processed:
                 continue
-            memo_key = (thread_id, tool_call_id, self._config.detect_refs_in_text) if tool_call_id else None
-            if memo_key is not None and memo_key in self._processed_results:
-                continue
-            entries = extract_artifacts_from_result(message, thread_id=thread_id, detect_refs_in_text=self._config.detect_refs_in_text)
-            # Record the extraction itself, whatever it yielded: eviction plus a
-            # still-present ToolMessage must not resurrect the entry next round.
-            if memo_key is not None:
-                self._remember_bounded(self._processed_results, memo_key)
+            entries = extract_artifacts_from_result(message, thread_id=thread_id, call_index=0 if message.id is not None else call_index, detect_refs_in_text=self._config.detect_refs_in_text)
+            processed.add(identity)
+            newly_processed.append(identity)
             if not entries:
                 continue
             for entry in entries:
@@ -133,25 +118,21 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
                 existing_handles.add(entry["handle"])
                 new_entries.append(entry)
 
-        if not new_entries:
-            return None
-        # Configured cap as a sliding window: when the projection exceeds it,
-        # a trailing trim directive makes the reducer evict the oldest entries
-        # (latest-wins merge keeps everything else intact). Fresh captures —
-        # typically the artifacts that post-date compaction and matter most —
-        # are always registered; nothing freezes at the cap.
-        projected = len(existing) + len(new_entries)
-        if projected > self._config.max_entries:
-            return {"tool_artifacts": [*new_entries, {"op": "trim_to", "keep": self._config.max_entries}]}
-        return {"tool_artifacts": new_entries}
+        update: dict[str, Any] = {}
+        if newly_processed:
+            update["tool_artifact_processed"] = newly_processed
+        if new_entries:
+            update["tool_artifacts"] = new_entries
+            if len(existing) + len(new_entries) > self._config.max_entries:
+                update["tool_artifacts"].append({"op": "trim_to", "keep": self._config.max_entries})
+        return update or None
 
-    def _remember_bounded(self, memo: dict, key) -> None:  # noqa: ANN001
-        while len(memo) >= self._MEMO_LIMIT:
-            memo.pop(next(iter(memo)))
-        memo[key] = None
-
-    def _remember_quiet(self, quiet_key: tuple[str, str]) -> None:
-        self._remember_bounded(self._quiet_calls, quiet_key)
+    @staticmethod
+    def _occurrence_key(kind: str, thread_id: str, message_id: str | None, tool_call_id: str, index: int) -> str:
+        # Graph message reducers assign durable IDs, including to imported
+        # history. The index fallback supports standalone ID-less hook callers.
+        seed = [thread_id, message_id, tool_call_id, index if message_id is None or kind == "call" else 0]
+        return kind + ":" + hashlib.sha256(json.dumps(seed).encode("utf-8")).hexdigest()
 
     def _track_consumption(self, state: AgentState, thread_id: str = "", pending_entries: list[ArtifactEntry] | None = None) -> dict | None:
         # The effective registry includes entries being captured in this very
@@ -167,10 +148,13 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
 
         messages = state.get("messages") or []
         consumed_updates: list[ArtifactEntry] = []
+        processed = set(state.get("tool_artifact_processed") or [])
+        newly_processed: list[str] = []
+        occurrences: dict[str, int] = {}
         for message in messages:
             if not isinstance(message, AIMessage):
                 continue
-            for tool_call in message.tool_calls or []:
+            for tool_index, tool_call in enumerate(message.tool_calls or []):
                 tool_call_id = tool_call.get("id")
                 args = tool_call.get("args")
                 if not tool_call_id or not isinstance(args, dict):
@@ -178,8 +162,10 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
                 # Args are immutable once in state. Settle the call only when
                 # every referenced handle resolved against the effective
                 # registry; a transient miss retries next round.
-                quiet_key = (thread_id, tool_call_id)
-                if quiet_key in self._quiet_calls:
+                fallback_index = occurrences.get(tool_call_id, 0)
+                occurrences[tool_call_id] = fallback_index + 1
+                quiet_key = self._occurrence_key("call", thread_id, message.id, tool_call_id, tool_index if message.id is not None else fallback_index)
+                if quiet_key in processed:
                     continue
                 had_unresolved = False
                 for handle in self._find_handles(args):
@@ -194,11 +180,15 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
                     consumed_updates.append(cast(ArtifactEntry, updated))
                     handle_map[handle] = consumed_updates[-1]
                 if not had_unresolved:
-                    self._remember_quiet(quiet_key)
+                    processed.add(quiet_key)
+                    newly_processed.append(quiet_key)
 
+        update: dict[str, Any] = {}
         if consumed_updates:
-            return {"tool_artifacts": consumed_updates}
-        return None
+            update["tool_artifacts"] = consumed_updates
+        if newly_processed:
+            update["tool_artifact_processed"] = newly_processed
+        return update or None
 
     def _find_handles(self, value: Any) -> set[str]:
         """Recursively find artifact handles in tool-call args."""

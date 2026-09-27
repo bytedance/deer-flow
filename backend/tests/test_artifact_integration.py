@@ -5,6 +5,7 @@ context -> model references the handle in a later tool call -> resolution
 rewrites it to the real reference at the tool-call boundary.
 """
 
+import re
 from typing import Any
 
 from _agent_e2e_helpers import FakeToolCallingModel
@@ -35,6 +36,10 @@ class RecordingToolCallingModel(FakeToolCallingModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # noqa: ANN001, ANN003
         self.received.append(list(messages))
+        if self.i == 1:
+            data = next(m.content for m in messages if m.additional_kwargs.get("durable_context_data"))
+            handle = re.search(r"art_[0-9a-f]{8}", data).group()
+            self.responses[1].tool_calls[0]["args"]["path"] = handle
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
 
 
@@ -99,9 +104,9 @@ def test_full_capture_inject_resolve_cycle():
     assert seen_read_args == [{"path": REAL_REF}], f"handle was not resolved at the tool boundary: {seen_read_args}"
 
     entries = {entry["handle"]: entry for entry in result["tool_artifacts"]}
-    assert FRESH_HANDLE in entries
-    assert entries[FRESH_HANDLE]["real_ref"] == REAL_REF
-    assert entries[FRESH_HANDLE]["consumed_by"] == ["call_read"]
+    made = next(e for e in entries.values() if e["tool_call_id"] == "call_make")
+    assert made["real_ref"] == REAL_REF
+    assert made["consumed_by"] == ["call_read"]
 
 
 def test_handle_projected_into_model_context():
@@ -110,9 +115,10 @@ def test_handle_projected_into_model_context():
     agent = _build_agent(model)
     config = {"configurable": {"thread_id": THREAD_ID}}
 
-    agent.invoke({"messages": [HumanMessage(content="make then read")]}, config, context={"thread_id": THREAD_ID})
+    result = agent.invoke({"messages": [HumanMessage(content="make then read")]}, config, context={"thread_id": THREAD_ID})
 
     # Round 3 is the request after both capture and consumption happened.
     round3 = model.received[-1]
     durable_blocks = [message.content for message in round3 if getattr(message, "additional_kwargs", {}).get("durable_context_data")]
-    assert any(FRESH_HANDLE in content for content in durable_blocks), "captured handle never reached the model-facing durable context block"
+    handle = next(e["handle"] for e in result["tool_artifacts"] if e["tool_call_id"] == "call_make")
+    assert any(handle in content for content in durable_blocks), "captured handle never reached the model-facing durable context block"

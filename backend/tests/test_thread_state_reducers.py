@@ -372,5 +372,6 @@ class TestThreadStateAnnotations:
             "delegations",
             "skill_context",
             "tool_artifacts",
+            "tool_artifact_processed",
             "task_notes",
         }

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
-from deerflow.agents.thread_state import merge_tool_artifacts
+from deerflow.agents.thread_state import merge_artifacts, merge_tool_artifacts
 from deerflow.config.tool_artifact_config import ToolArtifactConfig
 from deerflow.tools.artifact_registry import generate_handle
 
@@ -11,6 +11,12 @@ from deerflow.tools.artifact_registry import generate_handle
 def merge_and_apply(existing: list | None, update: list | None) -> list:
     """Apply an emitted update the way the LangGraph reducer would."""
     return merge_tool_artifacts(existing or [], update or [])
+
+
+def apply_update(state, update):
+    if update:
+        state["tool_artifacts"] = merge_tool_artifacts(state.get("tool_artifacts"), update.get("tool_artifacts"))
+        state["tool_artifact_processed"] = merge_artifacts(state.get("tool_artifact_processed"), update.get("tool_artifact_processed"))
 
 
 def _runtime(thread_id: str = "thread_1"):
@@ -67,7 +73,7 @@ class TestCapture:
         )
         state = {"messages": [msg], "tool_artifacts": []}
         first = middleware.before_model(state, _runtime())
-        state["tool_artifacts"] = first["tool_artifacts"]
+        apply_update(state, first)
         second = middleware.before_model(state, _runtime())
 
         assert second is None
@@ -216,7 +222,8 @@ class TestCapture:
         assert first is not None and first["tool_artifacts"][0]["consumed_by"] == ["call_2"]
         scans_after_first = len(scan_calls)
 
-        settled_state = {"messages": [ai_message], "tool_artifacts": first["tool_artifacts"]}
+        settled_state = {"messages": [ai_message]}
+        apply_update(settled_state, first)
         second = middleware.before_model(settled_state, _runtime())
 
         assert second is None or "tool_artifacts" not in (second or {})
@@ -248,7 +255,8 @@ class TestCapture:
         assert len(calls) == 2
 
         calls.clear()
-        state = {"messages": [captured_msg, empty_msg], "tool_artifacts": first["tool_artifacts"]}
+        state = {"messages": [captured_msg, empty_msg]}
+        apply_update(state, first)
         second = middleware.before_model(state, _runtime())
 
         assert second is None or "tool_artifacts" not in (second or {})
@@ -274,14 +282,14 @@ class TestCapture:
 
         # Saturate the registry.
         out = middleware.before_model(state, rt)
-        state["tool_artifacts"] = merge_and_apply(state.get("tool_artifacts") or [], out["tool_artifacts"])
+        apply_update(state, out)
 
         # A fresh capture arrives; the oldest entry is evicted but its message remains in context.
         fresh_msg = _tool_message("wrote file", tool_call_id="call_fresh", artifact={"structured_content": {"file": "/x/fresh.md"}})
         state["messages"] = [*old_msgs, fresh_msg]
         calls.clear()
         out = middleware.before_model(state, rt)
-        state["tool_artifacts"] = merge_and_apply(state["tool_artifacts"], out["tool_artifacts"])
+        apply_update(state, out)
 
         # Steady state: rounds over the same context must be quiescent.
         for _ in range(3):
@@ -337,7 +345,8 @@ class TestCapture:
         assert second["tool_artifacts"][0]["consumed_by"] == ["call_read"], "unresolved scan must retry, not settle"
 
         # Round 3: settled -> quiescent.
-        third_state = {"messages": [ai_message], "tool_artifacts": merge_and_apply([unrelated, late], second["tool_artifacts"])}
+        third_state = {"messages": [ai_message], "tool_artifacts": [unrelated, late]}
+        apply_update(third_state, second)
         third = middleware.before_model(third_state, _runtime("t"))
         assert third is None or "tool_artifacts" not in (third or {})
 

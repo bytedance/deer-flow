@@ -356,6 +356,7 @@ class ThreadState(AgentState):
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     tool_artifacts: Annotated[list[ArtifactEntry], merge_tool_artifacts]
+    tool_artifact_processed: Annotated[list[str], merge_artifacts]
     task_notes: Annotated[dict | None, TaskNotesChannel(dict | None, merge_task_notes)]
     task_history: NotRequired[dict | None]
     summary_text: NotRequired[str | None]
@@ -476,6 +477,7 @@ THREAD_STATE_REDUCER_FIELDS = frozenset(
         "delegations",
         "skill_context",
         "tool_artifacts",
+        "tool_artifact_processed",
         "task_notes",
     }
 )

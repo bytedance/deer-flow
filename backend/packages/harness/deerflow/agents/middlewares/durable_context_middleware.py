@@ -304,13 +304,23 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
 
     def _inject(self, request: ModelRequest) -> ModelRequest:
         state = request.state or {}
+        artifacts = []
+        if self._inject_tool_artifacts:
+            for entry in state.get("tool_artifacts") or []:
+                # Redact raw labels before HTML escaping; state and real_ref
+                # remain intact for server-side resolution. Handles are generated.
+                projected = dict(entry)
+                for field in ("display_name", "artifact_type", "tool_name", "mime_type"):
+                    if isinstance(projected.get(field), str):
+                        projected[field] = redact_text(projected[field], self._pii_redaction_config)
+                artifacts.append(projected)
         data_block = _render_durable_context_data(
             redact_text(state.get("summary_text"), self._pii_redaction_config),
             state.get("delegations") or [],
             state.get("skill_context") or [],
             (state.get("task_notes") or {}) if self._task_continuity_enabled else None,
             state.get("task_history") if self._task_continuity_enabled else None,
-            artifacts=(state.get("tool_artifacts") or []) if self._inject_tool_artifacts else [],
+            artifacts=artifacts,
         )
         if not data_block:
             return request

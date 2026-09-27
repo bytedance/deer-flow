@@ -30,7 +30,7 @@ _HANDLE_LENGTH = 8
 _SANDBOX_PATH_PATTERN = re.compile(r"/mnt/user-data/\S+")
 
 # Conservative URL-with-file-extension match for remote references.
-_REMOTE_FILE_URL_PATTERN = re.compile(r"https?://\S+\.(?:png|jpg|jpeg|gif|html|pdf|csv|json|txt|log|md|xlsx?|docx?|zip)")
+_REMOTE_FILE_URL_PATTERN = re.compile(r"https?://[^\s\"'`<>]+\.(?:png|jpg|jpeg|gif|html|pdf|csv|json|txt|log|md|xlsx?|docx?|zip)(?:[?#][^\s\"'`<>]*)?")
 
 # Structured-content keys whose string values are treated as concrete
 # references (paths, URLs, remote task ids) rather than opaque payload.
@@ -63,15 +63,17 @@ def _is_referenceable_url(url: str) -> bool:
     return not _REJECTED_SCHEME_RE.match(url) or url.startswith(_ACCEPTED_URL_SHAPES)
 
 
-def generate_handle(thread_id: str, tool_call_id: str, call_index: int, ref_ordinal: int = 0) -> str:
+def generate_handle(thread_id: str, tool_call_id: str, call_index: int, ref_ordinal: int = 0, *, occurrence_id: str | None = None) -> str:
     """Return a deterministic short handle for an artifact.
 
-    The same ``(thread_id, tool_call_id, call_index, ref_ordinal)`` always
-    produces the same handle. ``tool_call_id`` is unique within an ``AIMessage``
-    and ``ref_ordinal`` distinguishes multiple references extracted from one
-    result, so collisions are not possible within a thread.
+    Message IDs distinguish provider IDs reused across assistant turns and stay
+    stable through checkpoint reload and compaction. ID-less standalone callers
+    must supply an occurrence-specific ``call_index``. The ordinal distinguishes
+    references within one result. Short hashes are identifiers, not credentials.
     """
     seed = f"{thread_id}:{tool_call_id}:{call_index}:{ref_ordinal}"
+    if occurrence_id is not None:
+        seed += f":{occurrence_id}"
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:_HANDLE_LENGTH]
     return f"{_HANDLE_PREFIX}{digest}"
 
@@ -166,7 +168,8 @@ class _EntrySink:
     """Allocates sequential per-result ordinals so every extracted reference
     within one tool result gets a distinct handle."""
 
-    def __init__(self, *, thread_id: str, tool_call_id: str, call_index: int, created_at: str, tool_name: str):
+    def __init__(self, *, thread_id: str, tool_call_id: str, call_index: int, created_at: str, tool_name: str, occurrence_id: str | None):
+        self._occurrence_id = occurrence_id
         self._thread_id = thread_id
         self._tool_call_id = tool_call_id
         self._call_index = call_index
@@ -176,7 +179,7 @@ class _EntrySink:
 
     def add(self, *, artifact_type: str, display_name: str, real_ref: str, mime_type: str | None = None) -> ArtifactEntry:
         entry = _make_entry(
-            handle=generate_handle(self._thread_id, self._tool_call_id, self._call_index, self._next_ordinal),
+            handle=generate_handle(self._thread_id, self._tool_call_id, self._call_index, self._next_ordinal, occurrence_id=self._occurrence_id),
             tool_name=self._tool_name,
             tool_call_id=self._tool_call_id,
             call_index=self._call_index,
@@ -220,7 +223,7 @@ def extract_artifacts_from_result(
     now = _utc_now_iso()
     tool_name = result.name or "unknown"
     tool_call_id = result.tool_call_id or ""
-    sink = _EntrySink(thread_id=thread_id, tool_call_id=tool_call_id, call_index=call_index, created_at=now, tool_name=tool_name)
+    sink = _EntrySink(thread_id=thread_id, tool_call_id=tool_call_id, call_index=call_index, created_at=now, tool_name=tool_name, occurrence_id=result.id)
     entries: list[ArtifactEntry] = []
 
     artifact = result.artifact
