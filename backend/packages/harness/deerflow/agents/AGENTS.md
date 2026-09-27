@@ -1,8 +1,5 @@
 ### Agent System
 
-修改 `task_note` 容量或批次回执时，遵守 [连续性契约](../../../../../docs/task-continuity.md)，
-并运行 `backend/tests/test_task_note_capacity.py` 的真实图回归；单次快照加锁不能协调并行 Command。
-
 `AppConfig.lead_prompt_overlay` wraps the fully rendered lead system prompt with
 literal operator prepend/append text. Do not template-format these extensions
 or source them from run context. The graph and assembly descriptor must see the

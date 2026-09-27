@@ -1,5 +1,8 @@
 # Task continuity
 
+修改 `task_note` 容量或批次回执时，遵守 [连续性契约](../../../../../../docs/task-continuity.md)，
+并运行 `backend/tests/test_task_note_capacity.py` 的真实图回归；单次快照加锁不能协调并行 Command。
+
 `history_search` accepts optional `role=user|assistant|tool`, mapped at the tool
 boundary to stored roles `human|ai|tool`; omission/null keeps all roles. Filter
 archived JSON payloads before SQLite FTS `LIMIT 8`, and active messages before
