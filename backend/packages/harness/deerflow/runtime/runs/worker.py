@@ -773,13 +773,40 @@ class _SubagentEventBuffer:
             return
         batch = self._pending
         self._pending = []
-        try:
-            await self._event_store.put_batch(batch)
-        except Exception:
+        write_task = asyncio.create_task(self._event_store.put_batch(batch))
+        cancellation: asyncio.CancelledError | None = None
+        failure: Exception | None = None
+        while True:
+            try:
+                await asyncio.shield(write_task)
+                break
+            except asyncio.CancelledError as exc:
+                host_task = asyncio.current_task()
+                if host_task is None or not host_task.cancelling():
+                    # The store task itself was cancelled. It did not confirm
+                    # durability, so retain the batch for a later flush.
+                    self._pending = batch + self._pending
+                    raise
+                if cancellation is None:
+                    cancellation = exc
+                while host_task.cancelling():
+                    host_task.uncancel()
+            except Exception as exc:
+                failure = exc
+                break
+
+        if failure is not None:
             # Re-buffer the failed batch (ahead of any events queued since) so a
             # transient store error does not silently drop subagent step events.
             self._pending = batch + self._pending
-            logger.warning("Run %s: failed to persist %d subagent step event(s)", self._run_id, len(batch), exc_info=True)
+            logger.warning(
+                "Run %s: failed to persist %d subagent step event(s)",
+                self._run_id,
+                len(batch),
+                exc_info=(type(failure), failure, failure.__traceback__),
+            )
+        if cancellation is not None:
+            raise cancellation
 
 
 def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
