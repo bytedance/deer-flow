@@ -1726,7 +1726,12 @@ class RunJournal(BaseCallbackHandler):
             )
         return settled
 
-    async def _flush_until_settled_owned(self, *, retry_noncommitted: bool = True) -> bool:
+    async def _flush_until_settled_owned(
+        self,
+        *,
+        retry_noncommitted: bool = True,
+        still_owned: Callable[[], bool] | None = None,
+    ) -> bool:
         """Drain predecessors and buffer inside the task that owns the drain.
 
         The drain runs in its own task, so the joining caller's cancellation
@@ -1743,6 +1748,7 @@ class RunJournal(BaseCallbackHandler):
                 return await self._flush_locked(
                     settle_predecessors=True,
                     retry_noncommitted=retry_noncommitted,
+                    still_owned=still_owned,
                 )
             except asyncio.CancelledError as error:
                 current = asyncio.current_task()
@@ -1765,7 +1771,13 @@ class RunJournal(BaseCallbackHandler):
         task = asyncio.create_task(self._flush_until_settled_owned())
         return await _await_owned_task(task)
 
-    async def _flush_locked(self, *, settle_predecessors: bool = False, retry_noncommitted: bool = False) -> bool:
+    async def _flush_locked(
+        self,
+        *,
+        settle_predecessors: bool = False,
+        retry_noncommitted: bool = False,
+        still_owned: Callable[[], bool] | None = None,
+    ) -> bool:
         if self._closed:
             return True
         quarantine = self._quarantine
@@ -1791,6 +1803,11 @@ class RunJournal(BaseCallbackHandler):
                 await self._quiesce_progress()
 
                 while self._buffer:
+                    if still_owned is not None and not still_owned():
+                        # Ownership was lost while this drain was running: the
+                        # write already in flight above is still observed, but no
+                        # new batch may be started by the old owner.
+                        return False
                     batch = self._buffer[: self._flush_threshold]
                     del self._buffer[: self._flush_threshold]
                     settled = await self._put_batch_cancellation_safe(batch, register_active=True)
@@ -1980,7 +1997,7 @@ class RunJournal(BaseCallbackHandler):
         finally:
             self._detach_runtime_dependencies()
 
-    async def _finish_owned(self) -> JournalFinishResult:
+    async def _finish_owned(self, still_owned: Callable[[], bool] | None = None) -> JournalFinishResult:
         """Own one terminal finalization: settle, snapshot, then detach.
 
         The result is always returned, never raised, so the joining caller can
@@ -1993,7 +2010,10 @@ class RunJournal(BaseCallbackHandler):
             # already ahead of the owner-loop barrier, so the drain below covers
             # the complete accepted tail.
             await self.seal_producers()
-            settled = await self._flush_until_settled_owned(retry_noncommitted=True)
+            settled = await self._flush_until_settled_owned(
+                retry_noncommitted=True,
+                still_owned=still_owned,
+            )
         except BaseException as error:  # noqa: BLE001 - the outcome is reported, not raised
             quarantine = self._quarantine
             disposition = quarantine.disposition if quarantine is not None else JournalWriteDisposition.UNKNOWN
@@ -2006,11 +2026,12 @@ class RunJournal(BaseCallbackHandler):
                 caller_cancellation=None,
             )
         if not settled:
+            fenced = still_owned is not None and not still_owned()
             self._detach_runtime_dependencies()
             return JournalFinishResult(
                 disposition=JournalWriteDisposition.UNKNOWN,
                 snapshot=None,
-                failure=RuntimeError("journal did not settle before terminal receipt"),
+                failure=RuntimeError("journal writes were fenced before the terminal drain settled" if fenced else "journal did not settle before terminal receipt"),
                 caller_cancellation=None,
             )
         snapshot = JournalFinalizationSnapshot(
@@ -2026,18 +2047,25 @@ class RunJournal(BaseCallbackHandler):
             caller_cancellation=None,
         )
 
-    async def finish_for_terminal(self) -> JournalFinishResult:
+    async def finish_for_terminal(
+        self,
+        *,
+        still_owned: Callable[[], bool] | None = None,
+    ) -> JournalFinishResult:
         """Return the authoritative terminal outcome of this journal.
 
-        One owned task performs the seal-free settled drain, the snapshot and the
-        write-free detach; every concurrent caller joins that same task. The
+        One owned task performs the producer seal, the settled drain, the snapshot
+        and the write-free detach; every concurrent caller joins that same task.
+        ``still_owned`` lets the owner fence *new* batches if its lease is lost
+        mid-drain: the write already in flight is still observed, and the result
+        reports a non-committed outcome instead of publishing success. The
         caller's cancellation stops this wait but is reported in the result
         instead of being mapped onto the journal outcome, and it is left for the
         caller to re-raise once it has acted on the result.
         """
         owner = self._finish_owner_task
         if owner is None or owner.done():
-            owner = asyncio.create_task(self._finish_owned())
+            owner = asyncio.create_task(self._finish_owned(still_owned))
             self._finish_owner_task = owner
         caller_cancellation: asyncio.CancelledError | None = None
         while not owner.done():

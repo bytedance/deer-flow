@@ -1813,3 +1813,21 @@ async def test_shutdown_keeps_acknowledged_terminal_status_during_cleanup():
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_remote_cancel_reaches_a_live_staged_terminal_finalizer():
+    """A durable cancel observed during renewal must reach a staged terminal task."""
+    manager, store = _ownership_manager()
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    try:
+        assert await store.request_cancel(record.run_id, action="interrupt") == "interrupt"
+
+        await manager._renew_leases()
+
+        assert record.abort_event.is_set() is True
+        assert record.abort_action == "interrupt"
+        assert task.cancelling() > 0 or task.cancelled()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

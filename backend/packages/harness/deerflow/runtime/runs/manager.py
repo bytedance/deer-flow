@@ -1325,14 +1325,29 @@ class RunManager:
         """Set process-local abort state without status persistence or cleanup."""
         async with self._lock:
             record = self._runs.get(run_id)
-            if record is None or record.status not in (RunStatus.pending, RunStatus.running) or record.abort_event.is_set():
+            if record is None or record.abort_event.is_set():
+                return
+            task_active = record.task is not None and not record.task.done()
+            # A staged terminal status is still a live lifecycle: while the
+            # durable terminal row is unacknowledged, a durable cancel observed
+            # during renewal must reach the running finalizer instead of waiting
+            # for a terminal CAS that a blocked drain may never reach.
+            staged_terminal = (
+                task_active
+                and not record.terminal_committed
+                and record.status
+                in (
+                    RunStatus.success,
+                    RunStatus.error,
+                )
+            )
+            if record.status not in (RunStatus.pending, RunStatus.running) and not staged_terminal:
                 return
 
             record.abort_action = action
             record.abort_event.set()
-            task_active = record.task is not None and not record.task.done()
             record.finalizing = task_active
-            if task_active and record.status == RunStatus.running:
+            if task_active and record.status in (RunStatus.running, RunStatus.success, RunStatus.error):
                 record.task.cancel()
         logger.info("Run %s cancellation signalled locally (action=%s)", run_id, action)
 

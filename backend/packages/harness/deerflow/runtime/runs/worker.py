@@ -1544,7 +1544,7 @@ async def run_agent(
                 # ``bridge.publish_end``: a hung store holds the durable run
                 # ``running`` and stream consumers wait for the end frame until
                 # lease expiry or a worker restart.
-                finish_result = await journal.finish_for_terminal()
+                finish_result = await journal.finish_for_terminal(still_owned=lambda: not record.ownership_lost)
                 if finish_result.caller_cancellation is not None and deferred_finalization_interrupt is None:
                     # Preserve the first host interrupt by identity and re-raise
                     # it after the ordered receipt and terminal bookkeeping. This
@@ -1553,7 +1553,16 @@ async def run_agent(
                     deferred_finalization_interrupt = finish_result.caller_cancellation
 
                 snapshot = finish_result.snapshot
-                if finish_result.disposition is JournalWriteDisposition.COMMITTED and snapshot is not None:
+                if record.ownership_lost:
+                    # The lease was lost while the owned finish was running, so
+                    # this worker may no longer publish anything: the peer that
+                    # claimed the run owns its receipt and terminal outcome. The
+                    # drain still observed every write it had already started.
+                    logger.warning(
+                        "Skipping the terminal receipt for run %s because this worker lost its lease during journal finalization",
+                        run_id,
+                    )
+                elif finish_result.disposition is JournalWriteDisposition.COMMITTED and snapshot is not None:
                     # Authoritative terminal statistics, captured before detach.
                     completion_data = dict(snapshot.completion_data)
                     if delivery_content is None:
