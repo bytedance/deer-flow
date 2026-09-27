@@ -1831,3 +1831,29 @@ async def test_remote_cancel_reaches_a_live_staged_terminal_finalizer():
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_late_progress_snapshot_cannot_overwrite_an_acknowledged_terminal_row():
+    """A progress write that lands after the terminal commit is refused by the store.
+
+    A reporter that ignores cancellation may finish long after the run committed
+    its terminal row. The store's running-only guard is what keeps that stale
+    snapshot from rewriting the committed row.
+    """
+    manager, store = _ownership_manager()
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    try:
+        assert await manager.persist_current_status(record.run_id) is True
+        assert record.terminal_committed is True
+
+        # The local guard already refuses this; the store guard is the durable one.
+        await manager.update_run_progress(record.run_id, last_ai_message="stale")
+        await store.update_run_progress(record.run_id, last_ai_message="stale")
+
+        row = await store.get(record.run_id)
+        assert row["status"] == "success"
+        assert row.get("last_ai_message") != "stale"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

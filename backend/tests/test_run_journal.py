@@ -5103,3 +5103,29 @@ async def test_foreign_thread_middleware_during_terminal_drain_is_rejected_not_d
     assert journal._post_seal_rejected == 1
     events = await store.list_events("t-seal-race", "r-seal-race")
     assert [event["event_type"] for event in events] == ["A"]
+
+
+@pytest.mark.anyio
+async def test_repeated_finish_returns_the_same_committed_result():
+    """A later terminal finish must reuse the first result, not an empty one.
+
+    The first finish detaches the journal, so a second owner would find a closed
+    journal and report a committed-but-empty snapshot instead of the terminal
+    facts the run actually produced.
+    """
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-finish-again", "t-finish-again", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+    journal.set_first_human_message("hello")
+
+    first = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+    second = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert first.disposition is JournalWriteDisposition.COMMITTED
+    assert second.disposition is JournalWriteDisposition.COMMITTED
+    assert second.snapshot == first.snapshot
+    assert second.snapshot.completion_data["first_human_message"] == "hello"
+    assert second.snapshot.delivery_content == first.snapshot.delivery_content
+
+    events = await store.list_events("t-finish-again", "r-finish-again")
+    assert [event["event_type"] for event in events] == ["A"]

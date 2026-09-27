@@ -2064,7 +2064,11 @@ class RunJournal(BaseCallbackHandler):
         caller to re-raise once it has acted on the result.
         """
         owner = self._finish_owner_task
-        if owner is None or owner.done():
+        if owner is None:
+            # The first finish owns this journal's terminal outcome. Later calls
+            # join it and receive the same result instead of starting a second
+            # owner that would find a detached journal and report an empty
+            # committed snapshot.
             owner = asyncio.create_task(self._finish_owned(still_owned))
             self._finish_owner_task = owner
         caller_cancellation: asyncio.CancelledError | None = None
