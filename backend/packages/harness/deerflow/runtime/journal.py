@@ -23,9 +23,12 @@ Write-ownership invariants (keep these when changing buffering or progress):
   ``close(flush=True)`` drain without a deadline -- they settle buffer, detached
   writes and threshold wrappers for as long as that takes, and raise instead of
   returning ``False``.
-- Outcomes: success advances ``feed_generation``; only an explicitly failed or
-  cancelled write prepends its batch once for retry; an unresolved write is never
-  requeued, and caller cancellation re-raises after the outcome is handled.
+- Outcomes: success advances ``feed_generation``. A batch whose outcome is not
+  provably a non-commit is quarantined as UNKNOWN and never replayed, and it
+  blocks every successor; only ``RunEventWriteNotCommittedError`` (a store that
+  proves the whole batch did not commit) may be retried by a later explicit
+  drain. An unresolved write is never requeued, and caller cancellation re-raises
+  after the outcome is handled.
 - Closed-state gate: every requeue site funnels through one ``_requeue_batch()``
   helper, which discards the batch with a warning once ``_closed`` is set. A late
   outcome -- a cancelled wrapper, a failed write, a detached write settling after
@@ -71,8 +74,9 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -93,6 +97,7 @@ from deerflow.runtime.events.catalog import (
     RUN_ERROR_EVENT,
     RUN_START_EVENT,
 )
+from deerflow.runtime.events.store.base import RunEventWriteNotCommittedError
 from deerflow.utils.messages import message_to_text, restore_original_human_message
 
 if TYPE_CHECKING:
@@ -120,6 +125,28 @@ class _PendingLlmResponse:
 class _DetachedFlush:
     batch: list[dict]
     started: bool = False
+
+
+class JournalWriteDisposition(StrEnum):
+    """What the Journal can prove about one ``put_batch`` attempt."""
+
+    COMMITTED = "committed"
+    NOT_COMMITTED = "not_committed"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class _QuarantinedWrite:
+    """The first write whose outcome cannot be turned into a safe retry.
+
+    ``batch`` is held out of ``_buffer`` on purpose: an UNKNOWN outcome must never
+    be replayed by an automatic path, and a NOT_COMMITTED batch may only be
+    replayed by a later explicitly requested pre-terminal drain.
+    """
+
+    disposition: JournalWriteDisposition
+    error: BaseException
+    batch: list[dict]
 
 
 def _should_persist_human_input_message(message: BaseMessage) -> bool:
@@ -412,6 +439,8 @@ class RunJournal(BaseCallbackHandler):
         self._explicit_flush_in_progress = False
         self._active_write_tasks: dict[asyncio.Future[Any], list[dict]] = {}
         self._detached_write_tasks: dict[asyncio.Future[Any], list[dict]] = {}
+        # First write whose outcome could not be classified as a safe retry.
+        self._quarantine: _QuarantinedWrite | None = None
         self._flush_lock = asyncio.Lock()
         self._close_owner_task: asyncio.Task[None] | None = None
         self._pending_progress_task: asyncio.Task[None] | None = None
@@ -1086,14 +1115,10 @@ class RunJournal(BaseCallbackHandler):
         if caller_cancelling:
             try:
                 write_task.result()
-            except asyncio.CancelledError:
-                self._requeue_batch(batch, context="Journal write was cancelled while draining cancellation")
+            except asyncio.CancelledError as error:
+                self._record_write_failure(batch, error, context="Journal write was cancelled while draining cancellation")
             except BaseException as error:
-                self._requeue_batch(
-                    batch,
-                    context="Journal write failed while draining cancellation",
-                    exc_info=(type(error), error, error.__traceback__),
-                )
+                self._record_write_failure(batch, error, context="Journal write failed while draining cancellation")
             else:
                 self._feed_generation += 1
             self._active_write_tasks.pop(write_task, None)
@@ -1107,15 +1132,11 @@ class RunJournal(BaseCallbackHandler):
             # bounded ``flush()`` must report that as a definite failure, not
             # re-raise it as caller cancellation that the worker barrier would
             # classify as a host interrupt (D2c).
-            self._requeue_batch(batch, context="Journal write was cancelled")
+            self._record_write_failure(batch, error, context="Journal write was cancelled")
             self._active_write_tasks.pop(write_task, None)
-            raise RuntimeError(f"RunEventStore cancelled its own write for run {self.run_id}; the failed batch was returned to the buffer for retry") from error
+            raise RuntimeError(f"RunEventStore cancelled its own write for run {self.run_id}; the batch outcome is unknown and will not be replayed") from error
         except Exception as error:
-            self._requeue_batch(
-                batch,
-                context="Journal write failed",
-                exc_info=(type(error), error, error.__traceback__),
-            )
+            self._record_write_failure(batch, error, context="Journal write failed")
             self._active_write_tasks.pop(write_task, None)
             raise
         self._feed_generation += 1
@@ -1166,6 +1187,62 @@ class RunJournal(BaseCallbackHandler):
             )
         self._buffer = batch + self._buffer
 
+    @staticmethod
+    def _classify_write_error(error: BaseException) -> JournalWriteDisposition:
+        """Classify one failed ``put_batch`` attempt by what the store proved.
+
+        Only the explicit marker proves the whole batch did not commit. Anything
+        else -- an ordinary exception or a store-originated ``CancelledError`` --
+        leaves the batch possibly durable and therefore UNKNOWN.
+        """
+        if isinstance(error, RunEventWriteNotCommittedError):
+            return JournalWriteDisposition.NOT_COMMITTED
+        return JournalWriteDisposition.UNKNOWN
+
+    def _record_write_failure(
+        self,
+        batch: list[dict],
+        error: BaseException,
+        *,
+        context: str,
+    ) -> _QuarantinedWrite:
+        """Quarantine the first unsafe write outcome and keep its batch out of the buffer."""
+        existing = self._quarantine
+        if existing is not None:
+            # The first failed batch owns the drain outcome; later failures are
+            # reported but never replace it.
+            logger.warning(
+                "%s for run %s; the journal already quarantined %d events as %s",
+                context,
+                self.run_id,
+                len(existing.batch),
+                existing.disposition.value,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            return existing
+        quarantine = _QuarantinedWrite(
+            disposition=self._classify_write_error(error),
+            error=error,
+            batch=list(batch),
+        )
+        self._quarantine = quarantine
+        logger.warning(
+            "%s for run %s; %d events are quarantined as %s and will not be replayed",
+            context,
+            self.run_id,
+            len(batch),
+            quarantine.disposition.value,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        return quarantine
+
+    def _raise_quarantine(self) -> NoReturn:
+        """Report the quarantined outcome instead of retrying or overtaking it."""
+        quarantine = self._quarantine
+        if quarantine is None:
+            raise RuntimeError(f"Journal for run {self.run_id} has no quarantined write")
+        raise quarantine.error
+
     def _resolve_detached_write(self, task: asyncio.Future[Any]) -> None:
         """Apply one late write outcome exactly once."""
         batch = self._detached_write_tasks.pop(task, None)
@@ -1178,14 +1255,12 @@ class RunJournal(BaseCallbackHandler):
         if error is None:
             self._feed_generation += 1
             return
-        self._requeue_batch(
-            batch,
-            context="Detached journal write failed",
-            exc_info=(type(error), error, error.__traceback__),
-        )
+        self._record_write_failure(batch, error, context="Detached journal write failed")
 
     async def _await_write_predecessors(self, *, settle: bool) -> bool:
         """Observe predecessor writes without cancelling or overtaking them."""
+        if self._quarantine is not None:
+            self._raise_quarantine()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS
         current_task = asyncio.current_task()
@@ -1203,6 +1278,8 @@ class RunJournal(BaseCallbackHandler):
         except asyncio.CancelledError:
             cancellation_observed = True
         while True:
+            if self._quarantine is not None:
+                self._raise_quarantine()
             detached = tuple(self._detached_write_tasks)
             pending = tuple(self._pending_flush_tasks)
             if not detached and not pending:
@@ -1220,6 +1297,8 @@ class RunJournal(BaseCallbackHandler):
                     await asyncio.wait({task})
                 else:
                     await wait_for_task_until(task, deadline=deadline)
+            if self._quarantine is not None:
+                self._raise_quarantine()
             await asyncio.sleep(0)
             if not settle:
                 if cancellation_observed or (current_task is not None and current_task.cancelling() > cancelling_on_entry):
@@ -1541,6 +1620,11 @@ class RunJournal(BaseCallbackHandler):
     async def _flush_locked(self, *, settle_predecessors: bool = False) -> bool:
         if self._closed:
             return True
+        if self._quarantine is not None:
+            # An UNKNOWN batch blocks every successor; a NOT_COMMITTED batch is
+            # only replayed by an explicitly requested later drain (see
+            # ``_rearm_noncommitted_retry``).
+            self._raise_quarantine()
         self._explicit_flush_in_progress = True
         try:
             self._commit_pending_llm_response()
@@ -1643,6 +1727,7 @@ class RunJournal(BaseCallbackHandler):
         self._buffer.clear()
         self._pending_llm_response = None
         self._pending_flush_tasks.clear()
+        self._quarantine = None
         self._explicit_flush_in_progress = False
         self._pending_progress_task = None
         self._pending_progress_delayed = False

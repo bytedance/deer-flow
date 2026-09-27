@@ -16,7 +16,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
-from deerflow.runtime.journal import RunJournal
+from deerflow.runtime.journal import JournalWriteDisposition, RunJournal
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 # ---------------------------------------------------------------------------
@@ -62,6 +62,8 @@ class GatedRunEventStore(MemoryRunEventStore):
         self.started: dict[int, asyncio.Event] = {}
         self.release: dict[int, asyncio.Event] = {}
         self.failures: dict[int, BaseException] = {}
+        self.commit_then_fail: dict[int, BaseException] = {}
+        self.auto_release = False
 
     def gate(self, index: int) -> tuple[asyncio.Event, asyncio.Event]:
         started = self.started.setdefault(index, asyncio.Event())
@@ -72,6 +74,8 @@ class GatedRunEventStore(MemoryRunEventStore):
         self.failures[index] = error
 
     def release_all(self) -> None:
+        """Release every gate, now and for any batch attempted later."""
+        self.auto_release = True
         for event in self.release.values():
             event.set()
 
@@ -80,12 +84,18 @@ class GatedRunEventStore(MemoryRunEventStore):
         self.calls.append([event["event_type"] for event in events])
         started, release = self.gate(index)
         started.set()
-        await release.wait()
+        if not self.auto_release:
+            await release.wait()
         error = self.failures.get(index)
         if error is not None:
             raise error
         self.persisted.append([event["event_type"] for event in events])
-        return await super().put_batch(events)
+        results = await super().put_batch(events)
+        late_error = self.commit_then_fail.get(index)
+        if late_error is not None:
+            # The batch is durable; only the acknowledgement was lost.
+            raise late_error
+        return results
 
 
 def test_run_journal_is_marked_as_loop_bound():
@@ -395,7 +405,9 @@ async def test_closed_on_llm_end_returns_before_touching_response_or_state():
 
 
 @pytest.mark.anyio
-async def test_close_preserves_buffer_and_dependencies_when_flush_fails():
+async def test_close_preserves_failed_batch_and_dependencies_when_flush_fails():
+    """An UNKNOWN write failure keeps the store attached and the batch quarantined."""
+
     class FailOnceRunEventStore(MemoryRunEventStore):
         def __init__(self) -> None:
             super().__init__()
@@ -403,9 +415,7 @@ async def test_close_preserves_buffer_and_dependencies_when_flush_fails():
 
         async def put_batch(self, events):
             self.put_batch_calls += 1
-            if self.put_batch_calls == 1:
-                raise RuntimeError("transient store failure")
-            return await super().put_batch(events)
+            raise RuntimeError("transient store failure")
 
     store = FailOnceRunEventStore()
     journal = RunJournal("r-close-retry", "t-close-retry", store, flush_threshold=100)
@@ -416,19 +426,22 @@ async def test_close_preserves_buffer_and_dependencies_when_flush_fails():
 
     assert journal._closed is False
     assert journal._store is store
-    assert len(journal._buffer) == 1
-
-    await journal.close()
-
-    assert journal._closed is True
-    assert journal._store is None
+    # The batch is held by the quarantine, not re-armed for an automatic replay.
     assert journal._buffer == []
-    events = await store.list_events("t-close-retry", "r-close-retry")
-    assert [event["event_type"] for event in events] == ["middleware:test"]
+    assert journal._quarantine is not None
+    assert journal._quarantine.disposition is JournalWriteDisposition.UNKNOWN
+    assert [event["event_type"] for event in journal._quarantine.batch] == ["middleware:test"]
+
+    # A later close must not replay a batch whose outcome is UNKNOWN.
+    with pytest.raises(RuntimeError, match="transient store failure"):
+        await journal.close()
+    assert store.put_batch_calls == 1
+    assert journal._closed is False
+    assert journal._store is store
 
 
 @pytest.mark.anyio
-async def test_close_retries_pending_no_usage_response_without_duplication():
+async def test_close_quarantines_pending_no_usage_response_without_duplication():
     class FailOnceRunEventStore(MemoryRunEventStore):
         def __init__(self) -> None:
             super().__init__()
@@ -436,9 +449,7 @@ async def test_close_retries_pending_no_usage_response_without_duplication():
 
         async def put_batch(self, events):
             self.put_batch_calls += 1
-            if self.put_batch_calls == 1:
-                raise RuntimeError("transient store failure")
-            return await super().put_batch(events)
+            raise RuntimeError("transient store failure")
 
     async def progress_reporter(snapshot):
         del snapshot
@@ -469,29 +480,25 @@ async def test_close_retries_pending_no_usage_response_without_duplication():
     assert journal._store is store
     assert journal._progress_reporter is progress_reporter
     assert journal._pending_llm_response is None
-    assert [event["event_type"] for event in journal._buffer] == [
+    assert journal._buffer == []
+    assert [event["event_type"] for event in journal._quarantine.batch] == [
         "middleware:before",
         "llm.ai.response",
     ]
     assert journal.get_completion_data()["message_count"] == 1
     assert journal.get_completion_data()["last_ai_message"] == "Canonical without usage"
 
-    await journal.close()
-
+    # The UNKNOWN batch is never replayed, so the response cannot be duplicated.
+    with pytest.raises(RuntimeError, match="transient store failure"):
+        await journal.close()
+    assert store.put_batch_calls == 1
     events = await store.list_events("t-close-pending-retry", "r-close-pending-retry")
-    assert [event["event_type"] for event in events] == [
-        "middleware:before",
-        "llm.ai.response",
-    ]
-    responses = [event for event in events if event["event_type"] == "llm.ai.response"]
-    assert len(responses) == 1
-    assert responses[0]["content"]["content"] == "Canonical without usage"
-    assert responses[0]["content"]["usage_metadata"] is None
-    assert responses[0]["metadata"]["usage"] == {}
+    assert events == []
     assert journal.get_completion_data()["message_count"] == 1
-    assert journal._closed is True
-    assert journal._store is None
-    assert journal._progress_reporter is None
+    # The journal stays attached to its store so the fenced retry window is explicit.
+    assert journal._closed is False
+    assert journal._store is store
+    assert journal._progress_reporter is progress_reporter
 
 
 @pytest.mark.anyio
@@ -1155,7 +1162,8 @@ async def test_close_with_flush_failure_keeps_progress_reporting_attached():
     assert journal._closed is False
     assert journal._store is store
     assert journal._progress_reporter is reporter
-    assert [event["event_type"] for event in journal._buffer] == ["A"]
+    assert journal._buffer == []
+    assert [event["event_type"] for event in journal._quarantine.batch] == ["A"]
     assert getattr(journal, "_close_owner_task", None) is None
     assert store.attempts == 1
 
@@ -1223,18 +1231,19 @@ async def test_close_flush_reports_definite_failure_under_cancellation():
     # The received cancellation was suppressed, so its count was uncancelled.
     assert cancelling_after == [0]
 
-    # Store, buffer and the failed batch stay attached for a retry.
+    # Store and the quarantined batch stay attached for a fenced retry.
     assert journal._closed is False
     assert journal._store is store
-    assert [event["event_type"] for event in journal._buffer] == ["A"]
+    assert journal._buffer == []
+    assert [event["event_type"] for event in journal._quarantine.batch] == ["A"]
     assert getattr(journal, "_close_owner_task", None) is None
 
-    # A later explicit close succeeds once the store recovers.
-    await asyncio.wait_for(journal.close(), timeout=0.2)
-    assert journal._closed is True
-    assert journal._store is None
-    assert journal._buffer == []
-    assert store.attempts == [["A"], ["A"]]
+    # A later explicit close must not replay the UNKNOWN batch.
+    with pytest.raises(RuntimeError, match="durable write failed"):
+        await asyncio.wait_for(journal.close(), timeout=0.2)
+    assert journal._closed is False
+    assert journal._store is store
+    assert store.attempts == [["A"]]
 
 
 @pytest.mark.anyio
@@ -1341,10 +1350,11 @@ async def test_close_flush_store_self_cancellation_is_a_definite_failure():
 
     assert "cancelled its own write" in str(excinfo.value)
     assert isinstance(excinfo.value.__cause__, asyncio.CancelledError)
-    # The failed batch is recoverable: nothing was detached.
+    # The ambiguous batch is quarantined, not re-armed for retry.
     assert journal._closed is False
     assert journal._store is store
-    assert [event["event_type"] for event in journal._buffer] == ["A"]
+    assert journal._buffer == []
+    assert [event["event_type"] for event in journal._quarantine.batch] == ["A"]
     assert store.attempts == 1
 
 
@@ -1929,13 +1939,12 @@ class TestBufferFlush:
                 await asyncio.gather(*detached, return_exceptions=True)
 
     @pytest.mark.anyio
-    async def test_failed_blocked_write_rebuffers_before_successor_exactly_once(self):
-        """A failed blocked A must be retried as ``[A, B]``, exactly once, in order.
+    async def test_failed_blocked_write_quarantines_before_successor_exactly_once(self):
+        """A failed A blocks its successor B and is never replayed.
 
-        Characterization at this BASE: the explicit flush owns A; B is buffered
-        after A starts and never written concurrently. When A definitely fails,
-        its batch is re-buffered ahead of B, and the retry writes both events in
-        a single ordered batch.
+        The explicit flush owns A; B is buffered after A starts and never written
+        concurrently. When A fails with an UNKNOWN outcome, A is quarantined and
+        B stays buffered: the failed batch is neither replayed nor overtaken.
         """
 
         class FailOneBlockingStore(MemoryRunEventStore):
@@ -1967,13 +1976,15 @@ class TestBufferFlush:
             store.release.set()
             with pytest.raises(RuntimeError):
                 await asyncio.wait_for(first_flush, timeout=0.2)
-            # The failed batch is re-buffered ahead of the successor, exactly once.
-            assert [event["event_type"] for event in journal._buffer] == ["A", "B"]
+            # A is quarantined, so neither it nor its successor is written again.
+            assert [event["event_type"] for event in journal._buffer] == ["B"]
+            assert [event["event_type"] for event in journal._quarantine.batch] == ["A"]
             assert store.attempts == [["A"]]
-            assert (await journal.flush()) is True
-            assert store.attempts == [["A"], ["A", "B"]]
+            with pytest.raises(RuntimeError):
+                await journal.flush()
+            assert store.attempts == [["A"]]
             events = await store.list_events("t-threshold-fail", "r-threshold-fail")
-            assert [event["event_type"] for event in events] == ["A", "B"]
+            assert events == []
         finally:
             store.release.set()
             await asyncio.gather(first_flush, return_exceptions=True)
@@ -2395,7 +2406,13 @@ class TestBufferFlush:
         assert journal._active_write_tasks == {}
         assert journal._detached_write_tasks == {}
         assert journal.feed_generation == 0
-        assert [event["event_type"] for event in journal._buffer] == ["first"]
+        assert journal._buffer == []
+        assert [event["event_type"] for event in journal._quarantine.batch] == ["first"]
+
+        # The ambiguous batch is never attempted again.
+        with pytest.raises(BaseException):
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=0.5)
+        assert store.attempts == 1
 
     @pytest.mark.anyio
     async def test_flush_until_settled_reports_write_failure_over_caller_cancellation(self, monkeypatch):
@@ -2443,7 +2460,8 @@ class TestBufferFlush:
         assert store.attempts == 1
         assert journal._active_write_tasks == {}
         assert journal.feed_generation == 0
-        assert [event["event_type"] for event in journal._buffer] == ["first"]
+        assert journal._buffer == []
+        assert [event["event_type"] for event in journal._quarantine.batch] == ["first"]
 
     @pytest.mark.anyio
     async def test_close_without_flush_does_not_wait_for_stubborn_progress(self):
@@ -2504,7 +2522,7 @@ class TestBufferFlush:
             await asyncio.gather(pending, return_exceptions=True)
 
     @pytest.mark.anyio
-    async def test_failed_explicit_write_rebuffers_before_successor(self):
+    async def test_failed_explicit_write_blocks_successor_without_replay(self):
         class FailOnceStore(MemoryRunEventStore):
             def __init__(self):
                 super().__init__()
@@ -2515,10 +2533,7 @@ class TestBufferFlush:
             async def put_batch(self, batch):
                 self.calls += 1
                 self.attempted.extend(event["event_type"] for event in batch)
-                if self.calls == 1:
-                    raise RuntimeError("write failed")
-                self.persisted.extend(event["event_type"] for event in batch)
-                return []
+                raise RuntimeError("write failed")
 
         store = FailOnceStore()
         journal = RunJournal("r1", "t1", store, flush_threshold=100)
@@ -2526,13 +2541,15 @@ class TestBufferFlush:
         with pytest.raises(RuntimeError):
             await journal.flush()
 
-        assert [event["event_type"] for event in journal._buffer] == ["first"]
+        assert journal._buffer == []
         assert journal._active_write_tasks == {}
+        assert [event["event_type"] for event in journal._quarantine.batch] == ["first"]
 
         journal._put(event_type="second", category="trace", content="second")
-        assert (await journal.flush()) is True
-        assert store.attempted == ["first", "first", "second"]
-        assert store.persisted == ["first", "second"]
+        with pytest.raises(RuntimeError):
+            await journal.flush()
+        assert store.attempted == ["first"]
+        assert store.persisted == []
 
     @pytest.mark.anyio
     async def test_flush_ignores_already_handled_cancellation_request(self, journal_setup):
@@ -2625,7 +2642,7 @@ class TestBufferFlush:
         assert [event["event_type"] for event in events] == ["run.delivery"]
 
     @pytest.mark.anyio
-    async def test_cancelled_flush_requeues_batch_after_write_failure(self):
+    async def test_cancelled_flush_quarantines_batch_after_write_failure(self):
         class FailingStore:
             def __init__(self):
                 self.started = asyncio.Event()
@@ -2653,7 +2670,8 @@ class TestBufferFlush:
             await flush_task
 
         assert store.cancelled is False
-        assert [event["event_type"] for event in journal._buffer] == ["run.delivery"]
+        assert journal._buffer == []
+        assert [event["event_type"] for event in journal._quarantine.batch] == ["run.delivery"]
 
     @pytest.mark.anyio
     async def test_uncancelled_flush_bounds_ambiguous_write(self, monkeypatch):
@@ -2757,7 +2775,7 @@ class TestBufferFlush:
                 await asyncio.gather(*detached, return_exceptions=True)
 
     @pytest.mark.anyio
-    async def test_settled_flush_retries_late_failure_before_successor(self, monkeypatch):
+    async def test_settled_flush_reports_late_failure_before_successor_without_replay(self, monkeypatch):
         import deerflow.runtime.journal as journal_module
 
         monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
@@ -2796,9 +2814,13 @@ class TestBufferFlush:
             assert store.attempted == ["first"]
 
             store.fail_first.set()
-            await asyncio.wait_for(settled_flush, timeout=0.2)
-            assert store.attempted == ["first", "first", "second"]
-            assert store.persisted == ["first", "second"]
+            with pytest.raises(RuntimeError, match="late predecessor failure"):
+                await asyncio.wait_for(settled_flush, timeout=0.2)
+            # The late failure is reported once; neither the failed batch nor its
+            # successor is replayed or overtaken.
+            assert store.attempted == ["first"]
+            assert store.persisted == []
+            assert [event["event_type"] for event in journal._quarantine.batch] == ["first"]
         finally:
             store.fail_first.set()
             await asyncio.gather(first_flush, return_exceptions=True)
@@ -2873,11 +2895,14 @@ class TestBufferFlush:
         assert len(journal._detached_write_tasks) == 1
 
         store.fail_first.set()
-        await asyncio.wait_for(close_task, timeout=0.2)
-        assert store.calls == 2
-        assert store.persisted == ["run.delivery"]
-        assert journal._closed is True
-        assert journal._store is None
+        with pytest.raises(RuntimeError, match="late failure"):
+            await asyncio.wait_for(close_task, timeout=0.2)
+        # The ambiguous batch is quarantined and never replayed.
+        assert store.calls == 1
+        assert store.persisted == []
+        assert journal._closed is False
+        assert journal._store is store
+        assert [event["event_type"] for event in journal._quarantine.batch] == ["run.delivery"]
 
 
 class TestFeedGeneration:
@@ -4470,3 +4495,97 @@ class TestDeliveryTracking:
         assert content["presented"] == 1
         assert content["paths"] == ["/mnt/user-data/outputs/anon.txt"]
         assert content["by_tool"] == {}
+
+
+@pytest.mark.anyio
+async def test_write_ack_lost_after_actual_commit_is_unknown_not_replayed(monkeypatch):
+    """A batch that may have committed is UNKNOWN: never replayed, never overtaken."""
+    import deerflow.runtime.journal as journal_module
+
+    monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    store = GatedRunEventStore()
+    journal = RunJournal("r-ack-lost", "t-ack-lost", store, flush_threshold=100)
+    try:
+        journal._put(event_type="A", category="trace", content="a")
+
+        # The bounded drain times out, detaching A while its outcome is unknown.
+        first_drain = asyncio.create_task(journal.flush())
+        await asyncio.wait_for(store.gate(0)[0].wait(), timeout=1.0)
+        await asyncio.wait_for(first_drain, timeout=2.0)
+        assert store.calls == [["A"]]
+
+        # A buffered successor must not overtake the unresolved predecessor.
+        journal._put(event_type="B", category="trace", content="b")
+
+        # A actually committed; only the acknowledgement was lost.
+        store.commit_then_fail[0] = RuntimeError("ack lost after commit")
+        store.release_all()
+
+        with pytest.raises(RuntimeError, match="ack lost after commit"):
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=3.0)
+
+        # Neither A nor its successor is written again: UNKNOWN is not replayable.
+        assert store.calls == [["A"]]
+        assert store.persisted == [["A"]]
+
+        # A later explicit drain still fails closed instead of replaying the batch.
+        with pytest.raises(RuntimeError, match="ack lost after commit"):
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=3.0)
+        assert store.calls == [["A"]]
+    finally:
+        store.release_all()
+        await journal.close(flush=False)
+
+
+@pytest.mark.anyio
+async def test_store_self_cancel_after_possible_commit_is_unknown_not_host_cancel():
+    """A store-originated cancellation is an UNKNOWN failure, not host cancellation."""
+    store = GatedRunEventStore()
+    store.fail_with(0, asyncio.CancelledError("store cancelled its own write"))
+    # The write is never gated here: the injected failure is the point.
+    store.release_all()
+    journal = RunJournal("r-self-cancel", "t-self-cancel", store, flush_threshold=100)
+    try:
+        journal._put(event_type="A", category="trace", content="a")
+
+        with pytest.raises(RuntimeError, match="cancelled its own write"):
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=3.0)
+        assert store.calls == [["A"]]
+
+        # The ambiguous batch is quarantined, so it is never attempted again.
+        with pytest.raises(RuntimeError):
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=3.0)
+        assert store.calls == [["A"]]
+    finally:
+        store.release_all()
+        await journal.close(flush=False)
+
+
+def test_proven_noncommit_marker_is_opt_in_for_adapters():
+    """Only a store that can assert whole-batch non-commit may raise the marker."""
+    import importlib
+    import inspect
+
+    from deerflow.runtime.events.store import base as store_base
+
+    marker = store_base.RunEventWriteNotCommittedError
+    assert issubclass(marker, Exception)
+
+    for module_name in (
+        "deerflow.runtime.events.store.memory",
+        "deerflow.runtime.events.store.db",
+        "deerflow.runtime.events.store.jsonl",
+    ):
+        module = importlib.import_module(module_name)
+        for name, value in vars(module).items():
+            if not inspect.isclass(value) or not hasattr(value, "put_batch"):
+                continue
+            if getattr(value, "__module__", None) != module_name:
+                # Only adapters defined in this module own their put_batch.
+                continue
+            owner = next((klass for klass in value.__mro__ if "put_batch" in klass.__dict__), None)
+            if owner is None:
+                continue
+            source = inspect.getsource(owner.put_batch)
+            assert "RunEventWriteNotCommittedError" not in source, f"{module_name}.{name}.put_batch must not claim proven non-commit"
