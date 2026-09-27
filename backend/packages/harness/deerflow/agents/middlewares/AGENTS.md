@@ -128,5 +128,3 @@ Resolve the whole batch through user storage, enabled state and agent allowlist
 before activation; reject any invalid entry. Keep bodies in escaped HumanMessage
 context with task text once. Authenticated paths feed secrets/tool policy; record usage per skill.
 Legacy slash syntax is unchanged.
-
-Image-model choice cards also record the trusted IM channel and sender in their server-created artifact. Before streaming a follow-up run, the worker uses its materialized pre-run checkpoint to turn an exact option label or `1`/`2` from that same sender into a structured response. It requires the choice card to be the last checkpointed message and rechecks the managed revision and server model identity; no process-local pending-card registry or extra Gateway state request is used.
