@@ -20,7 +20,8 @@ deferred to a separate proposal and PR.
 | Validated manifest schema | `deerflow.capabilities.catalog.PluginManifest` |
 | Installation/status adapters | `backend/app/gateway/capabilities.py` |
 | Catalog and safe discovery HTTP API | `backend/app/gateway/routers/capabilities.py` |
-| MCP settings, secrets, enable/delete, cache reload | Existing `/api/mcp/config` services and `extensions_config.json` |
+| Personal MCP settings, secrets, enable/delete | `/api/mcp/personal/config` and `.deer-flow/users/<user_id>/integrations/mcp.json` |
+| Deployment MCP settings and cache reload | Administrator-only `/api/mcp/config` and `extensions_config.json` |
 | Lark installation and personal account authorization | Existing `/api/integrations/lark` services |
 | Skill archives, enable state, user storage | Existing `/api/skills` services |
 | Agent selection | Agent config `mcp_plugins` and existing `skills` |
@@ -139,8 +140,11 @@ service's authorization and validation; never add a provider branch to the galle
 - `GET /api/capabilities/catalog`: validated bundled manifests.
 - `GET /api/capabilities/installations/{adapter}`: safe installation projections
   for `mcp`, `business`, `lark`, and `skills`; separate requests isolate integration failures.
-- `POST /api/capabilities/installations`: administrator installation dispatch.
-  Body: `plugin_id`, `name`, and adapter `configuration`. MCP configuration uses
+- `POST /api/capabilities/installations`: installation dispatch with `plugin_id`,
+  `name`, adapter `configuration`, and optional `scope` (default `deployment`).
+  Deployment scope requires an administrator; authenticated users may choose
+  `scope: "user"` for MCP and bundled business connections. Other adapters
+  still require an administrator. MCP configuration uses
   the existing server definition schema. HTTP/SSE connections require a valid
   HTTP(S) URL without embedded credentials; stdio connections require a command.
   Invalid transport configuration returns 422 before saving. Duplicate server

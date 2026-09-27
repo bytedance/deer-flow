@@ -2,7 +2,9 @@
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -64,6 +66,27 @@ def test_persistent_same_name_connections_are_owner_only(personal_client):
     # A fresh read from disk, not a request-local cache, retains each owner.
     assert len(load_user_mcp_config("alice").get_enabled_mcp_servers()) == 2
     assert not load_user_mcp_config("bob").get_enabled_mcp_servers()
+
+
+@pytest.mark.parametrize("contents", ["{", "[]"])
+def test_corrupt_personal_config_returns_client_errors_without_overwriting_it(personal_client, contents):
+    path = user_mcp_config_path("alice")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(contents)
+    headers = {"test-user": "alice"}
+    requests = [
+        ("GET", "/api/mcp/personal/config", None),
+        ("POST", "/api/mcp/personal/config/servers", {"mcp_servers": {"new": {"type": "http", "url": "https://example.com/mcp"}}}),
+        ("PUT", "/api/mcp/personal/config/server", {"server_name": "new", "server": {"type": "http", "url": "https://example.com/mcp"}}),
+        ("PATCH", "/api/mcp/personal/config", {"server_name": "new", "enabled": False}),
+        ("DELETE", "/api/mcp/personal/config/servers/new", None),
+    ]
+    for method, url, body in requests:
+        response = personal_client.request(method, url, headers=headers, json=body)
+        assert response.status_code == 400, (method, response.text)
+        assert "Extensions configuration" in response.json()["detail"]
+        assert path.read_text() == contents
+    assert personal_client.get("/api/mcp/personal/config", headers={"test-user": "bob"}).status_code == 200
 
 
 def test_masked_edit_and_delete_do_not_touch_platform_or_peer(personal_client, tmp_path, monkeypatch):
@@ -278,12 +301,72 @@ async def test_real_mcp_calls_keep_credentials_separate_and_reject_stale_tools(p
 
 
 @pytest.mark.asyncio
+async def test_personal_tool_guard_reuses_validation_and_rejects_file_replacement(personal_client, monkeypatch):
+    import os
+
+    from langchain_core.tools import StructuredTool
+
+    import deerflow.mcp.user_config as user_config
+    from deerflow.config.extensions_config import atomic_write_extensions_config
+    from deerflow.mcp.user_tools import _guard
+
+    assert create(personal_client, "alice").status_code == 200
+    old_name = next(iter(load_user_mcp_config("alice").mcp_servers))
+    load = user_config.load_user_mcp_config
+    reads = 0
+
+    def counted_load(user_id):
+        nonlocal reads
+        reads += 1
+        return load(user_id)
+
+    monkeypatch.setattr(user_config, "load_user_mcp_config", counted_load)
+    calls = []
+
+    async def invoke():
+        calls.append(True)
+        return "ok"
+
+    tool = _guard(StructuredTool.from_function(coroutine=invoke, name="personal_test", description="Personal test"), "alice", old_name)
+    identity = set_current_user(SimpleNamespace(id="alice"))
+    try:
+        assert await tool.ainvoke({}) == "ok"
+        assert await tool.ainvoke({}) == "ok"
+        assert reads == 1
+
+        path = user_mcp_config_path("alice")
+        before = path.stat()
+        raw = read_user_mcp_config("alice")
+        raw["mcpServers"]["github"]["headers"]["Authorization"] = "Bearer ALICE"
+        atomic_write_extensions_config(path, raw)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = path.stat()
+        assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+        assert after.st_ino != before.st_ino
+        with pytest.raises(ToolException, match="changed, disabled or removed"):
+            await tool.ainvoke({})
+        assert reads == 2
+        assert len(calls) == 2
+    finally:
+        reset_current_user(identity)
+
+
+@pytest.mark.asyncio
 async def test_background_calls_resolve_only_persisted_task_owner(personal_client, monkeypatch):
+    import deerflow.mcp.user_config as user_config
     from deerflow.mcp.task_tool_caller import McpTaskToolCaller
 
     create(personal_client, "alice")
     name = next(iter(load_user_mcp_config("alice").mcp_servers))
     received = []
+    loaded = []
+    load = user_config.load_user_mcp_config
+
+    def counted_load(user_id):
+        loaded.append(user_id)
+        return load(user_id)
+
+    monkeypatch.setattr(user_config, "load_user_mcp_config", counted_load)
 
     async def invoke(self, **kwargs):
         received.append(self._extensions_config.mcp_servers[kwargs["server_name"]].headers["Authorization"])
@@ -291,16 +374,145 @@ async def test_background_calls_resolve_only_persisted_task_owner(personal_clien
     monkeypatch.setattr(McpTaskToolCaller, "_call_configured_tool", invoke)
     caller = McpTaskToolCaller(ExtensionsConfig())
     await caller.call_tool(server_name=name, tool_name="status", arguments={}, user_id="alice", thread_id="thread", connection_scope="personal")
+    first_caller = caller._personal_callers["alice"][1]
+    await caller.call_tool(server_name=name, tool_name="status", arguments={}, user_id="alice", thread_id="thread", connection_scope="personal")
+    assert caller._personal_callers["alice"][1] is first_caller
+    assert loaded == ["alice"]
     with pytest.raises(LookupError, match="Personal MCP"):
         await caller.call_tool(server_name=name, tool_name="status", arguments={}, user_id="bob", thread_id="thread", connection_scope="personal")
-    assert received == ["Bearer alice"]
+    assert received == ["Bearer alice", "Bearer alice"]
 
     # The same deployment name must not steal an existing personal task after
     # the Gateway restarts with that deployment entry in its startup snapshot.
     deployment = McpTaskToolCaller(ExtensionsConfig.model_validate({"mcpServers": {name: {"type": "http", "url": "https://example.com/platform", "headers": {"Authorization": "platform"}}}}))
     await deployment.call_tool(server_name=name, tool_name="status", arguments={}, user_id="alice", thread_id="thread", connection_scope="personal")
     await deployment.call_tool(server_name=name, tool_name="status", arguments={}, user_id="bob", thread_id="thread")
-    assert received == ["Bearer alice", "Bearer alice", "platform"]
+    assert received == ["Bearer alice", "Bearer alice", "Bearer alice", "platform"]
     assert personal_client.patch("/api/mcp/personal/config", headers={"test-user": "alice"}, json={"server_name": "github", "enabled": False}).status_code == 200
     with pytest.raises(LookupError, match="Personal MCP"):
         await deployment.call_tool(server_name=name, tool_name="status", arguments={}, user_id="alice", thread_id="thread", connection_scope="personal")
+
+
+@pytest.mark.asyncio
+async def test_background_caller_rebuilds_after_personal_credential_edit(personal_client, monkeypatch):
+    from deerflow.config.extensions_config import atomic_write_extensions_config
+    from deerflow.mcp.task_tool_caller import McpTaskToolCaller
+
+    assert create(personal_client, "alice").status_code == 200
+    old_name = next(iter(load_user_mcp_config("alice").mcp_servers))
+
+    async def credential(self, **kwargs):
+        return self._extensions_config.mcp_servers[kwargs["server_name"]].headers["Authorization"]
+
+    monkeypatch.setattr(McpTaskToolCaller, "_call_configured_tool", credential)
+    caller = McpTaskToolCaller(ExtensionsConfig())
+    request = {"tool_name": "status", "arguments": {}, "user_id": "alice", "thread_id": "thread", "connection_scope": "personal"}
+    assert await caller.call_tool(server_name=old_name, **request) == "Bearer alice"
+    previous = caller._personal_callers["alice"][1]
+
+    path = user_mcp_config_path("alice")
+    raw = read_user_mcp_config("alice")
+    raw["mcpServers"]["github"]["headers"]["Authorization"] = "Bearer ALICE"
+    atomic_write_extensions_config(path, raw)
+    with pytest.raises(LookupError, match="Personal MCP"):
+        await caller.call_tool(server_name=old_name, **request)
+    new_name = next(iter(load_user_mcp_config("alice").mcp_servers))
+    assert await caller.call_tool(server_name=new_name, **request) == "Bearer ALICE"
+    assert caller._personal_callers["alice"][1] is not previous
+    path.unlink()
+    with pytest.raises(LookupError, match="Personal MCP"):
+        await caller.call_tool(server_name=new_name, **request)
+
+
+@pytest.mark.asyncio
+async def test_background_caller_keeps_only_recent_owners(personal_client, monkeypatch):
+    import deerflow.mcp.task_tool_caller as task_tool_caller
+
+    monkeypatch.setattr(task_tool_caller, "_MAX_PERSONAL_CALLERS", 2)
+
+    async def credential(self, **kwargs):
+        return self._extensions_config.mcp_servers[kwargs["server_name"]].headers["Authorization"]
+
+    monkeypatch.setattr(task_tool_caller.McpTaskToolCaller, "_call_configured_tool", credential)
+    caller = task_tool_caller.McpTaskToolCaller(ExtensionsConfig())
+    names = {}
+    for user_id in ("alice", "bob", "carol"):
+        assert create(personal_client, user_id).status_code == 200
+        names[user_id] = next(iter(load_user_mcp_config(user_id).mcp_servers))
+        assert await caller.call_tool(server_name=names[user_id], tool_name="status", arguments={}, user_id=user_id, thread_id="thread", connection_scope="personal") == f"Bearer {user_id}"
+    assert list(caller._personal_callers) == ["bob", "carol"]
+    assert await caller.call_tool(server_name=names["alice"], tool_name="status", arguments={}, user_id="alice", thread_id="thread", connection_scope="personal") == "Bearer alice"
+    assert list(caller._personal_callers) == ["carol", "alice"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_registers_driver_for_personal_only_task_toolsets(personal_client):
+    from langchain_core.tools import StructuredTool
+
+    from app.gateway.app import lifespan
+    from deerflow.config.extensions_config import atomic_write_extensions_config
+    from deerflow.config.mcp_tasks_config import McpTasksConfig
+    from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER
+    from deerflow.mcp.tools import get_mcp_tools
+
+    path = user_mcp_config_path("alice")
+    atomic_write_extensions_config(
+        path,
+        {"mcpServers": {"reports": {"type": "http", "url": "https://example.com/mcp", "task_toolsets": [{"name": "reports", "submit_tool": "submit_report", "status_tool": "status_report", "cancel_tool": "cancel_report"}]}}},
+    )
+    personal = load_user_mcp_config("alice")
+    server_name = next(iter(personal.mcp_servers))
+    deployment = ExtensionsConfig()
+    startup = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(enabled=False, token_counting="char", shutdown_flush_timeout_seconds=5.0), mcp_tasks=McpTasksConfig(enabled=True))
+    app = FastAPI()
+
+    @asynccontextmanager
+    async def runtime(gateway, _config):
+        gateway.state.mcp_task_repo = object()
+        yield
+
+    class FakeClient:
+        def __init__(self, _servers, *, tool_interceptors, **_kwargs):
+            self.tool_interceptors = tool_interceptors
+            self.callbacks = None
+
+        async def get_tools(self, *, server_name):
+            async def call(topic: str) -> str:
+                return topic
+
+            return [StructuredTool.from_function(coroutine=call, name=f"{server_name}_{name}", description=name) for name in ("submit_report", "status_report", "cancel_report")]
+
+    channel = MagicMock()
+    channel.get_status.return_value = {}
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", runtime),
+        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+        patch("app.channels.service.start_channel_service", AsyncMock(return_value=channel)),
+        patch("app.channels.service.stop_channel_service", AsyncMock()),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
+        patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=deployment),
+        patch("app.mcp_tasks.McpTaskService.start", AsyncMock()),
+        patch("app.mcp_tasks.McpTaskService.stop", AsyncMock()),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient),
+    ):
+        async with lifespan(app):
+            assert not deployment.mcp_servers
+            assert app.state.mcp_task_service.drivers.get(ORDINARY_MCP_TASK_DRIVER) is not None
+            tools = await get_mcp_tools(personal, personal_user_id="alice")
+            assert [tool.name for tool in tools] == [f"{server_name}_submit_report"]
+            app.state.mcp_task_service.submit = AsyncMock(return_value={"id": "local-1", "status": "submitted"})
+            identity = set_current_user(SimpleNamespace(id="alice"))
+            try:
+                result = await tools[0].coroutine(
+                    runtime=SimpleNamespace(context={"thread_id": "thread-1", "thread_incarnation": "incarnation-1", "run_id": "run-1"}, config={}, tool_call_id="call-1"),
+                    topic="MCP",
+                )
+            finally:
+                reset_current_user(identity)
+            assert result["task_id"] == "local-1"
+            submitted = app.state.mcp_task_service.submit.await_args.kwargs
+            assert submitted["driver_name"] == ORDINARY_MCP_TASK_DRIVER
+            assert submitted["request"].driver_data["connection_scope"] == "personal"

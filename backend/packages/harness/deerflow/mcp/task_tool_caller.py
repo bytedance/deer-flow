@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta
@@ -18,10 +20,13 @@ from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
 from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
+from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, load_user_mcp_config_if_changed
 from deerflow.mcp_scope import mcp_session_scope_key
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
+# Cached callers retain personal credentials and OAuth state in memory.
+_MAX_PERSONAL_CALLERS = 128
 
 
 @dataclass
@@ -64,6 +69,8 @@ class McpTaskToolCaller:
         oauth_token_manager: OAuthTokenManager | None = None,
     ) -> None:
         self._extensions_config = extensions_config
+        self._personal_callers: OrderedDict[str, tuple[PersonalMcpConfigSnapshot, McpTaskToolCaller | None]] = OrderedDict()
+        self._personal_callers_lock = threading.Lock()
         self._oauth_token_manager = oauth_token_manager or OAuthTokenManager.from_extensions_config(extensions_config)
         context_headers_interceptor = build_context_headers_interceptor(extensions_config)
         # Built once so the two chains keep an identical interceptor order and a
@@ -111,12 +118,7 @@ class McpTaskToolCaller:
         binding, so an equal deployment server name cannot change its owner.
         """
         if connection_scope == "personal":
-            from deerflow.mcp.user_config import load_user_mcp_config
-
-            personal = await asyncio.to_thread(load_user_mcp_config, user_id)
-            if server_name not in personal.get_enabled_mcp_servers():
-                raise LookupError("Personal MCP task connection is missing, disabled or changed")
-            caller = McpTaskToolCaller(personal)
+            caller = await asyncio.to_thread(self._personal_caller_for, user_id, server_name)
             return await caller._call_configured_tool(
                 server_name=server_name,
                 tool_name=tool_name,
@@ -137,6 +139,23 @@ class McpTaskToolCaller:
             thread_incarnation=thread_incarnation,
             request_scoped_headers=request_scoped_headers,
         )
+
+    def _personal_caller_for(self, user_id: str, server_name: str) -> McpTaskToolCaller:
+        with self._personal_callers_lock:
+            previous = self._personal_callers.get(user_id)
+            snapshot = load_user_mcp_config_if_changed(user_id, previous[0] if previous else None)
+            caller = previous[1] if previous and previous[0] is snapshot else None
+            self._personal_callers[user_id] = (snapshot, caller)
+            self._personal_callers.move_to_end(user_id)
+            if len(self._personal_callers) > _MAX_PERSONAL_CALLERS:
+                self._personal_callers.popitem(last=False)
+            server = snapshot.config.mcp_servers.get(server_name)
+            if server is None or not server.enabled:
+                raise LookupError("Personal MCP task connection is missing, disabled or changed")
+            if caller is None:
+                caller = McpTaskToolCaller(snapshot.config)
+                self._personal_callers[user_id] = (snapshot, caller)
+            return caller
 
     async def _call_configured_tool(
         self,

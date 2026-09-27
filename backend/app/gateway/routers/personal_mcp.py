@@ -25,6 +25,13 @@ def _response(raw: dict) -> mcp.McpConfigResponse:
     return mcp.McpConfigResponse(mcp_servers={name: mcp._mask_server_config(server) for name, server in mcp._mcp_server_responses_from_raw(raw).items()})
 
 
+def _read_personal_config(user_id: str) -> dict:
+    try:
+        return read_user_mcp_config(user_id)
+    except ValueError as exc:
+        mcp._raise_invalid_mcp_configuration(str(exc), cause=exc)
+
+
 def _validate_personal_server(server: mcp.McpServerConfigResponse, *, admin: bool) -> None:
     # A personal store must not grant ordinary users the deployment operator's
     # ability to launch arbitrary host packages or query internal services.
@@ -45,7 +52,7 @@ def _mutate(user_id: str, operation: Literal["create", "update", "delete", "stat
     path = user_mcp_config_path(user_id)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with extensions_config_write_lock, extensions_config_file_lock(path):
-        raw = read_user_mcp_config(user_id)
+        raw = _read_personal_config(user_id)
         servers = mcp._raw_mcp_servers(raw)
         if operation == "create":
             for name, incoming in body.mcp_servers.items():
@@ -89,7 +96,7 @@ def _mutate(user_id: str, operation: Literal["create", "update", "delete", "stat
 @router.get("", response_model=mcp.McpConfigResponse)
 async def get_configuration(request: Request):
     owner = await _owner(request)
-    return _response(await asyncio.to_thread(read_user_mcp_config, owner))
+    return _response(await asyncio.to_thread(_read_personal_config, owner))
 
 
 async def _write(request: Request, operation: str, body):
