@@ -32,6 +32,11 @@ import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
+import {
+  type ToolOutputChunkEvent,
+  toolStreamUpdateFromEvent,
+  useToolStreaming,
+} from "../tasks/tool-streaming";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 import { uuid } from "../utils/uuid";
@@ -1908,6 +1913,7 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
+  const { updateToolStream, clearToolStream } = useToolStreaming();
 
   const scheduleActiveRunRejoinRetry = useCallback(() => {
     const rejoin = activeRunRejoinRef.current;
@@ -2080,6 +2086,10 @@ export function useThreadStream({
         localTurnAnchorRef.current = null;
         tasksRef.current = {};
         setTasks({});
+        // A gap means start/final chunks may have been dropped, so any entry
+        // still in the map can no longer be completed — without this it would
+        // keep its spinner rendered for the rest of the provider's lifetime.
+        clearToolStream();
         invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
         toast.warning(t.conversation.streamReplayGap);
         return;
@@ -2108,6 +2118,16 @@ export function useThreadStream({
         return;
       }
 
+      if (eventType === "tool_output_chunk") {
+        const e = event as ToolOutputChunkEvent;
+        // Partial chunks upsert/accumulate; final and error chunks tear the
+        // entry down (the canonical ToolMessage carries the full result), so
+        // the streaming map only ever holds actively-streaming tool calls
+        // instead of growing for the lifetime of the thread.
+        updateToolStream(e.tool_call_id, toolStreamUpdateFromEvent(e));
+        return;
+      }
+
       if (eventType === "llm_retry") {
         const e = event as { type: "llm_retry"; message?: unknown };
         if (typeof e.message === "string" && e.message.trim()) {
@@ -2120,6 +2140,10 @@ export function useThreadStream({
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);
+      // The run errored, so the final chunk for an in-flight tool call may
+      // never arrive.  Drop the entries here rather than leaving their
+      // streaming cards spinning until the provider remounts.
+      clearToolStream();
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
@@ -2144,6 +2168,10 @@ export function useThreadStream({
       }
       settleActiveRunRejoin();
       listeners.current.onFinish?.(state.values);
+      // A tool call can finish without its final chunk ever reaching us (it was
+      // emitted before a disconnect, or the run ended first).  Teardown is tied
+      // to the run, not to that chunk, so the streaming cards cannot outlive it.
+      clearToolStream();
       pendingPreparedReplayRef.current = null;
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current

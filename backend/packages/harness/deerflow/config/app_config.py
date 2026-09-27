@@ -58,6 +58,7 @@ from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
+from deerflow.config.tool_streaming_config import ToolStreamingConfig
 from deerflow.config.verification_config import VerificationConfig
 from deerflow.extensions.loader import ExtensionSpec
 
@@ -276,6 +277,7 @@ class AppConfig(BaseModel):
     loop_detection: LoopDetectionConfig = Field(default_factory=LoopDetectionConfig, description="Loop detection middleware configuration")
     tool_progress: ToolProgressConfig = Field(default_factory=ToolProgressConfig, description="Tool progress state machine middleware configuration")
     verification: VerificationConfig = Field(default_factory=VerificationConfig, description="Subagent result verification (receipts, checklist, judge)")
+    tool_streaming: ToolStreamingConfig = Field(default_factory=ToolStreamingConfig, description="Real-time tool output streaming middleware configuration")
     read_before_write: ReadBeforeWriteConfig = Field(default_factory=ReadBeforeWriteConfig, description="Read-before-write file gate middleware configuration")
     projects: ProjectsConfig = Field(default_factory=ProjectsConfig, description="User projects configuration (instructions injection, shelf index, trash retention)")
     pii_redaction: PiiRedactionConfig = Field(default_factory=PiiRedactionConfig, description="PII redaction middleware configuration (issue #3190)")

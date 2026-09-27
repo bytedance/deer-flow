@@ -4,6 +4,17 @@ import type { TokenUsage } from "../messages/usage";
 
 import type { SubtaskStep } from "./steps";
 
+/** Streaming tool output collected from ``tool_output_chunk`` custom events. */
+export interface ToolStreamOutput {
+  toolName: string;
+  /** Accumulated output text so far. */
+  text: string;
+  /** Whether the tool is still executing (more chunks expected). */
+  isPartial: boolean;
+  /** Whether the tool execution produced an error. */
+  isError: boolean;
+}
+
 export interface Subtask {
   id: string;
   status: "in_progress" | "completed" | "failed";
