@@ -5061,3 +5061,53 @@ class TestProgressEvalRedaction:
             result = client.chat("q", thread_id="t-eval-off")
 
         assert "deerflow-progress" in result
+
+    @staticmethod
+    def _simple_graph(responses):
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+
+        from deerflow.agents.middlewares.progress_scoring_middleware import ProgressScoringMiddleware
+
+        class _ToolCallingFakeModel(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        return create_agent(
+            model=_ToolCallingFakeModel(responses=responses),
+            tools=[],
+            middleware=[ProgressScoringMiddleware()],
+            state_schema=ThreadState,
+        )
+
+    def test_single_backtick_reply_is_delivered_exactly_once(self, client, mock_app_config):
+        # A reply consisting only of a possible fence prefix is fully held
+        # back by the redactor; the flush must land before the values
+        # snapshot synthesizes it, or chat() returns it twice.
+        from deerflow.config.progress_scoring_config import ProgressScoringConfig
+
+        mock_app_config.progress_scoring = ProgressScoringConfig(enabled=True)
+        graph = self._simple_graph([AIMessage(content="`", id="ai-1")])
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", graph),
+        ):
+            result = client.chat("q", thread_id="t-eval-backtick")
+
+        assert result == "`"
+
+    def test_unterminated_evaluation_reply_is_delivered_exactly_once(self, client, mock_app_config):
+        # An unterminated block is restored (the state-side regex only strips
+        # closed blocks) — exactly once, not again via values synthesis.
+        from deerflow.config.progress_scoring_config import ProgressScoringConfig
+
+        mock_app_config.progress_scoring = ProgressScoringConfig(enabled=True)
+        raw = '```deerflow-progress\n{"task_progress": 0'
+        graph = self._simple_graph([AIMessage(content=raw, id="ai-1")])
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", graph),
+        ):
+            result = client.chat("q", thread_id="t-eval-unterminated")
+
+        assert result == raw

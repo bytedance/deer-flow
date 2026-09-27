@@ -120,16 +120,30 @@ def _redact_progress_eval_items(items: Iterator[Any], redactor: ProgressEvalStre
     boundary before the bridge; this filter gives the embedded client the
     same boundary so ``stream()`` events (and ``chat()``, which concatenates
     them) never expose the evaluation JSON. Non-messages items pass through
-    untouched, and the stream tail flushes the redactor's held-back text.
+    untouched.
+
+    A values snapshot marks message completion, so the redactor's held-back
+    text is flushed *before* it: a reply that is only a possible fence prefix
+    (say, a single backtick) is fully buffered — its emptied messages frame
+    never marks the id as streamed, and the values path would then synthesize
+    the complete reply as a second delta. Flushing at the boundary makes the
+    messages delta arrive first, the values path sees the id as already
+    streamed, and the text is delivered exactly once. The stream-tail flush
+    remains as a safety net for streams that end without a trailing values
+    frame.
     """
     if redactor is None:
         yield from items
         return
     for item in items:
-        if isinstance(item, tuple) and len(item) == 2 and str(item[0]) == "messages":
+        mode = str(item[0]) if isinstance(item, tuple) and len(item) == 2 else "values"
+        if mode == "messages":
             for redacted_chunk in redactor.push(item[1]):
                 yield ("messages", redacted_chunk)
         else:
+            if mode == "values":
+                for redacted_chunk in redactor.finish():
+                    yield ("messages", redacted_chunk)
             yield item
     for redacted_chunk in redactor.finish():
         yield ("messages", redacted_chunk)
