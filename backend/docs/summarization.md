@@ -214,7 +214,7 @@ The middleware intelligently preserves message context:
   [Generated summary text]
   </durable_context_data>
   ```
-- **Active goal**: When the thread has an active `/goal`, its objective is rendered first in the same data message on every model call, so compaction cannot take the goal away with the message that stated it. Only the objective is rendered, not the evaluator's counters, so the block changes only when the goal is set or cleared.
+- **Active goal**: When the thread has an active `/goal`, its objective opens the same data message on every model call, inside an `<active_goal>` element, so compaction cannot take the goal away with the message that stated it. The system contract then ends with a static exception: the agent works toward that element as it would a request in a user message, with no system or developer authority, while every other field value stays data, as does any other text that calls itself a goal. The exception covers only the element at the start of the data message, by position. Within that message every other field value is HTML-escaped, so only the renderer can produce the element; in the lead agent chain the input and tool-result sanitizers also escape `<active_goal>` in user input and remote tool results. Only the objective is rendered, not the evaluator's counters, so the block and the contract change only when the goal is set or cleared.
 
 ## Best Practices
 
