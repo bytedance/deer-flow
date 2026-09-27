@@ -1185,19 +1185,34 @@ chats and requests. A changed model or endpoint invalidates that saved choice,
 so the next generation request asks again in the chat. Without an explicit
 default, a web profile saved after the server model takes priority; if the
 server image model changes later, the next generation request shows a choice
-card in the chat. The chat choice applies to that run only. Otherwise, configure
-`GEMINI_API_KEY`, `MINIMAX_API_KEY`, or `IMAGE_GENERATION_API_KEY` through
-`sandbox.environment` as before. OpenAI-compatible APIs also need
-`IMAGE_GENERATION_PROVIDER=openai`, `IMAGE_GENERATION_BASE_URL`, and
-`IMAGE_GENERATION_MODEL`.
+card in the chat. The chat choice applies to that run only. For a server-owned
+model, use the typed top-level `image_generation` block in `config.yaml`:
+
+```yaml
+image_generation:
+  provider: openai
+  model: gpt-image-1
+  base_url: https://api.openai.com/v1
+  api_key: $IMAGE_GENERATION_API_KEY
+```
+
+The server entry is read-only in Settings, but admins can test generation and
+reference editing there. Results are tied to the exact provider, model,
+endpoint, and key; changing any of them clears the displayed test result.
+The old `sandbox.environment` image variables remain a fallback when the typed
+block is absent. Do not define image settings in both places; configuration
+loading rejects that conflict. The server entry can coexist with web profiles,
+and either can be selected as the default.
 
 Local AIO images with `/v1/bash/exec` receive web credentials per command.
 Older images get a new container with startup credentials and the same
 workspace/upload/output mounts; active runs finish first. Container-only files,
 processes, and temporary installs are not preserved, and the key stays in the
 old container's environment until removal. Remote/provisioner AIO still needs
-`/v1/bash/exec` for web-managed keys. Changing legacy `sandbox.environment`
-requires a Gateway restart. A chat choice of a new server model uses a separate
+`/v1/bash/exec` for web-managed and typed server keys. Changing legacy
+`sandbox.environment` requires a Gateway restart. A typed server model or key
+change uses a separate local AIO container with the selected startup credentials.
+A chat choice of a new server model uses a separate
 container identity; the previous container remains available until normal
 idle or capacity cleanup. Other existing containers still need recreation to
 pick up changed startup variables. If a web profile is

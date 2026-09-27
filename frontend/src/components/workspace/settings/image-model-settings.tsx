@@ -22,6 +22,7 @@ import {
   saveImageProfile,
   setDefaultImageProfile,
   testImageProfile,
+  testServerImageProfile,
   type ImageProfile,
   type ImageProfileDraft,
   type ImageProvider,
@@ -64,14 +65,14 @@ export function ImageModelSettings() {
   }
 
   async function test(profile: ImageProfile, operation: "generation" | "edit") {
-    if (!profile.revision) return;
+    if (profile.source === "config" ? !profile.identity : !profile.revision)
+      return;
     setBusy(`${profile.name}:${operation}`);
     try {
-      const result = await testImageProfile(
-        profile.name,
-        profile.revision,
-        operation,
-      );
+      const result =
+        profile.source === "config"
+          ? await testServerImageProfile(profile.identity!, operation)
+          : await testImageProfile(profile.name, profile.revision!, operation);
       toast[result.ok ? "success" : "error"](
         text.results[result.message as keyof typeof text.results] ??
           text.failed,
@@ -237,28 +238,36 @@ export function ImageModelSettings() {
                   ] ?? text.failed}
                 </p>
               )}
-            {profile.source === "managed" && (
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  variant="outline"
-                  disabled={!!busy || !profile.has_api_key}
-                  onClick={() => void test(profile, "generation")}
-                >
-                  {busy === `${profile.name}:generation`
-                    ? text.working
-                    : text.testGeneration}
-                </Button>
-                <Button
-                  variant="outline"
-                  disabled={!!busy || !profile.has_api_key}
-                  onClick={() => void test(profile, "edit")}
-                >
-                  {busy === `${profile.name}:edit`
-                    ? text.working
-                    : text.testEdit}
-                </Button>
-              </div>
-            )}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                disabled={
+                  !!busy ||
+                  !profile.has_api_key ||
+                  (profile.source === "config"
+                    ? !profile.identity
+                    : !profile.revision)
+                }
+                onClick={() => void test(profile, "generation")}
+              >
+                {busy === `${profile.name}:generation`
+                  ? text.working
+                  : text.testGeneration}
+              </Button>
+              <Button
+                variant="outline"
+                disabled={
+                  !!busy ||
+                  !profile.has_api_key ||
+                  (profile.source === "config"
+                    ? !profile.identity
+                    : !profile.revision)
+                }
+                onClick={() => void test(profile, "edit")}
+              >
+                {busy === `${profile.name}:edit` ? text.working : text.testEdit}
+              </Button>
+            </div>
           </div>
         ))}
         {editing && (

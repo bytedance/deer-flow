@@ -1,6 +1,12 @@
 ### Configuration System
 
-Managed image profiles use `image_generation.py` and the same encrypted JSON
+Top-level `image_generation` is a typed, single operator-owned profile; it
+reuses the managed profile's provider/model/URL/key validation. Legacy image
+variables in `sandbox.environment` remain a fallback, but the two YAML forms
+cannot coexist. Both server forms share the image resolver and admin probe API.
+Server probe results are stored by credential-bound fingerprint in an encrypted
+catalog; a model, URL, or key change invalidates displayed readiness. Managed
+image profiles use `image_generation.py` and the same encrypted JSON
 catalog primitive as managed chat models. The image catalog lives at
 `runtime_home()/managed-image-profiles/catalog.enc` with an adjacent `key`, not
 in SQL or `config.yaml`. The admin-selected default lives in the adjacent
