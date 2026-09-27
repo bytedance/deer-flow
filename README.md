@@ -1347,6 +1347,16 @@ unchanged, and request-scoped secrets override operator values. Local bash
 output and command errors redact credential values while leaving benign
 settings such as model names and base URLs readable.
 
+Deployments that manage image credentials only through `config.yaml` can set
+`DEER_FLOW_MANAGED_IMAGE_PROFILES_ENABLED=false` in the Gateway environment
+(`.env` for the bundled Docker stacks). Restart a local Gateway or recreate its
+Docker container to apply the value. This removes
+the `/api/image-generation` management and test routes, hides the image-model
+Settings section, and makes the Agent use only the server image model. Existing
+web profiles and saved defaults stay on disk but are ignored until the switch
+is turned back on. The switch defaults to `true`. The static website build
+continues to use its local fixtures and does not request this Gateway feature.
+
 Local AIO images with `/v1/bash/exec` receive web credentials per command.
 Older images get a new container with startup credentials and the same
 workspace/upload/output mounts; active runs finish first. Container-only files,

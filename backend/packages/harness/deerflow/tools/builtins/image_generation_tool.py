@@ -15,6 +15,7 @@ from deerflow.config.image_generation import (
     image_profile_choice_needed,
     image_profile_container_identity,
     legacy_image_storage_identity,
+    managed_image_profiles_enabled,
     resolve_image_generation_profile,
     selected_image_generation_source,
 )
@@ -24,6 +25,13 @@ from deerflow.tools.types import Runtime
 
 _IMAGE_SCRIPT = "public/image-generation/scripts/generate.py"
 _OUTPUTS = f"{VIRTUAL_PATH_PREFIX}/outputs/"
+
+
+def _image_config_target() -> str:
+    try:
+        return "Settings > Models > Image models" if managed_image_profiles_enabled() else "config.yaml"
+    except ImageConfigurationError:
+        return "the Gateway deployment configuration"
 
 
 def _mask_image_secrets(output: str, env: dict[str, str]) -> str:
@@ -73,14 +81,14 @@ def check_image_generation_tool() -> str:
             return "Two image models are configured. A generate_image call will ask the user to choose one in chat."
         profile, source, managed = resolve_image_generation_profile(get_app_config().image_generation_environment)
         if profile is None:
-            return "Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in Settings > Models > Image models."
+            return f"Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in {_image_config_target()}."
         if not profile.usable():
-            return "Error: IMAGE_PROVIDER_INVALID_CONFIG. The selected image model has no API key. Open Settings > Models > Image models."
+            return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. The selected image model has no API key. Check {_image_config_target()}."
         verified = bool(managed and managed.verified_generation and managed.verified_edit)
         status = "verified for generation and editing" if verified else "configured; image generation and editing have not both been verified"
         return f"Image provider {profile.provider.value}/{profile.model} from {source}: {status}."
     except (ImageConfigurationError, ValueError, OSError):
-        return "Error: IMAGE_PROVIDER_INVALID_CONFIG. Check Settings > Models > Image models."
+        return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. Check {_image_config_target()}."
 
 
 @tool("generate_image", parse_docstring=True)
@@ -120,10 +128,10 @@ def generate_image_tool(
             return "Error: IMAGE_PROFILE_CHOICE_REQUIRED. Choose the web or server image model in chat before generation."
         profile, source, managed = resolve_image_generation_profile(get_app_config().image_generation_environment)
         if profile is None:
-            return "Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in Settings > Models > Image models."
+            return f"Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in {_image_config_target()}."
         env = profile.command_environment()
     except (ImageConfigurationError, ValueError, OSError):
-        return "Error: IMAGE_PROVIDER_INVALID_CONFIG. Check Settings > Models > Image models."
+        return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. Check {_image_config_target()}."
 
     try:
         prompt = _image_path(prompt_file)
@@ -212,11 +220,11 @@ async def _generate_image_async(runtime: Runtime, prompt_file: str, output_file:
                 return "Error: IMAGE_PROFILE_CHOICE_REQUIRED. Choose the web or server image model in chat before generation."
             profile, _, _ = resolve_image_generation_profile(get_app_config().image_generation_environment)
             if profile is None:
-                return "Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in Settings > Models > Image models."
+                return f"Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in {_image_config_target()}."
             if not profile.usable():
-                return "Error: IMAGE_PROVIDER_INVALID_CONFIG. The selected image model has no API key."
+                return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. The selected image model has no API key. Check {_image_config_target()}."
         except (ImageConfigurationError, ValueError, OSError):
-            return "Error: IMAGE_PROVIDER_INVALID_CONFIG. Check Settings > Models > Image models."
+            return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. Check {_image_config_target()}."
         return None
 
     if error := await asyncio.to_thread(preflight):
