@@ -50,6 +50,42 @@ answers for paginated history. See `docs/skill-usage-ui.md`.
 
 **Run delivery receipts:** Journal artifact evidence and terminal status must finalize in order. Details: `backend/docs/runtime-guidance-details.md`.
 
+**Journal write outcomes and terminal finalization** (`runtime/journal.py`,
+`runtime/runs/worker.py`, `runtime/runs/manager.py`): a `put_batch` outcome is
+classified, never guessed. Returning normally is COMMITTED; raising
+`RunEventWriteNotCommittedError` (declared in `runtime/events/store/base.py`)
+proves the whole batch did not commit; every other exception and any
+store-originated `CancelledError` is UNKNOWN. The first unsafe outcome is
+quarantined out of the auto-flush buffer and blocks its successors: UNKNOWN is
+never replayed, and only a later explicit `flush_until_settled()` may retry a
+proven NOT_COMMITTED batch. `close()` never replays a quarantined batch, so no
+journal write starts after the terminal decision.
+
+`RunJournal.finish_for_terminal(still_owned=...)` runs one owned
+`seal_producers()` -> settled drain -> immutable snapshot -> write-free detach and
+returns `JournalFinishResult(disposition, snapshot, failure, caller_cancellation)`.
+The seal takes the admission lock and then waits on an owner-loop barrier, so an
+append admitted before it is guaranteed to be in the drained tail while a later
+one is rejected and counted in `_post_seal_rejected` instead of being silently
+dropped by the detach guard. The snapshot exists only for COMMITTED, a joining
+caller's cancellation never changes the disposition, and a lease lost mid-drain
+fences *new* batches while the write already in flight is still observed. The
+worker consumes that result and must persist `snapshot.completion_data` for the
+terminal completion write: by then the journal has dropped its per-model usage and
+message summaries.
+
+`RunManager` keeps renewing a locally staged terminal run while its task is alive
+and its durable terminal row is unacknowledged (`RunRecord.terminal_committed`),
+fences it with `require_active=False` when renewal is rejected, adopts a durable
+terminal row that already holds this worker's staged outcome, and includes live
+staged-terminal tasks in the shutdown drain. A durable cancel observed during
+renewal reaches a live staged-terminal finalizer.
+
+Known limits: there is no store-level idempotency key or durable lease-token
+fencing yet, so a batch that may have committed cannot be replayed and an
+already-issued write cannot be fenced; a peer takeover of a run whose renewal was
+rejected is detected by the terminal CAS rather than by the journal.
+
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
 `tool_search` Sends read the same pre-step state, so state diffing alone can
