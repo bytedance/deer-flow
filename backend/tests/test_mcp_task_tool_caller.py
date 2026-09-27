@@ -76,7 +76,7 @@ class _SessionContext:
         return None
 
 
-def _binding_aware_pool(pool: MagicMock) -> ServerBinding:
+def _binding_aware_pool(pool: Any) -> ServerBinding:
     """Model the pool's per-server binding API for a first-seen stdio server.
 
     The caller resolves a binding from the BASE connection before touching the
@@ -182,6 +182,7 @@ async def test_task_without_applicable_user_auth_preserves_interceptor_context(t
     caller._interceptors.append(inspect_context)
     session = SimpleNamespace(initialize=AsyncMock(), call_tool=AsyncMock(return_value="result"))
     pool = SimpleNamespace(get_session=AsyncMock(return_value=session))
+    binding = _binding_aware_pool(pool) if transport == "stdio" else None
     user_token = set_current_user(ambient_user) if ambient_user is not None else None
     try:
         with (
@@ -199,6 +200,10 @@ async def test_task_without_applicable_user_auth_preserves_interceptor_context(t
         assert result == "result"
         assert observed_users == [ambient_user]
         assert get_current_user() is ambient_user
+        if binding is not None:
+            # The stdio call must forward the binding captured from the BASE
+            # connection, so a concurrent config change fences this wrapper.
+            assert pool.get_session.await_args.kwargs["binding"] is binding
     finally:
         if user_token is not None:
             reset_current_user(user_token)
