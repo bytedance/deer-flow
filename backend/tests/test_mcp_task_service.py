@@ -3313,12 +3313,19 @@ class OrdinaryReleaseBatchRepository:
     async def release_notification_claim(self, task_id, **kwargs):
         return await self._release(task_id, **kwargs)
 
+    async def release_poll_claim_after_cancellation(self, task_id, **kwargs):
+        return await self._release(task_id, **kwargs)
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["poll", "cancel", "notification"])
 @pytest.mark.parametrize("outcome", ["success", "failure", "self_cancel"])
 async def test_ordinary_batch_release_is_handed_off_without_duplication(phase, outcome, monkeypatch, caplog):
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
+    # 0.25 keeps the claim drain above Windows' coarse timer granularity
+    # (wait_for(shield(claim_task), 0.01) can fire before the claim's first
+    # scheduling slice on Windows/CPython 3.12, abandoning an instant claim to
+    # the background handoff) while staying far below the 1s compensation wait.
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.25)
     repo = OrdinaryReleaseBatchRepository(phase=phase, outcome=outcome)
     drivers = McpTaskDriverRegistry()
     if phase == "poll":
@@ -3336,12 +3343,12 @@ async def test_ordinary_batch_release_is_handed_off_without_duplication(phase, o
         get_run=AsyncMock(return_value=None),
     )
     caller = asyncio.create_task(_run_batch_probe(service, phase))
-    await repo.release_started.wait()
+    await asyncio.wait_for(repo.release_started.wait(), timeout=2)
     caller.cancel("first cancellation")
 
     try:
         with caplog.at_level(logging.ERROR), pytest.raises(asyncio.CancelledError) as caught:
-            await asyncio.wait_for(caller, timeout=0.2)
+            await asyncio.wait_for(caller, timeout=0.5)
         assert caught.value.args == ("first cancellation",)
         assert repo.release_interrupted is False
         assert repo.release_calls == ["task-1"]
@@ -3371,7 +3378,7 @@ async def test_ordinary_batch_release_is_handed_off_without_duplication(phase, o
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["poll", "cancel", "notification"])
 async def test_ordinary_batch_release_timeout_has_service_owned_strong_root(phase, monkeypatch):
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.25)
     repo = OrdinaryReleaseBatchRepository(phase=phase, outcome="success")
     drivers = McpTaskDriverRegistry()
     if phase == "poll":
@@ -3388,7 +3395,7 @@ async def test_ordinary_batch_release_timeout_has_service_owned_strong_root(phas
         get_run=AsyncMock(return_value=None),
     )
     caller = asyncio.create_task(_run_batch_probe(service, phase))
-    await repo.release_started.wait()
+    await asyncio.wait_for(repo.release_started.wait(), timeout=2)
     await caller
 
     assert len(service._compensation_tasks) == 1

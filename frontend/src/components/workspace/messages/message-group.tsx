@@ -3,6 +3,8 @@ import {
   BookOpenTextIcon,
   ChevronUp,
   CoinsIcon,
+  FileIcon,
+  FilesIcon,
   FolderOpenIcon,
   GlobeIcon,
   LightbulbIcon,
@@ -38,6 +40,7 @@ import {
   extractReasoningContentFromMessage,
   extractTextFromMessage,
 } from "@/core/messages/utils";
+import type { ArtifactEntry } from "@/core/threads/types";
 import { extractTitleFromMarkdown } from "@/core/utils/markdown";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -59,6 +62,7 @@ interface MessageGroupProps {
   tokenDebugSteps?: TokenDebugStep[];
   showTokenDebugSummaries?: boolean;
   threadId?: string;
+  toolArtifacts?: ArtifactEntry[];
 }
 
 function MessageGroupComponent({
@@ -69,6 +73,7 @@ function MessageGroupComponent({
   tokenDebugSteps = [],
   showTokenDebugSummaries = false,
   threadId,
+  toolArtifacts,
 }: MessageGroupProps) {
   const { t } = useI18n();
   const [showAbove, setShowAbove] = useState(
@@ -77,7 +82,10 @@ function MessageGroupComponent({
   const [showLastThinking, setShowLastThinking] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
-  const allSteps = useMemo(() => convertToSteps(messages), [messages]);
+  const allSteps = useMemo(
+    () => convertToSteps(messages, toolArtifacts),
+    [messages, toolArtifacts],
+  );
   // Keep the original messages and tool associations intact. Only the display
   // of clarification context moves outside the execution disclosure (#5503).
   const clarificationTextSteps = useMemo(
@@ -500,6 +508,7 @@ function areMessageGroupPropsEqual(
       Boolean(next.showTokenDebugSummaries) &&
     previous.threadId === next.threadId &&
     sameReferences(previous.messages, next.messages) &&
+    sameReferences(previous.toolArtifacts, next.toolArtifacts) &&
     sameReferences(previous.tokenDebugSteps, next.tokenDebugSteps)
   );
 }
@@ -635,6 +644,7 @@ function ToolCall({
   showDetails = false,
   resultMessage,
   browserView,
+  artifacts,
   threadId,
 }: {
   id?: string;
@@ -649,6 +659,7 @@ function ToolCall({
   showDetails?: boolean;
   resultMessage?: Extract<Message, { type: "tool" }>;
   browserView?: BrowserViewMeta;
+  artifacts?: ArtifactEntry[];
   threadId?: string;
 }) {
   const { t } = useI18n();
@@ -996,6 +1007,7 @@ function ToolCall({
         label={resolveLabel(description ?? t.toolCalls.useTool(name))}
         icon={WrenchIcon}
       >
+        {renderArtifactBadges(artifacts)}
         {showDetails && (
           <ToolCallDetails
             name={name}
@@ -1007,6 +1019,31 @@ function ToolCall({
       </ChainOfThoughtStep>
     );
   }
+}
+
+function renderArtifactBadges(artifacts?: ArtifactEntry[]) {
+  if (!artifacts || artifacts.length === 0) {
+    return null;
+  }
+  return (
+    <div className="artifact-badges mt-1 flex flex-wrap gap-1">
+      {artifacts.map((a) => (
+        <span
+          key={a.handle}
+          className="border-border bg-muted text-muted-foreground inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-xs"
+          title={a.real_ref}
+        >
+          {a.artifact_type === "file" ? (
+            <FileIcon className="size-3" />
+          ) : (
+            <FilesIcon className="size-3" />
+          )}
+          {a.display_name}
+          <code>{a.handle}</code>
+        </span>
+      ))}
+    </div>
+  );
 }
 
 interface GenericCoTStep<T extends string = string> {
@@ -1025,6 +1062,7 @@ interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   result?: string;
   resultMessage?: Extract<Message, { type: "tool" }>;
   browserView?: BrowserViewMeta;
+  artifacts?: ArtifactEntry[];
 }
 
 interface CoTAssistantTextStep extends GenericCoTStep<"assistantText"> {
@@ -1076,10 +1114,21 @@ function indexToolCallData(messages: Message[]) {
   return { browserViews, toolCallResults, resultMessages };
 }
 
-function convertToSteps(messages: Message[]): CoTStep[] {
+function convertToSteps(
+  messages: Message[],
+  toolArtifacts?: ArtifactEntry[],
+): CoTStep[] {
   const steps: CoTStep[] = [];
   const { browserViews, toolCallResults, resultMessages } =
     indexToolCallData(messages);
+  const artifactsByToolCallId = new Map<string, ArtifactEntry[]>();
+  for (const entry of toolArtifacts ?? []) {
+    const key = entry.tool_call_id;
+    artifactsByToolCallId.set(key, [
+      ...(artifactsByToolCallId.get(key) ?? []),
+      entry,
+    ]);
+  }
   for (const [messageIndex, message] of messages.entries()) {
     if (message.type === "ai") {
       // Reasoning precedes the answer text it produced, so it is pushed first:
@@ -1134,6 +1183,10 @@ function convertToSteps(messages: Message[]): CoTStep[] {
             }
           }
           step.browserView = browserViews.get(toolCallId);
+          const artifacts = artifactsByToolCallId.get(toolCallId);
+          if (artifacts) {
+            step.artifacts = artifacts;
+          }
         }
         steps.push(step);
       }

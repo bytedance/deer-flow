@@ -299,6 +299,7 @@ class RunJournal(BaseCallbackHandler):
         # Convenience fields
         self._last_ai_msg: str | None = None
         self._first_human_msg: str | None = None
+        self._first_human_message_captured = False
         self._msg_count = 0
         self._had_llm_error_fallback = False
         self._llm_error_fallback_message: str | None = None
@@ -437,7 +438,7 @@ class RunJournal(BaseCallbackHandler):
         if caller == "lead_agent":
             for batch in messages:
                 self._reconcile_consumed_tool_messages(batch)
-        if caller == "lead_agent" and not self._first_human_msg and messages:
+        if caller == "lead_agent" and not self._first_human_message_captured and messages:
             for batch in reversed(messages):
                 for m in reversed(batch):
                     if _should_persist_human_input_message(m):
@@ -451,7 +452,7 @@ class RunJournal(BaseCallbackHandler):
                         )
                         self._record_message_summary(persisted_message, caller=caller)
                         break
-                if self._first_human_msg:
+                if self._first_human_message_captured:
                     break
 
     def on_llm_start(self, serialized: dict, prompts: list[str], *, run_id: UUID, parent_run_id: UUID | None = None, tags: list[str] | None = None, metadata: dict[str, Any] | None = None, **kwargs: Any) -> None:
@@ -1065,6 +1066,8 @@ class RunJournal(BaseCallbackHandler):
 
     def set_first_human_message(self, content: str) -> None:
         """Record the first human message for convenience fields."""
+        # Media-only input is still captured even when it has no display text.
+        self._first_human_message_captured = True
         self._first_human_msg = content[:2000] if content else None
 
     def record_middleware(self, tag: str, *, name: str, hook: str, action: str, changes: dict) -> None:

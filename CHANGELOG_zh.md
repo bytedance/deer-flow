@@ -328,6 +328,49 @@
 
 ### 修复
 
+- **网关：** `GET` 与 `PUT /api/user-profile` 不再在事件循环上执行文件系统操作。这两个处理器
+  此前在循环上直接解析按用户隔离的 `USER.md` 路径（每次调用都会构造绝对路径）、stat、读取、
+  创建用户目录并写入文件，而自定义智能体路由里的其他所有处理器都通过 `asyncio.to_thread`
+  卸载这类工作。在严格的 Blockbuster 门禁下这一对处理器会抛出 `BlockingError`；在生产环境中，
+  磁盘变慢时会让该 worker 上的其他所有请求随之停顿。现在两者都把整段
+  解析-stat-读取 / 解析-mkdir-写入 的流程卸载到线程。([#5935])
+- **Docker：** 通过统一入口上传超过 1 MB 的项目文档不再被 nginx 直接以 `413` 拒绝。
+  `POST /api/projects/{id}/documents` 是 multipart 上传，Gateway 接受至多
+  `uploads.max_file_size`（默认 50 MiB）的文件，但没有任何 nginx location 匹配它，于是请求
+  落到 `/api/` 兜底块，被 nginx 默认的 `client_max_body_size 1m` 在到达 Gateway 之前拒绝——
+  一个 2 MB 的 PDF 会被拒，而同一个文件上传到会话里却没问题。三份维护中的配置（Docker、
+  `make dev`、Helm）现在都为 `/api/projects/{id}/documents` 单独设置 location，沿用会话上传的
+  设置（100M 上限、请求体流式转发）以及兜底块原本给予的读超时；兜底块自身保持 nginx 默认值。([#5934])
+- **Docker：** 生产栈（`make up` / `scripts/deploy.sh`）现在可以在禁用 IPv6 的主机上启动。
+  `docker/nginx/nginx.conf` 同时监听 `[::]:2026`；在以 `ipv6.disable=1` 启动的内核上，这条监听会让
+  nginx 在启动时退出，容器因此反复重启，`make up` 永远无法就绪。开发用 compose 文件自 #2027 起
+  会在 `/proc/net/if_inet6` 不存在时去掉 IPv6 监听，Helm chart 也做了同样处理；生产用 compose
+  文件是唯一还没有这层保护的启动器。现在它使用相同的启动脚本，并以 `exec` 启动 nginx 使其成为
+  PID 1。([#5900])
+- **部署：** `make up` / `scripts/deploy.sh` 现在会采用写在仓库根目录 `.env` 中的
+  `BETTER_AUTH_SECRET` 与 `DEER_FLOW_INTERNAL_AUTH_TOKEN`。此前脚本只检查 shell 环境，随后
+  就重新加载已持久化的密钥或生成新密钥并 export；而 Compose 插值时 shell 变量优先于
+  `--env-file`，于是部署文档让运维写进 `.env` 的值被悄悄替换：会话用的是运维从未选择的密钥，
+  在栈外运行、持有配置 token 的 Gateway worker 则收到 `401`。现在 `.env` 提供的密钥交由
+  Compose 自行读取（优先级 shell → `.env` → 持久化文件 → 新生成）。`.env` 是否提供了值由
+  Compose 自己决定：脚本用 `docker compose config` 渲染一个只含 `${KEY}` 的桩项目并读回结果，
+  因此 `KEY: VALUE` 写法和值内的 `${VAR}` 插值在所有 Compose v2 客户端上都按 Compose 的规则
+  计算；解析结果为空的值（例如已 export 但为空的 shell 变量）仍会触发生成，因为 Compose 否则
+  会把空值直接传下去。([#5928])
+- **技能：** `skill_manage(action="remove_file")` 与 `write_file` 现在可以处理二进制支持文件，
+  并会干净地拒绝目录。`.skill` 压缩包可以包含 `assets/logo.png`（安装器只拒绝*可执行*二进制），
+  但这两个操作在改动文件之前会先把原有内容按 UTF-8 文本读出（仅用于历史记录），于是二进制
+  成员会抛出 `UnicodeDecodeError`，文件既不会被删除也不会被覆盖。像 `assets` 这样的裸支持目录
+  也能通过路径校验并抛出 `IsADirectoryError`。现在非文本内容会记录为“无原有文本”，目录路径
+  则作为校验错误返回，而不是崩溃。([#5893])
+- **项目：** 会话文件视图不再为尚无标题的成员会话显示空标题。会话的 `display_name` 在标题
+  生成运行之前（或从未运行时）在接口上为 `null`，但文件分组类型将其声明为必填字符串并原样
+  渲染，因此在首次回复之前上传的文件会挂在一行空白之下。这类分组现在显示为“未命名”，与
+  项目的会话列表一致。([#5879])
+- **技能：** 删除包目录为运维方管理的符号链接的自定义技能现在可以成功。存储契约允许
+  `custom/` 下的一级链接，但 `delete_custom_skill` 用 `shutil.rmtree` 删除包目录，而它拒绝
+  符号链接：删除在写入历史记录之后以 `OSError` 失败，退出时清空了用户的技能投影视图，
+  `DELETE /api/skills/custom/{name}` 返回 500。现在只移除链接本身，绝不触碰其指向的外部目录。([#5881])
 - **前端：** 子任务渲染状态不再在 `MessageList` 渲染过程中被就地修
   改。子任务同步从渲染阶段移入 effect，因此即使任务上下文尚未发布
   更新，卡片也能立即拿到纯派生自消息的快照——修复了最终流式参数与
@@ -1182,6 +1225,14 @@
   code-span token 现在以同样方式切分 fragment 并去掉尾部
   句读标点；`references/v1.0.md#notes` 这类带点的文件名会
   保留其扩展名中的点。([#5841])
+- **技能：** 技能评审的 Markdown 链接扫描在对抗性输入下保持线性。
+  提取器曾对每个候选 opener 重复扫描同一目标串，一长串未闭合的 `[`
+  或 `](` 密集的非法目标都会让评审退化为平方复杂度——#5714 在 256 KiB
+  的 `[` 下实测 19 秒，而资源图会扫描每个 text 成员，
+  `PackageLimits.max_file_bytes` 为 64 MiB，单个大 SKILL.md 完全在影响
+  范围内。扫描现在只遍历一次候选 opener，经与基准正则的差分 fuzz 验证，
+  与 `finditer` 完全一致；已匹配区间改按位置清除，不再使用
+  `str.replace`，避免误删后方相同的文本。([#5884])
 - **配置：** 配置缓存签名的应是它实际解析的字节，而不是
   第二次读取。app-config 加载器此前打开 `config.yaml` 两次
   ——先解析一次，再对一次全新的读取做哈希来记录
@@ -5188,3 +5239,11 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5855]: https://github.com/bytedance/deer-flow/pull/5855
 [#5856]: https://github.com/bytedance/deer-flow/pull/5856
 [#5859]: https://github.com/bytedance/deer-flow/pull/5859
+[#5879]: https://github.com/bytedance/deer-flow/pull/5879
+[#5881]: https://github.com/bytedance/deer-flow/pull/5881
+[#5884]: https://github.com/bytedance/deer-flow/pull/5884
+[#5893]: https://github.com/bytedance/deer-flow/pull/5893
+[#5900]: https://github.com/bytedance/deer-flow/pull/5900
+[#5928]: https://github.com/bytedance/deer-flow/pull/5928
+[#5934]: https://github.com/bytedance/deer-flow/pull/5934
+[#5935]: https://github.com/bytedance/deer-flow/pull/5935
