@@ -3045,11 +3045,22 @@ run_ownership:
 # one request, and each publishes its own policy identity.
 #
 # Credentials: prefer api_key_env. `api_key` here puts the key in this file.
+# A consumer's `config` and this block are separate layers: the first layer that
+# sets `api_key` or `api_key_env` decides the credential, so a consumer with its
+# own `api_key_env` keeps reading that variable. Inside one layer a literal
+# `api_key` wins over that layer's `api_key_env`.
+#
+# These values are checked when a consumer is built, not on the first call: a
+# `base_url` that is not http(s) or that carries a query / fragment / embedded
+# credentials, a key with surrounding whitespace (a secret mounted from a file),
+# and a non-printable key character are all configuration errors. Numbers here are
+# validated strictly, so write `max_attempts: 2` — `true` is rejected rather than
+# silently read as `1`.
 #
 # typesafe:
 #   api_key_env: TYPESAFE_API_KEY        # default; the variable holding the key
 #   # api_key: <explicit key>            # alternative to api_key_env
-#   base_url: https://api.typesafe.ai    # default
+#   base_url: https://api.typesafe.ai    # default; http(s) only, no query/fragment/credentials
 #   model: jev-latest                    # default; pin an exact version for traceability
 #   timeout: 5.0                         # per-request timeout (seconds)
 #   deadline_seconds: 10.0               # whole-evaluation budget (seconds)

@@ -15,9 +15,10 @@ import json
 import httpx
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from deerflow.config.app_config import AppConfig
-from deerflow.config.typesafe_config import get_typesafe_config, load_typesafe_config_from_dict, reset_typesafe_config
+from deerflow.config.typesafe_config import TypeSafeConfig, get_typesafe_config, load_typesafe_config_from_dict, reset_typesafe_config
 from deerflow.guardrails.provider import GuardrailRequest
 from deerflow.guardrails.typesafe import TypeSafeGuardrailProvider
 from deerflow.typesafe.client import TypeSafeClient
@@ -133,6 +134,32 @@ class TestPrecedence:
 
         assert resolved.model == "block-model"
 
+    def test_a_consumers_api_key_env_is_not_overridden_by_the_blocks_literal_key(self, monkeypatch):
+        """One credential source per layer: the consumer's own variable decides, and
+        everything else still comes from the block.
+
+        The block's literal key would otherwise win — and it may not be valid for the
+        consumer's endpoint at all — while ``connection.api_key_env`` kept naming the
+        variable the consumer configured.
+        """
+        load_typesafe_config_from_dict({"api_key": "block-literal-key", "model": "block-model"})
+        monkeypatch.setenv("GATE_ONLY_KEY", "gate-env-key")
+        server = _Server()
+
+        TypeSafeGuardrailProvider(api_key_env="GATE_ONLY_KEY", transport_factory=server.transport).evaluate(_tool_call())
+
+        assert server.requests[0].headers["authorization"] == "Bearer gate-env-key"
+        assert server.bodies()[0]["model"] == "block-model"
+
+    def test_inside_one_layer_a_literal_key_beats_that_layers_env_name(self, monkeypatch):
+        """The standalone semantics are kept: a layer that sets both uses its literal key."""
+        monkeypatch.setenv("IGNORED_KEY", "env-key")
+        server = _Server()
+
+        TypeSafeGuardrailProvider(api_key="literal-key", api_key_env="IGNORED_KEY", transport_factory=server.transport).evaluate(_tool_call())
+
+        assert server.requests[0].headers["authorization"] == "Bearer literal-key"
+
 
 # --- mode: off -------------------------------------------------------------
 
@@ -194,3 +221,98 @@ class TestIdentities:
         assert declared["tools"] == ["bash"]
         assert "key-a" not in serialized
         assert hashlib.sha256(b"key-a").hexdigest()[:16] not in serialized, "the credential fingerprint is internal to sharing_key"
+
+
+# --- values no request could use fail where they are configured ------------
+
+
+class TestConnectionValuesFailAtConstruction:
+    """A connection value that no request can use must fail at construction, not per call.
+
+    ``base_url`` used to be checked only for being non-blank and the credential only
+    for being non-empty, so ``ftp://…``, a base URL with a query string, and a key
+    mounted from a file with a trailing newline all built fine and then failed on
+    every request — the last one by putting the whole ``Bearer`` value into h11's
+    ``LocalProtocolError`` message.
+    """
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "ftp://api.typesafe.ai",
+            "api.typesafe.ai",
+            "https://",
+            "https://api.typesafe.ai?tenant=1",
+            "https://api.typesafe.ai#frag",
+            "https://user:pass@api.typesafe.ai",
+            "https://api.typesafe.ai\n",
+            "https://api.typesafe.ai:notaport",
+        ],
+    )
+    def test_a_base_url_no_request_could_use_is_refused(self, base_url):
+        with pytest.raises(ValueError, match="base_url"):
+            resolve_connection(settings={"api_key": "own-key", "base_url": base_url}, configuration_source="tests.typesafe")
+
+    def test_a_usable_base_url_still_resolves_with_its_path_prefix(self):
+        resolved = resolve_connection(settings={"api_key": "own-key", "base_url": "http://127.0.0.1:8080/prefix"}, configuration_source="tests.typesafe")
+
+        assert resolved.url == "http://127.0.0.1:8080/prefix/v1/systemone"
+
+    @pytest.mark.parametrize("api_key", ["sk-live-abc\n", "sk-live-abc ", " sk-live-abc", "sk-live-abc\t", "sk-live-abc\u00a0"])
+    def test_a_credential_that_cannot_be_a_header_value_is_refused_without_echoing_it(self, api_key):
+        with pytest.raises(ValueError) as excinfo:
+            resolve_connection(settings={"api_key": api_key}, configuration_source="tests.typesafe")
+
+        assert api_key not in str(excinfo.value), "the value is never echoed"
+        assert "api_key" in str(excinfo.value), "the message names the setting to fix"
+
+    def test_a_credential_read_from_the_environment_is_checked_the_same_way(self, monkeypatch):
+        """The realistic shape: a secret mounted from a file ends with a newline."""
+        monkeypatch.setenv("MOUNTED_TYPESAFE_KEY", "sk-live-mount\n")
+
+        with pytest.raises(ValueError) as excinfo:
+            resolve_connection(settings={"api_key_env": "MOUNTED_TYPESAFE_KEY"}, configuration_source="tests.typesafe")
+
+        assert "sk-live-mount" not in str(excinfo.value)
+
+
+class TestStrictBlockValues:
+    """The block's values are checked like the consumer ``config`` path's.
+
+    In pydantic's lax mode ``max_attempts: true`` silently became ``1`` (``bool`` is
+    an ``int``) while the same value under ``guardrails.provider.config`` was
+    rejected, so one retry count meant two different things depending on where it was
+    written.
+    """
+
+    def test_a_boolean_retry_count_is_rejected(self):
+        with pytest.raises(ValidationError):
+            TypeSafeConfig.model_validate({"max_attempts": True})
+
+    def test_a_boolean_timeout_is_rejected(self):
+        with pytest.raises(ValidationError):
+            TypeSafeConfig.model_validate({"timeout": True})
+
+    def test_an_integer_is_still_a_usable_float(self):
+        block = TypeSafeConfig.model_validate({"timeout": 5, "max_attempts": 2})
+
+        assert block.connection_defaults() == {"timeout": 5.0, "max_attempts": 2}
+
+    def test_a_config_file_with_a_boolean_retry_count_is_refused(self, tmp_path, monkeypatch):
+        """The operator sees a config error instead of a silently shortened budget."""
+        extensions_path = tmp_path / "extensions_config.json"
+        extensions_path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                    "typesafe": {"api_key_env": "SHARED_TYPESAFE_KEY", "max_attempts": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+        with pytest.raises(ValidationError):
+            AppConfig.from_file(str(config_path))

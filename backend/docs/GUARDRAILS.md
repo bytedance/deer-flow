@@ -468,7 +468,7 @@ guardrails:
 | `max_state_chars` | `4000` | Argument text above this is denied locally. |
 | `cache_size` / `cache_ttl_seconds` | `256` / `300` | FIFO cache keyed by `(tool, arguments)`; `0` disables it. |
 
-The eight connection settings (`api_key` / `api_key_env` / `base_url` / `model` / `timeout` / `deadline_seconds` / `max_attempts` / `retry_backoff`) may instead live once in a top-level `typesafe:` block and be shared by every TypeSafe consumer; a value written here still wins (see "Shared client" below).
+The eight connection settings (`api_key` / `api_key_env` / `base_url` / `model` / `timeout` / `deadline_seconds` / `max_attempts` / `retry_backoff`) may instead live once in a top-level `typesafe:` block and be shared by every TypeSafe consumer; a value written here still wins (see "Shared client" below). The two credential settings are resolved per *layer*: the first layer that sets either one decides, and inside a layer a literal `api_key` beats that layer's own `api_key_env` — so a consumer configured with `api_key_env` keeps reading its own variable even when the block also carries a literal key. A connection value that no request could use is refused where it is configured: a `base_url` that is not `http(s)`, or that carries a query, fragment or embedded credentials, and a credential that cannot travel as a header value (surrounding whitespace from a mounted secret, a non-printable character) all fail at construction instead of on every call — the last one used to put the whole `Bearer <key>` value into h11's error message, which reaches the guardrail's exception log. The block itself is validated in pydantic's strict mode, so `max_attempts: true` is an error rather than a silent `1`.
 
 **Shared client.** The transport half of this provider — authentication, client lifecycle, retry and backoff, the deadline budget, response parsing and the error taxonomy, UTF-8 wire-size counting — lives in `packages/harness/deerflow/typesafe/` and is shared with the other host-side TypeSafe consumers (memory pre-screening and signal classification, planned). Everything that makes this a *gate* stays in the provider: the state it builds, its question and rubric, its threshold and direction, its local preflight, its cache, and the rule that an error denies. The same rule holds in the other direction: nothing in the shared client knows what a "risky tool call" is, and a change that would move a failure policy, a threshold or a cache into it is a design change, not a refactor.
 
@@ -685,6 +685,13 @@ server, with a meta-check proving the sync path on the loop trips the Blockbuste
 - The gate's own question-level failure still surfaces as `TypeSafeGuardrailError` / `invalid_response`
 - `wire_size` matches what httpx sends, counts UTF-8 bytes, and leaves the gate's `max_state_chars` a character count
 - Precedence consumer `config` > top-level `typesafe` > built-in defaults, and `mode: off` resolving no credential at all
+- One credential source per layer: a consumer's `api_key_env` is not overridden by a literal `api_key` in the block,
+  while a layer that sets both uses its own literal key
+- Unusable connection values fail at construction: non-`http(s)` / query / fragment / embedded-credential `base_url`
+  forms, a malformed port, and a credential that cannot be a header value (never echoed in the message)
+- Strict types for the `typesafe:` block: `max_attempts: true` is rejected instead of silently becoming `1`, while an
+  integer stays a usable float (`timeout: 5`)
+- A transport failure raises without chaining the original error, so a rejected header cannot print the credential
 - `sharing_key` (internal: credential fingerprint, connection settings, input limit, transport factory) versus
   `release_policy_parameters()` (public: behaviour, never the credential)
 

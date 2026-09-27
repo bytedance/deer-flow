@@ -313,9 +313,13 @@ class TypeSafeClient:
             # httpx.TransportError is an httpx.HTTPError subclass, so it is
             # matched first: a connection reset is worth another attempt, while a
             # request-building error is not.
-            raise _RetryableAttempt(f"TypeSafe request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from exc
+            # ``from None``: the original exception's message can contain the
+            # request it failed to build — for a rejected header that is the whole
+            # ``Bearer <key>`` value — and the guardrail's ``logger.exception``
+            # prints the cause chain. The type name below is kept for diagnosis.
+            raise _RetryableAttempt(f"TypeSafe request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from None
         except httpx.HTTPError as exc:
-            raise TypeSafeError(f"TypeSafe request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from exc
+            raise TypeSafeError(f"TypeSafe request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from None
 
     async def _attempt_async(self, client: httpx.AsyncClient, payload: dict[str, object], headers: dict[str, str], questions: Mapping[str, Question], deadline_at: float) -> AnswerSet:
         try:
@@ -330,9 +334,11 @@ class TypeSafeClient:
                 self._check_budget(deadline_at)
                 return answers
         except httpx.TransportError as exc:
-            raise _RetryableAttempt(f"TypeSafe request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from exc
+            # ``from None`` for the same reason as the sync path: a rejected header
+            # would otherwise carry the ``Bearer`` value in the printed chain.
+            raise _RetryableAttempt(f"TypeSafe request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from None
         except httpx.HTTPError as exc:
-            raise TypeSafeError(f"TypeSafe request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from exc
+            raise TypeSafeError(f"TypeSafe request failed: {type(exc).__name__}", cause=CAUSE_TRANSPORT) from None
 
     def _status_error(self, status_code: int) -> TypeSafeError:
         # Only the numeric status is reported. The response body *and* the HTTP

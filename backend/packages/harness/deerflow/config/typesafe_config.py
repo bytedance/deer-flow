@@ -16,11 +16,21 @@ every consumer behaves exactly as it did before this block existed.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TypeSafeConfig(BaseModel):
-    """Defaults for the shared TypeSafe client; every field is optional."""
+    """Defaults for the shared TypeSafe client; every field is optional.
+
+    Validated in strict mode on purpose: this block is YAML, and its numbers reach
+    the same eager helpers the consumer ``config`` path uses. In pydantic's lax mode
+    ``max_attempts: true`` silently becomes ``1`` (``bool`` is an ``int``) while the
+    same value under ``guardrails.provider.config`` is rejected, so the two spellings
+    disagreed about a retry count. Strict mode makes them agree; an integer is still
+    accepted for a float field, so ``timeout: 5`` keeps working.
+    """
+
+    model_config = ConfigDict(strict=True)
 
     api_key: str | None = Field(default=None, description="API key. Prefer api_key_env: a key here lives in config.yaml")
     api_key_env: str | None = Field(default=None, description="Environment variable holding the API key (default: TYPESAFE_API_KEY)")

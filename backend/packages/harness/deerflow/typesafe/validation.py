@@ -53,6 +53,25 @@ def defaulted_text(name: str, value: object, fallback: str) -> str:
     return value
 
 
+def credential_text(name: str, value: str) -> str:
+    """Return a credential that can be sent as a header value, or raise naming ``name``.
+
+    A key with surrounding whitespace (a secret mounted from a file, a quoted
+    ``.env`` value, a shell ``$(cat ...)``) or a non-printable character passes the
+    old non-empty check and then reaches h11, whose ``LocalProtocolError`` message
+    carries the whole ``Bearer <key>`` header — and the guardrail middleware's
+    ``logger.exception`` prints that cause chain. Rejecting the shape here turns a
+    per-call credential leak into a construction-time error.
+
+    Interior spaces are allowed because they are legal in a header value and leak
+    nothing; every character outside printable ASCII (plus leading and trailing
+    whitespace) is rejected. The message never echoes ``value``.
+    """
+    if value != value.strip() or any(not 0x20 <= ord(character) <= 0x7E for character in value):
+        raise ValueError(f"{name} must be printable ASCII with no leading or trailing whitespace: check the configured key and the environment variable it reads (the value is never echoed here or in any error message)")
+    return value
+
+
 def criteria_entry(criteria: Mapping[object, object] | None, flag: bool) -> object:
     """Look up a ``criteria`` entry under either the YAML or the JSON spelling.
 
@@ -69,4 +88,4 @@ def criteria_entry(criteria: Mapping[object, object] | None, flag: bool) -> obje
     return None
 
 
-__all__ = ["criteria_entry", "defaulted_text", "finite_float", "whole_number"]
+__all__ = ["credential_text", "criteria_entry", "defaulted_text", "finite_float", "whole_number"]

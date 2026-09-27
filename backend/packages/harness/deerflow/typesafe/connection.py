@@ -19,7 +19,15 @@ rule 2):
 The credential exists only inside this object: it is not in ``repr()``, not in
 ``public_parameters()``, and not in any error message. The environment-variable
 name is kept out of ``repr()`` too, and appears only in the construction-time
-error that tells an operator which variable to set.
+error that tells an operator which variable to set. A key that cannot be sent as a
+header value — surrounding whitespace from a mounted secret, a non-printable
+character — is rejected here instead of leaking into a per-call protocol error
+whose message carries the whole ``Bearer`` header.
+
+The two credential settings are resolved per *layer*: the first layer (consumer
+``config``, then ``typesafe:``) that sets either one decides the credential, so a
+consumer naming an environment variable is not silently overridden by a literal
+key written in the shared block.
 """
 
 from __future__ import annotations
@@ -28,8 +36,9 @@ import hashlib
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
-from deerflow.typesafe.validation import finite_float, whole_number
+from deerflow.typesafe.validation import credential_text, finite_float, whole_number
 
 DEFAULT_BASE_URL = "https://api.typesafe.ai"
 DEFAULT_API_KEY_ENV = "TYPESAFE_API_KEY"
@@ -107,6 +116,8 @@ def resolve_connection(
     that is absent — or explicitly ``None`` — is "not configured" and falls
     through to the next source; an explicitly blank value does not, so a blank
     ``api_key`` is reported rather than silently bypassed by the environment.
+    ``api_key`` and ``api_key_env`` are one credential *per layer*: see
+    :func:`_resolve_credential`.
 
     ``configuration_source`` names the consumer's settings location (for example
     ``guardrails.provider.config``); it reaches the missing-credential message so
@@ -119,18 +130,15 @@ def resolve_connection(
     if not isinstance(api_key_env, str) or not api_key_env:
         raise ValueError("api_key_env must be a non-empty string naming the environment variable that holds the API key")
 
-    if "api_key" in override:
-        api_key: object = override["api_key"]
-    elif "api_key" in fallback:
-        api_key = fallback["api_key"]
-    else:
-        api_key = os.environ.get(api_key_env)
+    api_key = _resolve_credential(override, fallback, api_key_env)
     if not isinstance(api_key, str) or not api_key:
         raise ValueError(f"TypeSafe requires an API key: pass 'api_key' in {configuration_source} or set the {api_key_env} environment variable")
+    # Shape only, and never echoed: a key that cannot travel as a header value is a
+    # configuration error here instead of a per-call protocol error whose message
+    # carries the whole ``Bearer`` header into the guardrail's exception log.
+    api_key = credential_text("api_key", api_key)
 
-    base_url = _first(override, fallback, "base_url", DEFAULT_BASE_URL)
-    if not isinstance(base_url, str) or not base_url.strip():
-        raise ValueError("base_url must be a non-empty string")
+    base_url = _validated_base_url(_first(override, fallback, "base_url", DEFAULT_BASE_URL))
 
     model = _first(override, fallback, "model", DEFAULT_MODEL)
     if not isinstance(model, str) or not model.strip():
@@ -196,6 +204,61 @@ def _first(override: Mapping[str, object], fallback: Mapping[str, object], key: 
     if key in fallback:
         return fallback[key]
     return default
+
+
+#: Schemes an endpoint base may use. ``http`` is allowed for any host on purpose:
+#: an internal http endpoint is a legitimate deployment, and TLS policy is the
+#: operator's. What is rejected is a base that no request could ever use.
+_BASE_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def _resolve_credential(override: Mapping[str, object], fallback: Mapping[str, object], default_env: str) -> object:
+    """The credential named by the first layer that sets either credential setting.
+
+    One credential source per layer: a layer that names an environment variable is
+    not overridden by a *different* layer's literal key, so a consumer configured
+    with ``api_key_env`` keeps reading its own variable even when the shared
+    ``typesafe:`` block also sets ``api_key`` (and its endpoint may not accept that
+    key at all). Inside one layer ``api_key`` wins over that layer's own
+    ``api_key_env``, which is what a standalone provider did. ``None`` from the
+    environment stays a missing credential rather than falling back to another
+    layer's key, and the built-in ``TYPESAFE_API_KEY`` is consulted only when no
+    layer names a credential.
+    """
+    for layer in (override, fallback):
+        if "api_key" in layer:
+            return layer["api_key"]
+        name = layer.get("api_key_env")
+        if isinstance(name, str) and name:
+            return os.environ.get(name)
+    return os.environ.get(default_env)
+
+
+def _validated_base_url(value: object) -> str:
+    """Return a base URL a request can use, or raise at construction.
+
+    A base that is not ``http(s)``, or that carries a query, fragment, embedded
+    credentials, whitespace or a control character, builds fine today and then fails
+    on every request: httpx rejects the scheme or the URL per call
+    (``UnsupportedProtocol`` / ``InvalidURL``), and the query would be silently
+    swallowed into the endpoint path this layer appends. Embedded credentials are
+    refused as well because the base URL is published in every consumer's policy
+    identity and reaches reason messages.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("base_url must be a non-empty string")
+    if any(character.isspace() or ord(character) < 0x21 or ord(character) == 0x7F for character in value):
+        raise ValueError("base_url must not contain whitespace or control characters")
+    try:
+        parts = urlsplit(value)
+        parts.port  # a malformed port is a per-request httpx error; fail it here instead
+    except ValueError as exc:
+        raise ValueError(f"base_url is not a usable URL: {exc}") from None
+    if parts.scheme not in _BASE_URL_SCHEMES or not parts.netloc:
+        raise ValueError("base_url must be an absolute http:// or https:// URL")
+    if parts.query or parts.fragment or "@" in parts.netloc:
+        raise ValueError("base_url must not carry a query, fragment or credentials")
+    return value
 
 
 __all__ = [

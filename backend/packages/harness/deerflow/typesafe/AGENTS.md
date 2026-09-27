@@ -31,3 +31,12 @@ every consumer — `wire_size` reports bytes and replaces no limit, and one CJK
 character is three of them. A credential never reaches a log, an error message, a
 policy identity, a reason message or `repr()` (`TypeSafeConnection` hides both the
 key and its environment-variable name); only `sha256` fingerprints are compared.
+Two rules keep that promise true at the edges: a credential that could not travel
+as a header value (surrounding whitespace, a non-printable character) is refused
+when the connection resolves, and a transport failure is raised without chaining
+the original exception, whose message can contain the request it refused.
+Credential resolution is per *layer* too — the first layer that sets `api_key` or
+`api_key_env` decides it, and inside one layer the literal key wins — so a
+consumer naming an environment variable is never silently switched to another
+layer's key. Likewise `base_url` must be an `http(s)` URL with no query, fragment
+or embedded credentials, checked at construction rather than on every request.

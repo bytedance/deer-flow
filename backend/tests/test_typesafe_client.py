@@ -13,7 +13,9 @@ these pin what the client adds on its own:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import traceback
 
 import httpx
 import pytest
@@ -227,3 +229,42 @@ class TestWireSize:
 
         assert sent_server.count == 1, "the same text fits under the character limit, so it is evaluated"
         assert judged.metadata["probability"] == 0.9
+
+
+# --- the failure chain never carries the credential ------------------------
+
+
+class TestTransportFailureChain:
+    """A rejected header is where a credential used to reach a log.
+
+    h11 builds its ``LocalProtocolError`` message from the request it refused — the
+    whole ``Bearer <key>`` value — and the guardrail's ``logger.exception`` prints the
+    cause chain, so the client raises without chaining it. The exception *type* stays
+    in the message: the failure is still diagnosable, only the value is gone.
+    """
+
+    @staticmethod
+    def _rejecting_transport(request: httpx.Request) -> httpx.Response:
+        raise httpx.LocalProtocolError(f"Illegal header value b'{request.headers['authorization']}'")
+
+    def _chain_client(self) -> TypeSafeClient:
+        connection = resolve_connection(settings={"api_key": _API_KEY, "max_attempts": 1}, configuration_source="tests.typesafe")
+        return TypeSafeClient(connection, transport_factory=lambda: httpx.MockTransport(self._rejecting_transport))
+
+    def test_the_sync_failure_does_not_print_the_key_into_the_chain(self):
+        with pytest.raises(TypeSafeError) as excinfo:
+            self._chain_client().ask({"tool_call": {"name": "bash", "arguments": "{}"}}, {_GATE_QUESTION: _NOUL})
+
+        assert _API_KEY not in "".join(traceback.format_exception(excinfo.value))
+        assert "LocalProtocolError" in str(excinfo.value), "the failure stays diagnosable"
+
+    def test_the_async_failure_does_not_print_the_key_into_the_chain(self):
+        client = self._chain_client()
+
+        async def ask():
+            return await client.aask({"tool_call": {"name": "bash", "arguments": "{}"}}, {_GATE_QUESTION: _NOUL})
+
+        with pytest.raises(TypeSafeError) as excinfo:
+            asyncio.run(ask())
+
+        assert _API_KEY not in "".join(traceback.format_exception(excinfo.value))
