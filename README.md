@@ -1312,7 +1312,14 @@ MiniMax, and OpenAI-compatible Images APIs. Admins configure an image model in
 **Settings → Models → Image models**, separately from chat models. Web profiles
 are encrypted under `DEER_FLOW_HOME/managed-image-profiles/`; back up both
 `catalog.enc` and `key`. They are not stored in the database or `config.yaml`.
-Only one web profile can be enabled; it takes priority. Otherwise, configure
+The administrator's default selection is stored alongside the catalog in
+`default.json`; back it up with the catalog. Only one web profile can be enabled.
+Settings can select the server or enabled web profile as the default for new
+chats and requests. A changed model or endpoint invalidates that saved choice,
+so the next generation request asks again in the chat. Without an explicit
+default, a web profile saved after the server model takes priority; if the
+server image model changes later, the next generation request shows a choice
+card in the chat. The chat choice applies to that run only. Otherwise, configure
 `GEMINI_API_KEY`, `MINIMAX_API_KEY`, or `IMAGE_GENERATION_API_KEY` through
 `sandbox.environment` as before. OpenAI-compatible APIs also need
 `IMAGE_GENERATION_PROVIDER=openai`, `IMAGE_GENERATION_BASE_URL`, and
@@ -1330,7 +1337,10 @@ workspace/upload/output mounts; active runs finish first. Container-only files,
 processes, and temporary installs are not preserved, and the key stays in the
 old container's environment until removal. Remote/provisioner AIO still needs
 `/v1/bash/exec` for web-managed keys. Changing legacy `sandbox.environment`
-requires a Gateway restart and container recreation. If a web profile is
+requires a Gateway restart. A chat choice of a new server model uses a separate
+container identity; the previous container remains available until normal
+idle or capacity cleanup. Other existing containers still need recreation to
+pick up changed startup variables. If a web profile is
 disabled during an active run, its profile-scoped local container cannot be
 used for the legacy fallback; image generation reports `IMAGE_PROFILE_CHANGED`
 until that container is replaced. See
