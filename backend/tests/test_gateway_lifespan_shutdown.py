@@ -656,3 +656,74 @@ def test_lifespan_continues_when_mcp_close_fails():
         browser_manager.close_all_sessions.assert_awaited_once()
 
     asyncio.run(scenario())
+
+
+def test_lifespan_closes_mcp_sessions_created_during_run_drain():
+    """An active run can acquire a session after other shutdown hooks begin."""
+    from app.gateway.app import lifespan
+    from deerflow.mcp.session_pool import MCPSessionPool
+    from deerflow.runtime import RunManager, RunStatus
+
+    async def scenario():
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        pool = MCPSessionPool()
+        run_manager = RunManager()
+        record = await run_manager.create("mcp-shutdown-race")
+        await run_manager.set_status(record.run_id, RunStatus.running)
+        resume = asyncio.Event()
+        session_created = asyncio.Event()
+        transport_closed = asyncio.Event()
+
+        class SessionContext:
+            async def __aenter__(self):
+                self.owner = asyncio.current_task()
+                return SimpleNamespace(initialize=AsyncMock())
+
+            async def __aexit__(self, *_args):
+                assert asyncio.current_task() is self.owner
+                transport_closed.set()
+
+        async def active_run():
+            await resume.wait()
+            await pool.get_session("server", "thread", {"transport": "stdio", "command": "unused"})
+            session_created.set()
+            await asyncio.Event().wait()
+
+        @asynccontextmanager
+        async def runtime(_app, _config):
+            record.task = asyncio.create_task(active_run())
+            try:
+                yield
+            finally:
+                await run_manager.shutdown(timeout=1.0)
+
+        async def shutdown_memory_backend(**_kwargs):
+            # This hook runs before langgraph_runtime drains the active run.
+            resume.set()
+            await asyncio.wait_for(session_created.wait(), timeout=5)
+
+        try:
+            with ExitStack() as stack:
+                for patcher in _gateway_lifespan_patches(startup_config, pool=pool):
+                    stack.enter_context(patcher)
+                stack.enter_context(patch("app.gateway.app.langgraph_runtime", runtime))
+                stack.enter_context(patch("app.gateway.app._shutdown_memory_backend", shutdown_memory_backend))
+                stack.enter_context(patch("langchain_mcp_adapters.sessions.create_session", side_effect=lambda _connection: SessionContext()))
+                async with lifespan(app):
+                    pass
+
+            assert record.task is not None and record.task.done()
+            assert transport_closed.is_set()
+            assert not pool._entries
+        finally:
+            resume.set()
+            if record.task is not None and not record.task.done():
+                record.task.cancel()
+                await asyncio.gather(record.task, return_exceptions=True)
+            await pool.close_all()
+
+    asyncio.run(scenario())
