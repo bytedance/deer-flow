@@ -4940,3 +4940,166 @@ async def test_concurrent_finish_joins_single_owner():
 
     assert first_result.disposition is second_result.disposition
     assert store.persisted == [["A"]]
+
+
+@pytest.mark.anyio
+async def test_foreign_thread_middleware_admitted_before_seal_executes_after_seal_and_persists():
+    """An event admitted before the seal still lands in the terminal drain.
+
+    The foreign thread enqueues while the owner loop is blocked, so the callback
+    is accepted but cannot have run yet when the seal starts.
+    """
+    import deerflow.runtime.journal as journal_module
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-seal-admitted", "t-seal-admitted", store, flush_threshold=100)
+    enqueued = threading.Event()
+
+    def foreign() -> None:
+        journal.record_middleware(
+            "tool_progress",
+            name="ToolProgressMiddleware",
+            hook="wrap_tool_call",
+            action="warn",
+            changes={"to_phase": "warned"},
+        )
+        enqueued.set()
+
+    thread = threading.Thread(target=foreign)
+    thread.start()
+    try:
+        # Blocking the owner loop keeps the accepted callback queued, not run.
+        assert enqueued.wait(timeout=2)
+        assert journal._buffer == []
+    finally:
+        thread.join()
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert result.disposition is journal_module.JournalWriteDisposition.COMMITTED
+    events = await store.list_events("t-seal-admitted", "r-seal-admitted")
+    assert [event["event_type"] for event in events] == ["middleware:tool_progress"]
+
+
+@pytest.mark.anyio
+async def test_foreign_thread_middleware_after_seal_rejected_and_counted():
+    """A foreign-thread producer that loses the admission race is rejected and counted."""
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-seal-late", "t-seal-late", store, flush_threshold=100)
+
+    await journal.seal_producers()
+    journal.record_middleware("owner", name="N", hook="h", action="a", changes={})
+    await asyncio.to_thread(
+        journal.record_middleware,
+        "foreign",
+        name="N",
+        hook="h",
+        action="a",
+        changes={},
+    )
+
+    assert journal._buffer == []
+    assert journal._post_seal_rejected == 2
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+    assert result.disposition is journal_module_disposition(journal)
+    events = await store.list_events("t-seal-late", "r-seal-late")
+    assert events == []
+
+
+def journal_module_disposition(journal):
+    """Return the COMMITTED disposition of ``journal``'s module."""
+    import deerflow.runtime.journal as journal_module
+
+    return journal_module.JournalWriteDisposition.COMMITTED
+
+
+@pytest.mark.anyio
+async def test_direct_journal_callback_after_seal_rejected():
+    """A direct owner-loop append after the seal cannot reopen the journal."""
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-seal-direct", "t-seal-direct", store, flush_threshold=100)
+
+    await journal.seal_producers()
+    journal._put(event_type="late", category="trace", content="late")
+
+    assert journal._buffer == []
+    assert journal._post_seal_rejected == 1
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+    assert result.snapshot is not None
+    events = await store.list_events("t-seal-direct", "r-seal-direct")
+    assert events == []
+
+
+@pytest.mark.anyio
+async def test_subagent_proxy_aclose_happens_before_parent_seal():
+    """A subagent proxy event accepted before its aclose still reaches the drain."""
+    from deerflow.tools.builtins.task_tool import _ParentLoopMiddlewareRecorderProxy
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-proxy-seal", "t-proxy-seal", store, flush_threshold=100)
+    proxy = _ParentLoopMiddlewareRecorderProxy(journal, asyncio.get_running_loop())
+
+    await asyncio.to_thread(
+        proxy.record_middleware,
+        tag="tool_progress",
+        name="ToolProgressMiddleware",
+        hook="wrap_tool_call",
+        action="warn",
+        changes={"to_phase": "warned"},
+    )
+    await proxy.aclose()
+    await journal.seal_producers()
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert result.snapshot is not None
+    events = await store.list_events("t-proxy-seal", "r-proxy-seal")
+    assert [event["event_type"] for event in events] == ["middleware:tool_progress"]
+
+
+@pytest.mark.anyio
+async def test_foreign_thread_middleware_during_terminal_drain_is_rejected_not_dropped():
+    """An enqueue that loses the seal race is rejected and counted, never silently dropped.
+
+    The store enqueues from a foreign thread while the terminal drain is between
+    its last write and its detach. Without a producer seal that callback is
+    accepted and then discarded by the post-detach guard with no record of the
+    loss; with the seal it is refused at admission and counted.
+    """
+
+    class EnqueueDuringWriteStore(MemoryRunEventStore):
+        journal: RunJournal | None = None
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.fired = False
+
+        async def put_batch(self, events):
+            result = await super().put_batch(events)
+            journal = self.journal
+            if not self.fired and journal is not None:
+                self.fired = True
+
+                def foreign() -> None:
+                    journal.record_middleware("race", name="N", hook="h", action="a", changes={})
+
+                thread = threading.Thread(target=foreign)
+                thread.start()
+                # Block the owner loop so the enqueue is admitted and queued
+                # while the drain is between its last write and its detach.
+                thread.join(timeout=2)
+            return result
+
+    store = EnqueueDuringWriteStore()
+    journal = RunJournal("r-seal-race", "t-seal-race", store, flush_threshold=100)
+    store.journal = journal
+    journal._put(event_type="A", category="trace", content="a")
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=3.0)
+
+    assert result.snapshot is not None
+    assert journal._post_seal_rejected == 1
+    events = await store.list_events("t-seal-race", "r-seal-race")
+    assert [event["event_type"] for event in events] == ["A"]

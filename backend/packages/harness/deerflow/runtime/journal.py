@@ -127,6 +127,19 @@ class _DetachedFlush:
     started: bool = False
 
 
+class JournalProducerState(StrEnum):
+    """Admission state of this journal's event producers.
+
+    ``OPEN`` accepts appends; ``SEALING``/``SEALED`` refuse them and count the
+    refusal; ``RELEASED`` means the run-scoped state is gone.
+    """
+
+    OPEN = "open"
+    SEALING = "sealing"
+    SEALED = "sealed"
+    RELEASED = "released"
+
+
 class JournalWriteDisposition(StrEnum):
     """What the Journal can prove about one ``put_batch`` attempt."""
 
@@ -467,6 +480,12 @@ class RunJournal(BaseCallbackHandler):
         self._pending_llm_response: _PendingLlmResponse | None = None
         self._pending_flush_tasks: set[asyncio.Task[None]] = set()
         self._explicit_flush_in_progress = False
+        # Producer admission. ``_admission_lock`` is a plain threading lock so a
+        # foreign thread can decide admission and enqueue atomically against the
+        # owner-loop seal; it is never held across an await.
+        self._admission_lock = threading.Lock()
+        self._producer_state = JournalProducerState.OPEN
+        self._post_seal_rejected = 0
         self._active_write_tasks: dict[asyncio.Future[Any], list[dict]] = {}
         self._detached_write_tasks: dict[asyncio.Future[Any], list[dict]] = {}
         # First write whose outcome could not be classified as a safe retry.
@@ -1062,7 +1081,23 @@ class RunJournal(BaseCallbackHandler):
         # Some providers immediately re-fire on_llm_end with usage filled in.
         # Defer an incomplete copy until the next event or flush.
 
-    def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
+    def _put(
+        self,
+        *,
+        event_type: str,
+        category: str,
+        content: str | dict = "",
+        metadata: dict | None = None,
+        admitted: bool = False,
+    ) -> None:
+        """Append one event, unless the producer seal already closed admission.
+
+        ``admitted`` marks a callback that won the admission race in a foreign
+        thread before the seal; it still respects the ``_closed`` fence so a
+        lost-lease teardown cannot be reopened.
+        """
+        if not admitted and not self._admit_owner_loop_append(context=event_type):
+            return
         if self._closed:
             return
         self._commit_pending_llm_response()
@@ -1434,6 +1469,8 @@ class RunJournal(BaseCallbackHandler):
         """
         if not self._track_tokens:
             return
+        if not self._admit_owner_loop_append(context="external LLM usage record"):
+            return
         for record in records:
             source_id = str(record.get("source_run_id", ""))
             if not source_id:
@@ -1474,6 +1511,82 @@ class RunJournal(BaseCallbackHandler):
         """Record the first human message for convenience fields."""
         self._first_human_msg = content[:2000] if content else None
 
+    def _admissions_open_locked(self) -> bool:
+        """Whether new appends are still admitted. Caller holds ``_admission_lock``."""
+        return not self._closed and self._producer_state is JournalProducerState.OPEN
+
+    def _reject_after_seal(self, *, context: str) -> None:
+        """Count and log one refused append. Caller holds ``_admission_lock``."""
+        self._post_seal_rejected += 1
+        logger.warning(
+            "Rejected %s for run %s after the producer seal (%d rejected so far)",
+            context,
+            self.run_id,
+            self._post_seal_rejected,
+        )
+
+    def _admit_owner_loop_append(self, *, context: str) -> bool:
+        """Decide admission for an append already running on the owner loop."""
+        with self._admission_lock:
+            if self._admissions_open_locked():
+                return True
+            self._reject_after_seal(context=context)
+            return False
+
+    def _admit_foreign_append(self, enqueue: Callable[[], None], *, context: str) -> bool:
+        """Atomically decide admission for a foreign-thread append and enqueue it.
+
+        Holding ``_admission_lock`` across the ``call_soon_threadsafe`` is what
+        makes the seal cut atomic: an enqueue that wins the lock is already ahead
+        of the owner-loop barrier the seal posts afterwards, so it runs before
+        the terminal drain. The lock is released before any await.
+        """
+        owner_loop = self._owner_loop
+        with self._admission_lock:
+            if not self._admissions_open_locked():
+                self._reject_after_seal(context=context)
+                return False
+            if owner_loop is None or owner_loop.is_closed() or not owner_loop.is_running():
+                self._reject_after_seal(context=context)
+                return False
+            try:
+                owner_loop.call_soon_threadsafe(enqueue)
+            except RuntimeError:
+                self._reject_after_seal(context=context)
+                return False
+            return True
+
+    async def seal_producers(self) -> None:
+        """Stop admitting producer events and drain everything already accepted.
+
+        Every append that wins ``_admission_lock`` before this call is guaranteed
+        to have run before the seal returns, because ``call_soon_threadsafe``
+        preserves FIFO order on the owner loop. Appends that lose the race are
+        rejected and counted instead of being silently dropped by the detach
+        guard, so the terminal drain has a defined, observable cut.
+        """
+        with self._admission_lock:
+            if self._producer_state in (JournalProducerState.SEALED, JournalProducerState.RELEASED):
+                return
+            self._producer_state = JournalProducerState.SEALING
+        await self._await_owner_loop_barrier()
+        with self._admission_lock:
+            if self._producer_state is JournalProducerState.SEALING:
+                self._producer_state = JournalProducerState.SEALED
+
+    async def _await_owner_loop_barrier(self) -> None:
+        """Yield until every callback accepted before this call has run."""
+        loop = asyncio.get_running_loop()
+        owner_loop = self._owner_loop
+        if owner_loop is None or owner_loop is loop:
+            # Already on the owner loop: callbacks queued ahead of this
+            # coroutine's resumption are FIFO before it.
+            await asyncio.sleep(0)
+            return
+        barrier: asyncio.Future[None] = owner_loop.create_future()
+        owner_loop.call_soon_threadsafe(barrier.set_result, None)
+        await asyncio.shield(barrier)
+
     def record_middleware(self, tag: str, *, name: str, hook: str, action: str, changes: dict) -> None:
         """Record a middleware state-change event.
 
@@ -1500,17 +1613,16 @@ class RunJournal(BaseCallbackHandler):
             if owner_loop.is_closed() or not owner_loop.is_running():
                 logger.warning("Dropping cross-thread middleware event after run loop shutdown")
                 return
-            try:
-                owner_loop.call_soon_threadsafe(
-                    partial(
-                        self._put,
-                        event_type=event_type,
-                        category=MIDDLEWARE_EVENT_PATTERN.category,
-                        content={"name": name, "hook": hook, "action": action, "changes": dict(changes)},
-                    )
-                )
-            except RuntimeError:
-                logger.warning("Dropping cross-thread middleware event after run loop shutdown")
+            self._admit_foreign_append(
+                partial(
+                    self._put,
+                    admitted=True,
+                    event_type=event_type,
+                    category=MIDDLEWARE_EVENT_PATTERN.category,
+                    content={"name": name, "hook": hook, "action": action, "changes": dict(changes)},
+                ),
+                context=f"cross-thread middleware event {event_type}",
+            )
             return
 
         self._put(
@@ -1772,6 +1884,8 @@ class RunJournal(BaseCallbackHandler):
         self._pending_llm_response = None
         self._pending_flush_tasks.clear()
         self._quarantine = None
+        with self._admission_lock:
+            self._producer_state = JournalProducerState.RELEASED
         self._explicit_flush_in_progress = False
         self._pending_progress_task = None
         self._pending_progress_delayed = False
@@ -1875,6 +1989,10 @@ class RunJournal(BaseCallbackHandler):
         the journal is fenced without replaying the quarantined batch.
         """
         try:
+            # Seal first: every producer append admitted before this point is
+            # already ahead of the owner-loop barrier, so the drain below covers
+            # the complete accepted tail.
+            await self.seal_producers()
             settled = await self._flush_until_settled_owned(retry_noncommitted=True)
         except BaseException as error:  # noqa: BLE001 - the outcome is reported, not raised
             quarantine = self._quarantine
