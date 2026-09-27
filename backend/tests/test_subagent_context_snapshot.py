@@ -94,6 +94,32 @@ def test_snapshot_preserves_serializable_media_and_removes_cache_control(media):
     assert "changed" not in snapshot.to_message().content[-1]
 
 
+@pytest.mark.parametrize("data", ["The budget is 75.", b"PRIVATE_BINARY_DOCUMENT"])
+def test_snapshot_preserves_native_document_or_reports_unserializable_content(data):
+    document = {
+        "type": "document",
+        "source": {"type": "text", "media_type": "text/plain", "data": data},
+        "title": "Requirements",
+        "cache_control": {"type": "ephemeral"},
+    }
+    parent = HumanMessage(content=[{"type": "text", "text": "Before"}, document, {"type": "text", "text": "After"}])
+    snapshot = ParentContextSnapshot.from_state({"messages": [parent]})
+    content = snapshot.to_message().content
+
+    assert content[1] == {"type": "text", "text": "Before"}
+    assert content[-1] == {"type": "text", "text": "After"}
+    assert len(content) == 4
+    if isinstance(data, bytes):
+        assert "Historical media omitted" in content[2]["text"]
+        assert "PRIVATE_BINARY_DOCUMENT" not in snapshot.content_json
+    else:
+        assert content[2] == {"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "The budget is 75."}, "title": "Requirements"}
+        parent.content[1]["source"]["data"] = "Changed parent"
+        content[2]["source"]["data"] = "Changed child"
+        assert snapshot.to_message().content[2]["source"]["data"] == "The budget is 75."
+    assert "cache_control" not in snapshot.content_json
+
+
 @pytest.mark.parametrize("payload_kind", ["bytearray", "circular"])
 def test_snapshot_with_only_unserializable_media_keeps_an_omission_notice(payload_kind):
     payload = bytearray(b"PRIVATE_BINARY_PAYLOAD") if payload_kind == "bytearray" else {}

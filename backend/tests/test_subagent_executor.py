@@ -714,7 +714,7 @@ class TestAgentConstruction:
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("inherit", [False, True])
-    @pytest.mark.parametrize("history_format", ["plain", "output_text"])
+    @pytest.mark.parametrize("history_format", ["plain", "output_text", "document"])
     async def test_snapshot_real_graph_writes_from_background_with_child_only_receipts(self, classes, base_config, tmp_path, inherit, history_format):
         """Real LangGraph/tool execution; the deterministic model observes its input.
 
@@ -755,6 +755,8 @@ class TestAgentConstruction:
             ],
             "summary_text": "Preserve offline operation.",
         }
+        if history_format == "document":
+            parent["messages"][0] = HumanMessage(content=[{"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "The implementation must use SQLite."}}])
         observed = []
         bound = []
         output = tmp_path / "decision.txt"

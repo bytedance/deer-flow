@@ -25,7 +25,7 @@ SNAPSHOT_SYSTEM_NOTE = (
 # Keep media as input blocks so vision/audio-capable child models can still use
 # the retained conversation. Provider reasoning/signature and tool-use blocks
 # are deliberately excluded; tool calls are rendered separately as inert text.
-_MEDIA_BLOCK_TYPES = frozenset({"image", "image_url", "audio", "input_audio", "video", "file"})
+_MEDIA_BLOCK_TYPES = frozenset({"image", "image_url", "audio", "input_audio", "video", "file", "document"})
 
 
 def _is_conversation_message(message: Any) -> bool:
