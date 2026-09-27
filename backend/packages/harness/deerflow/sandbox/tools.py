@@ -2053,6 +2053,17 @@ _CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
 # this is corrupt and must not bloat every sandbox command string.
 _CHANNEL_USER_ID_MAX_LEN = 256
 
+# Fixed env var exposing the authenticated DeerFlow user id to sandbox
+# commands, so skill scripts and the subprocesses they launch can scope their
+# work to the current user instead of guessing or hard-coding (#3919). An
+# identifier, not a secret.
+USER_ID_ENV = "DEERFLOW_USER_ID"
+
+# Same defensive bound as the channel identity: a real user id is short
+# (``make_safe_user_id`` output), so anything past this is corrupt and must not
+# bloat every sandbox command string.
+_USER_ID_MAX_LEN = 256
+
 
 def _is_windows() -> bool:
     return os.name == "nt"
@@ -2087,6 +2098,32 @@ def _channel_identity_prefix(runtime: Runtime) -> str | None:
     if isinstance(channel_user_id, str) and 0 < len(channel_user_id) <= _CHANNEL_USER_ID_MAX_LEN:
         return f"export {CHANNEL_USER_ID_ENV}={shlex.quote(channel_user_id)}; "
     return f"unset {CHANNEL_USER_ID_ENV}; "
+
+
+def _user_identity_prefix(runtime: Runtime) -> str:
+    """Build the command prefix that publishes the effective user id to bash.
+
+    Unlike :func:`_channel_identity_prefix`, this always returns a prefix.
+    ``resolve_runtime_user_id`` falls back to ``DEFAULT_USER_ID``, so there is
+    no "not applicable" run: every command is attributable to a user. Stating
+    the value on every command is also what keeps a skill script correct
+    regardless of what an earlier command exported into a reused shell session
+    — the same per-call discipline the channel identity needs.
+
+    - usable id (non-empty str within the length cap) → ``export VAR=<quoted>; ``
+    - unusable id (empty / non-str / over the cap) → ``unset VAR; ``
+
+    The id deliberately rides the command string instead of the
+    ``execute_command(env=...)`` channel: a non-empty ``env`` switches
+    ``AioSandbox`` to the ``bash.exec`` API (fresh session per call, image
+    >= 1.9.3 required), which is reserved for request-scoped secrets. The value
+    is an identifier, not a secret, so keeping it in the audit-visible command
+    string is fine.
+    """
+    user_id = resolve_runtime_user_id(runtime)
+    if isinstance(user_id, str) and 0 < len(user_id) <= _USER_ID_MAX_LEN:
+        return f"export {USER_ID_ENV}={shlex.quote(user_id)}; "
+    return f"unset {USER_ID_ENV}; "
 
 
 def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
@@ -2194,6 +2231,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         # never placed in the command string.
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         identity_prefix = _channel_identity_prefix(runtime)
+        user_prefix = _user_identity_prefix(runtime)
         github_env = _github_env_from_runtime(runtime)
         lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime))
         if github_env:
@@ -2210,8 +2248,8 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via
             # PowerShell/cmd.exe where `export` is not valid syntax.
-            if identity_prefix and not _is_windows():
-                command = identity_prefix + command
+            if not _is_windows():
+                command = user_prefix + (identity_prefix or "") + command
             try:
                 from deerflow.config.app_config import get_app_config
 
@@ -2234,8 +2272,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             )
         ensure_thread_directories_exist(runtime)
         command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
-        if identity_prefix:
-            command = identity_prefix + command
+        command = user_prefix + (identity_prefix or "") + command
         try:
             from deerflow.config.app_config import get_app_config
 

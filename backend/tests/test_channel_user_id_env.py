@@ -1,21 +1,28 @@
-"""Tests for exposing the IM-channel platform user id to sandbox commands (#3914).
+"""Tests for exposing caller identity to sandbox commands (#3914, #3919).
 
 Two halves:
 - Gateway: only an internally authenticated caller's top-level ``body.context``
   may supply ``channel_user_id``; free-form RunnableConfig values are cleared.
-- Sandbox: ``bash_tool`` exposes the id as the fixed env var
-  ``DEERFLOW_CHANNEL_USER_ID`` via an ``export`` prefix on the command string.
-  It must NOT ride the ``env=`` parameter: on ``AioSandbox`` a non-empty env
-  switches execution to the ``bash.exec`` API, which requires image >= 1.9.3
-  and abandons the persistent shell session — that channel is reserved for
-  request-scoped secrets.
+- Sandbox: ``bash_tool`` exposes both identities as fixed env vars via an
+  ``export`` prefix on the command string — ``DEERFLOW_CHANNEL_USER_ID`` for the
+  IM platform sender (#3914) and ``DEERFLOW_USER_ID`` for the authenticated
+  DeerFlow user (#3919). Neither must ride the ``env=`` parameter: on
+  ``AioSandbox`` a non-empty env switches execution to the ``bash.exec`` API,
+  which requires image >= 1.9.3 and abandons the persistent shell session —
+  that channel is reserved for request-scoped secrets.
+
+The two differ in applicability: the channel id is absent for non-IM runs so
+its prefix is skipped, whereas the user id always resolves (falling back to
+``default``) so its prefix is always emitted, and it comes first.
 """
 
 from types import SimpleNamespace
 
 from deerflow.sandbox.tools import (
     CHANNEL_USER_ID_ENV,
+    USER_ID_ENV,
     _channel_identity_prefix,
+    _user_identity_prefix,
     bash_tool,
 )
 
@@ -25,11 +32,16 @@ _THREAD_DATA = {
     "outputs_path": "/tmp/deer-flow/threads/t1/user-data/outputs",
 }
 
+# Pinned so expected command strings do not depend on whichever identity the
+# ambient test fixture happens to install.
+_USER_ID = "u-test"
+_USER_PREFIX = f"export {USER_ID_ENV}={_USER_ID}; "
+
 
 def _aio_runtime(context: dict) -> SimpleNamespace:
     return SimpleNamespace(
         state={"sandbox": {"sandbox_id": "aio-sandbox-1"}, "thread_data": _THREAD_DATA.copy()},
-        context=context,
+        context={"user_id": _USER_ID, **context},
     )
 
 
@@ -108,13 +120,15 @@ class TestBashToolChannelIdentityPrefix:
         sandbox = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "ou_feishu_123"}))
 
         assert len(sandbox.calls) == 1
-        assert sandbox.calls[0]["command"] == f"export {CHANNEL_USER_ID_ENV}=ou_feishu_123; cd /mnt/user-data/workspace; echo hi"
+        assert sandbox.calls[0]["command"] == f"{_USER_PREFIX}export {CHANNEL_USER_ID_ENV}=ou_feishu_123; cd /mnt/user-data/workspace; echo hi"
         assert sandbox.calls[0]["env"] is None
 
     def test_no_channel_user_id_omits_identity_prefix(self, monkeypatch):
         sandbox = _run_bash(monkeypatch, _aio_runtime({"thread_id": "t1"}))
 
-        assert sandbox.calls[0]["command"] == "cd /mnt/user-data/workspace; echo hi"
+        # The user id is always present, so only the channel half is skipped.
+        assert sandbox.calls[0]["command"] == f"{_USER_PREFIX}cd /mnt/user-data/workspace; echo hi"
+        assert CHANNEL_USER_ID_ENV not in sandbox.calls[0]["command"]
         assert sandbox.calls[0]["env"] is None
 
     def test_per_call_identity_follows_current_context(self, monkeypatch):
@@ -134,7 +148,7 @@ class TestBashToolChannelIdentityPrefix:
         assert command.endswith("; cd /mnt/user-data/workspace; echo hi")
         # shlex.quote wraps the value; the raw injection payload must not appear
         # as executable syntax outside the quoted region.
-        assert "export " + CHANNEL_USER_ID_ENV + "='x'\"'\"'; rm -rf /tmp/y; '\"'\"''; cd /mnt/user-data/workspace; echo hi" == command
+        assert _USER_PREFIX + "export " + CHANNEL_USER_ID_ENV + "='x'\"'\"'; rm -rf /tmp/y; '\"'\"''; cd /mnt/user-data/workspace; echo hi" == command
 
     def test_secrets_and_identity_compose(self, monkeypatch):
         """Active skill secrets keep the env= channel; the identity keeps the
@@ -149,7 +163,7 @@ class TestBashToolChannelIdentityPrefix:
 
         call = sandbox.calls[0]
         assert call["env"] == {"ERP_TOKEN": "secret-value"}
-        assert call["command"] == f"export {CHANNEL_USER_ID_ENV}=ou_1; cd /mnt/user-data/workspace; echo hi"
+        assert call["command"] == f"{_USER_PREFIX}export {CHANNEL_USER_ID_ENV}=ou_1; cd /mnt/user-data/workspace; echo hi"
         assert "secret-value" not in call["command"]
 
     def test_non_im_run_leaves_command_untouched(self):
@@ -176,8 +190,8 @@ class TestBashToolChannelIdentityPrefix:
         a = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "sender-a"}))
         b = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "b" * 5000}))
 
-        assert a.calls[0]["command"] == f"export {CHANNEL_USER_ID_ENV}=sender-a; cd /mnt/user-data/workspace; echo hi"
-        assert b.calls[0]["command"] == f"unset {CHANNEL_USER_ID_ENV}; cd /mnt/user-data/workspace; echo hi"
+        assert a.calls[0]["command"] == f"{_USER_PREFIX}export {CHANNEL_USER_ID_ENV}=sender-a; cd /mnt/user-data/workspace; echo hi"
+        assert b.calls[0]["command"] == f"{_USER_PREFIX}unset {CHANNEL_USER_ID_ENV}; cd /mnt/user-data/workspace; echo hi"
         assert b.calls[0]["env"] is None
 
     def test_windows_local_sandbox_skips_prefix(self, monkeypatch):
@@ -186,7 +200,7 @@ class TestBashToolChannelIdentityPrefix:
         every IM-channel command."""
         runtime = SimpleNamespace(
             state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
-            context={"channel_user_id": "ou_1", "thread_id": "t1"},
+            context={"channel_user_id": "ou_1", "thread_id": "t1", "user_id": _USER_ID},
         )
         sandbox = _CapturingSandbox()
         monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
@@ -202,7 +216,7 @@ class TestBashToolChannelIdentityPrefix:
     def test_posix_local_sandbox_gets_prefix(self, monkeypatch):
         runtime = SimpleNamespace(
             state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
-            context={"channel_user_id": "ou_1", "thread_id": "t1"},
+            context={"channel_user_id": "ou_1", "thread_id": "t1", "user_id": _USER_ID},
         )
         sandbox = _CapturingSandbox()
         monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
@@ -214,5 +228,108 @@ class TestBashToolChannelIdentityPrefix:
 
         assert len(sandbox.calls) == 1
         command = sandbox.calls[0]["command"]
-        assert command.startswith(f"export {CHANNEL_USER_ID_ENV}=ou_1; ")
+        assert command.startswith(f"{_USER_PREFIX}export {CHANNEL_USER_ID_ENV}=ou_1; ")
         assert command.endswith("echo hi")
+
+
+class TestBashToolUserIdentityPrefix:
+    """#3919 — the authenticated user id is published to every bash command."""
+
+    def test_user_id_exported_and_env_stays_none(self, monkeypatch):
+        """The id rides the command string; env must stay None so AioSandbox
+        keeps the persistent-shell path (same reason as the channel id)."""
+        sandbox = _run_bash(monkeypatch, _aio_runtime({"thread_id": "t1"}))
+
+        assert len(sandbox.calls) == 1
+        assert sandbox.calls[0]["command"] == f"{_USER_PREFIX}cd /mnt/user-data/workspace; echo hi"
+        assert sandbox.calls[0]["env"] is None
+
+    def test_prefix_emitted_even_without_an_explicit_user(self, monkeypatch):
+        """A run that carries no ``user_id`` still resolves one (``default``), so
+        the variable is always defined rather than silently absent."""
+        runtime = SimpleNamespace(
+            state={"sandbox": {"sandbox_id": "aio-sandbox-1"}, "thread_data": _THREAD_DATA.copy()},
+            context={"thread_id": "t1"},
+        )
+        sandbox = _run_bash(monkeypatch, runtime)
+
+        assert sandbox.calls[0]["command"].startswith(f"export {USER_ID_ENV}=")
+
+    def test_user_prefix_precedes_channel_prefix(self, monkeypatch):
+        """Both are POSIX exports; the user id is the outer one, so a reader sees
+        which user the command runs as before which IM sender it came from."""
+        sandbox = _run_bash(monkeypatch, _aio_runtime({"channel_user_id": "ou_1"}))
+
+        command = sandbox.calls[0]["command"]
+        assert command.startswith(_USER_PREFIX)
+        assert command.index(USER_ID_ENV) < command.index(CHANNEL_USER_ID_ENV)
+
+    def test_value_is_shell_quoted(self, monkeypatch):
+        """A hostile user id must not be able to inject shell syntax."""
+        sandbox = _run_bash(monkeypatch, _aio_runtime({"user_id": "x'; rm -rf /tmp/y; '"}))
+
+        command = sandbox.calls[0]["command"]
+        assert command.endswith("; cd /mnt/user-data/workspace; echo hi")
+        assert "export " + USER_ID_ENV + "='x'\"'\"'; rm -rf /tmp/y; '\"'\"''; cd /mnt/user-data/workspace; echo hi" == command
+
+    def test_unusable_value_emits_unset_not_none(self, monkeypatch):
+        """A corrupt id must clear the variable rather than skip the prefix, so a
+        command cannot inherit a stale value from a reused shell session."""
+        for bad in ("", 123, "x" * 5000, None):
+            monkeypatch.setattr(
+                "deerflow.sandbox.tools.resolve_runtime_user_id",
+                lambda runtime, _bad=bad: _bad,
+            )
+            prefix = _user_identity_prefix(SimpleNamespace(context={}))
+            assert prefix == f"unset {USER_ID_ENV}; ", f"value={bad!r}"
+
+    def test_composes_with_channel_prefix_and_secrets(self, monkeypatch):
+        """Secrets keep the env= channel; both identities keep the command-string
+        channel. They must not mix."""
+        runtime = _aio_runtime(
+            {
+                "channel_user_id": "ou_1",
+                "__active_skill_secrets": {"ERP_TOKEN": "secret-value"},
+            }
+        )
+        sandbox = _run_bash(monkeypatch, runtime)
+
+        call = sandbox.calls[0]
+        assert call["env"] == {"ERP_TOKEN": "secret-value"}
+        assert call["command"] == f"{_USER_PREFIX}export {CHANNEL_USER_ID_ENV}=ou_1; cd /mnt/user-data/workspace; echo hi"
+        assert "secret-value" not in call["command"]
+
+    def test_posix_local_sandbox_gets_user_prefix(self, monkeypatch):
+        runtime = SimpleNamespace(
+            state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+            context={"thread_id": "t1", "user_id": _USER_ID},
+        )
+        sandbox = _CapturingSandbox()
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+        monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+        monkeypatch.setattr("deerflow.sandbox.tools._is_windows", lambda: False)
+
+        bash_tool.func(runtime=runtime, description="test", command="echo hi")
+
+        assert len(sandbox.calls) == 1
+        assert sandbox.calls[0]["command"].startswith(_USER_PREFIX)
+
+    def test_windows_local_sandbox_skips_user_prefix(self, monkeypatch):
+        """POSIX ``export`` is invalid under the Windows local sandbox, so the
+        user id is skipped there too rather than breaking every command."""
+        runtime = SimpleNamespace(
+            state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+            context={"thread_id": "t1", "user_id": _USER_ID},
+        )
+        sandbox = _CapturingSandbox()
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+        monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+        monkeypatch.setattr("deerflow.sandbox.tools._is_windows", lambda: True)
+
+        bash_tool.func(runtime=runtime, description="test", command="echo hi")
+
+        assert len(sandbox.calls) == 1
+        assert USER_ID_ENV not in sandbox.calls[0]["command"]
+        assert "export" not in sandbox.calls[0]["command"]
