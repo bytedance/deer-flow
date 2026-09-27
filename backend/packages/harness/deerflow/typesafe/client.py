@@ -20,9 +20,9 @@ Consequences worth keeping in mind when editing:
   pool here (design §3.3).
 * **Timeouts are budgets, not guarantees.** The async path cancels the in-flight
   request through ``asyncio.timeout``. The sync path cannot preempt a blocking
-  call, so it checks the deadline after the response headers, around the body
-  read, and again after parsing — and drops a result that arrived late instead of
-  adopting it.
+  call, so it checks the deadline after the response headers, before each piece of
+  the body read, and again after parsing — and drops a result that arrived late
+  instead of adopting it.
 * **A question-level failure is data, not an exception** (design §2.3). One
   malformed answer must not discard the other valid answers in the same response;
   the consumer decides what "no result for this question" means.
@@ -80,10 +80,6 @@ MAX_RESPONSE_BYTES = 64 * 1024
 #: number that matters. A response that carries a non-identity
 #: ``Content-Encoding`` anyway is rejected rather than decoded.
 _ACCEPT_ENCODING = "identity"
-
-#: Bytes pulled per read. Bounds the memory one chunk can add, and lets the cap fire
-#: in bounded steps instead of after the whole body is buffered.
-_READ_CHUNK_BYTES = 8 * 1024
 
 #: A callable returning a fresh transport, because httpx closes the transport it
 #: was given when its client closes.
@@ -324,7 +320,7 @@ class TypeSafeClient:
                 if response.status_code != _OK_STATUS:
                     raise self._status_error(response.status_code)
                 self._check_budget(deadline_at)
-                body = _read_bounded(response)
+                body = _read_bounded(response, lambda: self._check_budget(deadline_at))
                 self._check_budget(deadline_at)
                 answers = self._parse(body, questions)
                 self._check_budget(deadline_at)
@@ -348,7 +344,7 @@ class TypeSafeClient:
                 if response.status_code != _OK_STATUS:
                     raise self._status_error(response.status_code)
                 self._check_budget(deadline_at)
-                body = await _aread_bounded(response)
+                body = await _aread_bounded(response, lambda: self._check_budget(deadline_at))
                 self._check_budget(deadline_at)
                 answers = self._parse(body, questions)
                 self._check_budget(deadline_at)
@@ -425,7 +421,7 @@ class TypeSafeClient:
         await asyncio.sleep(min(self._connection.retry_backoff * 2 ** (attempt - 1), self._remaining(deadline_at)))
 
 
-def _read_bounded(response: httpx.Response) -> bytes:
+def _read_bounded(response: httpx.Response, check_budget: Callable[[], None]) -> bytes:
     """The response body, refused past ``MAX_RESPONSE_BYTES`` and never decoded.
 
     The endpoint is treated as potentially hostile (module docstring), so a 200 is
@@ -434,15 +430,22 @@ def _read_bounded(response: httpx.Response) -> bytes:
     arrive rather than after the whole body is buffered. ``iter_bytes`` is the
     streamed *and* preloaded view (an injected transport may hand over a complete
     response), which is safe here because a non-identity encoding never gets this far.
+
+    ``check_budget`` runs before every piece. The sync path cannot preempt the read
+    it is already blocked in, so this is what keeps a dripping body from outliving
+    the deadline: the pieces are the transport's own reads (no re-chunking, which
+    would pull many reads inside one piece before the check could run), so the
+    caller waits at most one read past ``deadline_seconds`` instead of one per
+    ``MAX_RESPONSE_BYTES`` worth of them.
     """
     _reject_content_encoding(response)
-    return _accumulate(response.iter_bytes(_READ_CHUNK_BYTES))
+    return _accumulate(response.iter_bytes(), check_budget)
 
 
-async def _aread_bounded(response: httpx.Response) -> bytes:
+async def _aread_bounded(response: httpx.Response, check_budget: Callable[[], None]) -> bytes:
     """The async variant of :func:`_read_bounded`."""
     _reject_content_encoding(response)
-    return await _aaccumulate(response.aiter_bytes(_READ_CHUNK_BYTES))
+    return await _aaccumulate(response.aiter_bytes(), check_budget)
 
 
 def _reject_content_encoding(response: httpx.Response) -> None:
@@ -454,18 +457,20 @@ def _reject_content_encoding(response: httpx.Response) -> None:
         raise TypeSafeError(f"TypeSafe response carried a non-identity Content-Encoding ({recordable_model(encoding)})", cause=CAUSE_INVALID_RESPONSE)
 
 
-def _accumulate(chunks: Iterable[bytes]) -> bytes:
+def _accumulate(chunks: Iterable[bytes], check_budget: Callable[[], None]) -> bytes:
     body = bytearray()
     for chunk in chunks:
+        check_budget()
         body += chunk
         if len(body) > MAX_RESPONSE_BYTES:
             raise TypeSafeError(f"TypeSafe response exceeded {MAX_RESPONSE_BYTES} bytes", cause=CAUSE_INVALID_RESPONSE)
     return bytes(body)
 
 
-async def _aaccumulate(chunks: AsyncIterable[bytes]) -> bytes:
+async def _aaccumulate(chunks: AsyncIterable[bytes], check_budget: Callable[[], None]) -> bytes:
     body = bytearray()
     async for chunk in chunks:
+        check_budget()
         body += chunk
         if len(body) > MAX_RESPONSE_BYTES:
             raise TypeSafeError(f"TypeSafe response exceeded {MAX_RESPONSE_BYTES} bytes", cause=CAUSE_INVALID_RESPONSE)

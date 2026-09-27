@@ -16,7 +16,9 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import time
 import traceback
+from collections.abc import AsyncIterator, Iterator
 
 import httpx
 import pytest
@@ -38,7 +40,7 @@ from deerflow.typesafe.client import (
     wire_size,
 )
 from deerflow.typesafe.connection import resolve_connection
-from deerflow.typesafe.errors import CAUSE_INVALID_RESPONSE, TypeSafeError
+from deerflow.typesafe.errors import CAUSE_DEADLINE, CAUSE_INVALID_RESPONSE, TypeSafeError
 
 _API_KEY = "shared-client-test-key"
 _FIRST = "first_question"
@@ -275,8 +277,8 @@ class TestTransportFailureChain:
 # --- the reply is bounded and never decoded --------------------------------
 
 
-def _client_for(handler) -> TypeSafeClient:
-    connection = resolve_connection(settings={"api_key": _API_KEY, "max_attempts": 1}, configuration_source="tests.typesafe")
+def _client_for(handler, **settings) -> TypeSafeClient:
+    connection = resolve_connection(settings={"api_key": _API_KEY, "max_attempts": 1, **settings}, configuration_source="tests.typesafe")
     return TypeSafeClient(connection, transport_factory=lambda: httpx.MockTransport(handler))
 
 
@@ -367,3 +369,78 @@ class TestBoundedResponse:
             self._ask(_client_for(handler), as_async=as_async)
 
         assert excinfo.value.cause == CAUSE_INVALID_RESPONSE
+
+
+# --- the deadline is a budget on the read too ------------------------------
+
+
+class _DrippingStream(httpx.SyncByteStream):
+    """A body that arrives in pieces, each one a fraction of the deadline.
+
+    ``deadline_seconds`` is a budget, and the sync path cannot preempt the read it
+    is already blocked in — so an endpoint that stays just under the read timeout
+    holds the caller for as long as it keeps dripping. Counting the pieces the
+    client asked for is what separates "stopped at the deadline" from "read the
+    whole body and only then noticed the budget was gone".
+    """
+
+    def __init__(self, pieces: list[bytes], delay: float) -> None:
+        self.pieces = pieces
+        self.delay = delay
+        self.pulled = 0
+
+    def __iter__(self) -> Iterator[bytes]:
+        for piece in self.pieces:
+            time.sleep(self.delay)
+            self.pulled += 1
+            yield piece
+
+
+class _AsyncDrippingStream(httpx.AsyncByteStream):
+    """The async twin of :class:`_DrippingStream` (its deadline is a cancellation)."""
+
+    def __init__(self, pieces: list[bytes], delay: float) -> None:
+        self.pieces = pieces
+        self.delay = delay
+        self.pulled = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for piece in self.pieces:
+            await asyncio.sleep(self.delay)
+            self.pulled += 1
+            yield piece
+
+
+class TestDeadlineBudget:
+    """The deadline covers the body read, not only the response headers.
+
+    The body is a valid envelope delivered in slow pieces, so the outcome can only
+    be the deadline: a parse failure would mean the client read past its budget.
+    """
+
+    _DEADLINE = 0.2
+    _DELAY = 0.05
+    _PIECES = 24
+
+    @pytest.mark.parametrize("as_async", [False, True], ids=["sync", "async"])
+    def test_a_dripping_body_stops_at_the_deadline(self, as_async):
+        envelope = json.dumps(_response({_GATE_QUESTION: {"type": "noul", "noul": 0.1}})).encode()
+        body = envelope + b" " * (-len(envelope) % 8)
+        pieces = [body[index : index + 8] for index in range(0, len(body), 8)]
+        pieces += [b" "] * (self._PIECES - len(pieces))
+        assert len(pieces) == self._PIECES
+        stream = _AsyncDrippingStream(pieces, self._DELAY) if as_async else _DrippingStream(pieces, self._DELAY)
+        client = _client_for(lambda request: httpx.Response(200, stream=stream), deadline_seconds=self._DEADLINE)
+        state = {"tool_call": {"name": "bash", "arguments": "{}"}}
+
+        started = time.monotonic()
+        with pytest.raises(TypeSafeError) as excinfo:
+            if as_async:
+                asyncio.run(client.aask(state, {_GATE_QUESTION: _NOUL}))
+            else:
+                client.ask(state, {_GATE_QUESTION: _NOUL})
+        elapsed = time.monotonic() - started
+
+        assert excinfo.value.cause == CAUSE_DEADLINE
+        assert stream.pulled < self._PIECES, "the read stopped at the deadline instead of consuming the body"
+        assert elapsed < self._PIECES * self._DELAY, "the caller was held for the whole body"

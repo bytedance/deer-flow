@@ -31,6 +31,10 @@ a body that carries a non-identity `Content-Encoding`, and stops past
 endpoint that answers with something other than an answer set cannot be expanded
 into memory or accepted as a verdict. Deep nesting is mapped too — `json.loads`
 raises `RecursionError`, not `ValueError`, and it must not escape this taxonomy.
+The deadline covers the read, not only the headers: the sync path, which cannot
+preempt the read it is blocked in, re-checks the budget before each transport read,
+so a body that drips just under the read timeout cannot hold the caller for the
+whole of `MAX_RESPONSE_BYTES` past `deadline_seconds`.
 
 Limits and secrets must not move. `max_state_chars` stays a character count in
 every consumer — `wire_size` reports bytes and replaces no limit, and one CJK
