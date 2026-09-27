@@ -108,6 +108,43 @@ class McpTaskToolCaller:
         inside the Agent run that carries the secrets, while status and cancel
         run after that run ended.
         """
+        from deerflow.mcp.user_config import is_personal_server_name, load_user_mcp_config
+
+        if is_personal_server_name(server_name) and server_name not in self._extensions_config.mcp_servers:
+            personal = await asyncio.to_thread(load_user_mcp_config, user_id)
+            if server_name not in personal.get_enabled_mcp_servers():
+                raise LookupError("Personal MCP task connection is missing, disabled or changed")
+            caller = McpTaskToolCaller(personal)
+            return await caller._call_configured_tool(
+                server_name=server_name,
+                tool_name=tool_name,
+                arguments=arguments,
+                user_id=user_id,
+                thread_id=thread_id,
+                thread_incarnation=thread_incarnation,
+                request_scoped_headers=request_scoped_headers,
+            )
+        return await self._call_configured_tool(
+            server_name=server_name,
+            tool_name=tool_name,
+            arguments=arguments,
+            user_id=user_id,
+            thread_id=thread_id,
+            thread_incarnation=thread_incarnation,
+            request_scoped_headers=request_scoped_headers,
+        )
+
+    async def _call_configured_tool(
+        self,
+        *,
+        server_name: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        user_id: str,
+        thread_id: str,
+        thread_incarnation: str | None,
+        request_scoped_headers: bool,
+    ) -> Any:
         is_background_call = not request_scoped_headers
         interceptors = self._interceptors if is_background_call else self._submit_interceptors
         server_config = self._extensions_config.get_enabled_mcp_servers().get(server_name)

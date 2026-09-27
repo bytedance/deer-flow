@@ -202,10 +202,9 @@ archive/search behavior, read [Thread lifecycle invariants](../../docs/THREAD_LI
 It owns lineage and settled-checkpoint rules, legacy fallback boundaries, archive
 filtering before pagination, owner isolation, and activity-time preservation.
 
-Capability installation IDs must be unique for MCP create/replace/state writes.
-Single-server DELETE keeps schema validation but allows residual identity
-collisions, so legacy duplicate groups can be repaired incrementally. Runtime
-explicit selections still exclude ambiguous identities until repaired.
+MCP create/replace/state writes require unique installation IDs. DELETE validates
+schema but permits residual legacy ID collisions. Explicit selections exclude
+ambiguous IDs until repaired.
 
 Capability skill discovery (`/api/capabilities/installations/skills`) reuses
 `routers/skills.py::_filter_visible_skills` after its off-thread storage read.
@@ -225,3 +224,5 @@ model, while provider failures honor `authorization.fail_closed`.
 Skill listing authorization mirrors the models pattern: `routers/skills.py` routes resolve `(provider, principal)` through `authz.py::resolve_skill_authorization()` — a thin sibling of `resolve_model_authorization`, both delegating to the shared `_resolve_route_scoped_authorization` core — and the shared `_filter_visible_skills` helper filters the user-scoped catalog (public + caller's custom skills) through `filter_resources(principal, "skill", ...)` by name. Three user-facing surfaces apply it: `GET /api/skills` (the frontend skill list / slash-command autocomplete), `GET /api/skills/custom`, and `GET /api/skills/{name}` — the detail endpoint returns the standard 404 for an invisible skill so it cannot become an existence oracle the filtered list closed (`get_model`'s 403 is an execution decision via `authorize("model", "use")`, which has no skills equivalent in this layer). Anonymous callers are unfiltered (mirroring `list_models`), and provider resolution/decision errors follow `authorization.fail_closed` (fail-closed → empty listing / 404, fail-open → full listing). Skill management endpoints (`install`/`upload`/`reload`/custom-skill CRUD) stay `require_admin_user`-gated, and runtime activation authorization is a separate layer. The built-in RBAC provider maps this to the per-role `skills` policy key. Tests: `tests/test_skills_listing_authorization.py`.
 
 Batch workers pin `app.state.extensions`; never persist snapshots.
+
+Personal MCP uses owner-only files/calls; platform MCP stays shared.

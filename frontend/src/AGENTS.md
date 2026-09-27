@@ -196,3 +196,5 @@ are sent on save. Custom-agent chat derives its initial selection from the saved
 binding; explicit page-local overrides survive new-thread route replacement and
 reset on conversation changes. Gateway supplies defaults for clients without a
 selector; frontend visibility must not become a runtime enforcement boundary.
+
+MCP editor requests use the personal configuration API. Query keys for personal MCP config and capability installations include the authenticated user ID; remount the editor when that ID changes. Deployment installations remain read-only in the directory.

@@ -76,7 +76,7 @@ export function PluginGallery({ query }: { query: string }) {
   const copy = t.capabilities.directory;
   const labels = capabilityCopy(locale);
   const { user } = useAuth();
-  const canManage = user?.system_role === "admin" && !isStaticWebsiteOnly();
+  const canManage = !!user && !isStaticWebsiteOnly();
   const directory = useCapabilityCatalog();
   const definitions = directory.data ?? [];
   const adapterNames = [
@@ -86,7 +86,11 @@ export function PluginGallery({ query }: { query: string }) {
         .filter((name) => name !== "guide"),
     ),
   ];
-  const states = useQueries({ queries: adapterNames.map(installationQuery) });
+  const states = useQueries({
+    queries: adapterNames.map((adapter) =>
+      installationQuery(adapter, user?.id),
+    ),
+  });
   const client = useQueryClient();
   const [filter, setFilter] = useState("all");
   const [category, setCategory] = useState<PluginCategory | "all">("all");
@@ -165,48 +169,47 @@ export function PluginGallery({ query }: { query: string }) {
         ),
       };
     });
-  // Non-admins see safe installation projections, not the administrator's raw config editor.
-  if (!canManage)
-    for (const item of installations.filter((item) => item.adapter === "mcp")) {
-      const manifest = definitions.find(
-        (plugin) => plugin.id === item.plugin_id,
-      );
-      catalog.push({
-        id: item.id,
-        category: manifest?.category ?? "custom",
-        search: `${item.name} ${item.description}`,
-        installed: true,
-        node: (
-          <PluginRow
-            name={item.name}
-            description={item.description}
-            icon={
-              <PluginIcon
-                name={item.name}
-                icon={item.icon}
-                asset={manifest?.icon}
-                capabilityId={manifest?.id}
-              />
-            }
-            label={
-              item.selectable === false
-                ? labels.unavailable
-                : item.enabled
-                  ? t.capabilities.enabled
-                  : t.capabilities.disabled
-            }
-          >
-            <span className="text-muted-foreground text-xs">
-              {item.auth_status === "required"
-                ? labels.required
-                : item.auth_status === "configured"
-                  ? labels.configured
-                  : labels.unknown}
-            </span>
-          </PluginRow>
-        ),
-      });
-    }
+  // Deployment entries remain read-only; the editor manages personal connections.
+  for (const item of installations.filter(
+    (item) => item.adapter === "mcp" && item.scope !== "user",
+  )) {
+    const manifest = definitions.find((plugin) => plugin.id === item.plugin_id);
+    catalog.push({
+      id: item.id,
+      category: manifest?.category ?? "custom",
+      search: `${item.name} ${item.description}`,
+      installed: true,
+      node: (
+        <PluginRow
+          name={item.name}
+          description={item.description}
+          icon={
+            <PluginIcon
+              name={item.name}
+              icon={item.icon}
+              asset={manifest?.icon}
+              capabilityId={manifest?.id}
+            />
+          }
+          label={
+            item.selectable === false
+              ? labels.unavailable
+              : item.enabled
+                ? t.capabilities.enabled
+                : t.capabilities.disabled
+          }
+        >
+          <span className="text-muted-foreground text-xs">
+            {item.auth_status === "required"
+              ? labels.required
+              : item.auth_status === "configured"
+                ? labels.configured
+                : labels.unknown}
+          </span>
+        </PluginRow>
+      ),
+    });
+  }
   const toolbar = (
     <Tabs value={filter} onValueChange={setFilter}>
       <TabsList>
@@ -252,6 +255,7 @@ export function PluginGallery({ query }: { query: string }) {
       {directory.isLoading && <p role="status">{t.common.loading}</p>}
       {canManage ? (
         <MCPPluginManager
+          key={user?.id}
           query={query}
           toolbar={toolbar}
           category={category}
@@ -287,10 +291,14 @@ export function PluginGallery({ query }: { query: string }) {
               </DialogHeader>
               {Settings ? (
                 <Settings
-                  key={selected.id}
+                  key={`${user?.id}:${selected.id}`}
                   plugin={selected}
                   onSaved={close}
-                  canManage={canManage}
+                  canManage={
+                    canManage &&
+                    (selected.adapter !== "lark" ||
+                      user?.system_role === "admin")
+                  }
                 />
               ) : (
                 <p className="text-muted-foreground text-sm leading-6">

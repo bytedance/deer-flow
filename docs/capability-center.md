@@ -35,7 +35,7 @@ loader is separate from this user-facing directory.
 Three entries ship working API clients with the harness, using the `business`
 configuration adapter and the existing stdio MCP runtime. No separate service,
 package download, or Dify runtime is needed. Configure them under **Capability
-Center → Plugins** as an administrator:
+Center → Plugins** using your own account:
 
 | Plugin | Configuration | Tools |
 | --- | --- | --- |
@@ -51,9 +51,11 @@ DeerFlow's incoming IM channels. Existing manually configured CLI connections
 are not rewritten when the catalog entry changes.
 
 Configuration saves credentials without sending a message or creating a CRM
-record. These deployment credentials are shared by runs allowed to use the
-configured MCP server; they are not personal OAuth connections. Credentials
-remain in the existing MCP `env` configuration and its masked admin editor.
+record. Connections created in the web interface are personal: credentials,
+enabled state and edits belong to the signed-in user, including administrators.
+They are stored under `.deer-flow/users/<user_id>/integrations/mcp.json` and
+remain masked in the editor. Existing deployment connections in
+`extensions_config.json` stay shared and are not copied to any personal account.
 Edit, toggle and delete the configured entry using the existing MCP controls.
 An Agent selects these connections through **Plugins and skills**, just like
 other MCP servers. New tool selection applies on the next run.
@@ -118,7 +120,7 @@ only link to setup instructions; listing them never claims they are installed.
 The catalog version describes this manifest, not a remotely detected server
 version. A catalog listing does not install, enable, or authorize anything.
 
-The first MCP form supports HTTP endpoints and a deployment Authorization header.
+The MCP form saves a personal HTTP endpoint and Authorization header.
 The advanced JSON editor retains stdio, SSE, OAuth token configuration, and
 per-user credential mappings supported by the existing MCP runtime. The presence
 of `oauth` in a manifest is not a new interactive OAuth implementation. Lark
@@ -204,3 +206,33 @@ Agent persistence, delegated selection, and a real local stdio MCP invocation.
 Browser tests cover catalog installation, Agent selection save/reopen, existing
 icon editing, filtering, and desktop/mobile settings layouts. Browser fixture
 screenshots show sample integrations; they are not production default settings.
+
+## Personal and deployment MCP configuration
+
+`config.yaml` tools and existing `extensions_config.json` MCP servers remain
+platform-provided capabilities. The administrator-only `/api/mcp/config` API
+continues to manage deployment MCP configuration.
+
+The web editor uses `/api/mcp/personal/config`: GET reads only the authenticated
+user's definitions; POST `/servers`, PUT `/server`, PATCH and DELETE
+`/servers/{name}` manage that same user's file. No caller-supplied user ID selects
+the owner. Catalog installation accepts `scope: "user"`; catalog discovery
+accepts `scope=user` or `scope=all` (deployment plus the caller's connections).
+The default API scope remains deployment for existing integrations.
+
+Personal files use the existing atomic file writer and cross-process lock. Keep
+`DEER_FLOW_HOME` on persistent storage; multiple Gateway workers must share it.
+Personal values are literal and cannot read deployment environment variables.
+A missing personal connection never falls back to a same-named shared one.
+Personal tools are discovered per run, outside the process-wide platform cache.
+Calls check ownership and the current stored revision. Credential edits, disable
+and delete invalidate already assembled personal tools; restart the run after
+an edit. Durable tasks bind the same owner and connection revision, including
+after recovery; changing that connection blocks its pending remote calls until
+the original configuration is restored.
+
+Allowing personal configuration does not grant host execution privileges:
+ordinary users may configure public HTTP/SSE endpoints and the fixed bundled
+business launchers. Arbitrary stdio commands, internal endpoints and OAuth token
+endpoints still require an administrator. Public endpoints are checked again on
+HTTP requests, with redirects and environment proxies disabled.

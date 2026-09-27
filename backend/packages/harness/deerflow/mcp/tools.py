@@ -834,7 +834,7 @@ def _configure_task_tools_for_server(
     return configured
 
 
-async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> list[BaseTool]:
+async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, personal_user_id: str | None = None) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
@@ -864,7 +864,17 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> li
         # reflected when initializing MCP tools. Callers that need to prove which
         # revision produced these tools pass the instance they snapshotted instead.
         extensions_config = ExtensionsConfig.from_file()
-    validate_mcp_task_config_snapshot(extensions_config)
+    if personal_user_id is None:
+        validate_mcp_task_config_snapshot(extensions_config)
+    else:
+        from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
+        from deerflow.mcp.user_config import load_user_mcp_config
+
+        current = await asyncio.to_thread(load_user_mcp_config, personal_user_id)
+        if current != extensions_config:
+            raise McpTaskConfigurationError("Personal MCP configuration changed during discovery; retry the run")
+        if any(server.task_toolsets for server in current.mcp_servers.values()) and not is_mcp_task_runtime_available():
+            raise McpTaskConfigurationError("Personal MCP task toolsets require the platform's durable task runtime")
     servers_config = build_servers_config(extensions_config)
 
     if not servers_config:

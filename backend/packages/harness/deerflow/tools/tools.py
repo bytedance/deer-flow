@@ -262,6 +262,17 @@ def get_available_tools(
                     # MCP pays no config-hashing or discovery cost, while one that
                     # did still checks the existing cache for staleness.
                     refresh_mcp_cache_if_active()
+                from deerflow.mcp.user_tools import get_user_mcp_tools
+
+                try:
+                    personal_tools, personal_config = get_user_mcp_tools()
+                except Exception as exc:
+                    # Invalid personal credentials must neither be logged nor
+                    # bypass explicit selection of the platform tools.
+                    logger.warning("Could not load personal MCP tools (%s)", type(exc).__name__)
+                    personal_tools, personal_config = [], ExtensionsConfig()
+                mcp_tools = [*mcp_tools, *personal_tools]
+                extensions_config = extensions_config.model_copy(update={"mcp_servers": {**extensions_config.mcp_servers, **personal_config.mcp_servers}})
                 if mcp_plugins is not None:
                     from deerflow.capabilities.runtime import filter_mcp_plugins
 

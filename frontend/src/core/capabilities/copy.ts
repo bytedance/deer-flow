@@ -8,7 +8,7 @@ const en = {
   webhook_key: "Robot webhook key (the key parameter in its URL)",
   save: "Save configuration",
   accountHint:
-    "These are deployment credentials managed by the administrator. Personal authorization, when supported, uses the integration's account flow.",
+    "This configuration is saved to your account and is only used by your runs.",
   saved: "Configuration saved",
   unknown: "Not checked",
   required: "Account required",
@@ -39,8 +39,7 @@ const zh: typeof en = {
   sign_secret: "机器人加签密钥",
   webhook_key: "机器人 Webhook 密钥（地址中的 key 参数）",
   save: "保存配置",
-  accountHint:
-    "这里配置的是由管理员管理的部署凭据。支持个人授权的集成，通过其账号流程连接。",
+  accountHint: "这里的配置仅保存到你的账号，其他用户无法查看或使用。",
   saved: "配置已保存",
   unknown: "未检测",
   required: "需要连接账号",

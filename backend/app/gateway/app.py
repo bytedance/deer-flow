@@ -40,6 +40,7 @@ from app.gateway.routers import (
     mcp_tasks,
     memory,
     models,
+    personal_mcp,
     plugins,
     project_documents,
     project_thread_files,
@@ -1024,6 +1025,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # MCP API is mounted at /api/mcp
     app.include_router(capabilities.router)
     app.include_router(mcp.router)
+    app.include_router(personal_mcp.router)
 
     # Durable MCP tasks are scoped to their owning thread.
     app.include_router(mcp_tasks.router)

@@ -53,7 +53,7 @@ const skills = [
 
 async function mockCatalog(page: Page, locale = "en-US") {
   mockLangGraphAPI(page, { skills, threads: [] });
-  await page.route("**/api/mcp/config", (route) =>
+  await page.route("**/api/mcp/personal/config", (route) =>
     route.fulfill({
       json: {
         mcp_servers: {
@@ -218,7 +218,7 @@ test("MCP access errors preserve the independently available Lark integration", 
   page,
 }) => {
   await mockCatalog(page);
-  await page.route("**/api/mcp/config", (route) =>
+  await page.route("**/api/mcp/personal/config", (route) =>
     route.fulfill({ status: 403, json: { detail: "Admin only" } }),
   );
   await page.goto("/workspace/capabilities");
@@ -268,7 +268,7 @@ test("plugin filters remain usable after an MCP refetch fails", async ({
 }) => {
   await mockCatalog(page);
   let failRead = false;
-  await page.route("**/api/mcp/config", async (route) => {
+  await page.route("**/api/mcp/personal/config", async (route) => {
     if (route.request().method() === "PATCH") {
       failRead = true;
       return route.fulfill({ json: { mcp_servers: {} } });
@@ -385,7 +385,7 @@ test("manifest installation saves through the adapter and refreshes the catalog"
   mockLangGraphAPI(page);
   let installed: Record<string, unknown> | null = null;
   let submission: Record<string, unknown> | null = null;
-  await page.route("**/api/mcp/config", (route) =>
+  await page.route("**/api/mcp/personal/config", (route) =>
     route.fulfill({
       json: { mcp_servers: installed ? { "team-code": installed } : {} },
     }),
@@ -443,7 +443,7 @@ test("agent selection saves explicit plugin IDs and an empty skill list", async 
     agents: [{ name: "analyst", description: "Analyze reports" }],
     skills,
   });
-  await page.route("**/api/capabilities/installations/mcp", (route) =>
+  await page.route("**/api/capabilities/installations/mcp?scope=all", (route) =>
     route.fulfill({
       json: {
         can_manage: false,
