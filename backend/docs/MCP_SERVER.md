@@ -157,15 +157,24 @@ server is unavailable, the report is still delivered as `UNAUDITED`; network
 uncertainty during live citation checks is delivered as `DEGRADED`, not as a
 dead-link failure.
 
-The reviewed pin `cf72dfac4e57dd1aab64bc531552110b99d49148` includes the upstream
-DNS-rebinding transport fix and the follow-up proxy-policy fix. Direct sockets
+The pin `85d239f489722e02a42a5309b644aab6c09ec286` includes the upstream
+DNS-rebinding and proxy-policy fixes plus redirect hardening. Direct sockets
 connect only to validated public addresses, while Host and TLS verification
 retain the original hostname. Address pins are shared by HEAD/GET and same-host
-redirects; other redirect targets are validated before connecting. This applies
+redirects; other redirect targets are validated before connecting. Every
+redirect must remain HTTP(S), including with private-network or proxy opt-in,
+so FTP and other protocol handlers cannot bypass address validation.
+Intermediate redirect responses are closed without reading their bodies;
+the final response retains its size cap. This applies
 to direct MCP calls with `verify_sources: true`, not only the Skill workflow.
 The example explicitly sets `ADVERSARIAL_RESEARCH_AUDIT_ALLOW_PRIVATE_NETWORKS`
 to `false`, overriding any inherited opt-out. Do not enable this override for
 untrusted inputs.
+
+The redirect patch was authored in the `GodBlf/adversarial-research-audit`
+fork and submitted as [upstream PR #4](https://github.com/chenhz01/adversarial-research-audit/pull/4).
+It is not yet merged upstream. Review that proposed patch together with the
+immutable pin before enabling the server; do not treat it as an upstream release.
 
 The Skill defaults to `verify_sources: false`; live verification requires an
 explicit user request. Restricted mode refuses configured proxies with
@@ -192,11 +201,13 @@ public-skill checks before deployment.
 
 The opt-in transport regression suite imports a trusted local checkout of the
 exact configured pin, checks the imported files against that Git revision, and
-never downloads code. It uses controlled DNS and two synthetic loopback HTTP
-fixtures: a public endpoint stand-in and a private trap. Socket routing is
-intercepted so no public or private infrastructure is contacted. The private
-trap must receive zero requests through both `SourceVerifier` and the actual
-MCP `tools/call` handler, including HEAD-to-GET fallback, redirects, and proxies.
+never downloads code. It uses controlled DNS and synthetic loopback services:
+a public HTTP endpoint stand-in, a private HTTP trap, and a private FTP trap.
+Socket routing is intercepted so no external infrastructure is contacted.
+Both private traps must remain untouched through `SourceVerifier` and the
+actual MCP `tools/call` handler, including HEAD-to-GET fallback, redirects,
+and proxies. Redirect cases cover 301/302/303/307/308 at HEAD and GET stages;
+4 MiB intermediate responses verify that redirect bodies are never read.
 Ordinary offline CI skips these checks when the source checkout is absent.
 Before changing the pin, prepare a trusted checkout and run from `backend/`:
 

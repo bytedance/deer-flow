@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -53,9 +54,14 @@ def companion(monkeypatch):
 
 @pytest.fixture
 def network(companion, monkeypatch):
-    public_requests, private_requests, dials = [], [], []
+    public_requests, private_requests, ftp_connections, dials = [], [], [], []
     resolutions = Counter()
-    scenario = SimpleNamespace(head_status=200, redirect=None, private_first=False)
+    scenario = SimpleNamespace(head_status=200, redirect=None, private_first=False, redirect_status=302, redirect_bytes=0)
+
+    class FTPTrap(socketserver.StreamRequestHandler):
+        def handle(self):
+            ftp_connections.append(self.client_address)
+            self.wfile.write(b"421 synthetic private FTP trap" + bytes([13, 10]))
 
     class Trap(BaseHTTPRequestHandler):
         def do_HEAD(self):
@@ -76,24 +82,41 @@ def network(companion, monkeypatch):
     class Public(Trap):
         def respond(self):
             public_requests.append((self.command, self.path, self.headers["Host"]))
-            redirect_now = self.path == "/source" and scenario.redirect and (scenario.redirect != "get-private" or self.command == "GET")
+            redirect_now = self.path == "/source" and scenario.redirect and (not scenario.redirect.startswith("get-") or self.command == "GET")
             if redirect_now:
                 target = {
                     "same": f"http://{HOST}/final",
                     "cross": f"http://{OTHER_HOST}/final",
                     "private": "http://127.0.0.1/private",
                     "get-private": "http://127.0.0.1/private",
+                    "ftp": f"ftp://127.0.0.1:{ftp.server_address[1]}/file",
+                    "get-ftp": f"ftp://127.0.0.1:{ftp.server_address[1]}/file",
+                    "large": f"http://{HOST}/final",
+                    "get-large": f"http://{HOST}/final",
                 }[scenario.redirect]
-                self.send_response(302)
+                self.send_response(scenario.redirect_status)
                 self.send_header("Location", target)
             else:
                 self.send_response(scenario.head_status if self.command == "HEAD" else 200)
-            self.send_header("Content-Length", "0")
+            body_bytes = scenario.redirect_bytes if redirect_now and self.command == "GET" else 0
+            self.send_header("Content-Length", str(body_bytes))
             self.end_headers()
+            try:
+                chunk = b"x" * 65536
+                while body_bytes:
+                    size = min(body_bytes, len(chunk))
+                    self.wfile.write(chunk[:size])
+                    body_bytes -= size
+            except OSError:
+                # A safe client closes intermediate responses without draining.
+                pass
 
     public = ThreadingHTTPServer(("127.0.0.1", 0), Public)
     trap = ThreadingHTTPServer(("127.0.0.1", 0), Trap)
-    threads = [threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}) for server in (public, trap)]
+    ftp = socketserver.ThreadingTCPServer(("127.0.0.1", 0), FTPTrap)
+    ftp.daemon_threads = True
+    servers = (public, trap, ftp)
+    threads = [threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}) for server in servers]
     for thread in threads:
         thread.start()
     real_connect = socket.socket.connect
@@ -113,6 +136,8 @@ def network(companion, monkeypatch):
         if address[0] == PUBLIC_IP:
             return real_connect(sock, public.server_address)
         if address[0] == "127.0.0.1":
+            if address[1] == ftp.server_address[1]:
+                return real_connect(sock, ftp.server_address)
             return real_connect(sock, trap.server_address)
         raise AssertionError(f"unexpected connection: {address}")
 
@@ -123,9 +148,9 @@ def network(companion, monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", resolve)
     monkeypatch.setattr(socket.socket, "connect", connect)
     try:
-        yield SimpleNamespace(scenario=scenario, public=public_requests, private=private_requests, dials=dials, resolutions=resolutions)
+        yield SimpleNamespace(scenario=scenario, public=public_requests, private=private_requests, ftp=ftp_connections, dials=dials, resolutions=resolutions)
     finally:
-        for server in (public, trap):
+        for server in servers:
             server.shutdown()
             server.server_close()
         for thread in threads:
@@ -227,6 +252,45 @@ def test_get_timeout_after_successful_head_is_degraded(companion, network, monke
     assert network.private == []
     assert network.public == [("HEAD", "/source", HOST), ("GET", "/source", HOST)]
     assert degraded is True
+
+
+@pytest.mark.parametrize("entrypoint", ["verifier", "mcp"])
+@pytest.mark.parametrize("redirect", ["ftp", "get-ftp"])
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_non_http_redirect_never_reaches_private_ftp(companion, network, entrypoint, redirect, status):
+    network.scenario.redirect = redirect
+    network.scenario.redirect_status = status
+    degraded = _call(companion, entrypoint)
+    assert network.ftp == [], "scheme-switch redirect reached the private FTP service"
+    assert network.private == []
+    assert set(network.dials) == {PUBLIC_IP}
+    assert degraded is True
+
+
+@pytest.mark.parametrize("entrypoint", ["verifier", "mcp"])
+@pytest.mark.parametrize("redirect", ["large", "get-large"])
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_intermediate_redirect_body_is_not_read(companion, network, monkeypatch, entrypoint, redirect, status):
+    from http.client import HTTPResponse
+
+    network.scenario.redirect = redirect
+    network.scenario.redirect_status = status
+    network.scenario.redirect_bytes = 4 * 1024 * 1024
+    original_read = HTTPResponse.read
+    redirect_reads = []
+
+    def read(response, amt=None):
+        if response.status in {301, 302, 303, 307, 308}:
+            redirect_reads.append(amt)
+        return original_read(response, amt)
+
+    monkeypatch.setattr(HTTPResponse, "read", read)
+    degraded = _call(companion, entrypoint)
+    assert redirect_reads == [], "intermediate redirect bodies must be closed, not drained"
+    assert network.private == network.ftp == []
+    assert set(network.dials) == {PUBLIC_IP}
+    assert any(path == "/final" for _, path, _ in network.public)
+    assert degraded is False
 
 
 def test_https_preserves_hostname_for_tls(companion, monkeypatch):

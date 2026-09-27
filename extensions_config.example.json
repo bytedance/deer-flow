@@ -32,7 +32,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/chenhz01/adversarial-research-audit.git@cf72dfac4e57dd1aab64bc531552110b99d49148",
+        "git+https://github.com/chenhz01/adversarial-research-audit.git@85d239f489722e02a42a5309b644aab6c09ec286",
         "adversarial-research-audit-mcp"
       ],
       "env": {

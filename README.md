@@ -564,7 +564,9 @@ establish factual accuracy or source independence. The Skill defaults to offline
 structural checks; live source verification requires an explicit request. The
 pinned server binds direct connections to validated public IPs, including
 HEAD/GET and redirects, and the example explicitly disables private-network
-access. Restricted verification refuses proxy configurations rather than
+access. Redirects must remain HTTP(S), and intermediate response bodies are
+closed without being read; the final response retains its size cap.
+Restricted verification refuses proxy configurations rather than
 bypassing address validation; incomplete verification is reported as `DEGRADED`.
 See the
 [research report audit setup](backend/docs/MCP_SERVER.md#research-report-audit-optional).
