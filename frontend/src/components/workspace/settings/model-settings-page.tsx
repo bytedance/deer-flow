@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/select";
 import { GatewayApiError } from "@/core/api/errors";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useImageGenerationManagementEnabled } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { MODELS_QUERY_KEY } from "@/core/models/hooks";
 import {
@@ -64,6 +65,7 @@ export function ModelSettingsPage() {
   const text = t.settings.models;
   const client = useQueryClient();
   const canManage = user?.system_role === "admin" && !isStaticWebsiteOnly();
+  const imageManagementEnabled = useImageGenerationManagementEnabled(canManage);
   const queryKey = ["managed-models", user?.id];
   const catalog = useQuery({
     queryKey,
@@ -195,7 +197,7 @@ export function ModelSettingsPage() {
           </div>
         )}
       </SettingsSection>
-      {canManage && <ImageModelSettings />}
+      {canManage && imageManagementEnabled && <ImageModelSettings />}
     </div>
   );
 }

@@ -28,6 +28,7 @@ export interface FeaturesResponse {
   thread_activity?: {
     available?: boolean;
   };
+  image_generation_management?: { enabled: boolean };
 }
 
 export interface ScheduledTasksFeature {
@@ -98,6 +99,11 @@ export async function fetchBrowserControlEnabled(): Promise<boolean> {
 
 export async function fetchMcpTasksEnabled(): Promise<boolean> {
   return (await fetchFeatures()).mcp_tasks?.enabled ?? false;
+}
+
+export async function fetchImageGenerationManagementEnabled(): Promise<boolean> {
+  // Older Gateways always expose this API and do not report the flag.
+  return (await fetchFeatures()).image_generation_management?.enabled ?? true;
 }
 
 export async function fetchSubagentBatchesCapability(): Promise<SubagentBatchesCapability> {

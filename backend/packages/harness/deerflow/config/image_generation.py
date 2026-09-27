@@ -42,6 +42,16 @@ class ImageConfigurationError(ValueError):
     pass
 
 
+def managed_image_profiles_enabled() -> bool:
+    """Deployment-level switch for the web-managed image catalog."""
+    value = os.environ.get("DEER_FLOW_MANAGED_IMAGE_PROFILES_ENABLED", "true").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ImageConfigurationError("DEER_FLOW_MANAGED_IMAGE_PROFILES_ENABLED must be true or false")
+
+
 class ImageGenerationProfile(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -140,7 +150,7 @@ def bind_image_generation_source(source: Literal["managed", "sandbox_environment
 
 
 def selected_image_generation_source() -> Literal["managed", "sandbox_environment"] | None:
-    return _selected_image_source.get()
+    return _selected_image_source.get() if managed_image_profiles_enabled() else None
 
 
 class ManagedImageGenerationProfileStore:
@@ -152,6 +162,8 @@ class ManagedImageGenerationProfileStore:
         self.key_path = self._catalog.key_path
 
     def list(self) -> list[ManagedImageGenerationProfile]:
+        if not managed_image_profiles_enabled():
+            return []
         try:
             return [ManagedImageGenerationProfile.model_validate(item) for item in self._catalog.read()]
         except Exception:
@@ -163,6 +175,8 @@ class ManagedImageGenerationProfileStore:
         *,
         expected_revision: str | None,
     ) -> ManagedImageGenerationProfile:
+        if not managed_image_profiles_enabled():
+            raise ImageConfigurationError("Web-managed image profiles are disabled")
         with _lock, extensions_config_file_lock(self.path):
             records = self.list()
             previous = next((item for item in records if item.name == profile.name), None)
@@ -199,6 +213,8 @@ class ManagedImageGenerationProfileStore:
         operation: Literal["generation", "edit"],
         result: str,
     ) -> ManagedImageGenerationProfile:
+        if not managed_image_profiles_enabled():
+            raise ImageConfigurationError("Web-managed image profiles are disabled")
         with _lock, extensions_config_file_lock(self.path):
             records = self.list()
             profile = next((item for item in records if item.name == name), None)
@@ -216,6 +232,8 @@ class ManagedImageGenerationProfileStore:
             return updated
 
     def _write(self, records: list[ManagedImageGenerationProfile]) -> None:
+        if not managed_image_profiles_enabled():
+            raise ImageConfigurationError("Web-managed image profiles are disabled")
         self._catalog.write(
             [
                 {
@@ -256,6 +274,8 @@ class ImageGenerationDefaultStore:
         self.path = runtime_home() / "managed-image-profiles" / "default.json"
 
     def read(self) -> ImageGenerationDefault | None:
+        if not managed_image_profiles_enabled():
+            return None
         if not self.path.exists():
             return None
         try:
@@ -271,6 +291,8 @@ class ImageGenerationDefaultStore:
         expected_revision: str | None,
         environment: dict[str, str],
     ) -> ImageGenerationDefault:
+        if not managed_image_profiles_enabled():
+            raise ImageConfigurationError("Web-managed image profiles are disabled")
         with _lock, extensions_config_file_lock(self.path):
             current = self.read()
             if (current.revision if current else None) != expected_revision:
@@ -411,6 +433,8 @@ def _saved_default_source(managed: ManagedImageGenerationProfile | None, legacy:
 
 def saved_image_generation_source(raw_environment: dict[str, str]) -> Literal["managed", "sandbox_environment"] | None:
     """Return the saved admin default only while its model context still matches."""
+    if not managed_image_profiles_enabled():
+        return None
     managed = [item for item in ManagedImageGenerationProfileStore().list() if item.enabled]
     if len(managed) > 1:
         raise ImageConfigurationError("Multiple image profiles are enabled")
@@ -425,10 +449,12 @@ def saved_image_generation_source(raw_environment: dict[str, str]) -> Literal["m
 
 def effective_image_generation_source(raw_environment: dict[str, str]) -> Literal["managed", "sandbox_environment"] | None:
     """Return an explicit chat choice or a still-valid saved admin default."""
-    return _selected_image_source.get() or saved_image_generation_source(raw_environment)
+    return selected_image_generation_source() or saved_image_generation_source(raw_environment)
 
 
 def image_profile_choice_needed(raw_environment: dict[str, str]) -> bool:
+    if not managed_image_profiles_enabled():
+        return False
     managed = [item for item in ManagedImageGenerationProfileStore().list() if item.enabled]
     if len(managed) > 1:
         raise ImageConfigurationError("Multiple image profiles are enabled")
@@ -450,6 +476,9 @@ def image_profile_choice_needed(raw_environment: dict[str, str]) -> bool:
 def resolve_image_generation_profile(
     raw_environment: dict[str, str],
 ) -> tuple[ImageGenerationProfile | None, str | None, ManagedImageGenerationProfile | None]:
+    if not managed_image_profiles_enabled():
+        server = legacy_image_profile(raw_environment)
+        return server, "sandbox_environment" if server else None, None
     managed = [item for item in ManagedImageGenerationProfileStore().list() if item.enabled]
     if len(managed) > 1:
         raise ImageConfigurationError("Multiple image profiles are enabled")

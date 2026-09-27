@@ -44,6 +44,7 @@ def _app_with_config(
     app.state.scheduled_task_service = SimpleNamespace(is_running=scheduler_running) if scheduled_task_repo_available else None
     app.state.mcp_tasks_available = mcp_tasks_available
     app.state.subagent_batches_available = subagent_batches_available
+    app.state.image_generation_management_enabled = True
     if subagent_batch_repo_available is None:
         subagent_batch_repo_available = subagent_batches_available
     app.state.subagent_batch_repo = object() if subagent_batch_repo_available else None
@@ -91,6 +92,7 @@ def test_features_reports_agents_api_enabled() -> None:
         },
         "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60, "group_notifications": False},
         "thread_activity": {"available": False},
+        "image_generation_management": {"enabled": True},
     }
 
 
@@ -114,6 +116,7 @@ def test_features_reports_agents_api_disabled() -> None:
         },
         "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60, "group_notifications": False},
         "thread_activity": {"available": False},
+        "image_generation_management": {"enabled": True},
     }
 
 
