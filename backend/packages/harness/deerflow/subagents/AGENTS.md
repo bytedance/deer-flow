@@ -1,8 +1,6 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
-**JSON 验收**：修改 `json-valid` 前阅读 README 的读取边界契约。
-本地有界读取打开文件前必须经过实时 `sandbox:execute` 授权；保留的沙箱 ID
-不代表权限仍有效。授权拒绝保留 `UNVERIFIED`，普通 `task` 也必须覆盖此边界。
+**JSON**：见 README；本地读前实时授权，拒绝为 UNVERIFIED。
 
 Apply each subagent's prompt overlay after assembling its full SystemMessage.
 Registry overrides must not mutate `BUILTIN_SUBAGENTS`.
