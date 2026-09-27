@@ -1,5 +1,8 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+`task` 和 `batch_task` 的 JSON 验收语法为 `file:<path> json-valid`，仅显式
+启用；读取边界与 UNVERIFIED 契约由 [subagents/AGENTS.md](../subagents/AGENTS.md) 定义。
+
 `list_uploaded_files` 的续页契约见 [FILE_UPLOAD.md](../../../../docs/FILE_UPLOAD.md)。
 游标绑定可信用户/线程、规范化过滤条件、本轮上传排除集合和目录元数据；身份与目录
 始终由 runtime 解析，游标只负责一致性校验。先过滤，再按修改时间降序和原始文件名

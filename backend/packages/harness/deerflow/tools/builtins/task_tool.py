@@ -738,6 +738,9 @@ async def task_tool(
       every criterion that cannot be checked deterministically is marked
       UNVERIFIED — never silently passed. A `holds` leaf is execution evidence,
       not a guarantee that the deliverable is correct.
+    - JSON 交付物可显式使用 `file:<path> json-valid`：只校验最多 50,000 字节的
+      完整 UTF-8 JSON 语法，拒绝 NaN/Infinity；超限、读取不完整或解析资源限制
+      返回 UNVERIFIED。不校验 Schema 或业务内容，也不会自动检查所有 .json 文件。
     - `completed` means execution ended, not task acceptance. Read each criterion
       and retain useful work. For `does not hold`, inspect the reason and repair
       or recheck only the unmet condition, reusing unaffected outputs.
@@ -766,6 +769,7 @@ async def task_tool(
             back marked UNVERIFIED. Example for a report-writing delegation:
             ["file:../outputs/report.md non-empty"]. Omit for open-ended
             exploration where no crisp acceptance condition exists.
+            JSON 示例：["file:../outputs/report.json json-valid"]。
         description: Optional short (3-5 word) description of the task for logging/display.
         context_mode: Defaults to isolated (only the delegated prompt). Choose
             snapshot when relevant requirements or failed approaches are spread

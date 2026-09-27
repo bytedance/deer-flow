@@ -1650,6 +1650,17 @@ The lead agent can spawn sub-agents on the fly — each with its own scoped cont
 
 For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
 
+需要 JSON 语法验收时，可在 `task` 或 `batch_task` 条目的 `acceptance_criteria` 中显式填写
+`["file:../outputs/report.json json-valid"]`。检查仅限共享工作区内不超过 **50,000 字节**的
+完整 UTF-8 JSON：合法语法返回 `holds`，空文件、语法错误、非 UTF-8 或 `NaN`/`Infinity`
+返回 `does not hold`；超限、无法完整读取、路径范围外或解析器资源限制返回 `UNVERIFIED`。
+读取最多 50,001 字节以检测超限，远程返回会校验完整标记、读取退出码及探测大小；
+不支持所需探测工具的远程提供方保留不确定状态，不回退全文读取。同尺寸并发改写不构成原子快照。
+UTF-8 BOM 不被接受；顶层标量、重复键及语法合法的大数可以通过，但不代表 Schema、字段或
+业务语义正确。其他文件条件不变，也不会自动校验所有 `.json` 文件。
+相比每次让 Agent 自行编写 bash/Python 检查，这一条件统一了验收结果、路径和读取边界，
+并明确展示证据不足；执行完成状态和自动重试策略不受影响。
+
 Content-less sub-agent final messages report `No response generated` instead of the literal text `None`. A content-less provider-error fallback reports its structured error detail when available.
 
 An ordinary `task` also receives a defensive snapshot of the dispatching run's current uploads. This lets eligible sub-agents use `list_uploaded_files` to find earlier-turn files without returning same-turn attachments as historical. Delayed or recovered `batch_task` workers leave this tool disabled because they have no valid turn-local upload boundary.

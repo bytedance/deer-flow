@@ -158,6 +158,20 @@ async def test_completed_batch_records_mixed_checks_and_exports_after_reopen(env
 
 
 @pytest.mark.asyncio
+async def test_json_criterion_survives_batch_execution_and_storage(env):
+    """批次使用同一文件准入与验收，并独立保存执行状态和语法结论。"""
+    output = env.paths.sandbox_outputs_dir("thread-1", user_id="user-1") / "report.json"
+    output.write_bytes(b'{"incomplete":')
+    batch = await _submit(env, ["file:../outputs/report.json json-valid"])
+    await _execute(env)
+    item = (await env.repo.list_items(batch["id"], user_id="user-1"))[0]
+    assert item["status"] == "succeeded"
+    leaf = item["acceptance_verdict"]["leaves"][0]
+    assert (leaf["family"], leaf["checked"], leaf["holds"]) == ("file_json_valid", True, False)
+    assert item["attempt"] == 1
+
+
+@pytest.mark.asyncio
 async def test_no_criteria_skips_checker_and_preserves_success(env, monkeypatch):
     checker = AsyncMock(side_effect=AssertionError("no checklist"))
     monkeypatch.setattr(batch_service, "check_batch_acceptance", checker)

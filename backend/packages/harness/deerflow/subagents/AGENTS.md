@@ -1,13 +1,12 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+**JSON 验收**：修改 `json-valid` 前阅读 README 的读取边界契约。
+
 Apply each subagent's prompt overlay after assembling its full SystemMessage.
 Registry overrides must not mutate `BUILTIN_SUBAGENTS`.
 Durable batch specs store overlays as JSON and restore them before execution.
 
-**Empty remote artifacts**: Acceptance probes treat GNU `stat -c %F` labels
-`regular file` and `regular empty file` as regular files. Empty files satisfy
-`exists`/`file_written` but fail `non-empty`; symlink leaves, directories, and
-FIFOs remain rejected.
+**远程空文件**：GNU stat 的 `regular file`/`regular empty file` 均为普通文件。空文件通过 exists/file_written，未通过 non-empty；拒绝符号链接、目录、FIFO。
 
 **Context**: Capture after validation, before setup. Keep genuine replies, even hidden clarifications; exclude framework state and unpaired calls. Mark unserializable media as omitted.
 

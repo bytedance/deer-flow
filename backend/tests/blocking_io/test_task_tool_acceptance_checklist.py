@@ -157,6 +157,23 @@ async def test_acceptance_checklist_file_leaf_is_offloaded(monkeypatch, tmp_path
     assert verdict["leaves"][0]["holds"] is True
 
 
+async def test_json_acceptance_check_is_offloaded(monkeypatch, tmp_path):
+    """普通委托在工作线程读取真实 JSON，并将结论附在完成消息中。"""
+    runtime = _runtime(tmp_path)
+    (tmp_path / "user-data" / "outputs" / "report.json").write_bytes(b'{"ok": true}')
+    _patch_task_tool_boundary(monkeypatch, tmp_path)
+    command = await task_tool_module.task_tool.coroutine(
+        runtime=runtime,
+        prompt="p",
+        subagent_type="general-purpose",
+        tool_call_id="tc-json-check",
+        acceptance_criteria=["file:../outputs/report.json json-valid"],
+    )
+    verdict = command.update["messages"][0].additional_kwargs["subagent_acceptance_verdict"]
+    assert verdict["all_hold"] is True
+    assert verdict["leaves"][0]["family"] == "file_json_valid"
+
+
 async def test_blocking_probe_reader_actually_trips_the_gate(monkeypatch, tmp_path):
     """Meta-check: the same read on the event loop must raise BlockingError,
     so the anchor above cannot go vacuously green. (The size probe is

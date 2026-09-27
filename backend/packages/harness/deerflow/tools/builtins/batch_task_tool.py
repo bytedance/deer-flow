@@ -171,6 +171,9 @@ async def batch_task(
     separate acceptance verdict; ``succeeded`` only means execution completed.
     Retain useful results, repair unmet conditions, and verify consequential
     unknowns or preserve uncertainty. Acceptance never triggers automatic retries.
+    JSON 交付物可显式使用 ``file:<path> json-valid``：仅验收最多 50,000 字节的
+    完整 UTF-8 JSON 语法，拒绝 NaN/Infinity；超限或读取不完整返回 UNVERIFIED，
+    不检查 Schema 或业务内容。
 
     Args:
         title: Short batch name shown to the user.

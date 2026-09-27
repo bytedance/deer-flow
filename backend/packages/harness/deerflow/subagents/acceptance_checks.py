@@ -8,6 +8,9 @@ requirement.
 
 Leaf families:
 
+- ``file:<path> json-valid`` — 显式 UTF-8 JSON 语法检查，最大 50,000 字节。
+  读取上限加一字节并校验完整性；超限、截断或解析资源限制保留 UNVERIFIED。
+  拒绝 NaN/Infinity，不校验 Schema 或业务语义。
 - ``file:<path> exists`` / ``file:<path> non-empty`` — read through
   ``read_current_file_content`` (the ``ReadBeforeWriteMiddleware``
   precedent), **scoped to the shared thread workspace**: the path must
@@ -55,6 +58,9 @@ the async caller offloads the whole check with ``asyncio.to_thread``.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import ntpath
 import os
 import posixpath
@@ -86,6 +92,7 @@ _DETAIL_MAX_CHARS = 160
 _PROVIDER_ERROR_PREFIX = "Error:"
 
 _FILE_LEAF_RE = re.compile(r"^file:(?P<path>.+?)\s+(?P<mode>exists|non-empty)$", re.IGNORECASE)
+_JSON_FILE_LEAF_RE = re.compile(r"^file:(?P<path>.+?)\s+json-valid$", re.IGNORECASE)
 _FILE_WRITTEN_RE = re.compile(r"^file_written:(?P<path>.+)$", re.IGNORECASE)
 _TESTS_PASSED_RE = re.compile(r"^tests_passed:(?P<command>.+)$", re.IGNORECASE)
 
@@ -128,7 +135,7 @@ _TEST_FAIL_SHAPE_RE = re.compile(
 
 class AcceptanceLeaf(TypedDict):
     criterion: str  # original criterion text (bounded)
-    family: str  # file_exists | file_non_empty | file_written | tests_passed | undecidable
+    family: str  # file_exists | file_non_empty | file_json_valid | file_written | tests_passed | undecidable
     checked: bool  # a deterministic check ran
     holds: bool  # checked AND the condition holds; always False when unchecked
     detail: str  # short evidence note (bounded)
@@ -152,6 +159,9 @@ def parse_file_criterion(criterion: str) -> tuple[str, str] | None:
     if file_match is not None:
         family = "file_exists" if file_match.group("mode").lower() == "exists" else "file_non_empty"
         return family, file_match.group("path")
+    json_match = _JSON_FILE_LEAF_RE.match(criterion)
+    if json_match is not None:
+        return "file_json_valid", json_match.group("path")
     written_match = _FILE_WRITTEN_RE.match(criterion)
     if written_match is not None:
         return "file_written", written_match.group("path")
@@ -379,6 +389,107 @@ def _probe_file_readable(runtime: Any, resolved: str, thread_data: Mapping[str, 
     return None
 
 
+# 文件内容与读取退出码一起编码；外层完成标记可识别提供方截断，文件本身不能伪造退出码。
+_JSON_READ_INNER_SCRIPT = (
+    '[ -e "$1" ] || { echo NOFILE; exit 0; }; '
+    't=$(/usr/bin/stat -c %F -- "$1") || exit 1; '
+    'case "$t" in "regular file"|"regular empty file") ;; *) exit 1 ;; esac; '
+    'r=$(/usr/bin/realpath -- "$2") || exit 1; '
+    'p=$(/usr/bin/realpath -- "$1") || exit 1; '
+    'case $p in "$r"/*) ;; *) exit 1 ;; esac; '
+    'printf "JSON\\n"; '
+    '{ /usr/bin/timeout 5 /usr/bin/head -c "$3" -- "$p"; printf "\\n%03d" "$?"; } | /usr/bin/base64 -w 0; '
+    'printf "\\nEND\\n"'
+)
+
+
+def _read_bounded_json_content(runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None) -> bytes | None:
+    """读取上限加一字节以检测增长；不能证明完整读取时返回 None。"""
+    from deerflow.sandbox.tools import _resolve_local_read_path, ensure_sandbox_initialized, is_local_sandbox
+
+    if not is_local_sandbox(runtime):
+        sandbox = ensure_sandbox_initialized(runtime)
+        root = "/".join(resolved.split("/")[:4])
+        output = sandbox.execute_command(
+            f"/usr/bin/env -i /bin/sh -c {shlex.quote(_JSON_READ_INNER_SCRIPT)} json-read {shlex.quote(resolved)} {shlex.quote(root)} {_FILE_CONTENT_READ_CAP_BYTES + 1}",
+            env={"_DEERFLOW_SIZE_PROBE": "1"},
+            timeout=10,
+        )
+        if not isinstance(output, str):
+            return None
+        output = output.strip()
+        if output == "NOFILE":
+            raise FileNotFoundError(resolved)
+        if not output.startswith("JSON\n") or not output.endswith("\nEND"):
+            return None
+        encoded = output[5:-4]
+        if len(encoded) > 4 * ((_FILE_CONTENT_READ_CAP_BYTES + 5 + 2) // 3):
+            return None
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            return None
+        return payload[:-4] if payload.endswith(b"\n000") else None
+    host_path = _resolve_local_read_path(resolved, thread_data)
+    if host_path == resolved:
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    with os.fdopen(os.open(host_path, flags), "rb", buffering=0) as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            return None
+        content = bytearray()
+        # 禁止缓冲预读；短读继续直到 EOF 或上限加一，才可区分完整与截断。
+        while len(content) <= _FILE_CONTENT_READ_CAP_BYTES:
+            chunk = handle.read(_FILE_CONTENT_READ_CAP_BYTES + 1 - len(content))
+            if not chunk:
+                break
+            content.extend(chunk)
+        return bytes(content)
+
+
+class _NonStandardJSONConstant(ValueError):
+    """区分非标准常量与解析器资源限制。"""
+
+
+def _reject_json_constant(value: str) -> None:
+    raise _NonStandardJSONConstant(value)
+
+
+def _check_json_file(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None, probed_size: int) -> AcceptanceLeaf:
+    """仅对完整、有界的 UTF-8 文档判断 JSON 语法。"""
+    from deerflow.sandbox.exceptions import SandboxError, SandboxFileNotFoundError
+
+    if probed_size > _FILE_CONTENT_READ_CAP_BYTES:
+        base["detail"] = f"JSON file exceeds {_FILE_CONTENT_READ_CAP_BYTES}-byte read cap; content not read"
+        return base
+    try:
+        content = _read_bounded_json_content(runtime, resolved, thread_data)
+    except (FileNotFoundError, SandboxFileNotFoundError):
+        base["checked"] = True
+        base["detail"] = "file does not exist"
+        return base
+    except (OSError, SandboxError):
+        base["detail"] = "bounded JSON read failed"
+        return base
+    if content is None or len(content) > _FILE_CONTENT_READ_CAP_BYTES or len(content) != probed_size:
+        base["detail"] = "complete JSON content unavailable within the read cap"
+        return base
+    try:
+        # 只校验数字语法，不做大整数转换或浮点溢出运算。
+        json.loads(content.decode("utf-8"), parse_constant=_reject_json_constant, parse_int=str, parse_float=str)
+    except (UnicodeDecodeError, json.JSONDecodeError, _NonStandardJSONConstant):
+        base["checked"] = True
+        base["detail"] = "invalid UTF-8 JSON syntax"
+        return base
+    except (RecursionError, ValueError, MemoryError):
+        base["detail"] = "JSON parser resource limit; syntax unverified"
+        return base
+    base["checked"] = True
+    base["holds"] = True
+    base["detail"] = f"valid JSON syntax, {len(content)} bytes; no schema validation"
+    return base
+
+
 def _check_file_leaf(
     family: str,
     path: str,
@@ -417,6 +528,8 @@ def _check_file_leaf(
         # worker — degrade to UNVERIFIED instead.
         base["detail"] = "file size could not be established by a bounded probe; content not read"
         return base
+    if family == "file_json_valid":
+        return _check_json_file(base, runtime, resolved, thread_data, probed_size)
     if probed_size > _FILE_CONTENT_READ_CAP_BYTES:
         # Large deliverable: the size probe proved the file exists, is
         # regular, and is non-empty (size > cap > 0) — answering the
