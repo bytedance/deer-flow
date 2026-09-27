@@ -19,6 +19,74 @@ from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
+# ---------------------------------------------------------------------------
+# Terminal producer inventory (Task A0)
+#
+# Every path that can append a run event to a ``RunJournal`` and must therefore
+# be covered by the producer seal (Task A4):
+#
+#  * owner-loop callbacks: ``RunJournal._put`` from the LangChain callback
+#    surface (``on_chain_*`` / ``on_llm_*`` / ``on_tool_*``).
+#  * ``RunJournal.record_middleware`` from a foreign thread: it hops onto the
+#    owner loop with ``owner_loop.call_soon_threadsafe(self._put, ...)``.
+#  * task-tool subagent middleware proxy (``task_tool.py``):
+#    ``_ParentLoopMiddlewareRecorderProxy.record_middleware`` schedules
+#    ``_record_middleware_on_parent_loop``; its ``aclose()`` fences late appends.
+#  * task-tool subagent usage reports (``task_tool.py``): ``_report_usage_records``
+#    scheduled on the parent loop calls
+#    ``RunJournal.record_external_llm_usage_records``, which mutates accumulators
+#    and can schedule a progress-flush task.
+#  * journal-side progress snapshots: ``RunJournal._schedule_progress_flush``
+#    spawns a reporter task; the reporter does not append journal events.
+#
+# A new append path must be added here (with a regression test) before it can be
+# considered sealed by the terminal drain.
+# ---------------------------------------------------------------------------
+
+
+class GatedRunEventStore(MemoryRunEventStore):
+    """Memory store that gates every ``put_batch`` for deterministic interleavings.
+
+    ``calls`` records the event types of each attempted batch so a test can
+    assert an ambiguous write was attempted exactly once; ``persisted`` records
+    the batches that actually committed. ``started`` / ``release`` are per-batch
+    ``asyncio.Event``s used to force a specific ordering, and ``failures``
+    injects the exception a given batch raises (an ordinary ``Exception`` means
+    UNKNOWN; ``RunEventWriteNotCommittedError`` proves non-commit).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[list[str]] = []
+        self.persisted: list[list[str]] = []
+        self.started: dict[int, asyncio.Event] = {}
+        self.release: dict[int, asyncio.Event] = {}
+        self.failures: dict[int, BaseException] = {}
+
+    def gate(self, index: int) -> tuple[asyncio.Event, asyncio.Event]:
+        started = self.started.setdefault(index, asyncio.Event())
+        release = self.release.setdefault(index, asyncio.Event())
+        return started, release
+
+    def fail_with(self, index: int, error: BaseException) -> None:
+        self.failures[index] = error
+
+    def release_all(self) -> None:
+        for event in self.release.values():
+            event.set()
+
+    async def put_batch(self, events):
+        index = len(self.calls)
+        self.calls.append([event["event_type"] for event in events])
+        started, release = self.gate(index)
+        started.set()
+        await release.wait()
+        error = self.failures.get(index)
+        if error is not None:
+            raise error
+        self.persisted.append([event["event_type"] for event in events])
+        return await super().put_batch(events)
+
 
 def test_run_journal_is_marked_as_loop_bound():
     assert RunJournal.deerflow_loop_bound is True
