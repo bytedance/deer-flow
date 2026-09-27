@@ -1860,28 +1860,53 @@ async def test_late_progress_snapshot_cannot_overwrite_an_acknowledged_terminal_
 
 
 @pytest.mark.anyio
-async def test_renewal_rejected_after_own_terminal_row_committed_does_not_fence():
-    """A rejection that races our own terminal commit must not fence our run.
+async def test_own_terminal_cas_commit_racing_renewal_is_not_fenced():
+    """A renewal racing this worker's own in-flight CAS must not fence it.
 
-    The durable CAS can commit this worker's terminal row before the local
-    acknowledgement is published. Fencing on that rejection would mark our own
-    completed run as taken over.
+    The proof of a commit is this process's own in-flight CAS result, not a
+    store re-read: a peer takeover writes the same status while keeping our
+    owner id. This drives a real ``finalize_if_not_cancelled`` and blocks the
+    store between the commit and the caller's acknowledgement.
     """
-    store = LostLeaseRunStore()
+    committed = asyncio.Event()
+    release = asyncio.Event()
+
+    class RacingStore(LostLeaseRunStore):
+        async def finalize_if_not_cancelled(self, run_id, *, status, error=None, stop_reason=None):
+            result = await super().finalize_if_not_cancelled(
+                run_id,
+                status=status,
+                error=error,
+                stop_reason=stop_reason,
+            )
+            committed.set()
+            await release.wait()
+            return result
+
+    store = RacingStore()
     manager, _ = _ownership_manager(store)
     record, task = await _live_record(manager, store, status=RunStatus.success)
+    cas = None
+    renewal = None
     try:
-        # Our own terminal CAS already committed the row; the acknowledgement is
-        # still pending when the renewal is rejected.
-        await store.update_status(record.run_id, "success")
-        record.terminal_committed = False
+        cas = asyncio.create_task(manager.set_status_if_not_cancelled(record.run_id, RunStatus.success))
+        await asyncio.wait_for(committed.wait(), timeout=5)
 
-        await manager._renew_leases()
+        # The renewal is rejected while our own terminal CAS is still in flight.
+        renewal = asyncio.create_task(manager._renew_leases())
+        await asyncio.sleep(0.05)
+        release.set()
+
+        await asyncio.wait_for(cas, timeout=5)
+        await asyncio.wait_for(renewal, timeout=5)
 
         assert record.terminal_committed is True
         assert record.ownership_lost is False
-        assert (await store.get(record.run_id))["status"] == "success"
     finally:
+        release.set()
+        for pending in (cas, renewal):
+            if pending is not None:
+                await asyncio.gather(pending, return_exceptions=True)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
 
@@ -1938,24 +1963,31 @@ async def test_staged_success_already_expired_lease_is_fenced():
 
 @pytest.mark.anyio
 async def test_blocked_terminal_reread_does_not_starve_other_run_renewal():
-    """A blocked terminal re-read for one run must not stop another run's renewal.
+    """A blocked lease call for one run must not stop another run's renewal.
 
-    The heartbeat renews runs sequentially, and the rejection path re-reads the
-    row to confirm whether the terminal outcome was this worker's own. A store
-    read that cannot be interrupted therefore stalls every other run's lease,
-    even one whose confirmed deadline is closer.
+    Each run's attempt has its own absolute deadline and they run concurrently,
+    so a store call that cannot be interrupted must not stall every other run's
+    lease — even one whose confirmed deadline is closer.
     """
 
-    class BlockingRereadStore(MemoryRunStore):
+    class BlockingRenewStore(MemoryRunStore):
         def __init__(self) -> None:
             super().__init__()
             self.blocked_run_id: str | None = None
-            self.reread_started = asyncio.Event()
-            self.release_reread = asyncio.Event()
+            self.renew_started = asyncio.Event()
+            self.release_renew = asyncio.Event()
             self.renewed: list[str] = []
 
         async def update_lease(self, run_id, *, owner_worker_id, lease_expires_at):
             if run_id == self.blocked_run_id:
+                self.renew_started.set()
+                # Deliberately ignore cancellation: this models a store call that
+                # cannot be interrupted once it started.
+                while not self.release_renew.is_set():
+                    try:
+                        await asyncio.wait_for(self.release_renew.wait(), timeout=0.05)
+                    except (TimeoutError, asyncio.CancelledError):
+                        continue
                 return False
             renewed = await super().update_lease(
                 run_id,
@@ -1966,19 +1998,7 @@ async def test_blocked_terminal_reread_does_not_starve_other_run_renewal():
                 self.renewed.append(run_id)
             return renewed
 
-        async def get(self, run_id):
-            if run_id == self.blocked_run_id:
-                self.reread_started.set()
-                # Deliberately ignore cancellation: this models a store call that
-                # cannot be interrupted once it started.
-                while not self.release_reread.is_set():
-                    try:
-                        await asyncio.wait_for(self.release_reread.wait(), timeout=0.05)
-                    except (TimeoutError, asyncio.CancelledError):
-                        continue
-            return await super().get(run_id)
-
-    store = BlockingRereadStore()
+    store = BlockingRenewStore()
     manager = RunManager(
         store=store,
         run_ownership_config=RunOwnershipConfig(
@@ -2009,8 +2029,8 @@ async def test_blocked_terminal_reread_does_not_starve_other_run_renewal():
         record.task = asyncio.create_task(hold())
         return record
 
-    # A is a staged terminal whose renewal is rejected, so its failure path
-    # re-reads the row and blocks there. B has a much closer confirmed deadline.
+    # A is a staged terminal whose renewal call blocks (a store call that cannot
+    # be interrupted). B has a much closer confirmed deadline.
     record_a = await _make_run("thread-a", RunStatus.success, 1)
     store.blocked_run_id = record_a.run_id
     record_b = await _make_run("thread-b", RunStatus.running, 5)
@@ -2020,7 +2040,7 @@ async def test_blocked_terminal_reread_does_not_starve_other_run_renewal():
 
     renewal = asyncio.create_task(manager._renew_leases())
     try:
-        await asyncio.wait_for(store.reread_started.wait(), timeout=5)
+        await asyncio.wait_for(store.renew_started.wait(), timeout=5)
 
         # B must still be renewed (or fenced) while A's read is blocked.
         await asyncio.sleep(0.2)
@@ -2031,7 +2051,7 @@ async def test_blocked_terminal_reread_does_not_starve_other_run_renewal():
         await asyncio.sleep(1.2)
         assert record_a.ownership_lost is True
     finally:
-        store.release_reread.set()
+        store.release_renew.set()
         await asyncio.gather(renewal, return_exceptions=True)
         for record in (record_a, record_b):
             if record.task is not None:
@@ -2040,3 +2060,35 @@ async def test_blocked_terminal_reread_does_not_starve_other_run_renewal():
             *(record.task for record in (record_a, record_b) if record.task is not None),
             return_exceptions=True,
         )
+
+
+@pytest.mark.anyio
+async def test_persist_status_same_status_reread_is_not_a_terminal_ack():
+    """A matching terminal row we did not write must not become our own ack.
+
+    ``_persist_status`` treats ``update_status -> False`` plus a re-read that
+    already shows the target status as "already persisted" and acknowledges the
+    durable terminal. A peer's takeover (or any other writer) can leave exactly
+    that row, so the acknowledgement would not be attributable to this worker.
+    """
+
+    class NoWriteStore(MemoryRunStore):
+        async def update_status(self, run_id, status, *, error=None, stop_reason=None):
+            return False
+
+    store = NoWriteStore()
+    manager, _ = _ownership_manager(store)
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    try:
+        # Another writer already left the matching terminal row.
+        await MemoryRunStore.update_status(store, record.run_id, "success")
+        assert record.terminal_committed is False
+
+        persisted = await manager._persist_status(record, RunStatus.success)
+
+        assert persisted is True
+        # The row matching is not proof that this worker wrote it.
+        assert record.terminal_committed is False
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
