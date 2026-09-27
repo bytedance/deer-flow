@@ -14,6 +14,12 @@ on any error, timeout, non-2xx response, or malformed body, so the agent behaves
 exactly as if the gate were absent. Acting on the recommendation is a later,
 validated step.
 
+Design goal (measurable, not a promise of "never worse"): while in shadow mode the
+gate must add no state change and no routing change, and its added wall-clock cost
+per turn must stay within the configured total deadline. The shadow phase exists to
+measure total latency and cost, routing accuracy, and the rate of high-confidence
+mistakes against real traffic before any later phase is allowed to act on a route.
+
 Enable it explicitly with the ``SUPERFAST_ENABLED`` environment variable. The
 decision model itself is installed out of band and is not bundled here; the gate
 talks to it over plain HTTP using ``httpx``, which is already a core dependency.
@@ -21,6 +27,7 @@ talks to it over plain HTTP using ``httpx``, which is already a core dependency.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import os
@@ -29,6 +36,13 @@ from typing import Any
 
 import httpx
 from langchain.agents.middleware import AgentMiddleware
+
+from deerflow.utils.messages import (
+    ORIGINAL_USER_CONTENT_KEY,
+    get_original_user_content_text,
+    is_real_user_message,
+    message_content_to_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +55,17 @@ _TIMEOUT_MS_ENV = "SUPERFAST_TIMEOUT_MS"
 
 DEFAULT_ENDPOINT = "http://localhost:8000/v1/systemone"
 DEFAULT_MODEL = "von-1.2.0"
-DEFAULT_TIMEOUT_MS = 150
+# A warm single forward pass is tens to low-hundreds of ms; the first call also
+# loads the encoder. A 150 ms budget sat inside that range and left a correctly
+# installed gate silently inert, so the default sits above it.
+DEFAULT_TIMEOUT_MS = 1000
+
+# Bounds on what leaves the process. The classifier is given a small, capped slice
+# of recent conversation so the "answerable from context" question has something
+# real to reason over, while the total request body stays bounded.
+MAX_CONTEXT_MESSAGES = 6
+MAX_MESSAGE_CHARS = 800
+MAX_PAYLOAD_CHARS = 8000
 
 # The three typed questions asked in one pass. Kept small so the single forward
 # pass stays well under the timeout budget.
@@ -116,14 +140,23 @@ async def query_system_one(state: str, questions: dict[str, dict[str, Any]]) -> 
 
     Fail-open: a timeout, connection error, non-2xx status, or a body without a
     well-formed ``answers`` object all yield ``None`` and never raise into the
-    agent loop.
+    agent loop. ``httpx``'s own timeout bounds each network phase; the surrounding
+    ``asyncio.wait_for`` bounds the whole call so a response that is slow across
+    several phases can never exceed the total deadline.
     """
     body = {"model": _model(), "state": state, "questions": questions}
+    total = _timeout_seconds()
     try:
-        async with httpx.AsyncClient(timeout=_timeout_seconds()) as client:
-            response = await client.post(_endpoint(), json=body, headers={"Accept": "application/json"})
+        async with httpx.AsyncClient(timeout=total) as client:
+            response = await asyncio.wait_for(
+                client.post(_endpoint(), json=body, headers={"Accept": "application/json"}),
+                timeout=total,
+            )
+    except asyncio.TimeoutError:
+        logger.debug("superfast gate total deadline exceeded (fail-open)")
+        return None
     except Exception:
-        # Any transport error (timeout, connection refused, DNS, reset) fails open.
+        # Any transport error (connection refused, DNS, reset) fails open.
         logger.debug("superfast gate unavailable (fail-open)")
         return None
     if response.status_code != 200:
@@ -168,115 +201,97 @@ def derive_route(answers: dict[str, Any]) -> str:
     return "unknown"
 
 
-async def classify_turn(user_text: str) -> tuple[str, int] | None:
-    """Classify one user turn through the gate.
+def _message_role(message: Any) -> str | None:
+    if isinstance(message, dict):
+        role = message.get("type") or message.get("role")
+    else:
+        role = getattr(message, "type", None)
+    if role == "user":
+        return "human"
+    return role if isinstance(role, str) else None
+
+
+def _message_text(message: Any) -> str:
+    """Return the text of a message, preferring the pre-middleware user text.
+
+    For a real user message this reads ``original_user_content`` when present, so
+    the classifier sees exactly what the user typed rather than the transport
+    wrappers and reminder blocks the middleware layered on top. User-authored
+    ``<system-reminder>`` tags are therefore preserved, not stripped.
+    """
+    if isinstance(message, dict):
+        content = message.get("content")
+        additional = message.get("additional_kwargs")
+    else:
+        content = getattr(message, "content", "")
+        additional = getattr(message, "additional_kwargs", None)
+    if isinstance(additional, dict) and isinstance(additional.get(ORIGINAL_USER_CONTENT_KEY), str):
+        return get_original_user_content_text(content, additional)
+    return message_content_to_text(content)
+
+
+def _build_classification_context(state: Any) -> str:
+    """Build a bounded classification context from recent real messages.
+
+    The context is the most recent few real turns (framework-injected hidden
+    messages and summarization markers are excluded), each truncated, rendered as
+    ``role: text`` lines, with the current request last. The whole string is
+    capped so the request body stays bounded. This gives the "answerable from
+    context" question a real conversation to reason over instead of a single
+    message.
+    """
+    messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
+    if not messages:
+        return ""
+    recent: list[str] = []
+    for message in reversed(messages):
+        if len(recent) >= MAX_CONTEXT_MESSAGES:
+            break
+        # Only real user turns and assistant turns carry useful context; skip
+        # framework-injected hidden human messages and summary markers.
+        if _message_role(message) == "human" and not is_real_user_message(message):
+            continue
+        text = _message_text(message).strip()
+        if not text:
+            continue
+        if len(text) > MAX_MESSAGE_CHARS:
+            text = text[:MAX_MESSAGE_CHARS] + "…"
+        role = "user" if _message_role(message) == "human" else _message_role(message)
+        recent.append(f"{role}: {text}")
+    recent.reverse()
+    if not recent:
+        return ""
+    context = "\n".join(recent)
+    if len(context) > MAX_PAYLOAD_CHARS:
+        context = context[-MAX_PAYLOAD_CHARS:]
+    return context
+
+
+async def classify_turn(context: str) -> tuple[str, int] | None:
+    """Classify one turn through the gate.
 
     Returns ``(route, latency_ms)`` when the backend produced answers, or ``None``
-    when the turn is empty or the gate is unavailable (fail-open).
+    when the context is empty or the gate is unavailable (fail-open).
     """
-    if not user_text.strip():
+    if not context.strip():
         return None
     started = time.monotonic()
-    answers = await query_system_one(user_text, TURN_QUESTIONS)
+    answers = await query_system_one(context, TURN_QUESTIONS)
     latency_ms = int((time.monotonic() - started) * 1000)
     if answers is None:
         return None
     return derive_route(answers), latency_ms
 
 
-def _message_type(message: Any) -> str | None:
-    if isinstance(message, dict):
-        message_type = message.get("type") or message.get("role")
-    else:
-        message_type = getattr(message, "type", None)
-    if message_type == "user":
-        return "human"
-    return message_type if isinstance(message_type, str) else None
-
-
-def _content_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "\n".join(parts)
-    if isinstance(content, dict):
-        text = content.get("text")
-        return text if isinstance(text, str) else ""
-    return ""
-
-
-_REMINDER_OPEN = "<system-reminder>"
-_REMINDER_CLOSE = "</system-reminder>"
-
-
-def _strip_system_reminders(text: str) -> str:
-    """Drop ``<system-reminder>...</system-reminder>`` blocks in linear time.
-
-    The previous ``re.sub(r"<system-reminder>.*?</system-reminder>", "", text,
-    flags=re.DOTALL)`` is quadratic on adversarial input: every opener with no
-    closer makes the lazy ``.*?`` rescan to the end of the string looking for a
-    closer that never arrives, so a turn with many openers and no closers costs
-    O(n^2). That scan runs synchronously on the event loop in ``abefore_model``,
-    before the HTTP timeout can apply, so a crafted long turn could stall other
-    runs in the worker. This single left-to-right pass is O(n): each ``find``
-    resumes where the previous one stopped, so the scanned regions never overlap.
-    As with the non-greedy regex, only fully closed blocks are removed; an opener
-    with no closer anywhere after it leaves the remaining text verbatim.
-    """
-    out: list[str] = []
-    i = 0
-    n = len(text)
-    while i < n:
-        open_idx = text.find(_REMINDER_OPEN, i)
-        if open_idx == -1:
-            out.append(text[i:])
-            break
-        close_idx = text.find(_REMINDER_CLOSE, open_idx + len(_REMINDER_OPEN))
-        if close_idx == -1:
-            # No closer for this opener: keep the rest verbatim, exactly as the
-            # non-greedy regex would match nothing here.
-            out.append(text[i:])
-            break
-        out.append(text[i:open_idx])
-        i = close_idx + len(_REMINDER_CLOSE)
-    return "".join(out)
-
-
-def _latest_user_text(state: Any) -> str:
-    """Return the most recent user message text, or an empty string.
-
-    Only a trailing human message counts as a fresh user turn. Injected
-    ``<system-reminder>`` blocks are stripped so the gate sees the raw intent.
-    """
-    messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
-    if not messages:
-        return ""
-    last = messages[-1]
-    if _message_type(last) != "human":
-        return ""
-    content = last.get("content") if isinstance(last, dict) else getattr(last, "content", "")
-    text = _content_text(content)
-    text = _strip_system_reminders(text)
-    return text.strip()
-
-
 class SuperfastDecisionGateMiddleware(AgentMiddleware):
-    """Shadow-only observer that classifies the incoming user turn and logs the route.
+    """Shadow-only observer that classifies the incoming turn and logs the route.
 
     Registered at the front of the lead-agent middleware chain. On the async path
-    it reads the most recent user message, applies the configured PII boundary,
-    asks the decision backend the three typed questions, and logs the recommended
-    route and latency through the project logger. It never returns state updates,
-    never skips the model call, and never changes routing. When the gate is
-    disabled or unavailable it does nothing.
+    it builds a bounded context from the recent real conversation, applies the
+    configured PII boundary, asks the decision backend the three typed questions,
+    and logs the recommended route and latency through the project logger. It
+    never returns state updates, never skips the model call, and never changes
+    routing. When the gate is disabled or unavailable it does nothing.
 
     The shadow classifier needs an HTTP round-trip and runs only on the async
     path, where the production gateway lives. The synchronous ``before_model``
@@ -312,23 +327,23 @@ class SuperfastDecisionGateMiddleware(AgentMiddleware):
     async def abefore_model(self, state: Any, runtime: Any) -> dict[str, Any] | None:
         if not is_enabled():
             return None
-        user_text = _latest_user_text(state)
-        if not user_text:
+        context = _build_classification_context(state)
+        if not context:
             return None
-        # Apply the configured PII boundary before the turn leaves for the
+        # Apply the configured PII boundary before the context leaves for the
         # decision service. The model-call redaction wrapper runs later, so the
         # gate must redact its own request; if redaction fails, skip the request
         # entirely rather than send unredacted protected identifiers (fail-open).
         try:
             from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 
-            safe_text = redact_text(user_text, self._pii_redaction_config)
+            safe_context = redact_text(context, self._pii_redaction_config)
         except Exception:
             logger.debug("superfast gate redaction failed (fail-open, request skipped)")
             return None
-        if not safe_text or not safe_text.strip():
+        if not safe_context or not safe_context.strip():
             return None
-        result = await classify_turn(safe_text)
+        result = await classify_turn(safe_context)
         if result is None:
             return None
         route, latency_ms = result
