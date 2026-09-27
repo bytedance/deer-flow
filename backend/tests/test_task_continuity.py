@@ -154,6 +154,75 @@ def test_keywords_and_fts_syntax_are_data(scoped, query):
         assert result["results"]
 
 
+def test_history_search_filters_archived_rows_by_role_before_the_limit(scoped):
+    # Ten assistant rows share the keyword; the one user row must not be
+    # crowded out of the archived eight-result budget when role="user".
+    messages = [HumanMessage(content="Citrine target from the user", id="u1")]
+    messages += [AIMessage(content=f"Citrine discussion {i}", id=f"a{i}") for i in range(10)]
+    messages.append(ToolMessage(content="Citrine tool output", tool_call_id="t1", id="t1"))
+    state = {"task_history": archive.capture({}, scoped, messages, TaskContinuityConfig(enabled=True))}
+    rows = archive.records(messages, 64000)
+
+    by_user = archive.lookup(state, scoped, query="Citrine", role="human")
+    assert [row["id"] for row in by_user["results"]] == [rows[0]["id"]]
+
+    by_tool = archive.lookup(state, scoped, query="Citrine", role="tool")
+    assert [row["role"] for row in by_tool["results"]] == ["tool"]
+
+    by_assistant = archive.lookup(state, scoped, query="Citrine", role="ai")
+    assert len(by_assistant["results"]) == 8
+    assert all(row["role"] == "ai" for row in by_assistant["results"])
+
+    unfiltered = archive.lookup(state, scoped, query="Citrine")
+    assert len(unfiltered["results"]) == 8
+
+
+@pytest.mark.asyncio
+async def test_history_search_role_filters_active_messages(scoped):
+    import json
+
+    scoped.state = {
+        "messages": [
+            HumanMessage(content="replicas should be 4", id="u1"),
+            AIMessage(content="replicas were 3", id="a1"),
+        ]
+    }
+    result = json.loads(await history_search.coroutine(scoped, "replicas", role="user"))
+    assert [row["role"] for row in result["results"]] == ["human"]
+    assert result["results"][0]["excerpt"] == "replicas should be 4"
+
+    everything = json.loads(await history_search.coroutine(scoped, "replicas"))
+    assert {row["role"] for row in everything["results"]} == {"human", "ai"}
+
+
+def test_history_search_role_is_schema_constrained():
+    from typing import get_args
+
+    from pydantic import ValidationError
+
+    schema_cls = history_search.get_input_schema()
+    with pytest.raises(ValidationError):
+        schema_cls.model_validate({"query": "q", "role": "system"})
+
+    role_args = set()
+    for arg in get_args(schema_cls.model_fields["role"].annotation):
+        role_args.update(get_args(arg) or (arg,))
+    assert role_args == {"user", "assistant", "tool", type(None)}
+
+
+def test_history_read_ignores_role_and_keeps_pagination(scoped):
+    # history_read resolves one exact source; the search-time role filter must
+    # not gate it.
+    state = {"task_history": archive.capture({}, scoped, conversation(), TaskContinuityConfig(enabled=True))}
+    scoped.state = state
+    source_id = archive.records(conversation(), 64000)[1]["id"]
+    import json
+
+    page = json.loads(history_read.func(scoped, source_id))
+    assert page["role"] == "ai"
+    assert page["text"] == "Accepted"
+
+
 def test_truncation_and_omitted_sources_are_reported(scoped):
     config = TaskContinuityConfig(enabled=True, max_records_per_batch=1, max_record_chars=1000)
     history = archive.capture({}, scoped, [HumanMessage(content="old"), HumanMessage(content="Citrine " + "x" * 2000)], config)

@@ -152,7 +152,7 @@ async def acapture(*args) -> dict:
         raise
 
 
-def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | None = None) -> dict:
+def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | None = None, role: str | None = None) -> dict:
     path, owner = scope(runtime)
     batches = reachable(state, owner)
     active = records(state.get("messages", []), 64000)
@@ -173,7 +173,11 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                     rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? LIMIT 1", [*batches, source_id])
                 else:
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
-                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}) ORDER BY rank LIMIT 8", [match, *batches])
+                    # The role predicate belongs in the WHERE clause: filtering
+                    # after LIMIT 8 would let off-role rows consume the budget.
+                    role_sql = " AND json_extract(payload, '$.role') = ?" if role else ""
+                    params = [match, *batches, role] if role else [match, *batches]
+                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_sql} ORDER BY rank LIMIT 8", params)
                 for (payload,) in rows:
                     row = json.loads(payload)
                     found[row["id"]] = row
@@ -182,6 +186,8 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     elif history.get("scope") is not None and history["scope"] != owner:
         status = "scope_unavailable"
     for row in active:
+        if role and row["role"] != role:
+            continue
         if (source_id and row["id"] == source_id) or (query is not None and any(t in row["text"].casefold() for t in keywords)):
             found[row["id"]] = row
     return {"results": list(found.values())[:8], "status": status}
