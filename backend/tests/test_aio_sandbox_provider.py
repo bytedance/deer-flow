@@ -296,9 +296,7 @@ def _make_provider(tmp_path):
         provider._acquire_epoch_counter = 0
         provider._acquire_inflight = {}
         provider._acquire_serializer = AcquireSerializer(thread_name_prefix="aio-sandbox-lock-wait")
-        provider._acquire_worker_executor = aio_mod.ThreadPoolExecutor(
-            thread_name_prefix="aio-sandbox-owned-worker-test"
-        )
+        provider._acquire_worker_executor = aio_mod.ThreadPoolExecutor(thread_name_prefix="aio-sandbox-owned-worker-test")
         provider._lock = MagicMock()
         provider._idle_checker_stop = MagicMock()
         provider._renewal_stop = MagicMock()
@@ -1589,18 +1587,11 @@ async def test_acquire_async_lock_waiters_do_not_starve_holder_worker(tmp_path, 
         lambda *_args, **_kwargs: "sandbox-cached",
     )
 
-    owner = asyncio.create_task(
-        provider.acquire_async("thread-holder-deadlock", user_id="default")
-    )
+    owner = asyncio.create_task(provider.acquire_async("thread-holder-deadlock", user_id="default"))
     successors: list[asyncio.Task[str]] = []
     try:
         assert await asyncio.to_thread(projection_started.wait, 2)
-        successors = [
-            asyncio.create_task(
-                provider.acquire_async("thread-holder-deadlock", user_id="default")
-            )
-            for _ in range(2)
-        ]
+        successors = [asyncio.create_task(provider.acquire_async("thread-holder-deadlock", user_id="default")) for _ in range(2)]
         # Submission 1 acquired the holder's key. Submissions 2 and 3 are now
         # both running in the bounded serializer pool, blocked on that same key.
         assert await asyncio.to_thread(waiter_workers_started.wait, 2)
