@@ -29,7 +29,8 @@ files need backup. One profile may be enabled; its revision fences
 updates and capability test results. When a usable server image model and an
 enabled usable web profile coexist without a valid saved default, image
 generation requires a chat choice regardless of configuration order. The
-response is checked against the recorded card and current profile revision.
+response is checked against the recorded card, current managed revision, and
+server profile identity (provider, model, endpoint, and size; no API key).
 A valid saved default selects either source
 across runs; changes to either model or endpoint invalidate it and require a
 new chat choice. Unattended runs use the server source when both usable sources
