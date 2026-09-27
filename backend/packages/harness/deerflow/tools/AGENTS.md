@@ -29,6 +29,11 @@ Only standalone tool discovery without a model falls back to the base profile.
 image and PPT skills. `generate_image` validates virtual paths, chooses the
 managed image profile before legacy sandbox environment, injects managed
 credentials for a single sandbox command, validates the returned image, and
+requires a validated chat choice when a newer server model conflicts with the
+web profile. The choice is bound to one run; ambiguity returns before sandbox
+acquisition. The prior run parks its AIO container, so the selected source
+acquires its own container identity without directly destroying the old one;
+normal idle cleanup still applies. The tool
 converts it to the requested PNG/JPEG/WebP format before moving it to the
 requested output path. Its async entry point checks missing configuration
 before sandbox acquisition. Legacy `sandbox.environment` credentials already

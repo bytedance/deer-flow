@@ -1523,15 +1523,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         for sandbox_id, entry in expired:
             self._destroy_warm_entry(sandbox_id, entry, reason="idle_timeout", still_reapable=lambda sid=sandbox_id: sid in self._warm_pool)
 
-    def _evict_oldest_warm(self) -> str | None:
-        """Evict the oldest warm entry this instance still owns."""
+    def _evict_oldest_warm(self, *, protected_thread: tuple[str, str] | None = None) -> str | None:
+        """Evict an old warm entry while preserving a chat choice's prior container."""
         with self._lock:
             if not self._warm_pool:
                 return None
             # Snapshot oldest-first under the lock; ownership is resolved outside
             # it, since a claim can be a network round trip and the provider lock
             # guards every acquire path.
-            candidates = [(sandbox_id, entry) for sandbox_id, (entry, _) in sorted(self._warm_pool.items(), key=lambda item: item[1][1])]
+            candidates = [(sandbox_id, entry) for sandbox_id, (entry, _) in sorted(self._warm_pool.items(), key=lambda item: item[1][1]) if protected_thread is None or self._warm_pool_identity.get(sandbox_id) != protected_thread]
 
         for sandbox_id, entry in candidates:
             # "Still in the warm pool?" is the reapable check, and it has to run
@@ -1601,6 +1601,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         sandbox._deerflow_managed_image_local = isinstance(getattr(self, "_backend", None), LocalContainerBackend)
         profile = self._managed_image_profile()
         sandbox._deerflow_image_profile_revision = profile.revision if profile is not None and sandbox.id == self._image_profile_sandbox_id(base_id, profile.revision) else None
+        from deerflow.config.image_generation import effective_image_generation_source, legacy_image_storage_identity
+
+        environment = get_app_config().sandbox.environment
+        server_identity = legacy_image_storage_identity(environment) if effective_image_generation_source(environment) == "sandbox_environment" else None
+        sandbox._deerflow_server_image_storage_identity = server_identity if server_identity is not None and sandbox.id == self._image_config_sandbox_id(base_id, server_identity) else None
 
     def _base_sandbox_id_for_thread(self, thread_id: str | None, user_id: str | None) -> str:
         """Identity derived from user, thread, and skills mount policy."""
@@ -1628,6 +1633,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def _sandbox_id_for_thread(self, thread_id: str | None, user_id: str | None) -> str:
         """Use a new container when the selected web image profile changes."""
         base_id = self._base_sandbox_id_for_thread(thread_id, user_id)
+        from deerflow.config.image_generation import effective_image_generation_source, legacy_image_storage_identity
+
+        environment = get_app_config().sandbox.environment
+        if thread_id and effective_image_generation_source(environment) == "sandbox_environment":
+            server_identity = legacy_image_storage_identity(environment)
+            if server_identity is not None:
+                return self._image_config_sandbox_id(base_id, server_identity)
         if not thread_id or (profile := self._managed_image_profile()) is None:
             return base_id
         return self._image_profile_sandbox_id(base_id, profile.revision)
@@ -1635,6 +1647,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     @staticmethod
     def _image_profile_sandbox_id(base_id: str, revision: str) -> str:
         seed = b"image-profile-v1\0" + base_id.encode() + b"\0" + revision.encode()
+        return hashlib.sha256(seed).hexdigest()[:16]
+
+    @staticmethod
+    def _image_config_sandbox_id(base_id: str, identity: str) -> str:
+        seed = b"server-image-profile-v1\0" + base_id.encode() + b"\0" + identity.encode()
         return hashlib.sha256(seed).hexdigest()[:16]
 
     def _reuse_in_process_sandbox(self, thread_id: str | None, *, user_id: str | None = None, post_lock: bool = False) -> str | None:
@@ -2439,7 +2456,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
         replicas, total = self._replica_count()
         if total >= replicas:
-            evicted = self._evict_oldest_warm()
+            from deerflow.config.image_generation import effective_image_generation_source
+
+            protected_thread = self._thread_key(thread_id, effective_user_id) if thread_id and effective_image_generation_source(get_app_config().sandbox.environment) is not None else None
+            evicted = self._evict_oldest_warm(protected_thread=protected_thread)
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
         create_kwargs = {}
@@ -2520,7 +2540,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
         replicas, total = self._replica_count()
         if total >= replicas:
-            evicted = await run_sync_lifecycle_operation(self._evict_oldest_warm)
+            from deerflow.config.image_generation import effective_image_generation_source
+
+            protected_thread = self._thread_key(thread_id, effective_user_id) if thread_id and effective_image_generation_source(get_app_config().sandbox.environment) is not None else None
+            evicted = await run_sync_lifecycle_operation(self._evict_oldest_warm, protected_thread=protected_thread)
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
         create_kwargs = {}

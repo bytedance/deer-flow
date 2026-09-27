@@ -1339,7 +1339,7 @@ export const zhCN: Translations = {
     imageModels: {
       title: "图片模型",
       description:
-        "配置图片和 PPT 生成使用的模型。图片模型与聊天模型分开配置；已启用的网页配置优先于沙箱环境变量。测试会调用模型，可能产生费用。",
+        "为新聊天和图片任务选择默认图片模型。图片模型与聊天模型分开配置；模型或接口发生变化后，会在对话中重新选择。测试会调用模型，可能产生费用。",
       add: "添加图片模型",
       reload: "重新加载",
       loading: "正在加载图片模型…",
@@ -1354,6 +1354,15 @@ export const zhCN: Translations = {
         unreachable: "无法连接提供方",
       },
       serverConfig: "服务器配置 · 只读",
+      selected: "新图片请求使用此模型",
+      notSelected: "新图片请求不使用此模型",
+      chooseInChat: "生成图片前在对话中选择模型",
+      overridesServer: "优先于服务器配置",
+      setDefault: "设为默认",
+      setDefaultLabel: (name) => `将${name}设为默认图片模型`,
+      defaultTag: "默认使用",
+      defaultTagLabel: (name) => `默认图片模型：${name}`,
+      defaultSaved: "已更新默认图片模型",
       enabled: "已启用",
       disabled: "已停用",
       edit: "编辑",
@@ -1369,7 +1378,7 @@ export const zhCN: Translations = {
       testEdit: "测试参考图编辑",
       working: "处理中…",
       formDescription:
-        "保存提供方后，分别测试图片生成和参考图编辑。启用的网页配置会覆盖后续图片请求的沙箱环境变量。",
+        "保存提供方后，分别测试图片生成和参考图编辑。网页配置会成为当前服务器模型的默认选择。",
       name: "唯一名称",
       displayName: "显示名称",
       provider: "提供方",

@@ -11,6 +11,7 @@ from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
 from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
 from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+from deerflow.config.image_generation import bind_image_generation_source
 
 
 def test_profile_revision_changes_local_sandbox_identity_without_changing_base(monkeypatch):
@@ -177,6 +178,42 @@ def test_probe_container_cannot_be_discovered_as_profile_container_even_if_teard
     assert len(calls) == 2
     assert destroyed[0][0] != sandbox_id
     assert calls[1][1] == sandbox_id
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.asyncio
+async def test_chat_image_choice_does_not_evict_the_prior_thread_container(monkeypatch, tmp_path, async_mode):
+    provider, _, calls, destroyed, _ = _creation_provider(monkeypatch, tmp_path, supports_env=True)
+    monkeypatch.setattr(provider, "_managed_image_profile", lambda: None)
+    monkeypatch.setattr(provider, "_replica_count", lambda: (1, 1))
+    protected = []
+    monkeypatch.setattr(provider, "_evict_oldest_warm", lambda *, protected_thread=None: protected.append(protected_thread) or None)
+
+    async def ready(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(provider_module, "wait_for_sandbox_ready_async", ready)
+    with bind_image_generation_source("sandbox_environment"):
+        if async_mode:
+            assert await provider._create_sandbox_async("thread", "server-choice-id", user_id="user") == "server-choice-id"
+        else:
+            assert provider._create_sandbox("thread", "server-choice-id", user_id="user") == "server-choice-id"
+    assert protected == [("user", "thread")]
+    assert len(calls) == 1
+    assert destroyed == []
+
+
+def test_capacity_eviction_skips_a_chat_choice_thread(monkeypatch):
+    provider = object.__new__(AioSandboxProvider)
+    provider._lock = threading.Lock()
+    prior = SandboxInfo(sandbox_id="prior", sandbox_url="http://sandbox", container_id="prior")
+    other = SandboxInfo(sandbox_id="other", sandbox_url="http://sandbox", container_id="other")
+    provider._warm_pool = {"prior": (prior, 1), "other": (other, 2)}
+    provider._warm_pool_identity = {"prior": ("user", "thread"), "other": ("other-user", "other-thread")}
+    removed = []
+    monkeypatch.setattr(provider, "_destroy_warm_entry", lambda sandbox_id, _entry, **_kwargs: removed.append(sandbox_id) or True)
+    assert provider._evict_oldest_warm(protected_thread=("user", "thread")) == "other"
+    assert removed == ["other"]
 
 
 @pytest.mark.parametrize("network_mode", ["open", "restricted"])

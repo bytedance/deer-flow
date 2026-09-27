@@ -1206,6 +1206,15 @@ export interface Translations {
         string
       >;
       serverConfig: string;
+      selected: string;
+      notSelected: string;
+      chooseInChat: string;
+      overridesServer: string;
+      setDefault: string;
+      setDefaultLabel: (name: string) => string;
+      defaultTag: string;
+      defaultTagLabel: (name: string) => string;
+      defaultSaved: string;
       enabled: string;
       disabled: string;
       edit: string;
