@@ -332,7 +332,7 @@ This release closes that milestone with **181 merged pull requests**.
   ("only accepts Python datetime") and Postgres a `DataError`; only changing
   the cadence worked, because that path computes a fresh datetime. The
   repository now coerces every serialized timestamp it accepts in `update()`,
-  as `update_after_launch()` already did.
+  as `update_after_launch()` already did. ([#5964])
 - **gateway:** `GET` and `PUT /api/user-profile` no longer run their
   filesystem work on the event loop. Both handlers resolved the per-user
   `USER.md` path (which builds absolute paths on every call), stat'ed, read,
@@ -6217,4 +6217,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5928]: https://github.com/bytedance/deer-flow/pull/5928
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934
 [#5935]: https://github.com/bytedance/deer-flow/pull/5935
+[#5964]: https://github.com/bytedance/deer-flow/pull/5964
 

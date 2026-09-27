@@ -333,7 +333,7 @@
   而这个值是仓储以 ISO 字符串序列化后返回的。`ScheduledTaskRepository.update()` 原样把它赋给
   `DateTime` 列，于是 SQLite 抛出 `StatementError`（"only accepts Python datetime"），Postgres 抛出
   `DataError`；只有改变节奏才能成功，因为那条路径会重新计算出 datetime。现在仓储在 `update()` 中
-  会像 `update_after_launch()` 一样，把接收到的所有序列化时间戳转换回来。
+  会像 `update_after_launch()` 一样，把接收到的所有序列化时间戳转换回来。([#5964])
 - **网关：** `GET` 与 `PUT /api/user-profile` 不再在事件循环上执行文件系统操作。这两个处理器
   此前在循环上直接解析按用户隔离的 `USER.md` 路径（每次调用都会构造绝对路径）、stat、读取、
   创建用户目录并写入文件，而自定义智能体路由里的其他所有处理器都通过 `asyncio.to_thread`
@@ -5270,3 +5270,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5928]: https://github.com/bytedance/deer-flow/pull/5928
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934
 [#5935]: https://github.com/bytedance/deer-flow/pull/5935
+[#5964]: https://github.com/bytedance/deer-flow/pull/5964
