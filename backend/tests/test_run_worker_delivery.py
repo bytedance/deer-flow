@@ -774,9 +774,9 @@ class _BlockingJournalBatchStore(MemoryRunEventStore):
 
 @pytest.mark.anyio
 async def test_terminal_receipt_waits_for_bounded_flush_to_settle(monkeypatch):
-    """``flush() == False`` must settle the journal before the terminal receipt.
+    """An unsettled journal batch must settle before the terminal receipt.
 
-    The bounded flush only reports whether its deadline was met, so the receipt
+    The bounded drain deadline only reports whether it was met, so the receipt
     and the durable terminal row have to wait for the batch that missed it:
     otherwise the terminal run outlives journal events that must precede it.
     """
@@ -785,17 +785,14 @@ async def test_terminal_receipt_waits_for_bounded_flush_to_settle(monkeypatch):
     monkeypatch.setattr("deerflow.runtime.journal._CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05)
     event_store = _BlockingJournalBatchStore()
 
-    bounded_flush_results: list[bool] = []
-    bounded_flush_done = asyncio.Event()
-    real_flush = RunJournal.flush
+    finish_started = asyncio.Event()
+    real_finish = RunJournal.finish_for_terminal
 
-    async def spy_flush(journal):
-        settled = await real_flush(journal)
-        bounded_flush_results.append(settled)
-        bounded_flush_done.set()
-        return settled
+    async def spy_finish(journal):
+        finish_started.set()
+        return await real_finish(journal)
 
-    monkeypatch.setattr(RunJournal, "flush", spy_flush)
+    monkeypatch.setattr(RunJournal, "finish_for_terminal", spy_finish)
 
     class OrderingRunStore(MemoryRunStore):
         async def update_status(self, run_id, status, *, error=None, stop_reason=None):
@@ -829,8 +826,7 @@ async def test_terminal_receipt_waits_for_bounded_flush_to_settle(monkeypatch):
     )
     try:
         await asyncio.wait_for(event_store.batch_a_entered.wait(), timeout=2)
-        await asyncio.wait_for(bounded_flush_done.wait(), timeout=2)
-        assert bounded_flush_results == [False]
+        await asyncio.wait_for(finish_started.wait(), timeout=2)
         assert event_store.batches == [[f"test.step.{index}" for index in range(20)]]
 
         # While A is unresolved the worker must not have attempted the receipt ...
@@ -871,17 +867,14 @@ async def test_cross_thread_middleware_accepted_before_producer_barrier_persists
     monkeypatch.setattr("deerflow.runtime.journal._CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05)
     event_store = _BlockingJournalBatchStore()
 
-    bounded_flush_results: list[bool] = []
-    bounded_flush_done = asyncio.Event()
-    real_flush = RunJournal.flush
+    finish_started = asyncio.Event()
+    real_finish = RunJournal.finish_for_terminal
 
-    async def spy_flush(journal):
-        settled = await real_flush(journal)
-        bounded_flush_results.append(settled)
-        bounded_flush_done.set()
-        return settled
+    async def spy_finish(journal):
+        finish_started.set()
+        return await real_finish(journal)
 
-    monkeypatch.setattr(RunJournal, "flush", spy_flush)
+    monkeypatch.setattr(RunJournal, "finish_for_terminal", spy_finish)
 
     class OrderingRunStore(MemoryRunStore):
         async def update_status(self, run_id, status, *, error=None, stop_reason=None):
@@ -936,8 +929,7 @@ async def test_cross_thread_middleware_accepted_before_producer_barrier_persists
         )
     )
     try:
-        await asyncio.wait_for(bounded_flush_done.wait(), timeout=2)
-        assert bounded_flush_results == [False]
+        await asyncio.wait_for(finish_started.wait(), timeout=2)
         assert accepted_buffer == [["middleware:tool_progress"]]
         assert event_store.batches == [[f"test.step.{index}" for index in range(20)]]
 
@@ -1100,24 +1092,16 @@ async def test_store_self_cancellation_is_a_journal_failure_not_host_cancellatio
 
 
 @pytest.mark.anyio
-async def test_worker_barrier_cancellation_settles_journal_before_terminal_outcome(monkeypatch):
-    """Cancelling the worker inside the pre-receipt barrier must not strand the journal.
+async def test_worker_barrier_cancel_after_committed_drain_still_writes_receipt(monkeypatch):
+    """A committed drain keeps its receipt and outcome even when the worker is cancelled.
 
-    Pins the timing of the previously untested production shape: the graph has
-    already staged ``success`` while the durable row is still ``running``, the
-    first threshold batch A outlives the bounded ``flush()`` deadline, so the
-    barrier moves on to ``flush_until_settled()``, and only then is the worker
-    task cancelled.
-
-    Every production canceller that can reach this point cancels the worker task
-    while the run is still ``running``: a user cancel is staged as
-    ``interrupted`` before the task is signalled (``RunManager.cancel``), the
-    heartbeat-observed path skips runs that are no longer running, and lease
-    loss fences the record before cancelling. The invariant under test is
-    therefore the fail-closed one: a run that cannot prove its journal settled
-    must not become a durable ``success``; because it does not, it publishes no
-    terminal receipt either; and the batches the journal did own are still
-    supervised to a real outcome instead of being abandoned with the caller.
+    This reverses the earlier ``..._settles_journal_before_terminal_outcome``
+    assertion, which encoded the bug: ``flush_until_settled`` re-raises the
+    caller's cancellation after its owned drain has already committed, so
+    recording ``journal_failure`` there turned a settled journal into a failed
+    run (review 4097569404). The settled drain must publish its receipt and its
+    true terminal outcome first, and only then propagate the original
+    cancellation.
     """
     monkeypatch.setattr("deerflow.runtime.journal._CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05)
 
@@ -1165,13 +1149,13 @@ async def test_worker_barrier_cancellation_settles_journal_before_terminal_outco
             yield {"messages": []}
 
     barrier_entered = asyncio.Event()
-    real_settle = RunJournal.flush_until_settled
+    real_finish = RunJournal.finish_for_terminal
 
-    async def spy_settle(journal):
+    async def spy_finish(journal):
         barrier_entered.set()
-        return await real_settle(journal)
+        return await real_finish(journal)
 
-    monkeypatch.setattr(RunJournal, "flush_until_settled", spy_settle)
+    monkeypatch.setattr(RunJournal, "finish_for_terminal", spy_finish)
 
     bridge = _make_bridge()
     task = asyncio.create_task(
@@ -1188,18 +1172,13 @@ async def test_worker_barrier_cancellation_settles_journal_before_terminal_outco
     try:
         await asyncio.wait_for(event_store.batch_a_entered.wait(), timeout=2)
         await asyncio.wait_for(barrier_entered.wait(), timeout=2)
-        journal = journals[-1]
 
-        # The barrier is blocked on the owned settled drain: A is still in
-        # flight, B is still buffered, and the staged success is not durable.
+        # The staged success is still only local while A is in flight.
         assert record.status == RunStatus.success
         assert (await run_store.get(record.run_id))["status"] == "running"
-        assert journal._buffer
         assert not task.done()
 
-        # Interrupt the worker while it owns that drain. ``_await_owned_task``
-        # observes the request through ``asyncio.wait`` without cancelling the
-        # write, so the worker must stay alive until A reaches a real outcome.
+        # Interrupt the worker while it owns that drain.
         task.cancel()
         await asyncio.sleep(0.02)
         assert not task.done()
@@ -1215,26 +1194,120 @@ async def test_worker_barrier_cancellation_settles_journal_before_terminal_outco
     # drain persisted the successor batch behind it, in order.
     assert event_store.write_cancelled is False
     assert [len(batch) for batch in event_store.batches] == [20, 5]
-    persisted = await event_store.list_events("thread-1", record.run_id)
-    assert len([event for event in persisted if event["event_type"].startswith("test.step.")]) == 25
 
-    # The interrupt did not strand the journal: the drain completed and the
-    # worker still detached its store afterwards.
+    # The committed drain produced its receipt and a durable success instead of
+    # the ``_JOURNAL_UNSETTLED_ERROR`` the inverted assertion used to require.
+    assert event_store.receipt_attempted.is_set() is True
+    assert record.status == RunStatus.success
+    assert record.error is None
+    assert (await run_store.get(record.run_id))["status"] == "success"
+    receipt_events = await _delivery_events(event_store, "thread-1", record.run_id)
+    assert len(receipt_events) == 1
+
+    persisted = await event_store.list_events("thread-1", record.run_id)
+    journal_seqs = [event["seq"] for event in persisted if event["event_type"].startswith("test.step.")]
+    assert len(journal_seqs) == 25
+    assert max(journal_seqs) < receipt_events[0]["seq"]
+
+    # The end frame is published and the journal detached without a retry.
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    journal = journals[-1]
     assert journal._buffer == []
     assert journal._closed is True
     assert journal._store is None
 
-    # The end frame is published even though the barrier was interrupted, so
-    # stream consumers do not wait for a lease expiry or worker restart.
-    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    # The barrier preserved the host interrupt by identity; it did not run
+    # ``_defer_finalization_interrupt``'s uncancel-all helper, which would have
+    # cleared this count to zero.
+    assert task.cancelling() == 1
 
-    # Fail-closed terminal outcome: this run cannot prove a settled journal, so
-    # it must not keep the staged ``success``.
+
+@pytest.mark.anyio
+async def test_worker_definite_journal_failure_never_retries_after_terminal():
+    """After the terminal decision and the end frame, no journal write is started."""
+
+    class RecordingFailingStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[list[str]] = []
+            self.terminal_published = False
+
+        async def put_batch(self, events):
+            self.calls.append([event["event_type"] for event in events])
+            assert self.terminal_published is False, "a journal write started after the terminal decision"
+            raise RuntimeError("journal store unavailable")
+
+    event_store = RecordingFailingStore()
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+
+    class JournalingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            journal._put(event_type="test.step", category="steps", content={"index": 0})
+            yield {"messages": []}
+
+    bridge = _make_bridge()
+
+    async def publish_end(run_id):
+        event_store.terminal_published = True
+
+    bridge.publish_end = AsyncMock(side_effect=publish_end)
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=event_store),
+        agent_factory=lambda *, config: JournalingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert event_store.calls == [["test.step"]]
     assert record.status == RunStatus.error
     assert record.error == _JOURNAL_UNSETTLED_ERROR
     assert (await run_store.get(record.run_id))["status"] == "error"
-
-    # Receipt contract: a durable ``success`` may never outlive its receipt, and
-    # this run is refused as a success, so no receipt is written for it.
-    assert event_store.receipt_attempted.is_set() is False
     assert await _delivery_events(event_store, "thread-1", record.run_id) == []
+
+
+@pytest.mark.anyio
+async def test_worker_unknown_or_fenced_journal_never_publishes_success_or_receipt():
+    """A fenced worker publishes no receipt and no journal write."""
+
+    class RecordingStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[list[str]] = []
+
+        async def put_batch(self, events):
+            self.calls.append([event["event_type"] for event in events])
+            return await super().put_batch(events)
+
+    event_store = RecordingStore()
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+
+    class JournalingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            journal._put(event_type="test.step", category="steps", content={"index": 0})
+            # Lease loss fences the run before the terminal barrier.
+            record.ownership_lost = True
+            yield {"messages": []}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=event_store),
+        agent_factory=lambda *, config: JournalingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert event_store.calls == []
+    assert await _delivery_events(event_store, "thread-1", record.run_id) == []
+    assert record.ownership_lost is True

@@ -945,7 +945,7 @@ async def run_agent(
         # receipt, including checkpoint validation failures and cancellation
         # while waiting for an earlier run to finish finalizing.
         if event_store is not None:
-            from deerflow.runtime.journal import RunJournal
+            from deerflow.runtime.journal import JournalWriteDisposition, RunJournal
 
             journal = RunJournal(
                 run_id=run_id,
@@ -1529,38 +1529,48 @@ async def run_agent(
             # crash window where a terminal run could otherwise outlive its receipt.
             # A fenced worker leaves receipt recovery to the peer that claimed it.
             if not record.ownership_lost and journal is not None:
-                settled = False
-                journal_failure: BaseException | None = None
-                try:
-                    # The bounded flush reports whether its drain deadline was
-                    # met, not whether the write that missed it can still land,
-                    # so ``False`` is a "not yet": settle it before the receipt
-                    # and before the durable terminal row. D1 operational cost:
-                    # this settle is deliberately unbounded and precedes
-                    # ``bridge.publish_end``, so a hung store holds the durable
-                    # run ``running`` and stream consumers wait for the end frame
-                    # until lease expiry or a worker restart.
-                    settled = await journal.flush()
-                    if not settled:
-                        settled = await journal.flush_until_settled()
-                    if not settled:
-                        # Explicit invariant; not ``assert``, which ``python -O``
-                        # strips. ``flush_until_settled`` settles or raises.
-                        raise RuntimeError("journal did not settle before terminal receipt")
-                except asyncio.CancelledError as exc:
-                    # An interrupted barrier is not evidence of a settled
-                    # journal, and the interrupt must not be swallowed. Defer it
-                    # past the terminal bookkeeping below so the run still gets a
-                    # real durable outcome, and keep it out of the success path.
-                    deferred_finalization_interrupt = _defer_finalization_interrupt(
-                        deferred_finalization_interrupt,
-                        exc,
-                    )
-                    journal_failure = exc
-                except Exception as exc:
-                    journal_failure = exc
+                # The typed finish owns one settled drain and reports the journal
+                # outcome separately from this worker's cancellation, so a
+                # committed drain stays committed even when the worker task is
+                # interrupted while waiting for it (review 4097569404). The
+                # settle is deliberately unbounded and precedes
+                # ``bridge.publish_end``: a hung store holds the durable run
+                # ``running`` and stream consumers wait for the end frame until
+                # lease expiry or a worker restart.
+                finish_result = await journal.finish_for_terminal()
+                if finish_result.caller_cancellation is not None and deferred_finalization_interrupt is None:
+                    # Preserve the first host interrupt by identity and re-raise
+                    # it after the ordered receipt and terminal bookkeeping. This
+                    # deliberately does not run ``_defer_finalization_interrupt``,
+                    # which clears every pending ``task.cancelling()`` count.
+                    deferred_finalization_interrupt = finish_result.caller_cancellation
 
-                if journal_failure is not None:
+                snapshot = finish_result.snapshot
+                if finish_result.disposition is JournalWriteDisposition.COMMITTED and snapshot is not None:
+                    if delivery_content is None:
+                        if produced_output_paths is None:
+                            produced_output_paths = await _produced_output_paths(
+                                pre_run_workspace_snapshot,
+                                thread_id=thread_id,
+                                user_id=workspace_changes_user_id,
+                                extra_excluded_dir_names=workspace_excluded_dir_names,
+                            )
+                        delivery_content = _delivery_content_with_outputs(snapshot.delivery_content, produced_output_paths)
+                    receipt_persisted = await _persist_delivery_receipt(
+                        event_store,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        content=delivery_content,
+                    )
+                    if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
+                        await run_manager.set_status(
+                            run_id,
+                            RunStatus.error,
+                            error=_DELIVERY_RECEIPT_FAILED_ERROR,
+                            persist=False,
+                        )
+                else:
+                    journal_failure: BaseException = finish_result.failure or RuntimeError("journal did not settle before terminal receipt")
                     # Recovery only backfills a zero-delivery receipt and cannot
                     # replay this run's volatile journal batches, so publishing
                     # either the receipt or a durable success here would lose the
@@ -1578,30 +1588,6 @@ async def run_agent(
                             run_id,
                             RunStatus.error,
                             error=_JOURNAL_UNSETTLED_ERROR,
-                            persist=False,
-                        )
-
-                if settled:
-                    if delivery_content is None:
-                        if produced_output_paths is None:
-                            produced_output_paths = await _produced_output_paths(
-                                pre_run_workspace_snapshot,
-                                thread_id=thread_id,
-                                user_id=workspace_changes_user_id,
-                                extra_excluded_dir_names=workspace_excluded_dir_names,
-                            )
-                        delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
-                    receipt_persisted = await _persist_delivery_receipt(
-                        event_store,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        content=delivery_content,
-                    )
-                    if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
-                        await run_manager.set_status(
-                            run_id,
-                            RunStatus.error,
-                            error=_DELIVERY_RECEIPT_FAILED_ERROR,
                             persist=False,
                         )
 
@@ -1760,7 +1746,11 @@ async def run_agent(
             try:
                 if journal is not None:
                     try:
-                        await journal.close(flush=not record.ownership_lost)
+                        # The terminal finish already detached on success or
+                        # fenced the journal on failure. This close must never
+                        # start another durable write after the terminal
+                        # decision, so it is always a write-free teardown.
+                        await journal.close(flush=False)
                     except Exception:
                         logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
             finally:
