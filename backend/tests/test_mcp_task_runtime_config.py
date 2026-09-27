@@ -137,3 +137,37 @@ def test_mcp_interceptor_changes_remain_hot_reloadable_without_task_tools() -> N
         validate_mcp_task_config_snapshot(current)
     finally:
         set_mcp_task_config_snapshot(None)
+
+
+def _task_server(task_toolsets: list[dict]) -> dict:
+    return {"mcpServers": {"reports": {"command": "reports-mcp", "task_toolsets": task_toolsets}}}
+
+
+_TASK_TOOLSETS = [
+    {
+        "name": "reports",
+        "submit_tool": "submit_report",
+        "status_tool": "status_report",
+        "cancel_tool": "cancel_report",
+    }
+]
+
+
+def test_equivalent_interceptor_spellings_do_not_invalidate_task_runtime_snapshot() -> None:
+    startup = ExtensionsConfig.model_validate({**_task_server(_TASK_TOOLSETS), "mcpInterceptors": "example.interceptor:build"})
+    current = ExtensionsConfig.model_validate({**_task_server(_TASK_TOOLSETS), "mcpInterceptors": ["example.interceptor:build"]})
+    set_mcp_task_config_snapshot(startup)
+    try:
+        validate_mcp_task_config_snapshot(current)
+    finally:
+        set_mcp_task_config_snapshot(None)
+
+
+def test_transport_alias_does_not_invalidate_task_runtime_snapshot() -> None:
+    startup = ExtensionsConfig.model_validate({"mcpServers": {"reports": {"type": "stdio", "command": "reports-mcp", "task_toolsets": _TASK_TOOLSETS}}})
+    current = ExtensionsConfig.model_validate({"mcpServers": {"reports": {"transport": "stdio", "command": "reports-mcp", "task_toolsets": _TASK_TOOLSETS}}})
+    set_mcp_task_config_snapshot(startup)
+    try:
+        validate_mcp_task_config_snapshot(current)
+    finally:
+        set_mcp_task_config_snapshot(None)

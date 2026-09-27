@@ -2,9 +2,10 @@ export type ScheduledTask = {
   id: string;
   thread_id: string | null;
   context_mode: "fresh_thread_per_run" | "reuse_thread";
+  assistant_id: string | null;
   title: string;
   prompt: string;
-  schedule_type: "once" | "cron";
+  schedule_type: "once" | "cron" | "interval";
   schedule_spec: Record<string, unknown>;
   timezone: string;
   status:
@@ -33,12 +34,14 @@ export type ScheduledTaskRun = {
   trigger: "scheduled" | "manual";
   status:
     | "queued"
+    | "launching"
     | "running"
     | "success"
     | "failed"
     | "skipped"
     | "interrupted";
   error: string | null;
+  attempt_count: number;
   started_at: string | null;
   finished_at: string | null;
   created_at: string;

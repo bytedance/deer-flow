@@ -1,15 +1,14 @@
 "use client";
 
 import {
+  BotIcon,
   BellIcon,
   CableIcon,
   InfoIcon,
   BrainIcon,
   PaletteIcon,
-  PlugZapIcon,
-  SparklesIcon,
+  UsersRoundIcon,
   UserIcon,
-  WrenchIcon,
 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useEffect, useMemo, useState } from "react";
@@ -53,13 +52,6 @@ const ChannelsSettingsPage = dynamic(
     ),
   { loading: SettingsPageLoading },
 );
-const IntegrationsSettingsPage = dynamic(
-  () =>
-    import("./integrations-settings-page").then(
-      (module) => module.IntegrationsSettingsPage,
-    ),
-  { loading: SettingsPageLoading },
-);
 const MemorySettingsPage = dynamic(
   () =>
     import("./memory-settings-page").then(
@@ -74,14 +66,16 @@ const NotificationSettingsPage = dynamic(
     ),
   { loading: SettingsPageLoading },
 );
-const SkillSettingsPage = dynamic(
+const SubagentSettingsPage = dynamic(
   () =>
-    import("./skill-settings-page").then((module) => module.SkillSettingsPage),
+    import("./subagent-settings-page").then(
+      (module) => module.SubagentSettingsPage,
+    ),
   { loading: SettingsPageLoading },
 );
-const ToolSettingsPage = dynamic(
+const ModelSettingsPage = dynamic(
   () =>
-    import("./tool-settings-page").then((module) => module.ToolSettingsPage),
+    import("./model-settings-page").then((module) => module.ModelSettingsPage),
   { loading: SettingsPageLoading },
 );
 const AboutSettingsPage = dynamic(
@@ -91,13 +85,12 @@ const AboutSettingsPage = dynamic(
 );
 
 export type SettingsSection =
+  | "models"
   | "account"
   | "appearance"
   | "channels"
-  | "integrations"
   | "memory"
-  | "tools"
-  | "skills"
+  | "subagents"
   | "notification"
   | "about";
 
@@ -121,6 +114,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
 
   const sections = useMemo(
     () => [
+      { id: "models", label: t.settings.sections.models, icon: BotIcon },
       {
         id: "account",
         label: t.settings.sections.account,
@@ -142,27 +136,24 @@ export function SettingsDialog(props: SettingsDialogProps) {
         icon: CableIcon,
       },
       {
-        id: "integrations",
-        label: t.settings.sections.integrations,
-        icon: PlugZapIcon,
-      },
-      {
         id: "memory",
         label: t.settings.sections.memory,
         icon: BrainIcon,
       },
-      { id: "tools", label: t.settings.sections.tools, icon: WrenchIcon },
-      { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
+      {
+        id: "subagents",
+        label: t.settings.sections.subagents,
+        icon: UsersRoundIcon,
+      },
       { id: "about", label: t.settings.sections.about, icon: InfoIcon },
     ],
     [
+      t.settings.sections.models,
       t.settings.sections.account,
       t.settings.sections.appearance,
       t.settings.sections.channels,
-      t.settings.sections.integrations,
       t.settings.sections.memory,
-      t.settings.sections.tools,
-      t.settings.sections.skills,
+      t.settings.sections.subagents,
       t.settings.sections.notification,
       t.settings.sections.about,
     ],
@@ -209,18 +200,13 @@ export function SettingsDialog(props: SettingsDialogProps) {
           </nav>
           <ScrollArea className="h-full min-h-0 rounded-lg border">
             <div className="space-y-8 p-6">
+              {activeSection === "models" && <ModelSettingsPage />}
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}
-              {activeSection === "tools" && <ToolSettingsPage />}
-              {activeSection === "skills" && (
-                <SkillSettingsPage
-                  onClose={() => props.onOpenChange?.(false)}
-                />
-              )}
+              {activeSection === "subagents" && <SubagentSettingsPage />}
               {activeSection === "notification" && <NotificationSettingsPage />}
               {activeSection === "channels" && <ChannelsSettingsPage />}
-              {activeSection === "integrations" && <IntegrationsSettingsPage />}
               {activeSection === "about" && <AboutSettingsPage />}
             </div>
           </ScrollArea>

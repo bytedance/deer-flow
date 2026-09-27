@@ -43,19 +43,23 @@ curl http://localhost:8001/health
 curl http://localhost:2026/api/models
 ```
 
-## Config upgrade
+## Upgrading an existing checkout
 
-When you pull a new version of DeerFlow, the `config_version` in `config.example.yaml` may be higher than your `config.yaml`. To merge new fields without losing your customizations:
+Keep your existing `config.yaml`, `.env`, and `extensions_config.json`; do not
+run `make config` again. Stop the mode you currently use, pull the update, then
+start the same mode again:
 
-```bash
-make config-upgrade
-```
+| Current mode | Stop | Pull and restart |
+| --- | --- | --- |
+| Local development | `make stop` | `git pull --ff-only && make dev` |
+| Local production | `make stop` | `git pull --ff-only && make start` |
+| Docker development | `make docker-stop` | `git pull --ff-only && make docker-start` |
+| Docker production | `make down` | `git pull --ff-only && make up` |
 
-Check the current version in your config:
-
-```bash
-grep config_version config.yaml
-```
+Do not run `make docker-init` after every `git pull`; it is for first-time
+sandbox image setup. If the new version needs configuration fields, run
+`make config-upgrade` before restarting. It preserves existing values and writes
+`config.yaml.bak` before changing the file.
 
 ## Common problems
 

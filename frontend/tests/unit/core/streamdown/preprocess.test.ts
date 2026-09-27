@@ -273,6 +273,14 @@ test("stripLeakedSystemTags strips tags with attributes", () => {
   expect(stripLeakedSystemTags('<memory class="x">text</memory>')).toBe("text");
 });
 
+test("stripLeakedSystemTags strips project context tags with attributes", () => {
+  expect(
+    stripLeakedSystemTags(
+      '<project name="Roadmap">instructions</project><documents count="1" shown="1">- id=abc | a.pdf</documents>',
+    ),
+  ).toBe("instructions- id=abc | a.pdf");
+});
+
 test("stripLeakedSystemTags handles multiple occurrences", () => {
   expect(
     stripLeakedSystemTags(
@@ -321,7 +329,16 @@ test("stripLeakedSystemTags handles no tags present", () => {
   expect(stripLeakedSystemTags(input)).toBe(input);
 });
 
-test("stripLeakedSystemTags strips <uploaded_files> tag", () => {
+test("stripLeakedSystemTags strips <current_uploads> tag", () => {
+  expect(
+    stripLeakedSystemTags("<current_uploads>file.pdf</current_uploads>"),
+  ).toBe("file.pdf");
+});
+
+test("stripLeakedSystemTags strips legacy <uploaded_files> tag", () => {
+  // Display-only backward compatibility (#4212): pre-#4174 history still
+  // carries <uploaded_files> blocks; the leaked-tag stripper keeps handling
+  // the legacy spelling so old threads do not render raw XML.
   expect(
     stripLeakedSystemTags("<uploaded_files>file.pdf</uploaded_files>"),
   ).toBe("file.pdf");

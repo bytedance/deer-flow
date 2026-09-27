@@ -91,12 +91,15 @@ def test_every_duplicate_participant_must_satisfy_the_constraint():
 
 
 def test_core_constraints_are_declared():
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
     from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
     from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
+    from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.extensions.ordering import core_ordering_constraints
 
     pairs = {(c.outer, c.inner) for c in core_ordering_constraints()}
     assert (ToolProgressMiddleware, ToolErrorHandlingMiddleware) in pairs
+    assert (DeferredToolPromotionAuditMiddleware, SkillToolPolicyMiddleware) in pairs
 
 
 def test_core_constraints_are_a_plain_tuple():

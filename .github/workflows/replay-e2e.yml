@@ -10,7 +10,7 @@ name: Replay E2E (front-back contract)
 
 on:
   push:
-    branches: ["main", "2.0.x-dev"]
+    branches: ["main", "*-dev"]
     paths:
       - "frontend/**"
       - "backend/app/gateway/**"
@@ -89,7 +89,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
       - name: Enable Corepack
         run: corepack enable
       - name: Use pinned pnpm version

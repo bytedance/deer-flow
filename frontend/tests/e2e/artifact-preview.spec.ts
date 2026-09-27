@@ -216,7 +216,10 @@ test.describe("Artifact preview stability", () => {
     const artifactsPanel = page.locator("#artifacts");
     await expect(artifactsPanel.getByText("report.md")).toBeVisible();
 
-    const targetHeading = artifactsPanel.locator("h2#概述");
+    // Anchors keep rehype-sanitize's user-content- clobber prefix (see
+    // rehypeScopedSlug), so the heading id — and the translated fragment
+    // link that scrolls to it — are both prefixed.
+    const targetHeading = artifactsPanel.locator("h2#user-content-概述");
     await expect(targetHeading).toHaveCount(1);
     await artifactsPanel.getByRole("link", { name: "概述" }).click();
 
@@ -423,7 +426,7 @@ test.describe("Artifact preview stability", () => {
     ).toBeVisible();
   });
 
-  test("renders sandboxed iframe for a browser-previewable non-code file (urlOfArtifact path)", async ({
+  test("renders a PDF in an unsandboxed iframe so Chromium's viewer can display it (urlOfArtifact path)", async ({
     page,
   }) => {
     mockLangGraphAPI(page, {
@@ -458,8 +461,15 @@ test.describe("Artifact preview stability", () => {
     const artifactsPanel = page.locator("#artifacts");
     await expect(artifactsPanel.getByText("report.pdf")).toBeVisible();
 
-    const urlOfArtifactIframe = artifactsPanel.locator("iframe:not([title])");
+    // Chromium blocks its built-in PDF viewer inside a sandbox="" iframe, so
+    // PDFs render unsandboxed; the endpoint declares application/pdf and the
+    // Gateway adds X-Content-Type-Options: nosniff, so the response cannot be
+    // reinterpreted as active markup. Non-PDF previewable binaries (images,
+    // audio, video) keep the sandbox.
+    const urlOfArtifactIframe = artifactsPanel.locator(
+      'iframe[title="report.pdf"]',
+    );
     await expect(urlOfArtifactIframe).toBeVisible();
-    await expect(urlOfArtifactIframe).toHaveAttribute("sandbox", "");
+    await expect(urlOfArtifactIframe).not.toHaveAttribute("sandbox", "");
   });
 });

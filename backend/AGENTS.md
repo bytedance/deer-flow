@@ -1,10 +1,8 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with code in this repository. It is the source of truth; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
-
 ## Project Overview
 
-DeerFlow is a LangGraph-based AI super agent system with a full-stack architecture. The backend provides a "super agent" with sandbox execution, persistent memory, subagent delegation, and extensible tool integration - all operating in per-thread isolated environments.
+The backend runs a LangGraph-based super agent with sandbox execution, persistent memory, subagent delegation, and extensible tools in isolated per-thread environments.
 
 **Architecture**:
 - **Gateway API** (port 8001): REST API plus embedded LangGraph-compatible agent runtime
@@ -14,13 +12,17 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 
 **Runtime**:
 - `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Nginx exposes that runtime at `/api/langgraph/*` and rewrites it to Gateway's native `/api/*` routers.
-- Gateway streams `write_file` and `str_replace` argument deltas in bounded batches when clients also subscribe to `values`; messages-only consumers retain the original per-chunk contract, while `values` preserves the complete tool call.
+- Gateway streams `write_file` and `str_replace` argument deltas in bounded batches for multi-mode `messages-tuple` consumers; single-mode message consumers retain the original per-chunk contract. Non-message frames flush pending batches, and `values` remains an optional complete-state snapshot rather than a prerequisite for batching.
 - With `stream_subgraphs`, subgraph frames keep their namespace in the SSE event name (`values|<ns>`, LangGraph Platform style) instead of impersonating root frames — a delegated subagent inherits the parent checkpoint namespace, so publishing its `values` snapshot as bare `values` replaces the whole thread view in SDK clients (#4399). Root-only consumers (file-tool chunk batcher, subagent event persistence, LLM error-fallback detection) ignore namespaced frames. The web frontend does not request subgraph streaming; subtask progress rides root-namespace `task_*` custom events.
 - Background subagent identity is deliberately split: the provider `tool_call_id` remains the correlation key for `ToolMessage`, `task_*` SSE events, persisted lifecycle events, frontend cards, and the public `ExtensionData.scope_id` contract (stored as `SubagentResult.external_task_id`), while `SubagentExecutor.execute_async()` generates a full server-side `execution_id` for `SubagentResult.task_id`, the process-wide registry, polling, cancellation, timeout handling, and cleanup. Provider IDs are not globally unique across parent runs, so they must never become registry ownership keys; scheduler closures retain their own `SubagentResult` rather than resolving ownership again through the mutable registry. Terminal subagent token usage travels in the current run's `ToolMessage.additional_kwargs` and is attributed from message state, never through a process-global provider-ID cache.
-- Scheduled-task executions must reuse that same Gateway run lifecycle. The scheduler may decide *when* work runs, but it must dispatch through the existing run path rather than introducing a parallel execution stack.
-- The background scheduler is single-instance by default. `scheduler.multi_instance=true` opts into lease-aware recovery across Gateway instances and requires shared Postgres, `run_ownership.heartbeat_enabled=true`, and `run_events.backend=db`; otherwise startup rejects the configuration. Live scheduled runs are preserved when a peer starts; expired leases are atomically taken over, stale post-launch writes are fenced by the dispatch lease owner, and the Postgres advisory-locked budget makes `max_concurrent_runs` a shared global cap (including pre-launch reservations).
-- Long-running MCP work uses a separate durable task runtime rather than keeping remote task IDs or status polling inside the Agent loop. Explicit `task_toolsets` bind raw submit/status/cancel names; only submit remains Agent-visible, and its wrapper persists the remote handle before returning a local ID. `McpTaskService` claims due rows with leases, resolves a protocol-specific `McpTaskDriver`, and writes normalized snapshots back to `mcp_tasks`; expired leases are the restart-recovery mechanism, and a result returned after expiry must be discarded even when the owner token still matches. The database is the source of truth. `ThreadState` may receive only a bounded projection in later integration work, never the sole recoverable copy.
-- Scheduled-task dispatch enforces "at most one active run per task when `overlap_policy=skip`" at the DB layer via the partial unique index `uq_scheduled_task_run_active` (`scheduled_task_runs.task_id WHERE status IN ('queued','running')`). `ScheduledTaskService.dispatch_task`'s `has_active_runs` check is a non-atomic fast path (its own session, separated from the `create()` insert by `await` points), so two concurrent dispatches — a manual `POST /scheduled-tasks/{id}/trigger` racing the poller, a double-click, or a client retry — can both pass it; the index is the atomic arbiter, and the losing `create` surfaces as `ActiveScheduledRunConflict` (translated from `IntegrityError` in the repository) and collapses to the same outcome as the fast path (manual → 409 conflict, scheduled → a `"skipped"` tombstone). The scheduled-skip tombstone is created directly as terminal `"skipped"` (not a transient `"queued"`) so it never occupies the active slot the pre-existing run still holds. Sibling of the `runs` table's `uq_runs_thread_active` (PR #4003), which keys on `thread_id` and so does not cover the default `fresh_thread_per_run` context where every dispatch gets a new thread. Index is status-only, not `overlap_policy`-conditional (the policy is fixed to `"skip"` in the MVP).
+- Scheduled tasks dispatch through the normal Gateway run path. `launch_scheduled_thread_run` reads `get_app_config()` at dispatch and passes `scheduler.recursion_limit` (default 1000, matching the web UI; clamped by `max_recursion_limit`), so YAML changes apply on the next run without restarting Gateway.
+- Run-history `status` filters are occurrence states, not task states. `ScheduledTaskRunStatus` in `persistence/scheduled_tasks/model.py` is the shared API/repository vocabulary and must match the active and terminal occurrence-status sets. Keep owner lookup before reading history, and apply SQL task/status predicates before pagination; omitted status preserves the existing response.
+- The background scheduler is single-instance by default. `scheduler.multi_instance=true` opts into lease-aware recovery across Gateway instances and requires shared Postgres, `run_ownership.heartbeat_enabled=true`, and `run_events.backend=db`; otherwise startup rejects the configuration. Live scheduled runs are preserved when a peer starts; expired launch claims return to the durable queue, expired run leases are atomically taken over, stale launch writes are fenced by lease ownership, and the Postgres advisory-locked budget makes `max_concurrent_runs` a shared global cap for `launching`/`running` rows.
+- Long-running MCP work uses a separate durable task runtime (`McpTaskService` + `mcp_tasks`, lease-based recovery) rather than keeping remote task IDs or status polling inside the Agent loop; only submit remains Agent-visible, the database is the source of truth, and `ThreadState` receives only a bounded current-thread projection. Full contract (leases, cancellation fencing, delivery idempotency, management-tool exposure): [packages/harness/deerflow/mcp/AGENTS.md](packages/harness/deerflow/mcp/AGENTS.md).
+- MCP task notification retries, dead-lettering, and the cancel endpoint's worker-stopped 503 are part of that same contract — see [packages/harness/deerflow/mcp/AGENTS.md](packages/harness/deerflow/mcp/AGENTS.md).
+- Scheduled-task dispatch permits one active occurrence per task via `uq_scheduled_task_run_active` (`task_id WHERE status IN ('queued','launching','running')`). Durable `queued` rows survive restarts; only lease-fenced `launching` may call Gateway launch; `running` references the durable run. Stable admission idempotency keys reuse that run after recovery. Reused-thread `ConflictError` returns `launching` to `queued`; other launch errors become `failed`. Atomic queue claims enforce `max_concurrent_runs`, excluding waiting rows; the budget count and its UPDATE are separate statements, so writers must serialize before the count (Postgres advisory lock; SQLite `BEGIN IMMEDIATE`, whose deferred transaction otherwise reserves the writer only at the UPDATE) or claims on distinct rows overshoot the cap. Repeated triggers coalesce; same-thread FIFO blocks behind older active rows. Queue admission, PATCH/resume, pause and delete lock the parent before the occurrence, freezing active task definitions. Pause/delete atomically cancel `queued` work but reject `launching`/`running`; PATCH/resume reject all active states. Only queued conflicts offer pause cancellation. Manual triggers may queue/run while paused. Recovery locks task/run pairs in task-id/run-id order and restores `run_id`, `started_at` and live errors before releasing launch claims. Launch/failure/timeout updates use one parent-first transaction to prevent interleaved claims. Queue timeout fails the occurrence and advances scheduled work to prevent immediate requeue. Repository boundaries coerce serialized timestamps before SQL `DateTime` binding.
+- `POST /api/scheduled-tasks/preview-cron` requires authenticated `threads:read`. Bounded cron previews call the shared scheduler calculator in `asyncio.to_thread`, preserving its DST semantics. Capture the optional aware reference once; return UTC and offset-bearing local occurrences without acquiring task/thread/run stores or dispatching work. This advisory API does not reserve execution.
+- `extensions_config.json` is written at runtime by the Gateway (`PUT`/`PATCH /api/mcp/config`, the MCP enable switch, skill updates), so the production compose mounts it read-write while `config.yaml` stays `:ro`; Helm copies its ConfigMap seed into a writable home-volume directory before Gateway starts. Every read-modify-write holds both `extensions_config_write_lock` and the sidecar advisory `extensions_config_file_lock`, because the process-local lock alone loses updates across workers. Docker mounts the compose file as its own mount point, and Linux refuses `rename()` over a mount point with `EBUSY` even when the mount is writable — so `atomic_write_extensions_config` keeps the temp-file-plus-rename path and falls back to an in-place overwrite only on `EBUSY`. That fallback is deliberately non-atomic (a crash mid-write truncates the file); it exists because the alternative is a write that can never succeed, and only its first occurrence per target is logged at warning level. Any other `errno` still propagates. Pinned by `tests/test_compose_extensions_config_writable.py`, `tests/test_extensions_config_atomic_write.py`, and `tests/test_helm_extensions_config_writable.py`.
 
 **Project Structure**:
 ```
@@ -66,6 +68,7 @@ deer-flow/
 │   │   │   ├── app.py         # FastAPI application
 │   │   │   └── routers/       # FastAPI route modules (models, mcp, memory, skills, uploads, threads, artifacts, agents, suggestions, channels)
 │   │   └── channels/          # IM platform integrations
+│   ├── scripts/benchmark/       # Standalone reproducible backend benchmarks
 │   ├── tests/                 # Test suite
 │   └── docs/                  # Documentation
 ├── frontend/                   # Next.js frontend application
@@ -74,16 +77,74 @@ deer-flow/
     └── custom/                # Custom skills (gitignored)
 ```
 
+ATX outline closing markers use a linear suffix scan; do not use unanchored
+whitespace regex searches on unbounded uploaded headings. The long-heading
+regression exercises the production extractor under a generous process deadline.
+
 ## Important Development Guidelines
 
 ### Documentation Update Policy
-**CRITICAL: Always update README.md and AGENTS.md after every code change**
+Every code change must keep docs accurate and current: update `README.md` for
+user-facing behavior and the relevant `AGENTS.md` for development changes.
+`CLAUDE.md` imports `AGENTS.md`; do not edit the shim.
 
-When making code changes, you MUST update the relevant documentation:
-- Update `README.md` for user-facing changes (features, setup, usage instructions)
-- Update `AGENTS.md` for development changes (architecture, commands, workflows, internal systems). `CLAUDE.md` imports it via `@AGENTS.md`, so editing `AGENTS.md` updates both.
-- Keep documentation synchronized with the codebase at all times
-- Ensure accuracy and timeliness of all documentation
+### Backend Benchmarks
+
+`scripts/benchmark/context_snapshot/`: explicit `run-live` needs provider env
+vars; `summarize` and pytest are offline. See its README for the protocol.
+
+Benchmarks in `scripts/benchmark/` must be standalone and reproducible. Import
+production functions; never duplicate them or introduce an alternative runtime.
+
+- Pin every external dataset by immutable revision and SHA-256. Callers provide
+  the local dataset path; evaluation commands must not silently download data.
+- Never commit upstream dataset text, credentials, complete provider requests,
+  or response headers. Committed manifests may contain stable IDs and source
+  locators. Synthetic cases must identify themselves as synthetic.
+- Read provider credentials and endpoints from named environment variables.
+  Version model IDs, inference parameters, prompts, retry rules, clocks, and
+  random seeds in the evaluation config.
+- Public raw results may contain case IDs, policy decisions, model hypotheses,
+  grades, and non-secret response metadata. Keep dataset questions, reference
+  answers, memory content, and full provider payloads in ignored local run
+  directories.
+- Use fixed clocks and deterministic ordering for offline selection. Results
+  must record the config, manifest, prompt, dataset, and git revisions used.
+
+`scripts/benchmark/deermem_eviction/` evaluates the production
+`select_facts_for_capacity()` implementation used by DeerMem. It compares only
+the historical `confidence` policy and PR #4789's opt-in `hybrid-v1`; do not add
+another eviction strategy to this evaluation. Run its offline checks from
+`backend/`:
+
+```bash
+PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction validate-contracts
+PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction validate --dataset "$LONGMEMEVAL_ORACLE_PATH"
+PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction run-policy \
+  --dataset "$LONGMEMEVAL_ORACLE_PATH" \
+  --output-dir /tmp/deermem-eviction-policy-run
+PYTHONPATH=. uv run pytest tests/test_bench_deermem_eviction_*.py -q
+```
+
+The offline test suite must not require network access, provider credentials,
+or the LongMemEval dataset. Small LongMemEval-shaped fixtures must be synthetic
+and generated by tests.
+
+`scripts/benchmark/concurrency/` measures multi-process contention on the
+`users` table (N separate OS processes, not asyncio tasks) for SQLite vs
+Postgres -- the scenario `CONFIGURATION.md` requires Postgres for. `worker.py`
+connects directly via SQLAlchemy (skipping the ~8.5s Alembic bootstrap the
+orchestrator already ran once) and mirrors the app's per-connection SQLite
+PRAGMAs; `run_concurrency_bench.py` seeds a disposable per-run Postgres schema,
+synchronises workers on a READY/GO barrier before timing, and exits non-zero on
+any crash, short op count, or `errors > 0`. Postgres runs need a throwaway
+database via `--pg-url`; nothing here touches `public`. Run from `backend/`:
+
+```bash
+uv run python scripts/benchmark/concurrency/run_concurrency_bench.py \
+  --backend sqlite --workers 2,4,8,16 --ops-per-worker 50 --read-ratio 0.7
+uv run pytest tests/test_bench_concurrency.py tests/test_bench_worker.py -q
+```
 
 ## Commands
 
@@ -92,6 +153,7 @@ When making code changes, you MUST update the relevant documentation:
 make check      # Check system requirements
 make install    # Install all dependencies (frontend + backend)
 make extension-install SOURCE=...  # Install and enable a trusted Python extension
+make extension-upgrade SOURCE=...  # Replace an installed extension and keep its config
 make extension-list                # List configured Python extensions
 make extension-enable NAME=...     # Enable an installed extension
 make extension-disable NAME=...    # Disable an extension without uninstalling it
@@ -105,13 +167,15 @@ make stop       # Stop all services
 **Backend directory** (for backend development only):
 ```bash
 make install            # Install backend dependencies
-make dev                # Run Gateway API with runtime-safe reload (port 8001)
-make gateway            # Run Gateway API only (port 8001)
-make test               # Run offline backend tests (excludes live external-API tests)
-make test-live          # Explicitly run live DeerFlowClient tests with real APIs
-make test-blocking-io   # Run strict Blockbuster runtime gate on tests/blocking_io/
-make lint               # Lint with ruff
-make format             # Format code with ruff
+make dev                # Gateway API, reload (port 8001)
+make gateway            # Gateway API only (port 8001)
+make test               # offline tests (no live/blocking-io)
+make test-live          # live tests (real APIs)
+make test-blocking-io   # strict Blockbuster gate on tests/blocking_io/
+make test-shard SPLITS=4 GROUP=2  # one duration-aware shard
+make test-shard-durations  # refresh baseline
+make lint               # ruff lint
+make format             # ruff format
 make migrate-rev MSG="..."  # Autogenerate a new alembic revision (see Schema Migrations section)
 ```
 
@@ -161,6 +225,19 @@ modules that only need lightweight types, config, or registries should import
 the concrete submodule instead of adding eager package-root imports that pull in
 the tool graph or subagent executor during state/schema imports.
 
+`ThreadMetaStore.search()` keeps JSON filter semantics identical across memory,
+SQLite, and PostgreSQL: missing differs from null, bool differs from int, and
+float filters accept integer or real JSON numbers through `json_value_matches`.
+
+### Gateway Run-Context Trust Boundary
+
+Gate server-owned run context on both client feeds (`body.context` and
+`body.config`): `merge_run_context_overrides` admits it only for `internal=True`,
+while `strip_internal_context_keys` scrubs both destinations. Treat
+`disable_clarification` like `non_interactive`. Before run/state writes,
+`_normalize_input_messages` rejects canonical external system/developer roles;
+only `AUTH_SOURCE_INTERNAL` run input may retain them.
+
 ## Development Workflow
 
 ### Test-Driven Development (TDD) — MANDATORY
@@ -168,14 +245,17 @@ the tool graph or subagent executor during state/schema imports.
 **Every new feature or bug fix MUST be accompanied by unit tests. No exceptions.**
 
 - Write tests in `backend/tests/` following the existing naming convention `test_<feature>.py`
-- Run the full offline suite before and after your change: `make test`
+- Run both offline targets before and after your change: `make test` and `make test-blocking-io`
 - Tests must pass before a feature is considered complete
 - For lightweight config/utility modules, prefer pure unit tests with no external dependencies
 - If a module causes circular import issues in tests, add a `sys.modules` mock in `tests/conftest.py` (see existing example for `deerflow.subagents.executor`)
 
 ```bash
-# Run all offline tests
+# Run default offline tests
 make test
+
+# Run strict blocking-I/O tests
+make test-blocking-io
 
 # Explicit live integration tests (requires config.yaml and credentials;
 # calls real APIs and may create local side effects)
@@ -185,18 +265,16 @@ make test-live
 PYTHONPATH=. uv run pytest tests/test_<feature>.py -v
 ```
 
-Direct pytest collection or execution of `tests/test_client_live.py` remains
-skipped unless `DEER_FLOW_RUN_LIVE_TESTS=1` is set. Do not add that opt-in to
-default CI workflows.
+Keep live tests opt-in via `DEER_FLOW_RUN_LIVE_TESTS=1`; guard POSIX-only
+markers with `os.name` for Windows collection.
+
+Jina logging tests use dummy keys (`tests/test_jina_client.py`).
+Jina/Browserless/InfoQuest resolve URLs without rebuilding HTML.
+InfoQuest connect/read timeout is 30s, separate from crawl timeouts (`tests/test_infoquest_http_timeout.py`).
 
 ### Running the Full Application
 
-From the **project root** directory:
-```bash
-make dev
-```
-
-This starts all services and makes the application available at `http://localhost:2026`.
+Run `make dev` from the repo root to start all services at `http://localhost:2026`.
 
 **All startup modes:**
 
@@ -237,30 +315,45 @@ When using `make dev` from root, the frontend automatically connects through ngi
 
 ## Key Features
 
+### Web Search Recency
+
+DDG, Brave, Tavily, SearXNG, and Sofya `web_search` share optional
+`time_range=day|week|month|year`; omission preserves request shape. DDG maps to
+`d|w|m|y`, Brave to `pd|pw|pm|py`, Tavily/SearXNG pass values unchanged, and
+Sofya passes them unchanged as `freshness`.
+For recency, DDGS 9.14.1 uses only enabled Brave, DuckDuckGo, and Yahoo engines
+that honor `timelimit`: `auto`/`all` resolves to this set, incompatible configured
+engines are removed, and an empty set falls back to it. Re-check on DDGS upgrades.
+
+### Tavily Fetch
+
+Title fallback: result URL, then request URL.
+
 ### File Upload
 
-Multi-file upload with automatic document conversion:
+Outlines use ATX syntax (1–6 hashes, space/tab separator, ≤3 leading spaces), strip closing hashes and skip fenced code.
 - Endpoint: `POST /api/threads/{thread_id}/uploads`
 - Supports: PDF, PPT, Excel, Word documents (converted via `markitdown`)
-- Rejects directory inputs before copying so uploads stay all-or-nothing
-- Reuses one conversion worker per request when called from an active event loop
+- Rejects directories before copying to keep uploads all-or-nothing
+- One conversion worker per request when called from an active event loop
 - Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
-- Duplicate filenames in a single upload request are auto-renamed with `_N` suffixes so later files do not truncate earlier files
-- Gateway HTTP uploads stage bytes as `.upload-*.part` files and atomically replace the destination only after size validation. These staging files are hidden from upload listings, agent upload context, and sandbox listing/search tools, and swept on Gateway startup if a hard crash leaves one behind.
+- Duplicate filenames within one request get `_N` suffixes to prevent overwrites.
+- Gateway HTTP uploads stage `.upload-*.part` files, hidden from upload listings, agent context, and sandbox listings/searches. After size validation, publication is atomic; staged-name cleanup logs errors and leaves leftovers for startup sweep.
 - Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.
-- Mounted upload paths skip both sandbox acquisition and per-file synchronization. For AIO remote/provisioner deployments this requires an explicit, accurate `sandbox.thread_data_mounts: true`; omission preserves backend auto-detection.
-- Agent receives uploaded file list via `UploadsMiddleware`
+- Mounted uploads skip sandbox acquire/sync. AIO remote/provisioner requires accurate `sandbox.thread_data_mounts: true`; omission keeps backend auto-detection.
+- `UploadsMiddleware` caps outline titles at 200 characters and previews at 2000 including markers. Titles use `original_user_content`, not upload-prefixed content; attachment-only titles use a sanitized, bounded filename or count.
 
 See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
 
 ### Plan Mode
 
-TodoList middleware for complex multi-step tasks:
-- Controlled via runtime config: `config.configurable.is_plan_mode = True`
-- Provides `write_todos` tool for task tracking
-- One task in_progress at a time, real-time updates
+`config.configurable.is_plan_mode=True` enables TodoList `write_todos` for
+multi-step tasks: one `in_progress` task, real-time updates. See
+[usage](docs/plan_mode_usage.md).
 
-See [docs/plan_mode_usage.md](docs/plan_mode_usage.md) for details.
+### Run Interaction Policy
+
+Interaction-sensitive changes must follow [policy](docs/RUN_INTERACTION_POLICY.md).
 
 ### Context Summarization
 
@@ -283,7 +376,7 @@ See [docs/summarization.md](docs/summarization.md) for details.
 For models with `supports_vision: true`:
 - `ViewImageMiddleware` processes images in conversation
 - `view_image_tool` added to agent's toolset
-- Images are converted to base64 and injected into a hidden message carrying both a reserved ID prefix and a server-owned metadata marker for the model call; Gateway strips that marker from untrusted input, and the middleware requires both identifiers before removing the message. The `before_model` and `model` node checkpoints for that call still contain the payload; after `after_model` cleanup, subsequent checkpoints retain only lightweight `viewed_images` metadata, while client-chosen IDs survive
+- Images are converted to base64 and appended to the model request as a hidden message carrying both a reserved ID prefix and a server-owned metadata marker; Gateway strips that marker from untrusted input, and the middleware requires both identifiers to recognize its own message. The middleware injects inside `wrap_model_call`, so the payload never enters graph state: checkpoints retain only lightweight `viewed_images` metadata, while client-chosen IDs survive. It also sweeps its own message out of every request before rebuilding it, so a payload stranded in an older checkpoint by an interrupted run stops being resent
 
 ## Code Style
 

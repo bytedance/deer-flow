@@ -89,6 +89,9 @@ async def test_crawl_network_error(jina_client, monkeypatch):
 async def test_crawl_transient_failure_logs_without_traceback(jina_client, monkeypatch, caplog):
     """Transient network failures must log at WARNING without a traceback and include the exception type."""
 
+    # Keep the missing-key warning independent of test order and shard placement.
+    monkeypatch.setenv("JINA_API_KEY", "test-key")
+
     async def mock_post(self, url, **kwargs):
         raise httpx.ConnectTimeout("timed out")
 

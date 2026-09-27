@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -15,19 +16,15 @@ COREPACK_NOTICE = "Using pnpm via Corepack."
 
 def find_pnpm_command() -> list[str] | None:
     """Return the preferred pnpm-compatible command for this machine."""
-    pnpm_path = shutil.which("pnpm")
-    if pnpm_path:
-        return [str(Path(pnpm_path))]
+    pnpm_names = ("pnpm.cmd", "pnpm") if os.name == "nt" else ("pnpm", "pnpm.cmd")
+    for name in pnpm_names:
+        if pnpm_path := shutil.which(name):
+            return [str(Path(pnpm_path))]
 
-    pnpm_cmd_path = shutil.which("pnpm.cmd")
-    if pnpm_cmd_path:
-        return [str(Path(pnpm_cmd_path))]
-
-    corepack_path = shutil.which("corepack")
-    if not corepack_path:
-        corepack_path = shutil.which("corepack.cmd")
-    if corepack_path:
-        return [str(Path(corepack_path)), "pnpm"]
+    corepack_names = ("corepack.cmd", "corepack") if os.name == "nt" else ("corepack", "corepack.cmd")
+    for name in corepack_names:
+        if corepack_path := shutil.which(name):
+            return [str(Path(corepack_path)), "pnpm"]
     return None
 
 

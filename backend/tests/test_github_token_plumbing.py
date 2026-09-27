@@ -17,6 +17,8 @@ concurrent runs on different repos from clobbering each other's token.
 
 from __future__ import annotations
 
+import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -30,6 +32,17 @@ from app.channels.message_bus import InboundMessage, InboundMessageType, Message
 from app.channels.store import ChannelStore
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.tools import _github_env_from_runtime, bash_tool
+
+
+def _new_aio_sandbox_with_session_state():
+    """Build a manually wired AioSandbox including creation-ownership state."""
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox, _SessionCreationState
+
+    sbx = AioSandbox.__new__(AioSandbox)
+    sbx._session_creation_state_lock = threading.Lock()
+    sbx._shell_session_creation_state = _SessionCreationState()
+    sbx._bash_session_creation_state = _SessionCreationState()
+    return sbx
 
 
 def _make_conflict_error(detail: str = "thread_id already exists") -> ConflictError:
@@ -59,7 +72,8 @@ def test_local_sandbox_env_overlay_reaches_subprocess(monkeypatch: pytest.Monkey
         captured["env"] = env
         return ("", "", 0, False)
 
-    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(fake_run_posix))
+    runner = "_run_windows_command" if os.name == "nt" else "_run_posix_command"
+    monkeypatch.setattr(LocalSandbox, runner, staticmethod(fake_run_posix))
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "/bin/bash"))
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": "/usr/bin", "EXISTING": "kept"})
 
@@ -82,7 +96,8 @@ def test_local_sandbox_no_env_passes_sanitized_environ(monkeypatch: pytest.Monke
         captured["env"] = env
         return ("", "", 0, False)
 
-    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(fake_run_posix))
+    runner = "_run_windows_command" if os.name == "nt" else "_run_posix_command"
+    monkeypatch.setattr(LocalSandbox, runner, staticmethod(fake_run_posix))
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "/bin/bash"))
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": "/usr/bin", "OPENAI_API_KEY": "sk-leak"})
 
@@ -102,17 +117,24 @@ def test_aio_sandbox_env_routes_through_bash_exec() -> None:
     persistent-shell ``export … unset`` overlay, which could not keep secrets
     out of the command string.
     """
-    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 
     captured: dict = {}
 
     class _FakeBash:
+        def create_session(self, *, session_id, **kwargs):
+            captured["created_session"] = session_id
+            captured["create_options"] = kwargs.get("request_options")
+
         def exec(self, *, command, env=None, **kwargs):
             captured["command"] = command
             captured["env"] = env
+            captured["exec_session"] = kwargs["session_id"]
             return SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr=None))
 
-    sbx = AioSandbox.__new__(AioSandbox)
+        def close_session(self, session_id, **kwargs):
+            captured["closed_session"] = session_id
+
+    sbx = _new_aio_sandbox_with_session_state()
     sbx._lock = __import__("threading").Lock()
     sbx._client = SimpleNamespace(bash=_FakeBash())
     sbx._DEFAULT_NO_CHANGE_TIMEOUT = 30
@@ -124,10 +146,14 @@ def test_aio_sandbox_env_routes_through_bash_exec() -> None:
     assert out == "ok"
     assert captured["command"] == "gh pr create"
     assert captured["env"] == {"GH_TOKEN": "tok-123"}
+    assert captured["created_session"] == captured["exec_session"] == captured["closed_session"]
+    assert captured["create_options"] == {
+        "timeout_in_seconds": 5,
+        "max_retries": 0,
+    }
 
 
 def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
-    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 
     captured: dict = {}
 
@@ -142,10 +168,12 @@ def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
             captured["command"] = command
             return _FakeResult()
 
-    sbx = AioSandbox.__new__(AioSandbox)
+    sbx = _new_aio_sandbox_with_session_state()
     sbx._lock = __import__("threading").Lock()
     sbx._client = SimpleNamespace(shell=_FakeShell())
     sbx._DEFAULT_NO_CHANGE_TIMEOUT = 30
+    sbx._recovery_session_id = None
+    sbx._default_shell_corrupted = False
 
     sbx.execute_command("echo hello")
 
@@ -240,28 +268,26 @@ def test_local_sandbox_rejects_invalid_env_key(monkeypatch: pytest.MonkeyPatch) 
     """
     import deerflow.sandbox.local.local_sandbox as local_sandbox
 
-    fake_run_called = False
+    fake_popen_called = False
 
-    def fake_run(*args, **kwargs):
-        nonlocal fake_run_called
-        fake_run_called = True
-        return SimpleNamespace(stdout="", stderr="", returncode=0)
+    def fake_popen(*args, **kwargs):
+        nonlocal fake_popen_called
+        fake_popen_called = True
 
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(local_sandbox.subprocess, "Popen", fake_popen)
 
     with pytest.raises(ValueError, match="extra_env key"):
         LocalSandbox("local:t").execute_command(
             "echo hi",
             env={"X;rm -rf /mnt/user-data;Y": "v"},
         )
-    assert fake_run_called is False, "subprocess.run must not run when key is invalid"
+    assert fake_popen_called is False, "subprocess.Popen must not run when key is invalid"
 
 
 def test_aio_sandbox_rejects_invalid_env_key() -> None:
     """End-to-end on the AIO sandbox path — the injection vector flagged in
     the review never reaches the shell's ``exec_command``.
     """
-    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 
     exec_called = False
 
@@ -271,7 +297,7 @@ def test_aio_sandbox_rejects_invalid_env_key() -> None:
             exec_called = True
             return SimpleNamespace(data=SimpleNamespace(output="ok"))
 
-    sbx = AioSandbox.__new__(AioSandbox)
+    sbx = _new_aio_sandbox_with_session_state()
     sbx._lock = __import__("threading").Lock()
     sbx._client = SimpleNamespace(shell=_FakeShell())
     sbx._DEFAULT_NO_CHANGE_TIMEOUT = 30
@@ -390,6 +416,55 @@ def test_bash_tool_no_env_without_token(monkeypatch: pytest.MonkeyPatch) -> None
 
     bash_tool.func(runtime=runtime, description="ls", command="ls")
     assert captured["env"] is None
+
+
+def test_bash_tool_routes_subagent_command_to_its_shell_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "aio:xyz"}},
+        context={
+            "thread_id": "t1",
+            "sandbox_command_scope_id": "subagent:task-1",
+        },
+        config={},
+    )
+    captured: dict = {}
+
+    class _Sandbox:
+        def execute_command(self, command, env=None, timeout=None):
+            pytest.fail("subagent command must use its scoped shell session")
+
+        def execute_command_in_scope(
+            self,
+            command,
+            env=None,
+            timeout=None,
+            *,
+            scope_id=None,
+        ):
+            captured.update(
+                command=command,
+                env=env,
+                timeout=timeout,
+                scope_id=scope_id,
+            )
+            return "done"
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda runtime: _Sandbox(),
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        lambda runtime: None,
+    )
+
+    result = bash_tool.func(runtime=runtime, description="ls", command="ls")
+
+    assert result == "done"
+    assert captured["scope_id"] == "subagent:task-1"
+    assert captured["command"] == "cd /mnt/user-data/workspace; ls"
 
 
 # ---------------------------------------------------------------------------

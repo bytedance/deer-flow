@@ -35,6 +35,8 @@ def _make_app():
         ("/api/threads/thread-1/messages", -1),
         ("/api/threads/thread-1/runs/run-1/events", 0),
         ("/api/threads/thread-1/runs/run-1/events", -1),
+        ("/api/threads/thread-1/runs/page", 0),
+        ("/api/threads/thread-1/runs/page", -1),
     ],
 )
 def test_read_endpoints_reject_non_positive_limits(path: str, limit: int):
@@ -93,3 +95,21 @@ def test_read_endpoints_accept_positive_limits_and_hit_store():
         limit=1,
         after_seq=None,
     )
+
+
+@pytest.mark.parametrize("params", [{"before_created_at": "2026-01-01T00:00:00+00:00"}, {"before_run_id": "run-1"}])
+def test_runs_page_rejects_split_cursor(params: dict):
+    with TestClient(_make_app()) as client:
+        response = client.get("/api/threads/thread-1/runs/page", params=params)
+
+    assert response.status_code == 422
+
+
+def test_runs_page_rejects_invalid_created_at_cursor():
+    with TestClient(_make_app()) as client:
+        response = client.get(
+            "/api/threads/thread-1/runs/page",
+            params={"before_created_at": "not-a-timestamp", "before_run_id": "run-1"},
+        )
+
+    assert response.status_code == 422

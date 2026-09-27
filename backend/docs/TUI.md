@@ -70,10 +70,15 @@ for trusted embedded CLI runs.
 | `Enter` | Send message / accept palette selection |
 | `/` | Open the slash-command palette |
 | `↑` / `↓` | Palette navigation, or input history when the palette is closed |
+| `PageUp` / `PageDown` | Scroll the transcript without moving focus from the composer |
 | `Tab` | Complete the highlighted command (adds a trailing space) |
 | `Esc` | Close the palette / overlay |
 | `Ctrl+C` | Interrupt the active run, or quit when idle |
 | `Ctrl+L` | Redraw · `Ctrl+U` clear composer |
+
+Transcript updates follow new output while the view is at the bottom. After you
+scroll upward, streaming refreshes preserve the reading position until you
+return to the bottom with `PageDown`.
 
 ### Slash commands
 

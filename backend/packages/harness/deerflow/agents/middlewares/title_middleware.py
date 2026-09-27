@@ -2,7 +2,10 @@
 
 import logging
 import re
+from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NotRequired, override
+from unicodedata import category
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -11,8 +14,10 @@ from langgraph.constants import TAG_NOSTREAM
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
+from deerflow.agents.middlewares.pii_redaction_middleware import redact_texts
 from deerflow.config.title_config import get_title_config
 from deerflow.models import create_chat_model
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -25,6 +30,7 @@ class TitleMiddlewareState(AgentState):
     """Compatible with the `ThreadState` schema."""
 
     title: NotRequired[str | None]
+    uploaded_files: NotRequired[list[dict] | None]
 
 
 class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
@@ -106,8 +112,68 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     def _get_title_user_message(self, state: TitleMiddlewareState) -> str:
         messages = state.get("messages") or []
-        user_msg_content = next((self._message_content(m) for m in messages if self._is_user_message_for_title(m)), "")
+        user_message = next((m for m in messages if self._is_user_message_for_title(m)), None)
+        if user_message is None:
+            return ""
+        if isinstance(user_message, dict):
+            additional_kwargs = user_message.get("additional_kwargs")
+        else:
+            additional_kwargs = getattr(user_message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, Mapping) and isinstance(additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY), str):
+            user_msg_content = get_original_user_content_text(self._message_content(user_message), additional_kwargs)
+        else:
+            # Keep TitleMiddleware's richer normalization for ordinary structured content.
+            user_msg_content = self._message_content(user_message)
         return self._normalize_content(user_msg_content)
+
+    @staticmethod
+    def _clean_attachment_filename(filename: object) -> str | None:
+        """Return a safe, readable upload filename for use as a thread title."""
+        if not isinstance(filename, str) or not filename or Path(filename).name != filename:
+            return None
+
+        # File names enter the title as display text, never as a URL. Preserve
+        # readable Unicode and punctuation while preventing control characters
+        # from changing the thread-list layout.
+        cleaned = "".join(" " if category(char).startswith("C") else char for char in filename)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned or None
+
+    def _attachment_only_title(self, state: TitleMiddlewareState) -> str | None:
+        """Return a local title for a first turn containing attachments only."""
+        if self._get_title_user_message(state).strip():
+            return None
+
+        files = state.get("uploaded_files")
+        if not isinstance(files, list):
+            return None
+
+        filenames = []
+        seen_attachment_ids: set[str] = set()
+        for file in files:
+            if not isinstance(file, Mapping):
+                continue
+            filename = file.get("filename")
+            if not isinstance(filename, str):
+                continue
+            cleaned = self._clean_attachment_filename(filename)
+            if cleaned is None:
+                continue
+            # UploadsMiddleware builds the path from a verified basename.
+            # Deduplicate that stable attachment identity before display-name
+            # cleanup: distinct names can intentionally normalize alike.
+            attachment_id = file.get("path")
+            if not isinstance(attachment_id, str) or not attachment_id:
+                attachment_id = filename
+            if attachment_id in seen_attachment_ids:
+                continue
+            seen_attachment_ids.add(attachment_id)
+            filenames.append(cleaned)
+        if len(filenames) == 1:
+            return self._truncate_attachment_filename(filenames[0])
+        if len(filenames) > 1:
+            return self._attachment_count_title(len(filenames))
+        return None
 
     def _should_generate_title(self, state: TitleMiddlewareState, *, allow_partial_exchange: bool = False) -> bool:
         """Check if we should generate a title for this thread."""
@@ -150,10 +216,13 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         user_msg = self._get_title_user_message(state)
         assistant_msg = self._strip_think_tags(self._normalize_content(assistant_msg_content))
 
+        # This model is invoked directly, outside the main model wrappers.
+        # Redact complete fields before truncation can split an identifier.
+        redacted_user, redacted_assistant = redact_texts([user_msg, assistant_msg], getattr(self._app_config, "pii_redaction", None))
         prompt = config.prompt_template.format(
             max_words=config.max_words,
-            user_msg=user_msg[:500],
-            assistant_msg=assistant_msg[:500],
+            user_msg=redacted_user[:500],
+            assistant_msg=redacted_assistant[:500],
         )
         return prompt, user_msg
 
@@ -170,6 +239,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         return title[: config.max_chars] if len(title) > config.max_chars else title
 
     def _fallback_title(self, user_msg: str) -> str:
+        if not user_msg.strip():
+            return "New Conversation"
+
         config = self._get_title_config()
         fallback_chars = min(config.max_chars, 50)
         if len(user_msg) > fallback_chars:
@@ -178,7 +250,37 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             ellipsis = "..."
             body = min(fallback_chars, config.max_chars - len(ellipsis))
             return user_msg[:body].rstrip() + ellipsis
-        return user_msg if user_msg else "New Conversation"
+        return user_msg
+
+    def _truncate_attachment_filename(self, filename: str) -> str:
+        """Truncate a file-name title while retaining its extension when possible."""
+        config = self._get_title_config()
+        max_chars = config.max_chars
+        if len(filename) <= max_chars:
+            return filename
+
+        ellipsis = "..."
+        extension = Path(filename).suffix.lstrip(".")
+        remaining = max_chars - len(ellipsis) - len(extension)
+        if extension and remaining > 0:
+            return filename[:remaining].rstrip() + ellipsis + extension
+        return self._truncate_title(filename)
+
+    def _attachment_count_title(self, count: int) -> str:
+        """Return a bounded, readable title for multiple validated uploads."""
+        config = self._get_title_config()
+        for title in (f"{count} files uploaded", f"{count} files"):
+            if len(title) <= config.max_chars:
+                return title
+        return self._truncate_title(str(count))
+
+    def _truncate_title(self, title: str) -> str:
+        """Bound a local attachment title without overriding title.max_chars."""
+        max_chars = self._get_title_config().max_chars
+        if len(title) <= max_chars:
+            return title
+        ellipsis = "..."
+        return title[: max_chars - len(ellipsis)].rstrip() + ellipsis
 
     def _get_runnable_config(self) -> dict[str, Any]:
         """Inherit the parent RunnableConfig and add middleware tag.
@@ -204,6 +306,10 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         if not self._should_generate_title(state, allow_partial_exchange=allow_partial_exchange):
             return None
 
+        attachment_title = self._attachment_only_title(state)
+        if attachment_title is not None:
+            return {"title": attachment_title}
+
         user_msg = self._get_title_user_message(state)
         return {"title": self._fallback_title(user_msg)}
 
@@ -217,12 +323,19 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         if not self._should_generate_title(state):
             return None
 
-        config = self._get_title_config()
-        if not config.model_name:
-            user_msg = self._get_title_user_message(state)
-            return {"title": self._fallback_title(user_msg)}
+        attachment_title = self._attachment_only_title(state)
+        if attachment_title is not None:
+            return {"title": attachment_title}
 
         user_msg = self._get_title_user_message(state)
+        # An attachment-only first turn has no user-authored text. Do not let a
+        # configured title model infer a title from the assistant response.
+        if not user_msg.strip():
+            return {"title": self._fallback_title(user_msg)}
+
+        config = self._get_title_config()
+        if not config.model_name:
+            return {"title": self._fallback_title(user_msg)}
 
         try:
             prompt, user_msg = self._build_title_prompt(state)

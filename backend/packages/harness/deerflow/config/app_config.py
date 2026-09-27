@@ -14,6 +14,7 @@ from deerflow.config.agent_storage_config import AgentStorageConfig
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
 from deerflow.config.auth_config import AuthAppConfig
 from deerflow.config.authorization_config import AuthorizationConfig, load_authorization_config_from_dict
+from deerflow.config.blob_storage_config import BlobStorageConfig, load_blob_storage_config_from_dict
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
@@ -21,12 +22,17 @@ from deerflow.config.dedupe_storage_config import DedupeStorageConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
+from deerflow.config.file_signature import read_config_with_signature as _read_config_with_signature
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.input_polish_config import InputPolishConfig
+from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.mcp_tasks_config import McpTasksConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
+from deerflow.config.projects_config import ProjectsConfig
+from deerflow.config.prompt_overlay import PromptOverlay
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.config.reload_boundary import format_field_description
 from deerflow.config.run_events_config import RunEventsConfig
@@ -39,9 +45,12 @@ from deerflow.config.skill_evolution_config import SkillEvolutionConfig
 from deerflow.config.skill_scan_config import SkillScanConfig
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, load_stream_bridge_config_from_dict
+from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
 from deerflow.config.suggestions_config import SuggestionsConfig
 from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
+from deerflow.config.task_continuity_config import TaskContinuityConfig
 from deerflow.config.title_config import TitleConfig, load_title_config_from_dict
 from deerflow.config.token_budget_config import TokenBudgetConfig
 from deerflow.config.token_usage_config import TokenUsageConfig
@@ -50,6 +59,7 @@ from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
+from deerflow.config.verification_config import VerificationConfig
 from deerflow.extensions.loader import ExtensionSpec
 
 load_dotenv()
@@ -128,9 +138,18 @@ class LlmCallConfig(BaseModel):
 
 
 class LoggingEnhanceConfig(BaseModel):
-    """Request trace logging enhancement settings."""
+    """Request trace logging enhancement settings.
 
-    enabled: bool = Field(default=False, description="Enable request-level trace ids in Gateway response headers and log records.")
+    Trace ids are issued unconditionally (``TraceMiddleware`` for HTTP,
+    ``ensure_trace_context`` elsewhere) and always returned in the
+    ``X-Trace-Id`` response header. This block decides only whether log
+    records carry that id, and in which format.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Print the request trace id into log records. Trace ids are always issued and always returned in the X-Trace-Id response header; this controls log output only.",
+    )
     format: Literal["text", "json"] = Field(default="text", description="Enhanced log output format.")
 
 
@@ -138,22 +157,6 @@ class LoggingConfig(BaseModel):
     """Logging configuration."""
 
     enhance: LoggingEnhanceConfig = Field(default_factory=LoggingEnhanceConfig, description="Request trace correlation logging settings.")
-
-
-def is_trace_correlation_enabled(config: Any) -> bool:
-    """Return ``True`` when ``logging.enhance.enabled`` is set on *config*.
-
-    Single source of truth for the request-trace-correlation gate, shared by
-    the Gateway ``TraceMiddleware`` and the embedded ``DeerFlowClient`` so
-    the two entry points cannot drift on when ``deerflow_trace_id`` is
-    emitted (Langfuse metadata) and when a request-level trace id is bound
-    at all. Accepts any object exposing ``logging.enhance.enabled`` via
-    ``getattr`` chains (``AppConfig``, ``SimpleNamespace`` fixtures, etc.);
-    missing intermediate attributes silently degrade to ``False``.
-    """
-    logging_config = getattr(config, "logging", None)
-    enhance = getattr(logging_config, "enhance", None)
-    return bool(getattr(enhance, "enabled", False))
 
 
 def _legacy_config_candidates() -> tuple[Path, ...]:
@@ -190,6 +193,8 @@ def apply_logging_level(name: str | None) -> None:
 class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
 
+    lead_prompt_overlay: PromptOverlay = Field(default_factory=PromptOverlay, description="Operator-owned literal prepend/append around the assembled lead-agent system prompt")
+
     log_level: str = Field(
         default="info",
         description=format_field_description(
@@ -201,7 +206,7 @@ class AppConfig(BaseModel):
         default_factory=LoggingConfig,
         description=format_field_description(
             "logging",
-            field_doc="Structured logging and request trace correlation settings.",
+            field_doc="Structured logging settings: whether request trace ids appear in log records, and in which format.",
         ),
     )
     token_usage: TokenUsageConfig = Field(default_factory=TokenUsageConfig, description="Token usage tracking configuration")
@@ -219,10 +224,15 @@ class AppConfig(BaseModel):
             ),
         ),
     )
+    recursion_limit: int = Field(
+        default=100,
+        ge=1,
+        description="Default LangGraph recursion_limit for Gateway runs when the client does not provide one. Applied per run and capped by max_recursion_limit.",
+    )
     max_recursion_limit: int = Field(
         default=1000,
         ge=1,
-        description="Hard server-side ceiling for a client-supplied run recursion_limit. Client values above this are clamped; prevents runaway LangGraph super-steps (LLM cost / DoS).",
+        description="Hard server-side ceiling for configured defaults and client-supplied run recursion_limit values. Values above this are clamped; prevents runaway LangGraph super-steps (LLM cost / DoS).",
     )
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
     sandbox: SandboxConfig = Field(
@@ -242,7 +252,13 @@ class AppConfig(BaseModel):
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
     title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
+    task_continuity: TaskContinuityConfig = Field(default_factory=TaskContinuityConfig, description="Thread-local notes and compacted-source recall")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
+    blob_storage: BlobStorageConfig = Field(default_factory=BlobStorageConfig, description="Content-addressed blob store configuration")
+    knowledge_base: KnowledgeBaseConfig = Field(
+        default_factory=KnowledgeBaseConfig,
+        description="Provider-agnostic knowledge capability and custom-agent scope-selection configuration",
+    )
     agents_api: AgentsApiConfig = Field(default_factory=AgentsApiConfig, description="Custom-agent management API configuration")
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
@@ -261,7 +277,10 @@ class AppConfig(BaseModel):
     )
     loop_detection: LoopDetectionConfig = Field(default_factory=LoopDetectionConfig, description="Loop detection middleware configuration")
     tool_progress: ToolProgressConfig = Field(default_factory=ToolProgressConfig, description="Tool progress state machine middleware configuration")
+    verification: VerificationConfig = Field(default_factory=VerificationConfig, description="Subagent result verification (receipts, checklist, judge)")
     read_before_write: ReadBeforeWriteConfig = Field(default_factory=ReadBeforeWriteConfig, description="Read-before-write file gate middleware configuration")
+    projects: ProjectsConfig = Field(default_factory=ProjectsConfig, description="User projects configuration (instructions injection, shelf index, trash retention)")
+    pii_redaction: PiiRedactionConfig = Field(default_factory=PiiRedactionConfig, description="PII redaction middleware configuration (issue #3190)")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
     auth: AuthAppConfig = Field(default_factory=AuthAppConfig, description="Authentication configuration (local + OIDC SSO)")
     model_config = ConfigDict(extra="allow")
@@ -283,14 +302,14 @@ class AppConfig(BaseModel):
         default_factory=AgentStorageConfig,
         description=format_field_description(
             "agent_storage",
-            field_doc="Custom agent definition storage backend ('file' for today's per-user on-disk layout, 'db' to share definitions across nodes via the SQL persistence layer).",
+            field_doc="Custom-agent and managed-subagent definition storage backend ('file' for on-disk layouts, 'db' to share definitions across nodes via SQL).",
         ),
     )
     scheduler: SchedulerConfig = Field(
         default_factory=SchedulerConfig,
         description=format_field_description(
             "scheduler",
-            field_doc="Scheduled task runtime configuration (background poller for one-time and cron agent runs).",
+            field_doc="Scheduled task runtime configuration (background poller for one-time, cron, and interval agent runs).",
         ),
     )
     mcp_tasks: McpTasksConfig = Field(
@@ -298,6 +317,20 @@ class AppConfig(BaseModel):
         description=format_field_description(
             "mcp_tasks",
             field_doc="Long-running MCP task persistence and background polling runtime.",
+        ),
+    )
+    subagent_runtime: SubagentRuntimeConfig = Field(
+        default_factory=SubagentRuntimeConfig,
+        description=format_field_description(
+            "subagent_runtime",
+            field_doc="Process-local admission and execution capacity shared by ordinary and batch subagents.",
+        ),
+    )
+    subagent_batches: SubagentBatchesConfig = Field(
+        default_factory=SubagentBatchesConfig,
+        description=format_field_description(
+            "subagent_batches",
+            field_doc="Durable native-subagent batch scheduling, lease, and recovery configuration.",
         ),
     )
     checkpointer: CheckpointerConfig | None = Field(
@@ -333,6 +366,7 @@ class AppConfig(BaseModel):
     # ``_build_name_indexes``. They make ``get_model_config`` / ``get_tool_config``
     # / ``get_tool_group_config`` O(1) instead of an O(n) ``next(...)`` scan per
     # call. Private attrs are excluded from serialization.
+    _managed_model_names: set[str] = PrivateAttr(default_factory=set)
     _models_by_name: dict[str, ModelConfig] = PrivateAttr(default_factory=dict)
     _tools_by_name: dict[str, ToolConfig] = PrivateAttr(default_factory=dict)
     _tool_groups_by_name: dict[str, ToolGroupConfig] = PrivateAttr(default_factory=dict)
@@ -406,7 +440,17 @@ class AppConfig(BaseModel):
         """
         resolved_path = cls.resolve_config_path(config_path)
         with open(resolved_path, encoding="utf-8") as f:
-            config_data = yaml.safe_load(f) or {}
+            return cls._from_yaml_text(f.read(), resolved_path)
+
+    @classmethod
+    def _from_yaml_text(cls, text: str, resolved_path: Path) -> Self:
+        """Build the config from already-read YAML *text* of *resolved_path*.
+
+        Split out of :meth:`from_file` so the process-wide cache can parse the
+        exact bytes it signed (see ``_load_and_cache_app_config``) instead of
+        reading the file a second time.
+        """
+        config_data = yaml.safe_load(text) or {}
 
         # Check config version before processing
         cls._check_config_version(config_data, resolved_path)
@@ -458,6 +502,7 @@ class AppConfig(BaseModel):
         load_title_config_from_dict(config.title.model_dump())
         load_summarization_config_from_dict(config.summarization.model_dump())
         load_memory_config_from_dict(config.memory.model_dump())
+        load_blob_storage_config_from_dict(config.blob_storage.model_dump())
         load_agents_api_config_from_dict(config.agents_api.model_dump())
         load_subagents_config_from_dict(config.subagents.model_dump())
         load_tool_search_config_from_dict(config.tool_search.model_dump())
@@ -648,14 +693,25 @@ def _get_config_mtime(config_path: Path) -> float | None:
 
 
 def _load_and_cache_app_config(config_path: str | None = None) -> AppConfig:
-    """Load config from disk and refresh cache metadata."""
+    """Load config from disk and refresh cache metadata.
+
+    The file is read exactly once and the recorded signature is computed from
+    those bytes. Parsing the file and then hashing it again would open a window
+    in which a concurrent write leaves the cache holding the older content under
+    the newer content's signature — a state ``get_app_config`` can never detect,
+    because the on-disk signature already matches, so the edit would only be
+    picked up by the *next* edit. Signing the parsed bytes makes any write that
+    races the load show up as a signature mismatch on the next call instead.
+    """
     global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_is_custom
 
     resolved_path = AppConfig.resolve_config_path(config_path)
-    _app_config = AppConfig.from_file(str(resolved_path))
+    raw, signature = _read_config_with_signature(resolved_path)
+    config = AppConfig._from_yaml_text(raw.decode("utf-8"), resolved_path)
+    _app_config = config
     _app_config_path = resolved_path
-    _app_config_mtime = _get_config_mtime(resolved_path)
-    _app_config_signature = _get_config_signature(resolved_path)
+    _app_config_mtime = signature[0]
+    _app_config_signature = signature
     _app_config_is_custom = False
     return _app_config
 
@@ -692,7 +748,9 @@ def get_app_config() -> AppConfig:
         elif _app_config_path == resolved_path and _app_config_signature != current_signature:
             logger.info("Config file content signature changed, reloading AppConfig")
         _load_and_cache_app_config(str(resolved_path))
-    return _app_config
+    from deerflow.config.managed_models import merge_managed_models
+
+    return merge_managed_models(_app_config)
 
 
 def reload_app_config(config_path: str | None = None) -> AppConfig:
@@ -708,7 +766,9 @@ def reload_app_config(config_path: str | None = None) -> AppConfig:
     Returns:
         The newly loaded AppConfig instance.
     """
-    return _load_and_cache_app_config(config_path)
+    from deerflow.config.managed_models import merge_managed_models
+
+    return merge_managed_models(_load_and_cache_app_config(config_path))
 
 
 def reset_app_config() -> None:
@@ -745,6 +805,23 @@ def set_app_config(config: AppConfig) -> None:
 def peek_current_app_config() -> AppConfig | None:
     """Return the runtime-scoped AppConfig override, if one is active."""
     return _current_app_config.get()
+
+
+def peek_loaded_app_config() -> AppConfig | None:
+    """Return the configuration this process has loaded, without touching the filesystem.
+
+    The runtime-scoped override wins when one is active; otherwise this is the
+    cached singleton ``get_app_config()`` last loaded (or ``set_app_config()``
+    installed). ``None`` means no configuration has ever been loaded in this
+    process, which is what a host without a ``config.yaml`` looks like — as
+    opposed to a host that *is* running on a config and can no longer read the
+    file, where callers need the loaded value to tell "unavailable" from
+    "never configured".
+    """
+    override = _current_app_config.get()
+    if override is not None:
+        return override
+    return _app_config
 
 
 def push_current_app_config(config: AppConfig) -> None:

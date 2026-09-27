@@ -1,11 +1,13 @@
 import { describe, expect, it } from "@rstest/core";
 
 import {
+  allowedSubagentsToSelection,
   DEFAULT_MODEL_VALUE,
   INHERIT_VALUE,
   MAX_AGENT_OUTPUT_TOKENS,
   parseAgentModelSettingsDraft,
   resolveEffectiveModel,
+  selectionToAllowedSubagents,
   selectionToThinkingEnabled,
   thinkingEnabledToSelection,
 } from "@/components/workspace/agents/agent-settings-dialog-helpers";
@@ -66,6 +68,19 @@ describe("thinkingEnabledToSelection", () => {
   it("maps explicit booleans to on/off", () => {
     expect(thinkingEnabledToSelection(true)).toBe("on");
     expect(thinkingEnabledToSelection(false)).toBe("off");
+  });
+});
+
+describe("Custom Agent subagent access", () => {
+  it("round-trips all, none, and selected without collapsing null and []", () => {
+    expect(allowedSubagentsToSelection(null)).toBe("all");
+    expect(allowedSubagentsToSelection([])).toBe("none");
+    expect(allowedSubagentsToSelection(["planner"])).toBe("selected");
+    expect(selectionToAllowedSubagents("all", ["planner"])).toBeNull();
+    expect(selectionToAllowedSubagents("none", ["planner"])).toEqual([]);
+    expect(selectionToAllowedSubagents("selected", ["planner"])).toEqual([
+      "planner",
+    ]);
   });
 });
 

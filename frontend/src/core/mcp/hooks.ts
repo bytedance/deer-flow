@@ -7,10 +7,14 @@ import {
 import { toast } from "sonner";
 
 import {
+  createMCPServers,
+  deleteMCPServer,
   loadMCPConfig,
   MCPConfigRequestError,
+  updateMCPServer,
   updateMCPServerState,
 } from "./api";
+import type { MCPServerConfig } from "./types";
 
 export function useMCPConfig() {
   const { data, isLoading, error } = useQuery({
@@ -31,7 +35,12 @@ export function getEnableMCPServerMutationOptions(queryClient: QueryClient) {
   return {
     mutationFn: ({ serverName, enabled }: EnableMCPServerVariables) =>
       updateMCPServerState(serverName, enabled),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
+        queryClient.invalidateQueries({ queryKey: ["capabilities"] }),
+      ]);
+    },
     onError: (error: Error) => {
       toast.error(error.message);
     },
@@ -41,4 +50,48 @@ export function getEnableMCPServerMutationOptions(queryClient: QueryClient) {
 export function useEnableMCPServer() {
   const queryClient = useQueryClient();
   return useMutation(getEnableMCPServerMutationOptions(queryClient));
+}
+
+export type MCPServerMutationVariables =
+  | {
+      operation: "create";
+      servers: Record<string, MCPServerConfig>;
+    }
+  | {
+      operation: "update";
+      serverName: string;
+      server: MCPServerConfig;
+    }
+  | {
+      operation: "delete";
+      serverName: string;
+    };
+
+export function getMCPServerMutationOptions(queryClient: QueryClient) {
+  return {
+    mutationFn: (variables: MCPServerMutationVariables) => {
+      switch (variables.operation) {
+        case "create":
+          return createMCPServers(variables.servers);
+        case "update":
+          return updateMCPServer(variables.serverName, variables.server);
+        case "delete":
+          return deleteMCPServer(variables.serverName);
+      }
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
+        queryClient.invalidateQueries({ queryKey: ["capabilities"] }),
+      ]);
+    },
+    onError: (error: Error) => {
+      toast.error(error.message);
+    },
+  };
+}
+
+export function useMCPServerMutation() {
+  const queryClient = useQueryClient();
+  return useMutation(getMCPServerMutationOptions(queryClient));
 }

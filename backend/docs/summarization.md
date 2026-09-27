@@ -14,6 +14,20 @@ The summarization feature uses LangChain's `SummarizationMiddleware` to monitor 
 4. Maintains AI/Tool message pairs together for context continuity
 5. Stores the summary in `ThreadState.summary_text` and projects it ephemerally through durable context data
 
+## Todo reminders
+
+Compaction filters `HumanMessage(name="todo_reminder")` snapshots after the
+trigger check and before selecting the retained tail. They enter neither summary
+generation/pre-compaction hooks nor retained messages, while `state["todos"]`
+remains unchanged. Only a successful compaction commits the removal; no-op and
+failure paths keep the original state. The following `TodoMiddleware.before_model`
+rebuilds one reminder from current todos when no `write_todos` call is still
+visible; empty todos need no reminder. Both automatic and manual compaction use
+this shared preparation path. Coverage: `tests/test_todo_compaction.py`.
+`todo_middleware.py::TODO_REMINDER_MESSAGE_NAME` owns the backend message name;
+the producer, presence check, and compaction filter share it. Its value remains
+`todo_reminder` for compatibility with the frontend's hidden-message filtering.
+
 ## Configuration
 
 Summarization is configured in `config.yaml` under the `summarization` key:
@@ -95,6 +109,18 @@ summarization:
      value: 0.8  # 80% of max input tokens
    ```
 
+   The percentage resolves from the **summary model's** declared `context_window`
+   — the anchor that generates summaries: `summarization.model_name` when set,
+   otherwise the run's own model. Declare `context_window` on that models entry
+   in `config.yaml`. Third-party OpenAI-compatible models carry no built-in
+   capacity profile, so without a declared `context_window` the fraction clause
+   is dropped with a warning at agent build — any remaining absolute clauses
+   (`tokens` / `messages`) keep working. Caveat: when a separate summary model
+   is configured, its window sizes the threshold — a 64k run model paired with
+   a 128k-window summary model resolves `fraction: 0.8` to ~102k tokens and
+   auto-summarization cannot fire before the run model overflows; in that setup
+   prefer absolute `tokens` thresholds sized for the run model.
+
 **Multiple Triggers:**
 ```yaml
 trigger:
@@ -130,7 +156,7 @@ keep:
 #### `trim_tokens_to_summarize`
 - **Type**: Integer or null
 - **Default**: `4000`
-- **Description**: Maximum tokens to include when preparing messages for the summarization call itself. Set to `null` to skip trimming (not recommended for very long conversations).
+- **Description**: Token budget used to trim the raw input sections for the summarization call. Escaping, wrapper tags, and the summary prompt add overhead beyond this budget; it is not a hard limit on the final model request. When preserving the current user request leaves an assistant/tool-only summary window, trimming favors the most recent content in that window. If a mixed window still contains a human message but the human-anchored trim is empty, the existing final-message fallback is preserved. Set to `null` to skip trimming (not recommended for very long conversations).
 
 #### `summary_prompt`
 - **Type**: String or null

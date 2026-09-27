@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import stat
 from unittest.mock import patch
 
 import pytest
+from support.symlinks import symlink_or_skip
 
 from deerflow.config.paths import Paths
 from deerflow.skills.storage import get_or_new_skill_storage, reset_skill_storage
@@ -151,7 +151,7 @@ def test_rejects_dotdot_only(storage):
 def test_rejects_symlink_pointing_outside(tmp_path, storage, skill_dir):
     outside = tmp_path / "outside.txt"
     link = skill_dir / "escape_link.txt"
-    os.symlink(outside, link)
+    symlink_or_skip(link, outside)
     with pytest.raises(ValueError, match="skill directory"):
         storage.write_custom_skill("demo-skill", "escape_link.txt", "x")
 
@@ -160,7 +160,7 @@ def test_rejects_symlink_dir_pointing_outside(tmp_path, storage, skill_dir):
     outside_dir = tmp_path / "outside_dir"
     outside_dir.mkdir()
     link_dir = skill_dir / "linked_dir"
-    os.symlink(outside_dir, link_dir)
+    symlink_or_skip(link_dir, outside_dir)
     with pytest.raises(ValueError, match="skill directory"):
         storage.write_custom_skill("demo-skill", "linked_dir/file.txt", "x")
 
@@ -175,7 +175,7 @@ def test_allows_symlink_within_skill_dir(tmp_path, storage, skill_dir):
     real_file = skill_dir / "real.md"
     real_file.write_text("real")
     link = skill_dir / "alias.md"
-    os.symlink(real_file, link)
+    symlink_or_skip(link, real_file)
     # Should not raise
     storage.write_custom_skill("demo-skill", "alias.md", "updated")
     # resolve() writes through to the real target file

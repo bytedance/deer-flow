@@ -9,9 +9,12 @@ from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from langgraph.checkpoint.memory import InMemorySaver
 
 import deerflow.runtime.runs.worker as worker
+from deerflow.runtime import ConflictError, ThreadOperationKind
+from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.runs.manager import RunManager, RunStartOutcome
 from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, _persist_run_duration, run_agent
 
 
@@ -310,6 +313,75 @@ async def test_agent_stream_serializes_with_duration_checkpoint_write() -> None:
     await duration_task
 
     assert finished_during_stream is False
+
+
+@pytest.mark.anyio
+async def test_successful_run_stays_durably_active_through_final_duration_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A peer migration cannot enter before the terminal duration is stored."""
+    run_store = MemoryRunStore()
+    owner = RunManager(store=run_store, worker_id="duration-owner")
+    peer = RunManager(store=run_store, worker_id="duration-peer")
+    record = await owner.create_or_reject("duration-finalization-admission")
+    checkpointer = InMemorySaver()
+    await _put_checkpoint(
+        checkpointer,
+        thread_id=record.thread_id,
+        checkpoint_id="00000000-0000-6000-8000-000000000001",
+        messages=[
+            HumanMessage(
+                id="human-1",
+                content="Question",
+                additional_kwargs={"run_id": record.run_id},
+            ),
+            AIMessage(id="ai-1", content="Answer"),
+        ],
+        step=1,
+    )
+    observed_store_statuses: list[str] = []
+    persist_duration = worker._persist_run_duration
+
+    async def assert_active_then_persist(**kwargs) -> None:
+        stored = await run_store.get(record.run_id)
+        assert stored is not None
+        observed_store_statuses.append(stored["status"])
+        with pytest.raises(ConflictError):
+            async with peer.reserve_thread_operation(
+                record.thread_id,
+                kind=ThreadOperationKind.checkpoint_write,
+            ):
+                pass
+        await persist_duration(**kwargs)
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": []}
+
+    monkeypatch.setattr(worker, "_persist_run_duration", assert_active_then_persist)
+
+    await run_agent(
+        SimpleNamespace(
+            publish=AsyncMock(),
+            publish_end=AsyncMock(),
+            cleanup=AsyncMock(),
+        ),
+        owner,
+        record,
+        ctx=RunContext(
+            checkpointer=checkpointer,
+            event_store=MemoryRunEventStore(),
+        ),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert observed_store_statuses == [RunStatus.running.value]
+    stored = await run_store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == RunStatus.success.value
+    latest = await checkpointer.aget_tuple({"configurable": {"thread_id": record.thread_id, "checkpoint_ns": ""}})
+    assert latest is not None
+    assert record.run_id in latest.metadata["run_durations"]
 
 
 @pytest.mark.anyio

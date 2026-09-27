@@ -15,6 +15,7 @@ Implements two credential strategies:
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,18 @@ logger = logging.getLogger(__name__)
 
 # Required beta headers for Claude Code OAuth tokens
 OAUTH_ANTHROPIC_BETAS = "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14"
+
+# A descriptor handoff can be drained only once: a pipe returns EOF and a file
+# keeps its advanced offset. Every ClaudeChatModel instance loads credentials, so
+# secrets read from a descriptor are kept for the life of the process.
+#
+# The key is the descriptor number, not its identity: the handoff is fixed when
+# the process starts, so a number means one secret for the process lifetime. That
+# keeps the token available after the descriptor is closed, but a secret later
+# placed on a recycled number is not read. Anything that hands over a new secret
+# in-process must clear this cache.
+_fd_secret_cache: dict[tuple[str, int], str] = {}
+_fd_secret_lock = threading.Lock()
 
 
 def is_oauth_token(token: str) -> bool:
@@ -96,13 +109,22 @@ def _read_secret_from_file_descriptor(env_var: str) -> str | None:
         logger.warning(f"{env_var} must be an integer file descriptor, got: {fd_value}")
         return None
 
-    try:
-        secret = os.read(fd, 1024 * 1024).decode().strip()
-    except OSError as e:
-        logger.warning(f"Failed to read {env_var}: {e}")
-        return None
+    # Hold the lock across the read so concurrent first loads cannot race to EOF.
+    with _fd_secret_lock:
+        cached = _fd_secret_cache.get((env_var, fd))
+        if cached is not None:
+            return cached
 
-    return secret or None
+        try:
+            secret = os.read(fd, 1024 * 1024).decode().strip()
+        except OSError as e:
+            logger.warning(f"Failed to read {env_var}: {e}")
+            return None
+
+        if not secret:
+            return None
+        _fd_secret_cache[(env_var, fd)] = secret
+        return secret
 
 
 def _credential_from_direct_token(access_token: str, source: str) -> ClaudeCodeCredential | None:
@@ -126,16 +148,27 @@ def _iter_claude_code_credential_paths() -> list[Path]:
 
 
 def _extract_claude_code_credential(data: dict[str, Any], source: str) -> ClaudeCodeCredential | None:
-    oauth = data.get("claudeAiOauth", {})
+    if not isinstance(data, dict):
+        logger.debug("Claude Code credentials source %s is not a JSON object; skipping", source)
+        return None
+    oauth = data.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        logger.debug("Claude Code credentials source %s has a non-object claudeAiOauth container; skipping", source)
+        return None
     access_token = oauth.get("accessToken", "")
     if not access_token:
         logger.debug("Claude Code credentials container exists but no accessToken found")
         return None
 
+    expires_at = oauth.get("expiresAt", 0)
+    if not isinstance(expires_at, (int, float)):
+        logger.debug("Claude Code credentials source %s has a non-numeric expiresAt; skipping", source)
+        return None
+
     cred = ClaudeCodeCredential(
         access_token=access_token,
         refresh_token=oauth.get("refreshToken", ""),
-        expires_at=oauth.get("expiresAt", 0),
+        expires_at=expires_at,
         source=source,
     )
 
@@ -199,7 +232,8 @@ def load_codex_cli_credential() -> CodexCliCredential | None:
     """Load credential from Codex CLI (~/.codex/auth.json)."""
     cred_path = _resolve_credential_path("CODEX_AUTH_PATH", ".codex/auth.json")
     data = _load_json_file(cred_path, "Codex CLI credentials")
-    if data is None:
+    if not isinstance(data, dict):
+        logger.debug("Codex CLI credentials file is not a JSON object; skipping")
         return None
     tokens = data.get("tokens", {})
     if not isinstance(tokens, dict):
@@ -207,6 +241,9 @@ def load_codex_cli_credential() -> CodexCliCredential | None:
 
     access_token = data.get("access_token") or data.get("token") or tokens.get("access_token", "")
     account_id = data.get("account_id") or tokens.get("account_id", "")
+    if not isinstance(account_id, str):
+        logger.debug("Codex CLI credentials file has a non-string account_id; using no account")
+        account_id = ""
     if not access_token:
         logger.debug("Codex CLI credentials file exists but no token found")
         return None

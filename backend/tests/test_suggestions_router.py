@@ -16,6 +16,10 @@ def _clear_langfuse_env(monkeypatch):
     for name in ("LANGFUSE_TRACING", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_BASE_URL", "DEER_FLOW_ENV", "ENVIRONMENT"):
         monkeypatch.delenv(name, raising=False)
     reset_tracing_config()
+    # These tests bypass route auth to exercise parsing and tracing. Model
+    # admission is covered through HTTP in test_suggestions_model_authorization.
+    monkeypatch.setattr(suggestions, "get_current_user_from_request", AsyncMock(return_value=SimpleNamespace()))
+    monkeypatch.setattr(suggestions, "authorize_model_use", lambda *_args, **_kwargs: None)
     yield
     reset_tracing_config()
 

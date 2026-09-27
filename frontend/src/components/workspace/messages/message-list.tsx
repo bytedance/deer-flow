@@ -25,8 +25,14 @@ import {
   type ConversationProps,
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
+import { KnowledgeSourcesProvider } from "@/components/workspace/citations/knowledge-source";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
+import { getArtifactArchiveCandidatesByGroupIndex } from "@/core/messages/artifact-archive";
+import {
+  buildConversationChapters,
+  CONVERSATION_OUTLINE_MIN_TURNS,
+} from "@/core/messages/conversation-outline";
 import {
   deriveAssistantTurnUsageState,
   deriveStableMessageGroups,
@@ -49,7 +55,6 @@ import {
   areStreamMetadataSnapshotsEqual,
   extractContentFromMessage,
   extractPresentFilesFromMessage,
-  extractTextFromMessage,
   getAssistantTurnCopyData,
   getBranchableAssistantGroupIds,
   getLatestEditableTurn,
@@ -68,12 +73,13 @@ import {
   buildMessageSidecarContext,
   type SidecarContext,
 } from "@/core/sidecar";
+import {
+  getSkillUsageByGroupIndex,
+  type SkillUsage,
+} from "@/core/skills/usage";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
-import {
-  derivePendingSubtaskStatus,
-  parseSubtaskResult,
-} from "@/core/tasks/subtask-result";
+import { collectRenderedSubtasks } from "@/core/tasks/subtask-render";
 import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
@@ -81,8 +87,10 @@ import { ArtifactFileList } from "../artifacts/artifact-file-list";
 import { useMaybeBrowserView } from "../browser-view";
 import { CopyButton } from "../copy-button";
 import { useMaybeSidecar } from "../sidecar/context";
+import { SkillUsageMenu } from "../skill-usage/skill-usage-menu";
 import { Tooltip } from "../tooltip";
 
+import { ConversationOutline } from "./conversation-outline";
 import {
   HumanInputCard,
   type HumanInputSubmitResult,
@@ -97,7 +105,10 @@ import {
 import { RunActivity, RunDuration } from "./run-duration";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
-import { VirtualMessageList } from "./virtual-message-list";
+import {
+  VirtualMessageList,
+  type VirtualMessageListHandle,
+} from "./virtual-message-list";
 
 const EMPTY_TOKEN_DEBUG_STEPS: TokenDebugStep[] = [];
 const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
@@ -270,6 +281,7 @@ function LoadMoreHistoryIndicator({
 }
 
 export function MessageList({
+  archiveDownloadsEnabled = true,
   className,
   testId,
   threadId,
@@ -287,10 +299,12 @@ export function MessageList({
   canEdit = false,
   canBranch = false,
   enableSidecarActions = true,
+  enableConversationOutline = false,
   sidecarSurface = false,
   initialScroll = "smooth",
   resizeScroll = "smooth",
 }: {
+  archiveDownloadsEnabled?: boolean;
   className?: string;
   testId?: string;
   threadId: string;
@@ -320,6 +334,7 @@ export function MessageList({
   canEdit?: boolean;
   canBranch?: boolean;
   enableSidecarActions?: boolean;
+  enableConversationOutline?: boolean;
   sidecarSurface?: boolean;
   initialScroll?: ConversationProps["initial"];
   resizeScroll?: ConversationProps["resize"];
@@ -330,6 +345,60 @@ export function MessageList({
     useState<SelectionToolbarState | null>(null);
   const messages = thread.messages;
   const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
+  const chapters = useMemo(
+    () =>
+      buildConversationChapters(
+        groupedMessages,
+        t.conversation.outlineAttachmentFallback,
+      ),
+    [groupedMessages, t.conversation.outlineAttachmentFallback],
+  );
+  const conversationOutlineEnabled =
+    enableConversationOutline &&
+    chapters.length >= CONVERSATION_OUTLINE_MIN_TURNS;
+  const virtualMessageListRef = useRef<VirtualMessageListHandle | null>(null);
+  const [activeChapter, setActiveChapter] = useState<{
+    threadId: string;
+    chapterId: string;
+  } | null>(null);
+  const activeChapterId =
+    activeChapter?.threadId === threadId &&
+    chapters.some((chapter) => chapter.id === activeChapter.chapterId)
+      ? activeChapter.chapterId
+      : (chapters.at(-1)?.id ?? null);
+  const handleActiveGroupChange = useCallback(
+    (groupIndex: number) => {
+      let chapterId: string | undefined;
+      for (const chapter of chapters) {
+        if (chapter.groupIndex > groupIndex) {
+          break;
+        }
+        chapterId = chapter.id;
+      }
+      if (chapterId) {
+        setActiveChapter((current) =>
+          current?.threadId === threadId && current.chapterId === chapterId
+            ? current
+            : { threadId, chapterId },
+        );
+      }
+    },
+    [chapters, threadId],
+  );
+  const handleChapterSelect = useCallback(
+    (chapterId: string) => {
+      const chapter = chapters.find((candidate) => candidate.id === chapterId);
+      if (!chapter) {
+        return;
+      }
+      setActiveChapter({ threadId, chapterId });
+      virtualMessageListRef.current?.scrollToGroup(chapter.groupIndex, {
+        align: "start",
+        behavior: "auto",
+      });
+    },
+    [chapters, threadId],
+  );
   const browserView = useMaybeBrowserView();
   const pushBrowserFrame = browserView?.pushFrame;
   const messageCount = messages.length;
@@ -434,6 +503,30 @@ export function MessageList({
   }, [groupedMessages]);
   const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
+  const renderedSubtasks = useMemo(
+    () =>
+      collectRenderedSubtasks(
+        groupedMessages,
+        (groupIndex) => thread.isLoading && groupIndex === lastGroupIndex,
+        t.subtasks.failed,
+        t.subtasks.subtask,
+      ),
+    [
+      groupedMessages,
+      lastGroupIndex,
+      t.subtasks.failed,
+      t.subtasks.subtask,
+      thread.isLoading,
+    ],
+  );
+
+  useEffect(() => {
+    // Synchronize message-derived snapshots after render. The task context
+    // ignores identical updates, so streamed re-renders remain idempotent.
+    for (const task of renderedSubtasks.updates) {
+      updateSubtask(task);
+    }
+  }, [renderedSubtasks, updateSubtask]);
   const previousTurnUsageStateRef = useRef<AssistantTurnUsageState | undefined>(
     undefined,
   );
@@ -449,8 +542,16 @@ export function MessageList({
     () => getRunDurationDisplaysByGroupIndex(groupedMessages),
     [groupedMessages],
   );
+  const artifactArchiveCandidatesByGroupIndex = useMemo(
+    () => getArtifactArchiveCandidatesByGroupIndex(groupedMessages),
+    [groupedMessages],
+  );
   const workspaceChangeAnchorGroupIndices = useMemo(
     () => getWorkspaceChangeAnchorGroupIndices(groupedMessages),
+    [groupedMessages],
+  );
+  const skillUsageByGroupIndex = useMemo(
+    () => getSkillUsageByGroupIndex(groupedMessages),
     [groupedMessages],
   );
   useEffect(() => {
@@ -799,6 +900,7 @@ export function MessageList({
       isStreaming: boolean,
       enableBranchForTurn: boolean,
       enableRegenerateForTurn: boolean,
+      skills?: SkillUsage[],
     ) => {
       const clipboardData = getAssistantTurnCopyData(messages, { isStreaming });
       const actionTarget = [...messages]
@@ -813,8 +915,9 @@ export function MessageList({
       }
 
       return (
-        <div className="mt-2 flex justify-start gap-1 opacity-0 transition-opacity delay-200 duration-300 group-hover/assistant-turn:opacity-100">
+        <div className="mt-2 flex justify-start gap-1 opacity-100 transition-opacity delay-200 duration-300 focus-within:opacity-100 has-[[data-state=open]]:opacity-100 sm:opacity-0 sm:group-hover/assistant-turn:opacity-100">
           {clipboardData && <CopyButton clipboardData={clipboardData} />}
+          {!isStreaming && skills && <SkillUsageMenu skills={skills} />}
           {enableBranchForTurn &&
             !isStreaming &&
             actionTarget?.id &&
@@ -881,7 +984,7 @@ export function MessageList({
                 >
                   <RefreshCcwIcon
                     className={cn(
-                      "size-3",
+                      "size-4",
                       regeneratingMessageId === actionTarget.id &&
                         "animate-spin",
                     )}
@@ -1006,7 +1109,7 @@ export function MessageList({
     );
   };
   return (
-    <>
+    <KnowledgeSourcesProvider messages={thread.messages}>
       <Conversation
         className={cn("flex size-full flex-col justify-center", className)}
         data-testid={testId}
@@ -1020,8 +1123,12 @@ export function MessageList({
             loadMore={loadMoreHistory}
           />
           <VirtualMessageList
+            ref={virtualMessageListRef}
             groups={groupedMessages}
             isLoading={thread.isLoading}
+            onActiveGroupChange={
+              conversationOutlineEnabled ? handleActiveGroupChange : undefined
+            }
             renderGroup={(group, groupIndex) => {
               const turnUsageMessages =
                 turnUsageMessagesByGroupIndex[groupIndex];
@@ -1130,6 +1237,9 @@ export function MessageList({
                         group.id !== undefined &&
                           branchableAssistantGroupIds.has(group.id),
                         group.id === latestAssistantGroupId,
+                        sidecarSurface
+                          ? undefined
+                          : skillUsageByGroupIndex.get(groupIndex),
                       )}
                   </div>,
                 );
@@ -1200,14 +1310,17 @@ export function MessageList({
                 }
                 return withRunDuration(group, groupIndex, null);
               } else if (group.type === "assistant:present-files") {
-                const files: string[] = [];
+                const files = new Set<string>();
                 for (const message of group.messages) {
                   if (hasPresentFiles(message)) {
                     const presentFiles =
                       extractPresentFilesFromMessage(message);
-                    files.push(...presentFiles);
+                    for (const file of presentFiles) files.add(file);
                   }
                 }
+                const presentedFiles = [...files];
+                const archiveCandidate =
+                  artifactArchiveCandidatesByGroupIndex[groupIndex];
                 return withRunDuration(
                   group,
                   groupIndex,
@@ -1219,7 +1332,14 @@ export function MessageList({
                         className="mb-4"
                       />
                     )}
-                    <ArtifactFileList files={files} threadId={threadId} />
+                    <ArtifactFileList
+                      archiveDownloadsEnabled={
+                        archiveDownloadsEnabled && !thread.isLoading
+                      }
+                      files={presentedFiles}
+                      runId={archiveCandidate?.runId}
+                      threadId={threadId}
+                    />
                     {renderTokenUsage({
                       messages: group.messages,
                       turnUsageMessages,
@@ -1229,40 +1349,15 @@ export function MessageList({
               } else if (group.type === "assistant:subagent") {
                 const tasks = new Set<Subtask>();
                 for (const message of group.messages) {
-                  if (message.type === "ai") {
-                    for (const toolCall of message.tool_calls ?? []) {
-                      if (toolCall.name === "task") {
-                        const taskId = toolCall.id;
-                        if (!taskId) {
-                          continue;
-                        }
-                        const status = derivePendingSubtaskStatus(
-                          taskId,
-                          group.messages,
-                          groupIsLoading,
-                        );
-                        const task: Subtask = {
-                          id: taskId,
-                          subagent_type: toolCall.args.subagent_type,
-                          description: toolCall.args.description,
-                          prompt: toolCall.args.prompt,
-                          status,
-                          ...(status === "failed"
-                            ? { error: t.subtasks.failed }
-                            : {}),
-                        };
-                        updateSubtask(task);
-                        tasks.add(task);
-                      }
-                    }
-                  } else if (message.type === "tool") {
-                    const taskId = message.tool_call_id;
-                    if (taskId) {
-                      const parsed = parseSubtaskResult(
-                        extractTextFromMessage(message),
-                        message.additional_kwargs,
-                      );
-                      updateSubtask({ id: taskId, ...parsed });
+                  if (message.type !== "ai") {
+                    continue;
+                  }
+                  for (const toolCall of message.tool_calls ?? []) {
+                    const task = toolCall.id
+                      ? renderedSubtasks.tasks.get(toolCall.id)
+                      : undefined;
+                    if (toolCall.name === "task" && task) {
+                      tasks.add(task);
                     }
                   }
                 }
@@ -1305,6 +1400,10 @@ export function MessageList({
                       : [],
                   );
                   for (const taskId of taskIds ?? []) {
+                    const fallbackTask = renderedSubtasks.tasks.get(taskId);
+                    if (!fallbackTask) {
+                      continue;
+                    }
                     results.push(
                       <SubtaskCard
                         key={"task-group-" + taskId}
@@ -1312,6 +1411,7 @@ export function MessageList({
                         threadId={threadId}
                         runId={(message as { run_id?: string }).run_id}
                         isLoading={groupIsLoading}
+                        fallbackTask={fallbackTask}
                       />,
                     );
                   }
@@ -1361,6 +1461,13 @@ export function MessageList({
           <div style={{ height: `${paddingBottom}px` }} />
         </ConversationContent>
       </Conversation>
+      {conversationOutlineEnabled && (
+        <ConversationOutline
+          chapters={chapters}
+          activeChapterId={activeChapterId}
+          onChapterSelect={handleChapterSelect}
+        />
+      )}
       {selectionToolbar && sidecar && (
         <div
           className={cn(
@@ -1409,6 +1516,6 @@ export function MessageList({
           </Button>
         </div>
       )}
-    </>
+    </KnowledgeSourcesProvider>
   );
 }

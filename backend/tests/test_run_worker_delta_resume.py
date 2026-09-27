@@ -27,6 +27,7 @@ from langgraph.types import Overwrite
 
 from deerflow.agents.thread_state import merge_message_writes
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import RunContext, _checkpoint_thread_lock, _linearize_delta_checkpoint_resume, run_agent
@@ -116,6 +117,42 @@ async def test_linearizes_a_delta_resume_onto_the_head():
     new_head = await accessor.aget(_run_config("thread-1"))
     assert _ids(new_head) == ["h1", "a1"]
     assert new_head.config["configurable"]["checkpoint_id"] != head.config["configurable"]["checkpoint_id"]
+
+
+async def test_linearized_resume_preserves_selected_checkpoint_agent_binding():
+    checkpointer = InMemorySaver()
+    thread_config = _run_config("thread-binding")
+    seeded_config = {
+        **thread_config,
+        "metadata": {CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"},
+    }
+    graph = _build_answer_graph(_DeltaChannelState, checkpointer, "a1")
+    await graph.ainvoke(
+        {"messages": [HumanMessage(content="q1", id="h1")]},
+        seeded_config,
+    )
+    selected = await CheckpointStateAccessor.bind(graph, checkpointer, mode="delta").aget(thread_config)
+
+    graph = _build_answer_graph(_DeltaChannelState, checkpointer, "a2")
+    await graph.ainvoke(
+        {"messages": [HumanMessage(content="q2", id="h2")]},
+        thread_config,
+    )
+    accessor = CheckpointStateAccessor.bind(graph, checkpointer, mode="delta")
+
+    await _linearize_delta_checkpoint_resume(
+        accessor=accessor,
+        checkpointer=checkpointer,
+        config=_run_config(
+            "thread-binding",
+            selected.config["configurable"]["checkpoint_id"],
+        ),
+        thread_id="thread-binding",
+        run_id="run-binding",
+    )
+
+    rewritten = await accessor.aget(thread_config)
+    assert rewritten.metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] == "stateless-worker"
 
 
 async def test_linearization_restores_all_selected_state_and_clears_newer_channels():

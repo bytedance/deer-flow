@@ -31,6 +31,7 @@ def _make_memory(facts: list[dict[str, object]] | None = None) -> dict[str, obje
             "workContext": {"summary": "", "updatedAt": ""},
             "personalContext": {"summary": "", "updatedAt": ""},
             "topOfMind": {"summary": "", "updatedAt": ""},
+            "cognitiveStyle": {"summary": "", "updatedAt": ""},
         },
         "history": {
             "recentMonths": {"summary": "", "updatedAt": ""},
@@ -1716,6 +1717,8 @@ class TestUserIdForwarding:
         assert result is True
         invoke_config = model.invoke.call_args.kwargs["config"]
         metadata = invoke_config["metadata"]
+        # The update runs on a Timer thread that inherits no ContextVars, so the
+        # id captured at enqueue time is what keeps this trace correlated.
         assert metadata["deerflow_trace_id"] == "memory-trace-1"
         assert metadata["langfuse_session_id"] == "thread-memory"
         assert metadata["langfuse_user_id"] == "user-42"

@@ -15,7 +15,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import PrivateAttr
 
 # ABC contract -- the ONE allowed `from deerflow` import in this backend folder.
-from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError
+from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError, MemoryReadError
 
 from .client import Mem0APIError, Mem0Client
 from .config import Mem0Config
@@ -106,6 +106,13 @@ class Mem0Manager(MemoryManager):
         """Release the underlying HTTP connection pool."""
         self._client.close()
 
+    @classmethod
+    def read_failures_are_fatal_for_config(
+        cls,
+        backend_config: dict[str, Any] | None,
+    ) -> bool:
+        return Mem0Config.from_backend_config(backend_config).read_policy == "fail_closed"
+
     # ── Error policies ───────────────────────────────────────────────────
     def _read_or_fallback(self, fallback: Any, fn: Any) -> Any:
         try:
@@ -114,7 +121,7 @@ class Mem0Manager(MemoryManager):
             if self._config.read_policy == "fail_open":
                 logger.warning("mem0 read failed (%s); continuing without memory", e)
                 return fallback
-            raise MemoryManagerError(f"mem0 read failed: {e}") from e
+            raise MemoryReadError(f"mem0 read failed: {e}") from e
 
     def _write_or_drop(self, fn: Any) -> None:
         try:
@@ -180,10 +187,11 @@ class Mem0Manager(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
-        """Query-less recall: the contract passes no current query, so inject
-        the bucket's most recent memories (top_k). Query-aware recall is
-        available via search() in mode="tool"."""
+        """Query-less recall: this backend ignores the optional ``query``
+        hint and injects the bucket's most recent memories (top_k).
+        Query-aware recall is available via search() in mode="tool"."""
         filters = _build_filters(user_id=user_id, agent_name=agent_name, run_id=thread_id)
         if filters is None:
             return ""
@@ -239,12 +247,14 @@ class Mem0Manager(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         return await asyncio.to_thread(
             self.get_context,
             user_id,
             agent_name=agent_name,
             thread_id=thread_id,
+            query=query,
         )
 
     # ── Tier 2: search ───────────────────────────────────────────────────

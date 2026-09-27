@@ -84,6 +84,14 @@ _BLOCKED_EXACT_NAMES: frozenset[str] = frozenset(
         "REDISCLI_AUTH",
         "REDIS_AUTH",
         "PGSERVICEFILE",
+        # ``SSH_AUTH_SOCK`` points at the host's ssh-agent socket. A sandbox
+        # subprocess that inherits it can sign and authenticate with every key
+        # the agent holds (git push, ssh logins) without ever reading a key
+        # file — the same credential-*pointer* leak class as the ``*_ASKPASS``
+        # helpers deliberately scrubbed by ``*PASS*`` above. No wildcard fits
+        # (``*AUTH*`` would strip benign names and ``SOCK`` is not unique to
+        # credentials), so it needs an exact entry.
+        "SSH_AUTH_SOCK",
     }
 )
 

@@ -18,6 +18,10 @@ from deerflow.persistence.agents.file import FileAgentStore
 from deerflow.persistence.agents.model import AgentRow
 from deerflow.persistence.agents.sql import SqlAgentStore
 from deerflow.persistence.base import Base
+from deerflow.persistence.managed_subagents.base import ManagedSubagentDefinition
+from deerflow.persistence.managed_subagents.file import FileManagedSubagentStore
+from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
+from deerflow.persistence.managed_subagents.sql import SqlManagedSubagentStore
 
 
 def _cfg(agent_backend: str, db_backend: str, sqlite_dir: str = "/tmp/agent-store-test") -> SimpleNamespace:
@@ -72,7 +76,7 @@ def test_validation_warns_on_file_under_multiworker_postgres(monkeypatch, caplog
 
 @pytest.fixture()
 def file_home(tmp_path, monkeypatch):
-    """Root the file store at a temp DEER_FLOW_HOME with two seeded agents."""
+    """Root file stores at a temp DEER_FLOW_HOME with seeded definitions."""
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     from deerflow.config import paths as paths_module
 
@@ -80,6 +84,14 @@ def file_home(tmp_path, monkeypatch):
     fs = FileAgentStore()
     fs.create("reviewer", {"name": "reviewer", "description": "reviews"}, "review soul", user_id="u1")
     fs.create("planner", {"name": "planner", "description": "plans", "model": "m1"}, "plan soul", user_id="u2")
+    FileManagedSubagentStore().create(
+        ManagedSubagentDefinition(
+            name="researcher",
+            description="Researches topics",
+            system_prompt="Research carefully.",
+            enabled=False,
+        )
+    )
     return tmp_path
 
 
@@ -95,7 +107,7 @@ def _patch_importer(monkeypatch, cfg):
     # does, which also creates the sqlite directory).
     pathlib.Path(cfg.database.sqlite_dir).mkdir(parents=True, exist_ok=True)
     engine = create_engine(cfg.database.app_sync_sqlalchemy_url)
-    Base.metadata.create_all(engine, tables=[AgentRow.__table__])
+    Base.metadata.create_all(engine, tables=[AgentRow.__table__, ManagedSubagentRow.__table__])
     engine.dispose()
 
     monkeypatch.setattr(importer, "get_app_config", lambda: cfg)
@@ -103,7 +115,7 @@ def _patch_importer(monkeypatch, cfg):
     return importer
 
 
-def test_importer_copies_all_agents_into_db(file_home, monkeypatch):
+def test_importer_copies_all_definitions_into_db(file_home, monkeypatch):
     cfg = _cfg("db", "sqlite", str(file_home / "db"))
     importer = _patch_importer(monkeypatch, cfg)
     monkeypatch.setattr(sys, "argv", ["migrate_agents_to_db"])
@@ -114,6 +126,9 @@ def test_importer_copies_all_agents_into_db(file_home, monkeypatch):
     assert dest.get("reviewer", user_id="u1").description == "reviews"
     assert dest.get_soul("reviewer", user_id="u1") == "review soul"
     assert dest.get("planner", user_id="u2").model == "m1"
+    managed = SqlManagedSubagentStore(cfg.database.app_sync_sqlalchemy_url).get("researcher")
+    assert managed.description == "Researches topics"
+    assert managed.enabled is False
 
 
 def test_importer_is_idempotent(file_home, monkeypatch):
@@ -126,6 +141,7 @@ def test_importer_is_idempotent(file_home, monkeypatch):
     assert importer.main() == 0
     dest = SqlAgentStore(cfg.database.app_sync_sqlalchemy_url)
     assert len(dest.list_all()) == 2
+    assert [item.name for item in SqlManagedSubagentStore(cfg.database.app_sync_sqlalchemy_url).list()] == ["researcher"]
 
 
 def test_importer_dry_run_writes_nothing(file_home, monkeypatch):
@@ -136,6 +152,30 @@ def test_importer_dry_run_writes_nothing(file_home, monkeypatch):
     assert importer.main() == 0
     dest = SqlAgentStore(cfg.database.app_sync_sqlalchemy_url)
     assert dest.list_all() == []
+    assert SqlManagedSubagentStore(cfg.database.app_sync_sqlalchemy_url).list() == []
+
+
+def test_importer_runs_when_only_managed_subagents_exist(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    FileManagedSubagentStore().create(
+        ManagedSubagentDefinition(
+            name="writer",
+            description="Writes reports",
+            system_prompt="Write clearly.",
+        )
+    )
+
+    cfg = _cfg("db", "sqlite", str(tmp_path / "db"))
+    importer = _patch_importer(monkeypatch, cfg)
+    monkeypatch.setattr(sys, "argv", ["migrate_agents_to_db"])
+
+    assert importer.main() == 0
+
+    assert SqlAgentStore(cfg.database.app_sync_sqlalchemy_url).list_all() == []
+    assert SqlManagedSubagentStore(cfg.database.app_sync_sqlalchemy_url).get("writer").description == "Writes reports"
 
 
 def test_read_free_functions_dispatch_to_db_backend(file_home, monkeypatch):
@@ -223,9 +263,82 @@ def test_get_agent_store_falls_back_to_file_without_config(tmp_path, monkeypatch
     """The ``except -> file`` fallback is for genuinely unresolvable config only
     (CLI/tests); it must not fire when a config exists — that asymmetry is what
     keeps a misconfigured graph process from silently downgrading db to file."""
-    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "does-not-exist.yaml"))
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+    from deerflow.config import app_config
+
+    monkeypatch.setattr(app_config, "_legacy_config_candidates", lambda: ())
     try:
         reset_app_config()
         assert isinstance(get_agent_store(), FileAgentStore)
+    finally:
+        reset_app_config()
+
+
+def test_get_agent_store_does_not_fallback_when_explicit_config_is_missing(tmp_path, monkeypatch):
+    """An explicit config path is an operator assertion and must fail closed."""
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "does-not-exist.yaml"))
+    try:
+        reset_app_config()
+        with pytest.raises(FileNotFoundError, match="DEER_FLOW_CONFIG_PATH"):
+            get_agent_store()
+    finally:
+        reset_app_config()
+
+
+def test_get_agent_store_does_not_hide_invalid_config(monkeypatch):
+    """Only missing config falls back; config errors must reach the caller."""
+    from deerflow.config import app_config
+
+    def raise_invalid_config():
+        raise ValueError("invalid config")
+
+    monkeypatch.setattr(app_config, "get_app_config", raise_invalid_config)
+    with pytest.raises(ValueError, match="invalid config"):
+        get_agent_store()
+
+
+def test_get_agent_store_propagates_invalid_on_disk_config(tmp_path, monkeypatch):
+    """A present config with an invalid backend must fail instead of falling back."""
+    cfg_path = tmp_path / "config.yaml"
+    _write_min_config(cfg_path, {"agent_storage": {"backend": "invalid"}})
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(cfg_path))
+    try:
+        reset_app_config()
+        with pytest.raises(ValueError, match="agent_storage.backend"):
+            get_agent_store()
+    finally:
+        reset_app_config()
+
+
+def test_get_agent_store_propagates_malformed_yaml(tmp_path, monkeypatch):
+    """An unparseable config.yaml must surface the parse error, not fall back to file."""
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("agent_storage: [oops\n", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(cfg_path))
+    try:
+        reset_app_config()
+        with pytest.raises(yaml.YAMLError):  # ParserError/ScannerError, previously swallowed
+            get_agent_store()
+    finally:
+        reset_app_config()
+
+
+def test_get_agent_store_does_not_fallback_when_extensions_config_is_missing(tmp_path, monkeypatch):
+    """A missing nested config must not look like a missing main config."""
+    cfg_path = tmp_path / "config.yaml"
+    _write_min_config(
+        cfg_path,
+        {
+            "agent_storage": {"backend": "db"},
+            "database": {"backend": "sqlite", "sqlite_dir": str(tmp_path / "db")},
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(tmp_path / "missing-extensions.json"))
+    try:
+        reset_app_config()
+        with pytest.raises(FileNotFoundError, match="Extensions config"):
+            get_agent_store()
     finally:
         reset_app_config()

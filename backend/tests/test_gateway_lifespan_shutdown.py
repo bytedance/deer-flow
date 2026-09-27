@@ -25,6 +25,58 @@ async def _noop_langgraph_runtime(_app, _startup_config):
     yield
 
 
+@asynccontextmanager
+async def _langgraph_runtime_with_scheduler_repositories(app, _startup_config):
+    app.state.scheduled_task_repo = object()
+    app.state.scheduled_task_run_repo = object()
+    yield
+
+
+def test_enabled_scheduler_start_failure_aborts_gateway_lifespan():
+    """An enabled scheduler must fail lifespan before channel or request admission."""
+    from app.gateway.app import lifespan
+
+    async def scenario():
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        startup_config.scheduler.enabled = True
+        startup_config.scheduler.multi_instance = False
+        startup_config.scheduler.poll_interval_seconds = 5
+        startup_config.scheduler.lease_seconds = 120
+        startup_config.scheduler.max_concurrent_runs = 3
+        startup_config.scheduler.queue_timeout_seconds = 3600
+        startup_config.run_ownership.grace_seconds = 10
+        channel_service = MagicMock()
+        channel_service.get_status.return_value = {}
+        start_channel_service = AsyncMock(return_value=channel_service)
+        scheduler_service = MagicMock()
+        scheduler_service.start = AsyncMock(side_effect=RuntimeError("scheduled recovery failed"))
+        scheduler_service.stop = AsyncMock()
+
+        with (
+            patch("app.gateway.app.get_app_config", return_value=startup_config),
+            patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+            patch("app.gateway.app.langgraph_runtime", _langgraph_runtime_with_scheduler_repositories),
+            patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+            patch("app.channels.service.start_channel_service", start_channel_service),
+            patch("app.channels.service.stop_channel_service", AsyncMock()),
+            patch("app.scheduler.ScheduledTaskService", return_value=scheduler_service),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="scheduled recovery failed"):
+                async with lifespan(app):
+                    pass
+
+        scheduler_service.start.assert_awaited_once()
+        start_channel_service.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
 async def _run_lifespan_with_hanging_stop() -> float:
     """Drive the lifespan context with stop_channel_service hanging forever.
 
@@ -473,3 +525,46 @@ def test_lifespan_preserves_flush_budget_when_retrieval_warm_is_still_running() 
     assert shutdown_elapsed < 1.0
     manager.shutdown_flush.assert_called_once_with(5.0)
     manager.close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_pins_batch_service_to_app_extensions(monkeypatch):
+    import deerflow.extensions as extensions
+    from app.gateway.app import lifespan
+    from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+    from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    app = FastAPI()
+    snapshot = ExtensionRegistry().build()
+    app.state.extensions = snapshot
+    monkeypatch.setattr(extensions, "_loaded", ExtensionRegistry().build())
+    startup_config = MagicMock()
+    startup_config.log_level = "INFO"
+    startup_config.memory.enabled = False
+    startup_config.scheduler.enabled = False
+    startup_config.mcp_tasks.enabled = False
+    startup_config.subagent_batches = SubagentBatchesConfig(enabled=True)
+    startup_config.subagent_runtime = SubagentRuntimeConfig()
+    channel_service = MagicMock()
+    channel_service.get_status.return_value = {}
+
+    @asynccontextmanager
+    async def runtime(app, _config):
+        app.state.subagent_batch_repo = object()
+        yield
+
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", runtime),
+        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+        patch("app.channels.service.start_channel_service", AsyncMock(return_value=channel_service)),
+        patch("app.channels.service.stop_channel_service", AsyncMock()),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
+        patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+        patch("deerflow.subagents.batch_service.SubagentBatchService.start", AsyncMock()),
+        patch("deerflow.subagents.batch_service.SubagentBatchService.stop", AsyncMock()),
+    ):
+        async with lifespan(app):
+            assert app.state.subagent_batch_service._extensions is snapshot

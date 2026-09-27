@@ -10,12 +10,18 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, get_args
 
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 TOOL_META_KEY = "deerflow_tool_meta"
+PROGRESS_GUARD_ERROR_TYPE = "blocked_by_progress_guard"
+
+ToolResultStatus = Literal["success", "error", "partial_success"]
+RecommendedNextAction = Literal["continue", "rewrite_query", "try_alternative", "summarize", "stop"]
+TOOL_RESULT_STATUSES = frozenset(get_args(ToolResultStatus)) | {"unknown"}
+TOOL_RESULT_NEXT_ACTIONS = frozenset(get_args(RecommendedNextAction)) | {"unknown"}
 
 _ERROR_PREFIX = "Error:"
 _PARTIAL_MARKERS = (
@@ -33,10 +39,10 @@ _PARTIAL_MARKERS = (
 
 @dataclass(frozen=True, slots=True)
 class ToolResultMeta:
-    status: Literal["success", "error", "partial_success"]
+    status: ToolResultStatus
     error_type: str | None
     recoverable_by_model: bool
-    recommended_next_action: Literal["continue", "rewrite_query", "try_alternative", "summarize", "stop"]
+    recommended_next_action: RecommendedNextAction
     source: Literal["exception", "tool_return", "content_analysis", "progress_middleware"]
 
 
@@ -97,6 +103,7 @@ _PAGE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset({"web_fetch"})
 # _ERROR_RULES already declares. Derived rather than duplicated so a shell can
 # never drift from the recoverable/next-action contract of its own category.
 _ATTRS_BY_ERROR_TYPE: dict[str, dict[str, object]] = {str(attrs["error_type"]): attrs for _keywords, attrs in _ERROR_RULES}
+TOOL_RESULT_ERROR_TYPES = frozenset(_ATTRS_BY_ERROR_TYPE) | {"unknown", PROGRESS_GUARD_ERROR_TYPE}
 
 # Reason phrases (RFC 9110 §15 plus the wording real servers ship) mapped onto the
 # error_type they already have in _ERROR_RULES. Restricted to the statuses a fetch
@@ -243,10 +250,31 @@ def stamp_exception_meta(msg: ToolMessage, exc_info: str) -> ToolMessage:
     return msg
 
 
+# Structured task/subagent failures (see subagents/status_contract.py). These
+# producers put authoritative status in additional_kwargs["subagent_status"] while
+# leaving ToolMessage.status at LangChain's default "success" and using display
+# text that does not start with "Error:" — so content heuristics alone mis-label
+# them as success. Honor the structured field before any content analysis.
+_SUBAGENT_FAILURE_STATUSES = frozenset({"failed", "cancelled", "timed_out", "polling_timed_out"})
+
+
 def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
     """Attach deerflow_tool_meta to a ToolMessage if not already present."""
     existing = (msg.additional_kwargs or {}).get(TOOL_META_KEY)
     if existing is not None:
+        return msg
+
+    kwargs = msg.additional_kwargs or {}
+    subagent_status = kwargs.get("subagent_status")
+    if subagent_status in _SUBAGENT_FAILURE_STATUSES:
+        error_text = kwargs.get("subagent_error")
+        if not isinstance(error_text, str) or not error_text:
+            error_text = msg.content if isinstance(msg.content, str) else ""
+        attrs = _classify_error_text(str(error_text))
+        meta = _make_meta(status="error", source="tool_return", **attrs)
+        updated_kwargs = dict(kwargs)
+        updated_kwargs[TOOL_META_KEY] = meta
+        msg.additional_kwargs = updated_kwargs
         return msg
 
     content = msg.content if isinstance(msg.content, str) else ""
@@ -297,8 +325,34 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
     return msg
 
 
-def normalize_tool_result(result: ToolMessage | Command) -> ToolMessage | Command:
-    """Normalize a tool result, handling Command wrappers transparently."""
+def _command_messages(result: Command) -> list | tuple | None:
+    update = result.update
+    if not isinstance(update, dict):
+        return None
+    messages = update.get("messages")
+    if isinstance(messages, ToolMessage):
+        return [messages]
+    if isinstance(messages, (list, tuple)):
+        return messages
+    return None
+
+
+def normalize_tool_result(result: ToolMessage | Command, *, tool_call_id: str = "") -> ToolMessage | Command:
+    """Normalize a tool result, handling Command wrappers transparently.
+
+    When ``tool_call_id`` is provided, only the matching ``ToolMessage`` inside a
+    Command is stamped. Other Command fields and unrelated messages are left intact.
+    Producer-supplied ``deerflow_tool_meta`` is preserved by ``normalize_tool_message``.
+    """
     if isinstance(result, ToolMessage):
         return normalize_tool_message(result)
+    messages = _command_messages(result)
+    if messages is None:
+        return result
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        if tool_call_id and str(message.tool_call_id) != tool_call_id:
+            continue
+        normalize_tool_message(message)
     return result

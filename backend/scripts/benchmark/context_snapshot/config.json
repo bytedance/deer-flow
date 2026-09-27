@@ -1,0 +1,14 @@
+{
+  "protocol": "context-snapshot-synthetic-v1",
+  "temperature": 0.2,
+  "reasoning_effort": "none",
+  "max_tokens": 4096,
+  "context_window": 262144,
+  "http_timeout_seconds": 120,
+  "worker_timeout_seconds": 180,
+  "max_graph_steps": 50,
+  "max_retries": 0,
+  "seed": 1703,
+  "order_seed": 20260913,
+  "concurrency": 2
+}

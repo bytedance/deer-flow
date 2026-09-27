@@ -619,6 +619,7 @@ def test_client_ensure_agent_enforces_model_use_when_authorized(monkeypatch):
 
     # Denied ``gpt-4`` was swapped for the authorized fallback ``claude-3``.
     assert captured_name["name"] == "claude-3"
+    assert client._effective_model_name == "claude-3"
 
 
 def test_client_ensure_agent_resolves_none_default_before_authorization(monkeypatch):
@@ -647,6 +648,7 @@ def test_client_ensure_agent_resolves_none_default_before_authorization(monkeypa
     client._ensure_agent(config)
 
     assert captured_name["name"] == "claude-3"
+    assert client._effective_model_name == "claude-3"
 
 
 def test_client_ensure_agent_noop_when_authorization_disabled(monkeypatch):
@@ -679,7 +681,7 @@ def _stub_client_assembly(monkeypatch) -> dict[str, str]:
     )
     monkeypatch.setattr("deerflow.client.create_agent", lambda **kwargs: object())
     monkeypatch.setattr("deerflow.client.build_middlewares", lambda *args, **kwargs: [])
-    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled: []))  # noqa: ARG005
+    monkeypatch.setattr("deerflow.client.DeerFlowClient._get_tools", staticmethod(lambda *, model_name, subagent_enabled, mcp_plugins=None: []))  # noqa: ARG005
     monkeypatch.setattr("deerflow.client.get_enabled_skills_for_config", lambda app_config: [])  # noqa: ARG005
     monkeypatch.setattr(
         "deerflow.client.build_skill_search_setup",

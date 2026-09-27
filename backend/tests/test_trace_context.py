@@ -11,12 +11,14 @@ import pytest
 
 from deerflow.trace_context import (
     _MAX_TRACE_ID_LENGTH,
-    is_trace_id_from_request_header,
-    mark_trace_id_from_request_header,
+    bind_trace_id,
+    ensure_trace_context,
+    ensure_trace_id,
+    get_current_trace_id,
     normalize_trace_id,
     request_trace_context,
-    reset_trace_id_from_request_header,
-    resolve_deerflow_trace_id,
+    reset_trace_id,
+    resolve_trace_id,
 )
 
 
@@ -94,28 +96,106 @@ class TestNormalizeTraceIdRejectsUnsafeInput:
         assert normalize_trace_id("trace-\ud83d") is None
 
 
-class TestResolveDeerflowTraceId:
-    def test_header_marker_defaults_false_and_resets(self) -> None:
-        assert is_trace_id_from_request_header() is False
-        token = mark_trace_id_from_request_header(from_header=True)
+class TestEnsureTraceId:
+    """The non-nullable accessor that lets consumers drop presence guards."""
+
+    def test_returns_the_bound_id(self) -> None:
+        with request_trace_context("bound-1"):
+            assert ensure_trace_id() == "bound-1"
+
+    def test_mints_and_binds_when_unset(self) -> None:
+        assert get_current_trace_id() is None
+        trace_id = ensure_trace_id()
+        assert trace_id
+        # Binding is what makes repeated reads inside one context agree.
+        assert get_current_trace_id() == trace_id
+        assert ensure_trace_id() == trace_id
+
+
+class TestResolveTraceId:
+    """Carrier fallback: the one place that knows the order."""
+
+    def test_first_usable_carrier_wins(self) -> None:
+        with request_trace_context("ambient"):
+            assert resolve_trace_id("runtime-ctx", "config-metadata") == "runtime-ctx"
+
+    def test_falls_through_absent_and_malformed_carriers_alike(self) -> None:
+        with request_trace_context("ambient"):
+            assert resolve_trace_id(None, "trace\nid", "config-metadata") == "config-metadata"
+
+    def test_falls_back_to_ambient_trace(self) -> None:
+        with request_trace_context("ambient"):
+            assert resolve_trace_id(None, None) == "ambient"
+
+    def test_never_returns_none_without_any_binding(self) -> None:
+        assert get_current_trace_id() is None
+        assert resolve_trace_id(None)
+
+
+class TestBindTraceId:
+    """Low-level pair for callers that cannot use the context managers."""
+
+    def test_binds_and_restores(self) -> None:
+        token = bind_trace_id("step-1")
         try:
-            assert is_trace_id_from_request_header() is True
+            assert get_current_trace_id() == "step-1"
         finally:
-            reset_trace_id_from_request_header(token)
-        assert is_trace_id_from_request_header() is False
+            reset_trace_id(token)
+        assert get_current_trace_id() is None
 
-    def test_metadata_wins_without_inbound_header(self) -> None:
-        with request_trace_context("ambient-trace"):
-            assert resolve_deerflow_trace_id("metadata-trace") == "metadata-trace"
-
-    def test_inbound_header_overrides_metadata(self) -> None:
-        with request_trace_context("header-trace"):
-            token = mark_trace_id_from_request_header(from_header=True)
+    def test_none_clears_the_binding(self) -> None:
+        """How a test harness restores an unbound baseline — see the autouse
+        ``_isolate_trace_context`` fixture in conftest."""
+        with request_trace_context("outer"):
+            token = bind_trace_id(None)
             try:
-                assert resolve_deerflow_trace_id("metadata-trace") == "header-trace"
+                assert get_current_trace_id() is None
             finally:
-                reset_trace_id_from_request_header(token)
+                reset_trace_id(token)
+            assert get_current_trace_id() == "outer"
 
-    def test_falls_back_to_ambient_context(self) -> None:
-        with request_trace_context("ambient-only"):
-            assert resolve_deerflow_trace_id(None) == "ambient-only"
+
+class TestRequestTraceContext:
+    def test_generates_when_no_inbound_id(self) -> None:
+        with request_trace_context() as trace_id:
+            assert trace_id
+            assert get_current_trace_id() == trace_id
+        assert get_current_trace_id() is None
+
+    def test_never_inherits_an_ambient_id(self) -> None:
+        """A crafted header must not silently fall back to the id of whatever
+        request ran before it on the same task."""
+        with request_trace_context("outer"):
+            with request_trace_context("trace\nid") as inner:
+                assert inner != "outer"
+            assert get_current_trace_id() == "outer"
+
+
+class TestEnsureTraceContext:
+    def test_rebinds_a_propagated_id_across_a_boundary(self) -> None:
+        with ensure_trace_context("carried-over") as trace_id:
+            assert trace_id == "carried-over"
+            assert get_current_trace_id() == "carried-over"
+        assert get_current_trace_id() is None
+
+    def test_inherits_rather_than_minting_when_no_id_is_carried(self) -> None:
+        """A non-HTTP launch reached from inside a request stays on the
+        caller's trace instead of minting a competing id."""
+        with request_trace_context("gateway-request-1"):
+            with ensure_trace_context() as trace_id:
+                assert trace_id == "gateway-request-1"
+
+    def test_mints_a_scoped_id_for_a_non_http_entry_point(self) -> None:
+        """A long-lived worker task must not leak one unit of work's id into
+        the next, so the minted id is unbound on exit."""
+        with ensure_trace_context() as first:
+            assert first
+        assert get_current_trace_id() is None
+        with ensure_trace_context() as second:
+            assert second != first
+
+    def test_keeps_the_ambient_binding_when_the_id_already_matches(self) -> None:
+        with request_trace_context("outer"):
+            with ensure_trace_context("outer") as trace_id:
+                assert trace_id == "outer"
+            assert get_current_trace_id() == "outer"

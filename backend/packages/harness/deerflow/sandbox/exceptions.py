@@ -111,3 +111,24 @@ class SandboxCapacityExceededError(SandboxError):
         self.replicas = replicas
         self.retry_after_seconds = retry_after_seconds
         self.reason = reason
+
+
+class SandboxAuthorizationError(SandboxError):
+    """Raised when the caller's role is denied sandbox execution.
+
+    Phase 3 pluggable authorization: ``authorize("sandbox", "execute")`` is
+    checked before sandbox acquisition. On deny this error propagates up
+    through the tool's execution so the agent's tool-error handling converts
+    it to a friendly ``ToolMessage`` ("sandbox not permitted for your role"),
+    rather than crashing the run (RFC §9).
+    """
+
+    def __init__(
+        self,
+        message: str = "Sandbox execution is not permitted for your role",
+        *,
+        role: str | None = None,
+    ) -> None:
+        details = {"role": role} if role else None
+        super().__init__(message, details)
+        self.role = role

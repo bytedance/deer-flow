@@ -12,6 +12,7 @@ const extensionMap: Record<string, string> = {
   // Text
   txt: "text",
   csv: "csv",
+  tsv: "tsv",
   log: "text",
   conf: "text",
   config: "text",

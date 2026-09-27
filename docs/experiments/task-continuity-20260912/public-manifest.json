@@ -1,0 +1,359 @@
+{
+  "protocol_hash": "01bcc9117d1d1d72e24b09582d116347d3ef1a2150323cfcc1d21519740ecbe1",
+  "dev": [
+    {
+      "id": "af8d2e46",
+      "stratum": "single-session-user",
+      "history_tokens": 115744,
+      "records": 495,
+      "history_hash": "74b2f8dc260b5bfcb7f4bdef6592d9141cb00844c85d9f8e2d8a0be25ab2c41b"
+    },
+    {
+      "id": "41275add",
+      "stratum": "single-session-assistant",
+      "history_tokens": 119580,
+      "records": 531,
+      "history_hash": "442484e88e7f1888e8b2a9b3c384cefe77a66b5a4092211d89f609f281bc47fe"
+    },
+    {
+      "id": "b6025781",
+      "stratum": "single-session-preference",
+      "history_tokens": 118993,
+      "records": 460,
+      "history_hash": "f925c83a9562c36755da9cb2b1f38f42762239a7b803bc82e2a991eecc8c9a8b"
+    },
+    {
+      "id": "993da5e2",
+      "stratum": "temporal-reasoning",
+      "history_tokens": 116941,
+      "records": 486,
+      "history_hash": "7dfda85bdf1dfb5bab61b7680e0e4f1352e53ae593c12575d1fe3ba2bb1c8161"
+    },
+    {
+      "id": "50635ada",
+      "stratum": "knowledge-update",
+      "history_tokens": 120295,
+      "records": 531,
+      "history_hash": "22c312f1c5306138156167e6b3e1f20078c8a794bfb0f9f1cca09ad42d0dbd4f"
+    },
+    {
+      "id": "60bf93ed",
+      "stratum": "multi-session",
+      "history_tokens": 117825,
+      "records": 494,
+      "history_hash": "7d4167fe4256eb65706302bd6373a63f5176483514608784b9172519debc88c7"
+    },
+    {
+      "id": "15745da0_abs",
+      "stratum": "abstention",
+      "history_tokens": 118241,
+      "records": 547,
+      "history_hash": "39fc0ec26cdcd2166449056c0d5eb85a81914b1670a0dc6c17aedd03eb104fa6"
+    }
+  ],
+  "test": [
+    {
+      "id": "311778f1",
+      "stratum": "single-session-user",
+      "history_tokens": 119015,
+      "records": 500,
+      "history_hash": "ee4bc58d5c3532a93159a3dd1e8f6379b9312259e409984184dfe377eb3a1729"
+    },
+    {
+      "id": "f8c5f88b",
+      "stratum": "single-session-user",
+      "history_tokens": 117203,
+      "records": 487,
+      "history_hash": "bc27504d8ae14677a2d86b15950119eef38b5ac166d706c10981920ba4a7d339"
+    },
+    {
+      "id": "60d45044",
+      "stratum": "single-session-user",
+      "history_tokens": 120254,
+      "records": 541,
+      "history_hash": "9bbd1c6403bf1de2f44d32c76a3ffba5ce0d7189c6d386e35f9a0f93b61a19eb"
+    },
+    {
+      "id": "8ebdbe50",
+      "stratum": "single-session-user",
+      "history_tokens": 119595,
+      "records": 487,
+      "history_hash": "3f2095ca7d3d4d69ca9e8bc4d5f17f5b20280935b501c96a08df48242af44097"
+    },
+    {
+      "id": "c19f7a0b",
+      "stratum": "single-session-user",
+      "history_tokens": 117447,
+      "records": 478,
+      "history_hash": "94d25002c750d6d4cf19ebb3f2c7da9ee1af640c886988946356921bb7796b03"
+    },
+    {
+      "id": "a82c026e",
+      "stratum": "single-session-user",
+      "history_tokens": 119406,
+      "records": 476,
+      "history_hash": "7f24644b88c75fe8c16c70f4d78bd6b9f5f48b84aa53548dfa96545b490a62b0"
+    },
+    {
+      "id": "f523d9fe",
+      "stratum": "single-session-assistant",
+      "history_tokens": 119356,
+      "records": 484,
+      "history_hash": "ef4dc34ac84c2a166f5a39f2f2330665b1a25a9c676f9e2050413002a4ad9733"
+    },
+    {
+      "id": "1568498a",
+      "stratum": "single-session-assistant",
+      "history_tokens": 116071,
+      "records": 478,
+      "history_hash": "3e3034a0c60fd5bb44a4f26d52683d38e3a8d57b5138321f5587f13222ec4837"
+    },
+    {
+      "id": "c7cf7dfd",
+      "stratum": "single-session-assistant",
+      "history_tokens": 117057,
+      "records": 520,
+      "history_hash": "f9efe275ccedafd7865e3034a4992d5cededfda1a0c8d87797471937722770a1"
+    },
+    {
+      "id": "18dcd5a5",
+      "stratum": "single-session-assistant",
+      "history_tokens": 118984,
+      "records": 503,
+      "history_hash": "86c8a4ec76b9f23b3fb3ba4c5b89860b0e1c5c46d241018749bb7554ac1141a6"
+    },
+    {
+      "id": "7161e7e2",
+      "stratum": "single-session-assistant",
+      "history_tokens": 119462,
+      "records": 550,
+      "history_hash": "1e7773fd918405412805ac5b1908f9ed3a8e017a00d49b6f5f63acb9dc392046"
+    },
+    {
+      "id": "e8a79c70",
+      "stratum": "single-session-assistant",
+      "history_tokens": 119240,
+      "records": 483,
+      "history_hash": "e03f5907d321832c8828e50e3896e0a7ecd786df03f53cc20df02edb5c1e22ad"
+    },
+    {
+      "id": "1d4e3b97",
+      "stratum": "single-session-preference",
+      "history_tokens": 118084,
+      "records": 474,
+      "history_hash": "a3cbc2eaa6b9dffdc106fdd991c92375fb0576306ea247a2c5f76a66c16fc240"
+    },
+    {
+      "id": "fca70973",
+      "stratum": "single-session-preference",
+      "history_tokens": 116081,
+      "records": 442,
+      "history_hash": "46fe7ee7f7c7b8e163a9e5927a2809b793ae0f9379c461d722ccfb6c32137c3c"
+    },
+    {
+      "id": "afdc33df",
+      "stratum": "single-session-preference",
+      "history_tokens": 119841,
+      "records": 502,
+      "history_hash": "81f144b5cd6591b257c051e40314f1fb2e55218a972d39ddc085d66c24569fbb"
+    },
+    {
+      "id": "35a27287",
+      "stratum": "single-session-preference",
+      "history_tokens": 116386,
+      "records": 519,
+      "history_hash": "976509464923a7088b47812d9611568319e75aec97607911eee6236ebca379b0"
+    },
+    {
+      "id": "32260d93",
+      "stratum": "single-session-preference",
+      "history_tokens": 118226,
+      "records": 524,
+      "history_hash": "302ec566e0406af23fb294943a8f957a4571d133993ca8161e98e19c156a2c42"
+    },
+    {
+      "id": "caf03d32",
+      "stratum": "single-session-preference",
+      "history_tokens": 118395,
+      "records": 493,
+      "history_hash": "c0d2463b2bb9e29902045e499b1686875ba7c88f1212cb038b0bab51cccdd35b"
+    },
+    {
+      "id": "gpt4_d31cdae3",
+      "stratum": "temporal-reasoning",
+      "history_tokens": 114622,
+      "records": 480,
+      "history_hash": "d960996ace8a9677661f14f6761ca49f40448508d37234fbc306ad58baea7fce"
+    },
+    {
+      "id": "gpt4_61e13b3c",
+      "stratum": "temporal-reasoning",
+      "history_tokens": 118094,
+      "records": 467,
+      "history_hash": "66eec92ae69fc1aeb501924ca4e35589cc8792a0ae28edbed43b7fbf1c1fc17e"
+    },
+    {
+      "id": "gpt4_7ca326fa",
+      "stratum": "temporal-reasoning",
+      "history_tokens": 117452,
+      "records": 516,
+      "history_hash": "ff96c2d33d36b8ca758bef3c74fda916cb3c1b5ac0230c495fdcd8ad348359e7"
+    },
+    {
+      "id": "gpt4_68e94288",
+      "stratum": "temporal-reasoning",
+      "history_tokens": 117084,
+      "records": 459,
+      "history_hash": "8bf822e2a3dc22f4ad20289df78b479ac0e741979604f2c917f437cf2dcdae70"
+    },
+    {
+      "id": "gpt4_4929293a",
+      "stratum": "temporal-reasoning",
+      "history_tokens": 118733,
+      "records": 486,
+      "history_hash": "7ac8b19bee6594b29af16a32fb9ea76873fb53df18e21531ed4edf583fb2a1af"
+    },
+    {
+      "id": "6e984302",
+      "stratum": "temporal-reasoning",
+      "history_tokens": 115498,
+      "records": 460,
+      "history_hash": "ae1b934728d1329393369569238d49be24308837919a6502a9dcd0f7ec7a1a01"
+    },
+    {
+      "id": "ed4ddc30",
+      "stratum": "knowledge-update",
+      "history_tokens": 119424,
+      "records": 543,
+      "history_hash": "99347df88a66df4564f7dd1d1d28119c733c098f94422f22ed19ae797b0e0234"
+    },
+    {
+      "id": "0ddfec37",
+      "stratum": "knowledge-update",
+      "history_tokens": 116280,
+      "records": 483,
+      "history_hash": "7961b801c7efefbe16a9c2eea3266dca3b04f6167b388bf62b042d18309b1a2b"
+    },
+    {
+      "id": "6a1eabeb",
+      "stratum": "knowledge-update",
+      "history_tokens": 115446,
+      "records": 413,
+      "history_hash": "69f5b7e4de21385c3731497d5d68152e1f11b602fdef7739f478eaa2a5541335"
+    },
+    {
+      "id": "a2f3aa27",
+      "stratum": "knowledge-update",
+      "history_tokens": 116289,
+      "records": 448,
+      "history_hash": "f6c9e0f562a56b5cdb9e2196d6a3214f40c95fab5ba4bf4946d10925f25d0e7d"
+    },
+    {
+      "id": "22d2cb42",
+      "stratum": "knowledge-update",
+      "history_tokens": 116433,
+      "records": 473,
+      "history_hash": "e4859f76b9c8f4aa5358201a7fd308d13998910b90f60ce0c79bd7ad06f3ad4e"
+    },
+    {
+      "id": "e493bb7c",
+      "stratum": "knowledge-update",
+      "history_tokens": 119896,
+      "records": 506,
+      "history_hash": "c50147f4fa5ef19b95d16c9d66991a1b7fdb42ee1e09a5abf4689faa9383374a"
+    },
+    {
+      "id": "6c49646a",
+      "stratum": "multi-session",
+      "history_tokens": 117193,
+      "records": 429,
+      "history_hash": "20b7cf2c2aa50786f62ceea72db7b9f037f831df203711aa341b1091c437370c"
+    },
+    {
+      "id": "60472f9c",
+      "stratum": "multi-session",
+      "history_tokens": 110501,
+      "records": 454,
+      "history_hash": "0059aa0814cc0f910bed8ce64f67a3f657bf93307e2d32ca95d95a08e024c9a6"
+    },
+    {
+      "id": "6cb6f249",
+      "stratum": "multi-session",
+      "history_tokens": 116257,
+      "records": 470,
+      "history_hash": "fa5332ed7917dffcfb2693d3047a8c37b0ac8ab1cc34e43ccc9369d7598aba71"
+    },
+    {
+      "id": "681a1674",
+      "stratum": "multi-session",
+      "history_tokens": 118755,
+      "records": 476,
+      "history_hash": "8c02e8165a6a91eb2414653e1266f4707f3cd2953c47759efb949b3ef3a0fe7a"
+    },
+    {
+      "id": "c18a7dc8",
+      "stratum": "multi-session",
+      "history_tokens": 118428,
+      "records": 509,
+      "history_hash": "d9c1a70d4e404673e79f7b41ddefcb5547eaf2d26cc55e7c015ae019ce4c0c22"
+    },
+    {
+      "id": "ef9cf60a",
+      "stratum": "multi-session",
+      "history_tokens": 120074,
+      "records": 522,
+      "history_hash": "a83ea24387b57630fc52c108578a911266b49d1f12658a983bc6ffbfcd5ca3b5"
+    },
+    {
+      "id": "982b5123_abs",
+      "stratum": "abstention",
+      "history_tokens": 119881,
+      "records": 505,
+      "history_hash": "ae1a27667d496d9e8f9b4ae52e3322214e5bcb34fc129909366ff669746169be"
+    },
+    {
+      "id": "29f2956b_abs",
+      "stratum": "abstention",
+      "history_tokens": 118913,
+      "records": 494,
+      "history_hash": "b8604c5ce8bcc493acc55646c5da5ac884738019f132bef9870fde0b5a21bda0"
+    },
+    {
+      "id": "88432d0a_abs",
+      "stratum": "abstention",
+      "history_tokens": 119651,
+      "records": 510,
+      "history_hash": "10148daf31982747cd2abf0c0704963f4fa00962b81d3e4cebd10490c047e92a"
+    },
+    {
+      "id": "6aeb4375_abs",
+      "stratum": "abstention",
+      "history_tokens": 118450,
+      "records": 521,
+      "history_hash": "80da03d95d7c15390b8c118ccd20fca597b6a358bfa45e76127ee000b693870e"
+    },
+    {
+      "id": "gpt4_93159ced_abs",
+      "stratum": "abstention",
+      "history_tokens": 118461,
+      "records": 608,
+      "history_hash": "88a65d88c2e615e796def1ce044392a374344954ef755dde11cc07b809784ba4"
+    },
+    {
+      "id": "c8090214_abs",
+      "stratum": "abstention",
+      "history_tokens": 117273,
+      "records": 506,
+      "history_hash": "4b21af9f94517ce6dba791cb9915f7429633174f10dd70d25da72eb729451ebf"
+    }
+  ],
+  "stratum_counts": {
+    "single-session-user": 64,
+    "abstention": 30,
+    "multi-session": 121,
+    "single-session-preference": 30,
+    "temporal-reasoning": 127,
+    "knowledge-update": 72,
+    "single-session-assistant": 56
+  }
+}
