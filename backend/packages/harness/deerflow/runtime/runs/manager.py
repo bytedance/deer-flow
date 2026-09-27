@@ -36,6 +36,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Supervised lease calls that miss their deadline are cancelled but must stay
+# observed until they reach a terminal outcome; their late result is never
+# adopted by the caller.
+_retained_lease_tasks: set[asyncio.Future[Any]] = set()
+
+
+def _retain_lease_task(task: asyncio.Future[Any]) -> None:
+    if task in _retained_lease_tasks:
+        return
+    _retained_lease_tasks.add(task)
+    task.add_done_callback(_discard_lease_task)
+
+
+def _discard_lease_task(task: asyncio.Future[Any]) -> None:
+    _retained_lease_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        pass
+
 ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
 STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
 LEASE_ORPHAN_RECOVERY_ERROR = "Run lease expired — owning worker is unreachable."
@@ -2197,6 +2219,159 @@ class RunManager:
             return False
         return record.task is None or not record.task.done()
 
+    async def _fence_expired_lease(self, record: RunRecord, *, reason: str) -> None:
+        """Fence a run whose last confirmed lease expired.
+
+        The candidate list already excludes acknowledged terminals, but our own
+        terminal CAS may land while this renewal is in flight. Re-check the
+        acknowledgement first: fencing a run this worker already committed would
+        cancel a legitimate cleanup task. Every other outcome fails closed with
+        ``require_active=False`` so a staged terminal status cannot exempt it.
+        """
+        async with self._lock:
+            if record.terminal_committed or record.ownership_lost:
+                return
+        await self._mark_ownership_lost(record, reason=reason, require_active=False)
+
+    async def _supervised_lease_call(self, factory: Callable[[], Awaitable[Any]], *, deadline: datetime) -> tuple[bool, Any]:
+        """Run one lease store call inside an absolute deadline.
+
+        Returns ``(completed, value)``. A call that misses the deadline is
+        cancelled and retained for observation; its late result is never
+        adopted by the caller.
+        """
+        task = asyncio.create_task(factory())
+        remaining = (deadline - datetime.now(UTC)).total_seconds()
+        if remaining <= 0:
+            task.cancel()
+            _retain_lease_task(task)
+            return False, None
+        done, _ = await asyncio.wait({task}, timeout=remaining)
+        if not done:
+            task.cancel()
+            _retain_lease_task(task)
+            return False, None
+        return True, task.result()
+
+    async def _renew_one_lease(self, run_id: str, record: RunRecord) -> tuple[str, str] | None:
+        """Renew one run's lease inside its own last-confirmed deadline.
+
+        Runs concurrently with every other run's attempt, so one run whose store
+        call cannot be interrupted cannot stall the rest of the heartbeat.
+        Returns the durable cancellation action to signal, if any.
+        """
+        confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
+        if confirmed_deadline is None or confirmed_deadline <= datetime.now(UTC):
+            await self._fence_expired_lease(
+                record,
+                reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
+            )
+            return None
+
+        lease_seconds = self._run_ownership_config.lease_seconds if self._run_ownership_config is not None else 30
+        new_expiry = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
+        try:
+            completed, renewal = await self._supervised_lease_call(
+                lambda: self._call_store_with_retry(
+                    "renew_lease",
+                    run_id,
+                    lambda: self._store.renew_lease(
+                        run_id,
+                        owner_worker_id=self._worker_id,
+                        lease_expires_at=new_expiry,
+                    ),
+                ),
+                deadline=confirmed_deadline,
+            )
+        except Exception:
+            if confirmed_deadline <= datetime.now(UTC):
+                await self._fence_expired_lease(
+                    record,
+                    reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
+                )
+            else:
+                logger.warning(
+                    "Failed to renew lease for run %s before its confirmed deadline; will retry",
+                    run_id,
+                    exc_info=True,
+                )
+            return None
+
+        if not completed:
+            # The attempt missed its own deadline: fail closed rather than adopt
+            # a result that arrived late.
+            await self._fence_expired_lease(
+                record,
+                reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
+            )
+            return None
+
+        if renewal.renewed:
+            if confirmed_deadline <= datetime.now(UTC):
+                await self._fence_expired_lease(
+                    record,
+                    reason="Lease renewal completed after the last confirmed lease had already expired.",
+                )
+                return None
+            # Unsynced write is benign: ``lease_expires_at`` is the only field on
+            # an existing record this path mutates.
+            record.lease_expires_at = new_expiry
+            if renewal.cancel_action is None:
+                return None
+            action = renewal.cancel_action
+            if action not in ("interrupt", "rollback"):
+                logger.warning(
+                    "Run %s has invalid durable cancel action %r; using interrupt",
+                    run_id,
+                    action,
+                )
+                action = "interrupt"
+            return (run_id, action)
+
+        # ``renew_lease`` returned False: the row was claimed by another worker,
+        # or this worker's own terminal CAS already landed.
+        async with self._lock:
+            still_active = self._runs.get(run_id) is record and self._needs_lease(record)
+        if still_active:
+            # Our own terminal CAS may have committed this worker's row while the
+            # renewal was in flight, with the local acknowledgement not yet
+            # published. Yield once so that writer can land before deciding.
+            await asyncio.sleep(0)
+            async with self._lock:
+                still_active = self._runs.get(run_id) is record and self._needs_lease(record)
+            if still_active and record.status not in (RunStatus.pending, RunStatus.running):
+                try:
+                    completed, existing_row = await self._supervised_lease_call(
+                        lambda: self._store.get(run_id),
+                        deadline=confirmed_deadline,
+                    )
+                except Exception:
+                    completed, existing_row = False, None
+                if (
+                    completed
+                    and existing_row is not None
+                    and existing_row.get("status") == record.status.value
+                    and existing_row.get("owner_worker_id") == self._worker_id
+                ):
+                    async with self._lock:
+                        record.terminal_committed = True
+                    still_active = False
+        if still_active:
+            logger.warning(
+                "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
+                run_id,
+                record.status.value,
+                record.owner_worker_id,
+            )
+            # A staged terminal status must not exempt the run from fencing: the
+            # durable row is still this worker's until a peer takes it.
+            await self._mark_ownership_lost(
+                record,
+                reason="The durable store rejected lease renewal for this worker.",
+                require_active=False,
+            )
+        return None
+
     async def _renew_leases(self) -> None:
         """Renew locally-owned leases, failing closed at their deadlines.
 
@@ -2207,7 +2382,6 @@ class RunManager:
         """
         if self._store is None or self._run_ownership_config is None:
             return
-        lease_seconds = self._run_ownership_config.lease_seconds
         cancellations: list[tuple[str, str]] = []
 
         async with self._lock:
@@ -2223,108 +2397,15 @@ class RunManager:
             # ``error`` even though this worker still intends to execute it.
             active_runs = [(rid, record) for rid, record in self._runs.items() if self._needs_lease(record)]
 
-        for run_id, record in active_runs:
-            confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
-            if confirmed_deadline is None or confirmed_deadline <= datetime.now(UTC):
-                await self._mark_ownership_lost(
-                    record,
-                    reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
-                )
-                continue
-
-            remaining = (confirmed_deadline - datetime.now(UTC)).total_seconds()
-            new_expiry = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
-            try:
-                async with asyncio.timeout(remaining):
-                    renewal = await self._call_store_with_retry(
-                        "renew_lease",
-                        run_id,
-                        lambda: self._store.renew_lease(
-                            run_id,
-                            owner_worker_id=self._worker_id,
-                            lease_expires_at=new_expiry,
-                        ),
-                    )
-                if renewal.renewed:
-                    if confirmed_deadline <= datetime.now(UTC):
-                        await self._mark_ownership_lost(
-                            record,
-                            reason="Lease renewal completed after the last confirmed lease had already expired.",
-                        )
-                        continue
-                    # Unsynced write is benign: ``lease_expires_at`` is the
-                    # only field on an existing record this path mutates, so
-                    # there is no concurrent writer to race against
-                    # (``set_status`` / ``_persist_status`` touch other
-                    # fields). Re-acquiring ``self._lock`` here would
-                    # serialise against unrelated run mutations for no gain.
-                    record.lease_expires_at = new_expiry
-                    if renewal.cancel_action is not None:
-                        action = renewal.cancel_action
-                        if action not in ("interrupt", "rollback"):
-                            logger.warning(
-                                "Run %s has invalid durable cancel action %r; using interrupt",
-                                run_id,
-                                action,
-                            )
-                            action = "interrupt"
-                        cancellations.append((run_id, action))
-                else:
-                    # ``renew_lease`` returned False — the row was claimed
-                    # by another worker (status is no longer pending/running,
-                    # or ``owner_worker_id`` changed). Stop the local task so
-                    # we don't waste CPU or overwrite the takeover status on
-                    # finalisation.
-                    async with self._lock:
-                        still_active = self._runs.get(run_id) is record and self._needs_lease(record)
-                    if still_active:
-                        # Our own terminal CAS may have committed this worker's
-                        # row while the renewal was in flight, with the local
-                        # acknowledgement not yet published. Yield once so that
-                        # writer can land, then adopt a durable terminal row that
-                        # already holds this worker's staged outcome instead of
-                        # fencing our own completed run.
-                        await asyncio.sleep(0)
-                        async with self._lock:
-                            still_active = self._runs.get(run_id) is record and self._needs_lease(record)
-                        if still_active and record.status not in (RunStatus.pending, RunStatus.running):
-                            try:
-                                existing_row = await self._store.get(run_id)
-                            except Exception:
-                                existing_row = None
-                            if existing_row is not None and existing_row.get("status") == record.status.value and existing_row.get("owner_worker_id") == self._worker_id:
-                                async with self._lock:
-                                    record.terminal_committed = True
-                                still_active = False
-                    if still_active:
-                        logger.warning(
-                            "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
-                            run_id,
-                            record.status.value,
-                            record.owner_worker_id,
-                        )
-                        # A staged terminal status must not exempt the run from
-                        # fencing: the durable row is still this worker's until a
-                        # peer takes it, so losing the lease stops success
-                        # publication even though ``record.status`` is terminal.
-                        await self._mark_ownership_lost(
-                            record,
-                            reason="The durable store rejected lease renewal for this worker.",
-                            require_active=False,
-                        )
-            except Exception:
-                if confirmed_deadline <= datetime.now(UTC):
-                    await self._mark_ownership_lost(
-                        record,
-                        reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
-                        require_active=False,
-                    )
-                else:
-                    logger.warning(
-                        "Failed to renew lease for run %s before its confirmed deadline; will retry",
-                        run_id,
-                        exc_info=True,
-                    )
+        results = await asyncio.gather(
+            *(self._renew_one_lease(run_id, record) for run_id, record in active_runs),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.warning("Lease renewal attempt failed", exc_info=result)
+            elif result is not None:
+                cancellations.append(result)
 
         # Keep cancellation status writes and cleanup out of the sole renewal
         # loop. After every local lease has had a chance to renew, only signal
