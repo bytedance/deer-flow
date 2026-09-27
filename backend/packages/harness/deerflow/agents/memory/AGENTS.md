@@ -376,7 +376,10 @@ DeerMem through one injected `judge` hook (`judge(context) -> verdict`; a plain
 mapping in, so the vendored backend imports no host judging types, exactly like
 `extraction_callback`). Both default to `off`, and `off` resolves no class path,
 constructs nothing and validates no credentials, so an unconfigured deployment
-behaves exactly as before.
+behaves exactly as before. Each `mode` accepts the quoted spelling
+(`mode: "off"`) and the unquoted one a hand-edit tends to type (`mode: off`, which
+YAML parses as a boolean and both fields normalize back to `off`) — a rollback to
+off must load rather than fail the reload and leave the previous judge running.
 
 - The pre-screen is a **cost gate, never a safety boundary**. It gates no
   execution and no write; it only decides whether the extraction call is worth
@@ -451,7 +454,9 @@ behaves exactly as before.
   usual; the watermark advance on extraction success is unchanged.
 - Batches excluded from judging, in this order: no judge injected (L1),
   `bypass_watermark` (emergency flush), the shutdown drain (`judge=False`),
-  non-empty **deterministic** `detect_signals` on the feed (L3), and
+  non-empty **deterministic** `detect_signals` anywhere in the batch (L3 — the
+  whole post-watermark feed is scanned for this veto, because a skip consumes all
+  of it; the extraction hint keeps `detect_signals`' default 6-message window), and
   `staleness_review_enabled` / `consolidation_enabled` (L8 — a skip would also
   skip that batch's maintenance review). Note the shipped default
   `staleness_review_enabled: true` therefore makes the pre-screen inert until an

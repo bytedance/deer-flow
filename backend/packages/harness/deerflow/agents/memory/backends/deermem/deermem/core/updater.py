@@ -1774,6 +1774,12 @@ class MemoryUpdater:
             # served their purpose (backpressure admission at enqueue); the hint
             # is a soft nudge and must not point at turns the watermark excluded.
             feed_signals = detect_signals(feed_messages, patterns_dir=self._config.patterns_dir)
+            # The judge's L3 veto reads the whole batch, not the hint window: a skip
+            # consumes every turn fed here (it advances the watermark), so an explicit
+            # signal anywhere in the batch has to keep that batch out of judging. The
+            # extraction hint above keeps the default 6-message window -- a hint points
+            # at recent turns, a veto answers for the batch.
+            batch_signals = detect_signals(feed_messages, patterns_dir=self._config.patterns_dir, window=None)
             batch_text = format_conversation_for_update(feed_messages)
             # The memory judge (when the host injected one) runs here: still off the
             # turn path, before any LLM call, on exactly the text the extractor would
@@ -1782,7 +1788,7 @@ class MemoryUpdater:
             verdict = self._judge_batch(
                 self._config.judge if judge else None,
                 batch_text=batch_text,
-                signals=frozenset(feed_signals),
+                signals=frozenset(batch_signals),
                 thread_id=thread_id,
                 agent_name=agent_name,
                 user_id=user_id,

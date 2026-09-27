@@ -249,6 +249,30 @@ class TestEligibility:
         # the shadow evaluation reads.
         assert recorded[0]["prescreen"]["fallback_reason"] == "deterministic_signals"
 
+    def test_a_signal_outside_the_hint_window_still_keeps_the_batch_out_of_judging(self):
+        """L3 reads the whole batch, not the 6-message window the extraction hint uses.
+
+        A skip advances the watermark past every turn fed to this batch, so an
+        explicit correction in its *first* turn must keep the batch out of judging:
+        scanning only the trailing window let an eight-message batch be skipped, and
+        the correction was then never extracted.
+        """
+        correction = "No, that's wrong - use tabs not spaces"
+        batch = [HumanMessage(content=correction), AIMessage(content="Understood.")]
+        for index in range(3):
+            batch += [HumanMessage(content=f"what about the file {index}"), AIMessage(content="It is unchanged.")]
+        assert len(batch) == 8, "the correction has to sit outside detect_signals' 6-message window"
+        server = _Server(lambda request: httpx.Response(200, json=_answer(0.05)))
+        llm = _FakeLLM()
+        recorded: list = []
+        updater = _updater(judge=_judge(_prescreen(server, mode=MODE_ENFORCE), prescreen_mode=MODE_ENFORCE), llm=llm, recorded=recorded)
+
+        assert updater.update_memory(batch, thread_id="thread-1", user_id="user-1") is True
+
+        assert server.count == 0, "L3: a signal anywhere in the batch answers for the pre-screen"
+        assert llm.calls == 1, "the batch is not consumed by a skip"
+        assert recorded[0]["prescreen"]["fallback_reason"] == "deterministic_signals"
+
     def test_the_emergency_flush_path_never_judges(self):
         server = _Server()
         llm = _FakeLLM()

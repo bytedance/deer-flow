@@ -2206,7 +2206,7 @@ memory:
   # the shutdown drain. With the defaults shipped here, shadow/enforce therefore
   # sees no batches until staleness_review_enabled is turned off.
   # prescreen:
-  #   mode: off
+  #   mode: "off"
   #   use: deerflow.agents.memory.prescreen.typesafe:TypeSafeMemoryPrescreen
   #   config:
   #     skip_threshold: 0.2          # p below this skips; provisional, unmeasured
@@ -2227,7 +2227,7 @@ memory:
   # A model verdict never decides extraction, never drives deletion, and never
   # satisfies the reinforcement evidence gate (that gate stays deterministic).
   # signal_classification:
-  #   mode: off
+  #   mode: "off"
   #   use: deerflow.agents.memory.signals.typesafe:TypeSafeSignalClassifier
   #   combine: auto                  # auto | always | never: request sharing with the pre-screen
   #   config:

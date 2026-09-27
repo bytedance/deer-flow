@@ -49,6 +49,10 @@ Modes:
 | `memory.signal_classification.mode` | `off` / `shadow` / `hints` | `hints` merges `reinforcement` / `correction` labels into the extraction hint text and, only while the pre-screen is `enforce`, vetoes a skip |
 | `memory.signal_classification.combine` | `auto` / `always` / `never` | Whether the two sides share one request. `auto` shares only when every effective client setting matches (model, base URL, credential fingerprint, timeouts, retries, `max_state_chars`, cache settings); `always` fails at construction on a mismatch; `never` always splits |
 
+Both `mode` values are written quoted in `config.example.yaml` (`mode: "off"`).
+Unquoted `off` is still accepted — YAML parses it as a boolean and both fields
+normalize that back to `off` — but a quoted value says what an operator means.
+
 Failure direction is always extraction: an error, timeout, unusable response,
 missing verdict, provider exception, or an over-limit batch extracts as usual.
 Nothing is truncated to fit a limit. A skip changes **no** post-extraction gate
@@ -57,8 +61,10 @@ safety boundary.
 
 Batches that are never judged: no judge configured; the emergency
 (pre-summarization) flush; the shutdown drain (`flush_sync`, whose budget belongs
-to persistence); batches with a **deterministic** signal on the feed (a positive
-signal outranks a model negative); and any batch while
+to persistence); batches with a **deterministic** signal anywhere in the batch (a
+positive signal outranks a model negative — the veto scans the whole batch, since
+a skip consumes all of it, while the extraction hint keeps `detect_signals`' own
+6-message window); and any batch while
 `staleness_review_enabled` (default **true**) or `consolidation_enabled` is on,
 because a skip would also skip that batch's maintenance review. With the shipped
 defaults the pre-screen therefore sees no batches until `staleness_review_enabled`
@@ -68,8 +74,8 @@ is turned off — do that deliberately, with the evaluation below.
 may contain file paths or credentials) is sent to the TypeSafe API: a second
 destination beyond the deployment's own extraction model. Existing memory, fact
 ids and tool arguments are never sent. `pii_redaction_middleware` does not cover
-this path. `mode: off` is the rollback: no request, no behavior change, no data
-migration.
+this path. `mode: "off"` is the rollback — no request, no behavior change, no data
+migration; the unquoted `mode: off` a hand-edit may type is accepted too.
 
 **Before `enforce`.** Run the shadow evaluation and publish its gates:
 `miss_rate` (a skip on a batch whose extraction would have been accepted) at or

@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,19 @@ _LEGACY_DEERMEM_FIELDS = frozenset(
 )
 
 
+def _yaml_off_is_the_off_mode(value: object) -> object:
+    """Read the YAML ``off`` spelling as the mode name it looks like.
+
+    ``yaml.safe_load`` follows YAML 1.1, where an unquoted ``off`` (like ``no`` and
+    ``false``) is a boolean, so the ``mode: off`` that ``config.example.yaml`` ships
+    and that a rollback types arrives here as ``False``. Rejecting it would fail the
+    config *reload* that returns a deployment to off, and a failed reload leaves the
+    previous judge (and its judging requests) running. ``True`` has no mode it could
+    mean, so it is left to the ``Literal``, which rejects it naming the modes.
+    """
+    return "off" if value is False else value
+
+
 class MemoryPrescreenConfig(BaseModel):
     """Host-shared pre-screen slot: a cost gate over the extraction call.
 
@@ -66,6 +79,12 @@ class MemoryPrescreenConfig(BaseModel):
     mode: Literal["off", "shadow", "enforce"] = Field(default="off", description="off = no request and no behavior change; shadow = decide + record; enforce = a skip actually saves the extraction call")
     use: str | None = Field(default=None, description="Provider class path, e.g. deerflow.agents.memory.prescreen.typesafe:TypeSafeMemoryPrescreen")
     config: dict[str, Any] = Field(default_factory=dict, description="Provider-specific settings passed as kwargs")
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _read_yaml_off(cls, value: object) -> object:
+        """Accept the unquoted YAML ``off`` (see :func:`_yaml_off_is_the_off_mode`)."""
+        return _yaml_off_is_the_off_mode(value)
 
 
 class MemorySignalClassificationConfig(BaseModel):
@@ -82,6 +101,12 @@ class MemorySignalClassificationConfig(BaseModel):
         default="auto", description="Request combination with the pre-screen: auto shares when every effective client setting matches, always requires it, never splits every side into its own request"
     )
     config: dict[str, Any] = Field(default_factory=dict, description="Provider-specific settings passed as kwargs")
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _read_yaml_off(cls, value: object) -> object:
+        """Accept the unquoted YAML ``off`` (see :func:`_yaml_off_is_the_off_mode`)."""
+        return _yaml_off_is_the_off_mode(value)
 
 
 class MemoryConfig(BaseModel):
