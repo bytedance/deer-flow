@@ -1841,10 +1841,10 @@ sandbox:
 #   # api_key: $OPEN_SANDBOX_API_KEY  # optional when the SDK env var is set
 #   # domain: localhost:8080          # optional; OPEN_SANDBOX_DOMAIN fallback
 #   # protocol: http                  # localhost only; use https for remote domains
-#   # request_timeout: 30             # management API request timeout seconds
-#   # ready_timeout: 30               # create/readiness timeout seconds
+#   # request_timeout: 30             # finite positive management API request timeout seconds
+#   # ready_timeout: 30               # finite positive create/readiness timeout seconds
 #   # use_server_proxy: false         # proxy execd/file traffic through server
-#   # sandbox_timeout: 14400          # remote lifetime seconds; 0 = explicit cleanup
+#   # sandbox_timeout: 14400          # finite non-negative remote lifetime seconds; 0 = explicit cleanup
 #   # bash_command_timeout: 600       # default remote command timeout seconds
 #   # replicas: 3                     # active + warm cap per gateway process
 #   # idle_timeout: 600               # warm seconds before destroy; 0 disables
