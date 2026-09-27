@@ -1897,6 +1897,7 @@ and the [request contract](backend/docs/API.md#referencing-a-previous-conversati
 
 当前任务可通过 `task_continuity.enabled: true` 开启[任务笔记与历史回查](docs/task-continuity.md)。
 任务笔记最多八条；并行新增超出剩余名额时返回 `note_capacity`，保留原有笔记。
+启用资源句柄解析时按解析后的实际 key 计数，指向同一笔记的别名共用名额。
 已有 key 仍可替换或删除；同批删除及失败调用释放的名额在下一批可用，可届时重试。
 
 ### Long-Term Memory

@@ -12,8 +12,10 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 
+from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
 from deerflow.agents.task_continuity.tools import task_note
 from deerflow.agents.thread_state import ThreadState, get_thread_state_schema
+from deerflow.config.tool_artifact_config import ToolArtifactConfig
 
 
 class NoteModel(BaseChatModel):
@@ -201,3 +203,71 @@ async def test_shared_graph_keeps_simultaneous_task_capacity_independent():
     assert all(result["status"] == "saved" for result in replies(empty).values())
     assert set(full["task_notes"]) == set(notebook(8))
     assert all(result["error"] == "note_capacity" for result in replies(full).values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+async def test_resolved_handle_can_save_into_empty_notebook(async_mode):
+    calls = [note_call("art_ab12cd34", "check completion")]
+    graph = create_agent(NoteModel(calls=calls), tools=[task_note], middleware=[ArtifactResolutionMiddleware()], state_schema=ThreadState)
+    initial = {
+        "messages": [HumanMessage(content="save task reference")],
+        "tool_artifacts": [{"handle": "art_ab12cd34", "artifact_type": "task", "real_ref": "remote-task-42"}],
+    }
+    state = await graph.ainvoke(initial) if async_mode else graph.invoke(initial)
+    assert replies(state)["art_ab12cd34"]["status"] == "saved"
+    assert set(state["task_notes"]) == {"remote-task-42"}
+    assert state["task_notes"]["remote-task-42"]["content"] == "check completion"
+    assert next(message for message in state["messages"] if isinstance(message, AIMessage)).tool_calls == [{**call, "type": "tool_call"} for call in calls]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize(
+    ("count", "target", "calls", "expected_keys", "saved_ids", "rejected_ids"),
+    [
+        (7, "remote-task-42", [note_call("art_ab12cd34"), note_call("art_ab12cd35", "replacement"), note_call("overflow")], {"remote-task-42"}, ["art_ab12cd34", "art_ab12cd35"], ["overflow"]),
+        (6, "remote-task-42", [note_call("art_ab12cd34"), note_call("remote-task-42", "replacement"), note_call("new_b"), note_call("overflow")], {"remote-task-42", "new_b"}, ["art_ab12cd34", "remote-task-42", "new_b"], ["overflow"]),
+        (7, "keep0", [note_call("art_ab12cd34", "replacement"), note_call("new_b")], {"new_b"}, ["art_ab12cd34", "new_b"], []),
+        (8, "keep0", [note_call("art_ab12cd34", "replacement"), note_call("overflow")], set(), ["art_ab12cd34"], ["overflow"]),
+        (7, "remote-task-42", [note_call("`art_ab12cd34`", call_id="quoted"), note_call("overflow")], {"remote-task-42"}, ["quoted"], ["overflow"]),
+    ],
+    ids=["handle-aliases", "concrete-alias", "existing-key", "full-replacement", "backticks"],
+)
+async def test_resolved_batch_reserves_distinct_execution_keys(async_mode, mode, count, target, calls, expected_keys, saved_ids, rejected_ids):
+    graph = create_agent(NoteModel(calls=calls), tools=[task_note], middleware=[ArtifactResolutionMiddleware()], state_schema=get_thread_state_schema(mode), checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "resolved-capacity"}}
+    initial = {
+        "messages": [HumanMessage(content="save notes")],
+        "task_notes": notebook(count),
+        "tool_artifacts": [{"handle": handle, "artifact_type": "task", "real_ref": target} for handle in ["art_ab12cd34", "art_ab12cd35"]],
+    }
+    state = await graph.ainvoke(initial, config) if async_mode else graph.invoke(initial, config)
+    snapshot = await graph.aget_state(config) if async_mode else graph.get_state(config)
+    assert snapshot.values["task_notes"] == state["task_notes"]
+    assert set(state["task_notes"]) == set(notebook(count)) | expected_keys
+    for call_id in saved_ids:
+        assert replies(state)[call_id]["status"] == "saved"
+    for call_id in rejected_ids:
+        assert replies(state)[call_id]["error"] == "note_capacity"
+    assert state["task_notes"][target]["content"] == ("replacement" if any(call["args"]["content"] == "replacement" for call in calls) else "new note")
+    assert next(message for message in snapshot.values["messages"] if isinstance(message, AIMessage)).tool_calls == [{**call, "type": "tool_call"} for call in calls]
+    assert "__resolved_tool_call_args" not in snapshot.values
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("resolver_mode", ["absent", "disabled", "resolution-disabled"])
+async def test_disabled_resolution_reserves_literal_keys(async_mode, resolver_mode):
+    middleware = [] if resolver_mode == "absent" else [ArtifactResolutionMiddleware(ToolArtifactConfig(enabled=resolver_mode != "disabled", resolve_handles_in_args=resolver_mode != "resolution-disabled"))]
+    graph = create_agent(NoteModel(calls=[note_call("art_ab12cd34"), note_call("remote-task-42")]), tools=[task_note], middleware=middleware, state_schema=ThreadState)
+    state_input = {
+        "messages": [HumanMessage(content="save notes")],
+        "task_notes": notebook(7),
+        "tool_artifacts": [{"handle": "art_ab12cd34", "artifact_type": "task", "real_ref": "remote-task-42"}],
+    }
+    state = await graph.ainvoke(state_input) if async_mode else graph.invoke(state_input)
+    assert set(state["task_notes"]) == set(notebook(7)) | {"art_ab12cd34"}
+    assert replies(state)["art_ab12cd34"]["status"] == "saved"
+    assert replies(state)["remote-task-42"]["error"] == "note_capacity"

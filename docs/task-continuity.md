@@ -21,6 +21,7 @@ The standard lead-agent builders (including custom-agent bootstrap) and
 
 - `task_note`：保存、替换或删除命名笔记，最多八条，每条最多 750 字符和四个来源 ID。
   并行新增按模型响应中的工具调用顺序为不同的新 key 预留剩余名额，重复 key 共用名额；
+  启用资源句柄解析时，以解析后的实际 key 计数，多个句柄或直接 key 指向同一笔记时共用名额；
   超出名额返回 `note_capacity`，不会因容量不足而挤掉原有笔记或先报告 `saved` 再丢弃写入。
   已有 key 在满容量时仍可替换，空内容仍表示删除；同一 key 的多次合法写入保留既有的
   按调用顺序合并、后写覆盖前写语义，包括显式删除。

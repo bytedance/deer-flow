@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
@@ -84,6 +85,14 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
                 status="error",
             )
             return normalize_tool_result(message, tool_call_id=message.tool_call_id)
+
+        # 容量预留读取同批调用；只给本次工具运行时提供解析视图，保留原始历史。
+        if request.tool_call.get("name") == "task_note" and request.runtime is not None:
+            runtime = request.runtime
+            message = next((message for message in reversed(runtime.state.get("messages", [])) if isinstance(message, AIMessage)), None)
+            if message is not None:
+                resolved_calls = {call["id"]: self._resolve_value(call["args"], handle_map) for call in message.tool_calls if call["name"] == "task_note"}
+                request = replace(request, runtime=replace(runtime, state={**runtime.state, "__resolved_tool_call_args": resolved_calls}))
 
         resolved_args = self._resolve_value(args, handle_map)
         if resolved_args == args:

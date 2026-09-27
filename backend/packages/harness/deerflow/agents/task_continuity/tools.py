@@ -71,8 +71,10 @@ def _has_note_capacity(runtime: Runtime, notes: dict, key: str) -> bool:
     for call in message.tool_calls:
         if call["name"] != "task_note":
             continue
-        candidate = call["args"].get("key")
-        content = call["args"].get("content")
+        # 启用句柄解析时，中间件提供与实际执行一致的批次参数；否则使用原始参数。
+        args = runtime.state.get("__resolved_tool_call_args", {}).get(call["id"], call["args"])
+        candidate = args.get("key")
+        content = args.get("content")
         if not isinstance(candidate, str) or not NOTE_KEY_PATTERN.fullmatch(candidate) or not isinstance(content, str) or not content:
             continue
         if candidate not in notes and len(reserved) < available:
