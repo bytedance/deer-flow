@@ -693,7 +693,7 @@ class RunJournal(BaseCallbackHandler):
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
-        if self._closed:
+        if not self._admit_owner_loop_append(context=f"llm end {run_id}"):
             return
 
         messages: list[AnyMessage] = []
@@ -826,6 +826,11 @@ class RunJournal(BaseCallbackHandler):
 
     def on_tool_end(self, output, *, run_id, parent_run_id=None, **kwargs):
         """Handle tool end event, append message and clear node data"""
+        # Gate before any mutation: this callback pops active-tool state and
+        # records produced artifacts directly, so the ``_put`` gate alone would
+        # let a post-seal callback still change the terminal artifact snapshot.
+        if not self._admit_owner_loop_append(context=f"tool end {run_id}"):
+            return
         active_tool_name = self._active_tool_names.pop(str(run_id), None)
         try:
             if isinstance(output, ToolMessage):

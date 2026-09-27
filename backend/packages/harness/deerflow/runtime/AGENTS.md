@@ -67,12 +67,21 @@ returns `JournalFinishResult(disposition, snapshot, failure, caller_cancellation
 The seal takes the admission lock and then waits on an owner-loop barrier, so an
 append admitted before it is guaranteed to be in the drained tail while a later
 one is rejected and counted in `_post_seal_rejected` instead of being silently
-dropped by the detach guard. The snapshot exists only for COMMITTED, a joining
+dropped by the detach guard. The state-mutating callbacks that touch token
+accumulators, pending response events or artifact statistics (`on_llm_end`,
+`on_tool_end`) take the same gate, so a post-seal callback cannot change the
+snapshot the drain is about to take. The snapshot exists only for COMMITTED, a joining
 caller's cancellation never changes the disposition, and a lease lost mid-drain
 fences *new* batches while the write already in flight is still observed. The
 worker consumes that result and must persist `snapshot.completion_data` for the
 terminal completion write: by then the journal has dropped its per-model usage and
 message summaries.
+
+The worker's terminal status write always goes through
+`set_status_if_not_cancelled`, so a durable cancel observed during the drain beats
+a locally staged success instead of being persisted verbatim by
+`persist_current_status`; the receipt stays a fact record about the committed
+journal, not a verdict.
 
 `RunManager` keeps renewing a locally staged terminal run while its task is alive
 and its durable terminal row is unacknowledged (`RunRecord.terminal_committed`),

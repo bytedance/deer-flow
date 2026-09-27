@@ -5129,3 +5129,55 @@ async def test_repeated_finish_returns_the_same_committed_result():
 
     events = await store.list_events("t-finish-again", "r-finish-again")
     assert [event["event_type"] for event in events] == ["A"]
+
+
+@pytest.mark.anyio
+async def test_callbacks_after_seal_cannot_mutate_usage_events_or_artifacts():
+    """A post-seal LangChain callback must not change run state or stage events.
+
+    ``on_llm_end`` and ``on_tool_end`` mutate token accumulators, pending response
+    events and artifact statistics directly. Only ``_closed`` guarded them, so a
+    callback landing after the producer seal (but before detach) could still
+    change the terminal snapshot the drain is about to take.
+    """
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-seal-callbacks", "t-seal-callbacks", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+    journal.set_first_human_message("hello")
+
+    await journal.seal_producers()
+
+    buffer_before = list(journal._buffer)
+    completion_before = journal.get_completion_data()
+    artifacts_before = list(journal._produced_artifacts)
+    pending_before = journal._pending_llm_response
+
+    usage = {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+    journal.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(message=AIMessage(content="late", usage_metadata=usage))]]),
+        run_id=uuid4(),
+        parent_run_id=None,
+        tags=["lead_agent"],
+    )
+    journal._remember_current_run_tool_calls(
+        AIMessage(content="", tool_calls=[{"id": "call-late", "name": "present_files", "args": {}}]),
+        caller="lead_agent",
+    )
+    journal.on_tool_end(
+        Command(
+            update={
+                "artifacts": ["/mnt/user-data/outputs/late.txt"],
+                "messages": [ToolMessage("ok", tool_call_id="call-late")],
+            }
+        ),
+        run_id=uuid4(),
+    )
+
+    assert journal._buffer == buffer_before
+    assert journal._pending_llm_response is pending_before
+    assert journal.get_completion_data() == completion_before
+    assert journal._produced_artifacts == artifacts_before
+    assert journal._post_seal_rejected >= 2
