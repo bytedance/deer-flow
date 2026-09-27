@@ -26,6 +26,7 @@ from deerflow.sandbox import get_sandbox_provider
 from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
 from deerflow.sandbox.lease import (
     ensure_sandbox_lease_owner,
+    run_sync_lifecycle_operation,
     get_sandbox_lease_manager,
     sandbox_lease_owner,
 )
@@ -352,7 +353,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         thread_id = (runtime.context or {}).get("thread_id")
         if thread_id is None:
             return await super().abefore_agent(state, runtime)
-        await asyncio.to_thread(self._apply_network_policy_response, state, runtime)
+        await run_sync_lifecycle_operation(self._apply_network_policy_response, state, runtime)
         user_id = resolve_runtime_user_id(runtime)
         projection = await asyncio.to_thread(
             self._prepare_agent_skill_projection,
