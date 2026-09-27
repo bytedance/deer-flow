@@ -984,7 +984,7 @@ async def run_agent(
         still restores the pre-run checkpoint. A fenced worker never starts a
         new restore; restored ``values`` are published at most once.
         """
-        nonlocal checkpoint_rollback_completed, restored_values_published
+        nonlocal checkpoint_rollback_completed, deferred_finalization_interrupt, restored_values_published
         if record.ownership_lost:
             return
         if not _is_edit_replay_run(record) or record.status == RunStatus.success:
@@ -995,20 +995,29 @@ async def run_agent(
             if not checkpoint_rollback_completed:
                 checkpoint_rollback_completed = await _join_owned_restore(ensure_checkpoint_restored())
             if checkpoint_rollback_completed and not restored_values_published:
+                # Record the attempt before awaiting: a publish that fails after
+                # delivering must not be retried by the other barrier and emit a
+                # second ``values`` frame.
+                restored_values_published = True
                 await _publish_restored_checkpoint_values(
                     bridge=bridge,
                     run_id=run_id,
                     accessor=accessor,
                     thread_id=thread_id,
                 )
-                restored_values_published = True
                 logger.info(
                     "Run %s edit replay restored pre-run checkpoint %s",
                     run_id,
                     pre_run_checkpoint_id,
                 )
-        except asyncio.CancelledError:
-            raise
+        except asyncio.CancelledError as exc:
+            current = asyncio.current_task()
+            if current is None or current.cancelling() == 0:
+                raise
+            # A host interrupt must not skip the remaining terminal bookkeeping:
+            # record it and let the shared tail re-raise it after the end frame.
+            if deferred_finalization_interrupt is None:
+                deferred_finalization_interrupt = exc
         except BaseException:
             logger.warning("Run %s edit replay rollback failed", run_id, exc_info=True)
 
@@ -1620,7 +1629,14 @@ async def run_agent(
             # Persist any subagent step events still buffered (#3779) — including on
             # abort/exception paths, where the stream loop broke before its own flush.
             if not record.ownership_lost and subagent_events is not None:
-                await subagent_events.flush()
+                try:
+                    await subagent_events.flush()
+                except asyncio.CancelledError as exc:
+                    current = asyncio.current_task()
+                    if current is None or current.cancelling() == 0:
+                        raise
+                    if deferred_finalization_interrupt is None:
+                        deferred_finalization_interrupt = exc
 
             if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
                 try:
@@ -1686,12 +1702,23 @@ async def run_agent(
                                 extra_excluded_dir_names=workspace_excluded_dir_names,
                             )
                         delivery_content = _delivery_content_with_outputs(snapshot.delivery_content, produced_output_paths)
-                    receipt_persisted = await _persist_delivery_receipt(
-                        event_store,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        content=delivery_content,
-                    )
+                    try:
+                        receipt_persisted = await _persist_delivery_receipt(
+                            event_store,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            content=delivery_content,
+                        )
+                    except asyncio.CancelledError as exc:
+                        current = asyncio.current_task()
+                        if current is None or current.cancelling() == 0:
+                            raise
+                        # An interrupted receipt write is not a settled receipt;
+                        # keep the existing fail-closed downgrade but do not skip
+                        # the remaining terminal bookkeeping.
+                        receipt_persisted = False
+                        if deferred_finalization_interrupt is None:
+                            deferred_finalization_interrupt = exc
                     if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
                         await run_manager.set_status(
                             run_id,
@@ -1786,6 +1813,12 @@ async def run_agent(
                         await run_manager.persist_current_status(run_id)
                 except Exception:
                     logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
+
+            # The durable CAS above can still change the local outcome (an
+            # accepted interrupt/rollback that no heartbeat had signalled yet),
+            # so re-run the edit-replay recovery after it, before completion
+            # persistence and the end frame.
+            await _ensure_edit_replay_restored()
 
             if not record.ownership_lost and journal is not None and persist_completion:
                 try:

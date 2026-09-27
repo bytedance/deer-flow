@@ -1915,10 +1915,11 @@ async def test_own_terminal_cas_commit_racing_renewal_is_not_fenced():
 async def test_direct_cancel_signals_live_staged_terminal_without_heartbeat():
     """A direct cancel must reach a live staged terminal, not wait for a heartbeat.
 
-    ``cancel()`` records the durable request, but its local branch only accepts
-    pending/running records, so a locally staged terminal returns "cancelled"
-    without signalling the running finalizer. Only a later heartbeat would
-    deliver it, which a blocked terminal drain may never reach.
+    ``cancel()`` records the durable request and must signal the running
+    finalizer immediately, even though the local status is already a staged
+    terminal; otherwise a blocked terminal drain would wait for the next
+    heartbeat. The staged path stays signal-only so the worker's terminal CAS
+    still orders the receipt against the durable action.
     """
     manager, store = _ownership_manager()
     record, task = await _live_record(manager, store, status=RunStatus.success)
@@ -2092,3 +2093,127 @@ async def test_persist_status_same_status_reread_is_not_a_terminal_ack():
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_expired_lease_does_not_fence_own_inflight_terminal_cas():
+    """An expired lease must not fence a run whose own terminal CAS is deciding.
+
+    Fencing here would leave a durable ``success`` row with a locally fenced
+    record, so the worker would skip the receipt and completion persistence.
+    """
+    committed = asyncio.Event()
+    release = asyncio.Event()
+
+    class RacingStore(MemoryRunStore):
+        async def finalize_if_not_cancelled(self, run_id, *, status, error=None, stop_reason=None):
+            result = await super().finalize_if_not_cancelled(
+                run_id,
+                status=status,
+                error=error,
+                stop_reason=stop_reason,
+            )
+            committed.set()
+            await release.wait()
+            return result
+
+    store = RacingStore()
+    manager, _ = _ownership_manager(store)
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    cas = None
+    try:
+        cas = asyncio.create_task(manager.set_status_if_not_cancelled(record.run_id, RunStatus.success))
+        await asyncio.wait_for(committed.wait(), timeout=5)
+        record.lease_expires_at = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+
+        await manager._renew_leases()
+
+        assert record.ownership_lost is False
+        release.set()
+        await asyncio.wait_for(cas, timeout=5)
+        assert record.terminal_committed is True
+        assert record.status == RunStatus.success
+        assert (await store.get(record.run_id))["status"] == "success"
+    finally:
+        release.set()
+        if cas is not None:
+            await asyncio.gather(cas, return_exceptions=True)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_cancel_action_is_signalled_while_another_renewal_is_blocked():
+    """An accepted cancellation must reach its run without waiting for other runs."""
+    blocked = asyncio.Event()
+    release = asyncio.Event()
+
+    class SignalStore(MemoryRunStore):
+        blocked_run_id: str | None = None
+
+        async def update_lease(self, run_id, *, owner_worker_id, lease_expires_at):
+            if run_id == self.blocked_run_id:
+                blocked.set()
+                await release.wait()
+                return False
+            renewed = await super().update_lease(
+                run_id,
+                owner_worker_id=owner_worker_id,
+                lease_expires_at=lease_expires_at,
+            )
+            if renewed:
+                self._runs[run_id]["cancel_action"] = "interrupt"
+            return renewed
+
+    store = SignalStore()
+    manager = RunManager(
+        store=store,
+        run_ownership_config=RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        ),
+    )
+
+    async def _make_run(thread_id: str, status: RunStatus):
+        record = await manager.create(thread_id)
+        record.owner_worker_id = manager._worker_id
+        record.lease_expires_at = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        await store.update_status(record.run_id, "running")
+        await store.update_lease(
+            record.run_id,
+            owner_worker_id=manager._worker_id,
+            lease_expires_at=record.lease_expires_at,
+        )
+        record.status = status
+
+        async def hold() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise
+
+        record.task = asyncio.create_task(hold())
+        return record
+
+    record_a = await _make_run("thread-a", RunStatus.running)
+    record_b = await _make_run("thread-b", RunStatus.running)
+    store.blocked_run_id = record_b.run_id
+
+    renewal = asyncio.create_task(manager._renew_leases())
+    try:
+        await asyncio.wait_for(blocked.wait(), timeout=5)
+
+        await asyncio.sleep(0.2)
+        # A's accepted cancellation must not wait for B's blocked renewal.
+        assert record_a.abort_event.is_set() is True
+    finally:
+        release.set()
+        await asyncio.gather(renewal, return_exceptions=True)
+        for record in (record_a, record_b):
+            if record.task is not None:
+                record.task.cancel()
+        await asyncio.gather(
+            *(record.task for record in (record_a, record_b) if record.task is not None),
+            return_exceptions=True,
+        )

@@ -2135,6 +2135,10 @@ class RunManager:
             current = self._runs.get(record.run_id)
             if current is not record:
                 return False
+            if record.terminal_committed:
+                # Our own terminal write already landed; fencing it here would
+                # strand a committed run without its receipt/cleanup.
+                return False
             if require_active:
                 if record.status not in (RunStatus.pending, RunStatus.running):
                     return False
@@ -2287,6 +2291,11 @@ class RunManager:
         """
         confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
         if confirmed_deadline is None or confirmed_deadline <= datetime.now(UTC):
+            if self._terminal_commit_inflight.get(run_id) is not None:
+                # This worker's own terminal CAS is deciding the outcome; do not
+                # fence a run whose commit may be about to land. The CAS itself
+                # marks ownership lost when it cannot confirm.
+                return None
             await self._fence_expired_lease(
                 record,
                 reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
@@ -2324,7 +2333,10 @@ class RunManager:
 
         if not completed:
             # The attempt missed its own deadline: fail closed rather than adopt
-            # a result that arrived late.
+            # a result that arrived late, unless this worker's own terminal CAS
+            # is still deciding.
+            if self._terminal_commit_inflight.get(run_id) is not None:
+                return None
             await self._fence_expired_lease(
                 record,
                 reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
@@ -2397,7 +2409,6 @@ class RunManager:
         """
         if self._store is None or self._run_ownership_config is None:
             return
-        cancellations: list[tuple[str, str]] = []
 
         async with self._lock:
             # Renew any pending/running run owned by this worker unless its
@@ -2412,24 +2423,20 @@ class RunManager:
             # ``error`` even though this worker still intends to execute it.
             active_runs = [(rid, record) for rid, record in self._runs.items() if self._needs_lease(record)]
 
-        results = await asyncio.gather(
-            *(self._renew_one_lease(run_id, record) for run_id, record in active_runs),
-            return_exceptions=True,
-        )
-        for result in results:
-            if isinstance(result, BaseException):
-                logger.warning("Lease renewal attempt failed", exc_info=result)
-            elif result is not None:
-                cancellations.append(result)
-
-        # Keep cancellation status writes and cleanup out of the sole renewal
-        # loop. After every local lease has had a chance to renew, only signal
-        # the owning worker task; that task performs normal terminal handling.
-        for run_id, action in cancellations:
-            await self._signal_local_cancel(
-                run_id,
-                action=action,
-            )
+        attempts = [asyncio.create_task(self._renew_one_lease(run_id, record)) for run_id, record in active_runs]
+        # Signal each accepted cancellation as soon as its own renewal returns:
+        # waiting for the slowest attempt would delay a cancellation that is
+        # already known, which is the same head-of-line delay the concurrent
+        # renewals exist to remove.
+        for attempt in asyncio.as_completed(attempts):
+            try:
+                result = await attempt
+            except Exception:
+                logger.warning("Lease renewal attempt failed", exc_info=True)
+                continue
+            if result is not None:
+                run_id, action = result
+                await self._signal_local_cancel(run_id, action=action)
 
     async def _reconcile_orphans_periodic(self) -> None:
         """Sweep for expired leases owned by dead peers.
