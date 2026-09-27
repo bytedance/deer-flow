@@ -99,11 +99,7 @@ function MCPServerList({
   const previewEntry = previewEntries[0];
   const previewName =
     editor?.mode === "edit" ? editor.name : (previewEntry?.[0] ?? "");
-  const previewMetadata = catalogForServer(
-    previewName,
-    previewEntry?.[1],
-    definitions,
-  );
+  const previewMetadata = catalogForServer(previewEntry?.[1], definitions);
   const previewIcon =
     draftIcon === undefined && previewEntry
       ? readPluginIcon(previewEntry[1])
@@ -276,13 +272,13 @@ function MCPServerList({
           ...catalog.filter(
             (item) =>
               !entries.some(
-                ([name, server]) =>
-                  catalogForServer(name, server, definitions)?.id === item.id,
+                ([, server]) =>
+                  catalogForServer(server, definitions)?.id === item.id,
               ),
           ),
           ...entries.map(([name, config]): PluginDirectoryEntry => {
             const displayName = displayServerName(name);
-            const metadata = catalogForServer(name, config, definitions);
+            const metadata = catalogForServer(config, definitions);
             return {
               id: `mcp:${name}`,
               category: metadata?.category ?? "custom",

@@ -1,5 +1,11 @@
 ### Memory System
 
+DeerMem `prompt_prepend`/`prompt_append` wrap the first system message from
+`memory_update` after formatting, without touching its human data message or
+cached templates. This is the live summary/fact extraction path; do not wire
+extensions only to the legacy `FACT_EXTRACTION_PROMPT` alias. Settings belong
+to the constructed backend and require backend recreation to change.
+
 This directory owns memory capture, storage, retrieval, prompt injection, and model-driven memory tools.
 
 #### Main components
@@ -37,6 +43,9 @@ Only `AuthMiddleware` can authorize the internal owner header.
 
 No-auth mode uses `DEFAULT_USER_ID`, which is `"default"`.
 An absolute `storage_path` opts out of the default per-user root.
+`UserRepository.list_user_ids()` returns registered IDs in creation order for
+administrative workflows such as `scripts/load_memory_sample.py --all-users`.
+The bulk loader requires persistent database mode and backs up each user's memory by default.
 
 DeerMem uses this layout:
 
@@ -129,6 +138,10 @@ Every destructive migration first writes a verified `{manifest_filename}.v1.bak`
 Missing or mismatched backups abort migration without changing v1 data.
 Delete legacy agent JSON only after safe summary adoption or equality checks.
 Summary conflicts keep the source file and return an error.
+Compare both summary operands after additive normalization; preserve extension
+fields and keep fact migration validation strict. Replacement imports reject
+invalid fact containers or unusable content before normalization or storage
+access; recoverable metadata may default, but malformed facts never mean clear.
 
 Run the proactive migration from `backend/`:
 
@@ -147,6 +160,9 @@ The older isolation migration remains available:
 ```bash
 PYTHONPATH=. python scripts/migrate_user_isolation.py --dry-run
 ```
+
+It assigns legacy `memory.json`, `threads/`, `agents/`, `skills/`, and the global
+`USER.md` to `--user-id` (default `default`).
 
 #### Retrieval
 
@@ -350,3 +366,5 @@ runs by default.
   Attachment-only messages with an empty preserved request stay query-less.
 - Ranking must be deterministic, network-free, and mutation-free: caller-owned
   fact dicts are read-only inputs.
+
+Legacy fact normalization in DeerMem and `frontend/src/core/memory/import-memory.ts` uses neutral confidence `0.5` for missing or invalid values, clamps finite confidence to `[0, 1]`, trims content, and defaults blank or missing sources to `unknown`. Keep these compatibility defaults aligned.

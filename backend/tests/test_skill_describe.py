@@ -11,6 +11,7 @@ from deerflow.skills.describe import (
     build_skill_search_setup,
     get_skill_index_prompt_section,
 )
+from deerflow.skills.tool_policy import allowed_tool_names_for_skills
 from deerflow.skills.types import Skill, SkillCategory
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -281,3 +282,24 @@ def test_describe_tool_select_uncapped():
     content = result.update["messages"][0].content
     for s in many_skills:
         assert s.name in content, f"select: truncated — {s.name} missing from result"
+
+
+# ── Explicitly empty allowed-tools ─────────────────────────────────────────────
+
+
+def test_render_explicit_empty_allowed_tools_does_not_claim_all():
+    restricted = _make_skill("locked-down", allowed_tools=())
+    rendered = _render_skill_metadata([restricted], "/mnt/skills")
+    assert "Allowed tools: (all)" not in rendered
+    assert "Allowed tools: (none)" in rendered
+
+
+def test_rendered_allowed_tools_agree_with_skill_tool_policy():
+    """`(all)` must mean unrestricted, which is the one state that renders it."""
+    omitted = _make_skill("legacy")
+    assert allowed_tool_names_for_skills([omitted]) is None
+    assert "Allowed tools: (all)" in _render_skill_metadata([omitted], "/mnt/skills")
+
+    restricted = _make_skill("locked-down", allowed_tools=())
+    assert allowed_tool_names_for_skills([restricted]) == set()
+    assert "Allowed tools: (all)" not in _render_skill_metadata([restricted], "/mnt/skills")

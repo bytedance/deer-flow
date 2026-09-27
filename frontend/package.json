@@ -1,6 +1,6 @@
 {
   "name": "deer-flow-frontend",
-  "version": "2.1.0-rc0",
+  "version": "2.2.0-dev",
   "private": true,
   "type": "module",
   "scripts": {
@@ -84,6 +84,7 @@
     "nuxt-og-image": "^5.1.13",
     "ogl": "^1.0.11",
     "papaparse": "5.7.0",
+    "qrcode.react": "4.2.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-resizable-panels": "^4.4.1",

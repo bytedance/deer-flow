@@ -1,0 +1,257 @@
+---
+title: 服务与路由
+description: 扩展如何在 Gateway 的整个生命周期内运行代码，并提供自己的 HTTP API。涵盖服务的启动与停止顺序、服务收到的依赖、失败与超时行为、贡献路由如何校验和挂载、认证与 CSRF，以及如何识别调用方。
+---
+
+import { Callout } from "nextra/components";
+
+# 服务与路由
+
+**服务**是 Gateway 在持久化层就绪后启动、关闭时停止的对象。**路由**是 Gateway 挂载在自身 API 旁边的 FastAPI `APIRouter`。两者是独立的贡献，但大多数提供 HTTP 的扩展两者都需要：路由声明路径，服务持有这些路径在运行时要读取的东西。
+
+两者都属于应用作用域，每个 Gateway 进程只有一份，而不是每次运行一份。需要按运行生效的行为，见[中间件贡献](/docs/harness/extensions/middleware)。
+
+## 服务
+
+### 契约
+
+```python
+from deerflow_extension_api import ExtensionRuntimeDeps
+
+
+class MyService:
+    async def start(self, deps: ExtensionRuntimeDeps) -> None: ...
+
+    async def stop(self) -> None: ...
+
+
+def install(registry, config):
+    registry.service(MyService())
+```
+
+两个方法都是异步的，并且在协议里都有默认实现，所以服务可以只实现需要的那一个。
+
+### start() 收到什么
+
+每个服务收到同一份 `ExtensionRuntimeDeps` 快照：
+
+| 字段                  | 类型                                 | 含义                                                                                              |
+| --------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `app_store`           | `ExtensionData`                      | 应用作用域的类型化存储，与中间件贡献者和生命周期钩子收到的 `app_store` 是同一个对象                |
+| `policy`              | `HostPolicySnapshot`                 | 宿主实际执行的限制：token 预算设置（仅在 `token_budget.enabled` 时填充），以及来自 `subagents.max_total_per_run` 的 `max_subagents_per_run` |
+| `session_factory`     | SQLAlchemy `async_sessionmaker` 或 `None` | Gateway 的数据库会话工厂。`database.backend` 为 `memory` 时为 `None`                          |
+| `run_evidence_reader` | `RunEvidenceReader` 或 `None`        | 对所有用户的运行及其持久化事件的只读视图。路由处理函数请改用限定调用方的读取器。见[运行证据](/docs/harness/extensions/run-evidence) |
+
+`session_factory` 就是宿主自己的数据库连接，没有任何沙箱。用它的服务可以读写宿主的每一张表。如果扩展有自己的表，请在它的 `plugins:` 记录里声明 `table_prefix`，这样 `alembic revision --autogenerate` 就不会去动它们。
+
+### 服务何时启动和停止
+
+服务在 Gateway 启动期间按注册顺序启动：先按 `plugins:` 列表顺序，同一个扩展内按 `registry.service()` 的调用顺序。它在启动序列中的位置是固定的：
+
+1. 初始化数据库引擎、checkpointer 和 store。
+2. 创建运行存储和运行事件存储，并把证据读取器绑定到它们上。
+3. **服务启动**，逐个进行，每个都等待完成后再启动下一个。
+4. 运行时的其余部分启动：线程存储、运行管理器、中断运行的恢复、租约心跳。之后 Gateway 才开始接收请求。
+
+关闭按相反方向进行：
+
+1. 排空进行中的运行和子 Agent。
+2. **服务按注册顺序的逆序停止。**
+3. 关闭存储、checkpointer 和数据库引擎。
+
+因此从 `start()` 被调用到 `stop()` 返回，服务都可以使用 `session_factory` 和 `run_evidence_reader`，而调用 `stop()` 时已没有运行在执行。
+
+### 失败与超时
+
+| 发生了什么                         | 结果                                                                                   |
+| ---------------------------------- | -------------------------------------------------------------------------------------- |
+| `start()` 抛出异常                 | 记录为 `Extension <use>: service start() failed; continuing without it: ...`，下一个服务照常启动 |
+| `start()` 自己抛出 `CancelledError` | 与其他失败同样处理。Gateway 启动真正被取消时，取消仍会传播                              |
+| `start()` 一直不返回               | 没有启动超时。Gateway 会一直等待，启动无法完成                                          |
+| `stop()` 抛出异常                  | 记录日志，其余服务照常停止                                                              |
+| `stop()` 超过 30 秒                | 被取消并记录为 `service stop() timed out after 30.0s; continuing shutdown`。每个服务各有独立的 30 秒预算 |
+
+`start()` 失败的服务在关闭时仍会收到 `stop()`，因为 `start()` 可能在失败前已经申请了资源。请把 `stop()` 写成对只启动了一半的服务也能安全调用。
+
+<Callout type="warning">
+  长时间运行的工作放到 `start()` 创建的后台任务里，不要放在 `start()` 本身。
+  在 `start()` 里阻塞等待一个慢速网络调用，会让 Gateway 启动一直卡到它返回为止。
+</Callout>
+
+## 路由
+
+### 注册路由
+
+**在 `install()` 内**构建路由并立即注册：
+
+```python
+def install(registry, config):
+    service = MyService()
+    registry.service(service)
+    registry.routers((build_router(service),))
+```
+
+`registry.routers()` 接收一个 `APIRouter` 序列。契约把类型标为 `Any`，这样契约包不依赖 FastAPI；请在你自己的包元数据里声明 `fastapi`。
+
+路由在服务启动之前、任何请求到来之前就已存在，所以路径集合在启动时就固定了。路由处理函数通过它闭包引用的服务对象访问运行时状态。
+
+### 路由如何挂载
+
+Gateway 在**所有宿主路由之后**挂载贡献的路由，所以匹配时总是宿主的处理函数优先。挂载每个路由器之前，它会检查其中每一条路由。只要有一条路由被拒绝，整个路由器**一起**被拒绝；其他路由器，包括同一个扩展的其他路由器，照常挂载。
+
+| 被拒绝的情况                                                               | 运维人员看到                                                                                   |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| WebSocket 路由                                                             | `contributed WebSocket routes are not supported until the host can apply authentication and Origin checks` |
+| Starlette `Mount`                                                          | `contributed router contains a Starlette Mount, which FastAPI.include_router() ignores`        |
+| 路由器上的 `on_startup` / `on_shutdown` 钩子或自定义 `lifespan`            | `contributed router lifecycle hooks are not supported; register an ExtensionService instead`   |
+| 能进入宿主公开命名空间的路径：`/health`、`/docs`、`/redoc`、`/openapi.json`、`/api/v1/auth/oauth/`、`/api/v1/auth/callback/`、`/api/webhooks/` | `contributed route <path> can enter a host public namespace` |
+| 能进入跳过认证或 CSRF 的宿主认证端点的路径，例如 `/api/v1/auth/register`，或 `/api/v1/auth/me` 上的状态变更方法 | `contributed route <path> can enter a host-reserved exact path` |
+| 宿主或更早的扩展已经提供的路径和方法                                       | `router path <path> is already served by <host 或入口点>; this router was not mounted`         |
+
+每条消息都以 `Extension <use>:` 为前缀记录为错误。挂载成功时 Gateway 记录 `Extension routers mounted: <use> -> <path>; ...`。
+
+遮蔽检查是保守的。只有当更早的路由对同一方法**可证明地**覆盖新路由时才拒绝：路径完全相同，或者参数段的转换器能匹配新路由可能收到的每一个值。无法证明的情况一律放行。因此 `/api/{name}` 这样的通配路由可以挂载，但它只会收到没有任何宿主路由匹配的请求。请给路径加上你自己拥有的命名空间前缀，例如 `/api/<扩展名>/`。
+
+### 认证与 CSRF
+
+贡献的路由与宿主 API 共用同一套中间件，而且无法退出：
+
+- **认证。** 未认证的请求在你的处理函数运行之前就会得到 `401`。个人访问令牌（PAT）不能访问扩展贡献的路由：即使令牌有效，宿主也会在处理函数运行之前返回 `403 {"detail": "PAT credentials are not permitted on this route"}`。
+- **CSRF。** 来自浏览器会话的 `POST`、`PUT`、`PATCH` 或 `DELETE` 必须在 `X-CSRF-Token` 头里带上 `csrf_token` cookie 的值，DeerFlow 前端已经这样做了。缺少时请求在你的处理函数运行之前就会得到 `403`。Bearer 头会跳过 CSRF 检查，但不会让 PAT 获得访问扩展贡献路由的权限。
+
+当 Gateway 以 `DEER_FLOW_AUTH_DISABLED=1` 运行时（本地开发开关，`DEER_FLOW_ENV` 或 `ENVIRONMENT` 为 `prod` 或 `production` 时无效），每个请求都以一个合成的管理员用户运行，两项检查都不生效。
+
+### 识别调用方
+
+处理函数永远看不到宿主的认证对象，`deerflow_extension_api` 只提供一个投影：
+
+```python
+@dataclass(frozen=True)
+class ExtensionPrincipal:
+    user_id: str
+    is_admin: bool = False
+    is_internal: bool = False
+    roles: tuple[str, ...] = ()
+```
+
+| 辅助函数                     | 返回                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------- |
+| `resolve_principal(request)` | 调用方的 `ExtensionPrincipal`；宿主无法确定时返回 `None`                                    |
+| `require_admin(request)`     | 调用方是管理员时返回其 principal，否则抛出 `PermissionError`，身份未知时也是如此            |
+
+`roles` 保存调用方唯一的系统角色，例如 `("admin",)` 或 `("user",)`。对于 Gateway 自身组件用内部服务令牌发出的请求（例如 IM 渠道桥接），`is_internal` 为 `true`；这类调用方的角色是 `internal`，不是管理员。PAT 请求在到达扩展贡献路由的处理函数之前就会被拒绝，因此这里的辅助函数不会收到 PAT principal。
+
+两个辅助函数都是同步的，在同步和异步处理函数里都能用。它们与框架无关，所以要自己把结果映射成 HTTP 状态码：`None` 映射为 `401`，`PermissionError` 映射为 `403`。
+
+### 在路由中读取运行证据
+
+不要在路由里返回服务的 `run_evidence_reader` 中的数据：它能看到所有用户。请改为调用 `require_run_evidence_reader(request)`。只要调用方持有 `runs:read` 权限，宿主就返回一个限定到该已认证调用方的读取器。把 `PermissionError` 映射为 `403`，`NotImplementedError` 映射为 `503`。规则和一个完整的路由见[运行证据](/docs/harness/extensions/run-evidence)。
+
+## 示例：一个状态 API
+
+这个扩展提供两条路由。`GET /api/ext-status/me` 对所有已登录用户开放，`POST /api/ext-status/reset` 需要管理员。服务启动之前两者都返回 `503`。
+
+```python filename="deerflow_extension_status/__init__.py"
+"""Expose a small status API backed by a Gateway-lifetime service."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from deerflow_extension_api import (
+    ExtensionPrincipal,
+    ExtensionRegistry,
+    ExtensionRuntimeDeps,
+    extension,
+    require_admin,
+    resolve_principal,
+)
+from fastapi import APIRouter, Depends, HTTPException, Request
+
+
+class StatusService:
+    def __init__(self) -> None:
+        self._deps: ExtensionRuntimeDeps | None = None
+        self.resets = 0
+
+    async def start(self, deps: ExtensionRuntimeDeps) -> None:
+        self._deps = deps
+
+    async def stop(self) -> None:
+        self._deps = None
+
+    def require_running(self) -> ExtensionRuntimeDeps:
+        if self._deps is None:
+            raise HTTPException(status_code=503, detail="status extension is not running")
+        return self._deps
+
+
+def caller(request: Request) -> ExtensionPrincipal:
+    principal = resolve_principal(request)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="unknown caller")
+    return principal
+
+
+def admin(request: Request) -> ExtensionPrincipal:
+    try:
+        return require_admin(request)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+def build_router(service: StatusService) -> APIRouter:
+    router = APIRouter(prefix="/api/ext-status", tags=["ext-status"])
+
+    @router.get("/me")
+    async def me(
+        principal: ExtensionPrincipal = Depends(caller),
+        deps: ExtensionRuntimeDeps = Depends(service.require_running),
+    ) -> dict[str, Any]:
+        return {
+            "user_id": principal.user_id,
+            "is_admin": principal.is_admin,
+            "database": deps.session_factory is not None,
+            "evidence": deps.run_evidence_reader is not None,
+        }
+
+    @router.post("/reset")
+    async def reset(
+        principal: ExtensionPrincipal = Depends(admin),
+        deps: ExtensionRuntimeDeps = Depends(service.require_running),
+    ) -> dict[str, int]:
+        service.resets += 1
+        return {"resets": service.resets}
+
+    return router
+
+
+@extension(api="0.2.0", name="status")
+def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
+    service = StatusService()
+    registry.service(service)
+    registry.routers((build_router(service),))
+```
+
+`503` 守卫不是死代码。如果 `start()` 失败，Gateway 会不带这个服务启动，但路由器仍然挂载着。此时路由返回 `503`，而不是因为缺少状态而出错。
+
+在使用内存数据库后端的 Gateway 上，这些路由的响应是：
+
+| 请求                                             | 响应                                                                       |
+| ------------------------------------------------ | -------------------------------------------------------------------------- |
+| `GET /me`，没有会话                              | 宿主返回 `401 {"detail": {"code": "not_authenticated", ...}}`               |
+| `POST /reset`，已登录但没有 `X-CSRF-Token`       | 宿主返回 `403 {"detail": "CSRF token missing. Include X-CSRF-Token header."}` |
+| `GET /me`，以普通用户登录                        | `200 {"user_id": "...", "is_admin": false, "database": false, "evidence": true}` |
+| `POST /reset`，普通用户                        | `403 {"detail": "this endpoint requires an administrator account"}`         |
+| `GET /me` 或 `POST /reset`，个人访问令牌        | 宿主返回 `403 {"detail": "PAT credentials are not permitted on this route"}`  |
+| `POST /reset`，管理员会话并带 CSRF 头            | `200 {"resets": 1}`                                                        |
+
+## 常见误区
+
+- **在 `install()` 里打开资源。** `install()` 在 Gateway 构建应用时运行，那时数据库还不存在。在那里构建路由，但连接和任务要在 `start()` 里打开。
+- **路由器的 lifespan 钩子。** 会被拒绝。凡是有生命周期的东西都属于服务。
+- **通用路径。** 宿主命名空间下的路径会被拒绝，别的扩展先注册的路径会胜出。请使用你自己拥有的前缀。
+- **把 `resolve_principal` 当作认证。** 宿主已经拒绝了未认证的请求。principal 用于你路由内部的授权，为 `None` 时要按拒绝处理。
+- **以为令牌能带来管理员权限。** 个人访问令牌按设计永远无法通过 `require_admin`。
+- **在路由中返回服务读取器的数据。** 服务读取器是全局的。路由请使用限定调用方的请求读取器。

@@ -4,8 +4,11 @@ import pytest
 import pytest_asyncio
 
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.subagent_batches import SubagentBatchRepository
+
+_MISSING = object()
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -84,6 +87,59 @@ async def test_claim_separates_total_live_leased_and_running(tmp_path) -> None:
         limit=10,
     )
     assert while_full == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("thread_incarnation", "expected_present"),
+    [
+        ("incarnation-1", True),
+        (None, True),
+        (_MISSING, False),
+    ],
+)
+async def test_claim_preserves_thread_incarnation_presence(
+    tmp_path,
+    thread_incarnation,
+    expected_present,
+) -> None:
+    repo = await _repo(tmp_path)
+    execution_spec = {
+        "subagent_config": {
+            "name": "general-purpose",
+            "description": "test",
+        },
+    }
+    if thread_incarnation is not _MISSING:
+        execution_spec[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
+    await repo.create_batch(
+        batch_id="batch-1",
+        user_id="user-1",
+        thread_id="thread-1",
+        run_id="run-1",
+        tool_call_id="call-1",
+        submission_key="run-1:call-1",
+        title="Incarnation persistence",
+        subagent_type="general-purpose",
+        items=[{"key": "item-1", "prompt": "Process item"}],
+        max_live_items=1,
+        max_running_items=1,
+        max_attempts=1,
+        execution_spec=execution_spec,
+    )
+
+    claimed = await repo.claim_items(
+        now=datetime.now(UTC),
+        lease_owner="worker-1",
+        lease_seconds=60,
+        limit=1,
+    )
+
+    assert len(claimed) == 1
+    restored_spec = claimed[0]["batch"]["execution_spec"]
+    assert (THREAD_INCARNATION_CONTEXT_KEY in restored_spec) is expected_present
+    if expected_present:
+        assert restored_spec[THREAD_INCARNATION_CONTEXT_KEY] == thread_incarnation
 
 
 @pytest.mark.asyncio

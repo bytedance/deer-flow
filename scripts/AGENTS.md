@@ -8,12 +8,19 @@ because it runs before dependency synchronization. Read UTF-8 config files
 with or without a leading BOM so the first section remains detectable.
 `setup-sandbox.sh` also strips the leading BOM and normalizes CRLF before selecting the image;
 keep its shell filter compatible with GNU and BSD sed.
+An Apple Container pull that succeeds on macOS must not fail the setup step
+just because Docker is absent. Keep the Docker pull when Docker is available,
+including after an Apple Container failure, and retain the final image-config
+note rather than exiting early on Apple Container success.
 
 The root `PORT` value configures Docker's published nginx ingress only; local
 orchestration pins Next.js to `3000`. Runtime commands launch from the already
 synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
+
+Root `make install` runs pre-commit through uv, so uv's tool bin directory
+need not be on `PATH`.
 
 ## Shell Script Invocation Contract
 

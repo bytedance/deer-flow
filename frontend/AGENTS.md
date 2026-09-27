@@ -83,6 +83,11 @@ More specific `AGENTS.md` files under `src/` contain the frontend sections split
 
 ## Code Style
 
+`core/utils/markdown.ts` reads web-fetch titles from the first nonblank line.
+Match zero to three literal spaces before `# ` without trimming indentation;
+mixed space/tab code blocks must fall back to the URL. Keep this local to title
+extraction rather than changing the shared streamdown fence parser.
+
 Custom Agent `display_name` is an optional Unicode UI label, edited in
 `AgentSettingsDialog`. Use it with a fallback to `name` for gallery/chat text;
 keep `name` for React identity, URLs, requests, and runtime `agent_name`.
@@ -247,3 +252,51 @@ This version has breaking changes — APIs, conventions, and file structure may 
 This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
 
 <!-- END:nextjs-agent-rules -->
+
+### Shared model settings
+
+Settings → Models (`?settings=models`) offers administrator-only catalog management
+through `/api/managed-models`. YAML entries are read-only. `core/models/management.ts`
+whitelists editable fields so source metadata and `has_api_key` never get posted.
+Draft credentials stay in editor state, never query cache or browser storage; blank
+keeps the saved key, explicit removal sends an empty key. Saving invalidates both the
+admin catalog and `MODELS_QUERY_KEY`. Editor unmount aborts probes and fences late
+callbacks. Static demos and non-admin users must not query the management API.
+
+### Model reasoning capabilities
+
+`/api/models` projects a per-model `reasoning` contract (issue #5073) beside the
+deprecated `supports_thinking` / `supports_reasoning_effort` booleans.
+`core/models/reasoning.ts` is the only place that interprets it: it falls back to
+the booleans for older Gateways, clamps the chat mode (`getResolvedMode` never
+yields `flash` for a required-thinking model), lists the effort options the
+composer and the sidecar render, and maps mode presets and remembered values
+through the contract's aliases/default (`resolveReasoningEffort`). Effort values
+are open strings (`ReasoningEffortValue`), so provider-specific tokens such as
+`max` flow through local settings and account preferences unchanged; the custom
+agent dialog offers only the intersection with the per-agent `low/medium/high`
+schema and hides "off" for required-thinking models. Do not read the booleans in
+components directly. On a legacy model, `resolveReasoningEffort` keeps only its
+advertised generic values; this drops a remembered provider-specific token after
+a model switch without changing the backend's direct legacy-request behavior.
+
+## Full-stack plugin UI
+
+`core/extensions/` loads authenticated deployment-installed ES modules from `/api/plugins`.
+Inline modules use authenticated fetch plus a released Blob URL. Manifest assets use
+native credentialed module scripts, preserving relative imports and resource URLs.
+Both honor the backend base and prefixes; transport and cache semantics are documented in
+`docs/full-stack-plugins.md`. Host copy belongs in the typed locale dictionaries.
+Conversation action factories, shapes and availability callbacks are guarded per plugin;
+only validated value snapshots reach the toolbar/sidebar render paths.
+`PluginNavigation` and the dynamic workspace extension route consume page declarations;
+Capability Center details only show metadata and status. Conversation action slots augment
+normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
+Plugin views use mount/dispose and abort signals; Shadow DOM is CSS isolation, not a sandbox.
+Descriptors are user-keyed page snapshots, refreshed manually. Backend calls bind the plugin's
+namespace, action allowlist and expected viewer identity. See `docs/full-stack-plugins.md`.
+
+Plugin page `openConversation(threadId)` resolves authenticated thread metadata
+with `pathOfThread`; do not let plugins hardcode default-agent routes. The page's
+abort signal fences late navigation after unmount/account changes. Synchronous
+conversation-action callbacks reject Promise returns while consuming rejections.

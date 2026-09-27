@@ -15,6 +15,11 @@ from pydantic import BaseModel, Field
 
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+    runtime_thread_incarnation,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.subagents.batch_runtime import (
     BatchItemInput,
@@ -23,6 +28,7 @@ from deerflow.subagents.batch_runtime import (
     get_subagent_batch_submitter,
 )
 from deerflow.subagents.registry import get_available_subagent_names, get_subagent_config
+from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 
 
@@ -76,7 +82,15 @@ def _bind_batch_tool(
             _explicit_batch_app_config.reset(config_token)
             _explicit_batch_submitter.reset(submitter_token)
 
-    return tool.model_copy(update={"coroutine": bound_coroutine})
+    # The source tool may carry a sync func around the unbound coroutine (set
+    # in place by _ensure_sync_invocable_tool) or none at all; either way the
+    # copy's sync path must go through the bound coroutine.
+    return tool.model_copy(
+        update={
+            "coroutine": bound_coroutine,
+            "func": make_sync_tool_wrapper(bound_coroutine, tool.name),
+        }
+    )
 
 
 def bind_batch_tools(
@@ -162,8 +176,8 @@ async def batch_task(
         title: Short batch name shown to the user.
         items: Stable item keys, self-contained prompts, and optional per-item acceptance_criteria.
         subagent_type: Native subagent definition used for every item.
-        max_live_items: Optional queued-plus-running item window.
-        max_running_items: Optional per-batch real execution concurrency.
+        max_live_items: Optional queued-plus-running item window; when set it must be >= 1.
+        max_running_items: Optional per-batch real execution concurrency; when set it must be >= 1.
     """
     submitter = _batch_submitter()
     if submitter is None:
@@ -179,6 +193,8 @@ async def batch_task(
         return _result(tool_call_id, content="Batch item keys must be unique.", error=True)
 
     context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
+    if context.get(THREAD_INCARNATION_METADATA_GUARD_KEY) is True:
+        runtime_thread_incarnation(runtime)
     metadata = runtime.config.get("metadata", {}) if runtime is not None else {}
     app_config = _batch_app_config(runtime)
     allowed_subagents = metadata.get("allowed_subagents")
@@ -203,7 +219,7 @@ async def batch_task(
     run_id = context.get("run_id")
     submission_key = f"{run_id or thread_id}:{tool_call_id}"
     execution_spec = {
-        "subagent_config": asdict(config),
+        "subagent_config": {**asdict(config), "prompt_overlay": config.prompt_overlay.model_dump()},
         "parent_model": metadata.get("model_name"),
         "tool_groups": metadata.get("tool_groups"),
         "mcp_plugins": metadata.get("mcp_plugins"),
@@ -214,6 +230,8 @@ async def batch_task(
         "is_internal": context.get("is_internal") is True,
         "authz_attributes": normalize_authz_attributes(context.get("authz_attributes")),
     }
+    if THREAD_INCARNATION_CONTEXT_KEY in context:
+        execution_spec[THREAD_INCARNATION_CONTEXT_KEY] = context[THREAD_INCARNATION_CONTEXT_KEY]
     if KNOWLEDGE_SCOPE_RUNTIME_KEY in context:
         execution_spec["knowledge_scope"] = execution_scope(context[KNOWLEDGE_SCOPE_RUNTIME_KEY])
     try:

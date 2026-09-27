@@ -15,7 +15,6 @@ export function catalogText(text: LocalizedText, locale: string) {
 }
 /** Identity is explicit metadata. A display name never claims an official provider. */
 export function catalogForServer(
-  _name: string,
   config?: MCPServerConfig,
   catalog: PluginManifest[] = [],
 ) {

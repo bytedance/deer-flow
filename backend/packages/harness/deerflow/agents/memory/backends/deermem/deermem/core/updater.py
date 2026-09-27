@@ -32,6 +32,7 @@ from .storage import (
     MemoryManifestRevisionConflict,
     MemoryStorage,
     create_empty_memory,
+    normalize_memory_data,
     utc_now_iso_z,
 )
 
@@ -963,19 +964,12 @@ class MemoryUpdater:
         """Persist imported memory data via the injected storage."""
         if not isinstance(memory_data, dict):
             raise ValueError("memory_data")
-        memory_data = copy.deepcopy(memory_data)
-        empty = create_empty_memory()
-        for section in ("user", "history"):
-            incoming_section = memory_data.get(section, {})
-            if not isinstance(incoming_section, dict):
-                raise ValueError(f"memory_data.{section}")
-            complete_section = copy.deepcopy(empty[section])
-            for key, value in incoming_section.items():
-                if key in complete_section and isinstance(complete_section[key], dict) and isinstance(value, dict):
-                    complete_section[key].update(copy.deepcopy(value))
-                else:
-                    complete_section[key] = copy.deepcopy(value)
-            memory_data[section] = complete_section
+        # Replacement imports must not turn malformed facts into deletions.
+        # Validate before lenient compatibility normalization or any storage read.
+        raw_facts = memory_data.get("facts")
+        if not isinstance(raw_facts, list) or any(not isinstance(fact, dict) or not isinstance(fact.get("content"), str) or not fact["content"].strip() for fact in raw_facts):
+            raise ValueError("memory_data.facts must be a list of facts with non-empty content")
+        memory_data = normalize_memory_data(memory_data)
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             current = self.get_memory_data(agent_name, user_id=user_id)
             incoming_facts = copy.deepcopy(memory_data.get("facts", []))
@@ -1393,6 +1387,16 @@ class MemoryUpdater:
             "consolidation_section": consolidation_section,
         }
         prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name, prompts_dir=self._prompts_dir)
+        if config.prompt_prepend or config.prompt_append:
+            # Extend trusted instructions only, after formatting the original
+            # template. Conversation/memory data stays in its human message.
+            for index, message in enumerate(prompt):
+                if message.type == "system":
+                    content = "\n\n".join(part for part in (config.prompt_prepend, message.content, config.prompt_append) if part)
+                    prompt[index] = message.model_copy(update={"content": content})
+                    break
+            else:
+                raise ValueError("Memory prompt overlays require a system message in the configured chat template")
         return current_memory, prompt
 
     def _has_manual_facts(self, memory: dict[str, Any]) -> bool:
@@ -1973,7 +1977,7 @@ class MemoryUpdater:
 
         # Update user sections
         user_updates = update_data.get("user", {})
-        for section in ["workContext", "personalContext", "topOfMind"]:
+        for section in ["workContext", "personalContext", "topOfMind", "cognitiveStyle"]:
             section_data = user_updates.get(section, {})
             if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
                 continue

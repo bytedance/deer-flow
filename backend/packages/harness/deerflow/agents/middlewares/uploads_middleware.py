@@ -160,6 +160,25 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _coerce_file_size(value: object) -> int:
+        """Best-effort byte count from a client-supplied ``files[*].size``.
+
+        The value only feeds the human-readable size in ``<current_uploads>``,
+        and every other field in ``_files_from_kwargs`` is validated fail-soft,
+        so an unusable size must never abort the run: anything that is not a
+        non-negative finite number (``"abc"``, a list, a bool, ``-5``, ``inf``)
+        falls back to ``0``, the same value a missing size gets. Numeric
+        strings such as ``"2048"`` keep working.
+        """
+        if value is None or isinstance(value, bool):
+            return 0
+        try:
+            size = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return size if size >= 0 else 0
+
     def _files_from_kwargs(self, message: HumanMessage, uploads_dir: Path | None = None) -> list[dict] | None:
         """Extract file info from message additional_kwargs.files.
 
@@ -191,7 +210,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             files.append(
                 {
                     "filename": filename,
-                    "size": int(f.get("size") or 0),
+                    "size": self._coerce_file_size(f.get("size")),
                     "path": f"/mnt/user-data/uploads/{filename}",
                     "extension": Path(filename).suffix,
                 }

@@ -26,6 +26,7 @@ from langgraph.store.base import BaseStore
 
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.postgres_schema import dsn_with_search_path, ensure_postgres_schema_async
+from deerflow.runtime.cancellation import drained_async_context
 from deerflow.runtime.store.provider import (
     POSTGRES_CONN_REQUIRED,
     POSTGRES_STORE_INSTALL,
@@ -71,7 +72,7 @@ async def _async_store(config) -> AsyncIterator[BaseStore]:
         conn_str = resolve_sqlite_conn_str(config.connection_string or "store.db")
         await asyncio.to_thread(ensure_sqlite_parent_dir, conn_str)
 
-        async with AsyncSqliteStore.from_conn_string(conn_str) as store:
+        async with drained_async_context(AsyncSqliteStore.from_conn_string(conn_str)) as store:
             await store.setup()
             logger.info("Store: using AsyncSqliteStore (%s)", conn_str)
             yield store
@@ -88,7 +89,7 @@ async def _async_store(config) -> AsyncIterator[BaseStore]:
 
         await _ensure_postgres_schema(config.connection_string, config.postgres_schema)
         conn_string = dsn_with_search_path(config.connection_string, config.postgres_schema)
-        async with AsyncPostgresStore.from_conn_string(conn_string) as store:
+        async with drained_async_context(AsyncPostgresStore.from_conn_string(conn_string)) as store:
             await store.setup()
             logger.info("Store: using AsyncPostgresStore")
             yield store

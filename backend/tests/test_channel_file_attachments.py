@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 from support.symlinks import symlink_or_skip
 
 from app.channels.base import Channel
@@ -402,6 +404,170 @@ class TestInboundFileIngestion:
         assert outside_file.read_text(encoding="utf-8") == "protected"
         assert (uploads_dir / "victim.txt").read_text(encoding="utf-8") == "protected"
         assert (uploads_dir / "victim_1.txt").read_bytes() == b"new attachment data"
+
+
+# ---------------------------------------------------------------------------
+# Inbound file sandbox-readability tests
+# ---------------------------------------------------------------------------
+
+
+class TestInboundFileSandboxPerms:
+    def test_make_inbound_file_sandbox_readable_sets_group_other_read(self, tmp_path):
+        from app.channels.manager import _make_inbound_file_sandbox_readable
+
+        f = tmp_path / "photo.jpg"
+        f.write_bytes(b"\x89PNG data")
+        os.chmod(f, 0o600)
+
+        _make_inbound_file_sandbox_readable(f)
+
+        mode = stat.S_IMODE(os.stat(f).st_mode)
+        assert mode == 0o644
+        assert mode & stat.S_IRGRP
+        assert mode & stat.S_IROTH
+
+    def test_make_inbound_file_sandbox_readable_preserves_owner_bits(self, tmp_path):
+        from app.channels.manager import _make_inbound_file_sandbox_readable
+
+        f = tmp_path / "report.pdf"
+        f.write_bytes(b"pdf")
+        os.chmod(f, 0o640)
+
+        _make_inbound_file_sandbox_readable(f)
+
+        mode = stat.S_IMODE(os.stat(f).st_mode)
+        # Owner rw and the existing group read are preserved; only the missing
+        # other-read bit is added and no write is granted to group/other.
+        assert mode == 0o644
+        assert not (mode & stat.S_IWOTH)
+
+    def test_make_inbound_file_sandbox_readable_skips_symlink(self, tmp_path):
+        from support.symlinks import symlink_or_skip
+
+        from app.channels.manager import _make_inbound_file_sandbox_readable
+
+        target = tmp_path / "target.txt"
+        target.write_text("secret")
+        os.chmod(target, 0o600)
+        link = tmp_path / "link.txt"
+        symlink_or_skip(link, target)
+
+        # Must not raise and must leave the symlink target's mode untouched.
+        _make_inbound_file_sandbox_readable(link)
+
+        assert stat.S_IMODE(os.stat(target).st_mode) == 0o600
+
+    def test_make_inbound_file_sandbox_readable_missing_noop(self, tmp_path):
+        from app.channels.manager import _make_inbound_file_sandbox_readable
+
+        # Best-effort helper: a missing file is a silent no-op.
+        _make_inbound_file_sandbox_readable(tmp_path / "does-not-exist.txt")
+
+    def test_make_inbound_file_sandbox_readable_swap_after_lstat_does_not_follow_symlink(self, tmp_path, monkeypatch):
+        from app.channels.manager import _make_inbound_file_sandbox_readable
+
+        # An unrelated target OUTSIDE the uploads dir with restrictive perms.
+        target = tmp_path / "outside" / "secret.txt"
+        target.parent.mkdir()
+        target.write_text("secret")
+        os.chmod(target, 0o600)
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        upload = uploads_dir / "report.txt"
+        upload.write_bytes(b"upload")  # a regular file at lstat time
+
+        # Select the symlink-following chmod fallback: a platform whose os.chmod
+        # is not in os.supports_follow_symlinks degrades to a following chmod.
+        monkeypatch.setattr(os, "supports_follow_symlinks", frozenset(), raising=False)
+
+        real_lstat = os.lstat
+
+        def racing_lstat(path, *args, **kwargs):
+            st = real_lstat(path)
+            # The sandbox swaps the just-validated regular file for a symlink to
+            # the out-of-dir target immediately after lstat (the TOCTOU race).
+            if path == upload:
+                os.unlink(path)
+                os.symlink(target, path)
+            return st
+
+        monkeypatch.setattr(os, "lstat", racing_lstat)
+
+        _make_inbound_file_sandbox_readable(upload)
+
+        # The permission change must stay bound to the upload's validated inode
+        # and must not follow the swapped-in symlink to a target outside the
+        # uploads dir (the old following-chmod fallback would chmod it 0600->0644).
+        assert stat.S_IMODE(os.lstat(target).st_mode) == 0o600
+
+    @pytest.mark.skipif(not (hasattr(os, "mkfifo") and hasattr(os, "O_NOFOLLOW")), reason="POSIX-only: mkfifo + O_NOFOLLOW")
+    def test_make_inbound_file_sandbox_readable_swap_after_lstat_does_not_block_on_fifo(self, tmp_path, monkeypatch):
+        import threading
+
+        from app.channels.manager import _make_inbound_file_sandbox_readable
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        upload = uploads_dir / "report.txt"
+        upload.write_bytes(b"upload")  # a regular file at lstat time
+
+        real_lstat = os.lstat
+
+        def racing_lstat(path, *args, **kwargs):
+            st = real_lstat(path)
+            # The sandbox swaps the just-validated regular file for a FIFO
+            # immediately after lstat. Without O_NONBLOCK the read-only open
+            # below blocks in the kernel waiting for a writer, before the
+            # S_ISREG type check can skip the non-regular inode.
+            if path == upload:
+                os.unlink(path)
+                os.mkfifo(path)
+            return st
+
+        monkeypatch.setattr(os, "lstat", racing_lstat)
+
+        completed = threading.Event()
+
+        def call():
+            _make_inbound_file_sandbox_readable(upload)
+            completed.set()
+
+        worker = threading.Thread(target=call, daemon=True)
+        worker.start()
+        finished = completed.wait(5)
+        if not finished:
+            # Unblock the blocked open so the leaked thread can exit, then fail.
+            unblocker = os.open(upload, os.O_WRONLY | os.O_NONBLOCK)
+            os.close(unblocker)
+            worker.join(timeout=5)
+            pytest.fail("apply_upload_sandbox_permits blocked on a swapped-in FIFO (missing O_NONBLOCK)")
+
+        # Returned promptly and left the FIFO untouched (no chmod on a FIFO).
+        assert stat.S_ISFIFO(os.lstat(upload).st_mode)
+
+    def test_ingest_inbound_files_makes_file_sandbox_readable(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        msg = InboundMessage(
+            channel_name="telegram",
+            chat_id="chat-1",
+            user_id="user-1",
+            text="see attachment",
+            files=[{"type": "image", "filename": "photo.jpg", "_content": b"\x89PNG data"}],
+        )
+
+        with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir):
+            _run(manager._ingest_inbound_files("thread-1", msg))
+
+        dest = uploads_dir / "photo.jpg"
+        mode = stat.S_IMODE(os.stat(dest).st_mode)
+        # The 0o600 root-written upload is made group/other readable so the
+        # non-root sandbox process can read it.
+        assert mode & stat.S_IRGRP
+        assert mode & stat.S_IROTH
 
 
 # ---------------------------------------------------------------------------

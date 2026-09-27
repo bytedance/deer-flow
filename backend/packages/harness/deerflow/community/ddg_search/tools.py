@@ -13,6 +13,7 @@ from deerflow.config import get_app_config
 logger = logging.getLogger(__name__)
 
 DEFAULT_BACKEND = "auto"
+DEFAULT_MAX_RESULTS = 5
 DEFAULT_REGION = "wt-wt"
 DEFAULT_SAFESEARCH = "moderate"
 DEFAULT_WIKIPEDIA_REGION = "us-en"
@@ -28,6 +29,22 @@ WIKIPEDIA_LANGUAGE_ALIASES = {
     "tzh": "zh",
     "wt": "en",
 }
+
+
+def _coerce_max_results(value: object) -> int:
+    """Normalize config/parameter values before passing them to DDGS."""
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        # int() accepts booleans and silently truncates a YAML value such as 3.5.
+        count = 0
+    else:
+        try:
+            count = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError, OverflowError):
+            count = 0
+    if count <= 0:
+        logger.warning("Invalid DDG Search max_results=%r; using default %s", value, DEFAULT_MAX_RESULTS)
+        return DEFAULT_MAX_RESULTS
+    return count
 
 
 def _normalize_backend(backend: str | list[str] | tuple[str, ...] | None) -> str:
@@ -105,7 +122,7 @@ def _resolve_ddgs_region(query: str, region: str | None, backend: str | list[str
 
 def _search_text(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
     region: str | None = DEFAULT_REGION,
     safesearch: str | None = DEFAULT_SAFESEARCH,
     backend: str | list[str] | tuple[str, ...] | None = DEFAULT_BACKEND,
@@ -156,7 +173,7 @@ def _search_text(
 @tool("web_search", parse_docstring=True)
 def web_search_tool(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
     time_range: SearchTimeRange | None = None,
 ) -> str:
     """Search the web for information. Use this tool to find current information, news, articles, and facts from the internet.
@@ -180,7 +197,7 @@ def web_search_tool(
 
     results = _search_text(
         query=query,
-        max_results=max_results,
+        max_results=_coerce_max_results(max_results),
         region=region,
         safesearch=safesearch,
         backend=backend,

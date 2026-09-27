@@ -74,6 +74,11 @@ spec:
             {{- end }}
             # PVC mode — sandbox Pods mount the same PVCs the gateway uses.
             {{- if .Values.persistence.home.enabled }}
+            # Extra-mount paths originate in the Gateway's state namespace.
+            # Keep this logical base aligned so the provisioner can translate
+            # those paths into USERDATA PVC subPaths.
+            - name: DEER_FLOW_HOST_BASE_DIR
+              value: /app/backend/.deer-flow
             - name: USERDATA_PVC_NAME
               value: {{ include "deer-flow.homePVC" . | quote }}
             {{- end }}

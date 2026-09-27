@@ -54,6 +54,37 @@ class CapabilityAdapter(Protocol):
     async def install(self, context: AdapterContext, manifest: PluginManifest, name: str, configuration: dict[str, Any]) -> None: ...
 
 
+def validate_mcp_connection(configuration: dict[str, Any]) -> None:
+    """Validate the normalized transport definition, not manifest form fields."""
+    from urllib.parse import urlsplit
+
+    transport = configuration.get("type", configuration.get("transport", "stdio"))
+    if not isinstance(transport, str):
+        raise HTTPException(422, "Supply a supported MCP transport")
+    if transport in {"http", "sse"}:
+        url = configuration.get("url")
+        valid = False
+        try:
+            if isinstance(url, str):
+                parsed = urlsplit(url)
+                _ = parsed.port  # Validate malformed ports too.
+                has_http_scheme = parsed.scheme in {"https", "http"}
+                has_host = bool(parsed.hostname)
+                has_credentials = parsed.username is not None or parsed.password is not None
+                has_whitespace = any(c.isspace() for c in url)
+                valid = has_http_scheme and has_host and not has_credentials and not parsed.fragment and not has_whitespace
+        except ValueError:
+            valid = False
+        if not valid:
+            raise HTTPException(422, "Supply an HTTP(S) MCP server URL without embedded credentials")
+        return
+    if transport != "stdio":
+        raise HTTPException(422, "Supply a supported MCP transport and its required connection fields")
+    command = configuration.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise HTTPException(422, "Supply a supported MCP transport and its required connection fields")
+
+
 class MCPAdapter:
     async def list_installations(self, context: AdapterContext) -> list[CapabilityInstallation]:
         servers = await asyncio.to_thread(mcp._load_raw_mcp_server_responses)
@@ -97,26 +128,7 @@ class MCPAdapter:
         if not name.strip():
             raise HTTPException(422, "Installation name is required")
         if manifest.adapter == "mcp":
-            # The manifest form is normalized to a transport definition by the
-            # UI. Validate that wire contract, not form-only name/auth fields.
-            from urllib.parse import urlsplit
-
-            transport = configuration.get("type", configuration.get("transport", "stdio"))
-            if not isinstance(transport, str):
-                raise HTTPException(422, "Supply a supported MCP transport")
-            if transport in {"http", "sse"}:
-                url = configuration.get("url")
-                try:
-                    parsed = urlsplit(url) if isinstance(url, str) else None
-                    valid = parsed is not None and parsed.scheme in {"https", "http"} and bool(parsed.hostname) and parsed.username is None and parsed.password is None and not parsed.fragment and not any(c.isspace() for c in url)
-                    if parsed is not None:
-                        _ = parsed.port  # Validate malformed ports too.
-                except ValueError:
-                    valid = False
-                if not valid:
-                    raise HTTPException(422, "Supply an HTTP(S) MCP server URL without embedded credentials")
-            elif transport != "stdio" or not isinstance(configuration.get("command"), str) or not configuration["command"].strip():
-                raise HTTPException(422, "Supply a supported MCP transport and its required connection fields")
+            validate_mcp_connection(configuration)
         definition = {**configuration, "capability": {"id": str(uuid4()), "plugin_id": manifest.id, "version": manifest.version}}
         try:
             body = mcp.McpConfigUpdateRequest(mcp_servers={name: mcp.McpServerConfigResponse.model_validate(definition)})

@@ -20,6 +20,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+from deerflow.agents.middlewares.todo_middleware import TODO_REMINDER_MESSAGE_NAME
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import DEFAULT_KEEP
 from deerflow.config.task_continuity_config import TaskContinuityConfig
@@ -576,6 +577,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if not force and not self._should_summarize(trigger_messages, total_tokens):
             return None
 
+        # Todo reminders are snapshots of state["todos"], not conversation history.
+        # Exclude them before partitioning so neither the summary nor the retained
+        # tail contains stale task statuses. TodoMiddleware restores current context
+        # when needed before the next model call. Keep state untouched if compaction
+        # is skipped or summary generation fails.
+        messages = [message for message in messages if not (isinstance(message, HumanMessage) and message.name == TODO_REMINDER_MESSAGE_NAME)]
+
         cutoff_index = self._determine_cutoff_index(messages)
         if cutoff_index <= 0:
             return None
@@ -1015,9 +1023,11 @@ def create_summarization_middleware(
 
     hooks: list[BeforeSummarizationHook] = []
     if resolved_app_config.memory.enabled and not skip_memory_flush:
+        from functools import partial
+
         from deerflow.agents.memory.summarization_hook import memory_flush_hook
 
-        hooks.append(memory_flush_hook)
+        hooks.append(partial(memory_flush_hook, pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None)))
 
     return DeerFlowSummarizationMiddleware(
         **kwargs,

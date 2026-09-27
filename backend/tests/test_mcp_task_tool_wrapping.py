@@ -140,7 +140,7 @@ async def test_submit_wrapper_persists_before_returning_only_the_local_handle() 
         )
         submit_tool = configured[0]
         runtime = SimpleNamespace(
-            context={"thread_id": "thread-1", "run_id": "run-1"},
+            context={"thread_id": "thread-1", "thread_incarnation": "incarnation-1", "run_id": "run-1"},
             config={},
             tool_call_id="call-1",
         )

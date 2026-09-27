@@ -1,6 +1,7 @@
 """Tests for SearXNG community tools."""
 
 import json
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +15,28 @@ class AsyncMock(MagicMock):
 
     async def __call__(self, *args, **kwargs):
         return super().__call__(*args, **kwargs)
+
+
+@contextmanager
+def _searxng_pages(pages: dict[int, list[dict]]):
+    """Patch httpx so request page N answers with ``pages[N]``.
+
+    A page that was not given answers with an empty result set, which is what a
+    real instance does once the query is exhausted.
+    """
+    with patch("deerflow.community.searxng.searxng_client.httpx.AsyncClient") as mock_cls:
+        mock_ctx = MagicMock()
+        mock_cls.return_value.__aenter__.return_value = mock_ctx
+
+        def _get(url, params=None, headers=None):
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = {"results": pages.get(params["pageno"], [])}
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+
+        mock_ctx.get = AsyncMock(side_effect=_get)
+        yield mock_ctx
 
 
 @pytest.mark.asyncio
@@ -144,6 +167,56 @@ class TestSearxngClient:
             params = mock_ctx.get.call_args.kwargs["params"]
             assert "time_range" not in params
 
+    async def test_search_collects_results_across_pages(self):
+        """A max_results larger than one page is collected by walking pageno.
+
+        SearXNG's search API has no `limit` parameter -- /search answers with one
+        page (the instance's results_per_page, 10 by default) and ignores a limit
+        it is handed -- so a configured max_results above a page used to be
+        silently capped at whatever the first page held.
+        """
+        pages = {
+            1: [{"title": f"page1-{i}", "url": f"https://example.com/1/{i}", "content": "c"} for i in range(3)],
+            2: [{"title": f"page2-{i}", "url": f"https://example.com/2/{i}", "content": "c"} for i in range(3)],
+        }
+
+        with _searxng_pages(pages) as mock_ctx:
+            client = SearxngClient(base_url="http://searxng:8080")
+            result = await client.search("test query", max_results=5)
+
+        assert len(result) == 5
+        assert [call.kwargs["params"]["pageno"] for call in mock_ctx.get.call_args_list] == [1, 2]
+
+    async def test_search_makes_one_request_when_a_page_is_enough(self):
+        """The default max_results still costs exactly one request."""
+        rows = [{"title": f"r{i}", "url": f"https://example.com/{i}", "content": "c"} for i in range(10)]
+
+        with _searxng_pages({1: rows}) as mock_ctx:
+            client = SearxngClient(base_url="http://searxng:8080")
+            result = await client.search("test query", max_results=5)
+
+        assert len(result) == 5
+        assert mock_ctx.get.call_count == 1
+
+    async def test_search_stops_when_a_page_adds_nothing_new(self):
+        """A repeating page ends the walk instead of duplicating results."""
+        repeated = [{"title": f"r{i}", "url": f"https://example.com/{i}", "content": "c"} for i in range(2)]
+
+        with _searxng_pages({1: repeated, 2: repeated, 3: repeated}) as mock_ctx:
+            client = SearxngClient(base_url="http://searxng:8080")
+            result = await client.search("test query", max_results=50)
+
+        assert len(result) == 2
+        assert mock_ctx.get.call_count == 2
+
+    async def test_search_never_sends_the_unsupported_limit_parameter(self):
+        """`limit` is not part of the SearXNG search API, so it is not sent."""
+        with _searxng_pages({1: [{"title": "t", "url": "https://example.com/1", "content": "c"}]}) as mock_ctx:
+            client = SearxngClient(base_url="http://searxng:8080")
+            await client.search("test query", max_results=20)
+
+        assert "limit" not in mock_ctx.get.call_args_list[0].kwargs["params"]
+
 
 @pytest.mark.asyncio
 class TestSearxngTools:
@@ -195,6 +268,24 @@ class TestSearxngTools:
         mock_client.search.assert_called_once()
         call_kwargs = mock_client.search.call_args.kwargs
         assert call_kwargs["max_results"] == 3
+
+    @patch("deerflow.community.searxng.tools._get_searxng_client")
+    async def test_web_search_tool_unparseable_max_results_uses_default(self, mock_get_client):
+        """A max_results the config cannot give as a number falls back to the default."""
+        mock_client = MagicMock()
+        mock_client.search = AsyncMock(return_value=[])
+        mock_get_client.return_value = mock_client
+
+        # ``max_results:`` left blank in config.yaml loads as None; a word is a
+        # typo an operator can just as easily make. Neither is a reason to stop
+        # searching -- every sibling provider falls back to the default.
+        for raw in (None, "many"):
+            with patch("deerflow.community.searxng.tools._get_tool_config", return_value={"max_results": raw}):
+                result = await tools.web_search_tool.ainvoke("test query")
+
+            assert "error" not in json.loads(result), f"max_results={raw!r} failed the whole call"
+            mock_client.search.assert_called_once_with("test query", max_results=5)
+            mock_client.search.reset_mock()
 
     @patch("deerflow.community.searxng.tools._get_searxng_client")
     async def test_web_search_tool_forwards_time_range(self, mock_get_client):

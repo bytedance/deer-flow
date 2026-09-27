@@ -19,6 +19,9 @@ const { mutateAsync } = rs.hoisted(() => ({
 rs.mock("@/core/agents", () => ({
   useUpdateAgent: () => ({ mutateAsync, isPending: false }),
 }));
+rs.mock("@/core/features", () => ({
+  useKnowledgeBaseEnabled: () => ({ scopeSelectionEnabled: false }),
+}));
 rs.mock("@/core/models/hooks", () => ({ useModels: () => ({ models: [] }) }));
 rs.mock("@/core/subagents", () => ({
   useSubagents: () => ({ subagents: [] }),

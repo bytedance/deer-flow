@@ -1,4 +1,5 @@
-"""Regression coverage for Buzz replay persistence at the channel boundary."""
+"""Regression coverage for Buzz replay persistence at the channel boundary, and
+for the ``_start_channel`` wiring that gives the guard its store path."""
 
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from app.channels import buzz_nostr, buzz_seen_events
 from app.channels.buzz import BuzzChannel
 from app.channels.buzz_seen_events import BuzzSeenEventStore
 from app.channels.message_bus import MessageBus
+from app.channels.service import ChannelService
 
 pytestmark = pytest.mark.asyncio
 
@@ -186,3 +188,42 @@ async def test_abandoned_relay_records_are_drained_by_retried_stop_or_restart(tm
         assert await restarted_view.aseen(_CHANNEL_ID, "restart-event")
     finally:
         await channel.stop()
+
+
+async def test_start_channel_resolves_seen_store_path_off_the_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every channel start wires the Buzz replay guard its default store path, and
+    # ``Paths.base_dir`` is a realpath call — so this resolution has to leave the
+    # loop. It is reachable per request: ``POST /api/channels/{name}/restart``
+    # restarts a running channel through ``restart_channel`` on the Gateway loop.
+    #
+    # The offline twin of this test (``test_service_wiring_injects_persistent_store_path``)
+    # replaces ``get_paths`` with a stub whose ``base_dir`` is a plain string, so
+    # it cannot see the syscall at all; here the real ``Paths`` object stays in
+    # place and is isolated through ``DEER_FLOW_HOME`` instead.
+    captured: dict[str, object] = {}
+
+    class StubChannel:
+        def __init__(self, bus, config):
+            captured.update(config)
+            self.is_running = True
+
+        async def start(self):
+            pass
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr("deerflow.reflection.resolve_class", lambda _path, base_class=None: StubChannel)
+
+    # Construction is IO-free by contract: ``start_channel_service`` builds the
+    # service in a worker thread because ``ChannelStore`` resolves its JSON file
+    # path there. The test mirrors that boundary so only ``_start_channel``'s own
+    # resolution is exercised on the loop.
+    service = await asyncio.to_thread(ChannelService, channels_config={})
+    started = await service._start_channel("buzz", {"relay_url": "wss://buzz.example.com", "private_key": "unused-by-this-test"})
+
+    # ``_start_channel`` keeps a blanket ``except Exception`` around the whole
+    # wiring, so a regression onto the loop arrives here as a failed start plus a
+    # logged ``BlockingError: Blocking call to os.path.abspath`` (see the captured
+    # log of the red run) rather than as a raised gate error.
+    assert started is True
+    assert captured["seen_event_store_path"] == str(tmp_path / "channels" / "buzz_seen_events.json")

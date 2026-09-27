@@ -5,10 +5,39 @@ from langchain_openai.chat_models.base import BaseChatOpenAI
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.models.reasoning import ReasoningContract, ReasoningPolicyError, resolve_reasoning_contract, resolve_reasoning_request
 from deerflow.reflection import resolve_class
 from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
+
+# ``ModelConfig`` fields that describe the profile rather than configure the
+# provider client. They are stripped before the constructor sees the profile.
+_MODEL_METADATA_FIELDS: frozenset[str] = frozenset(
+    {
+        "use",
+        "name",
+        "display_name",
+        "description",
+        "supports_thinking",
+        "supports_reasoning_effort",
+        # Declarative reasoning contract (issue #5073); consumed by the
+        # normalization layer, never a provider kwarg.
+        "reasoning",
+        "when_thinking_enabled",
+        "when_thinking_disabled",
+        "thinking",
+        "supports_vision",
+        # Runtime/UI metadata used to size the context indicator. Provider
+        # clients do not accept this as a model-constructor argument.
+        "context_window",
+        # Presentation-only metadata (consumed by the console's cost
+        # display) — must never reach the provider client, which would
+        # forward unknown kwargs into the completion request payload.
+        "pricing",
+        "request_admission",
+    }
+)
 
 
 def _deep_merge_dicts(base: dict | None, override: dict) -> dict:
@@ -30,6 +59,167 @@ def _vllm_disable_chat_template_kwargs(chat_template_kwargs: dict) -> dict:
     if "enable_thinking" in chat_template_kwargs:
         disable_kwargs["enable_thinking"] = False
     return disable_kwargs
+
+
+def _merge_settings(settings: dict, payload: dict) -> None:
+    """Deep-merge *payload* into the constructor settings in place.
+
+    Nested dicts (``extra_body``, ``thinking``, ``chat_template_kwargs``) merge
+    recursively so a synthesized thinking block never clobbers unrelated keys an
+    operator put beside it (e.g. GLM's ``extra_body.tool_stream``).
+    """
+    for key, value in payload.items():
+        if isinstance(value, dict) and isinstance(settings.get(key), dict):
+            settings[key] = _deep_merge_dicts(settings[key], value)
+        else:
+            settings[key] = value
+
+
+def _set_dotted_setting(settings: dict, path: str, value: object) -> None:
+    """Write *value* at a dotted *path* (``reasoning_effort`` or ``extra_body.thinking.effort``)."""
+    head, _, rest = path.partition(".")
+    if not rest:
+        settings[head] = value
+        return
+    nested: dict = {}
+    cursor = nested
+    parts = rest.split(".")
+    for part in parts[:-1]:
+        cursor[part] = {}
+        cursor = cursor[part]
+    cursor[parts[-1]] = value
+    _merge_settings(settings, {head: nested})
+
+
+def _infer_dialect(effective_wte: dict) -> str:
+    """Infer the thinking payload dialect from a ``when_thinking_enabled`` template.
+
+    Mirrors the historical disable-path heuristics so ``dialect: auto`` behaves
+    like the legacy factory did for the same template shape.
+    """
+    extra_body = effective_wte.get("extra_body") or {}
+    thinking = extra_body.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type"):
+        return "openai_extra_body"
+    chat_template_kwargs = extra_body.get("chat_template_kwargs") or {}
+    if isinstance(chat_template_kwargs, dict) and ("thinking" in chat_template_kwargs or "enable_thinking" in chat_template_kwargs):
+        return "vllm_chat_template"
+    native_thinking = effective_wte.get("thinking")
+    if isinstance(native_thinking, dict) and native_thinking.get("type"):
+        return "anthropic"
+    if "reasoning" in effective_wte:
+        return "ollama"
+    return "none"
+
+
+def _vllm_toggle_chat_template_kwargs(chat_template_kwargs: dict, *, enabled: bool) -> dict:
+    """Mirror whichever vLLM/Qwen switch the template declares; default to ``enable_thinking``."""
+    toggled = {key: enabled for key in ("thinking", "enable_thinking") if key in chat_template_kwargs}
+    return toggled or {"enable_thinking": enabled}
+
+
+def _dialect_payload(dialect: str, *, enabled: bool, chat_template_kwargs: dict | None = None) -> dict:
+    """Constructor settings that switch thinking on or off for one payload dialect."""
+    if dialect == "openai_extra_body":
+        return {"extra_body": {"thinking": {"type": "enabled" if enabled else "disabled"}}}
+    if dialect == "anthropic":
+        return {"thinking": {"type": "enabled" if enabled else "disabled"}}
+    if dialect == "vllm_chat_template":
+        return {"extra_body": {"chat_template_kwargs": _vllm_toggle_chat_template_kwargs(chat_template_kwargs or {}, enabled=enabled)}}
+    if dialect == "ollama":
+        return {"reasoning": enabled}
+    return {}
+
+
+def _apply_legacy_thinking_settings(
+    settings: dict,
+    model_config,
+    *,
+    thinking_enabled: bool,
+    has_thinking_settings: bool,
+    effective_wte: dict,
+    requested_reasoning_effort: str | None,
+    is_codex_model: bool,
+) -> None:
+    """Historical thinking/effort payload path for profiles without a ``reasoning:`` contract.
+
+    Kept byte-for-byte so existing configurations retain their behavior (issue
+    #5073 acceptance criterion), including the synthesized ``reasoning_effort=minimal``
+    on the OpenAI-compatible disable path that the contract path drops.
+    """
+    if requested_reasoning_effort is not None and not is_codex_model:
+        settings["reasoning_effort"] = requested_reasoning_effort
+    if thinking_enabled and has_thinking_settings and effective_wte:
+        settings.update(effective_wte)
+    if not thinking_enabled:
+        if model_config.when_thinking_disabled is not None:
+            # User-provided disable settings take full precedence
+            settings.update(model_config.when_thinking_disabled)
+        elif has_thinking_settings and effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
+            # OpenAI-compatible gateway: thinking is nested under extra_body
+            settings["extra_body"] = _deep_merge_dicts(
+                settings.get("extra_body"),
+                {"thinking": {"type": "disabled"}},
+            )
+            settings["reasoning_effort"] = "minimal"
+        elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
+            # vLLM uses chat template kwargs to switch thinking on/off.
+            settings["extra_body"] = _deep_merge_dicts(
+                settings.get("extra_body"),
+                {"chat_template_kwargs": disable_chat_template_kwargs},
+            )
+        elif has_thinking_settings and effective_wte.get("thinking", {}).get("type"):
+            # Native langchain_anthropic: thinking is a direct constructor parameter
+            settings["thinking"] = {"type": "disabled"}
+
+
+def _apply_contract_thinking_settings(
+    settings: dict,
+    contract: ReasoningContract,
+    model_config,
+    *,
+    thinking_enabled: bool,
+    effective_wte: dict,
+    requested_reasoning_effort: str | None,
+    codex_handles_generic_effort: bool,
+) -> None:
+    """Thinking/effort payload path for profiles that declare a ``reasoning:`` contract.
+
+    ``thinking_enabled`` and ``requested_reasoning_effort`` are the *resolved*
+    values from :func:`resolve_reasoning_request`, so a required-thinking model
+    never enters the disable branch and the effort value is already one the
+    provider accepts.
+
+    * Enabled: the dialect's enable payload deep-merged under the operator's
+      ``when_thinking_enabled`` / ``thinking`` template (template wins), plus
+      ``clear_thinking`` when the contract states a history requirement and the
+      dialect nests thinking under ``extra_body``.
+    * Disabled: ``when_thinking_disabled`` when present, else the dialect's
+      disable payload. No effort value is ever synthesized here.
+    * Effort: written last at ``effort.path`` so a validated request wins over
+      a template value; ``None`` leaves any profile/template value in place. A
+      model without an effort contract never forwards ``reasoning_effort``.
+    """
+    dialect = contract.dialect if contract.dialect != "auto" else _infer_dialect(effective_wte)
+    # Both directions mirror whichever vLLM switch the template declares, so a
+    # template using the older ``thinking`` key never also grows ``enable_thinking``.
+    chat_template_kwargs = (effective_wte.get("extra_body") or {}).get("chat_template_kwargs") or {}
+    if thinking_enabled:
+        payload = _deep_merge_dicts(_dialect_payload(dialect, enabled=True, chat_template_kwargs=chat_template_kwargs), effective_wte)
+        if contract.history is not None and dialect == "openai_extra_body":
+            payload = _deep_merge_dicts(payload, {"extra_body": {"thinking": {"clear_thinking": contract.history == "clear"}}})
+        _merge_settings(settings, payload)
+    elif model_config.when_thinking_disabled is not None:
+        _merge_settings(settings, model_config.when_thinking_disabled)
+    else:
+        _merge_settings(settings, _dialect_payload(dialect, enabled=False, chat_template_kwargs=chat_template_kwargs))
+    if contract.effort is None or contract.effort.path != "reasoning_effort":
+        # A custom path is the only effort wire format for this contract.
+        # Drop a generic key supplied by model_overrides as well as stale
+        # settings on a ModelConfig mutated after load-time validation.
+        settings.pop("reasoning_effort", None)
+    if contract.effort is not None and requested_reasoning_effort is not None and not codex_handles_generic_effort:
+        _set_dotted_setting(settings, contract.effort.path, requested_reasoning_effort)
 
 
 def _declares_api_base(model_class: type) -> bool:
@@ -206,29 +396,14 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if model_config is None:
         raise ValueError(f"Model {name} not found in config") from None
     model_class = resolve_class(model_config.use, BaseChatModel)
-    model_settings_from_config = model_config.model_dump(
-        exclude_none=True,
-        exclude={
-            "use",
-            "name",
-            "display_name",
-            "description",
-            "supports_thinking",
-            "supports_reasoning_effort",
-            "when_thinking_enabled",
-            "when_thinking_disabled",
-            "thinking",
-            "supports_vision",
-            # Runtime/UI metadata used to size the context indicator. Provider
-            # clients do not accept this as a model-constructor argument.
-            "context_window",
-            # Presentation-only metadata (consumed by the console's cost
-            # display) — must never reach the provider client, which would
-            # forward unknown kwargs into the completion request payload.
-            "pricing",
-            "request_admission",
-        },
-    )
+    model_settings_from_config = model_config.model_dump(exclude_none=True, exclude=set(_MODEL_METADATA_FIELDS))
+    if isinstance(model_config.reasoning, bool | str):
+        # Before the capability contract, ``reasoning`` was an unrestricted
+        # provider kwarg. ChatOllama uses the boolean form and, for gpt-oss
+        # style models, the ``low|medium|high`` level string; keep forwarding
+        # both on the legacy path even though contract metadata is excluded
+        # above.
+        model_settings_from_config["reasoning"] = model_config.reasoning
     # Layer per-caller sampling overrides (e.g. a custom agent's temperature /
     # max_tokens) on top of the profile. Ignore None so an unset override never
     # clobbers a configured profile value. Applied here — before the thinking
@@ -246,8 +421,6 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
 
     is_codex_model = issubclass(model_class, CodexChatModel)
     requested_reasoning_effort = kwargs.pop("reasoning_effort", None)
-    if requested_reasoning_effort is not None and not is_codex_model:
-        model_settings_from_config["reasoning_effort"] = requested_reasoning_effort
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.
     # The `thinking` shortcut is equivalent to setting when_thinking_enabled["thinking"].
     has_thinking_settings = (model_config.when_thinking_enabled is not None) or (model_config.thinking is not None)
@@ -255,34 +428,50 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if model_config.thinking is not None:
         merged_thinking = {**(effective_wte.get("thinking") or {}), **model_config.thinking}
         effective_wte = {**effective_wte, "thinking": merged_thinking}
-    if thinking_enabled and has_thinking_settings:
-        if not model_config.supports_thinking:
-            raise ValueError(f"Model {name} does not support thinking. Set `supports_thinking` to true in the `config.yaml` to enable thinking.") from None
-        if effective_wte:
-            model_settings_from_config.update(effective_wte)
-    if not thinking_enabled:
-        if model_config.when_thinking_disabled is not None:
-            # User-provided disable settings take full precedence
-            model_settings_from_config.update(model_config.when_thinking_disabled)
-        elif has_thinking_settings and effective_wte.get("extra_body", {}).get("thinking", {}).get("type"):
-            # OpenAI-compatible gateway: thinking is nested under extra_body
-            model_settings_from_config["extra_body"] = _deep_merge_dicts(
-                model_settings_from_config.get("extra_body"),
-                {"thinking": {"type": "disabled"}},
-            )
-            model_settings_from_config["reasoning_effort"] = "minimal"
-        elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
-            # vLLM uses chat template kwargs to switch thinking on/off.
-            model_settings_from_config["extra_body"] = _deep_merge_dicts(
-                model_settings_from_config.get("extra_body"),
-                {"chat_template_kwargs": disable_chat_template_kwargs},
-            )
-        elif has_thinking_settings and effective_wte.get("thinking", {}).get("type"):
-            # Native langchain_anthropic: thinking is a direct constructor parameter
-            model_settings_from_config["thinking"] = {"type": "disabled"}
-    if not model_config.supports_reasoning_effort:
-        requested_reasoning_effort = None
-        model_settings_from_config.pop("reasoning_effort", None)
+
+    # One normalized reasoning policy for every caller (issue #5073): the lead
+    # agent, subagents, summarization, title generation and one-shot utilities
+    # all land here, so required thinking, unsupported thinking and restricted
+    # effort vocabularies are enforced in exactly one place.
+    contract = resolve_reasoning_contract(model_config)
+    # Codex's legacy/default-path adapter writes the generic constructor key.
+    # A declared custom path takes precedence even for a Codex subclass.
+    codex_handles_generic_effort = is_codex_model and (contract.source == "legacy" or contract.effort is None or contract.effort.path == "reasoning_effort")
+    if contract.source == "legacy" and thinking_enabled and has_thinking_settings and not contract.supports_thinking:
+        raise ValueError(f"Model {name} does not support thinking. Set `supports_thinking` to true in the `config.yaml` to enable thinking.") from None
+    try:
+        resolved_reasoning = resolve_reasoning_request(contract, thinking_enabled=thinking_enabled, reasoning_effort=requested_reasoning_effort)
+    except ReasoningPolicyError as exc:
+        raise ValueError(f"Model {name}: {exc}") from exc
+    if resolved_reasoning.adjustments:
+        logger.info("Model '%s': reasoning request adjusted by its capability contract (%s)", name, ", ".join(resolved_reasoning.adjustments))
+    requested_reasoning_effort = resolved_reasoning.reasoning_effort
+    if contract.source == "legacy":
+        # Profiles without a ``reasoning:`` block keep the historical payload
+        # path byte-for-byte, driven by the caller's raw thinking flag.
+        _apply_legacy_thinking_settings(
+            model_settings_from_config,
+            model_config,
+            thinking_enabled=thinking_enabled,
+            has_thinking_settings=has_thinking_settings,
+            effective_wte=effective_wte,
+            requested_reasoning_effort=requested_reasoning_effort,
+            is_codex_model=is_codex_model,
+        )
+        if not contract.supports_reasoning_effort:
+            requested_reasoning_effort = None
+            model_settings_from_config.pop("reasoning_effort", None)
+    else:
+        thinking_enabled = resolved_reasoning.thinking_enabled
+        _apply_contract_thinking_settings(
+            model_settings_from_config,
+            contract,
+            model_config,
+            thinking_enabled=thinking_enabled,
+            effective_wte=effective_wte,
+            requested_reasoning_effort=requested_reasoning_effort,
+            codex_handles_generic_effort=codex_handles_generic_effort,
+        )
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
     # heuristics (stream_usage default below / stream_chunk_timeout) see the canonical endpoint key.
@@ -294,13 +483,14 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         # The ChatGPT Codex endpoint currently rejects max_tokens/max_output_tokens.
         model_settings_from_config.pop("max_tokens", None)
 
-        # Use explicit reasoning_effort from frontend if provided (low/medium/high)
-        if not thinking_enabled:
-            model_settings_from_config["reasoning_effort"] = "none"
-        elif requested_reasoning_effort in ("low", "medium", "high", "xhigh"):
-            model_settings_from_config["reasoning_effort"] = requested_reasoning_effort
-        elif "reasoning_effort" not in model_settings_from_config:
-            model_settings_from_config["reasoning_effort"] = "medium"
+        if codex_handles_generic_effort:
+            # Use explicit reasoning_effort from frontend if provided (low/medium/high)
+            if not thinking_enabled:
+                model_settings_from_config["reasoning_effort"] = "none"
+            elif requested_reasoning_effort in ("low", "medium", "high", "xhigh"):
+                model_settings_from_config["reasoning_effort"] = requested_reasoning_effort
+            elif "reasoning_effort" not in model_settings_from_config:
+                model_settings_from_config["reasoning_effort"] = "medium"
 
     # For MindIE models: enforce conservative retry defaults.
     # Timeout normalization is handled inside MindIEChatModel itself.

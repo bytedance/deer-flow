@@ -348,9 +348,16 @@ class ScheduledTaskRepository:
         expected_lease_owner: str | None,
         status: str,
     ) -> bool:
-        """Release the short due-task claim after its occurrence is queued."""
+        """Release the short due-task claim after its occurrence is queued.
+
+        The lease-owner guard is only as fresh as the row it reads, so the
+        read takes the writer first (``_lock_task``): on SQLite a plain
+        ``SELECT`` sees a pre-pause snapshot, and the unconditional
+        ``row.status = status`` below would then write the caller's
+        ``"enabled"`` over a pause that had already committed.
+        """
         async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+            row = await self._lock_task(session, task_id)
             if row is None:
                 return False
             if expected_lease_owner is not None and row.lease_owner != expected_lease_owner:

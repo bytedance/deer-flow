@@ -14,6 +14,20 @@ The summarization feature uses LangChain's `SummarizationMiddleware` to monitor 
 4. Maintains AI/Tool message pairs together for context continuity
 5. Stores the summary in `ThreadState.summary_text` and projects it ephemerally through durable context data
 
+## Todo reminders
+
+Compaction filters `HumanMessage(name="todo_reminder")` snapshots after the
+trigger check and before selecting the retained tail. They enter neither summary
+generation/pre-compaction hooks nor retained messages, while `state["todos"]`
+remains unchanged. Only a successful compaction commits the removal; no-op and
+failure paths keep the original state. The following `TodoMiddleware.before_model`
+rebuilds one reminder from current todos when no `write_todos` call is still
+visible; empty todos need no reminder. Both automatic and manual compaction use
+this shared preparation path. Coverage: `tests/test_todo_compaction.py`.
+`todo_middleware.py::TODO_REMINDER_MESSAGE_NAME` owns the backend message name;
+the producer, presence check, and compaction filter share it. Its value remains
+`todo_reminder` for compatibility with the frontend's hidden-message filtering.
+
 ## Configuration
 
 Summarization is configured in `config.yaml` under the `summarization` key:

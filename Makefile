@@ -99,7 +99,7 @@ install:
 	@cd frontend && $(FRONTEND_PNPM) install
 	@echo "Installing pre-commit hooks..."
 	@uv tool install pre-commit
-	@pre-commit install --overwrite
+	@uv tool run pre-commit install --overwrite
 	@echo "✓ All dependencies installed"
 	@echo ""
 	@echo "=========================================="

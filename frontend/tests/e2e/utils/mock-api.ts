@@ -305,6 +305,7 @@ function runStreamThreadId(route: Route) {
  * for a real backend.
  */
 export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
+  void page.route("**/api/plugins", (route) => route.fulfill({ json: [] }));
   let threads = [...(options?.threads ?? [])];
   const projectsList = (options?.projects ?? []).map((project) => ({
     instructions: "",

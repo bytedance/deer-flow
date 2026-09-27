@@ -264,7 +264,7 @@ export function MessageListItem({
                   disabled={isEditPending || isSubmittingEdit}
                   onClick={startEditing}
                 >
-                  <PencilIcon className="size-3" />
+                  <PencilIcon className="size-4" />
                 </Button>
               </Tooltip>
             )}

@@ -57,6 +57,7 @@ export function WorkspaceChannelsList() {
   const { enabled, providers, isLoading, error } = useChannelProviders();
   const connectMutation = useConnectChannelProvider();
   const configureMutation = useConfigureChannelProvider();
+  const [setupStep, setSetupStep] = useState<"setup" | "binding">("setup");
   const [setupProvider, setSetupProvider] = useState<ChannelProvider | null>(
     null,
   );
@@ -66,6 +67,12 @@ export function WorkspaceChannelsList() {
     provider: ChannelProvider,
     preparedWindow?: Window | null,
   ) => {
+    if (provider.provider === "wechat") {
+      closeConnectWindow(preparedWindow ?? null);
+      setSetupStep(provider.configured ? "binding" : "setup");
+      setSetupProvider(provider);
+      return;
+    }
     const connectWindow =
       preparedWindow !== undefined
         ? preparedWindow
@@ -153,6 +160,7 @@ export function WorkspaceChannelsList() {
                       providerNeedsRuntimeConfig(provider) ||
                       (isConnected && canEditRuntimeConfig)
                     ) {
+                      setSetupStep("setup");
                       setSetupProvider(provider);
                       return;
                     }
@@ -180,7 +188,11 @@ export function WorkspaceChannelsList() {
         })}
       </SidebarMenu>
       <ChannelRuntimeConfigDialog
+        onConfigured={() => {
+          setSetupProvider(null);
+        }}
         provider={setupProvider}
+        initialStep={setupStep}
         open={setupProvider !== null}
         submitting={configureMutation.isPending}
         onOpenChange={(open) => {
@@ -191,9 +203,10 @@ export function WorkspaceChannelsList() {
         onSubmit={(provider, values) => {
           const connectWindow =
             provider.auth_mode === "deep_link" ? prepareConnectWindow() : null;
-          void configureMutation
+          return configureMutation
             .mutateAsync({ provider: provider.provider, values })
             .then((updated) => {
+              if (updated.provider === "wechat") return updated;
               setSetupProvider(null);
               if (providerCanConnect(updated)) {
                 startConnect(updated, connectWindow);

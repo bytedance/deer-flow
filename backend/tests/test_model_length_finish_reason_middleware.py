@@ -150,7 +150,8 @@ def test_finish_reason_length_drops_potentially_truncated_tool_calls():
     replacement = result["messages"][0]
     assert replacement.tool_calls == []
     assert replacement.invalid_tool_calls == []
-    assert replacement.content == [{"type": "text", "text": "partial answer"}]
+    assert replacement.content[0] == {"type": "text", "text": "partial answer"}
+    assert "output limit" in replacement.content[-1]["text"]
     assert "tool_calls" not in replacement.additional_kwargs
     assert replacement.additional_kwargs["model_length_termination"]["suppressed_tool_call_count"] == 1
     assert replacement.additional_kwargs["model_length_termination"]["suppressed_tool_call_names"] == ["write_file"]
@@ -218,6 +219,34 @@ def test_anthropic_thinking_is_preserved_when_native_tool_use_is_removed():
     assert all(block.get("type") != "tool_use" for block in content)
     assert content[-1]["type"] == "text"
     assert "output limit" in content[-1]["text"]
+
+
+def test_suppressed_tool_call_with_string_fragment_appends_notice():
+    """Reproduces the incident: string content fragment + suppressed tool call
+    at length cap -> notice is appended alongside the fragment."""
+    mw = ModelLengthFinishReasonMiddleware()
+    runtime = _runtime()
+    msg = AIMessage(
+        content="nit",
+        tool_calls=[
+            {
+                "name": "write_file",
+                "id": "call_truncated",
+                "args": {"path": "/mnt/user-data/outputs/report.md", "content": "# Deep Research\n| ext4 | jbd2 | Every 5s |"},
+            }
+        ],
+        response_metadata={"finish_reason": "length", "model_name": "deepseek-v4-pro"},
+    )
+
+    result = mw._apply({"messages": [msg]}, runtime)
+
+    assert result is not None
+    replacement = result["messages"][0]
+    assert replacement.tool_calls == []
+    assert "output limit" in replacement.content
+    assert "nit" in replacement.content
+    assert replacement.additional_kwargs["model_length_termination"]["suppressed_tool_call_names"] == ["write_file"]
+    assert runtime.context["stop_reason"] == MODEL_LENGTH_CAPPED_STOP_REASON
 
 
 def test_finish_reason_length_suppresses_complete_tool_call_as_safety_policy():

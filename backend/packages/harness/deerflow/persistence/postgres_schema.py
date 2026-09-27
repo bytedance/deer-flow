@@ -7,9 +7,9 @@ uses expect different mechanisms:
 - **asyncpg** (app ORM engine): only honours ``server_settings`` passed
   via SQLAlchemy ``connect_args``. It does not understand libpq's
   ``options=-c ...`` syntax.
-- **psycopg** (LangGraph checkpointer/store): uses the libpq
-  ``options=-c search_path=...`` connection parameter, either as a pool
-  kwarg or encoded into the DSN query string.
+- **psycopg** (LangGraph checkpointer/store and synchronous agent stores): uses
+  the libpq ``options=-c search_path=...`` connection parameter, either as a
+  pool kwarg or encoded into the DSN query string.
 
 Schema names are validated upstream by
 :class:`deerflow.config.database_config.DatabaseConfig` to be plain
@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import re
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+
+from deerflow.utils.file_io import await_drained
 
 
 def build_asyncpg_connect_args(schema: str) -> dict:
@@ -254,4 +256,4 @@ async def ensure_postgres_schema_async(conn_string: str, schema: str, *, install
     try:
         await conn.execute(statement)
     finally:
-        await conn.close()
+        await await_drained(conn.close())
