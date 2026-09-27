@@ -10,6 +10,7 @@ import {
 
 import { ModelSettingsPage } from "@/components/workspace/settings/model-settings-page";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { fetchImageGenerationManagementEnabled } from "@/core/features/api";
 import { enUS } from "@/core/i18n/locales/en-US";
 import type * as Management from "@/core/models/management";
 import {
@@ -19,8 +20,16 @@ import {
   testManagedModel,
   type ManagedModel,
 } from "@/core/models/management";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 rs.mock("@/core/auth/AuthProvider", () => ({ useAuth: rs.fn() }));
+rs.mock("@/core/features/api", () => ({
+  fetchImageGenerationManagementEnabled: rs.fn(),
+}));
+rs.mock("@/core/static-mode", () => ({ isStaticWebsiteOnly: rs.fn() }));
+rs.mock("@/components/workspace/settings/image-model-settings", () => ({
+  ImageModelSettings: () => <div data-testid="image-model-settings" />,
+}));
 rs.mock("@/core/i18n/hooks", () => ({ useI18n: () => ({ t: enUS }) }));
 rs.mock("@/core/models/management", () => ({
   ...rs.requireActual<typeof Management>("@/core/models/management"),
@@ -46,6 +55,8 @@ const auth = (role: "admin" | "user") =>
 
 beforeEach(() => {
   rs.mocked(useAuth).mockReturnValue(auth("admin"));
+  rs.mocked(isStaticWebsiteOnly).mockReturnValue(false);
+  rs.mocked(fetchImageGenerationManagementEnabled).mockResolvedValue(true);
   rs.mocked(loadManagedModels).mockResolvedValue({ models: [existing] });
   rs.mocked(saveManagedModel).mockResolvedValue({
     ...existing,
@@ -75,6 +86,28 @@ test("non-admin cannot load credentials configuration or add models", () => {
   mount();
   expect(screen.queryByRole("button", { name: "Add model" })).toBeNull();
   expect(loadManagedModels).not.toHaveBeenCalled();
+  expect(fetchImageGenerationManagementEnabled).not.toHaveBeenCalled();
+});
+
+test("hides image settings when deployment disables web-managed image profiles", async () => {
+  rs.mocked(fetchImageGenerationManagementEnabled).mockResolvedValue(false);
+  mount();
+  await waitFor(() =>
+    expect(fetchImageGenerationManagementEnabled).toHaveBeenCalledTimes(1),
+  );
+  expect(screen.queryByTestId("image-model-settings")).toBeNull();
+});
+
+test("shows image settings when the deployment enables them", async () => {
+  mount();
+  expect(await screen.findByTestId("image-model-settings")).toBeTruthy();
+});
+
+test("static website skips image management discovery and settings", () => {
+  rs.mocked(isStaticWebsiteOnly).mockReturnValue(true);
+  mount();
+  expect(fetchImageGenerationManagementEnabled).not.toHaveBeenCalled();
+  expect(screen.queryByTestId("image-model-settings")).toBeNull();
 });
 
 test("editing preserves saved key and refreshes chat catalog after saving", async () => {

@@ -13,6 +13,11 @@ Top-level `image_generation` is a typed, single operator-owned profile; it
 reuses the managed profile's provider/model/URL/key validation. Legacy image
 variables in `sandbox.environment` remain a fallback, but the two YAML forms
 cannot coexist. Both server forms share the image resolver and admin probe API.
+`DEER_FLOW_MANAGED_IMAGE_PROFILES_ENABLED=false` disables catalog reads and
+writes, saved web defaults, and per-run web choices; the resolver still accepts
+the server image profile. Gateway startup uses the same switch to omit the
+image management router and reports it through `/api/features`. Restart the
+local Gateway or recreate its Docker container after changing the switch.
 Server probe results are stored by credential-bound fingerprint in an encrypted
 catalog; a model, URL, or key change invalidates displayed readiness. Managed
 image profiles use `image_generation.py` and the same encrypted JSON

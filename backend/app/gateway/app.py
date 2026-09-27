@@ -1190,8 +1190,11 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Include routers
     # Models API is mounted at /api/models
     from app.gateway.routers import image_generation, managed_models
+    from deerflow.config.image_generation import managed_image_profiles_enabled
 
-    app.include_router(image_generation.router)
+    app.state.image_generation_management_enabled = managed_image_profiles_enabled()
+    if app.state.image_generation_management_enabled:
+        app.include_router(image_generation.router)
     app.include_router(managed_models.router)
     app.include_router(models.router)
 
