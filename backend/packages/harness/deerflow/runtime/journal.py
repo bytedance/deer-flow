@@ -308,26 +308,31 @@ async def _await_owned_task[T](task: asyncio.Task[T]) -> T:
     the write or drain it owns has to reach a terminal outcome before the
     cancellation is re-raised. Only a ``CancelledError`` actually delivered
     here makes this wait treat the caller as cancelled — a request handled at
-    an earlier checkpoint is not new. A received cancellation is either
-    propagated, leaving the caller's count untouched, or — when a definite
-    child failure replaces it — suppressed together with the other requests
-    made while joining, so the count returns to what it was on entry.
+    an earlier checkpoint is not new, and a request queued before entry but
+    delivered by the first checkpoint belongs to this join. A received
+    cancellation is either propagated, leaving the caller's count untouched, or
+    — when a definite child failure replaces it — balanced by uncancelling
+    exactly the requests this join consumed, so an older handled count survives.
     """
     current = asyncio.current_task()
-    cancellations_on_entry = current.cancelling() if current is not None else 0
-    cancellation_received = False
+    # Count the cancellations this join actually consumes. A request that was
+    # already delivered and handled before entry is not re-delivered, so it is
+    # never counted here and never cleared; a request queued before entry that
+    # this join's first checkpoint delivers is counted, so a definite child
+    # failure can balance exactly what the join replaced.
+    delivered_cancellations = 0
     try:
         # Also observes a cancellation requested before this call.
         await asyncio.sleep(0)
     except asyncio.CancelledError:
-        cancellation_received = True
+        delivered_cancellations += 1
     while not task.done():
         try:
             # Unlike ``gather``/``await task``, ``asyncio.wait`` does not cancel
             # the task it observes, so repeated cancellation cannot lose it.
             await asyncio.wait({task})
         except asyncio.CancelledError:
-            cancellation_received = True
+            delivered_cancellations += 1
     try:
         result = task.result()
     except asyncio.CancelledError:
@@ -335,14 +340,14 @@ async def _await_owned_task[T](task: asyncio.Task[T]) -> T:
         # absorb, so keep propagating it without touching the count.
         raise
     except BaseException:
-        # A definite child failure wins over the cancellation received here, so
-        # the requests made while joining are suppressed: uncancel exactly those,
-        # never the count that was already there when this call started.
+        # A definite child failure wins over the cancellations this join
+        # consumed, so balance exactly those -- never an older handled count and
+        # never a request this join did not deliver.
         if current is not None:
-            for _ in range(current.cancelling() - cancellations_on_entry):
+            for _ in range(delivered_cancellations):
                 current.uncancel()
         raise
-    if cancellation_received:
+    if delivered_cancellations:
         raise asyncio.CancelledError
     return result
 

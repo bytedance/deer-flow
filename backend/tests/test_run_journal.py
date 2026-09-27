@@ -4589,3 +4589,138 @@ def test_proven_noncommit_marker_is_opt_in_for_adapters():
                 continue
             source = inspect.getsource(owner.put_batch)
             assert "RunEventWriteNotCommittedError" not in source, f"{module_name}.{name}.put_batch must not claim proven non-commit"
+
+
+@pytest.mark.anyio
+async def test_owned_join_preentry_cancel_delivered_then_child_fails_balances_only_delivered_cancel():
+    """Only the cancellation this join consumed is balanced; older counts survive."""
+    import deerflow.runtime.journal as journal_module
+
+    child_started = asyncio.Event()
+    fail_child = asyncio.Event()
+
+    async def child() -> None:
+        child_started.set()
+        await fail_child.wait()
+        raise RuntimeError("owned child failed")
+
+    task = asyncio.create_task(child())
+    observed: list[BaseException] = []
+    cancelling_after: list[int] = []
+
+    async def joiner() -> None:
+        current = asyncio.current_task()
+        assert current is not None
+        # One already-handled cancellation stays counted on entry.
+        current.cancel()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            pass
+        assert current.cancelling() == 1
+
+        # A second request queued just before the join is delivered at its
+        # initial checkpoint, so the join owns it.
+        current.cancel()
+        try:
+            await journal_module._await_owned_task(task)
+        except BaseException as error:  # noqa: BLE001 - the test observes the outcome
+            observed.append(error)
+        cancelling_after.append(current.cancelling())
+
+    joiner_task = asyncio.create_task(joiner())
+    await asyncio.wait_for(child_started.wait(), timeout=0.5)
+    await asyncio.sleep(0)
+    fail_child.set()
+    await asyncio.wait_for(joiner_task, timeout=2.0)
+
+    assert len(observed) == 1
+    assert isinstance(observed[0], RuntimeError)
+    assert str(observed[0]) == "owned child failed"
+    # Exactly the delivered request was consumed; the older handled count remains.
+    assert cancelling_after == [1]
+
+
+@pytest.mark.anyio
+async def test_owned_join_repeated_cancel_preserves_child_outcome():
+    """Repeated caller cancellation never cancels the owned child."""
+    import deerflow.runtime.journal as journal_module
+
+    child_started = asyncio.Event()
+    release_child = asyncio.Event()
+    child_cancelled = False
+
+    async def child() -> str:
+        nonlocal child_cancelled
+        child_started.set()
+        try:
+            await release_child.wait()
+        except asyncio.CancelledError:
+            child_cancelled = True
+            raise
+        return "done"
+
+    task = asyncio.create_task(child())
+    observed: list[BaseException] = []
+    results: list[str] = []
+    cancelling_after: list[int] = []
+
+    async def joiner() -> None:
+        current = asyncio.current_task()
+        try:
+            results.append(await journal_module._await_owned_task(task))
+        except BaseException as error:  # noqa: BLE001 - the test observes the outcome
+            observed.append(error)
+        cancelling_after.append(current.cancelling())
+
+    joiner_task = asyncio.create_task(joiner())
+    await asyncio.wait_for(child_started.wait(), timeout=0.5)
+    await asyncio.sleep(0)
+    joiner_task.cancel()
+    await asyncio.sleep(0)
+    joiner_task.cancel()
+    await asyncio.sleep(0)
+    assert not joiner_task.done()
+
+    release_child.set()
+    await asyncio.wait_for(joiner_task, timeout=2.0)
+
+    assert child_cancelled is False
+    assert task.result() == "done"
+    # Success is a fact even though the caller's cancellation still propagates.
+    assert results == []
+    assert len(observed) == 1
+    assert isinstance(observed[0], asyncio.CancelledError)
+    assert cancelling_after == [2]
+
+
+@pytest.mark.anyio
+async def test_owned_join_handled_old_cancel_count_is_untouched():
+    """An older handled cancellation is never cleared by a successful owned join."""
+    import deerflow.runtime.journal as journal_module
+
+    async def child() -> str:
+        return "done"
+
+    task = asyncio.create_task(child())
+    await asyncio.sleep(0)
+    results: list[str] = []
+    cancelling_after: list[int] = []
+
+    async def joiner() -> None:
+        current = asyncio.current_task()
+        assert current is not None
+        current.cancel()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            pass
+        assert current.cancelling() == 1
+
+        results.append(await journal_module._await_owned_task(task))
+        cancelling_after.append(current.cancelling())
+
+    await asyncio.wait_for(asyncio.create_task(joiner()), timeout=2.0)
+
+    assert results == ["done"]
+    assert cancelling_after == [1]
