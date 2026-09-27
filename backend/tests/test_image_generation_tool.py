@@ -264,7 +264,8 @@ def test_managed_container_rejects_legacy_fallback_after_profile_is_disabled(mon
 
     monkeypatch.setattr(sandbox_tools, "_execute_bash_command", execute)
     args = (SimpleNamespace(context={}), "/mnt/user-data/workspace/prompt.json", "/mnt/user-data/outputs/slide.png")
-    assert image_tool.generate_image_tool.func(*args).startswith("Successfully generated")
+    with image_config.bind_image_generation_source("managed"):
+        assert image_tool.generate_image_tool.func(*args).startswith("Successfully generated")
     assert commands == [None]
 
     # The active sandbox is held across calls. Rebinding after the managed

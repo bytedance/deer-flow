@@ -26,11 +26,11 @@ catalog primitive as managed chat models. The image catalog lives at
 in SQL or `config.yaml`. The admin-selected default lives in the adjacent
 `default.json` and contains source/model identities but no credentials. Both
 files need backup. One profile may be enabled; its revision fences
-updates and capability test results. An enabled managed image profile takes
-priority over legacy `sandbox.environment` image variables unless the server
-model changes after the web profile is saved. That conflict requires a chat
-choice before image execution; the response is checked against the recorded
-card and current profile revision. A valid saved default selects either source
+updates and capability test results. When a usable server image model and an
+enabled usable web profile coexist without a valid saved default, image
+generation requires a chat choice regardless of configuration order. The
+response is checked against the recorded card and current profile revision.
+A valid saved default selects either source
 across runs; changes to either model or endpoint invalidate it and require a
 new chat choice. Disabled profiles do not shadow legacy variables. The
 `ImageConnectionStatus` enum is specific to image readiness: the existing IM

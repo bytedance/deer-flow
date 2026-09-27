@@ -152,7 +152,7 @@ test("shows which image profile is selected when server and web profiles coexist
   expect(screen.getByText("Not used for new image requests")).toBeTruthy();
 });
 
-test("shows an inline-chat choice when a new server image model conflicts", async () => {
+test("shows an inline-chat choice when server and web models coexist without a default", async () => {
   rs.mocked(loadImageProfiles).mockResolvedValue({
     profiles: [
       { ...profile, selected: false, conflict: true },

@@ -124,8 +124,8 @@ class ManagedImageGenerationProfile(ImageGenerationProfile):
     verified_edit: bool = False
     last_generation_result: str | None = None
     last_edit_result: str | None = None
-    # Server-owned snapshot when this web profile was saved. A new server
-    # model introduced later requires an explicit per-run choice.
+    # Historical server snapshot retained for existing encrypted catalogs;
+    # coexistence now requires an explicit choice regardless of save order.
     server_model_at_enable: str | None = None
 
     def public(self) -> dict:
@@ -464,13 +464,9 @@ def image_profile_choice_needed(raw_environment: dict[str, str]) -> bool:
         legacy = legacy_image_profile(raw_environment)
     except ValueError:
         legacy = None
-    if legacy is None or not legacy.usable() or not managed[0].usable() or (legacy.provider, legacy.model) == (managed[0].provider, managed[0].model):
+    if legacy is None or not legacy.usable() or not managed[0].usable():
         return False
-    if _saved_default_source(managed[0], legacy) is not None:
-        return False
-    if ImageGenerationDefaultStore().read() is not None:
-        return True
-    return managed[0].server_model_at_enable != f"{legacy.provider.value}:{legacy.model}"
+    return _saved_default_source(managed[0], legacy) is None
 
 
 def resolve_image_generation_profile(
