@@ -5,13 +5,17 @@ import base64
 import json
 import posixpath
 import uuid
+from typing import Literal
 
 from langchain.tools import tool
 
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.config.app_config import get_app_config
 from deerflow.config.image_generation import (
     ImageConfigurationError,
+    bind_image_generation_source,
     effective_image_generation_source,
+    image_generation_source_for_run,
     image_profile_choice_needed,
     image_profile_container_identity,
     legacy_image_storage_identity,
@@ -32,6 +36,13 @@ def _image_config_target() -> str:
         return "Settings > Models > Image models" if managed_image_profiles_enabled() else "config.yaml"
     except ImageConfigurationError:
         return "the Gateway deployment configuration"
+
+
+def _image_source_for_runtime(runtime: Runtime, environment: dict[str, str]) -> Literal["managed", "sandbox_environment"] | None:
+    context = getattr(runtime, "context", None)
+    context = context if isinstance(context, dict) else {}
+    allows_clarification = resolve_run_interaction_policy({"context": context}).allows_clarification and not context.get("is_subagent")
+    return image_generation_source_for_run(environment, allows_clarification=allows_clarification)
 
 
 def _mask_image_secrets(output: str, env: dict[str, str]) -> str:
@@ -74,19 +85,21 @@ def _python_script_command(args: list[str], marker: str) -> str:
 
 
 @tool("check_image_generation", parse_docstring=True)
-def check_image_generation_tool() -> str:
+def check_image_generation_tool(runtime: Runtime) -> str:
     """Check whether an image provider is configured before planning image or PPT work."""
     try:
-        if selected_image_generation_source() is None and image_profile_choice_needed(get_app_config().image_generation_environment):
-            return "Two image models are configured. A generate_image call will ask the user to choose one in chat."
-        profile, source, managed = resolve_image_generation_profile(get_app_config().image_generation_environment)
-        if profile is None:
-            return f"Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in {_image_config_target()}."
-        if not profile.usable():
-            return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. The selected image model has no API key. Check {_image_config_target()}."
-        verified = bool(managed and managed.verified_generation and managed.verified_edit)
-        status = "verified for generation and editing" if verified else "configured; image generation and editing have not both been verified"
-        return f"Image provider {profile.provider.value}/{profile.model} from {source}: {status}."
+        environment = get_app_config().image_generation_environment
+        with bind_image_generation_source(_image_source_for_runtime(runtime, environment)):
+            if selected_image_generation_source() is None and image_profile_choice_needed(environment):
+                return "Two image models are configured. A generate_image call will ask the user to choose one in chat."
+            profile, source, managed = resolve_image_generation_profile(environment)
+            if profile is None:
+                return f"Error: IMAGE_PROVIDER_NOT_CONFIGURED. Configure an image model in {_image_config_target()}."
+            if not profile.usable():
+                return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. The selected image model has no API key. Check {_image_config_target()}."
+            verified = bool(managed and managed.verified_generation and managed.verified_edit)
+            status = "verified for generation and editing" if verified else "configured; image generation and editing have not both been verified"
+            return f"Image provider {profile.provider.value}/{profile.model} from {source}: {status}."
     except (ImageConfigurationError, ValueError, OSError):
         return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. Check {_image_config_target()}."
 
@@ -110,6 +123,16 @@ def generate_image_tool(
         reference_images: Earlier image paths under /mnt/user-data/.
         aspect_ratio: Requested image aspect ratio, such as 16:9 or 1:1.
     """
+    try:
+        environment = get_app_config().image_generation_environment
+        source = _image_source_for_runtime(runtime, environment)
+    except (ImageConfigurationError, ValueError, OSError):
+        return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. Check {_image_config_target()}."
+    with bind_image_generation_source(source):
+        return _generate_image_with_selected_source(runtime, prompt_file, output_file, reference_images, aspect_ratio)
+
+
+def _generate_image_with_selected_source(runtime: Runtime, prompt_file: str, output_file: str, reference_images: list[str] | None, aspect_ratio: str) -> str:
     from deerflow.sandbox.tools import (
         _execute_bash_command,
         _resolve_and_validate_user_data_path,
@@ -213,6 +236,12 @@ def generate_image_tool(
 async def _generate_image_async(runtime: Runtime, prompt_file: str, output_file: str, reference_images: list[str] | None = None, aspect_ratio: str = "16:9") -> str:
     from deerflow.sandbox.tools import _run_sync_tool_after_async_sandbox_init
 
+    try:
+        environment = get_app_config().image_generation_environment
+        source = _image_source_for_runtime(runtime, environment)
+    except (ImageConfigurationError, ValueError, OSError):
+        return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. Check {_image_config_target()}."
+
     # Return before the helper acquires a sandbox when configuration is absent.
     def preflight() -> str | None:
         try:
@@ -227,12 +256,13 @@ async def _generate_image_async(runtime: Runtime, prompt_file: str, output_file:
             return f"Error: IMAGE_PROVIDER_INVALID_CONFIG. Check {_image_config_target()}."
         return None
 
-    if error := await asyncio.to_thread(preflight):
-        return error
+    with bind_image_generation_source(source):
+        if error := await asyncio.to_thread(preflight):
+            return error
 
-    # The shared helper uses the provider's async acquire path and runs the
-    # synchronous command on a worker thread after authorization.
-    return await _run_sync_tool_after_async_sandbox_init(generate_image_tool.func, runtime, prompt_file, output_file, reference_images, aspect_ratio)
+        # The shared helper uses the provider's async acquire path and runs the
+        # synchronous command on a worker thread after authorization.
+        return await _run_sync_tool_after_async_sandbox_init(generate_image_tool.func, runtime, prompt_file, output_file, reference_images, aspect_ratio)
 
 
 generate_image_tool.coroutine = _generate_image_async

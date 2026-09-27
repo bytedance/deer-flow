@@ -1184,8 +1184,13 @@ Settings can select the server or enabled web profile as the default for new
 chats and requests. When both are available and there is no valid saved default,
 the next generation request shows a choice card in the chat, regardless of
 which was configured first. A changed model or endpoint invalidates a saved
-choice. The chat choice applies to that run only. For a server-owned
-model, use the typed top-level `image_generation` block in `config.yaml`:
+choice. The chat choice applies to that run only. Scheduled runs, webhooks, and
+subagents cannot answer a chat choice. When both image sources are usable and
+no saved default applies, these runs use the server-configured model. A valid
+saved default still takes precedence. The source is selected before sandbox
+acquisition, and `check_image_generation` reports the model the run will use.
+For a server-owned model, use the typed top-level `image_generation` block in
+`config.yaml`:
 
 ```yaml
 image_generation:

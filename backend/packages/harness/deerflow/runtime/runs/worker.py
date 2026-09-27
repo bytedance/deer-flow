@@ -40,10 +40,11 @@ from langgraph.types import Overwrite
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
 from deerflow.agents.image_generation_choice import selected_image_source_from_reply
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
-from deerflow.config.image_generation import bind_image_generation_source, effective_image_generation_source
+from deerflow.config.image_generation import bind_image_generation_source, image_generation_source_for_run
 from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
 from deerflow.mcp_scope import (
@@ -1343,10 +1344,14 @@ async def run_agent(
                     image_config.image_generation_environment,
                 )
             if isinstance(image_config, AppConfig) and image_source is None:
-                image_source = await asyncio.to_thread(effective_image_generation_source, image_config.image_generation_environment)
+                image_source = await asyncio.to_thread(
+                    image_generation_source_for_run,
+                    image_config.image_generation_environment,
+                    allows_clarification=resolve_run_interaction_policy(config).allows_clarification,
+                )
         except (OSError, ValueError):
-            # An invalidated default or unavailable catalog cannot authorize a
-            # particular provider. The tool will require a fresh choice.
+            # An unavailable catalog cannot authorize a provider. The image
+            # tool reports the configuration error before sandbox acquisition.
             logger.warning("Run %s: image model choice could not be validated", run_id)
 
         # Capture the effective (resolved) model name from the agent's metadata.

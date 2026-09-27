@@ -147,6 +147,22 @@ def test_coexisting_server_and_web_require_explicit_image_choice_without_saved_d
     assert resolve_image_generation_profile(changed)[1] == "managed"
 
 
+def test_unattended_source_prefers_saved_default_then_server_when_choice_is_stale(store):
+    from deerflow.config.image_generation import ImageGenerationDefaultStore, image_generation_source_for_run, image_profile_identity
+
+    environment = {"GEMINI_API_KEY": "synthetic-server-key", "GEMINI_IMAGE_MODEL": "server-first"}
+    web = store.save(profile(), expected_revision=None)
+    assert image_generation_source_for_run(environment, allows_clarification=True) is None
+    assert image_generation_source_for_run(environment, allows_clarification=False) == "sandbox_environment"
+
+    ImageGenerationDefaultStore().save("managed", target_identity=image_profile_identity(web), expected_revision=None, environment=environment)
+    assert image_generation_source_for_run(environment, allows_clarification=False) == "managed"
+    changed = {**environment, "GEMINI_IMAGE_MODEL": "server-second"}
+    assert image_generation_source_for_run(changed, allows_clarification=False) == "sandbox_environment"
+    assert image_generation_source_for_run({}, allows_clarification=False) is None
+    assert resolve_image_generation_profile({})[1] == "managed"
+
+
 def test_matching_model_ids_at_different_endpoints_still_require_a_choice(store):
     from deerflow.config.image_generation import image_profile_choice_needed
 
@@ -251,6 +267,24 @@ def test_web_profile_saved_after_server_model_requires_choice_immediately(store,
     catalog = router._list_profiles()
     assert catalog["status"]["choice_required"] is True
     assert all(item["selected"] is False for item in catalog["profiles"])
+
+
+def test_name_only_profile_edit_does_not_clear_image_choice_requirement(store, monkeypatch):
+    from app.gateway.routers import image_generation as router
+
+    original = AppConfig.model_validate({"sandbox": {"use": "test", "environment": {"GEMINI_API_KEY": "synthetic-server-key", "GEMINI_IMAGE_MODEL": "server-first"}}})
+    monkeypatch.setattr(router, "get_app_config", lambda: original)
+    saved = router._save(router.SaveImageProfileRequest(config=profile(display_name="Before")))
+
+    changed = AppConfig.model_validate({"sandbox": {"use": "test", "environment": {"GEMINI_API_KEY": "synthetic-server-key", "GEMINI_IMAGE_MODEL": "server-second"}}})
+    monkeypatch.setattr(router, "get_app_config", lambda: changed)
+    assert router._list_profiles()["status"]["choice_required"] is True
+
+    edited = router._save(router.SaveImageProfileRequest(config=profile(display_name="After"), expected_revision=saved["revision"]))
+    catalog = router._list_profiles()
+    assert edited["display_name"] == "After"
+    assert catalog["status"]["choice_required"] is True
+    assert all(item["selected"] is False and item["conflict"] is True for item in catalog["profiles"])
 
 
 def test_admin_sets_server_default_and_rejects_stale_selection(store, monkeypatch):

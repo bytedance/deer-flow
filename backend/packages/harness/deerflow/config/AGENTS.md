@@ -23,7 +23,10 @@ generation requires a chat choice regardless of configuration order. The
 response is checked against the recorded card and current profile revision.
 A valid saved default selects either source
 across runs; changes to either model or endpoint invalidate it and require a
-new chat choice. Disabled profiles do not shadow legacy variables. The
+new chat choice. Unattended runs use the server source when both usable sources
+coexist without a valid default; a saved default still wins. Bind that source
+before sandbox acquisition so AIO identity and image credentials agree.
+Disabled profiles do not shadow legacy variables. The
 `ImageConnectionStatus` enum is specific to image readiness: the existing IM
 channel connection state does not represent generation versus reference edit.
 Legacy AIO image variables are inherited at container creation and do not

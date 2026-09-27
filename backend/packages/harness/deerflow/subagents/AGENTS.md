@@ -2,6 +2,12 @@
 
 **JSON**: See README. Authorize before local metadata and reads; inaccessible paths stay UNVERIFIED.
 
+Image-generating subagents cannot show a chat choice card. The executor binds
+an inherited run choice or saved default when available; otherwise it binds
+the server source before the child graph starts. The child runtime uses the
+autonomous interaction mode, and the binding remains active through sandbox
+release.
+
 Apply each subagent's prompt overlay after assembling its full SystemMessage.
 Registry overrides must not mutate `BUILTIN_SUBAGENTS`.
 Direct returns use the compiled tool registry, including middleware tools. Match current-turn IDs in call order; error ToolMessages fail the task with outputs preserved.

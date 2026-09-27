@@ -26,12 +26,13 @@ including custom-agent and thinking-mode overrides; an absent cap omits the hint
 Only standalone tool discovery without a model falls back to the base profile.
 
 `check_image_generation` performs the configuration preflight used by the
-image and PPT skills. `generate_image` validates virtual paths, chooses the
-managed image profile before legacy sandbox environment, injects managed
-credentials for a single sandbox command, validates the returned image, and
-requires a validated chat choice when a newer server model conflicts with the
-web profile. The choice is bound to one run; ambiguity returns before sandbox
-acquisition. The prior run parks its AIO container, so the selected source
+image and PPT skills. `generate_image` validates virtual paths, uses the
+saved or run-selected source, injects managed credentials for a single sandbox
+command, validates the returned image, and requires a validated chat choice
+when both usable sources coexist in an interactive run without a saved default.
+Unattended runs select the server source before sandbox acquisition; the check
+tool receives runtime context and reports that selection. The choice is bound
+to one run. The prior run parks its AIO container, so the selected source
 acquires its own container identity without directly destroying the old one;
 normal idle cleanup still applies. The tool
 converts it to the requested PNG/JPEG/WebP format before moving it to the

@@ -1600,6 +1600,33 @@ class TestAsyncExecutionPath:
         assert stream.closed is True
 
     @pytest.mark.anyio
+    async def test_unattended_subagent_binds_server_image_source_during_stream(self, classes, base_config, mock_agent, msg, tmp_path, monkeypatch):
+        from deerflow.config.image_generation import ManagedImageGenerationProfile, ManagedImageGenerationProfileStore, selected_image_generation_source
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        ManagedImageGenerationProfileStore().save(
+            ManagedImageGenerationProfile(name="web-image", provider="openai", model="web-model", base_url="https://images.example/v1", api_key="synthetic-web-key"),
+            expected_revision=None,
+        )
+        environment = {"GEMINI_API_KEY": "synthetic-server-key", "GEMINI_IMAGE_MODEL": "server-image"}
+        captured = []
+
+        async def stream(_state, **kwargs):
+            captured.append((selected_image_generation_source(), kwargs["context"]["interaction_mode"]))
+            yield {"messages": [msg.ai("Done", "final")]}
+
+        mock_agent.astream = stream
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], thread_id="test-thread")
+        app_config = _default_app_config()
+        app_config.image_generation_environment = environment
+        with patch.object(executor, "_get_resolved_app_config", return_value=app_config), patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Generate an image")
+
+        assert result.status == classes["SubagentStatus"].COMPLETED
+        assert captured == [("sandbox_environment", "autonomous")]
+        assert selected_image_generation_source() is None
+
+    @pytest.mark.anyio
     async def test_aexecute_marks_capacity_rejection_as_admission_failure(self, classes, base_config):
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
