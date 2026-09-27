@@ -3055,3 +3055,37 @@ def test_validate_mcp_update_enforces_stdio_transport_alias(monkeypatch):
 
     assert exc_info.value.status_code == 400
     assert "custom-mcp-server" in exc_info.value.detail
+
+
+def test_validation_error_detail_never_echoes_a_custom_validator_message() -> None:
+    """``include_input=False`` does not strip a value interpolated into ``msg``.
+
+    ``McpServerConfig._validate_task_tool_bindings`` reports the offending raw
+    tool name in its own ``ValueError`` text, so passing Pydantic's ``msg``
+    through would put that value into the HTTP 400 detail.
+    """
+    secret = "sk-live-do-not-log-0123456789"
+    raw = {
+        "mcpServers": {
+            "reports": {
+                "enabled": True,
+                "type": "stdio",
+                "command": "npx",
+                "args": [],
+                "task_toolsets": [
+                    {"name": "g1", "submit_tool": secret, "status_tool": secret, "cancel_tool": "cancel"},
+                ],
+            }
+        },
+        "skills": {},
+    }
+
+    with pytest.raises(HTTPException) as exc_info:
+        mcp_router._validate_extensions_config_candidate(raw)
+
+    detail = str(exc_info.value.detail)
+    assert exc_info.value.status_code == 400
+    assert secret not in detail
+    # The location and a controlled hint are still reported.
+    assert detail.startswith("Invalid MCP configuration: ")
+    assert "mcpServers.reports" in detail

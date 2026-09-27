@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from deerflow.config.runtime_paths import existing_project_file
 from deerflow.constants import (
@@ -288,7 +289,14 @@ class McpServerConfig(BaseModel):
                 raw_name = getattr(toolset, role)
                 previous = claimed.get(raw_name)
                 if previous is not None:
-                    raise ValueError(f"MCP task tool {raw_name!r} must be unique across task_toolsets and roles; it is configured as both {previous} and {toolset.name}.{role}")
+                    # A stable code lets the Gateway rebuild its 400 detail from
+                    # a value-free string: the rendered message interpolates the
+                    # raw tool name, which can be a resolved credential.
+                    raise PydanticCustomError(
+                        "mcp_task_tool_not_unique",
+                        "MCP task tool {tool} must be unique across task_toolsets and roles; it is configured as both {previous} and {current}",
+                        {"tool": repr(raw_name), "previous": previous, "current": f"{toolset.name}.{role}"},
+                    )
                 claimed[raw_name] = f"{toolset.name}.{role}"
         return self
 
@@ -413,7 +421,14 @@ class ExtensionsConfig(BaseModel):
             if not server.task_toolsets:
                 continue
             if not server_name.strip() or len(server_name) > MCP_TASK_SERVER_NAME_MAX_LENGTH:
-                raise ValueError(f"MCP task server name must contain 1 to {MCP_TASK_SERVER_NAME_MAX_LENGTH} characters")
+                # Value-free (only a module constant is interpolated), but it
+                # needs a stable code so the Gateway's 400 summary can tell it
+                # apart from the validators that do interpolate input.
+                raise PydanticCustomError(
+                    "mcp_task_server_name_invalid",
+                    "MCP task server name must contain 1 to {max_length} characters",
+                    {"max_length": MCP_TASK_SERVER_NAME_MAX_LENGTH},
+                )
         return self
 
     @classmethod

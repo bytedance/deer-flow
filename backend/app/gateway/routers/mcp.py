@@ -1188,9 +1188,45 @@ def _raise_invalid_mcp_configuration(detail: str, *, cause: Exception | None = N
     raise error
 
 
+#: Pydantic reports a ``ValueError`` raised inside one of our own validators as
+#: this error type. Its ``msg`` is author-written, so it can interpolate the
+#: rejected input (``f"... {value!r} ..."``); ``include_input=False`` does not
+#: strip that, because the value is already part of the message text.
+_CUSTOM_VALIDATOR_ERROR_TYPES = frozenset({"value_error", "assertion_error"})
+
+#: Value-free replacement for those messages. The location and error type are
+#: still reported, so the established 400 detail stays actionable.
+_CUSTOM_VALIDATOR_ERROR_HINT = "value is not acceptable here"
+
+#: Controlled 400 text for custom validators that raise a stable code. The raw
+#: message (which may interpolate a resolved credential) stays available to
+#: programmatic callers of ``validate_raw_extensions_config``; only the HTTP
+#: detail is rebuilt from these strings.
+_CUSTOM_VALIDATOR_HINTS = {
+    "mcp_task_tool_not_unique": "MCP task tool names must be unique across task_toolsets and roles",
+}
+
+
 def _validation_error_summary(exc: ValidationError) -> str:
-    errors = exc.errors(include_url=False, include_input=False)
-    return "; ".join(f"{'.'.join(str(part) for part in error['loc']) or 'config'}: {error['msg']}" for error in errors)
+    """Describe a config validation failure without echoing any input value.
+
+    ``include_input=False`` only drops Pydantic's separate ``input`` field; a
+    custom validator can still put the rejected value into its own ``msg``.
+    Those are replaced with a fixed hint, while built-in Pydantic messages
+    (generated from constraint metadata, never from the input) are kept so the
+    existing 400 detail stays informative.
+    """
+    parts: list[str] = []
+    for error in exc.errors(include_url=False, include_input=False):
+        location = ".".join(str(part) for part in error["loc"]) or "config"
+        error_type = error.get("type", "invalid")
+        if error_type in _CUSTOM_VALIDATOR_HINTS:
+            parts.append(f"{location}: {_CUSTOM_VALIDATOR_HINTS[error_type]}")
+        elif error_type in _CUSTOM_VALIDATOR_ERROR_TYPES:
+            parts.append(f"{location}: {_CUSTOM_VALIDATOR_ERROR_HINT} ({error_type})")
+        else:
+            parts.append(f"{location}: {error['msg']}")
+    return "; ".join(parts)
 
 
 def _mcp_server_response_from_raw(server_name: str, raw_server: Any) -> McpServerConfigResponse:

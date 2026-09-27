@@ -1468,6 +1468,7 @@ class DeerFlowClient:
             force_local_mcp_invalidation,
             prepare_mcp_reconciliation_from_revision,
         )
+        from deerflow.mcp.tasks.runtime import validate_mcp_task_config_snapshot
 
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
@@ -1486,6 +1487,13 @@ class DeerFlowClient:
                 config_data["mcpServers"] = mcp_servers
 
                 new_config = validate_raw_extensions_config(config_data)
+                # Match the Gateway writer: a change to a task-enabled server
+                # frozen to the runtime's startup snapshot must be rejected BEFORE
+                # anything is written, so the file and every pooled session stay
+                # untouched. Relying on the fence instead would commit the change
+                # first and leave the durable-task runtime on the old snapshot
+                # when no applied baseline exists yet.
+                validate_mcp_task_config_snapshot(new_config)
                 committed = commit_extensions_config(
                     config_path=config_path,
                     raw_data=config_data,

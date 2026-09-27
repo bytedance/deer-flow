@@ -78,17 +78,28 @@ class McpLifecycle(BaseModel):
         return self
 
 
+#: ``serverGenerations`` is a dynamic mapping, so a Pydantic error location can
+#: contain an operator-supplied *key*. Mask it: only the field name and the
+#: error type are safe to surface.
+_DYNAMIC_LOCATION_PLACEHOLDER = "[entry]"
+_DYNAMIC_LOCATION_FIELDS = frozenset({"serverGenerations", "server_generations"})
+
+
 def _safe_validation_summary(exc: ValidationError) -> str:
     """Describe a validation failure without echoing any input value.
 
     Pydantic's ``str(exc)`` and each error's ``input``/``msg`` can carry the
     offending value, and this block is read from an operator-editable file, so
-    only the error locations and types are safe to surface.
+    only the error locations and types are safe to surface. A location under a
+    dynamic mapping (``serverGenerations``) has its key masked, because the key
+    itself is operator-controlled.
     """
     parts = []
     for error in exc.errors():
-        location = ".".join(str(item) for item in error.get("loc", ())) or "<root>"
-        parts.append(f"{location}:{error.get('type', 'invalid')}")
+        location = [str(item) for item in error.get("loc", ())]
+        masked = [_DYNAMIC_LOCATION_PLACEHOLDER if previous in _DYNAMIC_LOCATION_FIELDS else item for previous, item in zip([None, *location], location)]
+        rendered = ".".join(masked) or "<root>"
+        parts.append(f"{rendered}:{error.get('type', 'invalid')}")
     return "; ".join(parts) or "invalid"
 
 
@@ -111,7 +122,9 @@ def parse_mcp_lifecycle(raw: object) -> McpLifecycle | None:
     try:
         return McpLifecycle.model_validate(dict(raw))
     except ValidationError as exc:
-        raise McpLifecycleError(f"invalid mcpLifecycle block ({_safe_validation_summary(exc)})") from exc
+        # ``from None``: the cause's own ``str()`` embeds the rejected input, so
+        # a traceback would defeat the sanitized summary above.
+        raise McpLifecycleError(f"invalid mcpLifecycle block ({_safe_validation_summary(exc)})") from None
 
 
 def lifecycle_covers_servers(lifecycle: McpLifecycle, server_names: Iterable[str]) -> bool:

@@ -1099,3 +1099,40 @@ def test_client_skill_reload_failure_still_reaps_the_prepared_owner(cache_global
     assert get_session_pool() is not pool
     _assert_stale(pool, owner_loop, "A", binding_a_before)
     assert session_a.closed is True
+
+
+def test_client_mcp_update_rejects_a_frozen_task_config_before_writing(cache_globals, monkeypatch, tmp_path, owner_loop) -> None:
+    """The embedded client must run the frozen-snapshot check before committing."""
+    import deerflow.client as client_module
+    from deerflow.client import DeerFlowClient
+
+    cfg = tmp_path / "extensions_config.json"
+    task_server = _stdio(
+        "npx",
+        task_toolsets=[{"name": "reports", "submit_tool": "submit", "status_tool": "status", "cancel_tool": "cancel"}],
+    )
+    _publish(monkeypatch, cfg, {"reports": task_server})
+    pool = get_session_pool()
+    session = _open_session(owner_loop, pool, "reports")
+    binding = pool.active_binding("reports")
+
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    set_mcp_task_config_snapshot(ExtensionsConfig.from_file())
+    before = cfg.read_text(encoding="utf-8")
+
+    app_config = MagicMock()
+    app_config.database.checkpoint_channel_mode = "full"
+    app_config.database.checkpoint_delta.snapshot_frequency = 10
+    monkeypatch.setattr(client_module, "get_app_config", lambda: app_config)
+    client = DeerFlowClient()
+
+    with pytest.raises(McpTaskConfigurationError):
+        client.update_mcp_config({"reports": {**task_server, "env": {"TOKEN": "rotated"}}})
+
+    # Rejected before the write: the file and the pooled session are untouched.
+    assert cfg.read_text(encoding="utf-8") == before
+    assert get_session_pool() is pool
+    assert pool.active_binding("reports") == binding
+    assert _entry(pool, "reports", owner_loop)[0] is session
+    assert session.closed is False

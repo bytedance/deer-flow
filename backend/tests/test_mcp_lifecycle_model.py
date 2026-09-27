@@ -323,3 +323,29 @@ def test_fresh_baseline_mints_a_new_lineage_id_even_when_counters_match() -> Non
 
     assert (first.global_generation, first.server_generations) == (second.global_generation, second.server_generations)
     assert first.lifecycle_id != second.lifecycle_id
+
+
+def test_validation_summary_masks_dynamic_server_generation_keys() -> None:
+    """A dynamic mapping key must not survive into the sanitized summary.
+
+    ``serverGenerations`` keys are operator-controlled, so a Pydantic error
+    location can carry a credential-like key.
+    """
+    secret_key = "sk-live-dynamic-key-0123456789"
+
+    with pytest.raises(McpLifecycleError) as excinfo:
+        parse_mcp_lifecycle(
+            {
+                "schemaVersion": 2,
+                "lifecycleId": "lineage-1",
+                "configRevision": 0,
+                "globalGeneration": 0,
+                "serverGenerations": {secret_key: "not-an-int"},
+            }
+        )
+
+    message = str(excinfo.value)
+    assert secret_key not in message
+    assert "[entry]" in message
+    # The chained ValidationError would re-print the rejected input.
+    assert excinfo.value.__cause__ is None
