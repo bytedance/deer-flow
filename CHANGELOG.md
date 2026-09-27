@@ -1266,6 +1266,16 @@ This release closes that milestone with **181 merged pull requests**.
   referenced. Code-span tokens now split the fragment the same way and strip
   trailing sentence punctuation; dotted filenames such as
   `references/v1.0.md#notes` keep their extension dots. ([#5841])
+- **skills:** Keep the skill review markdown-link scan linear on adversarial
+  input. The extractor re-scanned the same target run from every candidate
+  opener, so a long run of unmatched `[` or a `](`-dense invalid target drove
+  the review quadratic — #5714 measured 19 s on 256 KiB of `[`, and the
+  resource graph scans every text member with `PackageLimits.max_file_bytes`
+  at 64 MiB, so a single large SKILL.md is squarely in scope. The scan now
+  walks candidate openers once, reproducing `finditer` exactly (verified by
+  differential fuzzing against the base regex), and blanks matched spans by
+  position instead of `str.replace`, which could blank an unrelated later copy
+  of the same text. ([#5884])
 - **config:** Sign the bytes the config cache parsed, not a second read. The
   app-config loader opened `config.yaml` twice — parse once, then hash a fresh
   read to record the `(mtime, size, sha256)` signature — so a write landing
@@ -6127,6 +6137,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5859]: https://github.com/bytedance/deer-flow/pull/5859
 [#5879]: https://github.com/bytedance/deer-flow/pull/5879
 [#5881]: https://github.com/bytedance/deer-flow/pull/5881
+[#5884]: https://github.com/bytedance/deer-flow/pull/5884
 [#5893]: https://github.com/bytedance/deer-flow/pull/5893
 [#5900]: https://github.com/bytedance/deer-flow/pull/5900
 
