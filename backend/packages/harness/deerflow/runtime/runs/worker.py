@@ -38,9 +38,8 @@ from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
+from deerflow.agents.image_generation_choice import adapt_channel_image_choice_reply, selected_image_source_from_reply
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
-from deerflow.agents.image_generation_choice import selected_image_source_from_reply
-from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
@@ -1350,6 +1349,14 @@ async def run_agent(
 
             image_config = ctx.app_config or await asyncio.to_thread(get_app_config)
             if isinstance(image_config, AppConfig) and rollback_point is not None:
+                graph_input, image_source = await asyncio.to_thread(
+                    adapt_channel_image_choice_reply,
+                    graph_input,
+                    rollback_point.messages,
+                    image_config.image_generation_environment,
+                    runtime_ctx,
+                )
+            if isinstance(image_config, AppConfig) and rollback_point is not None and image_source is None:
                 image_source = await asyncio.to_thread(
                     selected_image_source_from_reply,
                     graph_input,
