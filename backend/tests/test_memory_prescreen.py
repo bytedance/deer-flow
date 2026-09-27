@@ -39,6 +39,7 @@ from deerflow.agents.memory.signals.contract import (
 )
 from deerflow.agents.memory.signals.coordinator import MemoryBatchContext, MemorySignalCoordinator
 from deerflow.agents.memory.signals.typesafe import QUESTION_AFFIRMATION, QUESTION_NEGATION, TypeSafeSignalClassifier
+from deerflow.typesafe.errors import TypeSafeError
 
 _API_KEY = "memory-judge-test-key"
 _PRESCREEN_Q = "memory_worth_keeping"
@@ -348,6 +349,42 @@ class TestFailureDirection:
 
         assert llm.calls == 1
 
+    @pytest.mark.parametrize(
+        "responder",
+        [
+            lambda request: httpx.Response(200, content=b"not json at all"),
+            lambda request: httpx.Response(400, json={}),
+            lambda request: (_ for _ in ()).throw(httpx.ConnectError("down", request=request)),
+        ],
+    )
+    def test_a_request_level_failure_is_recorded_as_request_failed(self, responder):
+        """The record separates a failed request from a provider with no opinion.
+
+        Both directions extract as usual, but only one of them means the endpoint is
+        unreachable — which is what an operator reads the fallback population for, so
+        the two must not both arrive as ``no_verdict``.
+        """
+        recorded: list = []
+        updater = _updater(judge=_judge(_prescreen(_Server(responder), mode=MODE_ENFORCE, retry_backoff=0.0), prescreen_mode=MODE_ENFORCE), llm=_FakeLLM(), recorded=recorded)
+
+        assert updater.update_memory(_conversation(), thread_id="thread-1", user_id="user-1") is True
+
+        assert recorded and recorded[0]["prescreen"]["fallback_reason"] == "request_failed"
+        assert recorded[0]["prescreen"]["verdict"] is None
+
+    def test_an_answered_but_unusable_response_is_not_a_request_failure(self):
+        """A question-level failure is the request *working*: "no verdict", not "failed"."""
+        recorded: list = []
+
+        def responder(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_answer("not a number"))
+
+        updater = _updater(judge=_judge(_prescreen(_Server(responder), mode=MODE_ENFORCE), prescreen_mode=MODE_ENFORCE), llm=_FakeLLM(), recorded=recorded)
+
+        assert updater.update_memory(_conversation(), thread_id="thread-1", user_id="user-1") is True
+
+        assert recorded[0]["prescreen"]["fallback_reason"] == "no_verdict"
+
 
 # --- modes: shadow / enforce ----------------------------------------------
 
@@ -608,6 +645,43 @@ class TestCoordinatorRules:
         assert verdict.payload["prescreen"]["fallback_reason"] == "deterministic_signals"
         assert verdict.skip is False
 
+    def test_a_failed_shared_request_marks_every_eligible_side(self):
+        """One failed request leaves both eligible sides without a verdict, and says so.
+
+        The endpoint answering ``400`` (not a retryable status) fails the round
+        immediately: no retry, no second request, and no verdict for either side.
+        """
+        server = _Server(lambda request: httpx.Response(400, json={}))
+        judge = _combined_judge(server)
+
+        verdict = judge.judge(_context())
+
+        assert server.count == 1
+        assert verdict.payload["prescreen"]["fallback_reason"] == "request_failed"
+        assert verdict.payload["signal_classification"]["fallback_reason"] == "request_failed"
+        assert verdict.skip is False and verdict.hints == frozenset()
+
+    def test_a_failed_shared_request_keeps_an_ineligible_sides_own_reason(self):
+        """Only the side that actually asked can report a request failure."""
+        server = _Server(lambda request: httpx.Response(400, json={}))
+        judge = _combined_judge(server)
+
+        verdict = judge.judge(_context(signals=frozenset({"correction"})))
+
+        assert server.count == 1, "the still-eligible classifier carried the request"
+        assert verdict.payload["prescreen"]["fallback_reason"] == "deterministic_signals", "L3 removed this side; it did not ask"
+        assert verdict.payload["signal_classification"]["fallback_reason"] == "request_failed"
+
+    def test_a_failed_shared_request_is_logged_where_it_happens(self, caplog):
+        """The durable trace is the record; an unreachable endpoint also needs a line now."""
+        server = _Server(lambda request: httpx.Response(400, json={}))
+        judge = _combined_judge(server)
+
+        with caplog.at_level("WARNING"):
+            judge.judge(_context())
+
+        assert any("Memory judge request failed" in record.message for record in caplog.records)
+
     def test_a_reused_verdict_is_not_reported_as_a_network_sample_when_the_other_side_fetches(self):
         """Per-answer provenance: a verdict reused from the bucket stays a cache hit.
 
@@ -748,6 +822,28 @@ class TestAdapterContracts:
         assert decision.model.startswith("unrecorded:sha256:")
         assert len(decision.model) == len("unrecorded:sha256:") + 16
         assert hostile not in decision.model
+
+    def test_a_request_level_failure_propagates_for_the_coordinator_to_record(self):
+        """``decide`` reports a transport failure by raising, not by returning ``None``.
+
+        Only the adapter that made the request can tell "the request failed" from "the
+        provider answered with no opinion", and the round's audit record needs the
+        difference, so the failure is not swallowed here.
+        """
+        server = _Server(lambda request: httpx.Response(400, json={}))
+
+        with pytest.raises(TypeSafeError):
+            _prescreen(server).decide(MemoryPrescreenRequest(batch_text=_CHATTER_TEXT, digest="d1"))
+        with pytest.raises(TypeSafeError):
+            _classifier(server).decide(MemorySignalRequest(batch_text=_CHATTER_TEXT, digest="d1"))
+
+    def test_a_question_level_failure_is_still_no_opinion(self):
+        """The envelope was usable, so this is not a request failure: no verdict, no raise."""
+        unparsable_answer = _Server(lambda request: httpx.Response(200, json=_answer("not a number")))
+        empty_envelope = _Server(lambda request: httpx.Response(200, json={"model": "jev-1.13.0", "answers": {}}))
+
+        assert _prescreen(unparsable_answer).decide(MemoryPrescreenRequest(batch_text=_CHATTER_TEXT, digest="d1")) is None
+        assert _classifier(empty_envelope).decide(MemorySignalRequest(batch_text=_CHATTER_TEXT, digest="d1")) is None
 
     def test_the_classifier_maps_both_directions(self):
         server = _Server(lambda request: httpx.Response(200, json=_answer(0.9, 0.9, questions=(QUESTION_AFFIRMATION, QUESTION_NEGATION))))

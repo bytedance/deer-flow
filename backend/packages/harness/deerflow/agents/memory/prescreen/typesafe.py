@@ -29,7 +29,6 @@ from deerflow.agents.memory.prescreen.contract import (
 )
 from deerflow.typesafe.client import QUESTION_NOUL, Answer, Question, TransportFactory, TypeSafeClient, recordable_model
 from deerflow.typesafe.connection import TypeSafeConnection, resolve_connection, typesafe_defaults
-from deerflow.typesafe.errors import TypeSafeError
 from deerflow.typesafe.validation import criteria_entry, defaulted_text, finite_float, whole_number
 
 QUESTION_ID = "memory_worth_keeping"
@@ -165,16 +164,18 @@ class TypeSafeMemoryPrescreen:
         """Judge one batch with this side's own cache (the single-side path).
 
         Used when this side is the only one enabled, or when the deployment
-        cannot combine requests. Never raises for a request-level failure — that
-        is L2's "extract as usual".
+        cannot combine requests. ``None`` means "no opinion for this batch" — a
+        question-level failure, or nothing to judge. A *request-level* failure
+        propagates as ``deerflow.typesafe.errors.TypeSafeError`` so the coordinator can record
+        ``request_failed`` rather than "no verdict"; the caller still extracts as
+        usual, which is L2's "extract as usual".
         """
         cached = self._cache.get(request.digest)
         if cached is not None:
             return self.interpret(cached.answers, model=cached.model_for(self._questions), cached=True)
-        try:
-            answer_set = self._client.ask(conversation_tail_state(request.batch_text), self._questions)
-        except TypeSafeError:
-            return None
+        # No try/except: the transport failure is the coordinator's to record, and it
+        # writes no bucket here either way (a failure must not be remembered).
+        answer_set = self._client.ask(conversation_tail_state(request.batch_text), self._questions)
         decision = self.interpret(answer_set.answers, model=answer_set.model, cached=False)
         if decision is not None:
             self._cache.put(request.digest, CachedVerdict(answers=dict(answer_set.answers), models={question_id: answer_set.model for question_id in answer_set.answers}))

@@ -5,7 +5,8 @@ not in an extension: the extension API's only memory touchpoint is a read-only
 post-hoc observer and its contributions are fail-open, which is the wrong shape
 for a switch that can affect writes (design §2.6).
 
-See ``docs/superpowers/specs/2026-09-25-jev-memory-prescreening-design.en.md``.
+See ``backend/docs/MEMORY_IMPROVEMENTS.md`` for the modes and the gates that
+must pass before ``enforce``, and ``agents/memory/AGENTS.md`` for the invariants.
 """
 
 from deerflow.agents.memory.prescreen.contract import (

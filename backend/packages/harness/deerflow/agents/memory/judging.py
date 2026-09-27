@@ -10,8 +10,8 @@ text looks worthless (failure ⇒ extract as usual); signal classification only 
 hint text (failure ⇒ fall back to the deterministic signals). Those are adapter
 policy, documented in:
 
-* ``docs/superpowers/specs/2026-09-25-jev-memory-prescreening-design.en.md``
-* ``docs/superpowers/specs/2026-09-25-jev-memory-signal-classification-design.en.md``
+* the pre-screen: ``backend/docs/MEMORY_IMPROVEMENTS.md``, ``prescreen/contract.py``
+* the classifier: ``backend/docs/MEMORY_IMPROVEMENTS.md``, ``signals/contract.py``
 """
 
 from __future__ import annotations

@@ -29,6 +29,7 @@ classification falls back to the regex union).
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -58,6 +59,8 @@ from deerflow.agents.memory.signals.contract import (
 )
 from deerflow.typesafe.client import Answer, AnswerSet, Question
 from deerflow.typesafe.errors import TypeSafeError
+
+logger = logging.getLogger(__name__)
 
 REASON_DISABLED = "disabled"
 REASON_DRAIN = "shutdown_drain"
@@ -148,6 +151,20 @@ class _Eligibility:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class _SideOutcome:
+    """One side's result for this round: a decision, or why there is none.
+
+    ``request_failed`` separates "the request never produced a usable answer" from
+    "the provider answered and had no verdict for this batch". The audit record and
+    the shadow evaluation count those two as different fallbacks, so the distinction
+    has to survive this far.
+    """
+
+    decision: MemoryPrescreenDecision | MemorySignalDecision | None = None
+    request_failed: bool = False
+
+
 class MemorySignalCoordinator:
     """Judge one batch with the enabled sides, combining their requests when allowed."""
 
@@ -232,8 +249,11 @@ class MemorySignalCoordinator:
 
         An ineligible side is a *fallback*, not silence: while any side is enabled
         the round still emits its record with the fallback reason (design §5's
-        "local fallbacks"), so "why was this batch not judged" stays auditable. Only
-        a round where every side is off produces an empty payload.
+        "local fallbacks"), so "why was this batch not judged" stays auditable. A
+        request that failed is recorded as ``request_failed``, which keeps an
+        unreachable endpoint distinguishable from a provider that answered with
+        nothing usable. Only a round where every side is off produces an empty
+        payload.
         """
         started = time.monotonic()
         batch_length = batch_chars(context.batch_text)
@@ -241,37 +261,47 @@ class MemorySignalCoordinator:
         classifier_eligibility = self._classifier_eligibility(context, batch_length)
 
         if self._combined and (prescreen_eligibility.eligible or classifier_eligibility.eligible):
-            prescreen_decision, classifier_decision = self._judge_combined(context, prescreen_eligibility, classifier_eligibility)
+            prescreen_outcome, classifier_outcome = self._judge_combined(context, prescreen_eligibility, classifier_eligibility)
         else:
-            prescreen_decision = self._decide_prescreen(context) if prescreen_eligibility.eligible else None
-            classifier_decision = self._decide_classifier(context) if classifier_eligibility.eligible else None
+            prescreen_outcome = self._decide_prescreen(context) if prescreen_eligibility.eligible else _SideOutcome()
+            classifier_outcome = self._decide_classifier(context) if classifier_eligibility.eligible else _SideOutcome()
         duration_ms = (time.monotonic() - started) * 1000
 
         return self._consume(
             context,
             prescreen_eligibility=prescreen_eligibility,
             classifier_eligibility=classifier_eligibility,
-            prescreen_decision=prescreen_decision,
-            classifier_decision=classifier_decision,
+            prescreen_outcome=prescreen_outcome,
+            classifier_outcome=classifier_outcome,
             duration_ms=duration_ms,
         )
 
-    def _decide_prescreen(self, context: MemoryBatchContext) -> MemoryPrescreenDecision | None:
+    def _decide_prescreen(self, context: MemoryBatchContext) -> _SideOutcome:
+        """This side's own request (the single-side path); a failure is data for the record."""
         if self._prescreen is None:
-            return None
-        return self._prescreen.decide(_prescreen_request(context))
+            return _SideOutcome()
+        try:
+            return _SideOutcome(decision=self._prescreen.decide(_prescreen_request(context)))
+        except TypeSafeError:
+            # The provider propagates a request-level failure (see its contract) so
+            # this round can record it; the caller still extracts as usual (L2).
+            return _request_failure(self._prescreen.name)
 
-    def _decide_classifier(self, context: MemoryBatchContext) -> MemorySignalDecision | None:
+    def _decide_classifier(self, context: MemoryBatchContext) -> _SideOutcome:
+        """As :meth:`_decide_prescreen`, for the classifier side."""
         if self._classifier is None:
-            return None
-        return self._classifier.decide(_signal_request(context))
+            return _SideOutcome()
+        try:
+            return _SideOutcome(decision=self._classifier.decide(_signal_request(context)))
+        except TypeSafeError:
+            return _request_failure(self._classifier.name)
 
     def _judge_combined(
         self,
         context: MemoryBatchContext,
         prescreen_eligibility: _Eligibility,
         classifier_eligibility: _Eligibility,
-    ) -> tuple[MemoryPrescreenDecision | None, MemorySignalDecision | None]:
+    ) -> tuple[_SideOutcome, _SideOutcome]:
         """One shared deployment's request assembly (§2.2.3): cache first, then the missing questions.
 
         The bucket is keyed by the **full logical question set**, independent of what
@@ -309,9 +339,14 @@ class MemorySignalCoordinator:
             try:
                 answer_set = asker.ask(context.batch_text, missing)
             except TypeSafeError:
-                # A whole-request failure writes no bucket and yields no result for
-                # either side: both fall back (S2/S7).
-                return None, None
+                # A whole-request failure writes no bucket and leaves every eligible
+                # side without a result: they fall back and the round records why
+                # (S2/S7). An ineligible side keeps its own reason.
+                failed = _request_failure("prescreen+signal_classification" if prescreen_eligibility.eligible and classifier_eligibility.eligible else asker.name)
+                return (
+                    failed if prescreen_eligibility.eligible else _SideOutcome(),
+                    failed if classifier_eligibility.eligible else _SideOutcome(),
+                )
             answers.update(answer_set.answers)
             fetched = set(answer_set.answers)
             fetched_model = answer_set.model
@@ -319,9 +354,11 @@ class MemorySignalCoordinator:
             if answer_set.answers:
                 self._cache.put(cache_key, CachedVerdict(answers=dict(answers), models=dict(models)))
 
+        # ``_interpret_side`` answers ``None`` for a question-level failure: the request
+        # was usable, this side's verdict was not (which is not a request failure).
         return (
-            self._interpret_side(self._prescreen, answers, fetched=fetched, fetched_model=fetched_model, bucket=held) if prescreen_eligibility.eligible else None,
-            self._interpret_side(self._classifier, answers, fetched=fetched, fetched_model=fetched_model, bucket=held) if classifier_eligibility.eligible else None,
+            _SideOutcome(decision=self._interpret_side(self._prescreen, answers, fetched=fetched, fetched_model=fetched_model, bucket=held)) if prescreen_eligibility.eligible else _SideOutcome(),
+            _SideOutcome(decision=self._interpret_side(self._classifier, answers, fetched=fetched, fetched_model=fetched_model, bucket=held)) if classifier_eligibility.eligible else _SideOutcome(),
         )
 
     @staticmethod
@@ -394,17 +431,19 @@ class MemorySignalCoordinator:
         *,
         prescreen_eligibility: _Eligibility,
         classifier_eligibility: _Eligibility,
-        prescreen_decision: MemoryPrescreenDecision | None,
-        classifier_decision: MemorySignalDecision | None,
+        prescreen_outcome: _SideOutcome,
+        classifier_outcome: _SideOutcome,
         duration_ms: float,
     ) -> MemoryBatchVerdict:
         payload: dict[str, object] = {}
         if (self._prescreen is not None and self._prescreen_mode != PRESCREEN_OFF) or (self._classifier is not None and self._classifier_mode != CLASSIFIER_OFF):
-            payload["prescreen"] = self._prescreen_payload(context, prescreen_eligibility, prescreen_decision, duration_ms)
-            payload["signal_classification"] = self._classifier_payload(context, classifier_eligibility, classifier_decision, duration_ms)
+            payload["prescreen"] = self._prescreen_payload(context, prescreen_eligibility, prescreen_outcome, duration_ms)
+            payload["signal_classification"] = self._classifier_payload(context, classifier_eligibility, classifier_outcome, duration_ms)
 
-        skip = prescreen_eligibility.eligible and prescreen_decision is not None and prescreen_decision.verdict == VERDICT_SKIP and self._prescreen_mode == MODE_ENFORCE
-        hints = classifier_decision.labels if (classifier_eligibility.eligible and classifier_decision is not None and self._classifier_mode == MODE_HINTS) else frozenset()
+        prescreen_decision = prescreen_outcome.decision
+        classifier_decision = classifier_outcome.decision
+        skip = prescreen_eligibility.eligible and isinstance(prescreen_decision, MemoryPrescreenDecision) and prescreen_decision.verdict == VERDICT_SKIP and self._prescreen_mode == MODE_ENFORCE
+        hints = classifier_decision.labels if (classifier_eligibility.eligible and isinstance(classifier_decision, MemorySignalDecision) and self._classifier_mode == MODE_HINTS) else frozenset()
         vetoed = False
         if skip and hints:
             # §2.2.7: the only way a model verdict changes the extraction decision.
@@ -413,9 +452,10 @@ class MemorySignalCoordinator:
             payload["skip_vetoed_by_model_signal"] = True
         return MemoryBatchVerdict(skip=skip, vetoed_by_model_signal=vetoed, hints=frozenset(hints), payload=payload)
 
-    def _prescreen_payload(self, context: MemoryBatchContext, eligibility: _Eligibility, decision: MemoryPrescreenDecision | None, duration_ms: float) -> dict[str, object] | None:
+    def _prescreen_payload(self, context: MemoryBatchContext, eligibility: _Eligibility, outcome: _SideOutcome, duration_ms: float) -> dict[str, object] | None:
         if self._prescreen is None or self._prescreen_mode == PRESCREEN_OFF:
             return None
+        decision = outcome.decision if isinstance(outcome.decision, MemoryPrescreenDecision) else None
         return {
             "mode": self._prescreen_mode,
             "verdict": decision.verdict if decision is not None else None,
@@ -428,12 +468,13 @@ class MemorySignalCoordinator:
             "message_count": context.message_count,
             "batch_chars": len(context.batch_text),
             "duration_ms": duration_ms,
-            "fallback_reason": None if decision is not None else (eligibility.reason or REASON_NO_VERDICT),
+            "fallback_reason": None if decision is not None else _fallback_reason(eligibility, outcome),
         }
 
-    def _classifier_payload(self, context: MemoryBatchContext, eligibility: _Eligibility, decision: MemorySignalDecision | None, duration_ms: float) -> dict[str, object] | None:
+    def _classifier_payload(self, context: MemoryBatchContext, eligibility: _Eligibility, outcome: _SideOutcome, duration_ms: float) -> dict[str, object] | None:
         if self._classifier is None or self._classifier_mode == CLASSIFIER_OFF:
             return None
+        decision = outcome.decision if isinstance(outcome.decision, MemorySignalDecision) else None
         return {
             "mode": self._classifier_mode,
             "labels": sorted(decision.labels) if decision is not None else [],
@@ -445,7 +486,7 @@ class MemorySignalCoordinator:
             # channels must stay separately auditable even when only one side is on.
             "signals": sorted(context.signals),
             "duration_ms": duration_ms,
-            "fallback_reason": None if decision is not None else (eligibility.reason or REASON_NO_VERDICT),
+            "fallback_reason": None if decision is not None else _fallback_reason(eligibility, outcome),
         }
 
     # --- identity --------------------------------------------------------
@@ -458,6 +499,29 @@ class MemorySignalCoordinator:
             "prescreen": self._prescreen.release_policy_parameters() if self._prescreen is not None else None,
             "signal_classification": self._classifier.release_policy_parameters() if self._classifier is not None else None,
         }
+
+
+def _request_failure(side: str) -> _SideOutcome:
+    """One failed judge request: a reason for the audit record and a line for the operator.
+
+    The round's record is the durable trace, but an endpoint that is unreachable must
+    not wait for the evaluation report to be noticed, so it is logged where it happens
+    (the guardrail logs its own provider failures the same way).
+    """
+    logger.warning("Memory judge request failed (side=%s); falling back for this batch", side, exc_info=True)
+    return _SideOutcome(request_failed=True)
+
+
+def _fallback_reason(eligibility: _Eligibility, outcome: _SideOutcome) -> str:
+    """Why this side has no verdict: the request failed, or the side had no opinion.
+
+    ``request_failed`` is only ever set for a side that actually asked, so an
+    ineligible side keeps its own reason (deterministic signals, over limit, the
+    drain, …) even when the round's request failed.
+    """
+    if outcome.request_failed:
+        return REASON_REQUEST_FAILED
+    return eligibility.reason or REASON_NO_VERDICT
 
 
 def _optional_str(value: object) -> str | None:

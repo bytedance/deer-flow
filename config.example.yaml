@@ -2187,7 +2187,8 @@ memory:
   #   shadow - decide and record the verdict, still extract (the safe first step).
   #   enforce - a low-probability batch skips the call AND advances the watermark,
   #     so that batch is consumed as "nothing durable here". Enable only after the
-  #     measurement gate in the memory pre-screening design §5
+  #     measurement gate that scripts/eval_memory_prescreen.py implements and
+  #     backend/docs/MEMORY_IMPROVEMENTS.md documents
   #     passes; `skip_threshold` below is provisional and unmeasured.
   # The failure direction is always extraction: an error, timeout, unusable
   # response, missing verdict, or an over-limit batch extracts as usual. A skip is

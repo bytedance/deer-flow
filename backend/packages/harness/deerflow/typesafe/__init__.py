@@ -26,7 +26,7 @@ error taxonomy, UTF-8 wire-size counting, and the request skeleton.
   memory pre-screen's record) and how it relates to the journal or metrics.
 
 A change that would move one of those into this package is a change to the design,
-not a refactor (see ``docs/superpowers/specs/2026-09-25-shared-jev-typesafe-client-design.en.md``
+not a refactor (see the "Shared client" section of ``backend/docs/GUARDRAILS.md``
 §2.2). Caching, pooling and per-consumer policy parameters must stay out.
 """
 

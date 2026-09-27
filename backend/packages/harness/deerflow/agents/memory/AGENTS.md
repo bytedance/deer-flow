@@ -436,6 +436,15 @@ behaves exactly as before.
   a failure fallback) is countable from the records. A round with no record at
   all now means no side was enabled (or the drain path forbade judging) — not
   "every enabled side was ineligible".
+- **A failed request is `request_failed`, never `no_verdict`.** The two are
+  separate populations: an unreachable endpoint (transport, non-200, unusable or
+  unbounded body, deadline) must not read as "the provider answered with nothing
+  usable". The adapters' `decide()` therefore *propagates* `TypeSafeError` instead of
+  swallowing it, the coordinator records the reason and logs a warning, and the
+  updater still extracts as usual. `no_verdict` is reserved for a question-level
+  failure — the envelope arrived, this side's answer did not. Only a side that
+  actually asked can report `request_failed`; an ineligible one keeps its own reason
+  (L3 / L5 / L7 / L8) even when the round's request failed.
 - **Only `enforce` + `skip` changes persistence:** it drops the extraction call
   and **advances the watermark**, consuming the batch as "nothing durable here",
   and emits a `prescreen` record with the digest. `shadow` records and extracts as

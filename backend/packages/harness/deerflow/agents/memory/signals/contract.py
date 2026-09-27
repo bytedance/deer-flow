@@ -11,7 +11,9 @@ Host contract, consumed through the memory-layer judge:
 * :class:`MemorySignalDecision` — hint labels, or ``None`` for "no model result";
 * :class:`MemorySignalProvider` — duck-typed, resolved by class path.
 
-See ``docs/superpowers/specs/2026-09-25-jev-memory-signal-classification-design.en.md``.
+See ``backend/docs/MEMORY_IMPROVEMENTS.md`` for the modes, the separate
+``hints`` evidence requirement and the pre-``enforce`` gates, and
+``agents/memory/AGENTS.md`` for the invariants.
 """
 
 from __future__ import annotations
@@ -73,12 +75,18 @@ class MemorySignalDecision:
 
 @runtime_checkable
 class MemorySignalProvider(Protocol):
-    """Contract for a pluggable signal classifier (synchronous; same thread rules as the pre-screen)."""
+    """Contract for a pluggable signal classifier (synchronous; same thread rules as the pre-screen).
+
+    ``None`` is "no model result" (a question-level failure, or nothing validated) and
+    means the deterministic signals stand. A *request-level* failure must propagate as
+    ``deerflow.typesafe.errors.TypeSafeError`` so the round's audit record can say
+    ``request_failed`` rather than "no verdict".
+    """
 
     name: str
 
     def decide(self, request: MemorySignalRequest) -> MemorySignalDecision | None:
-        """Return the batch's hint labels, or ``None`` when no model result is available."""
+        """Return the batch's hint labels, ``None`` for no model result, or raise ``TypeSafeError`` on a request failure."""
         ...
 
     def release_policy_parameters(self) -> dict[str, object]:

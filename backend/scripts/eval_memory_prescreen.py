@@ -1,12 +1,12 @@
 """Shadow evaluation of the memory pre-screen (Jev) from DeerMem extraction records.
 
-This is the pre-``enforce`` evidence for ``TypeSafeMemoryPrescreen`` (design
-``docs/superpowers/specs/2026-09-25-jev-memory-prescreening-design.en.md`` §5). It
-is an operator run over **shadow records**, not a CI test: in ``mode: shadow`` the
-extraction call always runs, so every pre-screen verdict comes with free ground
-truth — that same batch's extraction outcome. The script makes no network call,
-reads no credential and prints none; its input is a JSONL of DeerMem
-``extraction_callback`` payloads, one per line.
+This is the pre-``enforce`` evidence for ``TypeSafeMemoryPrescreen``: the gates
+documented in ``backend/docs/MEMORY_IMPROVEMENTS.md`` ("Before ``enforce``") and in
+``agents/memory/AGENTS.md``. It is an operator run over **shadow records**, not a CI
+test: in ``mode: shadow`` the extraction call always runs, so every pre-screen
+verdict comes with free ground truth — that same batch's extraction outcome. The
+script makes no network call, reads no credential and prints none; its input is a
+JSONL of DeerMem ``extraction_callback`` payloads, one per line.
 
 What one line must contain (the payload the host already emits)
 ----------------------------------------------------------------
@@ -59,10 +59,17 @@ Method, and the things it deliberately refuses to do
   of the saving, a third-party egress path is not justified. §5 gate 4 needs it
   *and* the recorded tokens and p50/p95 verdict latency: recorded calls alone are
   not the evidence the gate asks for, so missing any of them is ``INSUFFICIENT``
-  rather than a pass.
+  rather than a pass. A baseline that saves as many calls as the model — which the
+  shipped "everything trivial" sample does — is a ``FAIL``, not an enabling run.
 * The miss-rate bound is the exact one-sided **Clopper-Pearson** interval,
   computed here from the regularized incomplete beta function by bisection. No
-  normal approximation is used anywhere.
+  normal approximation is used anywhere, and the gate reads the *bound*, not the
+  point estimate: a sample whose observed rate is at or below the target while its
+  upper bound is above it is ``INSUFFICIENT`` — the evidence does not establish the
+  target yet, so the answer is to collect more skips, not to enable.
+* A count field that arrives negative (``mutations_accepted``, ``message_count``,
+  ``batch_chars``, a token count) is treated as absent: a count cannot be negative,
+  and scoring a corrupt one as a saving would tilt every rate toward a pass.
 * The exit code carries the verdict: ``0`` only when every gate is ``PASS``,
   ``1`` when any gate is ``FAIL`` or ``INSUFFICIENT`` — so an operator can gate
   enablement on ``python scripts/eval_memory_prescreen.py --records ... && <enable>``.
@@ -133,9 +140,15 @@ _BETA_TINY = 1e-300
 _BETA_BISECTIONS = 200
 
 
-def _as_int(value: Any) -> int | None:
-    """An integer, refusing ``bool`` (``True`` is not a count of mutations)."""
-    if isinstance(value, bool) or not isinstance(value, int):
+def _as_count(value: Any) -> int | None:
+    """A count, refusing ``bool`` and negatives.
+
+    ``True`` is not a count of mutations, and a negative count is a corrupt line: the
+    record must lose the field rather than be scored as a saving (a negative
+    ``mutations_accepted`` used to read as "no loss", which diluted the miss-rate
+    denominator and inflated ``saved_calls``).
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None
     return value
 
@@ -151,9 +164,9 @@ def _as_bool(value: Any) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def _first_int(mapping: Mapping[str, Any], keys: Sequence[str]) -> int | None:
+def _first_count(mapping: Mapping[str, Any], keys: Sequence[str]) -> int | None:
     for key in keys:
-        value = _as_int(mapping.get(key))
+        value = _as_count(mapping.get(key))
         if value is not None:
             return value
     return None
@@ -163,9 +176,9 @@ def _token_counts(usage: Any) -> tuple[int | None, int | None, int | None]:
     """Read input / output / total tokens from a LangChain-style ``usage_metadata``."""
     if not isinstance(usage, Mapping):
         return (None, None, None)
-    input_tokens = _first_int(usage, ("input_tokens", "prompt_tokens"))
-    output_tokens = _first_int(usage, ("output_tokens", "completion_tokens"))
-    total = _as_int(usage.get("total_tokens"))
+    input_tokens = _first_count(usage, ("input_tokens", "prompt_tokens"))
+    output_tokens = _first_count(usage, ("output_tokens", "completion_tokens"))
+    total = _as_count(usage.get("total_tokens"))
     if total is None and (input_tokens is not None or output_tokens is not None):
         total = (input_tokens or 0) + (output_tokens or 0)
     return (input_tokens, output_tokens, total)
@@ -316,7 +329,7 @@ def parse_record(index: int, raw: Mapping[str, Any]) -> Record:
     raw_verdict = block.get("verdict")
     verdict = raw_verdict if raw_verdict in (VERDICT_SKIP, VERDICT_EXTRACT) else None
     review_outcome = _normalize_review_outcome(raw.get("review_outcome"))
-    mutations_accepted = _as_int(raw.get("mutations_accepted"))
+    mutations_accepted = _as_count(raw.get("mutations_accepted"))
     success = _as_bool(raw.get("success"))
     input_tokens, output_tokens, total_tokens = _token_counts(raw.get("token_usage"))
     raw_signals = block.get("signals")
@@ -338,8 +351,8 @@ def parse_record(index: int, raw: Mapping[str, Any]) -> Record:
         duration_ms=_as_float(block.get("duration_ms")),
         signals=signals,
         signals_known=signals_known,
-        message_count=_as_int(block.get("message_count")),
-        batch_chars=_as_int(block.get("batch_chars")),
+        message_count=_as_count(block.get("message_count")),
+        batch_chars=_as_count(block.get("batch_chars")),
         success=success,
         mutations_accepted=mutations_accepted,
         input_tokens=input_tokens,
@@ -670,6 +683,7 @@ class Evidence:
     saved_skips_with_tokens: int
     latency_samples: int
     baseline_computable: int
+    baseline_saved_calls: int
 
 
 @dataclass(frozen=True)
@@ -693,14 +707,20 @@ def evaluate_gates(evidence: Evidence, coverage: Coverage, thresholds: Threshold
     gates: list[Gate] = []
     miss_rate = _rate(evidence.misses, evidence.scored_skips)
     upper = clopper_pearson_upper(evidence.misses, evidence.scored_skips, thresholds.confidence)
+    observed = f"miss_rate={evidence.misses}/{evidence.scored_skips}={miss_rate:.4f}" if miss_rate is not None else ""
+    bound = "no bound (no sample)" if upper is None else f"one-sided {thresholds.confidence:.0%} Clopper-Pearson upper bound {upper:.4f}"
+    sample = f"sample n={evidence.scored_skips}"
     if miss_rate is None:
         gates.append(Gate("network_miss_rate", INSUFFICIENT, "no scored skip verdict in the network population; there is no sample for the miss rate or its bound"))
+    elif miss_rate > thresholds.miss_target:
+        # The observation itself is over target: more samples cannot rescue it.
+        gates.append(Gate("network_miss_rate", FAIL, f"{observed} is above the target {thresholds.miss_target:.4f}; {bound} ({sample})"))
+    elif upper is None or upper > thresholds.miss_target:
+        # The point estimate meets the target and the exact bound does not establish
+        # it: the sample is underpowered, so the honest answer is more skips.
+        gates.append(Gate("network_miss_rate", INSUFFICIENT, f"{observed} meets the target {thresholds.miss_target:.4f}, but {bound} does not ({sample}): too few skips to establish the target"))
     else:
-        status = PASS if miss_rate <= thresholds.miss_target else FAIL
-        detail = f"miss_rate={evidence.misses}/{evidence.scored_skips}={miss_rate:.4f} target<={thresholds.miss_target:.4f}; one-sided {thresholds.confidence:.0%} Clopper-Pearson upper bound {upper:.4f} (sample n={evidence.scored_skips})"
-        if status == PASS and upper is not None and upper > thresholds.miss_target:
-            detail += f"; the point estimate is met but the exact upper bound exceeds the target ({upper:.4f} > {thresholds.miss_target:.4f}) - report the bound, do not read the point estimate as proof"
-        gates.append(Gate("network_miss_rate", status, detail))
+        gates.append(Gate("network_miss_rate", PASS, f"{observed} target<={thresholds.miss_target:.4f}; {bound} ({sample})"))
 
     missed_by_label = {label: evidence.sensitive_misses.get(label, 0) for label in sorted(SENSITIVE_LABELS)}
     uncovered = [label for label in sorted(SENSITIVE_LABELS) if evidence.sensitive_scored_skips.get(label, 0) == 0]
@@ -765,6 +785,27 @@ def evaluate_gates(evidence: Evidence, coverage: Coverage, thresholds: Threshold
             observed = f"tokens on {evidence.saved_skips_with_tokens} of them, {evidence.latency_samples} verdict latency sample(s), baseline on {evidence.baseline_computable} record(s)"
             gates.append(Gate("savings_recorded", PASS, f"{recorded}; {observed}"))
 
+    incremental = evidence.saved_calls - evidence.baseline_saved_calls
+    if evidence.baseline_computable == 0:
+        gates.append(
+            Gate(
+                "baseline_incremental_savings",
+                INSUFFICIENT,
+                "the no-network baseline is not computable for any record (the collector must set trivial_only), so no gain over it can be shown",
+            )
+        )
+    elif incremental <= 0:
+        saved_summary = f"the model saved {evidence.saved_calls} call(s) against the heuristic's {evidence.baseline_saved_calls}: {incremental:+d} incremental"
+        gates.append(Gate("baseline_incremental_savings", FAIL, f"{saved_summary}, so the egress buys nothing over the heuristic already in the stack"))
+    else:
+        gates.append(
+            Gate(
+                "baseline_incremental_savings",
+                PASS,
+                f"the model saved {incremental} call(s) more than the no-network heuristic ({evidence.saved_calls} vs {evidence.baseline_saved_calls})",
+            )
+        )
+
     return tuple(gates)
 
 
@@ -801,6 +842,7 @@ def build_report(
         saved_skips_with_tokens=sum(1 for record in saved if record.total_tokens is not None),
         latency_samples=sum(1 for record in network if record.duration_ms is not None),
         baseline_computable=baseline["computable"],
+        baseline_saved_calls=baseline["saved_calls"],
     )
     coverage = Coverage(records=len(records), censored=sum(1 for record in records if record.censored), malformed_lines=malformed_lines)
     gates = evaluate_gates(evidence, coverage, thresholds)

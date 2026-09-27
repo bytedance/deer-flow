@@ -496,7 +496,7 @@ A question-level failure is reported per question by the shared parser and mappe
 
 **What is sent.** The tool name plus the call's full argument JSON, under `state.tool_call`. The provider does **not** redact: arguments can carry user content, file paths, shell commands or secrets, and `pii_redaction_middleware` does not apply on this path. Narrow `tools` to the tools that can cause side effects, and clear the egress with your data-protection owner before enabling.
 
-**Limits are enforced locally.** Arguments that cannot be serialised as strict JSON (bytes, non-string keys, `NaN`/`Infinity`, lone surrogates that UTF-8 cannot encode) and argument text above `max_state_chars` are **denied without a request** (`typesafe.state_unusable`). A local refusal is a guardrail decision, so `fail_closed: false` does not turn it into an unevaluated tool run. Nothing is truncated and sent -- a prefix could hide the dangerous half of a `write_file` payload. The trade-off is real: long heredocs, inline scripts and large `write_file` bodies can trip the limit, and those refusals count toward the deployment's false-positive rate. Raising `max_state_chars` increases the data leaving the process.
+**Limits are enforced locally.** Arguments that cannot be serialised as strict JSON (bytes, non-string keys, `NaN`/`Infinity`, lone surrogates that UTF-8 cannot encode) and argument text above `max_state_chars` are **denied without a request** (`typesafe.state_unusable`). A local refusal is a guardrail decision, so `fail_closed: false` does not turn it into an unevaluated tool run. Nothing is truncated and sent -- a prefix could hide the dangerous half of a `write_file` payload. The trade-off is real: long heredocs, inline scripts and large `write_file` bodies can trip the limit, and those refusals count toward the deployment's false-positive rate. Raising `max_state_chars` increases the data leaving the process. The *reply* is bounded in the same spirit: the client asks for an identity encoding, refuses a body that carries a non-identity `Content-Encoding`, and stops past 64 KiB (`typesafe.client.MAX_RESPONSE_BYTES`), so a compressed or oversized response is a failed evaluation — `invalid_response`, and with `fail_closed: true` a denial — rather than an unexamined allow.
 
 **Deadlines.** The async path cancels an in-flight request through `asyncio.timeout`, which bounds the request duration but not the wall-clock cost of cleanup. The synchronous path cannot preempt a blocking call: it checks the deadline after the response headers arrive, around the body read, and before the decision is accepted, and drops results that arrived late. **No total return-time bound is promised on the sync path.**
 
@@ -692,6 +692,8 @@ server, with a meta-check proving the sync path on the loop trips the Blockbuste
 - Strict types for the `typesafe:` block: `max_attempts: true` is rejected instead of silently becoming `1`, while an
   integer stays a usable float (`timeout: 5`)
 - A transport failure raises without chaining the original error, so a rejected header cannot print the credential
+- The reply is bounded and never decoded: a compressed body is refused even when it decodes to a valid envelope, a body
+  over `MAX_RESPONSE_BYTES` is refused, one exactly at the cap is answered, and deep nesting is a request-level failure
 - `sharing_key` (internal: credential fingerprint, connection settings, input limit, transport factory) versus
   `release_policy_parameters()` (public: behaviour, never the credential)
 

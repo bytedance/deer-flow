@@ -7,7 +7,7 @@ drives deletion, and never participates in the reinforcement evidence gate.
 The memory-layer coordinator in this package owns request combination and the
 combined cache; each adapter keeps its own cache when the sides are not combined.
 
-See ``docs/superpowers/specs/2026-09-25-jev-memory-signal-classification-design.en.md``.
+See ``backend/docs/MEMORY_IMPROVEMENTS.md`` and ``agents/memory/AGENTS.md``.
 """
 
 from deerflow.agents.memory.signals.contract import (

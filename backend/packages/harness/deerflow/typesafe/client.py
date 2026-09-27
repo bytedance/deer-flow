@@ -26,6 +26,10 @@ Consequences worth keeping in mind when editing:
 * **A question-level failure is data, not an exception** (design §2.3). One
   malformed answer must not discard the other valid answers in the same response;
   the consumer decides what "no result for this question" means.
+* **The response body is bounded and never decoded.** A 200 is not a reason to
+  read a body into memory: the client asks for `identity`, refuses a non-identity
+  `Content-Encoding`, and stops past ``MAX_RESPONSE_BYTES``. A body that is not a
+  usable envelope is a request-level ``invalid_response`` failure, not a verdict.
 * **Wire size is a counting capability only** (design §2.4). No consumer's limit
   unit moves because this module exists.
 """
@@ -38,7 +42,7 @@ import json
 import math
 import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import AsyncIterable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 
 import httpx
@@ -64,6 +68,22 @@ CATEGORY_LABEL = "label"
 _OK_STATUS = 200
 _UNAUTHORIZED_STATUS = 401
 _RETRYABLE_STATUS_CODES = frozenset({429, 529})
+
+#: Most a 200 body may occupy before the response is rejected. A System One
+#: envelope is a few hundred bytes, so this only ever fires for an endpoint that
+#: answered with something other than an answer set — and a compressed body makes
+#: the decoded size, not the bytes on the wire, the number that matters.
+MAX_RESPONSE_BYTES = 64 * 1024
+
+#: Never ask for a compressed body: the client counts the bytes of a response and
+#: has no reason to accept an encoded one, which would make the *decoded* size the
+#: number that matters. A response that carries a non-identity
+#: ``Content-Encoding`` anyway is rejected rather than decoded.
+_ACCEPT_ENCODING = "identity"
+
+#: Bytes pulled per read. Bounds the memory one chunk can add, and lets the cap fire
+#: in bounded steps instead of after the whole body is buffered.
+_READ_CHUNK_BYTES = 8 * 1024
 
 #: A callable returning a fresh transport, because httpx closes the transport it
 #: was given when its client closes.
@@ -293,7 +313,7 @@ class TypeSafeClient:
         }
 
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._connection.api_key}", "Accept": "application/json"}
+        return {"Authorization": f"Bearer {self._connection.api_key}", "Accept": "application/json", "Accept-Encoding": _ACCEPT_ENCODING}
 
     # --- transport --------------------------------------------------------
 
@@ -304,7 +324,7 @@ class TypeSafeClient:
                 if response.status_code != _OK_STATUS:
                     raise self._status_error(response.status_code)
                 self._check_budget(deadline_at)
-                body = response.read()
+                body = _read_bounded(response)
                 self._check_budget(deadline_at)
                 answers = self._parse(body, questions)
                 self._check_budget(deadline_at)
@@ -328,7 +348,7 @@ class TypeSafeClient:
                 if response.status_code != _OK_STATUS:
                     raise self._status_error(response.status_code)
                 self._check_budget(deadline_at)
-                body = await response.aread()
+                body = await _aread_bounded(response)
                 self._check_budget(deadline_at)
                 answers = self._parse(body, questions)
                 self._check_budget(deadline_at)
@@ -357,7 +377,11 @@ class TypeSafeClient:
         """Split one response into a usable envelope plus per-question outcomes (design §2.3)."""
         try:
             payload = json.loads(body)
-        except ValueError as exc:
+        # ``RecursionError`` and not ``ValueError`` is what deep nesting raises, and it
+        # is not a ``TypeSafeError``: without it here a hostile or broken endpoint
+        # would escape this module's taxonomy and the consumer would lose the round's
+        # record instead of falling back.
+        except (ValueError, RecursionError) as exc:
             raise TypeSafeError("TypeSafe response was not valid JSON", cause=CAUSE_INVALID_RESPONSE) from exc
         if not isinstance(payload, dict):
             raise TypeSafeError("TypeSafe response must be a JSON object", cause=CAUSE_INVALID_RESPONSE)
@@ -399,6 +423,53 @@ class TypeSafeClient:
 
     async def _async_sleep_before_retry(self, attempt: int, deadline_at: float) -> None:
         await asyncio.sleep(min(self._connection.retry_backoff * 2 ** (attempt - 1), self._remaining(deadline_at)))
+
+
+def _read_bounded(response: httpx.Response) -> bytes:
+    """The response body, refused past ``MAX_RESPONSE_BYTES`` and never decoded.
+
+    The endpoint is treated as potentially hostile (module docstring), so a 200 is
+    not a reason to read an unbounded body into memory: a compressed response is
+    rejected before it is expanded, and the accumulated bytes are counted as they
+    arrive rather than after the whole body is buffered. ``iter_bytes`` is the
+    streamed *and* preloaded view (an injected transport may hand over a complete
+    response), which is safe here because a non-identity encoding never gets this far.
+    """
+    _reject_content_encoding(response)
+    return _accumulate(response.iter_bytes(_READ_CHUNK_BYTES))
+
+
+async def _aread_bounded(response: httpx.Response) -> bytes:
+    """The async variant of :func:`_read_bounded`."""
+    _reject_content_encoding(response)
+    return await _aaccumulate(response.aiter_bytes(_READ_CHUNK_BYTES))
+
+
+def _reject_content_encoding(response: httpx.Response) -> None:
+    """Refuse an encoded body instead of letting httpx decode it (see ``_ACCEPT_ENCODING``)."""
+    encoding = (response.headers.get("content-encoding") or "identity").strip().lower()
+    if encoding != "identity":
+        # ``recordable_model`` is this module's policy for a short response value that
+        # reaches a message: a token as itself, anything else as a digest.
+        raise TypeSafeError(f"TypeSafe response carried a non-identity Content-Encoding ({recordable_model(encoding)})", cause=CAUSE_INVALID_RESPONSE)
+
+
+def _accumulate(chunks: Iterable[bytes]) -> bytes:
+    body = bytearray()
+    for chunk in chunks:
+        body += chunk
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise TypeSafeError(f"TypeSafe response exceeded {MAX_RESPONSE_BYTES} bytes", cause=CAUSE_INVALID_RESPONSE)
+    return bytes(body)
+
+
+async def _aaccumulate(chunks: AsyncIterable[bytes]) -> bytes:
+    body = bytearray()
+    async for chunk in chunks:
+        body += chunk
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise TypeSafeError(f"TypeSafe response exceeded {MAX_RESPONSE_BYTES} bytes", cause=CAUSE_INVALID_RESPONSE)
+    return bytes(body)
 
 
 def _validate_answer(question_id: str, question: Question, raw: object) -> tuple[Answer | None, QuestionError | None]:
@@ -464,6 +535,7 @@ __all__ = [
     "CATEGORY_MISSING",
     "CATEGORY_PROBABILITY",
     "CATEGORY_TYPE",
+    "MAX_RESPONSE_BYTES",
     "QUESTION_CHOICE",
     "QUESTION_NOUL",
     "Answer",

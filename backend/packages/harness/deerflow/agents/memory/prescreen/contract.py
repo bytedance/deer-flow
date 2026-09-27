@@ -13,7 +13,9 @@ Host contract, consumed by the DeerMem updater through the memory-layer judge:
 * :class:`MemoryPrescreenDecision` — the verdict, or ``None`` for "no opinion";
 * :class:`MemoryPrescreenProvider` — duck-typed, resolved by class path.
 
-See ``docs/superpowers/specs/2026-09-25-jev-memory-prescreening-design.en.md``.
+The operator-facing modes and the pre-``enforce`` gates are documented in
+``backend/docs/MEMORY_IMPROVEMENTS.md``; the module invariants are in
+``agents/memory/AGENTS.md``.
 """
 
 from __future__ import annotations
@@ -73,14 +75,18 @@ class MemoryPrescreenProvider(Protocol):
     """Contract for a pluggable memory pre-screen.
 
     ``decide`` is **synchronous**: the updater runs on the debounce Timer /
-    executor thread and must not touch the event loop. It returns ``None`` for
-    "no opinion", which the caller treats exactly like a failure — extract.
+    executor thread and must not touch the event loop. ``None`` is "no opinion"
+    (a question-level failure, or nothing to judge), which the caller treats as a
+    fallback — extract. A *request-level* failure must propagate as
+    ``deerflow.typesafe.errors.TypeSafeError`` instead of ``None``, so the round's
+    audit record can say ``request_failed`` rather than "no verdict"; any other
+    exception is a provider bug and the updater still extracts as usual.
     """
 
     name: str
 
     def decide(self, request: MemoryPrescreenRequest) -> MemoryPrescreenDecision | None:
-        """Return a verdict for this batch, or ``None`` to fall back to extraction."""
+        """Return a verdict for this batch, ``None`` for no opinion, or raise ``TypeSafeError`` on a request failure."""
         ...
 
     def release_policy_parameters(self) -> dict[str, object]:

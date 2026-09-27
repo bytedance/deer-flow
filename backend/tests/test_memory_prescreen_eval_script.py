@@ -173,6 +173,26 @@ def test_a_manual_review_is_a_second_ground_truth_witness_for_a_skip():
     assert summary["misses"] == 2
 
 
+def test_a_negative_count_is_absent_not_a_saved_call():
+    """A corrupt counter must censor the sample rather than read as "nothing lost".
+
+    Scoring ``-3`` as a saved call (it is not a miss) added a phantom saving to both
+    the numerator and the scored-skip denominator, tilting every gate toward PASS on
+    input that could not have come from the apply site.
+    """
+    record = _record(mutations_accepted=-3)
+
+    assert record.mutations_accepted is None
+    assert record.scorable is False
+    assert record.censored is True
+    assert record.censored_reason == eval_script.CENSORED_OUTCOME_NOT_RECORDED
+
+    report = eval_script.build_report([record], source="corrupt.jsonl")
+    assert report["model"]["scored_skips"] == 0
+    assert report["model"]["saved_calls"] == 0
+    assert report["model"]["miss_rate"] is None
+
+
 def test_missed_digests_are_reported_for_audit():
     records = [_record(prescreen={"digest": "lost-1"}, mutations_accepted=1), _record(prescreen={"digest": "kept-0"}, mutations_accepted=0)]
     summary = _population(records, eval_script.NETWORK)
@@ -293,23 +313,28 @@ def _gates(evidence, coverage) -> dict[str, str]:
 
 def _evidence(**overrides: Any):
     base = {
-        "scored_skips": 250,
+        # 300 skips is the smallest zero-miss sample whose exact upper bound is at or
+        # below the 1% target: 1 - 0.05 ** (1 / 300) = 0.0099.
+        "scored_skips": 300,
         "misses": 0,
-        "saved_calls": 250,
+        "saved_calls": 300,
         "sensitive_scored_skips": {"identity": 2, "preference": 2, "correction": 1},
         "sensitive_misses": {"identity": 0, "preference": 0, "correction": 0},
         "reviewed_skips": 200,
         "reviewed_scored_skips": 200,
         "reviewed_missed": 0,
-        "saved_skips_with_tokens": 250,
-        "latency_samples": 250,
-        "baseline_computable": 250,
+        "saved_skips_with_tokens": 300,
+        "latency_samples": 300,
+        "baseline_computable": 300,
+        # The heuristic saves nothing here, so the model's 300 saved calls are all
+        # incremental (an equal count is a FAIL, see the test below).
+        "baseline_saved_calls": 0,
     }
     base.update(overrides)
     return eval_script.Evidence(**base)
 
 
-_CLEAN_COVERAGE = eval_script.Coverage(records=260, censored=10, malformed_lines=0)
+_CLEAN_COVERAGE = eval_script.Coverage(records=310, censored=10, malformed_lines=0)
 
 
 def test_every_gate_passes_on_a_clean_run():
@@ -319,18 +344,20 @@ def test_every_gate_passes_on_a_clean_run():
         "reviewed_skips_confirm_no_loss": eval_script.PASS,
         "censoring_disclosed": eval_script.PASS,
         "savings_recorded": eval_script.PASS,
+        "baseline_incremental_savings": eval_script.PASS,
     }
 
 
 @pytest.mark.parametrize(
     ("overrides", "coverage", "expected"),
     [
-        ({"misses": 3, "saved_calls": 247}, None, "network_miss_rate"),
+        ({"misses": 4, "saved_calls": 296}, None, "network_miss_rate"),
         ({"sensitive_misses": {"identity": 1}}, None, "sensitive_stratum_zero_misses"),
         ({"reviewed_skips": 199}, None, "reviewed_skips_confirm_no_loss"),
         ({"reviewed_missed": 1}, None, "reviewed_skips_confirm_no_loss"),
-        ({}, eval_script.Coverage(records=260, censored=10, malformed_lines=2), "censoring_disclosed"),
+        ({}, eval_script.Coverage(records=310, censored=10, malformed_lines=2), "censoring_disclosed"),
         ({"saved_calls": 0, "misses": 250}, None, "savings_recorded"),
+        ({"baseline_saved_calls": 300}, None, "baseline_incremental_savings"),
     ],
 )
 def test_a_failing_gate_is_reported_as_fail(overrides, coverage, expected):
@@ -340,17 +367,39 @@ def test_a_failing_gate_is_reported_as_fail(overrides, coverage, expected):
 
 def test_gates_report_insufficient_instead_of_passing_vacuously():
     empty = eval_script.Evidence(
-        scored_skips=0, misses=0, saved_calls=0, sensitive_scored_skips={}, sensitive_misses={}, reviewed_skips=0, reviewed_scored_skips=0, reviewed_missed=0, saved_skips_with_tokens=0, latency_samples=0, baseline_computable=0
+        scored_skips=0,
+        misses=0,
+        saved_calls=0,
+        sensitive_scored_skips={},
+        sensitive_misses={},
+        reviewed_skips=0,
+        reviewed_scored_skips=0,
+        reviewed_missed=0,
+        saved_skips_with_tokens=0,
+        latency_samples=0,
+        baseline_computable=0,
+        baseline_saved_calls=0,
     )
     statuses = _gates(empty, eval_script.Coverage(records=0, censored=0, malformed_lines=0))
     assert set(statuses.values()) == {eval_script.INSUFFICIENT}
     assert statuses["network_miss_rate"] == eval_script.INSUFFICIENT
 
     thin = eval_script.Evidence(
-        scored_skips=2, misses=0, saved_calls=2, sensitive_scored_skips={}, sensitive_misses={}, reviewed_skips=0, reviewed_scored_skips=0, reviewed_missed=0, saved_skips_with_tokens=2, latency_samples=2, baseline_computable=2
+        scored_skips=2,
+        misses=0,
+        saved_calls=2,
+        sensitive_scored_skips={},
+        sensitive_misses={},
+        reviewed_skips=0,
+        reviewed_scored_skips=0,
+        reviewed_missed=0,
+        saved_skips_with_tokens=2,
+        latency_samples=2,
+        baseline_computable=2,
+        baseline_saved_calls=0,
     )
     statuses = _gates(thin, eval_script.Coverage(records=2, censored=0, malformed_lines=0))
-    assert statuses["network_miss_rate"] == eval_script.PASS
+    assert statuses["network_miss_rate"] == eval_script.INSUFFICIENT, "two clean skips cannot establish a 1% target: the exact upper bound is 0.78"
     assert statuses["sensitive_stratum_zero_misses"] == eval_script.INSUFFICIENT
     assert statuses["reviewed_skips_confirm_no_loss"] == eval_script.INSUFFICIENT
 
@@ -387,11 +436,35 @@ def test_the_sensitive_gate_needs_evidence_for_each_stratum_not_a_pooled_sample(
 
 
 def test_miss_rate_gate_reports_the_exact_bound_and_the_sample_size():
-    gate = next(gate for gate in eval_script.evaluate_gates(_evidence(misses=1, saved_calls=249), _CLEAN_COVERAGE) if gate.gate_id == "network_miss_rate")
+    gate = next(gate for gate in eval_script.evaluate_gates(_evidence(), _CLEAN_COVERAGE) if gate.gate_id == "network_miss_rate")
+
     assert gate.status == eval_script.PASS
-    assert "n=250" in gate.detail
-    assert f"{eval_script.clopper_pearson_upper(1, 250):.4f}" in gate.detail
-    assert "exceeds the target" in gate.detail
+    assert "n=300" in gate.detail
+    assert f"{eval_script.clopper_pearson_upper(0, 300):.4f}" in gate.detail
+
+
+def test_the_miss_rate_gate_needs_the_bound_not_only_the_point_estimate():
+    """A zero-low point estimate on a thin sample must not be reported as proof.
+
+    ``misses=1`` of 300 is a 0.33% point estimate, but its one-sided 95% upper bound
+    is about 2%, so the sample does not establish the 1% target: the gate says
+    INSUFFICIENT and the detail carries the bound, not just the estimate.
+    """
+    gate = next(gate for gate in eval_script.evaluate_gates(_evidence(misses=1, saved_calls=299), _CLEAN_COVERAGE) if gate.gate_id == "network_miss_rate")
+
+    assert gate.status == eval_script.INSUFFICIENT
+    assert f"{eval_script.clopper_pearson_upper(1, 300):.4f}" in gate.detail
+    assert "too few skips" in gate.detail
+    assert "n=300" in gate.detail
+
+
+def test_the_baseline_gate_needs_a_gain_over_the_heuristic():
+    """The heuristic is already in the stack, so a tie is not a reason to egress."""
+    gate_id = "baseline_incremental_savings"
+
+    assert _gates(_evidence(baseline_saved_calls=300), _CLEAN_COVERAGE)[gate_id] == eval_script.FAIL, "the model saved exactly what the heuristic would have"
+    assert _gates(_evidence(baseline_saved_calls=299), _CLEAN_COVERAGE)[gate_id] == eval_script.PASS, "one incremental call is a gain"
+    assert _gates(_evidence(baseline_computable=0, baseline_saved_calls=0), _CLEAN_COVERAGE)[gate_id] == eval_script.INSUFFICIENT, "without the baseline field there is no comparison to make"
 
 
 # --- report assembly ------------------------------------------------------
@@ -449,13 +522,33 @@ def test_build_report_treats_a_record_set_without_savings_evidence_as_insufficie
 
 
 def test_build_report_enables_when_every_gate_passes():
+    """The enabling shape: enough skips for the bound, and calls the heuristic cannot save.
+
+    ``trivial_only=False`` is what makes the baseline comparison meaningful — the
+    heuristic skips only trivial, signal-free batches, so a batch it would have
+    extracted is exactly the saving the model adds.
+    """
     strata = ("identity", "preference", "correction")
-    records = [_record(prescreen={"digest": f"d{i}"}, mutations_accepted=0, trivial_only=True, reviewed=True, review_outcome="none_worth_remembering", stratum=strata[i] if i < 3 else None) for i in range(250)]
+    records = [_record(prescreen={"digest": f"d{i}"}, mutations_accepted=0, trivial_only=False, reviewed=True, review_outcome="none_worth_remembering", stratum=strata[i] if i < 3 else None) for i in range(300)]
     report = eval_script.build_report(records, source="clean.jsonl")
-    assert report["model"]["scored_skips"] == 250
+
+    assert report["model"]["scored_skips"] == 300
     assert report["model"]["misses"] == 0
+    assert report["baseline_heuristic"]["saved_calls"] == 0
     assert report["gate_summary"]["enable_recommended"] is True
     assert report["model"]["saved_call_rate_over_all_verdicts"] == 1.0
+
+
+def test_build_report_refuses_enforce_without_a_gain_over_the_heuristic():
+    """The reviewer's counterexample: a harmless all-trivial sample saves nothing extra."""
+    strata = ("identity", "preference", "correction")
+    records = [_record(prescreen={"digest": f"d{i}"}, mutations_accepted=0, trivial_only=True, reviewed=True, review_outcome="none_worth_remembering", stratum=strata[i] if i < 3 else None) for i in range(300)]
+    report = eval_script.build_report(records, source="trivial.jsonl")
+
+    assert report["baseline_heuristic"]["saved_calls"] == 300
+    gates = {gate["id"]: gate["status"] for gate in report["gates"]}
+    assert gates["baseline_incremental_savings"] == eval_script.FAIL
+    assert report["gate_summary"]["enable_recommended"] is False
 
 
 # --- label filtering ------------------------------------------------------

@@ -73,12 +73,15 @@ migration.
 
 **Before `enforce`.** Run the shadow evaluation and publish its gates:
 `miss_rate` (a skip on a batch whose extraction would have been accepted) at or
-below 1% with a confidence upper bound, zero misses on the identity / preference
-/ correction strata, at least 200 reviewed skips whose manual review confirms
-none was worth remembering, and the recorded savings evidence — calls and tokens
-saved, their p50/p95 verdict latency, and the no-network heuristic baseline on the
-same data; if the heuristic already captures the savings, the third-party call is
-not justified. `scripts/eval_memory_prescreen.py` reads
+below 1% **and** its one-sided 95% upper bound at or below that target — a sample
+that only meets the point estimate is reported `INSUFFICIENT`, so the answer is
+more skips rather than a smaller number to quote — zero misses on the identity /
+preference / correction strata, at least 200 reviewed skips whose manual review
+confirms none was worth remembering, and the recorded savings evidence — calls and
+tokens saved, their p50/p95 verdict latency, and the no-network heuristic baseline
+on the same data, with a positive incremental saving over that baseline; if the
+heuristic already captures the savings (it saves as many calls as the model), the
+third-party call is not justified and the gate fails. `scripts/eval_memory_prescreen.py` reads
 shadow records and reports those populations and gates, and reports a gate that
 lacks evidence as `INSUFFICIENT` rather than passing it. `skip_threshold` (0.2)
 and `hint_threshold` (0.5) are provisional and unmeasured.

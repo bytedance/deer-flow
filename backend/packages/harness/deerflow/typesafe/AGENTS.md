@@ -19,12 +19,18 @@ identity. Keeping that split is the whole point: contaminating either identity
 either merges requests that must stay apart or breaks assembly fingerprinting.
 
 Two-layer responses are load-bearing. A request-level failure (transport,
-deadline, non-200, missing envelope) raises `TypeSafeError` with a `cause`, and
-the consumer decides deny / fall back. A question-level failure is **data**
-(`AnswerSet.errors_by_question`), never an exception, so one bad answer cannot
-discard the other valid answers in the same response; the tool gate maps its own
-question's error back to `TypeSafeGuardrailError` because it has no verdict
-without it.
+deadline, non-200, missing envelope, unparsable-or-unbounded body) raises
+`TypeSafeError` with a `cause`, and the consumer decides deny / fall back. A
+question-level failure is **data** (`AnswerSet.errors_by_question`), never an
+exception, so one bad answer cannot discard the other valid answers in the same
+response; the tool gate maps its own question's error back to
+`TypeSafeGuardrailError` because it has no verdict without it. The reply is never
+read unbounded and never decoded: the client asks for an identity encoding, refuses
+a body that carries a non-identity `Content-Encoding`, and stops past
+`MAX_RESPONSE_BYTES` (64 KiB, a few hundred bytes is the expected envelope), so an
+endpoint that answers with something other than an answer set cannot be expanded
+into memory or accepted as a verdict. Deep nesting is mapped too — `json.loads`
+raises `RecursionError`, not `ValueError`, and it must not escape this taxonomy.
 
 Limits and secrets must not move. `max_state_chars` stays a character count in
 every consumer — `wire_size` reports bytes and replaces no limit, and one CJK

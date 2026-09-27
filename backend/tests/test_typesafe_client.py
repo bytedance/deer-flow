@@ -14,6 +14,7 @@ these pin what the client adds on its own:
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import traceback
 
@@ -27,6 +28,7 @@ from deerflow.typesafe.client import (
     CATEGORY_MISSING,
     CATEGORY_PROBABILITY,
     CATEGORY_TYPE,
+    MAX_RESPONSE_BYTES,
     QUESTION_CHOICE,
     QUESTION_NOUL,
     ChoiceAnswer,
@@ -268,3 +270,100 @@ class TestTransportFailureChain:
             asyncio.run(ask())
 
         assert _API_KEY not in "".join(traceback.format_exception(excinfo.value))
+
+
+# --- the reply is bounded and never decoded --------------------------------
+
+
+def _client_for(handler) -> TypeSafeClient:
+    connection = resolve_connection(settings={"api_key": _API_KEY, "max_attempts": 1}, configuration_source="tests.typesafe")
+    return TypeSafeClient(connection, transport_factory=lambda: httpx.MockTransport(handler))
+
+
+class TestBoundedResponse:
+    """A 200 is not a reason to read a body into memory.
+
+    The endpoint is treated as potentially hostile, so the two shapes from the review
+    are refused as request-level failures: a body that only becomes large after
+    decompression, and one that is large as sent. Both read paths (``ask`` /
+    ``aask``) go through their own helper, so both are covered here.
+    """
+
+    _CALL = {"tool_call": {"name": "bash", "arguments": "{}"}}
+    _ENVELOPE = json.dumps(_response({_GATE_QUESTION: {"type": "noul", "noul": 0.1}})).encode()
+
+    @staticmethod
+    def _ask(client: TypeSafeClient, *, as_async: bool):
+        if as_async:
+            return asyncio.run(client.aask(TestBoundedResponse._CALL, {_GATE_QUESTION: _NOUL}))
+        return client.ask(TestBoundedResponse._CALL, {_GATE_QUESTION: _NOUL})
+
+    @pytest.fixture(autouse=True)
+    def _bounded_helpers(self):
+        """Both directions of the cap: a body it must refuse and one it must still read."""
+        self.oversized = json.dumps({"model": "jev-1.13.0", "answers": {}, "pad": "x" * MAX_RESPONSE_BYTES}).encode()
+        self.deliberately_huge = gzip.compress(b" " * (4 << 20))
+        assert len(self.deliberately_huge) < MAX_RESPONSE_BYTES, "the wire size is small; only the decoded size is not"
+
+    def test_the_request_asks_for_an_identity_body(self):
+        server = _Server()
+        _ask(server, {_GATE_QUESTION: _NOUL})
+
+        assert server.requests[0].headers["accept-encoding"] == "identity"
+
+    @pytest.mark.parametrize("as_async", [False, True], ids=["sync", "async"])
+    def test_a_compressed_body_is_refused_even_when_it_decodes_to_a_valid_envelope(self, as_async):
+        """Refusing by encoding, not by parse failure: the decoded body here is valid."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=gzip.compress(self._ENVELOPE), headers={"Content-Encoding": "gzip"})
+
+        with pytest.raises(TypeSafeError) as excinfo:
+            self._ask(_client_for(handler), as_async=as_async)
+
+        assert excinfo.value.cause == CAUSE_INVALID_RESPONSE
+        assert "gzip" in str(excinfo.value), "the encoding is reported without being decoded"
+
+    @pytest.mark.parametrize("as_async", [False, True], ids=["sync", "async"])
+    def test_a_body_over_the_cap_is_refused(self, as_async):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=self.oversized)
+
+        with pytest.raises(TypeSafeError) as excinfo:
+            self._ask(_client_for(handler), as_async=as_async)
+
+        assert excinfo.value.cause == CAUSE_INVALID_RESPONSE
+        assert str(MAX_RESPONSE_BYTES) in str(excinfo.value)
+
+    @pytest.mark.parametrize("as_async", [False, True], ids=["sync", "async"])
+    def test_a_body_that_only_expands_is_refused_without_expanding(self, as_async):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=self.deliberately_huge, headers={"Content-Encoding": "gzip"})
+
+        with pytest.raises(TypeSafeError) as excinfo:
+            self._ask(_client_for(handler), as_async=as_async)
+
+        assert excinfo.value.cause == CAUSE_INVALID_RESPONSE
+
+    def test_a_body_at_the_cap_is_still_answered(self):
+        envelope = json.loads(self._ENVELOPE)
+        envelope["pad"] = ""
+        envelope["pad"] = "x" * (MAX_RESPONSE_BYTES - len(json.dumps(envelope).encode()))
+        at_cap = json.dumps(envelope).encode()
+        assert len(at_cap) == MAX_RESPONSE_BYTES
+
+        answer_set = self._ask(_client_for(lambda request: httpx.Response(200, content=at_cap)), as_async=False)
+
+        assert answer_set.noul(_GATE_QUESTION).probability == 0.1
+
+    @pytest.mark.parametrize("as_async", [False, True], ids=["sync", "async"])
+    def test_deep_nesting_is_a_request_level_failure(self, as_async):
+        """``json.loads`` raises ``RecursionError`` for deep nesting, not ``ValueError``."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"[" * 20000 + b"]" * 20000)
+
+        with pytest.raises(TypeSafeError) as excinfo:
+            self._ask(_client_for(handler), as_async=as_async)
+
+        assert excinfo.value.cause == CAUSE_INVALID_RESPONSE

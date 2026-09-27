@@ -27,7 +27,6 @@ from deerflow.agents.memory.signals.contract import (
 )
 from deerflow.typesafe.client import QUESTION_NOUL, Answer, Question, TransportFactory, TypeSafeClient, recordable_model
 from deerflow.typesafe.connection import TypeSafeConnection, resolve_connection, typesafe_defaults
-from deerflow.typesafe.errors import TypeSafeError
 from deerflow.typesafe.validation import criteria_entry, defaulted_text, finite_float, whole_number
 
 QUESTION_AFFIRMATION = "signal_affirmation"
@@ -175,8 +174,11 @@ class TypeSafeSignalClassifier:
     def decide(self, request: MemorySignalRequest) -> MemorySignalDecision | None:
         """Classify one batch with this side's own cache (the single-side path).
 
-        Never raises for a request-level failure: no model result is the
-        documented fallback to the deterministic signals (S2).
+        ``None`` means "no model result for this batch" (a question-level failure, or
+        nothing validated). A *request-level* failure propagates as
+        ``deerflow.typesafe.errors.TypeSafeError`` so the coordinator can record ``request_failed`` instead
+        of "no verdict"; the caller still falls back to the deterministic signals,
+        which is S2's documented direction.
 
         A bucket is per question, never per side (§2.2.6 / S18): holding one
         direction must not count as a full hit, so this round sends the missing
@@ -190,10 +192,7 @@ class TypeSafeSignalClassifier:
         if not missing:
             assert cached is not None
             return self.interpret(answers, model=cached.model_for(self._questions), cached=True)
-        try:
-            answer_set = self._client.ask(conversation_tail_state(request.batch_text), missing)
-        except TypeSafeError:
-            return None
+        answer_set = self._client.ask(conversation_tail_state(request.batch_text), missing)
         answers.update(answer_set.answers)
         models.update({question_id: answer_set.model for question_id in answer_set.answers})
         if answer_set.answers:
