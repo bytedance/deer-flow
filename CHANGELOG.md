@@ -323,6 +323,52 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **docker:** The production stack (`make up` / `scripts/deploy.sh`) now starts
+  on hosts with IPv6 disabled. `docker/nginx/nginx.conf` also listens on
+  `[::]:2026`; on a kernel booted with `ipv6.disable=1` that listen makes nginx
+  exit at startup, so the container restart-looped and `make up` never became
+  healthy. The dev compose file has stripped the IPv6 listen when
+  `/proc/net/if_inet6` is absent since #2027, and the Helm chart mirrors it;
+  the production compose file was the one launcher still without the guard.
+  It now uses the same launcher, and starts nginx with `exec` so it is PID 1. ([#5900])
+- **deploy:** `make up` / `scripts/deploy.sh` now honors `BETTER_AUTH_SECRET`
+  and `DEER_FLOW_INTERNAL_AUTH_TOKEN` written to the repo-root `.env`. The
+  script only checked the shell before reloading a persisted secret or
+  generating a new one and exporting it, and Compose interpolation lets shell
+  variables outrank `--env-file`, so the value the deployment docs tell
+  operators to put in `.env` was silently replaced: sessions were signed with
+  a secret the operator never chose, and Gateway workers running outside the
+  stack with the configured token got `401`. A `.env`-provided secret is now
+  left for Compose to read itself (shell → `.env` → persisted file →
+  generated). Whether `.env` provides one is decided by Compose itself — the
+  script renders a stub project with `${KEY}` through `docker compose config`
+  and reads the value back — so `KEY: VALUE` lines and `${VAR}` interpolation
+  count the way Compose counts them on every Compose v2 client. A value that
+  resolves empty, like an exported-but-empty shell variable, still triggers
+  generation because Compose would otherwise pass the empty value through. ([#5928])
+- **skills:** `skill_manage(action="remove_file")` and `write_file` now work on
+  binary support files, and reject directories cleanly. A `.skill` archive may
+  carry `assets/logo.png` (the installer only rejects *executable* binaries),
+  but both actions read the previous content as UTF-8 text — purely for the
+  history record — before touching the file, so a binary member raised
+  `UnicodeDecodeError` and was never removed or overwritten. A bare support
+  directory such as `assets` also slipped through path validation and raised
+  `IsADirectoryError`. Non-text content is now recorded as no previous text,
+  and a directory path is a validation error instead of a crash. ([#5893])
+- **projects:** The conversation-files view no longer shows an empty heading
+  for a member thread that has no title yet. A thread's `display_name` is
+  `null` on the wire until title generation has run (or if it never does), but
+  the file-group type declared it as a required string and rendered it as-is,
+  so files uploaded before the first reply sat under a blank line. Such groups
+  now read "Untitled", matching the project's thread list. ([#5879])
+- **skills:** Deleting a custom skill whose package directory is an
+  operator-managed symlink now succeeds. The storage contract accepts a
+  one-level link under `custom/`, but `delete_custom_skill` removed the
+  package with `shutil.rmtree`, which refuses symlinks: the delete failed with
+  `OSError` after its history record had been written, the user's projected
+  skill view was cleared on the way out, and `DELETE /api/skills/custom/{name}`
+  answered 500. The link itself is now removed; the external tree it points
+  at is never touched. ([#5881])
 - **frontend:** Stop mutating subtask render state during `MessageList` render.
   Subtask synchronization moved from render into an effect, so cards immediately
   receive pure message-derived snapshots even before the task context publishes
@@ -1235,6 +1281,16 @@ This release closes that milestone with **181 merged pull requests**.
   referenced. Code-span tokens now split the fragment the same way and strip
   trailing sentence punctuation; dotted filenames such as
   `references/v1.0.md#notes` keep their extension dots. ([#5841])
+- **skills:** Keep the skill review markdown-link scan linear on adversarial
+  input. The extractor re-scanned the same target run from every candidate
+  opener, so a long run of unmatched `[` or a `](`-dense invalid target drove
+  the review quadratic — #5714 measured 19 s on 256 KiB of `[`, and the
+  resource graph scans every text member with `PackageLimits.max_file_bytes`
+  at 64 MiB, so a single large SKILL.md is squarely in scope. The scan now
+  walks candidate openers once, reproducing `finditer` exactly (verified by
+  differential fuzzing against the base regex), and blanks matched spans by
+  position instead of `str.replace`, which could blank an unrelated later copy
+  of the same text. ([#5884])
 - **config:** Sign the bytes the config cache parsed, not a second read. The
   app-config loader opened `config.yaml` twice — parse once, then hash a fresh
   read to record the `(mtime, size, sha256)` signature — so a write landing
@@ -6094,4 +6150,10 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5855]: https://github.com/bytedance/deer-flow/pull/5855
 [#5856]: https://github.com/bytedance/deer-flow/pull/5856
 [#5859]: https://github.com/bytedance/deer-flow/pull/5859
+[#5879]: https://github.com/bytedance/deer-flow/pull/5879
+[#5881]: https://github.com/bytedance/deer-flow/pull/5881
+[#5884]: https://github.com/bytedance/deer-flow/pull/5884
+[#5893]: https://github.com/bytedance/deer-flow/pull/5893
+[#5900]: https://github.com/bytedance/deer-flow/pull/5900
+[#5928]: https://github.com/bytedance/deer-flow/pull/5928
 

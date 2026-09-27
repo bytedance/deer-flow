@@ -117,6 +117,28 @@ def test_stream_injects_langfuse_metadata_when_enabled(monkeypatch):
     assert sentinel in callbacks
 
 
+def test_stream_tags_the_effective_default_model(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_TRACING", "true")
+    monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk-lf-test")
+    monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-lf-test")
+    from deerflow.config.tracing_config import reset_tracing_config
+
+    reset_tracing_config()
+    fake_agent = _FakeAgent()
+
+    def ensure_agent(self, config, **kwargs):
+        self._effective_model_name = "stub-model"
+        self._agent = fake_agent
+
+    monkeypatch.setattr(DeerFlowClient, "_ensure_agent", ensure_agent)
+    client = _make_client(monkeypatch)
+    client._model_name = None
+
+    list(client.stream("hi", thread_id="thread-default-model"))
+
+    assert "model:stub-model" in fake_agent.captured_config["metadata"]["langfuse_tags"]
+
+
 def test_stream_is_inert_when_langfuse_disabled(monkeypatch):
     monkeypatch.setattr("deerflow.client.build_tracing_callbacks", lambda: [])
 

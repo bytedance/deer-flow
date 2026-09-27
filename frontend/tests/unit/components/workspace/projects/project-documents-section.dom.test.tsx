@@ -679,4 +679,39 @@ describe("ProjectDocumentsSection", () => {
     expect(screen.getByText("chart.png")).toBeDefined();
     expect(screen.queryByTestId("thread-files-truncated")).toBeNull();
   });
+
+  it.each([
+    ["null", null],
+    ["missing", undefined],
+    ["blank", "   "],
+  ])(
+    "labels a thread group whose title is %s as Untitled instead of rendering an empty heading",
+    (_label, displayName) => {
+      // ``display_name`` is nullable on the wire: the thread meta row starts
+      // as ``null`` and is only filled once title generation has run.
+      mocks.threadFileGroups = [
+        {
+          thread_id: "thread-9",
+          display_name: displayName,
+          updated_at: "2026-09-09T00:00:00Z",
+          truncated: false,
+          files: [
+            {
+              kind: "output",
+              name: "chart.png",
+              size_bytes: 1024,
+              modified_at: "2026-09-09T00:00:00Z",
+              artifact_url:
+                "/api/threads/thread-9/artifacts/mnt/user-data/outputs/chart.png",
+            },
+          ],
+        },
+      ];
+      render(
+        <ProjectDocumentsSection project={makeProject()} threads={THREADS} />,
+        { wrapper: Wrapper },
+      );
+      expect(screen.getByText("Untitled")).toBeDefined();
+    },
+  );
 });

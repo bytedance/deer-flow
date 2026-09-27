@@ -13,6 +13,7 @@ The provider itself handles:
 import asyncio
 import atexit
 import contextlib
+import errno
 import hashlib
 import logging
 import math
@@ -46,9 +47,11 @@ from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.identity import derive_sandbox_scope_token
+from deerflow.sandbox.lease import run_sync_lifecycle_operation
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.skills.types import SkillCategory
+from deerflow.utils.file_io import await_drained
 
 from .aio_sandbox import AioSandbox
 from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
@@ -121,6 +124,21 @@ def _lock_file_exclusive(lock_file) -> None:
 
     lock_file.seek(0)
     msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+
+
+def _try_lock_file_exclusive(lock_file) -> bool:
+    """Attempt the cross-process lock once without blocking the worker thread."""
+    try:
+        if fcntl is not None:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        else:  # pragma: no cover - Windows
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError as error:
+        if error.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+            return False
+        raise
+    return True
 
 
 def _unlock_file(lock_file) -> None:
@@ -2187,20 +2205,22 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         lock_file = await asyncio.to_thread(_open_lock_file, lock_path)
         locked = False
         try:
-            await asyncio.to_thread(_lock_file_exclusive, lock_file)
-            locked = True
+            while not locked:
+                locked = await run_sync_lifecycle_operation(_try_lock_file_exclusive, lock_file)
+                if not locked:
+                    await asyncio.sleep(0.02)
             # Re-check in-process caches under the file lock in case another
             # thread in this process won the race while we were waiting.
-            cached_id = await asyncio.to_thread(self._recheck_cached_sandbox, thread_id, sandbox_id, user_id=effective_user_id)
+            cached_id = await run_sync_lifecycle_operation(self._recheck_cached_sandbox, thread_id, sandbox_id, user_id=effective_user_id)
             if cached_id is not None:
                 return cached_id
 
             # Backend discovery is sync because local discovery may inspect
             # Docker and perform a health check; keep it off the event loop.
-            discovered = await asyncio.to_thread(self._backend.discover, sandbox_id)
+            discovered = await run_sync_lifecycle_operation(self._backend.discover, sandbox_id)
             if discovered is not None:
                 if discovered.requires_replacement:
-                    replaced = await asyncio.to_thread(
+                    replaced = await run_sync_lifecycle_operation(
                         self._replace_incompatible_sandbox,
                         discovered,
                         time.time(),
@@ -2211,13 +2231,20 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     # Registration publishes ownership, which is blocking store
                     # IO (filesystem or network depending on the backend) — same
                     # reason every other step in this coroutine is offloaded.
-                    return await asyncio.to_thread(self._register_discovered_sandbox, thread_id, discovered, user_id=effective_user_id)
+                    return await run_sync_lifecycle_operation(self._register_discovered_sandbox, thread_id, discovered, user_id=effective_user_id)
 
-            return await self._create_sandbox_async(thread_id, sandbox_id, user_id=effective_user_id)
+            # Keep the entire async create lifecycle under the cross-process flock.
+            # Shielding only individual to_thread workers is insufficient: cancellation
+            # after backend.create() would otherwise discard SandboxInfo before readiness
+            # and registration/cleanup run, then finally release the flock over an
+            # unregistered deterministic container.
+            return await await_drained(self._create_sandbox_async(thread_id, sandbox_id, user_id=effective_user_id))
         finally:
-            if locked:
-                await asyncio.to_thread(_unlock_file, lock_file)
-            await asyncio.to_thread(lock_file.close)
+            try:
+                if locked:
+                    await run_sync_lifecycle_operation(_unlock_file, lock_file)
+            finally:
+                await run_sync_lifecycle_operation(lock_file.close)
 
     def _destroy_unready_sandbox(self, sandbox_id: str, info: SandboxInfo) -> None:
         """Tear down a freshly-created container whose readiness check failed.
@@ -2333,10 +2360,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     async def _create_sandbox_async(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Async counterpart to ``_create_sandbox``."""
         effective_user_id = self._effective_acquire_user_id(user_id)
-        extra_mounts = await asyncio.to_thread(self._get_extra_mounts, thread_id, user_id=effective_user_id)
-        provision_lark_cli_runtime = await asyncio.to_thread(self._lark_integration_active, effective_user_id)
-        provision_lark_cli_broker = await asyncio.to_thread(self._lark_broker_active, effective_user_id)
-        config_mount_exclusion_root = await asyncio.to_thread(
+        extra_mounts = await run_sync_lifecycle_operation(self._get_extra_mounts, thread_id, user_id=effective_user_id)
+        provision_lark_cli_runtime = await run_sync_lifecycle_operation(self._lark_integration_active, effective_user_id)
+        provision_lark_cli_broker = await run_sync_lifecycle_operation(self._lark_broker_active, effective_user_id)
+        config_mount_exclusion_root = await run_sync_lifecycle_operation(
             self._local_config_mount_exclusion_root,
             thread_id,
             user_id=effective_user_id,
@@ -2346,7 +2373,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
         replicas, total = self._replica_count()
         if total >= replicas:
-            evicted = await asyncio.to_thread(self._evict_oldest_warm)
+            evicted = await run_sync_lifecycle_operation(self._evict_oldest_warm)
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
         create_kwargs = {}
@@ -2354,7 +2381,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
         if isinstance(self._backend, RemoteSandboxBackend):
             create_kwargs["skills_container_path"] = self._configured_skills_container_path()
-        info = await asyncio.to_thread(
+        info = await run_sync_lifecycle_operation(
             self._backend.create,
             thread_id,
             sandbox_id,
@@ -2376,12 +2403,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # ``_register_created_sandbox`` after this gate. Claim the teardown
             # lease before stopping it so a peer cannot adopt the not-yet-ready
             # Pod in the meantime (#4248).
-            await asyncio.to_thread(self._destroy_unready_sandbox, sandbox_id, info)
+            await run_sync_lifecycle_operation(self._destroy_unready_sandbox, sandbox_id, info)
             raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
 
         # Registration publishes ownership (blocking store IO), so it is offloaded
         # like every other blocking step on this path.
-        return await asyncio.to_thread(self._register_created_sandbox, thread_id, sandbox_id, info, user_id=effective_user_id)
+        return await run_sync_lifecycle_operation(self._register_created_sandbox, thread_id, sandbox_id, info, user_id=effective_user_id)
 
     def get(self, sandbox_id: str) -> Sandbox | None:
         """Get a sandbox by ID. Updates last activity timestamp.
