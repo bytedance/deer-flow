@@ -163,9 +163,9 @@ class ToolApprovalRequired(RuntimeError):
     Attributes:
         interrupts: The ``{"id", "value"}`` entries from the ``interrupt``
             event, in order. Feed the payload's action requests to ``resume()``.
-        thread_id: The parked thread, which ``resume()`` requires. ``None`` only
-            when the caller let ``chat()`` generate one and it could not be
-            recovered.
+        thread_id: The parked thread, which ``resume()`` requires. ``chat()``
+            resolves it before streaming, so it is populated even when the
+            caller supplied none and the ID was generated for the run.
         partial_text: AI text accumulated before the park, kept so it is not
             lost with the raise.
     """
@@ -1433,7 +1433,9 @@ class DeerFlowClient:
 
         Args:
             message: User message text.
-            thread_id: Thread ID for conversation context. Auto-generated if None.
+            thread_id: Thread ID for conversation context. Auto-generated if
+                None, and a generated one is still reported on
+                ``ToolApprovalRequired`` so a park stays resumable.
             **kwargs: Override client defaults (same as stream()).
 
         Returns:
@@ -1447,6 +1449,12 @@ class DeerFlowClient:
                 own docstring. Only reachable with ``tools[].interrupt_on``
                 configured and ``disable_tool_approval`` unset.
         """
+        # Resolve the ID here rather than letting ``_stream_turn`` mint it, so a
+        # park on the documented ``chat(message)`` default can still name its
+        # thread: ``resume()`` rejects a falsy one. Idempotent — a supplied ID is
+        # only validated, which ``_stream_turn`` would do anyway.
+        thread_id = resolve_thread_id(thread_id)
+
         # Per-id delta lists joined once at the end — avoids the O(n²) cost
         # of repeated ``str + str`` on a growing buffer for long responses.
         chunks: dict[str, list[str]] = {}

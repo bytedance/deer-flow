@@ -67,6 +67,12 @@ reason to suspect. It therefore raises `ToolApprovalRequired`, carrying the
 interrupt entries, the `thread_id` that `resume()` needs, and the text gathered
 before the park.
 
+`chat()` resolves that `thread_id` itself instead of forwarding its own argument,
+because the documented `chat(message)` default generates the ID inside
+`_stream_turn` — passing `None` through left the exception naming a thread
+`resume()` rejects, stranding the parked checkpoint. `resolve_thread_id` only
+validates an ID the caller supplied, so resolving early changes nothing else.
+
 Raising rather than returning keeps the `-> str` contract intact: a park is not a
 completed turn, so there is no correct string to return for one. The single
 production caller (`tui/cli.py::_run_print`) already sends

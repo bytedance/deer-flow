@@ -116,6 +116,43 @@ class TestChatDoesNotSwallowAPark:
         with pytest.raises(ToolApprovalRequired, match="resume"):
             client.chat("run ls", thread_id="t-1")
 
+    def test_a_generated_thread_id_still_reaches_the_error(self, monkeypatch):
+        """``chat(message)`` is the documented default, and it parks too.
+
+        The ID is generated inside ``_stream_turn``, so forwarding ``chat``'s
+        own ``thread_id=None`` left the exception telling the caller to
+        ``resume(thread_id=None)`` — which ``resume()`` rejects, stranding the
+        parked checkpoint with no way to name it.
+        """
+        seen: dict[str, str | None] = {}
+        events = self._parked_events()
+
+        def _stream(message, *, thread_id=None, **kwargs):
+            seen["thread_id"] = thread_id
+            return iter(events)
+
+        client = DeerFlowClient.__new__(DeerFlowClient)
+        monkeypatch.setattr(client, "stream", _stream)
+
+        with pytest.raises(ToolApprovalRequired) as excinfo:
+            client.chat("run ls")
+
+        assert excinfo.value.thread_id is not None
+        # The resumable ID must be the thread the run actually used, not a
+        # second one minted for the error message.
+        assert excinfo.value.thread_id == seen["thread_id"]
+
+    def test_a_generated_thread_id_is_resumable(self, monkeypatch):
+        """``resume()`` rejects a falsy thread, so the ID must satisfy it."""
+        from deerflow.utils.thread_id import validate_thread_id
+
+        client = self._client(monkeypatch, self._parked_events())
+
+        with pytest.raises(ToolApprovalRequired) as excinfo:
+            client.chat("run ls")
+
+        assert validate_thread_id(excinfo.value.thread_id) == excinfo.value.thread_id
+
     def test_an_ordinary_turn_still_returns_its_text(self, monkeypatch):
         """The park branch must not disturb the normal contract."""
         client = self._client(
