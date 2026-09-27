@@ -896,9 +896,10 @@ async def run_agent(
     # that child instead of starting another restore. None of this is marked
     # done before the operation actually reaches a terminal outcome.
     cancellation_action: str | None = None
-    cancellation_restore_task: asyncio.Task[bool] | None = None
+    checkpoint_restore_task: asyncio.Task[bool] | None = None
+    restored_values_published = False
 
-    async def _owned_cancellation_restore() -> bool:
+    async def _owned_checkpoint_restore() -> bool:
         """Own the run's single checkpoint restore.
 
         This child is the only place a rollback restore executes. Its own
@@ -964,12 +965,59 @@ async def run_agent(
             raise asyncio.CancelledError
         return restored
 
+    def ensure_checkpoint_restored() -> asyncio.Task[bool]:
+        """Return the run's single owned checkpoint-restore operation.
+
+        Every caller (user rollback and edit-replay recovery) joins this one
+        child, so the restore executes at most once per run.
+        """
+        nonlocal checkpoint_restore_task
+        if checkpoint_restore_task is None:
+            checkpoint_restore_task = asyncio.create_task(_owned_checkpoint_restore())
+        return checkpoint_restore_task
+
+    async def _ensure_edit_replay_restored() -> None:
+        """Restore a failed edit replay exactly once, whatever ended it.
+
+        Runs from the early failure path and again from the final outcome
+        barrier, so a late journal/receipt failure or an accepted late cancel
+        still restores the pre-run checkpoint. A fenced worker never starts a
+        new restore; restored ``values`` are published at most once.
+        """
+        nonlocal checkpoint_rollback_completed, restored_values_published
+        if record.ownership_lost:
+            return
+        if not _is_edit_replay_run(record) or record.status == RunStatus.success:
+            return
+        if not record.finalizing:
+            await run_manager.set_finalizing(run_id, True)
+        try:
+            if not checkpoint_rollback_completed:
+                checkpoint_rollback_completed = await _join_owned_restore(ensure_checkpoint_restored())
+            if checkpoint_rollback_completed and not restored_values_published:
+                await _publish_restored_checkpoint_values(
+                    bridge=bridge,
+                    run_id=run_id,
+                    accessor=accessor,
+                    thread_id=thread_id,
+                )
+                restored_values_published = True
+                logger.info(
+                    "Run %s edit replay restored pre-run checkpoint %s",
+                    run_id,
+                    pre_run_checkpoint_id,
+                )
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            logger.warning("Run %s edit replay rollback failed", run_id, exc_info=True)
+
     async def _finish_cancellation(
         action: str,
         *,
         restore_checkpoint: bool = True,
     ) -> None:
-        nonlocal cancellation_action, cancellation_restore_task
+        nonlocal cancellation_action
         if cancellation_action is None:
             cancellation_action = action
             await run_manager.set_finalizing(run_id, True)
@@ -1005,9 +1053,7 @@ async def run_agent(
             # must not consume the rollback a later safe boundary can still do.
             return
 
-        if cancellation_restore_task is None:
-            cancellation_restore_task = asyncio.create_task(_owned_cancellation_restore())
-        await _join_owned_restore(cancellation_restore_task)
+        await _join_owned_restore(ensure_checkpoint_restored())
 
     try:
         normalized_stream_modes = normalize_stream_modes(stream_modes)
@@ -1566,29 +1612,10 @@ async def run_agent(
                     run_id,
                 )
 
-            if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success:
-                if not record.finalizing:
-                    await run_manager.set_finalizing(run_id, True)
-                try:
-                    if not checkpoint_rollback_completed:
-                        checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
-                            accessor=accessor,
-                            checkpointer=checkpointer,
-                            thread_id=thread_id,
-                            run_id=run_id,
-                            rollback_point=rollback_point,
-                            snapshot_capture_failed=snapshot_capture_failed,
-                        )
-                    if checkpoint_rollback_completed:
-                        await _publish_restored_checkpoint_values(
-                            bridge=bridge,
-                            run_id=run_id,
-                            accessor=accessor,
-                            thread_id=thread_id,
-                        )
-                        logger.info("Run %s edit replay restored pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
-                except Exception:
-                    logger.warning("Run %s edit replay rollback failed", run_id, exc_info=True)
+            # Early edit-replay recovery for a failure the graph already raised.
+            # The final outcome barrier below re-checks after every late
+            # transition, and both paths join the same owned restore.
+            await _ensure_edit_replay_restored()
 
             # Persist any subagent step events still buffered (#3779) — including on
             # abort/exception paths, where the stream loop broke before its own flush.
@@ -1693,6 +1720,12 @@ async def run_agent(
                             error=_JOURNAL_UNSETTLED_ERROR,
                             persist=False,
                         )
+
+            # Final outcome barrier: a late journal or receipt failure has now
+            # settled the local status, so re-run the edit-replay recovery before
+            # the durable terminal row and the end frame. The shared owned
+            # restore makes this idempotent with the early path above.
+            await _ensure_edit_replay_restored()
 
             if not record.ownership_lost and journal is not None and persist_completion:
                 try:
