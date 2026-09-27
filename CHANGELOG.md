@@ -323,6 +323,26 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **gateway:** `GET` and `PUT /api/user-profile` no longer run their
+  filesystem work on the event loop. Both handlers resolved the per-user
+  `USER.md` path (which builds absolute paths on every call), stat'ed, read,
+  created the user bucket and wrote the file inline, while every other
+  handler in the custom-agent router offloads that work with
+  `asyncio.to_thread`. Under the strict Blockbuster gate the pair raised
+  `BlockingError`; in production a slow disk stalled every other request on
+  the worker for the duration. Both handlers now offload the whole
+  resolve-stat-read / resolve-mkdir-write sequence. ([#5935])
+- **docker:** Project-document uploads larger than 1 MB no longer fail with a
+  bare nginx `413` through the unified entry point. `POST
+  /api/projects/{id}/documents` is a multipart upload that Gateway accepts up
+  to `uploads.max_file_size` (50 MiB by default), but no nginx location
+  matched it, so it fell through to the `/api/` catch-all and nginx's default
+  `client_max_body_size 1m` rejected the request before Gateway saw it — a
+  2 MB PDF was refused while the same file uploaded fine into a thread. All
+  three maintained configs (Docker, `make dev`, Helm) now give
+  `/api/projects/{id}/documents` its own location with the thread-uploads
+  settings (100M ceiling, streamed request body) and the read timeout the
+  catch-all already granted; the catch-all itself keeps nginx's defaults. ([#5934])
 - **docker:** The production stack (`make up` / `scripts/deploy.sh`) now starts
   on hosts with IPv6 disabled. `docker/nginx/nginx.conf` also listens on
   `[::]:2026`; on a kernel booted with `ipv6.disable=1` that listen makes nginx
@@ -331,6 +351,21 @@ This release closes that milestone with **181 merged pull requests**.
   `/proc/net/if_inet6` is absent since #2027, and the Helm chart mirrors it;
   the production compose file was the one launcher still without the guard.
   It now uses the same launcher, and starts nginx with `exec` so it is PID 1. ([#5900])
+- **deploy:** `make up` / `scripts/deploy.sh` now honors `BETTER_AUTH_SECRET`
+  and `DEER_FLOW_INTERNAL_AUTH_TOKEN` written to the repo-root `.env`. The
+  script only checked the shell before reloading a persisted secret or
+  generating a new one and exporting it, and Compose interpolation lets shell
+  variables outrank `--env-file`, so the value the deployment docs tell
+  operators to put in `.env` was silently replaced: sessions were signed with
+  a secret the operator never chose, and Gateway workers running outside the
+  stack with the configured token got `401`. A `.env`-provided secret is now
+  left for Compose to read itself (shell → `.env` → persisted file →
+  generated). Whether `.env` provides one is decided by Compose itself — the
+  script renders a stub project with `${KEY}` through `docker compose config`
+  and reads the value back — so `KEY: VALUE` lines and `${VAR}` interpolation
+  count the way Compose counts them on every Compose v2 client. A value that
+  resolves empty, like an exported-but-empty shell variable, still triggers
+  generation because Compose would otherwise pass the empty value through. ([#5928])
 - **skills:** `skill_manage(action="remove_file")` and `write_file` now work on
   binary support files, and reject directories cleanly. A `.skill` archive may
   carry `assets/logo.png` (the installer only rejects *executable* binaries),
@@ -6140,4 +6175,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5884]: https://github.com/bytedance/deer-flow/pull/5884
 [#5893]: https://github.com/bytedance/deer-flow/pull/5893
 [#5900]: https://github.com/bytedance/deer-flow/pull/5900
+[#5928]: https://github.com/bytedance/deer-flow/pull/5928
+[#5934]: https://github.com/bytedance/deer-flow/pull/5934
+[#5935]: https://github.com/bytedance/deer-flow/pull/5935
 

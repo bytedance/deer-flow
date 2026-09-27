@@ -609,6 +609,7 @@ def build_middlewares(
         DurableContextMiddleware(
             skills_container_path=resolved_app_config.skills.container_path,
             skill_file_read_tool_names=resolved_app_config.summarization.skill_file_read_tool_names,
+            inject_tool_artifacts=resolved_app_config.tool_artifacts.enabled and resolved_app_config.tool_artifacts.inject_model_context,
             task_continuity_enabled=getattr(getattr(resolved_app_config, "task_continuity", None), "enabled", False) is True,
             pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None),
         )
