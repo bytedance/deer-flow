@@ -1343,10 +1343,10 @@ async def run_agent(
                     selected_image_source_from_reply,
                     graph_input,
                     rollback_point.messages,
-                    image_config.sandbox.environment,
+                    image_config.image_generation_environment,
                 )
             if isinstance(image_config, AppConfig) and image_source is None:
-                image_source = await asyncio.to_thread(effective_image_generation_source, image_config.sandbox.environment)
+                image_source = await asyncio.to_thread(effective_image_generation_source, image_config.image_generation_environment)
         except (OSError, ValueError):
             # An invalidated default or unavailable catalog cannot authorize a
             # particular provider. The tool will require a fresh choice.

@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import StrEnum
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -19,6 +19,9 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, m
 from deerflow.config.encrypted_catalog import EncryptedCatalog
 from deerflow.config.extensions_config import extensions_config_file_lock
 from deerflow.config.runtime_paths import runtime_home
+
+if TYPE_CHECKING:
+    from deerflow.config.app_config import AppConfig
 
 
 class ImageProvider(StrEnum):
@@ -71,10 +74,9 @@ class ImageGenerationProfile(BaseModel):
     def usable(self) -> bool:
         return bool(self.api_key and self.api_key.get_secret_value())
 
-    def command_environment(self) -> dict[str, str]:
-        if not self.usable():
-            raise ImageConfigurationError("Image generation API key is not configured")
-        key = self.api_key.get_secret_value()  # type: ignore[union-attr]
+    def server_environment(self) -> dict[str, str]:
+        """Represent a typed server profile for the existing image resolver."""
+        key = self.api_key.get_secret_value() if self.api_key else ""
         # Clear image credentials inherited from a previously configured
         # container so the selected profile is the only effective provider.
         env = {
@@ -96,6 +98,11 @@ class ImageGenerationProfile(BaseModel):
             env.update(MINIMAX_API_KEY=key, MINIMAX_IMAGE_MODEL=self.model)
             env["MINIMAX_API_HOST"] = self.base_url or "https://api.minimaxi.com"
         return env
+
+    def command_environment(self) -> dict[str, str]:
+        if not self.usable():
+            raise ImageConfigurationError("Image generation API key is not configured")
+        return self.server_environment()
 
 
 class ManagedImageGenerationProfile(ImageGenerationProfile):
@@ -235,6 +242,13 @@ def image_profile_identity(profile: ImageGenerationProfile) -> str:
     return hashlib.sha256(json.dumps(settings, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
 
 
+def image_profile_container_identity(profile: ImageGenerationProfile) -> str:
+    """Fence startup credentials without exposing the credential in the ID."""
+    secret = profile.api_key.get_secret_value() if profile.api_key else ""
+    payload = json.dumps([image_profile_identity(profile), secret], separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 class ImageGenerationDefaultStore:
     """Persist an admin-selected default separately from encrypted credentials."""
 
@@ -283,6 +297,28 @@ class ImageGenerationDefaultStore:
             )
             EncryptedCatalog.write_bytes(self.path, saved.model_dump_json().encode("utf-8"))
             return saved
+
+
+class ServerImageProbeStore:
+    """Remember admin probe results for the exact current server settings."""
+
+    def __init__(self):
+        self._catalog = EncryptedCatalog(runtime_home() / "managed-image-profiles" / "server-probes.enc")
+
+    @staticmethod
+    def _fingerprint(profile: ImageGenerationProfile) -> str:
+        return image_profile_container_identity(profile)
+
+    def results(self, profile: ImageGenerationProfile) -> dict[str, str]:
+        records = self._catalog.read()
+        if not records or records[0].get("fingerprint") != self._fingerprint(profile):
+            return {}
+        return {operation: records[0][operation] for operation in ("generation", "edit") if isinstance(records[0].get(operation), str)}
+
+    def record(self, profile: ImageGenerationProfile, operation: Literal["generation", "edit"], result: str) -> None:
+        with _lock, extensions_config_file_lock(self._catalog.path):
+            previous = self.results(profile)
+            self._catalog.write([{"fingerprint": self._fingerprint(profile), **previous, operation: result}])
 
 
 def _legacy_environment(raw: dict[str, str]) -> dict[str, str]:
@@ -335,6 +371,17 @@ def legacy_image_profile(raw_environment: dict[str, str]) -> ImageGenerationProf
         base_url=env.get("MINIMAX_API_HOST") or None,
         api_key=env.get("MINIMAX_API_KEY"),
     )
+
+
+def resolve_server_image_profile(config: AppConfig) -> ImageGenerationProfile | None:
+    """Resolve the one operator-owned image profile, whichever YAML form supplied it."""
+    return legacy_image_profile(image_environment(config))
+
+
+def image_environment(config: AppConfig) -> dict[str, str]:
+    """Return normalized image settings, including legacy config test doubles."""
+    environment = getattr(config, "image_generation_environment", None)
+    return environment if environment is not None else getattr(getattr(config, "sandbox", None), "environment", {})
 
 
 def legacy_image_model_identity(raw_environment: dict[str, str]) -> str | None:

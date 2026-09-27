@@ -112,6 +112,18 @@ export const testImageProfile = (
     signal,
   );
 
+export const testServerImageProfile = (
+  expectedIdentity: string,
+  operation: "generation" | "edit",
+  signal?: AbortSignal,
+) =>
+  request<{ ok: boolean; message: string }>(
+    `/server/test/${operation}`,
+    "POST",
+    { expected_identity: expectedIdentity },
+    signal,
+  );
+
 export function imageProfileDraft(profile?: ImageProfile): ImageProfileDraft {
   return {
     name: profile?.name ?? "",
