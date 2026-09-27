@@ -52,6 +52,8 @@ from mcp import ClientSession
 from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED
 
+from deerflow.mcp_scope import mcp_scope_belongs_to_thread
+
 logger = logging.getLogger(__name__)
 
 _MCP_CLOSED_STREAM_ERRORS = (
@@ -618,6 +620,27 @@ class MCPSessionPool:
             keys = [k for k in self._entries if k[1] == scope_key]
             entries = [(self._entries.pop(k)) for k in keys]
             inflight_keys = [k for k in self._inflight if k[1] == scope_key]
+            inflight = [self._inflight.pop(k) for k in inflight_keys]
+        await self._close_owners(entries, inflight)
+
+    async def close_thread_scope(self, *, user_id: str, thread_id: str) -> None:
+        """Close every session scoped to one user/thread identity.
+
+        Differs from :meth:`close_scope` in matching *all incarnations* of the
+        thread rather than one exact scope key. A thread-deletion path knows the
+        user and thread but not reliably the incarnation: the record may predate
+        incarnation tracking (legacy ``user:thread`` scope), and a new
+        incarnation can be minted between reading the record and tearing down.
+        Keying cleanup on a read incarnation would therefore both miss legacy
+        sessions and race a concurrent incarnation. Every generation of a
+        deleted thread is equally stale, so all of them are closed.
+
+        Sessions belonging to another user or thread are left untouched.
+        """
+        with self._lock:
+            keys = [k for k in self._entries if mcp_scope_belongs_to_thread(k[1], user_id=user_id, thread_id=thread_id)]
+            entries = [self._entries.pop(k) for k in keys]
+            inflight_keys = [k for k in self._inflight if mcp_scope_belongs_to_thread(k[1], user_id=user_id, thread_id=thread_id)]
             inflight = [self._inflight.pop(k) for k in inflight_keys]
         await self._close_owners(entries, inflight)
 

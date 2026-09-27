@@ -458,6 +458,60 @@ def test_delete_thread_route_closes_browser_session(tmp_path):
     manager.close_session.assert_awaited_once_with("thread-browser")
 
 
+def test_delete_thread_route_closes_mcp_sessions(tmp_path):
+    """Deleting a thread tears down its persistent MCP sessions so a later
+    caller who reuses the id gets fresh MCP server state instead of a retained
+    session (and its leaked owner task plus subprocess) — the same invariant the
+    browser-session cleanup above guards (#5188)."""
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    paths = Paths(tmp_path)
+
+    app = make_authed_test_app()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.include_router(threads.router)
+
+    pool = SimpleNamespace(close_thread_scope=AsyncMock(return_value=None))
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-mcp")
+
+    assert response.status_code == 200
+    pool.close_thread_scope.assert_awaited_once_with(
+        user_id=get_effective_user_id(),
+        thread_id="thread-mcp",
+    )
+
+
+def test_delete_thread_route_isolates_failing_mcp_cleanup(tmp_path):
+    """A failing MCP teardown must stay best-effort like every other cleanup step.
+
+    The delete has already removed the thread's filesystem data, checkpoints and
+    metadata by the time MCP sessions are closed, so an exception here must not
+    turn a successful deletion into a 500.
+    """
+    paths = Paths(tmp_path)
+
+    app = make_authed_test_app()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.include_router(threads.router)
+
+    pool = SimpleNamespace(close_thread_scope=AsyncMock(side_effect=RuntimeError("simulated MCP teardown failure")))
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-mcp-fail")
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "message": "Deleted local thread data for thread-mcp-fail"}
+    pool.close_thread_scope.assert_awaited_once()
+
+
 def _persistence_cleanup_app(tmp_path, *, run_store, event_store, feedback_repo):
     app = make_authed_test_app()
     app.state.run_manager = _ThreadTestRunManager()
