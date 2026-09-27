@@ -249,6 +249,13 @@ class TestWebSearchTool:
         assert "error" in parsed
         assert "402" in parsed["error"]
 
+
+def test_coerce_max_results_inf_falls_back_to_default():
+    """A YAML `.inf` max_results must fall back to the default, not crash."""
+    import deerflow.community.groundroute.tools as groundroute_mod
+
+    assert groundroute_mod._coerce_max_results(float("inf")) == groundroute_mod._DEFAULT_MAX_RESULTS
+
     def test_network_exception_returns_error_json(self, mock_config_with_key):
         patcher, mock_client_cls = _patch_post(MagicMock())
         mock_client_cls.return_value.__enter__.return_value.post.side_effect = Exception("timeout")
