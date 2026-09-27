@@ -1670,6 +1670,7 @@ For file acceptance criteria, an empty regular file in the shared workspace can 
 返回 `does not hold`；超限、无法完整读取、路径范围外或解析器资源限制返回 `UNVERIFIED`。
 读取最多 50,001 字节以检测超限，远程返回会校验完整标记、读取退出码及探测大小；
 不支持所需探测工具的远程提供方保留不确定状态，不回退全文读取。同尺寸并发改写不构成原子快照。
+本地读取文件内容前会重新检查沙箱权限；权限被撤销时返回 `UNVERIFIED`，不读取文件内容。
 UTF-8 BOM 不被接受；顶层标量、重复键及语法合法的大数可以通过，但不代表 Schema、字段或
 业务语义正确。其他文件条件不变，也不会自动校验所有 `.json` 文件。
 相比每次让 Agent 自行编写 bash/Python 检查，这一条件统一了验收结果、路径和读取边界，

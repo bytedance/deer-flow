@@ -405,6 +405,7 @@ _JSON_READ_INNER_SCRIPT = (
 
 def _read_bounded_json_content(runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None) -> bytes | None:
     """读取上限加一字节以检测增长；不能证明完整读取时返回 None。"""
+    from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
     from deerflow.sandbox.tools import _resolve_local_read_path, ensure_sandbox_initialized, is_local_sandbox
 
     if not is_local_sandbox(runtime):
@@ -430,6 +431,8 @@ def _read_bounded_json_content(runtime: Any, resolved: str, thread_data: Mapping
         except (binascii.Error, ValueError):
             return None
         return payload[:-4] if payload.endswith(b"\n000") else None
+    # 与沙箱工具复用实时授权；持久化的本地沙箱 ID 不能绕过已撤销的权限。
+    authorize_sandbox_execution(context=getattr(runtime, "context", None) or {}, app_config=safe_app_config())
     host_path = _resolve_local_read_path(resolved, thread_data)
     if host_path == resolved:
         return None

@@ -5,10 +5,48 @@ import os
 import shlex
 import subprocess
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from deerflow.subagents.acceptance_checks import check_acceptance_criteria, parse_file_criterion
+
+
+@pytest.mark.parametrize("sandbox_id", ["local", "local:thread-1"])
+@pytest.mark.parametrize("content", [b"{}", b"{invalid"])
+def test_local_json_rechecks_revoked_sandbox_grant(tmp_path, monkeypatch, sandbox_id, content):
+    """保留沙箱 ID 不保留授权；撤销后不得打开文件或产生语法结论。"""
+    from deerflow.authz.rbac import RbacAuthorizationProvider
+    from deerflow.config.authorization_config import AuthorizationConfig
+
+    config = SimpleNamespace(authorization=AuthorizationConfig(enabled=True))
+    provider = RbacAuthorizationProvider(roles={"user": {"sandbox": {"allow": "*"}}})
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.authz.sandbox_authz.resolve_authorization_provider", lambda config: provider)
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": sandbox_id}},
+        context={"thread_id": "thread-1", "user_id": "user-1", "user_role": "user"},
+    )
+    (tmp_path / "report.json").write_bytes(content)
+    criterion = "file:report.json json-valid"
+
+    def check():
+        return check_acceptance_criteria([criterion], runtime=runtime, thread_data={"workspace_path": str(tmp_path)})
+
+    assert check()["leaves"][0]["checked"] is True
+    provider = RbacAuthorizationProvider(roles={"user": {"sandbox": {"allow": []}}})
+    open_file = Mock(wraps=os.open)
+    monkeypatch.setattr(os, "open", open_file)
+    verdict = check()
+    open_file.assert_not_called()
+    assert (verdict["leaves"][0]["checked"], verdict["leaves"][0]["holds"]) == (False, False)
+    assert verdict["unchecked"] == [criterion]
+    assert runtime.state["sandbox"]["sandbox_id"] == sandbox_id
+
+    provider = RbacAuthorizationProvider(roles={"user": {"sandbox": {"allow": "*"}}})
+    restored = check()["leaves"][0]
+    assert (restored["checked"], restored["holds"]) == (True, content == b"{}")
+    open_file.assert_called_once()
 
 
 def test_json_file_is_checked_explicitly(tmp_path):
