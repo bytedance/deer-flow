@@ -610,6 +610,17 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         latest_user = next((item for item in reversed(messages) if isinstance(item, HumanMessage)), None)
         chinese = latest_user is not None and self._is_chinese(str(latest_user.content))
 
+        choice_marker = {
+            "managed_revision": managed.revision,
+            "server_model": f"{server.provider.value}:{server.model}",
+        }
+        context = getattr(runtime, "context", None)
+        if isinstance(context, dict):
+            channel_name = context.get("channel_name")
+            channel_user_id = context.get("channel_user_id")
+            if isinstance(channel_name, str) and channel_name and isinstance(channel_user_id, str) and channel_user_id:
+                choice_marker.update({"channel_name": channel_name, "channel_user_id": channel_user_id})
+
         call = {
             "name": ASK_CLARIFICATION_TOOL_NAME,
             "id": f"image-choice-{uuid.uuid4().hex}",
@@ -621,10 +632,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
                     f"{'网页' if chinese else 'Web'}: {managed.display_name or managed.name} ({managed.provider.value}/{managed.model})",
                     f"{'服务器' if chinese else 'Server'}: {server.provider.value}/{server.model}",
                 ],
-                "_image_profile_choice": {
-                    "managed_revision": managed.revision,
-                    "server_model": f"{server.provider.value}:{server.model}",
-                },
+                "_image_profile_choice": choice_marker,
             },
         }
         # Build a fresh message with the original id. Reusing the provider's
