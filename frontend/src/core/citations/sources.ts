@@ -108,9 +108,12 @@ export function maskCitationCode(markdown: string): string {
 // column-0 shape was recognised before, and indented fences were blanked by
 // accident because whole-document backtick pairing happened to close them.
 // Anchored: a backtick run further into a line is inline code, not an opener.
+// A list marker only opens a container when whitespace follows it, so `-```md`
+// is paragraph text rather than a fence opener.
 const FENCE_LINE_RE =
-  /^((?:(?:[ \t]*>)|[-+*]|\d{1,9}[.)]|[ \t])*)(`{3,}|~{3,})/;
-const BLOCKQUOTE_LINE_RE = /^[ \t]*>/;
+  /^((?:(?:[ \t]*>)|(?:[-+*]|\d{1,9}[.)])[ \t]|[ \t])*)(`{3,}|~{3,})/;
+const BLOCKQUOTE_PREFIX_RE = /^(?:[ \t]*>)+/;
+const LIST_ITEM_RE = /^(?:[-+*]|\d{1,9}[.)])[ \t]+/;
 
 // Inline spans end at a block boundary, not just at a blank line: see
 // `inlineSpanStarts` for the shapes and the matching scanner in
@@ -134,47 +137,103 @@ function indentationColumns(text: string): number {
   return column;
 }
 
+// Where a line sits once its blockquote markers are stripped: how deep in the
+// quotes it is, the column its content starts at inside them, and the text after
+// that indentation. A line that loses a `>` has left the blockquote that held
+// the fence, which is why the depth is counted rather than tested as a boolean.
+function linePosition(line: string): {
+  quoteDepth: number;
+  indent: number;
+  body: string;
+} {
+  const quoted = BLOCKQUOTE_PREFIX_RE.exec(line)?.[0] ?? "";
+  const rest = line.slice(quoted.length);
+  const body = rest.replace(/^[ \t]+/, "");
+  return {
+    quoteDepth: quoted.split(">").length - 1,
+    indent: indentationColumns(rest.slice(0, rest.length - body.length)),
+    body,
+  };
+}
+
+// Column a fence marker starts at, measured from the content of the innermost
+// blockquote. Container prefixes are part of the offset, so `- ```md` and
+// `  ```md` both read as column two.
+function fenceMarkerColumn(line: string, marker: string): number {
+  const quoted = BLOCKQUOTE_PREFIX_RE.exec(line)?.[0] ?? "";
+  const rest = line.slice(quoted.length);
+  return rest.indexOf(marker);
+}
+
+type OpenFence = { quoteDepth: number; column: number };
+
 function maskFencedCodeBlocks(markdown: string): string {
   // Blank a fenced block from its opener to its matching closer — or, while the
   // message is still streaming, to end of input when the fence is unclosed.
   // Marker-aware like the shared FENCE_MARKER_RE: a closer must repeat the
   // opener character and be at least as long, so a shorter run inside the block
-  // does not close it early. A fence also cannot outlive the container it was
-  // opened in, which is what `container` tracks (blank lines never end one,
-  // since a fenced block keeps them, but a blockquote loses its fence as soon
-  // as a line drops the `>` marker).
+  // does not close it early.
+  //
+  // A fence also cannot outlive the container it was opened in, and the marker's
+  // own indentation is not part of that container: up to three columns of it are
+  // allowed anywhere, so `  ```md` at the top level keeps swallowing an
+  // unindented sample line, while the same two columns inside a list item whose
+  // content starts at column two end the fence as soon as a line drops back to
+  // column zero. `items` is what tells those two apart.
   const lines = markdown.split("\n");
   let openMarker: string | null = null;
-  let container: { quoted: boolean; columns: number } | null = null;
+  let fence: OpenFence | null = null;
+  let items: number[] = [];
+  let itemsQuoteDepth = 0;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
-    const fence = FENCE_LINE_RE.exec(line);
+    const position = linePosition(line);
+    const opener = FENCE_LINE_RE.exec(line);
     if (openMarker) {
-      const escaped = container!.quoted
-        ? !BLOCKQUOTE_LINE_RE.test(line)
-        : line.trim() !== "" && indentationColumns(line) < container!.columns;
+      const escaped =
+        position.quoteDepth < fence!.quoteDepth ||
+        (position.body !== "" && position.indent < fence!.column);
       if (escaped) {
         openMarker = null;
-        container = null;
+        fence = null;
       } else {
         lines[i] = maskKeepingNewlines(line);
-        const marker = fence?.[2];
+        const closer = opener?.[2];
         if (
-          marker &&
-          marker.startsWith(openMarker.charAt(0)) &&
-          marker.length >= openMarker.length
+          closer &&
+          position.quoteDepth === fence!.quoteDepth &&
+          fenceMarkerColumn(line, closer) - fence!.column <= 3 &&
+          closer.startsWith(openMarker.charAt(0)) &&
+          closer.length >= openMarker.length
         ) {
           openMarker = null;
-          container = null;
+          fence = null;
         }
         continue;
       }
     }
-    if (fence) {
-      openMarker = fence[2]!;
-      container = {
-        quoted: fence[1]!.includes(">"),
-        columns: indentationColumns(fence[1]!),
+    // Outside a fence the line is structure again, so it can open or close a
+    // list item. Blank lines neither end an item nor start one.
+    if (position.quoteDepth !== itemsQuoteDepth) {
+      items = [];
+      itemsQuoteDepth = position.quoteDepth;
+    }
+    while (
+      position.body !== "" &&
+      items.length > 0 &&
+      position.indent < (items[items.length - 1] ?? 0)
+    ) {
+      items.pop();
+    }
+    const item = LIST_ITEM_RE.exec(position.body);
+    if (item && position.indent - (items[items.length - 1] ?? 0) <= 3) {
+      items.push(position.indent + item[0].length);
+    }
+    if (opener) {
+      openMarker = opener[2]!;
+      fence = {
+        quoteDepth: position.quoteDepth,
+        column: items[items.length - 1] ?? 0,
       };
       lines[i] = maskKeepingNewlines(line);
     }

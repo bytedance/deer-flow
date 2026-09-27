@@ -256,6 +256,62 @@ describe("extractCitationSources", () => {
     ]);
   });
 
+  it("keeps an indented top-level fence open for unindented content", () => {
+    // The opener's own indentation is not container indentation: content lines
+    // may sit further left than the marker, and the closer only has to come back
+    // within three columns of the opener.
+    const markdown = [
+      "Intro text.",
+      "  ```md",
+      "[citation:Fake](https://example.com/fake)",
+      "  ```",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("treats a four-space indented marker inside a column-zero fence as content", () => {
+    const markdown = [
+      "```md",
+      "    ```",
+      "[citation:Fake](https://example.com/fake)",
+      "```",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("does not open a fence from a list marker with no space after it", () => {
+    // `-` has to be followed by indentation to start a list item, so `-```md`
+    // is ordinary paragraph text and nothing behind it is code.
+    const markdown = [
+      "-```md",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("ends a fence when a line drops out of the inner blockquote", () => {
+    const markdown = [
+      ">> ```md",
+      ">> [citation:Fake](https://example.com/fake)",
+      "> Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
   it("uses the source domain when the citation label is generic", () => {
     const markdown = "See [citation:Source](https://www.example.com/path).";
 
