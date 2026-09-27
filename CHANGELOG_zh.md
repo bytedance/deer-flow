@@ -363,13 +363,17 @@
   成员会抛出 `UnicodeDecodeError`，文件既不会被删除也不会被覆盖。像 `assets` 这样的裸支持目录
   也能通过路径校验并抛出 `IsADirectoryError`。现在非文本内容会记录为“无原有文本”，目录路径
   则作为校验错误返回，而不是崩溃。([#5893])
-- **模型：** 在旧路径（没有 `reasoning:` 块）上，`when_thinking_enabled` 不再整体替换模型档案的
-  `extra_body`。启用分支用浅层 `dict.update` 套用模板，因此档案里与
-  `when_thinking_enabled.extra_body.thinking` 模板并列的 `extra_body: {tool_stream: true}`
-  在开启思考时会丢失 `tool_stream`——而禁用分支和契约路径早已是深度合并。现在启用分支同样
-  深度合并；发生冲突时仍以模板值为准。合并还会让模板的 vLLM 开关在两种拼写之间保持权威：
-  档案里写着 `chat_template_kwargs.enable_thinking: false`、模板却用旧别名 `thinking: true`
-  时，思考不再被固定为关闭（相反的情形现在也能正常关闭），旧路径与契约路径均如此。([#5894])
+- **模型：** 在旧路径（没有 `reasoning:` 块）上，`when_thinking_enabled` 与 `when_thinking_disabled`
+  不再整体替换模型档案的 `extra_body`。两个模板此前都用浅层 `dict.update` 套用，因此档案里与
+  `when_thinking_enabled.extra_body.thinking` / `when_thinking_disabled` 模板并列的
+  `extra_body: {tool_stream: true}`（`config.example.yaml` 里大多数基于 `extra_body` 的示例都是
+  这种写法）在开与关两个方向都会丢失 `tool_stream`，而合成的禁用载荷和契约路径早已是深度合并。
+  现在两个旧路径模板同样深度合并。合并语义为：永不删除键，模板只能新增或覆盖，嵌套映射会继承
+  档案里的其他键，冲突时以模板值为准。合并还会让模板的 vLLM 开关在两种拼写之间保持权威：当档案
+  与模板对开关的拼写不同（`chat_template_kwargs.enable_thinking: false` 并列旧别名
+  `thinking: true`）时，模板的值会镜像到档案的拼写上，因此 `VllmChatModel` 与普通的 OpenAI 兼容
+  类都会在服务端实际读取的那个键上发送模板的意图——旧路径与契约路径、开与关两个方向均如此。
+  非映射类型的模板值按原样转发。([#5894])
 - **项目：** 会话文件视图不再为尚无标题的成员会话显示空标题。会话的 `display_name` 在标题
   生成运行之前（或从未运行时）在接口上为 `null`，但文件分组类型将其声明为必填字符串并原样
   渲染，因此在首次回复之前上传的文件会挂在一行空白之下。这类分组现在显示为“未命名”，与
