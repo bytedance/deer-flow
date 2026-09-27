@@ -340,7 +340,7 @@
   `--env-file`，于是部署文档让运维写进 `.env` 的值被悄悄替换：会话用的是运维从未选择的密钥，
   在栈外运行、持有配置 token 的 Gateway worker 则收到 `401`。现在 `.env` 提供的密钥交由
   Compose 自行读取（优先级 shell → `.env` → 持久化文件 → 新生成），而已 export 但为空的
-  shell 变量仍会触发生成，因为 Compose 否则会把空值直接传下去。
+  shell 变量仍会触发生成，因为 Compose 否则会把空值直接传下去。([#5928])
 - **技能：** `skill_manage(action="remove_file")` 与 `write_file` 现在可以处理二进制支持文件，
   并会干净地拒绝目录。`.skill` 压缩包可以包含 `assets/logo.png`（安装器只拒绝*可执行*二进制），
   但这两个操作在改动文件之前会先把原有内容按 UTF-8 文本读出（仅用于历史记录），于是二进制
@@ -5219,3 +5219,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5881]: https://github.com/bytedance/deer-flow/pull/5881
 [#5893]: https://github.com/bytedance/deer-flow/pull/5893
 [#5900]: https://github.com/bytedance/deer-flow/pull/5900
+[#5928]: https://github.com/bytedance/deer-flow/pull/5928

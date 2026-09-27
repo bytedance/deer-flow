@@ -341,7 +341,7 @@ This release closes that milestone with **181 merged pull requests**.
   stack with the configured token got `401`. A `.env`-provided secret is now
   left for Compose to read itself (shell → `.env` → persisted file →
   generated), while an exported-but-empty shell variable still triggers
-  generation because Compose would otherwise pass the empty value through.
+  generation because Compose would otherwise pass the empty value through. ([#5928])
 - **skills:** `skill_manage(action="remove_file")` and `write_file` now work on
   binary support files, and reject directories cleanly. A `.skill` archive may
   carry `assets/logo.png` (the installer only rejects *executable* binaries),
@@ -6140,4 +6140,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5881]: https://github.com/bytedance/deer-flow/pull/5881
 [#5893]: https://github.com/bytedance/deer-flow/pull/5893
 [#5900]: https://github.com/bytedance/deer-flow/pull/5900
+[#5928]: https://github.com/bytedance/deer-flow/pull/5928
 
