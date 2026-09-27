@@ -1254,11 +1254,10 @@ are encrypted under `DEER_FLOW_HOME/managed-image-profiles/`; back up both
 The administrator's default selection is stored alongside the catalog in
 `default.json`; back it up with the catalog. Only one web profile can be enabled.
 Settings can select the server or enabled web profile as the default for new
-chats and requests. A changed model or endpoint invalidates that saved choice,
-so the next generation request asks again in the chat. Without an explicit
-default, a web profile saved after the server model takes priority; if the
-server image model changes later, the next generation request shows a choice
-card in the chat. The chat choice applies to that run only. For a server-owned
+chats and requests. When both are available and there is no valid saved default,
+the next generation request shows a choice card in the chat, regardless of
+which was configured first. A changed model or endpoint invalidates a saved
+choice. The chat choice applies to that run only. For a server-owned
 model, use the typed top-level `image_generation` block in `config.yaml`:
 
 ```yaml
