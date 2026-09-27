@@ -702,6 +702,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
                 set_subagent_batch_submitter(None)
 
+        # Close pooled long-lived sessions before the worker exits. Both pools
+        # own live transports that nothing else can reach once the loop stops:
+        # MCP sessions are keyed by (server, user, thread) and each is owned by
+        # a dedicated task that only runs its transport's ``__aexit__`` when the
+        # close signal is delivered, and browser sessions are keyed by thread.
+        # Abandoning them leaves stdio MCP servers and browser subprocesses with
+        # no orderly teardown. ``close_all`` is the async close: the docstring of
+        # ``close_all_sync`` directs callers inside a running loop to await it
+        # rather than signal-and-return.
+        try:
+            from deerflow.mcp.session_pool import get_session_pool
+
+            await asyncio.wait_for(
+                get_session_pool().close_all(),
+                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "MCP session pool shutdown exceeded %.1fs; proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to close MCP sessions")
+
         try:
             from deerflow.community.browser_automation import get_browser_session_manager
 

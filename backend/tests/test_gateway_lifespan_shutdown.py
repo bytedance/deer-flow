@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -568,3 +568,91 @@ async def test_lifespan_pins_batch_service_to_app_extensions(monkeypatch):
     ):
         async with lifespan(app):
             assert app.state.subagent_batch_service._extensions is snapshot
+
+
+def _gateway_lifespan_patches(startup_config, *, pool=None, browser_manager=None):
+    """Common patch set for driving the Gateway lifespan in a unit test."""
+    channel_service = MagicMock()
+    channel_service.get_status.return_value = {}
+    patches = [
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+        patch("app.channels.service.start_channel_service", AsyncMock(return_value=channel_service)),
+        patch("app.channels.service.stop_channel_service", AsyncMock()),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
+        patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+    ]
+    if pool is not None:
+        patches.append(patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool))
+    if browser_manager is not None:
+        patches.append(
+            patch(
+                "deerflow.community.browser_automation.get_browser_session_manager",
+                return_value=browser_manager,
+            )
+        )
+    return patches
+
+
+def test_lifespan_closes_pooled_mcp_sessions_on_shutdown():
+    """Pooled MCP sessions must be closed while the worker is still shutting down.
+
+    Each pooled session owns a live transport (a stdio subprocess, or an
+    SSE/HTTP connection) held by a dedicated owner task. Nothing else can reach
+    that task once the event loop stops, so lifespan shutdown is the only place
+    its ``__aexit__`` can run. The browser session manager is closed here for
+    the same reason; the MCP pool used to be skipped.
+    """
+    from app.gateway.app import lifespan
+
+    async def scenario():
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        pool = MagicMock()
+        pool.close_all = AsyncMock()
+
+        with ExitStack() as stack:
+            for patcher in _gateway_lifespan_patches(startup_config, pool=pool):
+                stack.enter_context(patcher)
+            async with lifespan(app):
+                pass
+
+        pool.close_all.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
+def test_lifespan_continues_when_mcp_close_fails():
+    """A failing MCP close must not abort the remaining shutdown hooks.
+
+    Shutdown is best-effort by design: every hook is isolated so one broken
+    teardown cannot strand the others.
+    """
+    from app.gateway.app import lifespan
+
+    async def scenario():
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        pool = MagicMock()
+        pool.close_all = AsyncMock(side_effect=RuntimeError("close failed"))
+        browser_manager = MagicMock()
+        browser_manager.close_all_sessions = AsyncMock(return_value=0)
+
+        with ExitStack() as stack:
+            for patcher in _gateway_lifespan_patches(startup_config, pool=pool, browser_manager=browser_manager):
+                stack.enter_context(patcher)
+            async with lifespan(app):
+                pass
+
+        pool.close_all.assert_awaited_once()
+        browser_manager.close_all_sessions.assert_awaited_once()
+
+    asyncio.run(scenario())
