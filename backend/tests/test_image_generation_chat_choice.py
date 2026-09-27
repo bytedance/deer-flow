@@ -359,6 +359,57 @@ def test_chat_card_selects_live_profile_without_running_image_tool(image_choice,
     assert selected_image_source_from_reply({"messages": [reply]}, (card,), {**environment, "GEMINI_IMAGE_MODEL": "changed-again"}) is None
 
 
+@pytest.mark.parametrize("option_id,expected", [("option-1", "managed"), ("option-2", "sandbox_environment")])
+@pytest.mark.parametrize("channel_name", [None, "feishu"])
+def test_server_endpoint_change_invalidates_pending_image_choice(image_choice, monkeypatch, option_id, expected, channel_name):
+    from deerflow.agents.image_generation_choice import adapt_channel_image_choice_reply
+
+    environment = {
+        "IMAGE_GENERATION_API_KEY": "synthetic-server-key",
+        "IMAGE_GENERATION_MODEL": "same-model",
+        "IMAGE_GENERATION_BASE_URL": "https://endpoint-a.example/v1",
+    }
+    config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}})
+    monkeypatch.setattr("deerflow.agents.middlewares.clarification_middleware.get_app_config", lambda: config)
+    context = {"channel_name": channel_name, "channel_user_id": "synthetic-user-a"} if channel_name else {}
+    card = _choice_card(context)
+    marker = card.artifact["human_input"]["image_profile_choice"]
+    assert marker["server_profile_identity"] == legacy_image_storage_identity(environment)
+    assert "synthetic-server-key" not in str(marker)
+    option = next(item for item in card.artifact["human_input"]["options"] if item["id"] == option_id)
+
+    if channel_name:
+        graph_input = {"messages": [HumanMessage(content="1" if option_id == "option-1" else "2")]}
+
+        def choose(current_environment):
+            return adapt_channel_image_choice_reply(graph_input, (card,), current_environment, context)[1]
+
+    else:
+        reply = HumanMessage(
+            content=option["value"],
+            additional_kwargs={
+                "human_input_response": {
+                    "version": 1,
+                    "kind": "human_input_response",
+                    "source": "ask_clarification",
+                    "request_id": card.id,
+                    "response_kind": "option",
+                    "option_id": option_id,
+                    "value": option["value"],
+                }
+            },
+        )
+
+        def choose(current_environment):
+            return selected_image_source_from_reply({"messages": [reply]}, (card,), current_environment)
+
+    assert choose(environment) == expected
+    assert choose({**environment, "IMAGE_GENERATION_BASE_URL": "https://endpoint-b.example/v1"}) is None
+    marker.pop("server_profile_identity")
+    marker["server_model"] = "openai:same-model"
+    assert choose(environment) is None
+
+
 def test_ambiguous_image_tool_fails_before_sandbox_acquisition(image_choice, monkeypatch):
     from deerflow.tools.builtins.image_generation_tool import generate_image_tool
 
