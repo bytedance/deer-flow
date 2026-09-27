@@ -23,6 +23,7 @@ from deerflow.config.app_config import get_app_config
 from deerflow.config.image_generation import (
     ManagedImageGenerationProfileStore,
     image_profile_choice_needed,
+    image_profile_identity,
     legacy_image_profile,
     selected_image_generation_source,
 )
@@ -612,7 +613,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         choice_marker = {
             "managed_revision": managed.revision,
-            "server_model": f"{server.provider.value}:{server.model}",
+            "server_profile_identity": image_profile_identity(server),
         }
         context = getattr(runtime, "context", None)
         if isinstance(context, dict):
