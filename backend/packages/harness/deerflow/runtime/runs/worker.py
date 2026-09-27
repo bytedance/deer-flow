@@ -941,6 +941,7 @@ async def run_agent(
         cancellation is re-raised afterwards. A cancelled or failed child is
         reported as a failure, never as a completed rollback.
         """
+        nonlocal deferred_finalization_interrupt
         current = asyncio.current_task()
         delivered = 0
         try:
@@ -962,7 +963,13 @@ async def run_agent(
                     current.uncancel()
             raise
         if delivered:
-            raise asyncio.CancelledError
+            # Only a cancellation this owned join actually consumed is deferred
+            # for the shared tail; every other host cancellation keeps the
+            # pre-existing worker semantics.
+            cancellation = asyncio.CancelledError()
+            if deferred_finalization_interrupt is None:
+                deferred_finalization_interrupt = cancellation
+            raise cancellation
         return restored
 
     def ensure_checkpoint_restored() -> asyncio.Task[bool]:
@@ -1577,18 +1584,10 @@ async def run_agent(
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
 
-    except asyncio.CancelledError as exc:
-        current = asyncio.current_task()
-        if current is not None and current.cancelling() > 0:
-            # A genuine host cancellation is preserved and re-raised only after
-            # the terminal bookkeeping (and any owned rollback) reaches a safe
-            # boundary. A ``CancelledError`` raised by a dependency while this
-            # task is not being cancelled is not the caller's request and keeps
-            # its previous handling. Deliberately not
-            # ``_defer_finalization_interrupt``: that helper clears every pending
-            # ``task.cancelling()`` count.
-            if deferred_finalization_interrupt is None:
-                deferred_finalization_interrupt = exc
+    except asyncio.CancelledError:
+        # The cancellation this run actually consumed inside its owned restore is
+        # recorded there and re-raised by the shared tail after the safe
+        # boundary; any other host cancellation keeps the previous handling.
         await _finish_cancellation(record.abort_action)
 
     except Exception as exc:
@@ -1629,14 +1628,7 @@ async def run_agent(
             # Persist any subagent step events still buffered (#3779) — including on
             # abort/exception paths, where the stream loop broke before its own flush.
             if not record.ownership_lost and subagent_events is not None:
-                try:
-                    await subagent_events.flush()
-                except asyncio.CancelledError as exc:
-                    current = asyncio.current_task()
-                    if current is None or current.cancelling() == 0:
-                        raise
-                    if deferred_finalization_interrupt is None:
-                        deferred_finalization_interrupt = exc
+                await subagent_events.flush()
 
             if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
                 try:
@@ -1702,23 +1694,12 @@ async def run_agent(
                                 extra_excluded_dir_names=workspace_excluded_dir_names,
                             )
                         delivery_content = _delivery_content_with_outputs(snapshot.delivery_content, produced_output_paths)
-                    try:
-                        receipt_persisted = await _persist_delivery_receipt(
-                            event_store,
-                            thread_id=thread_id,
-                            run_id=run_id,
-                            content=delivery_content,
-                        )
-                    except asyncio.CancelledError as exc:
-                        current = asyncio.current_task()
-                        if current is None or current.cancelling() == 0:
-                            raise
-                        # An interrupted receipt write is not a settled receipt;
-                        # keep the existing fail-closed downgrade but do not skip
-                        # the remaining terminal bookkeeping.
-                        receipt_persisted = False
-                        if deferred_finalization_interrupt is None:
-                            deferred_finalization_interrupt = exc
+                    receipt_persisted = await _persist_delivery_receipt(
+                        event_store,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        content=delivery_content,
+                    )
                     if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
                         await run_manager.set_status(
                             run_id,

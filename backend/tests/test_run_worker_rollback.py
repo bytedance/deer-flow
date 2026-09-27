@@ -160,10 +160,7 @@ async def test_run_agent_releases_execution_lease_when_cancelled():
         )
         await asyncio.wait_for(lease_bound.wait(), timeout=1)
         task.cancel()
-        # The host cancellation is re-raised only after the worker reached a safe
-        # terminal boundary; the cleanup assertions below still have to hold.
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        await task
         await asyncio.sleep(0)
 
         assert len(owner_ids) == 1
@@ -219,9 +216,7 @@ async def test_run_agent_cleans_up_when_mcp_task_projection_is_cancelled():
     await asyncio.wait_for(projection_started.wait(), timeout=1)
 
     run_task.cancel("MCP projection interrupted")
-    # Cancellation propagates after the bounded cleanup, not before it.
-    with pytest.raises(asyncio.CancelledError):
-        await run_task
+    await run_task
     await asyncio.sleep(0)
 
     agent_factory.assert_not_called()
@@ -3377,10 +3372,7 @@ async def test_interrupted_title_does_not_overwrite_checkpoint_from_admitted_rep
         checkpointer.latest_checkpoint = copy.deepcopy(replacement_checkpoint)
         checkpointer.latest_metadata = {"source": "loop", "step": 2}
         checkpointer.replacement_checkpoint_written.set()
-        # The interrupt strategy cancels the older run; a cancelled worker now
-        # surfaces that host cancellation after its safe terminal boundary.
-        with suppress(asyncio.CancelledError):
-            await old_task
+        await old_task
     finally:
         checkpointer.replacement_checkpoint_written.set()
         if not old_task.done():
@@ -3442,10 +3434,7 @@ async def test_replacement_run_waits_for_prior_finalizing_run():
 
         await run_manager.set_finalizing(old_record.run_id, False)
         await asyncio.wait_for(replacement_started.wait(), timeout=1.0)
-        # A cancelled worker now surfaces its host cancellation after the safe
-        # terminal boundary instead of ending as if it had completed normally.
-        with suppress(asyncio.CancelledError):
-            await task
+        await task
     finally:
         await run_manager.set_finalizing(old_record.run_id, False)
         if not task.done():
