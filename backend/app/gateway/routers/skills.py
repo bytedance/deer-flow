@@ -187,6 +187,18 @@ def _get_user_skill_storage(config: AppConfig) -> SkillStorage:
     return get_or_new_user_skill_storage(get_effective_user_id(), app_config=config)
 
 
+def _load_user_skills(config: AppConfig) -> list[Skill]:
+    """Load every skill visible to the caller's storage, enabled or not.
+
+    Blocking filesystem IO: always call this via ``asyncio.to_thread``.
+    Resolving the user-scoped storage builds absolute paths, and
+    ``load_skills`` walks every public and custom skill directory and parses
+    each ``SKILL.md`` -- work that scales with the number of installed skills
+    (#5747 moved the same call off the loop for ``get_custom_skill``).
+    """
+    return _get_user_skill_storage(config).load_skills(enabled_only=False)
+
+
 def _copy_uploaded_skill_archive(source: BinaryIO) -> Path:
     """Copy an uploaded archive to a bounded temporary file off the event loop."""
     destination: Path | None = None
@@ -327,7 +339,7 @@ async def list_skills(request: Request, config: AppConfig = Depends(get_config))
     yields an empty list (fail-closed) or all skills (fail-open).
     """
     try:
-        skills = _get_user_skill_storage(config).load_skills(enabled_only=False)
+        skills = await asyncio.to_thread(_load_user_skills, config)
     except Exception as e:
         logger.error(f"Failed to load skills: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to load skills: {str(e)}")
@@ -447,7 +459,7 @@ async def list_custom_skills(request: Request, config: AppConfig = Depends(get_c
     surface names the main listing hides.
     """
     try:
-        skills = [skill for skill in _get_user_skill_storage(config).load_skills(enabled_only=False) if skill.category == SkillCategory.CUSTOM]
+        skills = [skill for skill in await asyncio.to_thread(_load_user_skills, config) if skill.category == SkillCategory.CUSTOM]
         visible_skills = await _filter_visible_skills(request, config, skills)
         return SkillsListResponse(skills=[_skill_to_response(skill) for skill in visible_skills])
     except Exception as e:
@@ -697,7 +709,7 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
 async def get_skill(skill_name: str, request: Request, config: AppConfig = Depends(get_config)) -> SkillResponse:
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        skills = _get_user_skill_storage(config).load_skills(enabled_only=False)
+        skills = await asyncio.to_thread(_load_user_skills, config)
         skill = next((s for s in skills if s.name == skill_name), None)
 
         if skill is None:
@@ -838,10 +850,7 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
         else:
             await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
 
-        def _reload_skills() -> list[Skill]:
-            return _get_user_skill_storage(config).load_skills(enabled_only=False)
-
-        skills = await asyncio.to_thread(_reload_skills)
+        skills = await asyncio.to_thread(_load_user_skills, config)
         updated_skill = next((s for s in skills if s.name == skill_name), None)
 
         if updated_skill is None:
