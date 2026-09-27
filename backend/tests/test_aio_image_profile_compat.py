@@ -11,10 +11,80 @@ from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
 from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
 from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
-from deerflow.config.image_generation import bind_image_generation_source
+from deerflow.config.app_config import AppConfig
+from deerflow.config.image_generation import ImageGenerationDefaultStore, ManagedImageGenerationProfile, ManagedImageGenerationProfileStore, bind_image_generation_source, image_profile_container_identity
 
 
-def test_profile_revision_changes_local_sandbox_identity_without_changing_base(monkeypatch):
+@pytest.mark.parametrize("failure", ["catalog", "default", "provider"])
+def test_generic_aio_identity_and_binding_ignore_image_configuration_failures(monkeypatch, tmp_path, failure):
+    from deerflow.sandbox import tools as sandbox_tools
+    from deerflow.tools.builtins import image_generation_tool as image_tool
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    provider = object.__new__(AioSandboxProvider)
+    provider._config = {"skills_container_path": "/mnt/skills"}
+    provider._backend = object.__new__(LocalContainerBackend)
+    monkeypatch.setattr(provider, "_thread_skill_projection_active", lambda *_args: False)
+    environment = {"IMAGE_GENERATION_PROVIDER": "openai", "IMAGE_GENERATION_MODEL": "synthetic-model", "IMAGE_GENERATION_API_KEY": "synthetic-key"}
+    if failure == "provider":
+        environment["IMAGE_GENERATION_PROVIDER"] = "invalid-provider"
+    config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}})
+    monkeypatch.setattr(provider_module, "get_app_config", lambda: config)
+    if failure == "catalog":
+        monkeypatch.setattr(ManagedImageGenerationProfileStore, "list", lambda _self: (_ for _ in ()).throw(ValueError("unreadable catalog")))
+    elif failure == "default":
+        web = ManagedImageGenerationProfile(name="web", provider="openai", model="web-model", base_url="https://web.example/v1", api_key="synthetic-web-key", revision="revision-1")
+        monkeypatch.setattr(ManagedImageGenerationProfileStore, "list", lambda _self: [web])
+        monkeypatch.setattr(ImageGenerationDefaultStore, "read", lambda _self: (_ for _ in ()).throw(ValueError("malformed default")))
+    else:
+        monkeypatch.setattr(ManagedImageGenerationProfileStore, "list", lambda _self: [])
+
+    base = provider._base_sandbox_id_for_thread("thread", "user")
+    assert provider._sandbox_id_for_thread("thread", "user") == base
+    sandbox = SimpleNamespace(id=base)
+    provider._bind_image_profile_context(sandbox, "thread", "user")
+    assert sandbox._deerflow_image_profile_revision is None
+    assert sandbox._deerflow_server_image_storage_identity is None
+
+    monkeypatch.setattr(image_tool, "get_app_config", lambda: config)
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: pytest.fail("sandbox was acquired"))
+    result = image_tool.generate_image_tool.func(SimpleNamespace(context={}, state={}), "/mnt/user-data/prompt.txt", "/mnt/user-data/outputs/image.png")
+    assert result.startswith("Error: IMAGE_PROVIDER_INVALID_CONFIG")
+
+
+def test_generic_aio_typed_server_profile_ignores_unreadable_catalog(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    provider = object.__new__(AioSandboxProvider)
+    provider._backend = object.__new__(LocalContainerBackend)
+    config = AppConfig.model_validate({"sandbox": {"use": "test"}, "image_generation": {"provider": "openai", "model": "synthetic-model", "base_url": "https://server.example/v1", "api_key": "synthetic-key"}})
+    monkeypatch.setattr(provider_module, "get_app_config", lambda: config)
+    monkeypatch.setattr(ManagedImageGenerationProfileStore, "list", lambda _self: (_ for _ in ()).throw(ValueError("unreadable catalog")))
+    assert provider._typed_server_image_profile() is None
+
+
+def test_valid_typed_server_image_keeps_its_separate_aio_identity(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr(ManagedImageGenerationProfileStore, "list", lambda _self: [])
+    config = AppConfig.model_validate({"sandbox": {"use": "test"}, "image_generation": {"provider": "openai", "model": "synthetic-model", "base_url": "https://server.example/v1", "api_key": "synthetic-key"}})
+    monkeypatch.setattr(provider_module, "get_app_config", lambda: config)
+    provider = object.__new__(AioSandboxProvider)
+    provider._config = {"skills_container_path": "/mnt/skills"}
+    provider._backend = object.__new__(LocalContainerBackend)
+    monkeypatch.setattr(provider, "_thread_skill_projection_active", lambda *_args: False)
+
+    base = provider._base_sandbox_id_for_thread("thread", "user")
+    identity = image_profile_container_identity(config.image_generation)
+    sandbox_id = provider._image_config_sandbox_id(base, identity)
+    assert provider._sandbox_id_for_thread("thread", "user") == sandbox_id
+    sandbox = SimpleNamespace(id=sandbox_id)
+    provider._bind_image_profile_context(sandbox, "thread", "user")
+    assert sandbox._deerflow_server_image_storage_identity == identity
+    assert provider._typed_server_image_profile() == config.image_generation
+
+
+def test_profile_revision_changes_local_sandbox_identity_without_changing_base(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr(provider_module, "get_app_config", lambda: AppConfig.model_validate({"sandbox": {"use": "test", "environment": {}}}))
     provider = object.__new__(AioSandboxProvider)
     provider._config = {"skills_container_path": "/mnt/skills"}
     provider._backend = object.__new__(LocalContainerBackend)
@@ -134,6 +204,31 @@ def _creation_provider(monkeypatch, tmp_path, *, supports_env):
     monkeypatch.setattr(provider_module, "wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
 
     return provider, provider._image_profile_sandbox_id("base-id", profile.revision), calls, destroyed, user_file
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.asyncio
+async def test_generic_aio_capacity_ignores_image_configuration_failures(monkeypatch, tmp_path, async_mode):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr(ManagedImageGenerationProfileStore, "list", lambda _self: [])
+    provider, _, calls, _, _ = _creation_provider(monkeypatch, tmp_path, supports_env=True)
+    monkeypatch.setattr(provider, "_managed_image_profile", lambda: None)
+    monkeypatch.setattr(provider, "_typed_server_image_profile", lambda: None)
+    monkeypatch.setattr(provider, "_replica_count", lambda: (1, 1))
+    monkeypatch.setattr(provider, "_evict_oldest_warm", lambda *, protected_thread=None: None)
+    config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": {"IMAGE_GENERATION_PROVIDER": "invalid-provider"}}})
+    monkeypatch.setattr(provider_module, "get_app_config", lambda: config)
+
+    async def ready(*_args, **_kwargs):
+        return True
+
+    monkeypatch.setattr(provider_module, "wait_for_sandbox_ready_async", ready)
+    if async_mode:
+        assert await provider._create_sandbox_async("thread", "base-id", user_id="user") == "base-id"
+    else:
+        assert provider._create_sandbox("thread", "base-id", user_id="user") == "base-id"
+    assert len(calls) == 1
+    assert calls[0][1] == "base-id"
 
 
 @pytest.mark.parametrize("supports_env", [True, False])
