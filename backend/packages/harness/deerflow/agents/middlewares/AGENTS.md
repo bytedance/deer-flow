@@ -154,5 +154,3 @@ JSON from a provider, and hashing an unhashable value would raise TypeError out 
 chain instead of skipping the block and reading the remaining text. Tests:
 `tests/test_model_response.py` plus the middleware-level classification cases in
 `tests/test_llm_error_handling_middleware.py`.
-
-Image-model choice cards also record the trusted IM channel and sender in their server-created artifact. Before streaming a follow-up run, the worker uses its materialized pre-run checkpoint to turn an exact option label or `1`/`2` from that same sender into a structured response. It requires the choice card to be the last checkpointed message and rechecks the managed revision and server model identity; no process-local pending-card registry or extra Gateway state request is used.
