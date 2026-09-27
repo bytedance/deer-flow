@@ -108,7 +108,7 @@ def _validate_agent_name(name: str) -> None:
     Raises:
         HTTPException: 422 if the name is invalid.
     """
-    if not AGENT_NAME_PATTERN.match(name):
+    if not AGENT_NAME_PATTERN.fullmatch(name):
         raise HTTPException(
             status_code=422,
             detail=f"Invalid agent name '{name}'. Must match ^[A-Za-z0-9-]+$ (letters, digits, and hyphens only).",

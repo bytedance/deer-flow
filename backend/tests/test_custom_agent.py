@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.gateway.routers.agents import AGENT_NAME_PATTERN as GATEWAY_AGENT_NAME_PATTERN
 from deerflow.agents.memory.backends.deermem.deermem.core.paths import AGENT_NAME_PATTERN as DEERMEM_AGENT_NAME_PATTERN
-from deerflow.agents.memory.backends.deermem.deermem.core.paths import DEFAULT_AGENT_BUCKET, validate_agent_name
+from deerflow.agents.memory.backends.deermem.deermem.core.paths import DEFAULT_AGENT_BUCKET, agent_facts_directory, validate_agent_name
 from deerflow.config.agents_api_config import AgentsApiConfig, get_agents_api_config, set_agents_api_config
 
 # ---------------------------------------------------------------------------
@@ -24,6 +24,20 @@ def test_reserved_memory_bucket_stays_outside_both_public_agent_patterns() -> No
     assert GATEWAY_AGENT_NAME_PATTERN.fullmatch(DEFAULT_AGENT_BUCKET) is None
     assert DEERMEM_AGENT_NAME_PATTERN.fullmatch(DEFAULT_AGENT_BUCKET) is None
     validate_agent_name(DEFAULT_AGENT_BUCKET)  # Internal storage sentinel remains usable.
+
+
+@pytest.mark.parametrize("name", ["reviewer\n", "reviewer \n"])
+def test_agent_name_validation_rejects_trailing_newline(name: str) -> None:
+    """``$`` in ``^[A-Za-z0-9-]+$`` also matches before a final newline.
+
+    Only ``fullmatch`` anchors it, so DeerMem's inlined copy of the host's
+    agent-name grammar accepted ``"reviewer\\n"`` and used it as a directory
+    name — which the host's own strict validator then refuses forever.
+    """
+    with pytest.raises(ValueError, match="Invalid agent name"):
+        validate_agent_name(name)
+    with pytest.raises(ValueError, match="Invalid agent name"):
+        agent_facts_directory(Path("memory.json"), name)
 
 
 def _make_paths(base_dir: Path):
@@ -608,6 +622,16 @@ class TestAgentsAPI:
         assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": "🦌" * 100}).status_code == 201
         assert agent_client.put("/api/agents/reviewer", json={"display_name": display_name}).status_code == 422
         assert agent_client.get("/api/agents/reviewer").json()["display_name"] == "🦌" * 100
+
+    @pytest.mark.parametrize("name", ["reviewer\n", "reviewer\n\n"])
+    def test_trailing_newline_in_agent_name_is_rejected(self, agent_client, name):
+        """The router's ``AGENT_NAME_PATTERN.match`` accepted these and the store 500'd.
+
+        ``$`` matches before a trailing newline, so the name reached the file
+        store, which validates the same grammar with ``fullmatch``.
+        """
+        assert agent_client.post("/api/agents", json={"name": name}).status_code == 422
+        assert agent_client.get("/api/agents").json()["agents"] == []
 
     def test_display_name_round_trip_keeps_stable_identity(self, agent_client):
         response = agent_client.post("/api/agents", json={"name": "code-reviewer", "display_name": "  代码审查助手  "})
