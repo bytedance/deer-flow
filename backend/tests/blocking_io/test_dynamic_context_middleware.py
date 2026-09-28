@@ -3,7 +3,8 @@
 ``_inject`` performs synchronous file I/O (memory JSON loading) and
 potentially blocking network calls (tiktoken encoding download on first
 use — see issue #3402).  ``abefore_agent`` offloads the call via
-``asyncio.to_thread`` so the event loop stays responsive.
+``run_context_injection`` so the event loop stays responsive and slow reads
+cannot consume the default executor.
 
 This anchor drives the real ``create_agent`` graph via ``ainvoke`` under
 the strict Blockbuster gate.  If the offload regresses and the blocking
@@ -16,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest import mock
 
@@ -35,6 +35,8 @@ from deerflow.agents.middlewares.dynamic_context_middleware import (
 )
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.utils import context_io
+from deerflow.utils.context_io import ContextInjectionBusyError
 
 pytestmark = pytest.mark.asyncio
 
@@ -426,7 +428,7 @@ async def test_abefore_agent_records_checkpointed_memory_on_timeout() -> None:
 
 @pytest.mark.parametrize("read_policy", ["fail_open", "raise"])
 @pytest.mark.parametrize("already_saturated", [False, True], ids=["read_occupies_worker", "pool_already_full"])
-async def test_timeout_does_not_wait_for_saturated_executor(monkeypatch, read_policy, already_saturated):
+async def test_busy_or_timed_out_injection_preserves_read_policy(monkeypatch, read_policy, already_saturated):
     """Neither a running read nor another request may delay timeout handling."""
     monkeypatch.setenv("OPENVIKING_API_KEY", "test-key")
     await asyncio.to_thread(_scan_backends)  # normal Gateway startup discovery
@@ -441,8 +443,8 @@ async def test_timeout_does_not_wait_for_saturated_executor(monkeypatch, read_po
     entered = threading.Event()
     release = threading.Event()
     finished = threading.Event()
-    executor = ThreadPoolExecutor(max_workers=1)
-    loop = asyncio.get_running_loop()
+    pool = context_io._ContextInjectionPool(max_workers=1)
+    blocker = None
 
     def occupy_worker(*_args):
         entered.set()
@@ -450,11 +452,10 @@ async def test_timeout_does_not_wait_for_saturated_executor(monkeypatch, read_po
         finished.set()
 
     try:
-        with mock.patch.object(loop, "_default_executor", executor):
+        with mock.patch.object(context_io, "_CONTEXT_POOL", pool):
             if already_saturated:
-                executor.submit(occupy_worker)
-                while not entered.is_set():
-                    await asyncio.sleep(0)
+                blocker = asyncio.create_task(pool.run(occupy_worker))
+                assert await asyncio.to_thread(entered.wait, 1)
             with (
                 mock.patch.object(mw, "_inject", side_effect=occupy_worker) as inject,
                 mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS", 0.01),
@@ -463,14 +464,17 @@ async def test_timeout_does_not_wait_for_saturated_executor(monkeypatch, read_po
                 if read_policy == "raise":
                     with pytest.raises(MemoryReadError) as exc_info:
                         await asyncio.wait_for(call, 0.25)
-                    assert isinstance(exc_info.value.__cause__, TimeoutError)
+                    expected_cause = ContextInjectionBusyError if already_saturated else TimeoutError
+                    assert isinstance(exc_info.value.__cause__, expected_cause)
                 else:
                     assert await asyncio.wait_for(call, 0.25) is None
                 assert not finished.is_set()  # the request returned before its worker
                 assert inject.call_count == (0 if already_saturated else 1)
     finally:
         release.set()
-        await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)
+        if blocker is not None:
+            await blocker
+        await asyncio.to_thread(pool.shutdown, wait=True)
 
 
 @pytest.mark.parametrize("read_policy", ["fail_closed", "fail_open"])
@@ -479,10 +483,10 @@ async def test_legacy_backend_timeout_preserves_read_policy(read_policy):
     cfg = MemoryConfig(manager_class=f"{__name__}:_LegacyBackend", backend_config={"failure_policy": {"read": read_policy}})
     backend = _LegacyBackend.from_config(cfg.backend_config)
     mw = DynamicContextMiddleware(app_config=SimpleNamespace(memory=cfg))
-    executor = ThreadPoolExecutor(max_workers=1)
+    pool = context_io._ContextInjectionPool(max_workers=1)
     try:
         with (
-            mock.patch.object(asyncio.get_running_loop(), "_default_executor", executor),
+            mock.patch.object(context_io, "_CONTEXT_POOL", pool),
             mock.patch("deerflow.agents.memory.get_memory_manager", return_value=backend),
             mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS", 0.01),
         ):
@@ -496,7 +500,7 @@ async def test_legacy_backend_timeout_preserves_read_policy(read_policy):
             assert not backend._finished.is_set()
     finally:
         backend._release.set()
-        await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)
+        await asyncio.to_thread(pool.shutdown, wait=True)
     assert backend._finished.is_set()
 
 
@@ -550,28 +554,37 @@ async def test_cold_policy_resolution_stays_off_event_loop(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("disabled_field", [None, "enabled", "injection_enabled"], ids=["unknown_policy", "memory_disabled", "injection_disabled"])
-async def test_cold_saturated_timeout_never_starts_discovery(monkeypatch, disabled_field):
+async def test_cold_saturated_admission_never_starts_discovery(monkeypatch, disabled_field):
     """An unknown policy fails closed; disabled memory needs no policy lookup."""
     cfg = MemoryConfig(manager_class="openviking")
     if disabled_field:
         setattr(cfg, disabled_field, False)
     mw = DynamicContextMiddleware(app_config=SimpleNamespace(memory=cfg))
-    executor = ThreadPoolExecutor(max_workers=1)
+    pool = context_io._ContextInjectionPool(max_workers=1)
     release = threading.Event()
+    started = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    blocker = None
+
+    def occupy_worker():
+        loop.call_soon_threadsafe(started.set)
+        release.wait(timeout=2)
+
     try:
         with (
-            mock.patch.object(asyncio.get_running_loop(), "_default_executor", executor),
+            mock.patch.object(context_io, "_CONTEXT_POOL", pool),
             mock.patch("deerflow.agents.memory.manager._scan_backends") as scan,
             mock.patch("deerflow.config.memory_config.get_memory_config") as reload_config,
             mock.patch.object(mw, "_inject") as inject,
             mock.patch("deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS", 0.01),
         ):
-            executor.submit(release.wait, 2)
+            blocker = asyncio.create_task(pool.run(occupy_worker))
+            await asyncio.wait_for(started.wait(), 1)
             call = mw.abefore_agent({}, SimpleNamespace(context={}))
             if disabled_field is None:
                 with pytest.raises(MemoryReadError) as exc_info:
                     await asyncio.wait_for(call, 0.25)
-                assert isinstance(exc_info.value.__cause__, TimeoutError)
+                assert isinstance(exc_info.value.__cause__, ContextInjectionBusyError)
             else:
                 assert await asyncio.wait_for(call, 0.25) is None
             scan.assert_not_called()
@@ -579,4 +592,6 @@ async def test_cold_saturated_timeout_never_starts_discovery(monkeypatch, disabl
             inject.assert_not_called()
     finally:
         release.set()
-        await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)
+        if blocker is not None:
+            await blocker
+        await asyncio.to_thread(pool.shutdown, wait=True)

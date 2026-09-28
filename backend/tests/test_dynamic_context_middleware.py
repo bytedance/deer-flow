@@ -209,8 +209,14 @@ async def _wait_forever(*_args, **_kwargs):
 
 
 @pytest.mark.asyncio
-async def test_memory_opt_out_async_timeout_still_removes_frozen_memory(monkeypatch):
-    """A date/injection timeout cannot delay an already-active opt-out."""
+@pytest.mark.parametrize("saturated", [False, True], ids=["timeout", "saturated"])
+async def test_memory_opt_out_async_timeout_still_removes_frozen_memory(monkeypatch, saturated):
+    """Timeout or saturation cannot delay an already-active opt-out."""
+    from deerflow.utils.context_io import ContextInjectionBusyError
+
+    async def reject_injection(*_args, **_kwargs):
+        raise ContextInjectionBusyError("Context injection pool saturated")
+
     date = "2026-05-08, Friday"
     state = {
         "messages": [
@@ -224,8 +230,8 @@ async def test_memory_opt_out_async_timeout_still_removes_frozen_memory(monkeypa
         ]
     }
     monkeypatch.setattr(
-        "deerflow.agents.middlewares.dynamic_context_middleware.asyncio.to_thread",
-        _wait_forever,
+        "deerflow.agents.middlewares.dynamic_context_middleware.run_context_injection",
+        reject_injection if saturated else _wait_forever,
     )
     monkeypatch.setattr(
         "deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS",

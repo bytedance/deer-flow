@@ -1,5 +1,10 @@
 ### Middleware Chain
 
+DynamicContext async injection uses `utils.context_io.run_context_injection`.
+Saturation and timeout share the existing memory read-failure policy: strict
+or unknown fails closed; fail-open skips the new injection. Opt-out cleanup
+precedes admission. Keep date-only subagent injection independent of this pool.
+
 Compaction keeps state `SystemMessage`s; transient instructions use request
 wrappers, and fully rescued partitions skip compaction. If latest-user rescue
 empties an AI/Tool-only window, use `_build_summary_input_text(strategy="last")`;

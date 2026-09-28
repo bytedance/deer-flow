@@ -2,6 +2,27 @@
 
 This guide explains how to configure DeerFlow for your environment.
 
+## Context injection workers
+
+Set `DEER_FLOW_CONTEXT_WORKERS` to a positive integer to size the dedicated
+dynamic-context injection pool (default `4`, per process). Invalid values log
+a warning and use the default. Restart the Gateway or embedded application
+after changing it. This is an environment variable, not a `config.yaml` field.
+
+At most that many injections may be submitted and unfinished across all event
+loops in the process. When full, the pool rejects additional work without
+queueing it. Optional memory skips the new injection; required memory, or an
+unresolved read policy, fails closed. Existing frozen context remains active,
+and memory opt-out cleanup still runs. Date-only subagent injection stays on
+its existing executor and does not share this slow-memory capacity.
+
+The five-second injection deadline bounds waiting, not the synchronous work.
+A running worker retains its admission slot after timeout or cancellation
+until it actually finishes. Downstream memory/network operations still need
+their own deadlines; this isolation cannot forcibly terminate Python threads.
+The pool preserves request ContextVars and cancels pending work on shutdown.
+Running work can still delay interpreter exit.
+
 ## Prompt overlays
 
 Operators can add instructions around existing system prompts in `config.yaml`.

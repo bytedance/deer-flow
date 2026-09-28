@@ -1868,6 +1868,15 @@ request the binary capability retain the legacy JSON/base64 frame protocol.
 
 ### Context Engineering
 
+**Context Injection Isolation**: Slow memory reads and cold tokenizer downloads use
+a dedicated pool, keeping the default executor available for unrelated requests.
+`DEER_FLOW_CONTEXT_WORKERS` sets the per-process admission limit (default `4`;
+restart required). A full pool rejects new injections immediately: optional
+memory degrades gracefully, while required or unresolved memory policies fail
+the turn. The existing five-second wait limit still applies; a timed-out worker
+holds its slot until its synchronous work finishes. See
+[context injection configuration](backend/docs/CONFIGURATION.md#context-injection-workers).
+
 **Isolated Sub-Agent Context**: Each sub-agent runs in its own isolated context. This means that the sub-agent will not be able to see the context of the main agent or other sub-agents. This is important to ensure that the sub-agent is able to focus on the task at hand and not be distracted by the context of the main agent or other sub-agents.
 
 **Summarization**: Within a session, DeerFlow manages context aggressively — summarizing completed sub-tasks, offloading intermediate results to the filesystem, compressing what's no longer immediately relevant. This lets it stay sharp across long, multi-step tasks without blowing the context window.

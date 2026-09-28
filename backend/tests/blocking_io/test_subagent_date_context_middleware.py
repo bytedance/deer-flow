@@ -4,8 +4,9 @@
 reads the OS timezone database (or the bundled ``tzdata`` wheel) on a cold
 cache. ``abefore_agent`` runs on the async subagent path with no guarantee that
 an assembly observer warmed that resolution first, so it offloads the call via
-``asyncio.to_thread`` — the same pattern ``DynamicContextMiddleware`` uses for
-its file-I/O injection (see issue #3402).
+``asyncio.to_thread``. The memory-bearing ``DynamicContextMiddleware`` instead
+uses a separate bounded pool so slow memory reads cannot starve this date-only
+offload (see issues #3402 and #3427).
 
 This anchor drives the real ``create_agent`` graph via ``ainvoke`` under the
 strict Blockbuster gate with the knob enabled. If the offload regresses and

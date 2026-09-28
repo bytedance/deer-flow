@@ -61,6 +61,7 @@ from langgraph.runtime import Runtime
 from deerflow.projects.context import build_project_context_message, is_project_context_message, pinned_project_snapshot, project_context_insertion_index, render_documents_block, render_project_block
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.utils.context_io import ContextInjectionBusyError, run_context_injection
 from deerflow.utils.messages import INJECTED_USER_MESSAGE_ID_SUFFIX, ORIGINAL_USER_CONTENT_KEY, strip_injected_user_message_id_suffix
 
 if TYPE_CHECKING:
@@ -640,21 +641,25 @@ class DynamicContextMiddleware(AgentMiddleware):
         # block for tens of minutes (OS TCP timeout).  Time-box injection so
         # the request degrades gracefully (no new dynamic-context update)
         # rather than hanging. Frozen context already in state remains active.
+        # Timeout does not stop the synchronous worker. Keep these calls in a
+        # dedicated pool with bounded admission, so abandoned injections cannot
+        # exhaust the default executor or build an unbounded queue (#3427).
         try:
             result = await asyncio.wait_for(
-                asyncio.to_thread(inject_with_policy),
+                run_context_injection(inject_with_policy),
                 timeout=_INJECT_TIMEOUT_SECONDS,
             )
-        except TimeoutError as exc:
+        except (TimeoutError, ContextInjectionBusyError) as exc:
             from deerflow.agents.memory import MemoryReadError
 
+            reason = "unavailable (context injection pool saturated)" if isinstance(exc, ContextInjectionBusyError) else "timed out"
             # A worker that never started (or is still resolving policy) leaves
             # the policy unknown. Fail closed without waiting for that worker.
             if read_failures_are_fatal is not False:
-                raise MemoryReadError("Required memory context retrieval timed out") from exc
+                raise MemoryReadError(f"Required memory context retrieval {reason}") from exc
             logger.warning(
-                "DynamicContextMiddleware: injection timed out (%.1fs); skipping new memory/date injection for this turn",
-                _INJECT_TIMEOUT_SECONDS,
+                "DynamicContextMiddleware: injection %s; skipping new memory/date injection for this turn",
+                reason,
             )
             return {"messages": memory_removals} if memory_removals else None
         self._track_injected_memory_message(result)

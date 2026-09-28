@@ -66,6 +66,12 @@ Use explicit synchronization such as `threading.Event` rather than sleep-based t
 
 Stress/soak testing, AnyIO worker instrumentation, Uvicorn multi-process behavior, and broad production executor redesign are separate concerns and should not be folded into these deterministic regressions.
 
+`test_dynamic_context_starvation.py` drives the real middleware with controlled
+blocking injections; its default-executor sentinel must complete before release.
+`test_context_io.py` pins bounded admission, ContextVars, cancellation, failure
+recovery and capacity across loop closure. Saturation policy tests must fill the
+dedicated context pool, not the now-independent default executor.
+
 ## Managed DeepSeek compatibility
 
 `test_managed_deepseek.py` exercises real SDK request serialization and SSE parsing
