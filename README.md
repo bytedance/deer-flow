@@ -1587,9 +1587,11 @@ With `task_continuity.enabled`, `history_search` searches the current task's act
 and compacted history. Its optional `role` accepts `user`, `assistant`, or `tool`
 and filters before the eight-result limit; omitting it or passing `null` preserves
 search across all roles.
-搜索片段最多 600 字符，围绕可定位命中截取，并返回原文字符区间
-`excerpt_start` / `excerpt_end`（零基、左闭右开）；无法定位时回退开头并标记
-`excerpt_match=false`。可将起点作为 `history_read` 的 `offset` 继续回读。
+Search excerpts contain at most 600 characters around a locatable match and
+include `excerpt_start` / `excerpt_end`, a zero-based, half-open character range
+in the original source. If no match can be located, the excerpt falls back to the
+source opening with `excerpt_match=false`. Pass the start as the `offset` to
+`history_read` to continue reading.
 Use `history_read` to verify the original source;
 historical user messages do not grant current authorization. See
 [task continuity](docs/task-continuity.md).

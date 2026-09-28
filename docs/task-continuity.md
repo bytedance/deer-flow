@@ -39,33 +39,41 @@ The standard lead-agent builders (including custom-agent bootstrap) and
 - `history_read`: read the exact source ID in 4,000-character pages. Results mark
   truncation and provide `next_offset` while more stored text remains.
 
-### 命中片段与字符偏移
+### Matching excerpts and character offsets
 
-每个搜索结果返回 `excerpt`、`excerpt_start`、`excerpt_end` 和 `excerpt_match`。
-偏移是可由 `history_read` 回读的原文 Unicode 字符位置，零基、左闭右开；
-始终满足 `source_text[excerpt_start:excerpt_end] == excerpt`。不添加省略号，
-也不额外返回开头摘要。Python 字符计数包括独立的组合字符，不是 UTF-8 字节、
-UTF-16 编码单元或用户感知的字形数量。
+Each search result includes `excerpt`, `excerpt_start`, `excerpt_end`, and
+`excerpt_match`. Offsets are zero-based, half-open Unicode character positions in
+the original source readable through `history_read`, satisfying
+`source_text[excerpt_start:excerpt_end] == excerpt`. No ellipsis or separate
+opening summary is added. Python character counting includes individual combining
+characters; it does not count UTF-8 bytes, UTF-16 code units, or grapheme clusters.
 
-例如，5000 个字符之后出现 `Needle`，且两侧上下文足够时，搜索 `needle` 会返回
-`excerpt_start=4703`、`excerpt_end=5303`；调用
-`history_read(source_id=结果.id, offset=4703)` 即可从该片段开始继续阅读。
-片段围绕最早的可定位词尽量居中，到达首尾时向另一侧补齐，最多 600 字符。
-多词沿用 OR 检索；按原文位置选最早命中，同起点选较短词，不要求覆盖所有词，
-也不改变结果排名。重复词不会扩大结果数量。
+For example, if `Needle` appears after 5000 characters with enough surrounding
+context, searching for `needle` returns `excerpt_start=4703` and
+`excerpt_end=5303`. Call `history_read(source_id=result.id, offset=4703)` to read
+from that excerpt onward. The excerpt is centered on the earliest locatable term
+where possible and shifts at source boundaries, up to 600 characters. Multiple
+terms retain OR matching: choose the earliest source position, preferring the
+shorter term when starts tie. The excerpt need not cover all terms, and result
+ranking is unchanged. Repeated terms do not increase the result count.
 
-查询仍仅对前 500 字符分词并取前 32 个词。active 沿用 casefold 子串匹配，
-archive 沿用 FTS 词匹配；定位共享英文词及中文双字切分规则。
-`Straße` 等 casefold 后长度变化的文本映射回原文位置；`İ` 折叠后产生的组合点
-仍按现有分词规则处理。FTS 重音归一化等匹配未必能精确映射到索引词，
-例如 `cafe` 检索到 `café`；无法定位完整命中，或展开后的词无法完整放入 600 字符时，
-返回开头片段并设置 `excerpt_match=false`，不宣称片段包含关键词。
+Queries still tokenize only the first 500 characters and use the first 32 terms.
+Active sources retain casefolded substring matching; archived sources retain FTS
+token matching. Location shares the English-word and Chinese-bigram tokenizer.
+Length-changing casefolds such as `Straße` map back to original positions; the
+combining dot produced by folding `İ` follows the existing tokenization rules.
+FTS normalization may not map exactly to indexed terms, such as `cafe` matching
+`café`. If a complete match cannot be located, or the matched term's original span
+cannot fit within 600 characters, return the source opening with
+`excerpt_match=false` rather than claiming the excerpt contains the keyword.
 
-偏移仅针对同一状态下可读取的来源：同一 ID 的 active 版本优先于归档；
-若同源内容以不同上限重复归档，选择与 `history_read` 相同的首个存储版本。
-较短版本不含检索词时也明确回退。`truncated` 继续表示来源被截断，
-而非片段截短；分页 `next_offset` 仍按该来源计算。压缩、保留期淘汰或状态变化后，
-应重新搜索确认可用内容，不能把旧偏移当作不受生命周期影响的快照。
+Offsets apply only to the source readable in the same state. The active version
+of an ID takes precedence over its archive. If a source was archived repeatedly
+with different caps, choose the first stored version, as `history_read` does.
+Fall back explicitly if the shorter version lacks the query term. `truncated`
+still describes source truncation, not excerpt clipping; `next_offset` is computed
+against that source. Search again after compaction, retention expiry, or state
+changes; old offsets are not snapshots independent of the source lifecycle.
 
 An active skill's tool policy and runtime authorization still apply. The model
 may need more than one keyword search. Search is lexical; paraphrases are not

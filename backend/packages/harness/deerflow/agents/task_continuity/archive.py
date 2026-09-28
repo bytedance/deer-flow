@@ -78,7 +78,7 @@ def records(messages, cap: int = 16000) -> list[dict]:
 
 
 def _token_spans(folded: str):
-    """保留索引词在大小写折叠文本中的位置，不改变分词语义。"""
+    """Preserve indexed token positions in casefolded text without changing tokenization."""
     for match in re.finditer(r"[^\W_]+", folded):
         word = match.group()
         if re.search(r"[\u3400-\u9fff]", word):
@@ -101,7 +101,7 @@ def index_text(text: str) -> str:
 
 
 def _search_excerpt(text: str, keywords: list[str], *, substring: bool) -> dict:
-    """在原文中定位大小写折叠后的首个关键词，并返回可回读片段。"""
+    """Locate the first casefolded keyword match and return an excerpt from the readable source."""
     folded = text.casefold()
     if substring:
         hits = [(position, position + len(term)) for term in keywords if (position := folded.find(term)) >= 0]
@@ -203,7 +203,7 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                     row = json.loads(payload)
                     found[row["id"]] = row
                 if excerpts and query is not None and found:
-                    # 同一来源可能以不同长度归档；与 history_read 一样选首个存储版本。
+                    # A source may be archived at different lengths; select its first stored version, as history_read does.
                     ids = list(found)
                     id_placeholders = ",".join("?" for _ in ids)
                     canonical = {}
@@ -223,7 +223,7 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
         active_by_id = {row["id"]: row for row in active}
         excerpts_result = []
         for row in results:
-            # active 是按 ID 回读时的优先来源，即使它只通过归档 FTS 被检索到。
+            # Active text takes precedence when reading by ID, even if only archived FTS matched the source.
             row = dict(active_by_id.get(row["id"], row))
             row.update(_search_excerpt(row.pop("text"), keywords, substring=row["id"] in active_by_id))
             excerpts_result.append(row)
