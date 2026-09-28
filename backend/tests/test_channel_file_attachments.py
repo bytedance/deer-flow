@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -412,6 +413,7 @@ class TestInboundFileIngestion:
 
 
 class TestInboundFileSandboxPerms:
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission modes cannot be asserted on Windows (os.chmod is an approximation)")
     def test_make_inbound_file_sandbox_readable_sets_group_other_read(self, tmp_path):
         from app.channels.manager import _make_inbound_file_sandbox_readable
 
@@ -426,6 +428,7 @@ class TestInboundFileSandboxPerms:
         assert mode & stat.S_IRGRP
         assert mode & stat.S_IROTH
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission modes cannot be asserted on Windows (os.chmod is an approximation)")
     def test_make_inbound_file_sandbox_readable_preserves_owner_bits(self, tmp_path):
         from app.channels.manager import _make_inbound_file_sandbox_readable
 
@@ -441,6 +444,7 @@ class TestInboundFileSandboxPerms:
         assert mode == 0o644
         assert not (mode & stat.S_IWOTH)
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission modes cannot be asserted on Windows (os.chmod is an approximation)")
     def test_make_inbound_file_sandbox_readable_skips_symlink(self, tmp_path):
         from support.symlinks import symlink_or_skip
 
@@ -463,6 +467,7 @@ class TestInboundFileSandboxPerms:
         # Best-effort helper: a missing file is a silent no-op.
         _make_inbound_file_sandbox_readable(tmp_path / "does-not-exist.txt")
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission modes cannot be asserted on Windows (os.chmod is an approximation)")
     def test_make_inbound_file_sandbox_readable_swap_after_lstat_does_not_follow_symlink(self, tmp_path, monkeypatch):
         from app.channels.manager import _make_inbound_file_sandbox_readable
 
