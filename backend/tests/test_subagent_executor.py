@@ -4247,7 +4247,7 @@ async def test_subagent_mcp_uses_captured_thread_incarnation(classes, monkeypatc
     from mcp.types import CallToolResult
 
     from deerflow.mcp import tools as mcp_tools
-    from deerflow.mcp.session_pool import ServerBinding
+    from deerflow.mcp.session_pool import MCPPoolResource, ServerBinding
 
     executor_module = importlib.import_module("deerflow.subagents.executor")
     monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [])
@@ -4261,7 +4261,7 @@ async def test_subagent_mcp_uses_captured_thread_incarnation(classes, monkeypatc
         "server",
         {"transport": "stdio", "command": "unused"},
         pool=pool,
-        binding=ServerBinding("server", 1, "fp"),
+        binding=ServerBinding(MCPPoolResource(domain="deployment", server_name="server"), 1, "fp"),
     )
     graph = StateGraph(MessagesState, context_schema=dict)
     graph.add_node("tools", ToolNode([tool], handle_tool_errors=False))

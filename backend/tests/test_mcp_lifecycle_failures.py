@@ -226,8 +226,10 @@ def _open_session(loop, pool, name: str, *, scope: str = "thread-1"):
     return loop.run_until_complete(pool.get_session(name, scope, _connection(name), binding=binding))
 
 
-def _entry(pool, name: str, loop, *, scope: str = "thread-1"):
-    return pool._entries.get((name, scope, loop))
+def _entry(pool, name: str, loop, *, scope: str = "thread-1", domain: str = "deployment"):
+    from deerflow.mcp.session_pool import MCPPoolResource
+
+    return pool._entries.get((MCPPoolResource(domain=domain, server_name=name), scope, loop))
 
 
 async def _wait_for_pending_teardowns() -> None:
@@ -639,7 +641,11 @@ def test_indeterminate_commit_retires_local_state_and_reports_unknown_outcome(ca
 
     # Local state is conservatively invalidated: the old binding is fenced out
     # and its session torn down.
-    assert get_session_pool() is not pool
+    # A deployment-domain retirement keeps the pool object -- personal MCP
+    # shares it -- while dropping the deployment bindings, so the old
+    # wrapper is fenced without taking personal sessions down.
+    assert get_session_pool() is pool
+    assert pool.active_binding("A") is None
     _assert_stale(pool, owner_loop, "A", binding_a)
     assert session_a.closed is True
 
@@ -666,7 +672,11 @@ def test_committed_but_not_reconciled_retires_local_state(cache_globals, monkeyp
 
     assert "committed" in str(exc_info.value).lower()
     assert "retired" not in str(exc_info.value).lower()
-    assert get_session_pool() is not pool
+    # A deployment-domain retirement keeps the pool object -- personal MCP
+    # shares it -- while dropping the deployment bindings, so the old
+    # wrapper is fenced without taking personal sessions down.
+    assert get_session_pool() is pool
+    assert pool.active_binding("A") is None
     _assert_stale(pool, owner_loop, "A", binding_a)
     assert session_a.closed is True
 
@@ -810,7 +820,11 @@ def test_mid_write_failure_invalidates_outside_the_config_lock(cache_globals, mo
 
     assert len(errors) == 1
     assert isinstance(errors[0], MCPCommitOutcomeUnknownError)
-    assert get_session_pool() is not pool
+    # A deployment-domain retirement keeps the pool object -- personal MCP
+    # shares it -- while dropping the deployment bindings, so the old
+    # wrapper is fenced without taking personal sessions down.
+    assert get_session_pool() is pool
+    assert pool.active_binding("A") is None
     _assert_stale(pool, owner_loop, "A", binding_a)
     assert session_a.closed is True
 
@@ -841,7 +855,11 @@ def test_fence_failure_invalidates_outside_the_config_lock(cache_globals, monkey
 
     assert len(errors) == 1
     assert isinstance(errors[0], MCPCommittedNotReconciledError)
-    assert get_session_pool() is not pool
+    # A deployment-domain retirement keeps the pool object -- personal MCP
+    # shares it -- while dropping the deployment bindings, so the old
+    # wrapper is fenced without taking personal sessions down.
+    assert get_session_pool() is pool
+    assert pool.active_binding("A") is None
     _assert_stale(pool, owner_loop, "A", binding_a)
     assert session_a.closed is True
 
@@ -874,7 +892,11 @@ def test_task_config_conflict_escaping_the_fence_still_invalidates(cache_globals
     assert "MCP task-enabled server configuration changed" in excinfo.value.detail
     # Conservative invalidation: no session may survive the committed write.
     assert cache_module._cache_initialized is False
-    assert get_session_pool() is not pool
+    # A deployment-domain retirement keeps the pool object -- personal MCP
+    # shares it -- while dropping the deployment bindings, so the old
+    # wrapper is fenced without taking personal sessions down.
+    assert get_session_pool() is pool
+    assert pool.active_binding("A") is None
     assert session_a.closed is True
     assert session_b.closed is True
 
@@ -940,7 +962,11 @@ def test_skill_write_repairing_an_invalid_block_fences_local_state(cache_globals
 
     # The repair established a new lineage, so the local ownership transfer ran.
     assert _lifecycle(cfg)["lifecycleId"] != applied_id_before
-    assert get_session_pool() is not pool
+    # A deployment-domain retirement keeps the pool object -- personal MCP
+    # shares it -- while dropping the deployment bindings, so the old
+    # wrapper is fenced without taking personal sessions down.
+    assert get_session_pool() is pool
+    assert pool.active_binding("A") is None
     _assert_stale(pool, owner_loop, "A", binding_a)
     assert session_a.closed is True
 
@@ -965,7 +991,11 @@ def test_skill_write_indeterminate_outcome_invalidates_local_state(cache_globals
     message = str(exc_info.value).lower()
     assert "unknown" in message
     assert "sessions were retired" not in message
-    assert get_session_pool() is not pool
+    # A deployment-domain retirement keeps the pool object -- personal MCP
+    # shares it -- while dropping the deployment bindings, so the old
+    # wrapper is fenced without taking personal sessions down.
+    assert get_session_pool() is pool
+    assert pool.active_binding("A") is None
     _assert_stale(pool, owner_loop, "A", binding_a)
     assert session_a.closed is True
 
@@ -1096,7 +1126,11 @@ def test_client_skill_reload_failure_still_reaps_the_prepared_owner(cache_global
     assert "committed" in str(exc_info.value).lower()
     # The ownership transfer already ran, so the detached owner must still be
     # reaped even though the reload raised.
-    assert get_session_pool() is not pool
+    # A deployment-domain retirement keeps the pool object -- personal MCP
+    # shares it -- while dropping the deployment bindings, so the old
+    # wrapper is fenced without taking personal sessions down.
+    assert get_session_pool() is pool
+    assert pool.active_binding("A") is None
     _assert_stale(pool, owner_loop, "A", binding_a_before)
     assert session_a.closed is True
 

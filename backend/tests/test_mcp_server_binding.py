@@ -7,12 +7,20 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from deerflow.mcp.session_pool import (
+    MCPPoolResource,
     MCPSessionPool,
     PreparedRetirement,
     ServerBinding,
     StaleMCPBindingError,
     normalized_connection_fingerprint,
 )
+
+
+def _res(name: str, domain: str = "deployment"):
+    """Registry key for one pooled resource (the pool keys on (resource, scope, loop))."""
+    from deerflow.mcp.session_pool import MCPPoolResource
+
+    return MCPPoolResource(domain=domain, server_name=name)
 
 
 def test_same_fingerprint_is_idempotent():
@@ -23,7 +31,7 @@ def test_same_fingerprint_is_idempotent():
 
 def test_server_binding_repr_hides_fingerprint():
     """Binding reprs must not leak resolved connection secrets into logs."""
-    binding = ServerBinding("A", 1, "secret-token-value")
+    binding = ServerBinding(MCPPoolResource(domain="deployment", server_name="A"), 1, "secret-token-value")
     assert "secret-token-value" not in repr(binding)
 
 
@@ -150,7 +158,7 @@ async def test_reconcile_detaches_only_changed_server():
     assert prepared.inflight == ()
 
     # B is still registered and its CM has not been exited.
-    assert pool._entries[("B", "u:t", loop)][0] is session_b
+    assert pool._entries[(_res("B"), "u:t", loop)][0] is session_b
     assert cm_b.closed is False, "B's __aexit__ must not run when only A changed"
 
     # Only A's epoch advanced.
@@ -193,7 +201,7 @@ async def test_blocked_initialize_never_commits_after_reconcile():
     with patch("langchain_mcp_adapters.sessions.create_session", return_value=cm):
         call = asyncio.create_task(pool.get_session("A", "u:t", _CONNECTION, binding=old))
         await asyncio.wait_for(cm.initialize_started.wait(), timeout=1)
-        assert ("A", "u:t") in {k[:2] for k in pool._inflight}
+        assert (_res("A"), "u:t") in {k[:2] for k in pool._inflight}
 
         # Release the block, then reconcile before the owner resumes: the owner
         # reaches the commit fence with a superseded binding.
@@ -239,7 +247,7 @@ async def test_unchanged_fingerprint_reconcile_is_noop():
     assert prepared.entries == ()
     assert prepared.inflight == ()
     assert pool.active_binding("A") is a
-    assert pool._entries[("A", "u:t", loop)][0] is session
+    assert pool._entries[(_res("A"), "u:t", loop)][0] is session
     assert cm.closed is False
 
 
@@ -273,7 +281,7 @@ async def test_force_rebind_advances_epoch_for_an_unchanged_fingerprint():
     # B is byte-identical: same binding, same entry, CM not exited.
     assert pool.active_binding("B") is b
     assert pool.active_binding("B").epoch == b.epoch
-    assert pool._entries[("B", "u:t", loop)][0] is session_b
+    assert pool._entries[(_res("B"), "u:t", loop)][0] is session_b
     assert cm_b.closed is False
 
     _session, _loop, a_task, _close = prepared.entries[0]
@@ -415,7 +423,7 @@ async def test_reconcile_while_initializing_fails_creator_and_joiner_as_stale():
 
         joiner = asyncio.create_task(pool.get_session("A", "u:t", _CONNECTION, binding=old))
         await asyncio.sleep(0.05)  # let the joiner park on the in-flight future
-        assert ("A", "u:t") in {k[:2] for k in pool._inflight}
+        assert (_res("A"), "u:t") in {k[:2] for k in pool._inflight}
 
         prepared = pool.reconcile_bindings({"A": "a2"}, ())
         assert len(prepared.inflight) == 1
@@ -451,7 +459,7 @@ async def test_reconcile_while_entering_fails_creator_and_joiner_as_stale():
 
         joiner = asyncio.create_task(pool.get_session("A", "u:t", _CONNECTION, binding=old))
         await asyncio.sleep(0.05)  # let the joiner park on the in-flight future
-        assert ("A", "u:t") in {k[:2] for k in pool._inflight}
+        assert (_res("A"), "u:t") in {k[:2] for k in pool._inflight}
 
         prepared = pool.reconcile_bindings({"A": "a2"}, ())
         assert len(prepared.inflight) == 1
@@ -546,7 +554,7 @@ async def test_bindingless_readd_same_fingerprint_is_fenced():
     with patch("langchain_mcp_adapters.sessions.create_session", return_value=cm):
         session = await pool.get_session("A", "u:t", _CONNECTION, binding=readded)
 
-    assert pool._entries[("A", "u:t", asyncio.get_running_loop())][0] is session
+    assert pool._entries[(_res("A"), "u:t", asyncio.get_running_loop())][0] is session
 
 
 @pytest.mark.asyncio
@@ -560,7 +568,7 @@ async def test_bindingless_first_seen_still_installs_binding():
     binding = pool.active_binding("A")
     assert binding is not None
     assert binding.fingerprint == normalized_connection_fingerprint(_CONNECTION)
-    assert pool._entries[("A", "u:t", asyncio.get_running_loop())][0] is session
+    assert pool._entries[(_res("A"), "u:t", asyncio.get_running_loop())][0] is session
 
 
 def test_capture_binding_returns_active_binding():

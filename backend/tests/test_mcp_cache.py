@@ -535,9 +535,16 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
             # No bindings are modelled beyond the sessions this fake records.
             return bool(self.sessions)
 
-        def reconcile_existing_bindings(self, active):
+        def reconcile_existing_bindings(self, active, *, domain="deployment"):
             from types import SimpleNamespace
 
+            return SimpleNamespace(entries=(), inflight=())
+
+        def prepare_retire_all(self, *, domain=None):
+            from types import SimpleNamespace
+
+            self.closed = True
+            self.sessions.clear()
             return SimpleNamespace(entries=(), inflight=())
 
     real_reset_session_pool = session_pool_module.reset_session_pool
@@ -576,7 +583,9 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
 
         assert second == ["session-uvx"]
         assert loaded_pools[0] is old_pool
-        assert loaded_pools[1] is not old_pool
+        # Deployment-domain retirement keeps the pool object; only its
+        # deployment resources are retired.
+        assert loaded_pools[1] is old_pool
         assert loaded_sessions[0] is not loaded_sessions[1]
         assert old_pool.closed is True
         assert cache_module._cache_initialized is True
@@ -1463,6 +1472,14 @@ class _RecordingSessionPool:
     def retire_all(self) -> None:
         self.retired = True
 
+    def prepare_retire_all(self, *, domain=None):
+        """Deployment-domain retirement: the pool object survives, its sessions do not."""
+        from types import SimpleNamespace
+
+        self.closed = True
+        self.sessions.clear()
+        return SimpleNamespace(entries=(), inflight=())
+
     def close_all_sync(self) -> None:
         self.closed = True
 
@@ -1508,7 +1525,9 @@ def test_lifecycle_advance_during_discovery_discards_and_retires_the_pool(cache_
         assert cache_module._cache_initialized is False
         assert cache_module._mcp_tools_cache is None
         assert old_pool.closed is True
-        assert session_pool_module.get_session_pool() is not old_pool
+        # Deployment-domain retirement: the pool object survives so personal MCP
+        # resources sharing it keep their sessions.
+        assert session_pool_module.get_session_pool() is old_pool
     finally:
         session_pool_module.reset_session_pool()
 

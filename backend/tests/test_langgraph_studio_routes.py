@@ -31,7 +31,7 @@ from langgraph.runtime import Runtime
 from mcp.types import CallToolResult, TextContent
 
 from deerflow.mcp import tools as mcp_tools
-from deerflow.mcp.session_pool import ServerBinding
+from deerflow.mcp.session_pool import MCPPoolResource, ServerBinding
 
 
 class _FakePool:
@@ -70,7 +70,7 @@ pooled_probe = mcp_tools._make_session_pool_tool(
     "test-server",
     {"transport": "streamable_http", "url": "http://unused.invalid/mcp"},
     pool=_POOL,
-    binding=ServerBinding("test-server", 1, "fp"),
+    binding=ServerBinding(MCPPoolResource(domain="deployment", server_name="test-server"), 1, "fp"),
 )
 
 builder = StateGraph(MessagesState, context_schema=dict)

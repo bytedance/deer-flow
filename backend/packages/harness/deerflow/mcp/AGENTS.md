@@ -12,20 +12,26 @@
   loop); a `RuntimeError` from discovery itself (e.g. `McpTaskConfigurationError`) is
   logged once and never triggers a second discovery pass.
 - **Loop-isolated stdio sessions**: Both the live registry and in-flight creations
-  are keyed by `(server_name, scope_key, owning_loop)`. Same-loop callers share
-  initialization and state; live sibling loops must never cancel or replace each
-  other's sessions merely because their server/scope matches. Explicit server,
-  scope, pair, thread-identity and global cleanup span all loops; disconnect
-  eviction matches the exact session identity. Thread-identity cleanup
-  (`close_thread_scope`) deliberately matches *every incarnation* of a
-  user/thread pair instead of one exact scope key: a thread-deletion caller
-  cannot rely on reading the current incarnation (the record may predate
-  incarnation tracking, and a new incarnation can be minted concurrently), and
-  every generation of a deleted thread is equally stale. Keep `close_scope` for
-  callers that already hold one exact key. Owner completion drops only its own
-  records, including during `asyncio.run()` shutdown. Sync wrappers use fresh
-  loops per invocation, so parallel sync calls have independent
-  subprocess/server state.
+  are keyed by `(MCPPoolResource(domain, server_name), scope_key, owning_loop)`.
+  Same-loop callers for the same resource/scope share initialization and state;
+  live sibling loops must never cancel or replace each other's sessions merely
+  because their resource/scope matches. Deployment and personal resources are
+  distinct ownership domains even when their runtime server names are equal, so
+  neither can fence or retire the other. Explicit resource, exact-scope, pair,
+  thread-identity and process-wide cleanup span all loops; disconnect eviction
+  matches the exact session identity. Thread-identity cleanup
+  (`close_thread_scope`) matches *every incarnation* of a user/thread pair
+  instead of one exact scope key: a thread-deletion caller cannot rely on
+  reading the current incarnation (the record may predate incarnation tracking,
+  and a new incarnation can be minted concurrently), and every generation of a
+  deleted thread is equally stale. It spans every ownership domain -- a deleted
+  thread's deployment and personal sessions are equally stale -- and never
+  retires a binding or advances/tombstones its epoch, because a binding is the
+  configuration epoch of the whole resource, not of one thread. Keep
+  `close_scope` for callers that already hold one exact key. Owner completion
+  drops only its own records, including during `asyncio.run()` shutdown. Sync
+  wrappers use fresh loops per invocation, so parallel sync calls have
+  independent subprocess/server state.
   Manual loop owners must drain pending tasks before `loop.close()`. Closing a
   loop with a pending session owner prevents its completion callback and resource
   teardown; an abandoned live-registry record remains bounded by `MAX_SESSIONS`

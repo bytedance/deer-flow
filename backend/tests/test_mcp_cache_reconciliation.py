@@ -220,8 +220,10 @@ def _open_session(loop, pool, name: str, *, scope: str = "thread-1"):
     return loop.run_until_complete(pool.get_session(name, scope, _connection(name), binding=binding))
 
 
-def _entry(pool, name: str, loop, *, scope: str = "thread-1"):
-    return pool._entries.get((name, scope, loop))
+def _entry(pool, name: str, loop, *, scope: str = "thread-1", domain: str = "deployment"):
+    from deerflow.mcp.session_pool import MCPPoolResource
+
+    return pool._entries.get((MCPPoolResource(domain=domain, server_name=name), scope, loop))
 
 
 def _lock_is_held(lock) -> bool:
@@ -443,7 +445,11 @@ def test_interceptor_change_is_a_full_reset(cache_globals, monkeypatch, tmp_path
     assert transition is not None and transition.retire_servers is None
     assert cache_module.refresh_mcp_cache_if_active() is True
 
-    assert get_session_pool() is not pool
+    # A deployment-domain retirement keeps the pool object -- personal MCP
+    # shares it -- while dropping the deployment bindings, so the old
+    # wrapper is fenced without taking personal sessions down.
+    assert get_session_pool() is pool
+    assert pool.active_binding("A") is None
     assert session_a.closed is True
     assert cache_module._cache_initialized is False
 
@@ -667,8 +673,10 @@ def test_reconcile_during_first_initialization_fences_stale_publish(cache_global
     assert cache_module._cache_initialized is False
     assert cache_module._mcp_tools_cache is None
     assert cache_module._mcp_applied_servers is None
-    assert get_session_pool() is not pool_before
-    assert pool_before._retired is True
+    assert get_session_pool() is pool_before
+    # Deployment-domain retirement drops the deployment binding but keeps the
+    # pool live, because personal MCP resources share it.
+    assert pool_before._retired is False
     assert get_session_pool().active_binding("A") is None
 
 

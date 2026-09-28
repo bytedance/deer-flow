@@ -23,6 +23,7 @@ from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import (
+    MCPPoolDomain,
     MCPSessionPool,
     ServerBinding,
     call_pooled_session_tool,
@@ -673,6 +674,7 @@ def _make_session_pool_tool(
                     tool_name=request.name,
                     arguments=request.args,
                     call_kwargs=kwargs,
+                    domain=binding.resource.domain,
                 )
 
             handler = compose_tool_interceptors(tool_interceptors, base_handler)
@@ -693,6 +695,7 @@ def _make_session_pool_tool(
                 tool_name=original_name,
                 arguments=arguments,
                 call_kwargs=call_kwargs,
+                domain=binding.resource.domain,
             )
 
         # The after-call snapshot diff only feeds bare-filename correlation in
@@ -858,6 +861,8 @@ def _resolve_discovery_binding(
     pool: MCPSessionPool,
     server_name: str,
     connection: Mapping[str, Any],
+    *,
+    domain: MCPPoolDomain = "deployment",
 ) -> ServerBinding:
     """Resolve *server_name*'s binding BEFORE the first discovery await.
 
@@ -870,7 +875,7 @@ def _resolve_discovery_binding(
     under a single ``_lock`` acquisition — so a reconciliation that commits
     concurrently can never be overwritten by this discovery.
     """
-    return pool.ensure_binding(server_name, normalized_connection_fingerprint(connection))
+    return pool.ensure_binding(server_name, normalized_connection_fingerprint(connection), domain=domain)
 
 
 async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, personal_user_id: str | None = None) -> list[BaseTool]:
@@ -931,7 +936,12 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
     server_bindings: dict[str, ServerBinding] = {}
     for server_name, server_connection in servers_config.items():
         if server_connection.get("transport", "stdio") == "stdio":
-            server_bindings[server_name] = _resolve_discovery_binding(pool, server_name, server_connection)
+            server_bindings[server_name] = _resolve_discovery_binding(
+                pool,
+                server_name,
+                server_connection,
+                domain="personal" if personal_user_id is not None else "deployment",
+            )
 
     try:
         # Create the multi-server MCP client

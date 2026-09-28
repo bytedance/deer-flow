@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
-from deerflow.mcp.session_pool import ServerBinding
+from deerflow.mcp.session_pool import MCPPoolResource, ServerBinding
 from deerflow.mcp.tools import _make_session_pool_tool, get_mcp_tools
 
 
@@ -134,7 +134,7 @@ async def test_session_init_timeout_raises_when_session_creation_hangs(tmp_path,
             "github",
             {"transport": "stdio", "command": "mcp-server", "args": []},
             pool=mock_pool,
-            binding=ServerBinding("github", 1, "fp"),
+            binding=ServerBinding(MCPPoolResource(domain="deployment", server_name="github"), 1, "fp"),
             session_init_timeout=0.05,
             tool_name_prefix=False,
         )
@@ -240,7 +240,7 @@ async def test_session_init_timeout_does_not_block_fast_session(tmp_path) -> Non
             "github",
             {"transport": "stdio", "command": "mcp-server", "args": []},
             pool=mock_pool,
-            binding=ServerBinding("github", 1, "fp"),
+            binding=ServerBinding(MCPPoolResource(domain="deployment", server_name="github"), 1, "fp"),
             session_init_timeout=5.0,
             tool_name_prefix=False,
         )

@@ -903,7 +903,7 @@ def _apply_reconciliation_locked(plan: _McpReconciliationPlan) -> _PendingTeardo
     returned to the caller so it happens outside ``_init_condition`` and outside
     ``pool._lock`` (and off the event loop when one is running).
     """
-    from deerflow.mcp.session_pool import get_session_pool, reset_session_pool
+    from deerflow.mcp.session_pool import get_session_pool
 
     incoming = plan.incoming
     if incoming is not None:
@@ -918,7 +918,7 @@ def _apply_reconciliation_locked(plan: _McpReconciliationPlan) -> _PendingTeardo
         # compared, so an unrelated live session (including a durable-task
         # session) is preserved and discovery still seeds the rest.
         pool = get_session_pool()
-        prepared = pool.reconcile_existing_bindings(plan.active)
+        prepared = pool.reconcile_existing_bindings(plan.active, domain="deployment")
         if plan.void_in_flight_initialization:
             # Bump the generation so a superseded in-flight discovery cannot
             # publish a stale result. The pool itself is not retired.
@@ -926,14 +926,17 @@ def _apply_reconciliation_locked(plan: _McpReconciliationPlan) -> _PendingTeardo
         return _PendingTeardown(pool=pool, prepared=prepared)
 
     if plan.transition.retire_servers is None:
-        retired_pool = reset_session_pool()
-        prepared = retired_pool.prepare_retire_all() if retired_pool is not None else None
+        # Whole *deployment domain* retirement -- never the process-wide reset:
+        # personal MCP resources share this pool and are outside the deployment
+        # configuration's ownership, so they keep their sessions here.
+        pool = get_session_pool()
+        prepared = pool.prepare_retire_all(domain="deployment")
         _reset_mcp_tools_cache_state()
         _clear_applied_revision()
-        return _PendingTeardown(pool=retired_pool, prepared=prepared)
+        return _PendingTeardown(pool=pool, prepared=prepared)
 
     pool = get_session_pool()
-    prepared = pool.reconcile_bindings(plan.active, plan.removed, force_rebind=plan.force_rebind)
+    prepared = pool.reconcile_bindings(plan.active, plan.removed, force_rebind=plan.force_rebind, domain="deployment")
     # Retain the just-applied revision across the tool-cache clear so a
     # back-to-back edit diffs against it rather than an erased snapshot.
     _reset_mcp_tools_cache_state()
@@ -1120,7 +1123,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                     _initializing_generation = None
                 _init_condition.notify_all()
 
-    retired_pool = None
+    discard_teardown = None
     with _init_condition:
         try:
             if _cache_generation != claim_generation:
@@ -1144,6 +1147,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             if not publish:
                 logger.warning("MCP config changed during initialization; discarding stale result")
                 retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+                discard_teardown = retired_pool
             else:
                 _mcp_tools_cache = loaded_tools
                 _cache_initialized = True
@@ -1161,8 +1165,8 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 _initializing_generation = None
             _init_condition.notify_all()
 
-    if retired_pool is not None:
-        retired_pool.close_all_sync()
+    if discard_teardown is not None:
+        _run_pending_teardown(discard_teardown)
     return []
 
 
@@ -1373,20 +1377,23 @@ def _reset_mcp_tools_cache_state() -> None:
     _init_condition.notify_all()
 
 
-def _reset_mcp_tools_cache_state_and_retire_pool_locked():
-    """Retire the MCP session pool and reset cache state under one lock.
+def _reset_mcp_tools_cache_state_and_retire_pool_locked() -> _PendingTeardown:
+    """Retire every *deployment* MCP resource and reset cache state under one lock.
 
-    Tool wrappers close over the module-level session-pool singleton when they
-    are built. Any path that invalidates the tool cache must therefore swap the
-    singleton before waiters/fresh initializers can rebuild wrappers, including
-    automatic config-signature invalidation in ``get_cached_mcp_tools()``.
+    Only the deployment ownership domain is retired. Personal MCP servers share
+    this pool under their own domain, and a deployment configuration change must
+    never close their sessions. Old deployment wrappers are still fenced: their
+    binding no longer matches any registry entry, so every stale-equality check
+    fails without swapping the singleton (which would take the personal
+    resources down with it).
     """
-    from deerflow.mcp.session_pool import reset_session_pool
+    from deerflow.mcp.session_pool import get_session_pool
 
-    retired_pool = reset_session_pool()
+    pool = get_session_pool()
+    prepared = pool.prepare_retire_all(domain="deployment")
     _reset_mcp_tools_cache_state()
     _clear_applied_revision()
-    return retired_pool
+    return _PendingTeardown(pool=pool, prepared=prepared)
 
 
 def force_local_mcp_invalidation() -> None:
@@ -1402,11 +1409,12 @@ def force_local_mcp_invalidation() -> None:
     foreign-loop owner, and holding ``extensions_config_write_lock`` across that
     wait would stall unrelated config writers.
 
-    Under ``_init_condition`` it retires the session-pool singleton (fencing
-    every existing binding), clears the published tool cache, drops the applied
-    baseline and notifies waiters via the existing full-reset machinery; the
-    retired pool's blocking teardown then runs *outside* the lock. Session
-    closing is deliberately not re-implemented here.
+    Under ``_init_condition`` it retires every *deployment* resource (fencing
+    every deployment binding while leaving personal MCP sessions alone), clears
+    the published tool cache, drops the applied baseline and notifies waiters via
+    the existing full-reset machinery; the detached owners' blocking teardown
+    then runs *outside* the lock. Session closing is deliberately not
+    re-implemented here.
 
     Never raises: it runs on an error path where masking the original commit
     error would be worse than partially-completed cleanup. A failure to detach
@@ -1416,18 +1424,17 @@ def force_local_mcp_invalidation() -> None:
     """
     try:
         with _init_condition:
-            retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+            pending = _reset_mcp_tools_cache_state_and_retire_pool_locked()
     except Exception:
         logger.exception("Could not conservatively invalidate local MCP state: the pool was not retired and the tool cache was not cleared")
         return
-    if retired_pool is not None:
-        try:
-            retired_pool.close_all_sync()
-        except Exception:
-            logger.warning(
-                "Conservative MCP invalidation fenced the retired pool, but its session teardown did not complete",
-                exc_info=True,
-            )
+    try:
+        _run_pending_teardown(pending)
+    except Exception:
+        logger.warning(
+            "Conservative MCP invalidation fenced the deployment resources, but their session teardown did not complete",
+            exc_info=True,
+        )
     logger.info("MCP state conservatively invalidated")
 
 

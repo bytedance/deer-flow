@@ -14,7 +14,7 @@ from mcp.types import CONNECTION_CLOSED, ErrorData
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpUserScopedAuthConfig
 from deerflow.config.paths import Paths
-from deerflow.mcp.session_pool import MCPSessionPool, ServerBinding
+from deerflow.mcp.session_pool import MCPPoolResource, MCPSessionPool, ServerBinding
 from deerflow.mcp.task_tool_caller import McpTaskToolCaller
 from deerflow.mcp_scope import mcp_session_scope_key
 from deerflow.runtime.user_context import get_current_user, reset_current_user, set_current_user
@@ -84,7 +84,7 @@ def _binding_aware_pool(pool: Any) -> ServerBinding:
     would return a truthy value that never matches, so model a first-seen seed
     and return that binding for the call site to assert on.
     """
-    binding = ServerBinding(server_name="reports", epoch=1, fingerprint="base-fp")
+    binding = ServerBinding(resource=MCPPoolResource(domain="deployment", server_name="reports"), epoch=1, fingerprint="base-fp")
     pool.ensure_binding = MagicMock(return_value=binding)
     return binding
 
@@ -249,6 +249,7 @@ async def test_broken_stdio_task_session_is_evicted_for_next_poll_reconnect(disc
         "reports",
         "user-1:thread-1",
         session,
+        domain="deployment",
     )
     pool.close_session.assert_not_awaited()
 

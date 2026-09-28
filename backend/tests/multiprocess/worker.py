@@ -349,8 +349,14 @@ def _state_reply(cmd: Any, worker: _Worker, **extra: Any) -> dict[str, Any]:
     pool = get_session_pool()
     bindings: dict[str, Any] = {}
     with pool._lock:
-        for name, binding in pool._bindings.items():
-            bindings[name] = {"epoch": binding.epoch, "fingerprint": binding.fingerprint}
+        for resource, binding in pool._bindings.items():
+            # The harness speaks in plain server names; the ownership domain is
+            # reported alongside so a test can still tell the two apart.
+            bindings[resource.server_name] = {
+                "domain": resource.domain,
+                "epoch": binding.epoch,
+                "fingerprint": binding.fingerprint,
+            }
     sessions = {f"{name}|{scope}": bool(session.closed) for (name, scope), session in worker.opened.items()}
     applied = cache_module._mcp_applied_lifecycle
     reply = {

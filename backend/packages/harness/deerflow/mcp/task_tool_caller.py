@@ -21,6 +21,7 @@ from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
 from deerflow.mcp.personal_access import require_personal_mcp_access
 from deerflow.mcp.session_pool import (
+    MCPPoolDomain,
     MCPSessionPool,
     ServerBinding,
     call_pooled_session_tool,
@@ -70,6 +71,8 @@ def _resolve_stdio_binding(
     pool: MCPSessionPool,
     server_name: str,
     connection: Mapping[str, Any],
+    *,
+    domain: MCPPoolDomain = "deployment",
 ) -> ServerBinding:
     """Resolve *server_name*'s binding from the BASE connection.
 
@@ -83,7 +86,7 @@ def _resolve_stdio_binding(
     adds the per-call workspace cwd/TMPDIR, so those additions never affect
     identity. Fingerprints are never logged.
     """
-    return pool.ensure_binding(server_name, normalized_connection_fingerprint(connection))
+    return pool.ensure_binding(server_name, normalized_connection_fingerprint(connection), domain=domain)
 
 
 class McpTaskToolCaller:
@@ -155,6 +158,7 @@ class McpTaskToolCaller:
                 thread_id=thread_id,
                 thread_incarnation=thread_incarnation,
                 request_scoped_headers=request_scoped_headers,
+                domain="personal",
             )
         if connection_scope != "deployment":
             raise ValueError("Invalid MCP task connection scope")
@@ -195,6 +199,7 @@ class McpTaskToolCaller:
         thread_id: str,
         thread_incarnation: str | None,
         request_scoped_headers: bool,
+        domain: MCPPoolDomain = "deployment",
     ) -> Any:
         is_background_call = not request_scoped_headers
         interceptors = self._interceptors if is_background_call else self._submit_interceptors
@@ -216,7 +221,7 @@ class McpTaskToolCaller:
             # workspace cwd/TMPDIR: those additions must not affect identity,
             # and a mid-flight config change must fence this wrapper rather
             # than silently rebinding it to a new epoch.
-            binding = _resolve_stdio_binding(pool, server_name, connection)
+            binding = _resolve_stdio_binding(pool, server_name, connection, domain=domain)
             connection = await asyncio.to_thread(
                 _prepare_stdio_connection,
                 connection,
@@ -252,6 +257,7 @@ class McpTaskToolCaller:
                 session_init_timeout_seconds=None,
                 persistent_session=True,
                 interceptors=interceptors,
+                domain=domain,
             )
 
         authorization = await self._oauth_token_manager.get_authorization_header(server_name)
@@ -293,6 +299,7 @@ class McpTaskToolCaller:
         session_init_timeout_seconds: float | None,
         persistent_session: bool,
         interceptors: list[Any],
+        domain: MCPPoolDomain = "deployment",
     ) -> Any:
         from langchain_mcp_adapters.interceptors import MCPToolCallRequest
         from langchain_mcp_adapters.sessions import create_session
@@ -320,6 +327,7 @@ class McpTaskToolCaller:
                     tool_name=request.name,
                     arguments=request.args,
                     call_kwargs=call_kwargs,
+                    domain=domain,
                 )
 
             effective_connection = dict(connection)

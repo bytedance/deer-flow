@@ -214,8 +214,10 @@ def _open_session(loop, pool, name: str, *, scope: str = "thread-1"):
     return loop.run_until_complete(pool.get_session(name, scope, {"transport": "stdio", "command": name, "args": []}, binding=binding))
 
 
-def _entry(pool, name, loop, *, scope: str = "thread-1"):
-    return pool._entries.get((name, scope, loop))
+def _entry(pool, name, loop, *, scope: str = "thread-1", domain: str = "deployment"):
+    from deerflow.mcp.session_pool import MCPPoolResource
+
+    return pool._entries.get((MCPPoolResource(domain=domain, server_name=name), scope, loop))
 
 
 # ---------------------------------------------------------------------------
