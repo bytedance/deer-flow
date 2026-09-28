@@ -71,7 +71,7 @@ def _image_path(path: str, *, output: bool = False) -> str:
 
 
 def _python_script_command(args: list[str], marker: str) -> str:
-    """Pass paths as data through POSIX, PowerShell and cmd.exe shells."""
+    """Pass paths as data without importing code from the sandbox workspace."""
     payload = base64.urlsafe_b64encode(json.dumps(args, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).decode("ascii")
     program = ";".join(
         (
@@ -81,7 +81,10 @@ def _python_script_command(args: list[str], marker: str) -> str:
             "runpy.run_path(sys.argv[0],run_name='__main__')",
         )
     )
-    return f'python -c "{program}" {marker}'
+    # -I excludes cwd, PYTHONPATH, and user site-packages before the first
+    # import, including this launcher's base64/json/runpy imports. The script
+    # still runs by absolute path with installed system packages available.
+    return f'python -I -c "{program}" {marker}'
 
 
 @tool("check_image_generation", parse_docstring=True)

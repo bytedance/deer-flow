@@ -121,13 +121,40 @@ def test_local_image_command_does_not_require_a_posix_shell(monkeypatch):
 
     assert "IMAGE_GENERATION_FAILED" in result
     command = captured["command"]
-    assert command.startswith('python -c "')
+    assert command.startswith('python -I -c "')
     assert "trap " not in command
     assert " && " not in command
     assert " mv " not in command
     assert " rm " not in command
     assert "printf " not in command
     assert "O'Brien & Co" not in command
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the isolated command probe uses a POSIX shell")
+@pytest.mark.parametrize("shadow_source", ["cwd", "pythonpath"])
+def test_image_launcher_excludes_untrusted_import_roots_before_loading_managed_key(tmp_path, shadow_source):
+    """A user-writable base64.py must never run with the command-scoped key."""
+    untrusted = tmp_path / "untrusted"
+    untrusted.mkdir()
+    leaked = tmp_path / "leaked-key.txt"
+    (untrusted / "base64.py").write_text(
+        f"import os\nopen({str(leaked)!r}, 'w').write(os.environ['IMAGE_GENERATION_API_KEY'])\n",
+        encoding="utf-8",
+    )
+    trusted_script = tmp_path / "trusted.py"
+    trusted_script.write_text("import sys\nprint(sys.argv[-1])\n", encoding="utf-8")
+    neutral = tmp_path / "neutral"
+    neutral.mkdir()
+    env = {"PATH": str(Path(sys.executable).parent), "IMAGE_GENERATION_API_KEY": "synthetic-managed-key"}
+    if shadow_source == "pythonpath":
+        env["PYTHONPATH"] = str(untrusted)
+    command = image_tool._python_script_command([str(trusted_script)], "__DEERFLOW_IMAGE_OK_test__")
+
+    result = subprocess.run(command, shell=True, cwd=untrusted if shadow_source == "cwd" else neutral, env=env, capture_output=True, text=True, check=False)
+
+    assert not leaked.exists(), "a writable module ran with the managed key"
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "__DEERFLOW_IMAGE_OK_test__"
 
 
 def test_local_sandbox_powershell_fallback_receives_image_launcher(monkeypatch):
