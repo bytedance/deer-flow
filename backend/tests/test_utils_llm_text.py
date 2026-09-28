@@ -69,6 +69,20 @@ def test_strip_think_blocks_removes_complete_and_keeps_dangling_when_disabled() 
     assert result == "keep<think>trunc"
 
 
+def test_strip_think_blocks_does_not_treat_junk_close_prefix_as_closing_tag() -> None:
+    text = "a<think>x</thinky>b"
+    assert strip_think_blocks(text) == "a"
+    assert strip_think_blocks(text, truncate_unclosed=False) == text
+
+
+def test_strip_think_blocks_accepts_multiline_whitespace_before_close() -> None:
+    assert strip_think_blocks("<THINK>x</THINK\n >ok") == "ok"
+
+
+def test_strip_think_blocks_consumes_multiple_opens_through_first_close() -> None:
+    assert strip_think_blocks("<think>a<think>b</think>c") == "c"
+
+
 @pytest.mark.parametrize("tag", ["<think>", "<think"])
 @pytest.mark.parametrize("truncate_unclosed", [True, False])
 def test_strip_think_blocks_handles_many_unclosed_tags_in_bounded_time(tag: str, truncate_unclosed: bool) -> None:
