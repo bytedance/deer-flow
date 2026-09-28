@@ -332,6 +332,17 @@
 
 ### 修复
 
+- **配置：** `make config-upgrade`（`make dev` / `make start` 也会执行）现在升级的是
+  Gateway 实际加载的 `config.yaml`。当 `<checkout>/config.yaml` 与
+  `backend/config.yaml` 同时存在时，脚本升级的是 `backend/` 下的副本，而 Gateway
+  读取的是 checkout 根目录的副本，因此实际使用的文件仍停留在旧版本，升级却显示
+  成功。脚本还会忽略 `DEER_FLOW_PROJECT_ROOT` 以及 `.env` 中设置的
+  `DEER_FLOW_CONFIG_PATH`，并在 `DEER_FLOW_CONFIG_PATH` 指向不存在的文件时退回到
+  其他文件。现在脚本通过 harness 的解析器
+  （`AppConfig.resolve_config_path`）确定文件；`DEER_FLOW_CONFIG_PATH` 不存在或
+  `DEER_FLOW_PROJECT_ROOT` 无效时，会以 Gateway 相同的错误失败，而不是升级
+  回退文件。
+
 - **前端：** 文件上传完成后，乐观显示的用户消息气泡不再丢失引用与对话
   引用标签。上传完成时的更新会用仅含已上传文件的对象替换气泡的
   `additional_kwargs`，因此在服务端回传该消息之前这些标签会消失；随本次

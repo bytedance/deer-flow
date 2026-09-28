@@ -43,6 +43,14 @@ standalone binaries listed in `DEER_FLOW_TEST_COMPOSE_BINARIES`.
 Root `make install` runs pre-commit through uv, so uv's tool bin directory
 need not be on `PATH`.
 
+`config-upgrade.sh` upgrades the file the Gateway loads by asking the harness
+(`AppConfig.resolve_config_path`) rather than copying its lookup order. It
+defaults `DEER_FLOW_PROJECT_ROOT` to the checkout, as `serve.sh` does, so
+`<checkout>/config.yaml` wins over a legacy `backend/config.yaml`. A missing
+`DEER_FLOW_CONFIG_PATH` or invalid project root is an error, never a fallback.
+Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
+`backend/tests/test_config_version.py::test_config_upgrade_*` pins this.
+
 ## Shell Script Invocation Contract
 
 Root Makefile recipes must invoke repository `.sh` files through

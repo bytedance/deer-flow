@@ -625,3 +625,139 @@ def test_version_46_pii_disabled_config_upgrade_skips_token_secret(tmp_path):
     assert upgraded["config_version"] == expected_version
     assert "token_secret" not in upgraded["pii_redaction"]
     AppConfig.model_validate(upgraded)
+
+
+def _run_config_upgrade_in_checkout(checkout: Path, **env_overrides: str):
+    """Run a copy of scripts/config-upgrade.sh from a throwaway checkout.
+
+    The script resolves the checkout from its own location, so the copy sees
+    ``checkout`` as the repository root while ``UV_PROJECT`` keeps its
+    ``uv run`` on the real backend environment. Resolution overrides are
+    cleared so the developer's shell cannot pick the file under test.
+
+    The harness's legacy fallback is anchored to its install location, which
+    here is the real repository, so every run must resolve before reaching it:
+    otherwise the script would upgrade the developer's own ``config.yaml``.
+    """
+    import shutil
+    import subprocess
+
+    project_root = Path(env_overrides.get("DEER_FLOW_PROJECT_ROOT", checkout))
+    if "DEER_FLOW_CONFIG_PATH" not in env_overrides and project_root.is_dir():
+        assert (project_root / "config.yaml").is_file(), "would fall back to the real repository's config.yaml"
+
+    repo_root = Path(__file__).resolve().parents[2]
+    (checkout / "scripts").mkdir(parents=True, exist_ok=True)
+    (checkout / "backend").mkdir(exist_ok=True)
+    shutil.copy2(repo_root / "scripts" / "config-upgrade.sh", checkout / "scripts" / "config-upgrade.sh")
+    shutil.copy2(repo_root / "config.example.yaml", checkout / "config.example.yaml")
+
+    env = {key: value for key, value in os.environ.items() if key not in {"DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT"}}
+    env["UV_PROJECT"] = str(repo_root / "backend")
+    env.update(env_overrides)
+    return subprocess.run(
+        [SCRIPT_BASH, str(checkout / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def _write_outdated_config(path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = yaml.dump({"config_version": 1, "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+    path.write_text(text, encoding="utf-8")
+    return text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_targets_checkout_config_over_legacy_backend_copy(tmp_path):
+    """With both copies present, upgrade the checkout config.yaml that `make dev` loads."""
+    checkout = tmp_path / "checkout"
+    _write_outdated_config(checkout / "config.yaml")
+    legacy_text = _write_outdated_config(checkout / "backend" / "config.yaml")
+
+    result = _run_config_upgrade_in_checkout(checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    expected_version = yaml.safe_load((checkout / "config.example.yaml").read_text(encoding="utf-8"))["config_version"]
+    upgraded = yaml.safe_load((checkout / "config.yaml").read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version
+    assert (checkout / "backend" / "config.yaml").read_text(encoding="utf-8") == legacy_text
+    assert not (checkout / "backend" / "config.yaml.bak").exists()
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_honors_deer_flow_project_root(tmp_path):
+    """An exported DEER_FLOW_PROJECT_ROOT decides the file, as it does for the Gateway."""
+    checkout = tmp_path / "checkout"
+    project_root = tmp_path / "project"
+    checkout_text = _write_outdated_config(checkout / "config.yaml")
+    _write_outdated_config(project_root / "config.yaml")
+
+    result = _run_config_upgrade_in_checkout(checkout, DEER_FLOW_PROJECT_ROOT=str(project_root))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    upgraded = yaml.safe_load((project_root / "config.yaml").read_text(encoding="utf-8"))
+    assert upgraded["config_version"] > 1
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == checkout_text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_fails_on_missing_deer_flow_config_path(tmp_path):
+    """A missing explicit config stops the Gateway, so no fallback file is upgraded instead."""
+    checkout = tmp_path / "checkout"
+    checkout_text = _write_outdated_config(checkout / "config.yaml")
+    legacy_text = _write_outdated_config(checkout / "backend" / "config.yaml")
+    missing = tmp_path / "missing" / "config.yaml"
+
+    result = _run_config_upgrade_in_checkout(checkout, DEER_FLOW_CONFIG_PATH=str(missing))
+    assert result.returncode != 0
+    assert "DEER_FLOW_CONFIG_PATH" in result.stderr
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == checkout_text
+    assert (checkout / "backend" / "config.yaml").read_text(encoding="utf-8") == legacy_text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_reports_invalid_deer_flow_project_root(tmp_path):
+    """A project root the Gateway rejects fails with its message, not a traceback."""
+    checkout = tmp_path / "checkout"
+    checkout_text = _write_outdated_config(checkout / "config.yaml")
+
+    result = _run_config_upgrade_in_checkout(checkout, DEER_FLOW_PROJECT_ROOT=str(tmp_path / "missing"))
+    assert result.returncode != 0
+    assert "DEER_FLOW_PROJECT_ROOT is set to" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == checkout_text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_honors_deer_flow_config_path_from_dotenv(tmp_path):
+    """`make config-upgrade` does not source .env, but the Gateway loads it; follow the Gateway."""
+    checkout = tmp_path / "checkout"
+    live = tmp_path / "live" / "config.yaml"
+    checkout_text = _write_outdated_config(checkout / "config.yaml")
+    _write_outdated_config(live)
+    (checkout / ".env").write_text(f"DEER_FLOW_CONFIG_PATH={live}\n", encoding="utf-8")
+
+    result = _run_config_upgrade_in_checkout(checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert yaml.safe_load(live.read_text(encoding="utf-8"))["config_version"] > 1
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == checkout_text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_resolves_relative_deer_flow_config_path_from_backend(tmp_path):
+    """The Gateway runs from backend/, so a relative DEER_FLOW_CONFIG_PATH is relative to it."""
+    checkout = tmp_path / "checkout"
+    checkout_text = _write_outdated_config(checkout / "config.yaml")
+    _write_outdated_config(checkout / "backend" / "custom.yaml")
+
+    result = _run_config_upgrade_in_checkout(checkout, DEER_FLOW_CONFIG_PATH="custom.yaml")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    upgraded = yaml.safe_load((checkout / "backend" / "custom.yaml").read_text(encoding="utf-8"))
+    assert upgraded["config_version"] > 1
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == checkout_text
