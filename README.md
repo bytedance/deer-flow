@@ -2221,7 +2221,7 @@ deerflow --tui-transparent                    # use the terminal's default backg
 deerflow --continue                           # resume the most recent thread
 deerflow --resume THREAD                      # resume a thread by id
 deerflow --print "summarize this repo"        # headless one-shot answer to stdout
-deerflow --json  "hello"                       # headless newline-delimited StreamEvents
+deerflow --json  "hello"                       # headless newline-delimited StreamEvents; failure -> one {"type": "error"} record, exit 1
 deerflow --recursion-limit 250 --print "task" # override the headless agent-loop limit
 ```
 

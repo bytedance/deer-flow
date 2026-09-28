@@ -173,3 +173,34 @@ def test_main_headless_boundary_preserves_keyboard_interrupt(monkeypatch):
     monkeypatch.setattr(cli, "_make_session", lambda: session)
     with pytest.raises(KeyboardInterrupt):
         cli.main(["--print", "hello"])
+
+
+class _BrokenStdout:
+    """A stdout whose consumer closed the pipe early (e.g. ``| head``)."""
+
+    def isatty(self):
+        return False
+
+    def write(self, *_args, **_kwargs):
+        raise BrokenPipeError
+
+    def flush(self):
+        pass
+
+    def fileno(self):
+        raise OSError  # forces the devnull dup2 to take its best-effort path
+
+
+def test_main_print_broken_pipe_exits_without_traceback(monkeypatch):
+    monkeypatch.setattr(cli, "_make_session", _FakeSession)
+    monkeypatch.setattr(cli.sys, "stdout", _BrokenStdout())
+    rc = cli.main(["--print", "hello"])
+    assert rc == 1
+
+
+def test_main_json_broken_pipe_error_record_fails_silently(monkeypatch):
+    session = _raising_session(RuntimeError("boom"))
+    monkeypatch.setattr(cli, "_make_session", lambda: session)
+    monkeypatch.setattr(cli.sys, "stdout", _BrokenStdout())
+    rc = cli.main(["--json", "hello"])
+    assert rc == 1
