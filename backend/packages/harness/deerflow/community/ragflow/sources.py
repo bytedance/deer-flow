@@ -52,11 +52,20 @@ def budget_source_artifact(content: str, artifact: object, max_chars: int, *, su
     entries = [summary] if summary else []
     used = len(summary)
     retained = []
+
+    def source_entry(source: dict[str, Any], number: int) -> str:
+        return f"[citation:{number}](#knowledge-{source['id']}) {source['dataset_name']} / {source['document_name']}\n{source['text']}"
+
+    complete_length = used
+    for number, source in enumerate(sources, start=1):
+        complete_length += len(source_entry(source, number)) + (2 if number > 1 or summary else 0)
+    reserve_notice = complete_length > max_chars
+
     for source in sources:
-        entry = f"[citation:{len(retained) + 1}](#knowledge-{source['id']}) {source['dataset_name']} / {source['document_name']}\n{source['text']}"
+        entry = source_entry(source, len(retained) + 1)
         cost = len(entry) + (2 if entries else 0)
-        # Reserve a complete omission notice; never emit a partial source link.
-        if used + cost + len(notice) + 2 > max_chars:
+        # Reserve notice space only when at least one source must be omitted.
+        if used + cost + (len(notice) + 2 if reserve_notice else 0) > max_chars:
             continue
         entries.append(entry)
         used += cost

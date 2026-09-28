@@ -125,3 +125,24 @@ def test_delegated_budget_retains_the_report_reference_and_complete_evidence():
     assert content.startswith("Task completed.")
     assert "/mnt/user-data/outputs/.tool-results/report.txt" in content
     assert_paired(original, original.model_copy(update={"content": content, "artifact": artifact}), 7000)
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_budget_keeps_all_sources_when_complete_entries_fit(count):
+    sources = [
+        {
+            "id": f"{'a' * 32}-{index}",
+            "provider": "ragflow",
+            "dataset_name": "Knowledge",
+            "document_name": "Guide",
+            "text": f"Evidence {index}",
+        }
+        for index in range(1, count + 1)
+    ]
+    artifact = {"knowledge_sources": {"version": 1, "sources": sources}}
+    expected = "\n\n".join(f"[citation:{index}](#knowledge-{source['id']}) Knowledge / Guide\n{source['text']}" for index, source in enumerate(sources, start=1))
+
+    content, result_artifact = budget_source_artifact(expected + "\nExtra report text", artifact, len(expected))
+
+    assert content == expected
+    assert result_artifact == artifact
