@@ -196,7 +196,7 @@ async def test_goal_worker_returns_hidden_continuation_when_goal_is_unmet(monkey
 
 
 @pytest.mark.asyncio
-async def test_goal_worker_clears_goal_when_evaluator_is_satisfied(monkeypatch):
+async def test_goal_worker_defers_satisfied_goal_completion_until_run_finalization(monkeypatch):
     checkpointer = InMemorySaver()
     thread_id = "done-goal-thread"
     await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
@@ -222,9 +222,9 @@ async def test_goal_worker_clears_goal_when_evaluator_is_satisfied(monkeypatch):
         app_config=None,
     )
 
-    assert continuation is None
-    assert await read_thread_goal(checkpointer, thread_id) is None
-    assert bridge.events[0][0] == "values"
+    assert isinstance(continuation, worker._GoalCompletionCandidate)
+    assert await read_thread_goal(checkpointer, thread_id) == continuation.goal
+    assert bridge.events == []
 
 
 @pytest.mark.asyncio
@@ -457,7 +457,7 @@ async def test_goal_worker_resumes_after_the_user_answers_clarification(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_goal_worker_clears_a_satisfied_goal_even_after_the_run_hit_its_token_budget(monkeypatch):
+async def test_goal_worker_defers_satisfied_goal_completion_even_after_token_cap(monkeypatch):
     checkpointer = InMemorySaver()
     thread_id = "token-capped-done-goal-thread"
     await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
@@ -484,9 +484,9 @@ async def test_goal_worker_clears_a_satisfied_goal_even_after_the_run_hit_its_to
         run_stop_reason="token_capped",
     )
 
-    # The satisfied branch runs before the token-cap stand-down: the goal is cleared, not stood down.
-    assert continuation is None
-    assert await read_thread_goal(checkpointer, thread_id) is None
+    # A token cap does not veto completion, but delivery must still succeed.
+    assert isinstance(continuation, worker._GoalCompletionCandidate)
+    assert await read_thread_goal(checkpointer, thread_id) == continuation.goal
 
 
 @pytest.mark.asyncio

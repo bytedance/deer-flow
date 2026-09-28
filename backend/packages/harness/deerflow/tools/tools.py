@@ -26,7 +26,7 @@ from deerflow.tools.builtins import (
     task_tool,
     view_image_tool,
 )
-from deerflow.tools.mcp_metadata import tag_mcp_tool
+from deerflow.tools.mcp_metadata import get_mcp_source, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 
 logger = logging.getLogger(__name__)
@@ -262,6 +262,25 @@ def get_available_tools(
                     # MCP pays no config-hashing or discovery cost, while one that
                     # did still checks the existing cache for staleness.
                     refresh_mcp_cache_if_active()
+                from deerflow.mcp.user_tools import get_user_mcp_tools
+
+                try:
+                    personal_tools, personal_config = get_user_mcp_tools()
+                except Exception as exc:
+                    # Invalid personal credentials must neither be logged nor
+                    # bypass explicit selection of the platform tools.
+                    logger.warning("Could not load personal MCP tools (%s)", type(exc).__name__)
+                    personal_tools, personal_config = [], ExtensionsConfig()
+                colliding_names = extensions_config.mcp_servers.keys() & personal_config.mcp_servers.keys()
+                if colliding_names:
+                    # A deployment name can match a generated personal runtime
+                    # name. Keep only the deployment tool and its routing metadata.
+                    logger.warning("Skipping personal MCP tools with deployment name collisions: %s", sorted(colliding_names))
+                    personal_tools = [tool for tool in personal_tools if (source := get_mcp_source(tool)) and source["server_name"] not in colliding_names]
+                    available_servers = {name: server for name, server in personal_config.mcp_servers.items() if name not in colliding_names}
+                    personal_config = personal_config.model_copy(update={"mcp_servers": available_servers})
+                mcp_tools = [*mcp_tools, *personal_tools]
+                extensions_config = extensions_config.model_copy(update={"mcp_servers": {**extensions_config.mcp_servers, **personal_config.mcp_servers}})
                 if mcp_plugins is not None:
                     from deerflow.capabilities.runtime import filter_mcp_plugins
 

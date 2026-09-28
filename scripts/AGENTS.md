@@ -295,3 +295,7 @@ bounded, drop-oldest frame queue. WebSocket clients that request
 The legacy no-parameter protocol still base64-encodes frames into JSON at the
 Gateway boundary for backward compatibility. Unknown `frame_format` values
 receive a JSON error and close code 1008.
+
+The support bundle's `extensions_config.json` reader accepts UTF-8 with or
+without a leading BOM, matching the runtime loader. Preserve redaction and
+avoid flagging a valid BOM-prefixed file as a syntax error in triage output.

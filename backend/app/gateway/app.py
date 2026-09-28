@@ -40,6 +40,7 @@ from app.gateway.routers import (
     mcp_tasks,
     memory,
     models,
+    personal_mcp,
     plugins,
     project_documents,
     project_thread_files,
@@ -393,6 +394,33 @@ async def _shutdown_startup_trash_sweep(app: FastAPI) -> None:
 
 
 @asynccontextmanager
+async def _runtime_with_mcp_pool_shutdown(app: FastAPI, startup_config: AppConfig) -> AsyncGenerator[None, None]:
+    """Close pooled MCP transports after runtime producers have stopped."""
+    try:
+        async with langgraph_runtime(app, startup_config):
+            yield
+    finally:
+        # RunManager drains active graph tasks when langgraph_runtime exits.
+        # Those tasks can still acquire new MCP sessions during earlier
+        # shutdown hooks, so closing the pool inside the runtime leaves fresh
+        # owner tasks and transports alive after the only close pass.
+        try:
+            from deerflow.mcp.session_pool import get_session_pool
+
+            await asyncio.wait_for(
+                get_session_pool().close_all(),
+                timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "MCP session pool shutdown exceeded %.1fs; proceeding with worker exit.",
+                _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.exception("Failed to close MCP sessions")
+
+
+@asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
 
@@ -499,7 +527,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("Upload staging file cleanup skipped", exc_info=True)
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
-    async with langgraph_runtime(app, startup_config):
+    from app.gateway.personal_mcp_access import personal_mcp_authority
+
+    async with personal_mcp_authority(), _runtime_with_mcp_pool_shutdown(app, startup_config):
         logger.info("LangGraph runtime initialised")
 
         # Check admin bootstrap state and migrate orphan threads after admin exists.
@@ -576,7 +606,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             OrdinaryMcpTaskDriver,
         )
         from deerflow.mcp.tasks.runtime import (
-            configured_task_toolset_count,
             set_mcp_task_config_snapshot,
             set_mcp_task_submitter,
             validate_mcp_task_runtime_configuration,
@@ -595,11 +624,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         if mcp_task_repo is not None:
             mcp_task_drivers = McpTaskDriverRegistry()
-            if configured_task_toolset_count(task_extensions_config):
-                mcp_task_drivers.register(
-                    ORDINARY_MCP_TASK_DRIVER,
-                    OrdinaryMcpTaskDriver(McpTaskToolCaller(task_extensions_config)),
-                )
+            mcp_task_drivers.register(
+                ORDINARY_MCP_TASK_DRIVER,
+                OrdinaryMcpTaskDriver(McpTaskToolCaller(task_extensions_config)),
+            )
             mcp_task_service = McpTaskService(
                 repository=mcp_task_repo,
                 drivers=mcp_task_drivers,
@@ -702,6 +730,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
                 set_subagent_batch_submitter(None)
 
+        # Browser sessions have their own bounded teardown. MCP sessions close
+        # after the runtime drains runs, since those runs may still call tools.
         try:
             from deerflow.community.browser_automation import get_browser_session_manager
 
@@ -1024,6 +1054,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # MCP API is mounted at /api/mcp
     app.include_router(capabilities.router)
     app.include_router(mcp.router)
+    app.include_router(personal_mcp.router)
 
     # Durable MCP tasks are scoped to their owning thread.
     app.include_router(mcp_tasks.router)
