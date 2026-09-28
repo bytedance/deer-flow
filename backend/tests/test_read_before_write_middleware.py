@@ -857,3 +857,30 @@ def test_lock_scope_resolves_overwrite_wrapped_sandbox():
         runtime=MagicMock(context={}),
     )
     assert ReadBeforeWriteMiddleware._lock_scope(req) == "sb-fork-lock"
+
+
+class TestBlockMessageLineCount:
+    PATH = "/mnt/user-data/outputs/report.md"
+
+    def test_block_message_includes_line_count_multi_line(self):
+        content = "line1\nline2\nline3"
+        mw = _middleware({self.PATH: content})
+        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
+        result = mw.wrap_tool_call(request, MagicMock())
+        assert result.status == "error"
+        assert f"{self.PATH} already exists (3 lines) and you have not read" in result.content
+
+    def test_block_message_includes_line_count_empty_file(self):
+        mw = _middleware({self.PATH: ""})
+        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
+        result = mw.wrap_tool_call(request, MagicMock())
+        assert result.status == "error"
+        assert f"{self.PATH} already exists (0 lines) and you have not read" in result.content
+
+    def test_block_message_includes_line_count_trailing_newline(self):
+        content = "line1\nline2\n"
+        mw = _middleware({self.PATH: content})
+        request = _make_request("str_replace", {"description": "d", "path": self.PATH, "old_str": "a", "new_str": "b"})
+        result = mw.wrap_tool_call(request, MagicMock())
+        assert result.status == "error"
+        assert f"{self.PATH} already exists (2 lines) and you have not read" in result.content

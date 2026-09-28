@@ -67,8 +67,10 @@ def test_start_line_negative_returns_clean_error(tmp_path, monkeypatch) -> None:
 
 
 def test_start_line_greater_than_end_line_returns_clean_error(tmp_path, monkeypatch) -> None:
+    from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY_RANGE
+
     result = _read(tmp_path, monkeypatch, start_line=4, end_line=2)
-    assert "start_line > end_line" in result
+    assert result == READ_FILE_EMPTY_RANGE
     # No garbage slice content leaked into the error.
     assert "line4" not in result
 
@@ -99,3 +101,10 @@ def test_only_end_line_negative_returns_clean_error(tmp_path, monkeypatch) -> No
 def test_end_line_past_eof_clamps_to_last_line(tmp_path, monkeypatch) -> None:
     result = _read(tmp_path, monkeypatch, end_line=99)
     assert result == _FIVE_LINES
+
+
+def test_contract_constants_membership() -> None:
+    from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY_RANGE, READ_FILE_NO_CONTENT_RESULTS
+
+    assert READ_FILE_EMPTY_RANGE == "(invalid line range: start_line must be <= end_line)"
+    assert READ_FILE_EMPTY_RANGE in READ_FILE_NO_CONTENT_RESULTS
