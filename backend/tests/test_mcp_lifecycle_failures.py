@@ -1216,10 +1216,20 @@ def test_failed_cold_discovery_releases_bindings_so_a_gateway_write_recovers(cac
     assert get_session_pool().active_binding("A") is None
     assert get_session_pool().active_binding("B") is None
 
-    # A Gateway write can now rebuild from a fresh pool, and the retry succeeds.
+    # The Gateway now changes A's BASE CONNECTION through the targeted writer, so
+    # this is a real per-server lifecycle event rather than a no-op-ish state
+    # write: A's fingerprint must change and its generation must advance.
     failing.clear()
-    _allow_router_admin(monkeypatch)
-    asyncio.run(update_mcp_server_state(None, McpServerStateUpdateRequest(server_name="A", enabled=True)))
+    mcp_router._apply_mcp_server_config_update(
+        McpServerConfigUpdateRequest(
+            server_name="A",
+            server=McpServerConfigResponse(enabled=True, type="stdio", command="npx", args=["--changed"]),
+        )
+    )
+    assert _lifecycle(cfg)["serverGenerations"]["A"] == 1
+
+    # The retry now succeeds, and A is re-bound against its NEW fingerprint on a
+    # pool that carries none of the failed attempt's bindings.
     asyncio.run(cache_module.initialize_mcp_tools())
 
     # Both servers discover on the same fresh pool, with no residual binding.
@@ -1227,7 +1237,8 @@ def test_failed_cold_discovery_releases_bindings_so_a_gateway_write_recovers(cac
     assert sorted(seen) == ["A", "A", "B", "B"]
 
     pool = get_session_pool()
-    assert pool.active_binding("A") is not None
+    expected_a = normalized_connection_fingerprint(build_server_params("A", ExtensionsConfig.from_file().mcp_servers["A"]))
+    assert pool.active_binding("A").fingerprint == expected_a
     assert pool.active_binding("B") is not None
 
 
