@@ -278,6 +278,22 @@ def test_probe_container_cannot_be_discovered_as_profile_container_even_if_teard
 @pytest.mark.parametrize("async_mode", [False, True])
 @pytest.mark.asyncio
 async def test_chat_image_choice_does_not_evict_the_prior_thread_container(monkeypatch, tmp_path, async_mode):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setenv("DEER_FLOW_MANAGED_IMAGE_PROFILES_ENABLED", "true")
+    config = AppConfig.model_validate(
+        {
+            "sandbox": {
+                "use": "test",
+                "environment": {
+                    "IMAGE_GENERATION_PROVIDER": "openai",
+                    "IMAGE_GENERATION_MODEL": "synthetic-model",
+                    "IMAGE_GENERATION_API_KEY": "synthetic-key",
+                },
+            }
+        }
+    )
+    monkeypatch.setattr(provider_module, "get_app_config", lambda: config)
+    monkeypatch.setattr(ManagedImageGenerationProfileStore, "list", lambda _self: (_ for _ in ()).throw(ValueError("unreadable catalog")))
     provider, _, calls, destroyed, _ = _creation_provider(monkeypatch, tmp_path, supports_env=True)
     monkeypatch.setattr(provider, "_managed_image_profile", lambda: None)
     monkeypatch.setattr(provider, "_replica_count", lambda: (1, 1))

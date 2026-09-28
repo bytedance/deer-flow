@@ -56,11 +56,12 @@ managed profile cleared its bound revision marker.
 For a local AIO web profile, the tool checks the container's bound profile
 revision and probes `/v1/bash/exec`: modern images use per-command credentials,
 while legacy images use startup credentials on their profile-scoped container.
-Remote AIO still needs the per-command API. The tool launches one Python
-command with base64-encoded paths, so LocalSandbox's Windows PowerShell/cmd
-fallback does not parse POSIX operators. The image CLI validates, converts,
-atomically replaces and cleans up in Python; the tool requires its success
-marker as well as the authoritative shell exit status.
+Remote AIO still needs the per-command API. The tool launches one `python -I`
+command with base64-encoded paths; isolated mode excludes cwd, `PYTHONPATH`, and
+user site-packages before any import runs with the managed key. LocalSandbox's
+Windows PowerShell/cmd fallback does not parse POSIX operators. The image CLI
+validates, converts, atomically replaces and cleans up in Python; the tool
+requires its success marker as well as the authoritative shell exit status.
 
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
 
