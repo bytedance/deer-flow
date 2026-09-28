@@ -337,9 +337,10 @@
   `DEER_FLOW_PROJECT_ROOT`：指向不存在路径、会让 Gateway 无法启动的覆盖值仍会
   显示 `✓ config.yaml found` 与 `✓ config.yaml loadable`，而指向其他有效文件的
   覆盖值则会让它检查错误的文件。现在 doctor 通过 harness 自身的解析器确定路径，
-  并像 `make dev` 一样处理这两个位置变量：`.env` 中的值覆盖 shell 中的值，
-  `DEER_FLOW_PROJECT_ROOT` 未设置或为空时取仓库根目录。Gateway 会拒绝的覆盖值
-  会让 `config.yaml found` 失败并给出 Gateway 的错误，其余配置检查随之跳过。([#5987])
+  并像 `make dev` 一样处理这两个位置变量：`.env` 中的值覆盖 shell 中的值（未加
+  引号的开头 `~` 会展开），`DEER_FLOW_PROJECT_ROOT` 未设置或为空时取仓库根目录。
+  Gateway 会拒绝的覆盖值会让 `config.yaml found` 失败并给出 Gateway 的错误，
+  其余配置检查随之跳过。([#5987])
 - **数据库：** `DatabaseConfig` 现在严格校验 `pool_size`、`pool_recycle` 与
   `command_timeout`。此前，YAML 布尔值（`true`/`false`）会被强制转换为 `1`/`0`，
   导致 `pool_size: true`（变成仅 1 个连接）和 `command_timeout: true`（变成 1 秒超时）

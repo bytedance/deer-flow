@@ -277,6 +277,14 @@ def check_nginx() -> CheckResult:
 CONFIG_LOCATION_ENV_VARS = ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT")
 
 
+def _unquoted_dotenv_keys(env_path: Path) -> set[str]:
+    """Return the ``.env`` keys whose value is written without quotes."""
+    from dotenv.parser import parse_stream
+
+    with open(env_path, encoding="utf-8") as stream:
+        return {binding.key for binding in parse_stream(stream) if binding.key and binding.original.string.split("=", 1)[-1].lstrip()[:1] not in ("'", '"')}
+
+
 def resolve_config_path() -> tuple[Path, CheckResult | None]:
     """Locate the config.yaml the Gateway would read.
 
@@ -291,13 +299,14 @@ def resolve_config_path() -> tuple[Path, CheckResult | None]:
     default_path = Path(os.environ.get("DEER_FLOW_PROJECT_ROOT") or ".") / "config.yaml"
     try:
         from deerflow.config.app_config import AppConfig
-    except ImportError as exc:
-        # Keep diagnosing a broken backend environment instead of crashing;
-        # the YAML-only checks still run against the most likely path.
+    except Exception as exc:
+        # Keep diagnosing a broken backend environment instead of crashing
+        # (any import-time failure, as in check_config_loadable); the
+        # YAML-only checks still run against the most likely path.
         return Path(config_env) if config_env else default_path, CheckResult(
             "config.yaml found",
             "fail",
-            f"cannot import the DeerFlow harness to resolve it: {exc}",
+            f"cannot import the DeerFlow harness to resolve it ({type(exc).__name__}: {exc})",
             fix="Run 'make install'",
         )
 
@@ -819,9 +828,11 @@ def main() -> int:
             load_dotenv(env_path, override=False)
             # `make dev` (scripts/serve.sh) sources .env over the shell, so
             # for the variables that choose the config file, .env wins.
+            unquoted = _unquoted_dotenv_keys(env_path)
             for name, value in dotenv_values(env_path).items():
                 if name in CONFIG_LOCATION_ENV_VARS and value is not None:
-                    os.environ[name] = value
+                    # `source` expands an unquoted leading `~`, not a quoted one.
+                    os.environ[name] = os.path.expanduser(value) if name in unquoted else value
     except ImportError:
         pass
 

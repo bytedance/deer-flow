@@ -6,6 +6,7 @@ Run from repo root:
 
 from __future__ import annotations
 
+import builtins
 import importlib.util
 import json
 import sys
@@ -186,9 +187,18 @@ class TestResolveConfigPath:
         assert failure is None
         assert doctor.check_config_exists(path).fix == "Run 'make setup' to create it"
 
-    def test_unimportable_harness_is_reported_not_raised(self, tmp_path, runtime_path_env):
-        # A broken backend environment is exactly what doctor must diagnose.
-        runtime_path_env.setitem(sys.modules, "deerflow.config.app_config", None)
+    @pytest.mark.parametrize("error", [ImportError("no module"), TypeError("ABI mismatch"), SyntaxError("bad syntax")], ids=lambda e: type(e).__name__)
+    def test_unimportable_harness_is_reported_not_raised(self, tmp_path, runtime_path_env, error):
+        # A broken backend environment is exactly what doctor must diagnose,
+        # whatever the harness raises while its module body executes.
+        real_import = builtins.__import__
+
+        def broken_import(name, *args, **kwargs):
+            if name == "deerflow.config.app_config":
+                raise error
+            return real_import(name, *args, **kwargs)
+
+        runtime_path_env.setattr(builtins, "__import__", broken_import)
         runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
 
         path, failure = doctor.resolve_config_path()
@@ -197,6 +207,7 @@ class TestResolveConfigPath:
         assert failure is not None
         assert failure.status == "fail"
         assert "harness" in failure.detail
+        assert type(error).__name__ in failure.detail
         assert failure.fix == "Run 'make install'"
 
 
@@ -1102,3 +1113,34 @@ class TestMainConfigResolution:
         output = capsys.readouterr().out
         assert "✓ config.yaml found" in output
         assert "✓ models configured  (1 model(s))" in output
+
+    @pytest.mark.parametrize(
+        ("name", "value", "found"),
+        [
+            ("DEER_FLOW_CONFIG_PATH", "~/cfg.yaml", True),
+            ("DEER_FLOW_PROJECT_ROOT", "~/repo", True),
+            # bash leaves a quoted tilde literal, so the Gateway fails too.
+            ("DEER_FLOW_CONFIG_PATH", '"~/cfg.yaml"', False),
+        ],
+        ids=["config-path", "project-root", "quoted-config-path"],
+    )
+    def test_dotenv_location_tilde_expands_like_source(self, tmp_path, runtime_path_env, capsys, name, value, found):
+        # serve.sh's `source .env` expands an unquoted leading `~` (bash tilde
+        # expansion in an assignment) and keeps a quoted one literal.
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        for home_var in ("HOME", "USERPROFILE"):
+            runtime_path_env.setenv(home_var, str(tmp_path))
+        (tmp_path / "cfg.yaml").write_text("config_version: 5\nmodels:\n  - name: home-model\n")
+        (repo_root / "config.yaml").write_text("config_version: 5\nmodels:\n  - name: checkout-model\n")
+        (repo_root / ".env").write_text(f"{name}={value}\n")
+
+        exit_code = doctor.main()
+
+        output = capsys.readouterr().out
+        if found:
+            assert "✓ config.yaml found" in output
+            assert "✓ models configured  (1 model(s))" in output
+        else:
+            assert exit_code == 1
+            assert "✗ config.yaml found" in output
+            assert "~/cfg.yaml" in output
