@@ -1,6 +1,7 @@
 """Personal MCP persistence, HTTP ownership and real MCP credential routing."""
 
 import asyncio
+import ipaddress
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -104,6 +105,31 @@ def test_masked_edit_and_delete_do_not_touch_platform_or_peer(personal_client, t
     assert not load_user_mcp_config("alice").mcp_servers
     assert read_user_mcp_config("bob")["mcpServers"]["github"]["headers"]["Authorization"] == "Bearer bob"
     assert platform.read_bytes() == before
+
+
+@pytest.mark.parametrize("contents", ["{", "[]"])
+@pytest.mark.parametrize("adapter", ["mcp", "business"])
+def test_corrupt_personal_config_in_capability_listings(personal_client, tmp_path, monkeypatch, contents, adapter):
+    from app.gateway.deps import get_config
+    from app.gateway.routers import capabilities
+
+    app = personal_client.app
+    app.include_router(capabilities.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    deployment = tmp_path / "deployment.json"
+    deployment.write_text(json.dumps({"mcpServers": {"shared": {"type": "http", "url": "https://example.com/mcp"}}}))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(deployment))
+    path = user_mcp_config_path("alice")
+    path.parent.mkdir(parents=True)
+    path.write_text(contents)
+    url = f"/api/capabilities/installations/{adapter}"
+    for scope in ("user", "all"):
+        response = personal_client.get(url, params={"scope": scope}, headers={"test-user": "alice"})
+        assert response.status_code == 400
+        assert "Extensions configuration" in response.json()["detail"]
+    assert personal_client.get(url, params={"scope": "deployment"}, headers={"test-user": "alice"}).status_code == 200
+    assert personal_client.get(url, params={"scope": "all"}, headers={"test-user": "bob"}).status_code == 200
+    assert path.read_text() == contents
 
 
 def test_personal_values_do_not_resolve_platform_environment(personal_client, monkeypatch):
@@ -226,7 +252,6 @@ def test_untrusted_users_cannot_launch_packages_or_connect_to_private_hosts(pers
 async def test_personal_network_rechecks_destination_before_each_request(monkeypatch):
     from deerflow.mcp import personal_network
 
-    client_class = httpx.AsyncClient
     received = []
     blocked = False
 
@@ -234,11 +259,11 @@ async def test_personal_network_rechecks_destination_before_each_request(monkeyp
         received.append(str(request.url))
         return httpx.Response(302, headers={"location": "http://127.0.0.1/private"})
 
-    monkeypatch.setattr(personal_network.httpx, "AsyncClient", lambda **kwargs: client_class(transport=httpx.MockTransport(transport), **kwargs))
-    monkeypatch.setattr(personal_network, "validate_public_http_url", lambda *a, **k: "private address" if blocked else None)
+    monkeypatch.setattr(personal_network.httpx, "AsyncHTTPTransport", lambda **kwargs: httpx.MockTransport(transport))
+    monkeypatch.setattr(personal_network, "resolve_host_addresses", lambda host: [ipaddress.ip_address("127.0.0.1" if blocked else "8.8.8.8")])
     async with personal_network.personal_httpx_client_factory() as client:
         assert (await client.get("https://example.com/mcp")).status_code == 302
-        assert received == ["https://example.com/mcp"]
+        assert received == ["https://8.8.8.8/mcp"]
         blocked = True
         with pytest.raises(ValueError, match="public HTTP"):
             await client.get("https://example.com/mcp")

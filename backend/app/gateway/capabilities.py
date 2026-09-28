@@ -91,7 +91,10 @@ class MCPAdapter:
         if context.scope == "user":
             from deerflow.mcp.user_config import read_user_mcp_config
 
-            raw_config = await asyncio.to_thread(read_user_mcp_config, context.user_id)
+            try:
+                raw_config = await asyncio.to_thread(read_user_mcp_config, context.user_id)
+            except ValueError as exc:
+                mcp._raise_invalid_mcp_configuration(str(exc), cause=exc)
             servers = mcp._mcp_server_responses_from_raw(raw_config)
         else:
             servers = await asyncio.to_thread(mcp._load_raw_mcp_server_responses)
