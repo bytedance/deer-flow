@@ -1859,6 +1859,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  void page.route("**/api/mcp/config", (route) =>
+    route.fulfill({ json: { mcp_servers: {} } }),
+  );
+
   void page.route("**/api/mcp/personal/config", (route) =>
     route.fulfill({ json: { mcp_servers: {} } }),
   );

@@ -229,7 +229,9 @@ test("MCP access errors preserve the independently available Lark integration", 
     page.locator("article").filter({ hasText: "Lark / Feishu" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Add MCP plugin" }),
+    page
+      .getByRole("region", { name: "My plugins", exact: true })
+      .getByRole("button", { name: "Add MCP plugin" }),
   ).toHaveCount(0);
 });
 
@@ -290,7 +292,9 @@ test("plugin filters remain usable after an MCP refetch fails", async ({
   ).toBeVisible();
   await expect(installed).toHaveAttribute("aria-selected", "true");
   await expect(
-    page.getByRole("button", { name: "Add MCP plugin" }),
+    page
+      .getByRole("region", { name: "My plugins", exact: true })
+      .getByRole("button", { name: "Add MCP plugin" }),
   ).toHaveCount(0);
   await page.getByRole("tab", { name: "All plugins", exact: true }).click();
   await expect(

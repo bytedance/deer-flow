@@ -220,6 +220,7 @@ test("upload previews, cancellation, save, reload, restore default, and create a
   expect(servers.github?.presentation).toEqual({ display_name: "Engineering" });
 
   await page
+    .getByRole("region", { name: "我的插件", exact: true })
     .getByRole("button", { name: "添加 MCP 插件", exact: true })
     .click();
   await dialog.getByRole("textbox").fill(

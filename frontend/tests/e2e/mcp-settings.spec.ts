@@ -22,6 +22,7 @@ for (const { viewport, name } of [
 
     for (const mode of ["edit", "add"] as const) {
       await page
+        .getByRole("region", { name: "My plugins", exact: true })
         .getByRole("button", {
           name: mode === "edit" ? `Edit ${name}` : "Add MCP plugin",
           exact: true,
@@ -116,6 +117,7 @@ for (const viewport of [
 
     for (const mode of ["edit", "add"] as const) {
       await page
+        .getByRole("region", { name: "My plugins", exact: true })
         .getByRole("button", {
           name: mode === "edit" ? "Edit github" : "Add MCP plugin",
           exact: true,

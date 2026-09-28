@@ -15,7 +15,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
-import { MCPConfigRequestError } from "@/core/mcp/api";
+import { MCPConfigRequestError, type MCPScope } from "@/core/mcp/api";
 import {
   useEnableMCPServer,
   useMCPConfig,
@@ -44,6 +44,7 @@ import { PluginIcon } from "./plugin-icon";
 import { PluginIconPicker } from "./plugin-icon-picker";
 
 type MCPPluginManagerProps = {
+  scope?: MCPScope;
   query?: string;
   catalog?: PluginDirectoryEntry[];
   category?: PluginCategory | "all";
@@ -53,7 +54,7 @@ type MCPPluginManagerProps = {
 };
 
 export function MCPPluginManager(props: MCPPluginManagerProps) {
-  const { config, isLoading, error } = useMCPConfig();
+  const { config, isLoading, error } = useMCPConfig(props.scope);
   // Keep the directory mounted while MCP discovery completes. Replacing the
   // entire subtree can swallow a click on an independently available plugin.
   return (
@@ -68,6 +69,7 @@ export function MCPPluginManager(props: MCPPluginManagerProps) {
 
 function MCPServerList({
   servers,
+  scope = "user",
   query = "",
   catalog = [],
   category = "all",
@@ -82,8 +84,9 @@ function MCPServerList({
   error?: Error | null;
 }) {
   const { t } = useI18n();
-  const { isPending, mutate: enableMCPServer } = useEnableMCPServer();
-  const { isPending: isWriting, mutate: mutateServer } = useMCPServerMutation();
+  const { isPending, mutate: enableMCPServer } = useEnableMCPServer(scope);
+  const { isPending: isWriting, mutate: mutateServer } =
+    useMCPServerMutation(scope);
   const [editor, setEditor] = useState<
     { mode: "add" } | { mode: "edit"; name: string } | null
   >(null);

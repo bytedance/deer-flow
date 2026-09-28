@@ -19,12 +19,12 @@ import {
 import type { MCPScope } from "./api";
 import type { MCPServerConfig } from "./types";
 
-export function useMCPConfig() {
+export function useMCPConfig(scope: MCPScope = "user") {
   const { user } = useAuth();
   const { data, isLoading, error } = useQuery({
-    queryKey: ["mcpConfig", "user", user?.id],
-    queryFn: () => loadMCPConfig("user"),
-    enabled: !!user,
+    queryKey: ["mcpConfig", scope, user?.id],
+    queryFn: () => loadMCPConfig(scope),
+    enabled: !!user && (scope === "user" || user.system_role === "admin"),
     retry: (count, error) =>
       !(error instanceof MCPConfigRequestError) && count < 3,
   });
@@ -55,9 +55,9 @@ export function getEnableMCPServerMutationOptions(
   };
 }
 
-export function useEnableMCPServer() {
+export function useEnableMCPServer(scope: MCPScope = "user") {
   const queryClient = useQueryClient();
-  return useMutation(getEnableMCPServerMutationOptions(queryClient, "user"));
+  return useMutation(getEnableMCPServerMutationOptions(queryClient, scope));
 }
 
 export type MCPServerMutationVariables =
@@ -102,7 +102,7 @@ export function getMCPServerMutationOptions(
   };
 }
 
-export function useMCPServerMutation() {
+export function useMCPServerMutation(scope: MCPScope = "user") {
   const queryClient = useQueryClient();
-  return useMutation(getMCPServerMutationOptions(queryClient, "user"));
+  return useMutation(getMCPServerMutationOptions(queryClient, scope));
 }
