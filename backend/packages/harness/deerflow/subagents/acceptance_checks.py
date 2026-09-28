@@ -224,6 +224,24 @@ def _resolve_scoped_path(path: str, thread_data: Mapping[str, Any] | None, *, re
     return None
 
 
+# A failed existence test can mean EACCES. Prove a searchable ancestor and
+# canonical containment before reporting absence; broken symlinks stay uncertain.
+_REMOTE_ABSENCE_GUARD = (
+    'if [ ! -e "$1" ]; then '
+    '[ ! -L "$1" ] || { echo NONREGULAR; exit 0; }; '
+    'd=$(/usr/bin/dirname -- "$1") || { echo UNREADABLE; exit 0; }; '
+    'while [ ! -e "$d" ]; do '
+    '[ ! -L "$d" ] && [ "$d" != / ] || { echo UNREADABLE; exit 0; }; '
+    'd=${d%/*}; [ -n "$d" ] || d=/; '
+    "done; "
+    '[ -d "$d" ] && [ -x "$d" ] || { echo UNREADABLE; exit 0; }; '
+    'r=$(/usr/bin/realpath -- "$2") || { echo UNREADABLE; exit 0; }; '
+    'p=$(/usr/bin/realpath -m -- "$1") || { echo UNREADABLE; exit 0; }; '
+    'case $p in "$r"/*) echo NOFILE ;; *) echo ESCAPED ;; esac; exit 0; '
+    "fi; "
+)
+
+
 #: Remote size-probe script (POSIX sh, positional params: ``$1`` path,
 #: ``$2`` mount root). Answers a bare byte count for a regular file, or one
 #: of ``NOFILE`` / ``UNREADABLE`` / ``NONREGULAR`` / ``ESCAPED``. Everything
@@ -240,8 +258,7 @@ def _resolve_scoped_path(path: str, thread_data: Mapping[str, Any] | None, *, re
 #: lands outside the canonical root (ESCAPED). GNU stat labels zero-byte
 #: regular files as ``regular empty file``; both regular-file labels qualify.
 _SIZE_PROBE_INNER_SCRIPT = (
-    '[ -e "$1" ] || { echo NOFILE; exit 0; }; '
-    't=$(/usr/bin/stat -c %F -- "$1") || { echo UNREADABLE; exit 0; }; '
+    _REMOTE_ABSENCE_GUARD + 't=$(/usr/bin/stat -c %F -- "$1") || { echo UNREADABLE; exit 0; }; '
     'case "$t" in "regular file"|"regular empty file") ;; *) echo NONREGULAR; exit 0 ;; esac; '
     'r=$(/usr/bin/realpath -- "$2") || { echo UNREADABLE; exit 0; }; '
     'p=$(/usr/bin/realpath -- "$1") || { echo UNREADABLE; exit 0; }; '
@@ -330,8 +347,7 @@ def _probe_file_size(runtime: Any, resolved: str, thread_data: Mapping[str, Any]
 #: claim. The regular-file gate runs first, so no FIFO or device is ever
 #: opened.
 _READ_PROBE_INNER_SCRIPT = (
-    '[ -e "$1" ] || { echo NOFILE; exit 0; }; '
-    't=$(/usr/bin/stat -c %F -- "$1") || { echo UNREADABLE; exit 0; }; '
+    _REMOTE_ABSENCE_GUARD + 't=$(/usr/bin/stat -c %F -- "$1") || { echo UNREADABLE; exit 0; }; '
     'case "$t" in "regular file"|"regular empty file") ;; *) echo NONREGULAR; exit 0 ;; esac; '
     'r=$(/usr/bin/realpath -- "$2") || { echo UNREADABLE; exit 0; }; '
     'p=$(/usr/bin/realpath -- "$1") || { echo UNREADABLE; exit 0; }; '
@@ -391,8 +407,7 @@ def _probe_file_readable(runtime: Any, resolved: str, thread_data: Mapping[str, 
 
 # Encode content with the read exit code; the outer marker detects provider truncation, and file content cannot forge the exit code.
 _JSON_READ_INNER_SCRIPT = (
-    '[ -e "$1" ] || { echo NOFILE; exit 0; }; '
-    't=$(/usr/bin/stat -c %F -- "$1") || exit 1; '
+    _REMOTE_ABSENCE_GUARD + 't=$(/usr/bin/stat -c %F -- "$1") || exit 1; '
     'case "$t" in "regular file"|"regular empty file") ;; *) exit 1 ;; esac; '
     'r=$(/usr/bin/realpath -- "$2") || exit 1; '
     'p=$(/usr/bin/realpath -- "$1") || exit 1; '
@@ -510,11 +525,21 @@ def _check_file_leaf(
     from deerflow.sandbox.exceptions import SandboxError, SandboxFileNotFoundError
     from deerflow.sandbox.tools import is_local_sandbox
 
+    base: AcceptanceLeaf = {"criterion": "", "family": family, "checked": False, "holds": False, "detail": ""}
+    if family == "file_json_valid" and is_local_sandbox(runtime):
+        from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
+
+        # Authorize before canonicalization or metadata probes can disclose file existence.
+        try:
+            authorize_sandbox_execution(context=getattr(runtime, "context", None) or {}, app_config=safe_app_config())
+        except SandboxError:
+            base["detail"] = "sandbox access denied; JSON file unverified"
+            return base
+
     # Symlink escapes are a local-sandbox concern (host-visible links); remote
     # providers resolve paths inside the sandbox where the parent cannot
     # canonicalize, so the check stays lexical there.
     resolved = _resolve_scoped_path(criterion_path, thread_data, resolve_symlinks=is_local_sandbox(runtime))
-    base: AcceptanceLeaf = {"criterion": "", "family": family, "checked": False, "holds": False, "detail": ""}
     if resolved is None:
         base["detail"] = "path is outside the shared thread workspace" if thread_data else "shared thread workspace unavailable"
         return base

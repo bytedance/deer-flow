@@ -1,6 +1,6 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
-**JSON**: See README. Authorize local reads; denial stays UNVERIFIED.
+**JSON**: See README. Authorize before local metadata and reads; inaccessible paths stay UNVERIFIED.
 
 Apply each subagent's prompt overlay after assembling its full SystemMessage.
 Registry overrides must not mutate `BUILTIN_SUBAGENTS`.

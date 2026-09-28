@@ -1678,8 +1678,10 @@ Reads are capped at 50,001 bytes to detect oversize content. Remote results are 
 for a completion marker, the read exit code, and the probed size. Remote providers lacking
 the required probe tools leave the result unverified rather than falling back to full-content
 reads. Concurrent writes of the same size do not yield an atomic snapshot.
-Local reads recheck sandbox permissions before accessing file content; revoked permissions
-return `UNVERIFIED` without reading the content. UTF-8 BOMs are rejected. Top-level scalars,
+Local checks authorize sandbox access before resolving paths or probing metadata, and recheck
+before reading content; revoked permissions return `UNVERIFIED` without revealing existence.
+Remote probes report missing files only with a searchable ancestor and in-scope canonical path;
+inaccessible directories remain `UNVERIFIED`. UTF-8 BOMs are rejected. Top-level scalars,
 duplicate keys, and syntactically valid large numbers can pass, without validating schemas,
 fields, or business semantics. Other file criteria are unchanged, and `.json` files are not
 checked automatically. This criterion standardizes verdicts, path boundaries, and read limits

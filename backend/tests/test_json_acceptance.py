@@ -4,6 +4,7 @@ import base64
 import os
 import shlex
 import subprocess
+import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -13,7 +14,7 @@ from deerflow.subagents.acceptance_checks import check_acceptance_criteria, pars
 
 
 @pytest.mark.parametrize("sandbox_id", ["local", "local:thread-1"])
-@pytest.mark.parametrize("content", [b"{}", b"{invalid"])
+@pytest.mark.parametrize("content", [b"{}", b"{invalid", None])
 def test_local_json_rechecks_revoked_sandbox_grant(tmp_path, monkeypatch, sandbox_id, content):
     """Retained sandbox IDs do not retain grants; revocation prevents file reads and syntax verdicts."""
     from deerflow.authz.rbac import RbacAuthorizationProvider
@@ -27,7 +28,8 @@ def test_local_json_rechecks_revoked_sandbox_grant(tmp_path, monkeypatch, sandbo
         state={"sandbox": {"sandbox_id": sandbox_id}},
         context={"thread_id": "thread-1", "user_id": "user-1", "user_role": "user"},
     )
-    (tmp_path / "report.json").write_bytes(content)
+    if content is not None:
+        (tmp_path / "report.json").write_bytes(content)
     criterion = "file:report.json json-valid"
 
     def check():
@@ -46,7 +48,10 @@ def test_local_json_rechecks_revoked_sandbox_grant(tmp_path, monkeypatch, sandbo
     provider = RbacAuthorizationProvider(roles={"user": {"sandbox": {"allow": "*"}}})
     restored = check()["leaves"][0]
     assert (restored["checked"], restored["holds"]) == (True, content == b"{}")
-    open_file.assert_called_once()
+    if content is None:
+        open_file.assert_not_called()
+    else:
+        open_file.assert_called_once()
 
 
 def test_json_file_is_checked_explicitly(tmp_path):
@@ -76,7 +81,7 @@ def test_nonstandard_constants_do_not_hold(tmp_path, content):
 
 @pytest.fixture
 def remote_sandbox(tmp_path, monkeypatch):
-    if os.name == "nt":
+    if sys.platform != "linux":
         pytest.skip("Requires Linux sandbox tools")
 
     class ShellSandbox:
@@ -263,6 +268,43 @@ def test_remote_permission_denied_is_uncertain(tmp_path, remote_sandbox):
         assert verdict["leaves"][0]["checked"] is False
     finally:
         path.chmod(0o600)
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="Requires non-root POSIX permissions")
+@pytest.mark.parametrize(("before_read", "exists"), [(False, True), (False, False), (True, True)])
+def test_remote_inaccessible_parent_is_uncertain(tmp_path, remote_sandbox, before_read, exists):
+    parent = tmp_path / "locked"
+    nested = parent / "nested"
+    nested.mkdir(parents=True)
+    if exists:
+        (nested / "report.json").write_bytes(b"{}")
+    if before_read:
+        remote_sandbox.before_read = lambda: parent.chmod(0)
+    else:
+        parent.chmod(0)
+    try:
+        verdict = check_acceptance_criteria(
+            ["file:locked/nested/report.json json-valid"],
+            runtime=SimpleNamespace(state=None),
+            thread_data={"workspace_path": str(tmp_path)},
+        )
+        assert (verdict["leaves"][0]["checked"], verdict["leaves"][0]["holds"]) == (False, False)
+    finally:
+        parent.chmod(0o700)
+
+
+@pytest.mark.parametrize("path", ["missing/report.json", "missing/nested/report.json"])
+def test_remote_missing_parent_is_negative(tmp_path, remote_sandbox, path):
+    verdict = check_acceptance_criteria([f"file:{path} json-valid"], runtime=SimpleNamespace(state=None), thread_data={"workspace_path": str(tmp_path)})
+    assert (verdict["leaves"][0]["checked"], verdict["leaves"][0]["holds"]) == (True, False)
+
+
+@pytest.mark.parametrize("target", ["missing", "outside"])
+def test_remote_missing_file_through_symlink_is_uncertain(tmp_path, remote_sandbox, target):
+    destination = tmp_path / target if target == "missing" else tmp_path.parent
+    (tmp_path / "link").symlink_to(destination, target_is_directory=True)
+    verdict = check_acceptance_criteria(["file:link/report.json json-valid"], runtime=SimpleNamespace(state=None), thread_data={"workspace_path": str(tmp_path)})
+    assert verdict["leaves"][0]["checked"] is False
 
 
 def test_remote_special_filename_is_literal(tmp_path, remote_sandbox):
