@@ -80,6 +80,11 @@ production caller (`tui/cli.py::_run_print`) already sends
 handle a park inline use `stream()`, which surfaces the event directly. Pinned by
 `tests/test_client_tool_approval.py::TestChatDoesNotSwallowAPark`.
 
+That opt-out has to stay, not lean on the headless boundary that now wraps both
+one-shots: the boundary turns any exception into `Error: <text>` and exit 1, so a
+park would be reported as a failed run rather than the unanswerable request it
+is. Pinned by `tests/test_tool_approval_client_downgrade.py`.
+
 ### A waited run that re-parks is not a completion
 
 `POST /runs/wait` and `POST /threads/{id}/runs/wait` block until the run finishes
