@@ -661,6 +661,27 @@ def test_status_runtime_probe_skipped_when_not_requested(monkeypatch, tmp_path) 
     assert detail is None
 
 
+def test_status_explicitly_reports_remote_runtime_probe_state(monkeypatch, tmp_path) -> None:
+    _patch_paths(monkeypatch, tmp_path / "home")
+    config = _config(tmp_path / "skills")
+    config.sandbox = SimpleNamespace(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        provisioner_url="http://provisioner:8002",
+    )
+    monkeypatch.setattr(
+        lark_cli,
+        "_probe_provisioner_capabilities",
+        lambda _config: {"lark_cli_init_image": True, "lark_cli_broker_image": False},
+    )
+
+    unprobed = lark_cli.get_lark_integration_status("alice", config, check_runtime=False)
+    probed = lark_cli.get_lark_integration_status("alice", config, check_runtime=True)
+
+    assert unprobed.sandbox_runtime_probed is False
+    assert probed.sandbox_runtime_probed is True
+    assert probed.sandbox_runtime_ready is True
+
+
 def _reset_broker_mode_cache() -> None:
     if hasattr(lark_cli.sandbox_lark_broker_active, "_cache"):
         del lark_cli.sandbox_lark_broker_active._cache
@@ -2212,6 +2233,60 @@ def test_complete_lark_auth_polls_device_code_and_returns_status(monkeypatch, tm
     }
 
 
+def test_complete_lark_auth_returns_probed_runtime_after_releasing_credential_lock(monkeypatch, tmp_path) -> None:
+    config = _config(tmp_path / "skills")
+    lock_state = {"active": False}
+    status_lock_states: list[bool] = []
+
+    class _CredentialLock:
+        def __enter__(self):
+            assert lock_state["active"] is False
+            lock_state["active"] = True
+
+        def __exit__(self, *_args):
+            lock_state["active"] = False
+
+    monkeypatch.setattr(lark_cli, "_lark_credential_lock", lambda _user_id: _CredentialLock())
+    monkeypatch.setattr(lark_cli, "_require_lark_flow_generation_locked", lambda _user_id, generation: generation)
+    monkeypatch.setattr(lark_cli, "_require_lark_cli_path", lambda: "/usr/bin/lark-cli")
+    monkeypatch.setattr(lark_cli, "_run_lark_cli_json", lambda *_args, **_kwargs: {})
+
+    def _status(_user_id, _config, **kwargs):
+        status_lock_states.append(lock_state["active"])
+        runtime_ready = kwargs.get("check_runtime") is True
+        return lark_cli.LarkIntegrationStatus(
+            installed=True,
+            version="v1.0.65",
+            manifest_version="v1.0.65",
+            latest_available_version=None,
+            runtime_version_mismatch=False,
+            app_configured=True,
+            app_id="cli_mock",
+            app_brand="feishu",
+            skills_expected=27,
+            skills_installed=27,
+            installed_skills=("lark-doc",),
+            enabled_skills=("lark-doc",),
+            install_path="/tmp/lark",
+            cli=lark_cli.LarkCliProbe(available=True),
+            auth=lark_cli.LarkAuthProbe(status="authenticated", user="Alice", verified=True),
+            sandbox_runtime_mode="init-container",
+            sandbox_runtime_ready=runtime_ready,
+        )
+
+    monkeypatch.setattr(lark_cli, "get_lark_integration_status", _status)
+
+    result = lark_cli.complete_lark_auth(
+        "alice",
+        config,
+        device_code="device-code",
+        generation="auth-generation",
+    )
+
+    assert result.status.sandbox_runtime_ready is True
+    assert status_lock_states == [False]
+
+
 def test_complete_lark_auth_accepts_short_automatic_poll_timeout(monkeypatch, tmp_path) -> None:
     assert "wait_timeout_seconds" in inspect.signature(lark_cli.complete_lark_auth).parameters
     _patch_paths(monkeypatch, tmp_path / "home")
@@ -2576,6 +2651,7 @@ def test_lark_status_is_available_to_authenticated_users(monkeypatch, tmp_path):
             install_path="/tmp/lark-cli",
             cli=lark_cli.LarkCliProbe(available=False, error="missing"),
             auth=lark_cli.LarkAuthProbe(status="unavailable", message="missing"),
+            sandbox_runtime_probed=True,
         ),
     )
 
@@ -2584,6 +2660,7 @@ def test_lark_status_is_available_to_authenticated_users(monkeypatch, tmp_path):
 
     assert response.status_code == 200
     assert response.json()["installed"] is False
+    assert response.json()["sandbox_runtime_probed"] is True
 
 
 def _status_with_host_paths() -> lark_cli.LarkIntegrationStatus:

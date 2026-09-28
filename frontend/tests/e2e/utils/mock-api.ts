@@ -382,6 +382,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       | "none"
       | "gateway-download"
       | "init-container",
+    sandbox_runtime_probed: true,
     sandbox_runtime_ready: false,
     sandbox_runtime_detail:
       "The provisioner has no lark-cli init image configured (LARK_CLI_INIT_IMAGE)." as
@@ -1969,6 +1970,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           verified: false,
         },
         sandbox_runtime_mode: "init-container",
+        sandbox_runtime_probed: true,
         sandbox_runtime_ready: true,
         sandbox_runtime_detail: null,
       };

@@ -215,6 +215,7 @@ class LarkIntegrationStatus:
     cli: LarkCliProbe
     auth: LarkAuthProbe
     sandbox_runtime_mode: str = "none"
+    sandbox_runtime_probed: bool = False
     sandbox_runtime_ready: bool = False
     sandbox_runtime_detail: str | None = None
 
@@ -1748,8 +1749,24 @@ def get_lark_integration_status(
         cli=cli,
         auth=probe_lark_auth(user_id, verify=verify_auth),
         sandbox_runtime_mode=runtime_mode,
+        sandbox_runtime_probed=check_runtime or not (_uses_aio_sandbox(config) and _uses_remote_provisioner(config)),
         sandbox_runtime_ready=runtime_ready,
         sandbox_runtime_detail=runtime_detail,
+    )
+
+
+def _get_lark_mutation_status(
+    user_id: str,
+    config: AppConfig,
+    *,
+    verify_auth: bool = False,
+) -> LarkIntegrationStatus:
+    """Build a mutation response with the same runtime probe used by the GET route."""
+    return get_lark_integration_status(
+        user_id,
+        config,
+        verify_auth=verify_auth,
+        check_runtime=True,
     )
 
 
@@ -1855,7 +1872,7 @@ def install_lark_integration(
         sandbox_version = str(installed_manifest.get("version") or resolved_version or FALLBACK_LARK_CLI_VERSION)
         _ensure_managed_sandbox_lark_cli(sandbox_version)
 
-    status = get_lark_integration_status(user_id, config)
+    status = _get_lark_mutation_status(user_id, config)
     content_changed = previous_content_sha is not None and previous_content_sha != content_sha
     message = f"Installed {len(installed_skills)} Lark/Feishu skills."
     if content_changed:
@@ -1990,7 +2007,7 @@ def complete_lark_config(
             app_secret=app_secret,
             brand=final_brand,
         )
-        status = get_lark_integration_status(user_id, config)
+    status = _get_lark_mutation_status(user_id, config)
     return LarkConfigCompleteResult(
         success=True,
         status=status,
@@ -2027,7 +2044,7 @@ def set_lark_app_credentials(
             app_secret=app_secret,
             brand=parsed_brand,
         )
-        status = get_lark_integration_status(user_id, config)
+    status = _get_lark_mutation_status(user_id, config)
     return LarkConfigCompleteResult(
         success=True,
         status=status,
@@ -2105,7 +2122,7 @@ def complete_lark_auth(
             timeout=wait_timeout_seconds,
             allow_empty_success=True,
         )
-        status = get_lark_integration_status(user_id, config, verify_auth=True)
+    status = _get_lark_mutation_status(user_id, config, verify_auth=True)
     return LarkAuthCompleteResult(
         success=status.auth.status == "authenticated",
         status=status,

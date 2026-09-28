@@ -9,8 +9,7 @@ import {
   startLarkAuthorization,
   startLarkConfiguration,
 } from "./api";
-
-export const larkIntegrationQueryKey = ["integrations", "lark"] as const;
+import { larkIntegrationQueryKey } from "./cache";
 
 export function useLarkIntegrationStatus() {
   return useQuery({
