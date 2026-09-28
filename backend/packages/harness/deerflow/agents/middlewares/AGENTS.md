@@ -1,5 +1,9 @@
 ### Middleware Chain
 
+`ViewImageMiddleware` bounds host image reads to the validated file size plus one
+byte, retaining length and SHA-256 checks after the read. A file that grows after
+stat must not cause unbounded allocation before those checks can reject it.
+
 Compaction keeps state `SystemMessage`s; transient instructions use request
 wrappers, and fully rescued partitions skip compaction. If latest-user rescue
 empties an AI/Tool-only window, use `_build_summary_input_text(strategy="last")`;

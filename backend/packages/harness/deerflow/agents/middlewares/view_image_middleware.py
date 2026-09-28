@@ -157,7 +157,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             if current_size != expected_size or current_size > _MAX_IMAGE_BYTES:
                 return None
             with open(file_path, "rb") as f:
-                image_bytes = f.read()
+                image_bytes = f.read(current_size + 1)
             return cls._encode_image_bytes(
                 image_bytes,
                 mime_type,
