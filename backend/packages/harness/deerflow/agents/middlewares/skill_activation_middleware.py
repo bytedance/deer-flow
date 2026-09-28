@@ -612,17 +612,35 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             # The two sources resolve independently — a transient failure of
             # the fresh slash lookup must not zero the entry sources (they
             # have their own snapshot and never consult that registry).
+            slash_path = read_slash_skill_source_path(context, owner_token=self._slash_source_owner_token)
             if slash_registry is not None:
                 # Slash source: exempt from the ``secrets-autonomous`` opt-out
                 # (explicit ceremony), but still enabled + allowlist checked.
-                slash_path = read_slash_skill_source_path(context, owner_token=self._slash_source_owner_token)
                 slash_skill = self._resolve_registry_skill(slash_registry, slash_path, require_autonomous=False)
                 if slash_skill is not None:
                     sources.append((slash_skill.name, tuple(slash_skill.required_secrets)))
-            # Entry sources resolve independently; a skill already bound by the
-            # slash source (activation era) does not contribute an entry view.
-            slash_bound = frozenset(name for name, _ in sources)
-            sources.extend(self._in_context_secret_sources(request, entry_registry_effective, activation_decisions=activation_decisions, exclude_names=slash_bound))
+            # Entry sources resolve independently. The same-skill exclusion is
+            # anchored on the AUTHENTICATED slash activation identity — not on
+            # binding success, and not on the declared name alone: a
+            # slash-activated skill whose current version declares no secrets
+            # binds nothing itself, yet must still suppress its stale entry
+            # view, and a mid-run rename (same path, new declared name) would
+            # otherwise slip a name-anchored exclusion. The PATH is the stable
+            # identity shared by the activation and every earlier read, so the
+            # identity path always excludes; the resolved names (fresh registry
+            # first, then the entry snapshot) additionally cover the cross-path
+            # same-name shadowing case.
+            slash_bound = {name for name, _ in sources}
+            identity_paths: frozenset[str] = frozenset()
+            if isinstance(slash_path, str) and slash_path:
+                normalized_identity = posixpath.normpath(slash_path)
+                identity_paths = frozenset({normalized_identity})
+                for registry in (slash_registry, entry_registry_effective):
+                    identity = registry.get(normalized_identity) if isinstance(registry, dict) else None
+                    if identity is not None:
+                        slash_bound.add(identity.name)
+                        break
+            sources.extend(self._in_context_secret_sources(request, entry_registry_effective, activation_decisions=activation_decisions, exclude_names=frozenset(slash_bound), exclude_paths=identity_paths))
 
         injected: dict[str, str] = {}
         bound_skills: set[str] = set()
@@ -721,6 +739,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         *,
         activation_decisions: dict[str, bool] | None = None,
         exclude_names: frozenset[str] = frozenset(),
+        exclude_paths: frozenset[str] = frozenset(),
     ) -> list[tuple[str, tuple[SecretRequirement, ...]]]:
         """Map ``ThreadState.skill_context`` entries to declared-secret sources.
 
@@ -737,7 +756,11 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         tool-policy middleware applies), and the slash source is resolved from
         a fresher registry than the entry snapshot — letting the same skill
         contribute both sources would bind two eras of its declarations when
-        they change across the prepass→activation window.
+        they change across the prepass→activation window. *exclude_paths*
+        carries the authenticated slash identity's container path — the stable
+        identity across mid-run renames, where the same path's old and new
+        versions carry different declared names and a name-anchored exclusion
+        alone would slip.
         """
         state = getattr(request, "state", None) or {}
         try:
@@ -750,7 +773,13 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            skill = self._resolve_registry_skill(registry, entry.get("path"), require_autonomous=True)
+            entry_path = entry.get("path")
+            normalized_entry_path = posixpath.normpath(entry_path) if isinstance(entry_path, str) and entry_path else None
+            if normalized_entry_path is not None and normalized_entry_path in exclude_paths:
+                # The slash-activated identity owns this path; its entry view
+                # must not widen or stale it under any declared name.
+                continue
+            skill = self._resolve_registry_skill(registry, entry_path, require_autonomous=True)
             if skill is None or skill.name in seen:
                 continue
             if skill.name in exclude_names:

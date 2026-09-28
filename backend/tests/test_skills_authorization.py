@@ -2901,6 +2901,175 @@ def test_entry_decisions_carrier_is_redaction_listed():
     assert context["__skill_entry_activation_decisions"]["decisions"] == {"/mnt/skills/custom/foo/SKILL.md": True}
 
 
+def test_slash_dominance_holds_when_activation_era_declares_no_secrets(tmp_path, monkeypatch):
+    """[P2 regression, R10] The same-skill exclusion must be derived from the
+    authenticated slash activation identity, not only from successfully
+    bound slash sources. When the prepass snapshots the OLD declaration
+    (required-secrets: [OLD_KEY]) and the operator edits the skill to declare
+    no secrets during the await window, the slash source binds nothing
+    (required_secrets gate) — the stale entry view must STILL be suppressed,
+    or a secret the just-activated skill no longer declares keeps injecting."""
+    import asyncio
+    import dataclasses
+
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.middlewares import skill_activation_middleware as activation_module
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY
+    from deerflow.skills.types import Skill as SkillObject
+    from deerflow.skills.types import SkillCategory
+
+    skill_dir = tmp_path / "foo"
+    skill_dir.mkdir(exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("---\ndescription: d\n---\n# foo", encoding="utf-8")
+
+    base = SkillObject(
+        name="foo",
+        description="d",
+        license=None,
+        skill_dir=skill_dir,
+        skill_file=skill_dir / "SKILL.md",
+        relative_path=Path("foo"),
+        category=SkillCategory.CUSTOM,
+        enabled=True,
+    )
+    object.__setattr__(base, "secrets_autonomous", True)
+    old_version = dataclasses.replace(base, required_secrets=[SimpleNamespace(name="OLD_KEY", optional=False)])
+    # The activation-era version declares NO secrets at all.
+    new_version = dataclasses.replace(base, required_secrets=[])
+
+    # Load #1 (prepass snapshot) sees OLD; #2 (activation) and #3 (fresh
+    # slash lookup) see the no-secrets version.
+    load_calls = {"count": 0}
+
+    def _mutating_load(*, enabled_only):
+        load_calls["count"] += 1
+        return [old_version] if load_calls["count"] == 1 else [new_version]
+
+    storage = SimpleNamespace(
+        load_skills=_mutating_load,
+        get_container_root=lambda: "/mnt/skills",
+        get_skills_root_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr(activation_module, "get_or_new_skill_storage", lambda **kw: storage)
+
+    provider = _AsyncOnlyProvider()
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = SkillActivationMiddleware(
+        available_skills={"foo"},
+        skill_authorization=resolved,
+        slash_source_owner_token="test-token",
+    )
+
+    foo_path = posixpath_normpath(old_version.get_container_file_path("/mnt/skills"))
+    run_context: dict = {"secrets": {"OLD_KEY": "old-value"}}
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    request = _Request(
+        messages=[HumanMessage(content="/foo go")],
+        state={"skill_context": [{"name": "foo", "path": foo_path}]},
+        runtime=SimpleNamespace(context=run_context),
+    )
+
+    async def _identity(prepared):
+        return prepared
+
+    asyncio.run(middleware.awrap_model_call(request, _identity))
+
+    # The slash-activated skill declares no secrets now; its stale entry view
+    # must not inject OLD_KEY.
+    assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) is None
+
+
+def test_slash_dominance_anchors_on_path_across_midrun_rename(tmp_path, monkeypatch):
+    """[R10-fix audit regression] The same-skill exclusion must anchor on the
+    authenticated identity PATH, not the declared name: when the operator
+    renames the skill (same path, new declared name) during the await window
+    and the user activates by the NEW name, a name-anchored exclusion set
+    (holding only the new name) lets the stale entry — resolving the same path
+    to the OLD name in the snapshot — bind two eras of declarations."""
+    import asyncio
+    import dataclasses
+
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.middlewares import skill_activation_middleware as activation_module
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY
+    from deerflow.skills.types import Skill as SkillObject
+    from deerflow.skills.types import SkillCategory
+
+    skill_dir = tmp_path / "foo"
+    skill_dir.mkdir(exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("---\ndescription: d\n---\n# foo", encoding="utf-8")
+
+    base = SkillObject(
+        name="foo",
+        description="d",
+        license=None,
+        skill_dir=skill_dir,
+        skill_file=skill_dir / "SKILL.md",
+        relative_path=Path("foo"),
+        category=SkillCategory.CUSTOM,
+        enabled=True,
+    )
+    object.__setattr__(base, "secrets_autonomous", True)
+    old_version = dataclasses.replace(base, required_secrets=[SimpleNamespace(name="OLD_KEY", optional=False)])
+    renamed_version = dataclasses.replace(base, name="bar", required_secrets=[SimpleNamespace(name="NEW_KEY", optional=False)])
+
+    load_calls = {"count": 0}
+
+    def _mutating_load(*, enabled_only):
+        load_calls["count"] += 1
+        return [old_version] if load_calls["count"] == 1 else [renamed_version]
+
+    storage = SimpleNamespace(
+        load_skills=_mutating_load,
+        get_container_root=lambda: "/mnt/skills",
+        get_skills_root_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr(activation_module, "get_or_new_skill_storage", lambda **kw: storage)
+
+    provider = _AsyncOnlyProvider()
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = SkillActivationMiddleware(
+        available_skills={"foo", "bar"},
+        skill_authorization=resolved,
+        slash_source_owner_token="test-token",
+    )
+
+    identity_path = posixpath_normpath(old_version.get_container_file_path("/mnt/skills"))
+    run_context: dict = {"secrets": {"OLD_KEY": "old-value", "NEW_KEY": "new-value"}}
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    # The user activates by the NEW name; the persisted entry is the OLD read
+    # of the same path.
+    request = _Request(
+        messages=[HumanMessage(content="/bar go")],
+        state={"skill_context": [{"name": "foo", "path": identity_path}]},
+        runtime=SimpleNamespace(context=run_context),
+    )
+
+    async def _identity(prepared):
+        return prepared
+
+    asyncio.run(middleware.awrap_model_call(request, _identity))
+
+    # Only the renamed (activation-era) declaration binds — no union of eras.
+    assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) == {"NEW_KEY": "new-value"}
+
+
 def posixpath_normpath(path: str) -> str:
     import posixpath
 

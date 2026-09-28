@@ -1111,6 +1111,45 @@ Phase 1 最低验证要求：
 - **维持：** M9–M13 突变全红记录、发布/消费构造保证、接线/顺序双测试、
   fail_closed=True（生产默认）方向覆盖。套件 64→65。
 
+### 2026-09-28 — PR #4541 review R10（willem-bd，P2）：无秘密时代的支配排除
+
+- **背景：** R9 修复推送后的新发现：同技能排除集此前从"成功绑定的 slash 来源"
+  推导（`slash_bound = sources 名`）。当预扫描快照为旧声明（OLD_KEY）、operator
+  在 await 窗口内把技能改为**不声明任何秘密**时：激活与新鲜 slash 查询看到新版，
+  `_resolve_registry_skill` 因 `required_secrets` 为空返回 None → slash 来源不进
+  sources → 排除集为空 → 旧快照条目视图照旧把 OLD_KEY 注入——刚激活的技能已
+  不声明任何秘密却仍被注入。
+- **决策（身份推导）：** 排除集改为从**已认证的 slash 激活身份**（run context 里的
+  slash source path，token 认证）推导：身份路径先在新鲜注册表、后在条目快照中
+  解析出名字（名字不因声明变化而失锚），加入排除集——与该技能当前是否绑定成功
+  无关。slash 身份在两处注册表都不可解析（技能已卸载）时不排除——沿用条目的
+  快照参照点语义。
+- **证据：** `test_slash_dominance_holds_when_activation_era_declares_no_secrets`
+  （快照 OLD、激活/新鲜=无秘密：`ACTIVE_SECRETS_CONTEXT_KEY is None`）；突变 M14
+  （身份推导禁用，退回 sources 推导）必红。套件 65→66。
+- **兼容性：** 有秘密时代的支配行为不变（既有 dominance 回归覆盖）；无 slash
+  身份时排除集来源不变。
+
+### 2026-09-28（R10 修复自查）— 改名交错：身份锚定从名字升级为路径
+
+- **背景：** 对 R10 修复本身执行清单第 39–41 条（用户点名"当前修改也要做设计/
+  方向处理"）。第 40 条（值→门→下游）命中：只枚举了 `required_secrets` 的 ∅，
+  没枚举**声明 `name` 本身的变化**。复现坐实：operator 在 await 窗口内改名
+  （同路径 foo→bar），用户按新名 `/bar` 激活——名字锚定的排除集只含 "bar"，
+  快照条目把同一路径解析为旧名 "foo" → 不被排除 → `{OLD_KEY, NEW_KEY}` 两
+  时代并集，R10 的洞经改名存活。根源：条目与 slash 来源共享的稳定身份是
+  **路径**；名字是每注册表版本可变的派生属性。
+- **决策（路径锚定 + 名字补充）：** `_in_context_secret_sources` 新增
+  `exclude_paths`——条目规范化路径 == 已认证 slash 身份路径即排除（先于注册表
+  解析，不依赖任一版本叫它什么）；名字排除保留，覆盖同名异径遮蔽（custom
+  shadow public）。身份路径不可解析（已卸载）时路径排除仍然生效——身份是
+  run 级承诺。
+- **证据：** `test_slash_dominance_anchors_on_path_across_midrun_rename`
+  （快照 foo/OLD_KEY，激活/新鲜 bar/NEW_KEY，按新名激活：仅 NEW 绑定）；
+  突变 M16（仅路径排除禁用）必红。套件 66→67；受影响面 242 passed。
+- **复盘：** 本洞由"对刚写的修复立即执行新清单条目"抓出——第 41 条
+  （重攻自身修复）的直接收益。
+
 ### 新记录模板
 
 ```markdown
