@@ -268,6 +268,35 @@ class TestModelCallBoundary:
         assert messages[0].additional_kwargs["custom"] == "v"
         assert messages[0].response_metadata == {"source": "gateway"}
 
+    def test_preserved_metadata_is_not_shared_with_the_original(self):
+        # model_copy is shallow: without an explicit copy the rewritten message
+        # and the original would hold the same response_metadata dict, so
+        # writing metadata on the model-facing message would mutate the
+        # request message retained in thread state.
+        original = HumanMessage(
+            content="alice@example.com",
+            response_metadata={"source": "gateway", "nested": {"k": "v"}},
+        )
+        messages, request = _run_model_call(_make_middleware(), [original])
+        assert messages[0].response_metadata == original.response_metadata
+
+        messages[0].response_metadata["source"] = "mutated"
+        assert request.messages[0].response_metadata["source"] == "gateway"
+
+    def test_redaction_survives_a_content_block_that_cannot_be_copied(self):
+        # A caller can put a value whose copy raises into a block. The rewrite
+        # must still happen: letting the copy failure escape would fail the
+        # whole request open and hand raw PII to the model.
+        class NoCopy:
+            def __deepcopy__(self, memo):
+                raise RuntimeError("cannot copy this block value")
+
+        original = HumanMessage(content=[{"type": "text", "text": "reach me at alice@example.com", "meta": NoCopy()}])
+        messages, _ = _run_model_call(_make_middleware(), [original])
+
+        assert EMAIL_ALICE in messages[0].content[0]["text"]
+        assert "alice@example.com" not in messages[0].content[0]["text"]
+
     def test_ai_message_untouched(self):
         ai = AIMessage("contact alice@example.com")
         messages, _ = _run_model_call(_make_middleware(), [ai])

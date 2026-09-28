@@ -292,6 +292,31 @@ class _Redactor:
         return replace
 
 
+def _independent_copy(value: object, *, what: str) -> object:
+    """Copy *value* so the rebuilt message shares no mutable state with the original.
+
+    ``deepcopy`` keeps nested mutable blocks and metadata independent, which is
+    what the rewrite needs: ``_redact_content`` retains references to the blocks
+    it leaves untouched, and ``model_copy`` alone is shallow. It can raise for an
+    exotic value a caller placed in a block, and a copy failure must never skip
+    the rewrite — that would hand raw PII to the model. Fall back to a shallow
+    per-container copy, which still detaches the containers the rewrite touches.
+    """
+    try:
+        return deepcopy(value)
+    except Exception:
+        logger.warning(
+            "PII redaction could not deep-copy %s; using a shallow copy",
+            what,
+            exc_info=True,
+        )
+        if isinstance(value, list):
+            return [dict(item) if isinstance(item, dict) else item for item in value]
+        if isinstance(value, dict):
+            return dict(value)
+        return value
+
+
 def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]:
     """Redact *content*, preserving its shape. Returns ``(content, changed)``.
 
@@ -373,8 +398,11 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
                 continue
             messages[index] = msg.model_copy(
                 update={
-                    "content": deepcopy(content),
+                    "content": _independent_copy(content, what="message content"),
                     "additional_kwargs": dict(msg.additional_kwargs or {}),
+                    # model_copy is shallow, so the preserved metadata would
+                    # otherwise be the same dict as the original message's.
+                    "response_metadata": _independent_copy(dict(msg.response_metadata or {}), what="response_metadata"),
                 },
             )
             changed = True
