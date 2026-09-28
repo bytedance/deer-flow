@@ -25,6 +25,29 @@ This release closes that milestone with **181 merged pull requests**.
 
 #### Agents & runtime
 
+- **uploads:** Surface the converted Markdown companion in `<current_uploads>`
+  and `list_uploaded_files`, and forward `markdown_file` from the frontend,
+  so the agent can `read_file` UTF-8 text instead of the binary original.
+  Outline line numbers now refer to that companion path. Convert-time
+  `.deer-flow-companions.json` keeps collision-renamed mappings
+  (`a.pdf` → `a_1.md`) for historical listing after summarization.
+  Companion identity is a private hard-link pin (not a reusable inode number),
+  so an in-place sandbox edit stays attached while a delete-and-recreate under
+  the same name — including Linux inode reuse — is stale and is not deleted
+  with the original. Sidecar reads are no-follow and byte/entry-capped.
+  Conversion writes with temp+`os.replace` so a symlink planted after
+  `O_CREAT|O_EXCL` reservation cannot escape the uploads directory.
+  Re-uploading the same original removes an unmodified previous companion
+  and keeps an edited one. Sidecar writes and post-delete sidecar cleanup
+  are advisory: they log a warning instead of 500/rolling back files
+  already stored. The sidecar lock lives beside `user-data`
+  (outside sandbox mounts), is opened with no-follow semantics so a planted
+  symlink is not followed with Gateway privileges, and uses a bounded
+  non-blocking flock so a held lock cannot stall the shared file-IO pool.
+  Companion `.md` names are reserved with `O_CREAT|O_EXCL` against the
+  uploads directory (not just the current request), so a later `notes.docx`
+  cannot overwrite an earlier `notes.md`, and a later `a.pdf` cannot
+  collapse `a.docx` → `a.md`. ([#4981], related [#3750])
 - **uploads:** Add stable cursor pagination to the `list_uploaded_files`
   discovery tool. With more than 100 historical uploads matching the same
   filters the tool could only return the first page, giving an agent no
@@ -2724,29 +2747,6 @@ This release closes that milestone with **772 merged pull requests**.
   a hard stop saved to the checkpoint kept failing on each new message. All
   guards now remove the matching content blocks through one shared helper,
   which also keeps a Responses call that clarification retains. ([#5447])
-- **uploads:** Surface the converted Markdown companion in `<current_uploads>`
-  and `list_uploaded_files`, and forward `markdown_file` from the frontend, 
-  so the agent can `read_file` UTF-8 text instead of the binary original. 
-  Outline line numbers now refer to that companion path. Convert-time `.
-  deer-flow-companions.json` keeps collision-renamed mappings 
-  (`a.pdf` → `a_1.md`) for historical listing after summarization. 
-  Companion identity is a private hard-link pin (not a reusable inode number), 
-  so an in-place sandbox edit stays attached while a delete-and-recreate under
-  the same name — including Linux inode reuse — is stale and is not deleted 
-  with the original. Sidecar reads are no-follow and byte/entry-capped. 
-  Conversion writes with temp+`os.replace` so a symlink planted after 
-  `O_CREAT|O_EXCL` reservation cannot escape the uploads directory. 
-  Re-uploading the same original removes an unmodified previous companion
-  and keeps an edited one. Sidecar writes and post-delete sidecar cleanup
-  are advisory: they log a warning instead of 500/rolling back files 
-  already stored. The sidecar lock lives beside `user-data` 
-  (outside sandbox mounts), is opened with no-follow semantics so a planted 
-  symlink is not followed with Gateway privileges, and uses a bounded 
-  non-blocking flock so a held lock cannot stall the shared file-IO pool. 
-  Companion `.md` names are reserved with `O_CREAT|O_EXCL` against the 
-  uploads directory (not just the current request), so a later `notes.docx`
-  cannot overwrite an earlier `notes.md`, and a later `a.pdf` cannot 
-  collapse `a.docx` → `a.md`. ([#4981], related [#3750])
 - **sandbox:** Stop remote `glob` and `grep` from reporting "no matches" when
   their output was cut off. BoxLite, Tenki, E2B, and OpenSandbox cap the
   search's raw output and then filter it in Python (ignored directories such as
