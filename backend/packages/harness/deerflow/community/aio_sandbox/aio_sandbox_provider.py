@@ -1617,7 +1617,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             environment = image_environment(config)
             source = effective_image_generation_source(environment)
             typed = getattr(config, "image_generation", None)
-            resolved_source = resolve_image_generation_profile(environment)[1] if source is not None or typed is not None else None
+            # An explicit run choice already determines the source; resolving
+            # again would read the catalog during generic sandbox acquisition.
+            resolved_source = resolve_image_generation_profile(environment)[1] if source is None and typed is not None else None
             selected_server = source == "sandbox_environment" or (typed is not None and resolved_source == "sandbox_environment")
             if not selected_server:
                 return source is not None, None
