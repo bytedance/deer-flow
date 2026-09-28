@@ -8,6 +8,12 @@ which takes a whole message and uses different list/mapping semantics.
 Regression coverage lives in `tests/test_utils_messages.py`,
 `tests/test_subagent_executor.py`, and `tests/test_task_continuity.py`.
 
+`llm_text.py::strip_think_blocks` scans opening and closing tags forward so
+repeated unclosed `<think>` prefixes in model output do not rescan the same
+suffix. Keep its case-insensitive tag handling, optional whitespace before
+the closing `>`, and the `truncate_unclosed` behavior. Regression coverage
+lives in `tests/test_utils_llm_text.py`.
+
 ### Agent / Tool Assembly Off-Load
 
 Tool and agent assembly re-enters `get_available_tools()` and may block on MCP discovery, so the four async assembly entry points — `run_agent`'s `agent_factory` call, `task_tool`, durable batch `_execute_item`, and `abuild_checkpoint_state_accessor` — dispatch through `deerflow.utils.assembly_io.run_assembly`, a dedicated ContextVar-preserving bounded executor (`DEER_FLOW_ASSEMBLY_WORKERS`, default 8) rather than the loop's default executor; a hung MCP server therefore parks an assembly worker instead of queueing unrelated default-executor work, and the pool logs a warning when pending assemblies exceed the worker count. `tests/blocking_io/test_tool_assembly_offloop.py` pins all four offloads plus the ContextVar propagation.

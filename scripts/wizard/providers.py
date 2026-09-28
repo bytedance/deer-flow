@@ -736,6 +736,14 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         tool_name="web_fetch",
     ),
     WebProvider(
+        name="unbrowse",
+        display_name="Unbrowse",
+        description="Page as markdown, cloud browser for JavaScript pages, API key required",
+        use="deerflow.community.unbrowse.tools:web_fetch_tool",
+        env_var="UNBROWSE_API_KEY",
+        tool_name="web_fetch",
+    ),
+    WebProvider(
         name="crawl4ai",
         display_name="Crawl4AI",
         description="Self-hosted headless Chromium with markdown output, no API key required",

@@ -293,6 +293,17 @@ class DeerMemConfig(BaseModel):
             "post-invoke observability. Set programmatically (not from YAML)."
         ),
     )
+    # ── Memory judge (pre-screen + signal classification) ────────────────
+    judge: Any = Field(
+        default=None,
+        description=(
+            "Optional host-injected memory judge ``judge(context) -> MemoryBatchVerdict``: "
+            "decides whether this batch is worth an extraction call (pre-screening) and "
+            "supplies model hint labels (signal classification). None (default) = no judging, "
+            "leaving the extraction path byte-identical to a deployment without this feature. "
+            "Set programmatically by the host factory (not from YAML)."
+        ),
+    )
     # ── Watermark cache (in-memory, bounded LRU) ─────────────────────────
     watermark_max_keys: int = Field(
         default=4096,

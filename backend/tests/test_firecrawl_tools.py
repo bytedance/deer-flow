@@ -1,13 +1,16 @@
 """Unit tests for the Firecrawl community tools."""
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 
 class TestWebSearchTool:
-    @patch("deerflow.community.firecrawl.tools.FirecrawlApp")
+    @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
     @patch("deerflow.community.firecrawl.tools.get_app_config")
-    def test_search_uses_web_search_config(self, mock_get_app_config, mock_firecrawl_cls):
+    @pytest.mark.anyio
+    async def test_search_uses_web_search_config(self, mock_get_app_config, mock_firecrawl_cls):
         search_config = MagicMock()
         search_config.model_extra = {"api_key": "firecrawl-search-key", "max_results": 7}
         mock_get_app_config.return_value.get_tool_config.return_value = search_config
@@ -16,11 +19,11 @@ class TestWebSearchTool:
         mock_result.web = [
             MagicMock(title="Result", url="https://example.com", description="Snippet"),
         ]
-        mock_firecrawl_cls.return_value.search.return_value = mock_result
+        mock_firecrawl_cls.return_value.search = AsyncMock(return_value=mock_result)
 
         from deerflow.community.firecrawl.tools import web_search_tool
 
-        result = web_search_tool.invoke({"query": "test query"})
+        result = await web_search_tool.ainvoke({"query": "test query"})
 
         assert json.loads(result) == [
             {
@@ -35,9 +38,10 @@ class TestWebSearchTool:
 
 
 class TestWebFetchTool:
-    @patch("deerflow.community.firecrawl.tools.FirecrawlApp")
+    @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
     @patch("deerflow.community.firecrawl.tools.get_app_config")
-    def test_fetch_uses_web_fetch_config(self, mock_get_app_config, mock_firecrawl_cls):
+    @pytest.mark.anyio
+    async def test_fetch_uses_web_fetch_config(self, mock_get_app_config, mock_firecrawl_cls):
         fetch_config = MagicMock()
         fetch_config.model_extra = {"api_key": "firecrawl-fetch-key"}
 
@@ -51,11 +55,11 @@ class TestWebFetchTool:
         mock_scrape_result = MagicMock()
         mock_scrape_result.markdown = "Fetched markdown"
         mock_scrape_result.metadata = MagicMock(title="Fetched Page")
-        mock_firecrawl_cls.return_value.scrape.return_value = mock_scrape_result
+        mock_firecrawl_cls.return_value.scrape = AsyncMock(return_value=mock_scrape_result)
 
         from deerflow.community.firecrawl.tools import web_fetch_tool
 
-        result = web_fetch_tool.invoke({"url": "https://example.com"})
+        result = await web_fetch_tool.ainvoke({"url": "https://example.com"})
 
         assert result == "# Fetched Page\n\nFetched markdown"
         mock_get_app_config.return_value.get_tool_config.assert_any_call("web_fetch")
@@ -67,9 +71,10 @@ class TestWebFetchTool:
 
 
 class TestFirecrawlBaseUrl:
-    @patch("deerflow.community.firecrawl.tools.FirecrawlApp")
+    @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
     @patch("deerflow.community.firecrawl.tools.get_app_config")
-    def test_fetch_passes_base_url_as_api_url(self, mock_get_app_config, mock_firecrawl_cls):
+    @pytest.mark.anyio
+    async def test_fetch_passes_base_url_as_api_url(self, mock_get_app_config, mock_firecrawl_cls):
         fetch_config = MagicMock()
         fetch_config.model_extra = {"base_url": "http://192.168.0.47:3002"}
 
@@ -83,18 +88,19 @@ class TestFirecrawlBaseUrl:
         mock_scrape_result = MagicMock()
         mock_scrape_result.markdown = "Fetched markdown"
         mock_scrape_result.metadata = MagicMock(title="Fetched Page")
-        mock_firecrawl_cls.return_value.scrape.return_value = mock_scrape_result
+        mock_firecrawl_cls.return_value.scrape = AsyncMock(return_value=mock_scrape_result)
 
         from deerflow.community.firecrawl.tools import web_fetch_tool
 
-        result = web_fetch_tool.invoke({"url": "https://example.com"})
+        result = await web_fetch_tool.ainvoke({"url": "https://example.com"})
 
         assert result == "# Fetched Page\n\nFetched markdown"
         mock_firecrawl_cls.assert_called_once_with(api_key=None, api_url="http://192.168.0.47:3002")
 
-    @patch("deerflow.community.firecrawl.tools.FirecrawlApp")
+    @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
     @patch("deerflow.community.firecrawl.tools.get_app_config")
-    def test_search_passes_base_url_and_api_key(self, mock_get_app_config, mock_firecrawl_cls):
+    @pytest.mark.anyio
+    async def test_search_passes_base_url_and_api_key(self, mock_get_app_config, mock_firecrawl_cls):
         search_config = MagicMock()
         search_config.model_extra = {
             "api_key": "firecrawl-key",
@@ -105,10 +111,10 @@ class TestFirecrawlBaseUrl:
 
         mock_result = MagicMock()
         mock_result.web = []
-        mock_firecrawl_cls.return_value.search.return_value = mock_result
+        mock_firecrawl_cls.return_value.search = AsyncMock(return_value=mock_result)
 
         from deerflow.community.firecrawl.tools import web_search_tool
 
-        web_search_tool.invoke({"query": "test query"})
+        await web_search_tool.ainvoke({"query": "test query"})
 
         mock_firecrawl_cls.assert_called_once_with(api_key="firecrawl-key", api_url="http://192.168.0.47:3002")

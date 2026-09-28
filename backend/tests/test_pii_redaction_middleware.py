@@ -248,6 +248,55 @@ class TestModelCallBoundary:
         messages, _ = _run_model_call(_make_middleware(), [original])
         assert messages[0].additional_kwargs["custom"] == "v"
 
+    def test_redacted_user_message_preserves_other_fields(self):
+        # The rewrite must not drop fields it does not touch: a hand-built
+        # constructor call silently loses response_metadata and every other
+        # field outside content/id/name/additional_kwargs. The tool-result
+        # seam in this same middleware already rebuilds with model_copy for
+        # exactly that reason.
+        original = HumanMessage(
+            content="alice@example.com",
+            id="msg-1",
+            name="user",
+            additional_kwargs={"custom": "v"},
+            response_metadata={"source": "gateway"},
+        )
+        messages, _ = _run_model_call(_make_middleware(), [original])
+        assert messages[0].content == EMAIL_ALICE
+        assert messages[0].id == "msg-1"
+        assert messages[0].name == "user"
+        assert messages[0].additional_kwargs["custom"] == "v"
+        assert messages[0].response_metadata == {"source": "gateway"}
+
+    def test_preserved_metadata_is_not_shared_with_the_original(self):
+        # model_copy is shallow: without an explicit copy the rewritten message
+        # and the original would hold the same response_metadata dict, so
+        # writing metadata on the model-facing message would mutate the
+        # request message retained in thread state.
+        original = HumanMessage(
+            content="alice@example.com",
+            response_metadata={"source": "gateway", "nested": {"k": "v"}},
+        )
+        messages, request = _run_model_call(_make_middleware(), [original])
+        assert messages[0].response_metadata == original.response_metadata
+
+        messages[0].response_metadata["source"] = "mutated"
+        assert request.messages[0].response_metadata["source"] == "gateway"
+
+    def test_redaction_survives_a_content_block_that_cannot_be_copied(self):
+        # A caller can put a value whose copy raises into a block. The rewrite
+        # must still happen: letting the copy failure escape would fail the
+        # whole request open and hand raw PII to the model.
+        class NoCopy:
+            def __deepcopy__(self, memo):
+                raise RuntimeError("cannot copy this block value")
+
+        original = HumanMessage(content=[{"type": "text", "text": "reach me at alice@example.com", "meta": NoCopy()}])
+        messages, _ = _run_model_call(_make_middleware(), [original])
+
+        assert EMAIL_ALICE in messages[0].content[0]["text"]
+        assert "alice@example.com" not in messages[0].content[0]["text"]
+
     def test_ai_message_untouched(self):
         ai = AIMessage("contact alice@example.com")
         messages, _ = _run_model_call(_make_middleware(), [ai])
@@ -299,6 +348,17 @@ class TestModelCallBoundary:
         assert messages[0].content[2] == f"or {EMAIL_BOB_ORG}"
         # The original message object is untouched.
         assert original.content[0] == "reach me at alice@example.com"
+
+    def test_rebuilt_user_message_does_not_alias_the_original_content(self):
+        # _redact_content appends untouched blocks by reference, so the
+        # rebuilt message must copy the container: without the copy, mutating
+        # a non-text block on the redacted message would write through to the
+        # message kept in thread state.
+        image_block = {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}
+        original = HumanMessage(["alice@example.com", image_block])
+        messages, _ = _run_model_call(_make_middleware(), [original])
+        messages[0].content[1]["image_url"]["url"] = "https://example.com/mutated.png"
+        assert original.content[1]["image_url"]["url"] == "https://example.com/a.png"
 
 
 # ---------------------------------------------------------------------------

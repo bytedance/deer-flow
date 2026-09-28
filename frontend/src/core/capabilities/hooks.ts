@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { fetch } from "@/core/api/fetcher";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
 
 import type { InstallationList, PluginManifest } from "./types";
@@ -30,7 +31,8 @@ export function useCapabilityCatalog() {
   });
 }
 export function useCapabilityInstallations(adapter: string) {
-  return useQuery(installationQuery(adapter));
+  const { user } = useAuth();
+  return useQuery(installationQuery(adapter, user?.id));
 }
 export function useInstallCapability() {
   const client = useQueryClient();
@@ -43,7 +45,7 @@ export function useInstallCapability() {
       request<InstallationList>("installations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ ...body, scope: "user" }),
       }),
     onSuccess: async () => {
       await Promise.all([
@@ -55,10 +57,12 @@ export function useInstallCapability() {
   });
 }
 
-export function installationQuery(adapter: string) {
+export function installationQuery(adapter: string, userId?: string) {
   return {
-    queryKey: ["capabilities", "installations", adapter],
+    queryKey: ["capabilities", "installations", adapter, userId],
     queryFn: () =>
-      request<InstallationList>(`installations/${encodeURIComponent(adapter)}`),
+      request<InstallationList>(
+        `installations/${encodeURIComponent(adapter)}?scope=all`,
+      ),
   };
 }
