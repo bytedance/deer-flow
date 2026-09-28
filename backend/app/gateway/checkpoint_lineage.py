@@ -40,9 +40,46 @@ def checkpoint_metadata(checkpoint_tuple: Any) -> dict[str, Any]:
     return dict(metadata) if isinstance(metadata, dict) else {}
 
 
-def is_duration_only_checkpoint(checkpoint_tuple: Any) -> bool:
-    writes = checkpoint_metadata(checkpoint_tuple).get("writes")
-    return isinstance(writes, dict) and "runtime_run_duration" in writes
+def is_duration_only_checkpoint(checkpoint_tuple: Any, *, stamp_fallback: bool = True) -> bool:
+    """Return whether the tuple is a metadata-only run-duration checkpoint.
+
+    ``persist_run_history_metadata`` (``deerflow.runtime.runs.worker``) is the
+    only writer of these checkpoints. It stamps
+    ``metadata["writes"]["runtime_run_duration"]``, and the memory and SQLite
+    savers round-trip that marker unchanged — so whenever ``writes`` is
+    present it is authoritative: its per-writer key classifies the leaf
+    exactly (a title leaf carries ``runtime_interrupt_title``, a graph step
+    carries its channel writes, and neither is a duration checkpoint).
+
+    The Postgres savers instead funnel metadata through langgraph's
+    ``get_serializable_checkpoint_metadata``, which pops ``writes`` before
+    the row lands (``langgraph/checkpoint/postgres/aio.py``; no other saver
+    calls it) — so on Postgres the marker never comes back and every duration
+    checkpoint would look like an addressable state to the replay and history
+    paths. The writer's index keys (``run_durations`` and
+    ``run_message_ids``) and ``source == "update"`` do survive that round
+    trip, and the fallback trusts them only while ``writes`` is absent.
+
+    Stamps alone are not exact: ``_ensure_interrupted_title`` and
+    ``_rollback_to_pre_run_checkpoint`` copy the head's metadata, so a title
+    or rollback leaf stacked on a stamped head inherits them. The read paths
+    tolerate that because every stamp-bearing leaf either copies its parent's
+    messages verbatim or restores an ancestor's exact message state, so a
+    skipped leaf only ever advances a message-presence scan onto a
+    state-equivalent checkpoint. Destructive callers must not rely on the
+    fallback — pass ``stamp_fallback=False`` and confirm by shape instead,
+    as ``checkpoint_retention._mark_duration_leaves_without_the_marker`` does.
+    """
+
+    metadata = checkpoint_metadata(checkpoint_tuple)
+    writes = metadata.get("writes")
+    if isinstance(writes, dict):
+        return "runtime_run_duration" in writes
+    if not stamp_fallback:
+        return False
+    if metadata.get("source") != "update":
+        return False
+    return "run_durations" in metadata or "run_message_ids" in metadata
 
 
 def has_pending_tasks(checkpoint_tuple: Any) -> bool:

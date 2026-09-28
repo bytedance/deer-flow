@@ -17,12 +17,24 @@ from app.gateway.checkpoint_lineage import (
     CheckpointParentMissingError,
     find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    is_duration_only_checkpoint,
 )
 
 THREAD_ID = "thread-1"
 
+# The metadata a Postgres row carries for a duration-only checkpoint: the
+# writer's ``writes.runtime_run_duration`` stamp was dropped by langgraph's
+# Postgres metadata serialisation, so only the index keys and ``source``
+# survive the round trip.
+_POSTGRES_DURATION_METADATA = {
+    "source": "update",
+    "step": 3,
+    "run_durations": {"run-1": 12},
+    "run_message_ids": {"ai-1": "run-1"},
+}
 
-def _snapshot(checkpoint_id: str, messages: list[object], *, next_tasks: tuple[str, ...] = (), parent_id: str | None = None):
+
+def _snapshot(checkpoint_id: str, messages: list[object], *, next_tasks: tuple[str, ...] = (), parent_id: str | None = None, metadata: dict | None = None):
     parent_config = None
     if parent_id is not None:
         parent_config = {"configurable": {"thread_id": THREAD_ID, "checkpoint_ns": "", "checkpoint_id": parent_id}}
@@ -36,7 +48,7 @@ def _snapshot(checkpoint_id: str, messages: list[object], *, next_tasks: tuple[s
                 "checkpoint_map": None,
             }
         },
-        metadata={},
+        metadata=metadata or {},
         parent_config=parent_config,
         next=next_tasks,
     )
@@ -147,3 +159,129 @@ def test_unknown_pending_tasks_do_not_block_selection():
 
     assert found is True
     assert base.config["configurable"]["checkpoint_id"] == "ckpt-base"
+
+
+def test_memory_backed_duration_checkpoint_is_recognised():
+    """The marker memory and SQLite savers round-trip unchanged."""
+    snapshot = _snapshot(
+        "ckpt-duration",
+        [],
+        metadata={"source": "update", "step": 3, "writes": {"runtime_run_duration": {"run_ids": ["run-1"], "message_ids": []}}},
+    )
+
+    assert is_duration_only_checkpoint(snapshot) is True
+
+
+def test_postgres_duration_checkpoint_is_recognised_without_the_writes_marker():
+    """Postgres serialisation pops ``writes``; the surviving index keys identify the leaf."""
+    snapshot = _snapshot("ckpt-duration", [], metadata=dict(_POSTGRES_DURATION_METADATA))
+
+    assert is_duration_only_checkpoint(snapshot) is True
+
+
+def test_postgres_attribution_only_duration_checkpoint_is_recognised():
+    """A leaf stamped for message attribution alone has an empty ``run_durations`` map."""
+    snapshot = _snapshot(
+        "ckpt-duration",
+        [],
+        metadata={"source": "update", "step": 3, "run_durations": {}, "run_message_ids": {"ai-1": "run-1"}},
+    )
+
+    assert is_duration_only_checkpoint(snapshot) is True
+
+
+def test_client_update_state_is_not_a_duration_checkpoint():
+    """A real ``update_state`` carries ``writes`` but none of the writer's index keys."""
+    snapshot = _snapshot("ckpt-update", [], metadata={"source": "update", "step": 3, "writes": {"notes": "value"}})
+
+    assert is_duration_only_checkpoint(snapshot) is False
+
+
+def test_graph_step_checkpoints_are_not_duration_checkpoints():
+    for source in ("input", "loop", "step"):
+        snapshot = _snapshot("ckpt-step", [], metadata={"source": source, "step": 1, "writes": {"messages": "..."}})
+        assert is_duration_only_checkpoint(snapshot) is False
+    assert is_duration_only_checkpoint(_snapshot("ckpt-plain", [])) is False
+    assert is_duration_only_checkpoint(SimpleNamespace(values={}, config={}, metadata=None)) is False
+
+
+def test_chronological_scan_skips_postgres_shaped_duration_checkpoints():
+    """An interleaved import must not hand the replay base to a metadata-only leaf.
+
+    The duration leaf belongs to an older incarnation whose timestamps interleave
+    with the live branch; without the Postgres-shape classification it would be
+    selected as the replay base for a message that only the newer real state and
+    the head contain.
+    """
+    human = HumanMessage(id="h1", content="question")
+    answer = AIMessage(id="ai-1", content="answer")
+    history = [
+        _snapshot("ckpt-x-head", [human, answer]),
+        _snapshot("ckpt-a-early", []),
+        _snapshot("ckpt-a-duration", [human], parent_id="ckpt-a-early", metadata=dict(_POSTGRES_DURATION_METADATA)),
+        _snapshot("ckpt-a-input", []),
+    ]
+
+    base, found = find_checkpoint_before_message_chronologically(history, "h1")
+
+    assert found is True
+    assert base.config["configurable"]["checkpoint_id"] == "ckpt-a-early"
+
+
+def test_lineage_walk_crosses_chained_postgres_duration_checkpoints():
+    """The lineage walk skips duration-only parents even when ``writes`` never comes back."""
+    swapped_human = HumanMessage(id="h1__user", content="question")
+    raw_human = HumanMessage(id="h1", content="question")
+    ai = AIMessage(id="ai-1", content="answer")
+    history = [
+        _snapshot("ckpt-head", [swapped_human, ai], parent_id="ckpt-leaf-2"),
+        _snapshot("ckpt-leaf-2", [swapped_human, ai], parent_id="ckpt-leaf-1", metadata=dict(_POSTGRES_DURATION_METADATA)),
+        _snapshot("ckpt-leaf-1", [swapped_human, ai], parent_id="ckpt-turn1-tail", metadata=dict(_POSTGRES_DURATION_METADATA)),
+        _snapshot("ckpt-turn1-tail", [raw_human]),
+    ]
+    accessor = _Accessor(history)
+
+    base = asyncio.run(find_checkpoint_before_message(accessor, history[0], "h1__user", max_depth=10))
+
+    assert base.config["configurable"]["checkpoint_id"] == "ckpt-turn1-tail"
+
+
+def test_title_leaf_inheriting_duration_stamps_is_not_duration_only():
+    """``_ensure_interrupted_title`` copies the head's metadata, stamps included.
+
+    On memory/SQLite the leaf keeps its own ``writes.runtime_interrupt_title``
+    marker, which must win over the inherited ``run_durations`` — otherwise a
+    title write stacked on a stamped head would be classified as a duration
+    checkpoint even where the marker is authoritative.
+    """
+    snapshot = _snapshot(
+        "ckpt-title",
+        [],
+        metadata={
+            "source": "update",
+            "step": 4,
+            "writes": {"runtime_interrupt_title": {"title": "hi"}},
+            "run_durations": {"run-1": 12},
+            "run_message_ids": {"ai-1": "run-1"},
+        },
+    )
+
+    assert is_duration_only_checkpoint(snapshot) is False
+
+
+def test_stamp_fallback_disabled_requires_the_writes_marker():
+    """Destructive callers must see a Postgres-shaped leaf as *not* duration-only.
+
+    Without the ``writes`` marker the stamps are only evidence, not proof —
+    ``checkpoint_retention`` refuses them here and widens the class solely via
+    the parent-shape check in ``_mark_duration_leaves_without_the_marker``.
+    """
+    postgres_shaped = _snapshot("ckpt-duration", [], metadata=dict(_POSTGRES_DURATION_METADATA))
+    marker_backed = _snapshot(
+        "ckpt-duration",
+        [],
+        metadata={"source": "update", "step": 3, "writes": {"runtime_run_duration": {"run_ids": [], "message_ids": []}}},
+    )
+
+    assert is_duration_only_checkpoint(postgres_shaped, stamp_fallback=False) is False
+    assert is_duration_only_checkpoint(marker_backed, stamp_fallback=False) is True
