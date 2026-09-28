@@ -323,6 +323,15 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **frontend:** The optimistic human bubble keeps its quote and conversation
+  reference chips once a file upload finishes. The upload-complete update
+  replaced the bubble's `additional_kwargs` with only the uploaded files, so
+  those chips disappeared until the server echoed the message; project
+  attachments staged with the send were also missing from the bubble, both
+  while uploading and after. The submitted message was always intact. The
+  optimistic copy (before and after the upload) and the submit now build
+  `additional_kwargs` through one helper, `buildHumanMessageAdditionalKwargs`.
+
 - **gateway:** `GET /api/skills`, `GET /api/skills/custom` and
   `GET /api/skills/{name}` no longer walk the skill directories on the event
   loop. Each called `load_skills()` inline, which resolves the caller's
