@@ -78,6 +78,90 @@ def test_unavailable_readabilityjs_never_invokes_node_extraction(monkeypatch):
     assert "test" in article.html_content
 
 
+def test_python_fallback_title_prefers_og_title_over_generic_title_tag():
+    """A generic site-name <title> must not replace the real og:title headline."""
+    from deerflow.utils.readability import _python_fallback_article_json
+
+    html = '<html><head><title>Example Site</title><meta property="og:title" content="The Real Headline"></head><body><p>Body prose.</p></body></html>'
+
+    assert _python_fallback_article_json(html)["title"] == "The Real Headline"
+
+
+def test_python_fallback_title_prefers_h1_when_title_is_generic_or_missing():
+    """Pages without a headline <title> keep their entry <h1> headline."""
+    from deerflow.utils.readability import _python_fallback_article_json
+
+    generic_title = "<html><head><title>Example Site</title></head><body><h1>Entry Headline</h1><p>Body prose.</p></body></html>"
+    missing_title = "<html><body><h1>Entry Headline</h1><p>Body prose.</p></body></html>"
+
+    assert _python_fallback_article_json(generic_title)["title"] == "Entry Headline"
+    assert _python_fallback_article_json(missing_title)["title"] == "Entry Headline"
+
+
+def test_python_fallback_keeps_all_articles_and_sibling_content():
+    """A teaser article before the real content must not truncate the page."""
+    from deerflow.utils.readability import _python_fallback_article_json
+
+    body_prose = "<p>Real story prose. </p>" * 30
+    html = f"<html><head><title>News</title></head><body><article><h2>Teaser</h2><p>Short summary of another story.</p></article><section><h1>Real Story</h1>{body_prose}<a href='../next'>Next</a></section></body></html>"
+
+    article = _python_fallback_article_json(html)
+
+    assert "Teaser" in article["content"]
+    assert "Real Story" in article["content"]
+    assert '<a href="../next">Next</a>' in article["content"]
+    # The entry <h1> headline wins over the generic document title.
+    assert article["title"] == "Real Story"
+
+
+def test_python_fallback_selects_main_container_over_first_article():
+    """<main> is the canonical container; content outside it is site chrome."""
+    from deerflow.utils.readability import _python_fallback_article_json
+
+    body_prose = "<p>Section prose. </p>" * 20
+    html = f"<html><body><article><h2>Teaser</h2><p>Short summary.</p></article><main><h1>Real Story</h1>{body_prose}</main></body></html>"
+
+    article = _python_fallback_article_json(html)
+
+    # Per HTML5 semantics, site-level chrome (e.g. a related-story teaser)
+    # lives outside <main> and is intentionally not part of the article body.
+    assert "Teaser" not in article["content"]
+    assert "Real Story" in article["content"]
+    assert article["title"] == "Real Story"
+
+
+def test_python_fallback_selects_dominant_single_article():
+    """A single article carrying nearly all text narrows to drop residual noise."""
+    from deerflow.utils.readability import _python_fallback_article_json
+
+    body_prose = "<p>This article explains the documentation in detail.</p>" * 20
+    html = f"<html><head><title>Doc</title></head><body><article><h1>Main Article</h1>{body_prose}</article><p>Cookie notice.</p></body></html>"
+
+    article = _python_fallback_article_json(html)
+
+    assert "Main Article" in article["content"]
+    assert "Cookie notice" not in article["content"]
+
+
+def test_python_fallback_title_skips_site_header_h1():
+    """A site/logo <h1> inside <header> must not outrank the real <title>."""
+    from deerflow.utils.readability import _python_fallback_article_json
+
+    html = f"<html><head><title>Real Story</title></head><body><header><h1>Site Name</h1></header><p>{'Story prose. ' * 30}</p></body></html>"
+
+    assert _python_fallback_article_json(html)["title"] == "Real Story"
+
+
+def test_python_fallback_title_uses_container_h1_over_site_header():
+    """A real headline <h1> inside the content container beats a site-header <h1>."""
+    from deerflow.utils.readability import _python_fallback_article_json
+
+    body_prose = "<p>Section prose. </p>" * 20
+    html = f"<html><head><title>News</title></head><body><header><h1>Site Name</h1></header><main><h1>Real Story</h1>{body_prose}</main></body></html>"
+
+    assert _python_fallback_article_json(html)["title"] == "Real Story"
+
+
 def test_article_to_message_with_images():
     """Article.to_message should handle articles containing images without AttributeError."""
     # Absolute image URL without source url

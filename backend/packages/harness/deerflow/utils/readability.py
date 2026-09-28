@@ -171,6 +171,56 @@ def _readability_available() -> bool:
 _FALLBACK_DROP_TAGS = ("script", "style", "noscript", "template", "iframe", "svg", "nav", "footer", "aside", "form", "button")
 
 
+def _fallback_article_title(soup: BeautifulSoup, root=None) -> str:
+    """Ranked headline extraction for the link-preserving fallback.
+
+    ``og:title`` is the site-published headline and comes first. ``<h1>``
+    candidates are restricted to the selected content container and skip
+    site-header logo headings: many article pages keep a site or logo
+    ``<h1>`` inside ``<header>`` while the real headline lives in
+    ``<title>`` (the story body using ``<h2>``), so such headings must not
+    outrank the document title. A bare ``<title>`` is the last resort.
+    """
+    og_title = soup.find("meta", attrs={"property": "og:title", "content": True})
+    if og_title is not None:
+        candidate = og_title["content"].strip()
+        if candidate:
+            return candidate
+    container = root if root is not None else soup
+    for h1 in container.find_all("h1"):
+        if h1.find_parent("header") is not None:
+            continue  # A site/logo heading, not the article headline.
+        candidate = h1.get_text(strip=True)
+        if candidate:
+            return candidate
+    if soup.title is not None:
+        return soup.title.get_text(strip=True)
+    return ""
+
+
+def _fallback_content_root(soup: BeautifulSoup):
+    """Pick a content container without truncating sibling content.
+
+    ``<main>`` is the canonical container and is kept whole. Without one,
+    the body is kept unless a single ``article`` dominates the page (the
+    text outside it is a rounding error) — the only case where narrowing
+    to that article cannot drop a teaser article or sibling sections the
+    way the previous first-``article`` selection did.
+    """
+    body = soup.body if soup.body is not None else soup
+    main = body.find("main")
+    if main is not None:
+        return main
+    articles = body.find_all("article")
+    if len(articles) == 1:
+        article = articles[0]
+        container_chars = len(body.get_text(strip=True))
+        outside_chars = container_chars - len(article.get_text(strip=True))
+        if outside_chars < min(200, container_chars // 10):
+            return article
+    return body
+
+
 def _python_fallback_article_json(html: str) -> dict[str, str | None]:
     """Link-preserving extraction used when Readability.js is unavailable.
 
@@ -183,9 +233,12 @@ def _python_fallback_article_json(html: str) -> dict[str, str | None]:
     soup = BeautifulSoup(html, "html5lib")
     for element in soup.find_all(_FALLBACK_DROP_TAGS):
         element.decompose()
-    title = soup.title.get_text(strip=True) if soup.title else ""
-    root = soup.find("article") or soup.find("main") or soup.body or soup
-    return {"title": title, "date": None, "content": str(root)}
+    root = _fallback_content_root(soup)
+    return {
+        "title": _fallback_article_title(soup, root),
+        "date": None,
+        "content": str(root),
+    }
 
 
 class ReadabilityExtractor:
