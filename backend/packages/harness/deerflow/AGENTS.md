@@ -102,12 +102,9 @@ policy or network-mode mismatch; only the provider may replace it after the
 orphan grace, local teardown reservation, and cross-instance teardown lease.
 Destroy the sandbox, sidecar, and both networks together.
 
-### Tenki Configuration
+### Tenki `sticky`
 
-Tenki's provider-local `sticky` option is an extra sandbox field, so environment
-substitution leaves it as a string. Validate it as a boolean before passing it
-to the SDK; Python string truthiness turns `"false"` into `True`. Offline tests
-in `tests/test_tenki_provider.py` cover YAML/environment loading through create.
+Env values stay strings; parse booleans before SDK calls (`bool("false")` is true).
 
 ### E2B Mount Uploads
 
