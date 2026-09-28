@@ -5,3 +5,13 @@ Postgres bootstrap owns its session-scoped advisory lock until `pg_advisory_unlo
 When `database.postgres_schema` is configured, both async ORM connections and the synchronous SQLAlchemy connections used by DB-backed custom agents and managed subagents must use the same `search_path`; preserve this invariant when adding another persistence entry point.
 
 Alembic stamp/upgrade workers started inside `bootstrap_schema()` remain owned by the bootstrap critical section until the worker finishes. Drain those `asyncio.to_thread()` calls across host cancellation before releasing the in-process SQLite bootstrap lock or PostgreSQL advisory lock; otherwise another bootstrap can overlap a still-running migration worker.
+
+## JSON integer filters
+
+Stored JSON integers are not bounded by the signed-64-bit filter input contract.
+SQLite predicates must check the extracted SQL value's `typeof`, not only JSON
+`json_type`, to exclude oversized integers decoded as REAL. PostgreSQL predicates
+compare integer text (including `-0` for zero) without casting arbitrary stored
+numbers to BIGINT or NUMERIC. Preserve integer/float/boolean/string distinctions.
+`tests/test_json_integer_matching.py` exercises both dialects; PostgreSQL opts in
+with `DEERFLOW_TEST_POSTGRES_URL` and uses connection-local temporary tables.
