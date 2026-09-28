@@ -341,7 +341,7 @@
   其他文件。现在脚本通过 harness 的解析器
   （`AppConfig.resolve_config_path`）确定文件；`DEER_FLOW_CONFIG_PATH` 不存在或
   `DEER_FLOW_PROJECT_ROOT` 无效时，会以 Gateway 相同的错误失败，而不是升级
-  回退文件。
+  回退文件。([#5991])
 
 - **前端：** 文件上传完成后，乐观显示的用户消息气泡不再丢失引用与对话
   引用标签。上传完成时的更新会用仅含已上传文件的对象替换气泡的
@@ -5277,3 +5277,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5964]: https://github.com/bytedance/deer-flow/pull/5964
 [#5981]: https://github.com/bytedance/deer-flow/pull/5981
 [#5982]: https://github.com/bytedance/deer-flow/pull/5982
+[#5991]: https://github.com/bytedance/deer-flow/pull/5991

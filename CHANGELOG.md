@@ -337,7 +337,7 @@ This release closes that milestone with **181 merged pull requests**.
   one. The script now asks the harness resolver
   (`AppConfig.resolve_config_path`) for the file, and a missing
   `DEER_FLOW_CONFIG_PATH` or invalid `DEER_FLOW_PROJECT_ROOT` fails with the
-  Gateway's error instead of upgrading a fallback.
+  Gateway's error instead of upgrading a fallback. ([#5991])
 
 - **frontend:** The optimistic human bubble keeps its quote and conversation
   reference chips once a file upload finishes. The upload-complete update
@@ -6217,4 +6217,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5964]: https://github.com/bytedance/deer-flow/pull/5964
 [#5981]: https://github.com/bytedance/deer-flow/pull/5981
 [#5982]: https://github.com/bytedance/deer-flow/pull/5982
+[#5991]: https://github.com/bytedance/deer-flow/pull/5991
 
