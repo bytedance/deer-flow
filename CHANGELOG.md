@@ -327,7 +327,14 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
-- **database:** `DatabaseConfig` now validates `pool_size`, `pool_recycle`, and
+- **sandbox:** Unwrap `Overwrite`-wrapped sandbox state across tools and
+  middlewares (`ToolOutputBudgetMiddleware`, `ReadBeforeWriteMiddleware`, and
+  `task_tool`). In delta checkpoint mode, forked or restored threads deliver
+  the `sandbox` channel wrapped in LangGraph's `Overwrite`. Without unwrapping,
+  `isinstance(sandbox_state, dict)` returned `False`, causing large tool output
+  externalization to fail and fall back to inline truncation, read-before-write
+  lock scoping to miss the active sandbox ID, and subagents to receive
+  un-unwrapped channel state. ([#4380])
   `command_timeout` strictly. Previously, YAML booleans (`true`/`false`) were
   coerced to `1`/`0` respectively, allowing `pool_size: true` (pool size 1) and
   `command_timeout: true` (a 1-second statement timeout) to silently pass

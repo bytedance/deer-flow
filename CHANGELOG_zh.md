@@ -332,7 +332,11 @@
 
 ### 修复
 
-- **数据库：** `DatabaseConfig` 现在严格校验 `pool_size`、`pool_recycle` 与
+- **沙箱：** 在中间件与内置工具（`ToolOutputBudgetMiddleware`、`ReadBeforeWriteMiddleware`
+  与 `task_tool`）中解包 `Overwrite` 包装的沙箱状态。在 delta checkpoint 模式下，分叉或回滚
+  的对话交付的 `sandbox` 通道状态会被 LangGraph 的 `Overwrite` 包装。此前直接判断
+  `isinstance(sandbox_state, dict)` 会返回 `False`，导致大工具输出无法外部化到沙箱而退化为内联
+  硬截断、写前读锁作用域丢失有效沙箱 ID、以及子智能体收到未解包的包装对象。([#4380])
   `command_timeout`。此前，YAML 布尔值（`true`/`false`）会被强制转换为 `1`/`0`，
   导致 `pool_size: true`（变成仅 1 个连接）和 `command_timeout: true`（变成 1 秒超时）
   静默通过配置加载；`pool_size` 还接受非正数（`0`、`-1`），`command_timeout` 接受
