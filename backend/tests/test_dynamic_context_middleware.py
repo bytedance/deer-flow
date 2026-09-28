@@ -1130,3 +1130,40 @@ def test_effective_timezone_sentinel_uses_offset_when_local_zone_is_not_resolvab
 
     monkeypatch.setattr(module, "_server_local_utc_offset_minutes", lambda: -5 * 60 - 30)
     assert module._effective_date_timezone_name() == "server-local(-05:30)"
+
+# ---------------------------------------------------------------------------
+# response_metadata preserved through the ID-swap (issue #5976)
+# ---------------------------------------------------------------------------
+
+
+def test_make_reminder_and_user_messages_preserves_response_metadata():
+    """The re-id'd user message must keep caller-attached fields.
+
+    ``DynamicContextMiddleware._make_reminder_and_user_messages`` rebuilds the
+    incoming user turn as ``{id}__user``. Before the fix it carried only
+    content/id/name/additional_kwargs, silently dropping fields such as
+    ``response_metadata`` (issue #5976).
+    """
+    from deerflow.agents.middlewares.dynamic_context_middleware import (
+        DynamicContextMiddleware,
+    )
+
+    original = HumanMessage(content="Hello", id="abc", response_metadata={"external": "value"})
+    result = DynamicContextMiddleware._make_reminder_and_user_messages(original, "reminder")
+
+    user_msg = next(m for m in result if isinstance(m, HumanMessage) and str(m.id) == "abc__user")
+    assert user_msg.response_metadata == {"external": "value"}
+
+
+def test_make_reminder_and_user_messages_does_not_share_metadata_mapping():
+    """dict() copy keeps the re-id'd message's metadata independent."""
+    from deerflow.agents.middlewares.dynamic_context_middleware import (
+        DynamicContextMiddleware,
+    )
+
+    original = HumanMessage(content="Hello", id="abc", response_metadata={"k": [1]})
+    result = DynamicContextMiddleware._make_reminder_and_user_messages(original, "reminder")
+    user_msg = next(m for m in result if isinstance(m, HumanMessage) and str(m.id) == "abc__user")
+
+    user_msg.response_metadata["k"].append(2)
+    assert original.response_metadata == {"k": [1]}

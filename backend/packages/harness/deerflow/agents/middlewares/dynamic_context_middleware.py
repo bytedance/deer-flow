@@ -548,6 +548,11 @@ class DynamicContextMiddleware(AgentMiddleware):
                 id=f"{stable_id}{INJECTED_USER_MESSAGE_ID_SUFFIX}",
                 name=original.name,
                 additional_kwargs=original.additional_kwargs,
+                # Preserve caller-attached fields such as response_metadata so
+                # the re-id'd user message is a faithful copy of the incoming
+                # turn, not a stripped one (issue #5976). dict() avoids sharing
+                # a mutable mapping with the original message.
+                response_metadata=dict(original.response_metadata),
             )
         )
         return messages
