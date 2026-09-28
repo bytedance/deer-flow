@@ -328,6 +328,12 @@
 
 ### 修复
 
+- **网关：** `GET /api/skills`、`GET /api/skills/custom` 与 `GET /api/skills/{name}` 不再在事件循环上
+  遍历技能目录。三者此前都内联调用 `load_skills()`：它会解析调用者的存储、扫描所有公共与自定义
+  技能目录并解析每个 `SKILL.md`，工作量随已安装技能数增长。#5747 已经为自定义技能内容路由把同一
+  调用移出事件循环并注明原因，但这三条路由被遗漏了，因此严格的 Blockbuster 门禁会在它们上抛出
+  `BlockingError`；在生产环境中，技能树很大或磁盘很慢时，扫描期间该 worker 上的其他所有请求都会
+  停顿。现在三者通过一个共享辅助函数用 `asyncio.to_thread` 卸载加载过程。([#5945])
 - **网关：** `GET` 与 `PUT /api/user-profile` 不再在事件循环上执行文件系统操作。这两个处理器
   此前在循环上直接解析按用户隔离的 `USER.md` 路径（每次调用都会构造绝对路径）、stat、读取、
   创建用户目录并写入文件，而自定义智能体路由里的其他所有处理器都通过 `asyncio.to_thread`
@@ -363,6 +369,22 @@
   成员会抛出 `UnicodeDecodeError`，文件既不会被删除也不会被覆盖。像 `assets` 这样的裸支持目录
   也能通过路径校验并抛出 `IsADirectoryError`。现在非文本内容会记录为“无原有文本”，目录路径
   则作为校验错误返回，而不是崩溃。([#5893])
+- **模型：** 在旧路径（没有 `reasoning:` 块）上，`when_thinking_enabled` 与 `when_thinking_disabled`
+  不再整体替换模型档案的 `extra_body`。两个模板此前都用浅层 `dict.update` 套用，因此档案里与
+  `when_thinking_enabled.extra_body.thinking` / `when_thinking_disabled` 模板并列的
+  `extra_body: {tool_stream: true}`（`config.example.yaml` 里大多数基于 `extra_body` 的示例都是
+  这种写法）在开与关两个方向都会丢失 `tool_stream`，而合成的禁用载荷和契约路径早已是深度合并。
+  现在两个旧路径模板同样深度合并。合并语义为：永不删除键，模板只能新增或覆盖，嵌套映射会继承
+  档案里的其他键，冲突时以模板值为准。合并还会让模板的 vLLM 开关在两种拼写之间保持权威：当档案
+  与模板对开关的拼写不同（`chat_template_kwargs.enable_thinking: false` 并列旧别名
+  `thinking: true`）时，模板的值会镜像到档案的拼写上，因此 `VllmChatModel` 与普通的 OpenAI 兼容
+  类都会在服务端实际读取的那个键上发送模板的意图——旧路径与契约路径、开与关两个方向均如此。
+  非映射类型的模板值按原样转发。迁移提示：由于键永不删除，`when_thinking_disabled` 模板不再能
+  清除档案基础 `extra_body` 里设置的键——基础 `extra_body.thinking: {type: enabled, budget_tokens: 4096}`
+  在关闭思考时会以 `{type: disabled, budget_tokens: 4096}` 发到 provider，Anthropic 风格的 API 会拒绝。
+  `budget_tokens` 之类仅在开启时有意义的键应放在 `when_thinking_enabled` 里，而不是基础 `extra_body`；
+  合成的禁用载荷与契约路径此前已是这一行为。模板在合并时会被深拷贝，因此构造参数不会与缓存的
+  档案共享对象。([#5894])
 - **项目：** 会话文件视图不再为尚无标题的成员会话显示空标题。会话的 `display_name` 在标题
   生成运行之前（或从未运行时）在接口上为 `null`，但文件分组类型将其声明为必填字符串并原样
   渲染，因此在首次回复之前上传的文件会挂在一行空白之下。这类分组现在显示为“未命名”，与
@@ -5243,7 +5265,9 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5881]: https://github.com/bytedance/deer-flow/pull/5881
 [#5884]: https://github.com/bytedance/deer-flow/pull/5884
 [#5893]: https://github.com/bytedance/deer-flow/pull/5893
+[#5894]: https://github.com/bytedance/deer-flow/pull/5894
 [#5900]: https://github.com/bytedance/deer-flow/pull/5900
 [#5928]: https://github.com/bytedance/deer-flow/pull/5928
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934
 [#5935]: https://github.com/bytedance/deer-flow/pull/5935
+[#5945]: https://github.com/bytedance/deer-flow/pull/5945

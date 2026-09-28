@@ -323,6 +323,17 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **gateway:** `GET /api/skills`, `GET /api/skills/custom` and
+  `GET /api/skills/{name}` no longer walk the skill directories on the event
+  loop. Each called `load_skills()` inline, which resolves the caller's
+  storage, scans every public and custom skill directory and parses each
+  `SKILL.md` — filesystem work that grows with the number of installed
+  skills. #5747 moved that same call off the loop for the custom-skill
+  content route and documented why; these three routes were missed, so the
+  strict Blockbuster gate raised `BlockingError` on them and, in production,
+  a large or slow skills tree stalled every other request on the worker for
+  the duration of the scan. All three now offload the load with
+  `asyncio.to_thread` through one shared helper. ([#5945])
 - **gateway:** `GET` and `PUT /api/user-profile` no longer run their
   filesystem work on the event loop. Both handlers resolved the per-user
   `USER.md` path (which builds absolute paths on every call), stat'ed, read,
@@ -375,6 +386,34 @@ This release closes that milestone with **181 merged pull requests**.
   directory such as `assets` also slipped through path validation and raised
   `IsADirectoryError`. Non-text content is now recorded as no previous text,
   and a directory path is a validation error instead of a crash. ([#5893])
+- **models:** `when_thinking_enabled` and `when_thinking_disabled` no longer
+  replace a profile's whole `extra_body` on the legacy (no `reasoning:` block)
+  path. Both templates were applied with a shallow `dict.update`, so a profile
+  carrying `extra_body: {tool_stream: true}` beside
+  `when_thinking_enabled.extra_body.thinking` / `when_thinking_disabled`
+  templates — the shape of most `extra_body`-based examples in
+  `config.example.yaml` — lost `tool_stream` in both directions, while the
+  synthesized disable payloads and the contract path already deep-merged. Both
+  legacy templates now deep-merge the same way. The merge semantics are: keys
+  are never removed, a template can only add or override, nested mappings
+  inherit the profile's other keys, and template values win on conflicts. The
+  merge also keeps the template's vLLM switch authoritative across its two
+  spellings: when a profile spells the switch differently from its template
+  (`chat_template_kwargs.enable_thinking: false` beside the legacy
+  `thinking: true` alias), the template's value is mirrored onto the profile's
+  spelling, so `VllmChatModel` and plain OpenAI-compatible classes alike send
+  the template's intent under whichever key the server reads — on both the
+  legacy and the contract path, in both directions. Non-mapping template
+  values are forwarded unchanged. Migration note: because keys are never
+  removed, a `when_thinking_disabled` template can no longer clear a key the
+  profile's base `extra_body` sets — a base
+  `extra_body.thinking: {type: enabled, budget_tokens: 4096}` now reaches the
+  provider as `{type: disabled, budget_tokens: 4096}` when thinking is off,
+  which Anthropic-style APIs reject. Enable-only keys such as `budget_tokens`
+  belong in `when_thinking_enabled`, not in the base `extra_body`; the
+  synthesized disable payloads and the contract path already behaved this
+  way. Templates are also deep-copied as they are merged, so constructor
+  kwargs never alias the cached profile. ([#5894])
 - **projects:** The conversation-files view no longer shows an empty heading
   for a member thread that has no title yet. A thread's `display_name` is
   `null` on the wire until title generation has run (or if it never does), but
@@ -6174,8 +6213,10 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5881]: https://github.com/bytedance/deer-flow/pull/5881
 [#5884]: https://github.com/bytedance/deer-flow/pull/5884
 [#5893]: https://github.com/bytedance/deer-flow/pull/5893
+[#5894]: https://github.com/bytedance/deer-flow/pull/5894
 [#5900]: https://github.com/bytedance/deer-flow/pull/5900
 [#5928]: https://github.com/bytedance/deer-flow/pull/5928
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934
 [#5935]: https://github.com/bytedance/deer-flow/pull/5935
+[#5945]: https://github.com/bytedance/deer-flow/pull/5945
 
