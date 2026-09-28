@@ -184,12 +184,19 @@ class ModelConfig(BaseModel):
     )
     stream_chunk_timeout: float | None = Field(
         default=None,
+        ge=0,
+        allow_inf_nan=False,
         description=(
             "Maximum seconds to wait between successive streaming chunks before "
             "langchain-openai raises StreamChunkTimeoutError. None means use the "
-            "factory default (240s for OpenAI-compatible clients). Tune higher for "
-            "reasoning models with long thinking pauses; lower for latency-sensitive "
-            "interactive endpoints. Has no effect on non-OpenAI-compatible providers."
+            "factory default (240s for OpenAI-compatible clients). 0 disables the "
+            "gap timeout. Booleans, negatives, and non-finite values are rejected: "
+            "YAML true/on/yes would otherwise become a 1-second timeout, "
+            "false/off/no would become 0 and disable the watchdog, inf (including "
+            "the YAML string 1e999) never fires it, and a negative is rewritten by "
+            "langchain-openai to its own 120s default instead of DeerFlow's 240s. "
+            "Tune higher for reasoning models with long thinking pauses. Has no "
+            "effect on non-OpenAI-compatible providers."
         ),
     )
     thinking: dict | None = Field(
@@ -199,6 +206,21 @@ class ModelConfig(BaseModel):
             "This is a shortcut for `when_thinking_enabled` and will be merged with `when_thinking_enabled` if both are provided."
         ),
     )
+
+    @field_validator("stream_chunk_timeout", mode="before")
+    @classmethod
+    def _reject_boolean_stream_chunk_timeout(cls, value: object) -> object:
+        """Reject YAML booleans before pydantic coerces them to 0.0 or 1.0.
+
+        ``stream_chunk_timeout: off`` (and ``no`` / ``false``) is a bool under
+        PyYAML's YAML 1.1 loader. Coercing that to ``0.0`` disables the chunk-gap
+        watchdog, and ``on`` / ``yes`` / ``true`` becomes a 1-second timeout that
+        aborts every reasoning stream. ``0`` remains the explicit off switch;
+        omit the key (or set null) for the 240s factory default.
+        """
+        if isinstance(value, bool):
+            raise ValueError("stream_chunk_timeout must be a number of seconds or null, not a boolean")
+        return value
 
     @model_validator(mode="after")
     def _validate_reasoning_contract(self) -> "ModelConfig":

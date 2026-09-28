@@ -327,6 +327,16 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **models:** `models[].stream_chunk_timeout` no longer accepts a boolean, a
+  negative, or a non-finite value. YAML `true`/`on`/`yes` was coerced to `1.0`,
+  so a reasoning model's stream died after one second with
+  `StreamChunkTimeoutError`; `false`/`off`/`no` became `0` and disabled the
+  chunk-gap watchdog; `inf` (including the YAML string `1e999`) never fires
+  `asyncio.wait_for`, so the watchdog stayed off with no error; a negative was
+  rewritten by langchain-openai to its own 120s default instead of DeerFlow's
+  240s. `null` still selects that 240s default and `0` still disables the gap
+  timeout. Invalid spellings now fail when the config loads.
+
 - **frontend:** The optimistic human bubble keeps its quote and conversation
   reference chips once a file upload finishes. The upload-complete update
   replaced the bubble's `additional_kwargs` with only the uploaded files, so
