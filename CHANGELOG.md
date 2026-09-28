@@ -333,10 +333,11 @@ This release closes that milestone with **181 merged pull requests**.
   that stops the Gateway from starting still reported `✓ config.yaml found`
   and `✓ config.yaml loadable`, and a valid override pointing elsewhere got
   the wrong file checked. Doctor now resolves the path through the harness's
-  own resolver, defaulting `DEER_FLOW_PROJECT_ROOT` to the checkout as
-  `make dev` does; an override the Gateway would reject fails
-  `config.yaml found` with the Gateway's error, and the config checks skip.
-  ([#5987])
+  own resolver and hands it the location variables the way `make dev` does:
+  `.env` values override the shell, and an unset or empty
+  `DEER_FLOW_PROJECT_ROOT` becomes the checkout. An override the Gateway
+  would reject fails `config.yaml found` with the Gateway's error, and the
+  config checks skip. ([#5987])
 - **frontend:** The optimistic human bubble keeps its quote and conversation
   reference chips once a file upload finishes. The upload-complete update
   replaced the bubble's `additional_kwargs` with only the uploaded files, so

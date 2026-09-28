@@ -337,9 +337,9 @@
   `DEER_FLOW_PROJECT_ROOT`：指向不存在路径、会让 Gateway 无法启动的覆盖值仍会
   显示 `✓ config.yaml found` 与 `✓ config.yaml loadable`，而指向其他有效文件的
   覆盖值则会让它检查错误的文件。现在 doctor 通过 harness 自身的解析器确定路径，
-  并像 `make dev` 一样把 `DEER_FLOW_PROJECT_ROOT` 默认设为仓库根目录；Gateway
-  会拒绝的覆盖值会让 `config.yaml found` 失败并给出 Gateway 的错误，其余配置
-  检查随之跳过。([#5987])
+  并像 `make dev` 一样处理这两个位置变量：`.env` 中的值覆盖 shell 中的值，
+  `DEER_FLOW_PROJECT_ROOT` 未设置或为空时取仓库根目录。Gateway 会拒绝的覆盖值
+  会让 `config.yaml found` 失败并给出 Gateway 的错误，其余配置检查随之跳过。([#5987])
 - **前端：** 文件上传完成后，乐观显示的用户消息气泡不再丢失引用与对话
   引用标签。上传完成时的更新会用仅含已上传文件的对象替换气泡的
   `additional_kwargs`，因此在服务端回传该消息之前这些标签会消失；随本次

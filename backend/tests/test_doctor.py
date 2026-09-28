@@ -1029,12 +1029,15 @@ class TestMainConfigResolution:
         assert "✓ config.yaml found" in output
         assert "✗ models configured  (no models found)" in output
 
-    def test_defaults_project_root_to_the_checkout_like_make_dev(self, tmp_path, runtime_path_env, capsys):
+    @pytest.mark.parametrize("project_root_env", [None, ""], ids=["unset", "empty"])
+    def test_defaults_project_root_to_the_checkout_like_make_dev(self, tmp_path, runtime_path_env, capsys, project_root_env):
         repo_root = _fake_checkout(tmp_path, runtime_path_env)
-        # `make dev` runs from backend/, but serve.sh pins the runtime root to
-        # the checkout, so the Gateway prefers <checkout>/config.yaml over the
-        # legacy backend/config.yaml. Resolving from the cwd would pick the
-        # backend copy instead.
+        # `make dev` runs from backend/, but serve.sh pins an unset or empty
+        # runtime root to the checkout, so the Gateway prefers
+        # <checkout>/config.yaml over the legacy backend/config.yaml.
+        # Resolving from the cwd would pick the backend copy instead.
+        if project_root_env is not None:
+            runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", project_root_env)
         backend_dir = repo_root / "backend"
         backend_dir.mkdir()
         runtime_path_env.chdir(backend_dir)
@@ -1058,3 +1061,44 @@ class TestMainConfigResolution:
         assert exit_code == 1
         assert "✗ config.yaml found" in output
         assert "DEER_FLOW_PROJECT_ROOT" in output
+
+    def test_dotenv_config_path_overrides_the_shell_like_make_dev(self, tmp_path, runtime_path_env, capsys):
+        # serve.sh sources .env over the shell, so the Gateway loads the .env
+        # config even when the shell exports a different (missing) one.
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        cfg = tmp_path / "from-dotenv.yaml"
+        cfg.write_text("config_version: 5\nmodels:\n  - name: dotenv-model\n")
+        (repo_root / ".env").write_text(f"DEER_FLOW_CONFIG_PATH={cfg}\n")
+        runtime_path_env.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "missing.yaml"))
+
+        doctor.main()
+
+        output = capsys.readouterr().out
+        assert "✓ config.yaml found" in output
+        assert "✓ models configured  (1 model(s))" in output
+
+    def test_dotenv_project_root_overrides_the_shell_like_make_dev(self, tmp_path, runtime_path_env, capsys):
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        (repo_root / "config.yaml").write_text("config_version: 5\nmodels:\n  - name: checkout-model\n")
+        (repo_root / ".env").write_text(f"DEER_FLOW_PROJECT_ROOT={repo_root}\n")
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path / "missing-root"))
+
+        doctor.main()
+
+        output = capsys.readouterr().out
+        assert "✓ config.yaml found" in output
+        assert "✓ models configured  (1 model(s))" in output
+
+    def test_empty_dotenv_config_path_clears_the_shell_value_like_make_dev(self, tmp_path, runtime_path_env, capsys):
+        # Sourcing `DEER_FLOW_CONFIG_PATH=` exports an empty value, which the
+        # resolver skips, so the Gateway falls back to <checkout>/config.yaml.
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        (repo_root / "config.yaml").write_text("config_version: 5\nmodels:\n  - name: checkout-model\n")
+        (repo_root / ".env").write_text("DEER_FLOW_CONFIG_PATH=\n")
+        runtime_path_env.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "missing.yaml"))
+
+        doctor.main()
+
+        output = capsys.readouterr().out
+        assert "✓ config.yaml found" in output
+        assert "✓ models configured  (1 model(s))" in output

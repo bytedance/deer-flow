@@ -273,6 +273,10 @@ def check_nginx() -> CheckResult:
     )
 
 
+# Environment variables that choose which config file the Gateway loads.
+CONFIG_LOCATION_ENV_VARS = ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT")
+
+
 def resolve_config_path() -> tuple[Path, CheckResult | None]:
     """Locate the config.yaml the Gateway would read.
 
@@ -808,18 +812,24 @@ def main() -> int:
 
     # Load .env early so key checks work
     try:
-        from dotenv import load_dotenv
+        from dotenv import dotenv_values, load_dotenv
 
         env_path = project_root / ".env"
         if env_path.exists():
             load_dotenv(env_path, override=False)
+            # `make dev` (scripts/serve.sh) sources .env over the shell, so
+            # for the variables that choose the config file, .env wins.
+            for name, value in dotenv_values(env_path).items():
+                if name in CONFIG_LOCATION_ENV_VARS and value is not None:
+                    os.environ[name] = value
     except ImportError:
         pass
 
-    # Like `make dev` (scripts/serve.sh), default the runtime root to the
-    # checkout after .env is loaded, so config resolution and the loadable
-    # check see what the Gateway sees.
-    os.environ.setdefault("DEER_FLOW_PROJECT_ROOT", str(project_root))
+    # serve.sh then replaces an unset or empty runtime root with the
+    # checkout, so config resolution and the loadable check see what the
+    # Gateway sees.
+    if not os.environ.get("DEER_FLOW_PROJECT_ROOT"):
+        os.environ["DEER_FLOW_PROJECT_ROOT"] = str(project_root)
     config_path, config_failure = resolve_config_path()
 
     print()
