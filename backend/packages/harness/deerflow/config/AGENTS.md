@@ -75,6 +75,9 @@ not by the top-level infrastructure reload-boundary registry.
 
 MCP servers and skills are configured together in `extensions_config.json` in project root:
 
+Both the runtime loader and raw read-modify-write reader accept UTF-8 with or
+without a leading BOM. Writes remain UTF-8 without a BOM.
+
 Docker development mounts the project directory at `/app/project` and points
 `DEER_FLOW_CONFIG_PATH` / `DEER_FLOW_EXTENSIONS_CONFIG_PATH` into that directory.
 Keep mutable config files behind a directory bind mount: single-file bind mounts
