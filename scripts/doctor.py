@@ -273,6 +273,51 @@ def check_nginx() -> CheckResult:
     )
 
 
+def resolve_config_path() -> tuple[Path, CheckResult | None]:
+    """Locate the config.yaml the Gateway would read.
+
+    Delegates to the harness resolver (``DEER_FLOW_CONFIG_PATH``, then
+    ``config.yaml`` under ``DEER_FLOW_PROJECT_ROOT``, then the legacy
+    backend/repository-root locations) so doctor checks the same file the
+    Gateway loads. When an environment override would stop the Gateway from
+    starting, returns the path it names (which does not exist) and a failed
+    ``config.yaml found`` result carrying the Gateway's error.
+    """
+    config_env = os.environ.get("DEER_FLOW_CONFIG_PATH")
+    default_path = Path(os.environ.get("DEER_FLOW_PROJECT_ROOT") or ".") / "config.yaml"
+    try:
+        from deerflow.config.app_config import AppConfig
+    except ImportError as exc:
+        # Keep diagnosing a broken backend environment instead of crashing;
+        # the YAML-only checks still run against the most likely path.
+        return Path(config_env) if config_env else default_path, CheckResult(
+            "config.yaml found",
+            "fail",
+            f"cannot import the DeerFlow harness to resolve it: {exc}",
+            fix="Run 'make install'",
+        )
+
+    try:
+        return AppConfig.resolve_config_path(), None
+    except FileNotFoundError as exc:
+        if not config_env:
+            # Nothing at the default locations: a plain missing config.
+            return default_path, None
+        return Path(config_env), CheckResult(
+            "config.yaml found",
+            "fail",
+            str(exc),
+            fix="Point DEER_FLOW_CONFIG_PATH at an existing config.yaml, or unset it",
+        )
+    except ValueError as exc:
+        return Path(os.environ["DEER_FLOW_PROJECT_ROOT"]) / "config.yaml", CheckResult(
+            "config.yaml found",
+            "fail",
+            str(exc),
+            fix="Point DEER_FLOW_PROJECT_ROOT at the DeerFlow checkout, or unset it",
+        )
+
+
 def check_config_exists(config_path: Path) -> CheckResult:
     if config_path.exists():
         return CheckResult("config.yaml found", "ok")
@@ -760,7 +805,6 @@ def check_env_file(project_root: Path) -> CheckResult:
 
 def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
-    config_path = project_root / "config.yaml"
 
     # Load .env early so key checks work
     try:
@@ -771,6 +815,12 @@ def main() -> int:
             load_dotenv(env_path, override=False)
     except ImportError:
         pass
+
+    # Like `make dev` (scripts/serve.sh), default the runtime root to the
+    # checkout after .env is loaded, so config resolution and the loadable
+    # check see what the Gateway sees.
+    os.environ.setdefault("DEER_FLOW_PROJECT_ROOT", str(project_root))
+    config_path, config_failure = resolve_config_path()
 
     print()
     print(bold("DeerFlow Health Check"))
@@ -792,7 +842,7 @@ def main() -> int:
     cfg_checks: list[CheckResult] = [
         check_env_file(project_root),
         check_frontend_env(project_root),
-        check_config_exists(config_path),
+        config_failure or check_config_exists(config_path),
         check_config_version(config_path, project_root),
         check_config_loadable(config_path),
         check_models_configured(config_path),

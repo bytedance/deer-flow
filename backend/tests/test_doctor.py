@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import doctor
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -110,6 +111,93 @@ class TestCheckConfigExists:
         cfg.write_text("config_version: 5\n")
         result = doctor.check_config_exists(cfg)
         assert result.status == "ok"
+
+
+# ---------------------------------------------------------------------------
+# resolve_config_path
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def runtime_path_env(monkeypatch):
+    """Clear the runtime path variables and restore them after the test.
+
+    ``main()`` defaults ``DEER_FLOW_PROJECT_ROOT`` in ``os.environ`` the way
+    ``make dev`` does. ``monkeypatch.delenv`` records nothing for an unset
+    variable, so set each one first to make teardown remove what main() adds.
+    """
+    for name in ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT"):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    return monkeypatch
+
+
+class TestResolveConfigPath:
+    def test_uses_config_path_env(self, tmp_path, runtime_path_env):
+        cfg = tmp_path / "elsewhere.yaml"
+        cfg.write_text("config_version: 5\n")
+        runtime_path_env.setenv("DEER_FLOW_CONFIG_PATH", str(cfg))
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path / "root"))
+
+        assert doctor.resolve_config_path() == (cfg, None)
+
+    def test_missing_config_path_env_fails(self, tmp_path, runtime_path_env):
+        (tmp_path / "config.yaml").write_text("config_version: 5\n")
+        missing = tmp_path / "missing.yaml"
+        runtime_path_env.setenv("DEER_FLOW_CONFIG_PATH", str(missing))
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+
+        path, failure = doctor.resolve_config_path()
+
+        assert path == missing
+        assert failure is not None
+        assert failure.status == "fail"
+        assert "DEER_FLOW_CONFIG_PATH" in failure.detail
+        assert "DEER_FLOW_CONFIG_PATH" in failure.fix
+
+    def test_uses_config_under_project_root_env(self, tmp_path, runtime_path_env):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\n")
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+
+        assert doctor.resolve_config_path() == (cfg, None)
+
+    def test_missing_project_root_env_fails(self, tmp_path, runtime_path_env):
+        missing_root = tmp_path / "missing-root"
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(missing_root))
+
+        path, failure = doctor.resolve_config_path()
+
+        assert not path.exists()
+        assert failure is not None
+        assert failure.status == "fail"
+        assert "DEER_FLOW_PROJECT_ROOT" in failure.detail
+        assert "DEER_FLOW_PROJECT_ROOT" in failure.fix
+
+    def test_no_config_anywhere_is_a_plain_missing_config(self, tmp_path, runtime_path_env):
+        from deerflow.config import app_config
+
+        runtime_path_env.setattr(app_config, "_legacy_config_candidates", lambda: ())
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+
+        path, failure = doctor.resolve_config_path()
+
+        assert path == tmp_path / "config.yaml"
+        assert failure is None
+        assert doctor.check_config_exists(path).fix == "Run 'make setup' to create it"
+
+    def test_unimportable_harness_is_reported_not_raised(self, tmp_path, runtime_path_env):
+        # A broken backend environment is exactly what doctor must diagnose.
+        runtime_path_env.setitem(sys.modules, "deerflow.config.app_config", None)
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+
+        path, failure = doctor.resolve_config_path()
+
+        assert path == tmp_path / "config.yaml"
+        assert failure is not None
+        assert failure.status == "fail"
+        assert "harness" in failure.detail
+        assert failure.fix == "Run 'make install'"
 
 
 # ---------------------------------------------------------------------------
@@ -869,17 +957,35 @@ class TestCheckSandbox:
 # ---------------------------------------------------------------------------
 
 
-class TestMainExitCode:
-    def test_returns_int(self, tmp_path, monkeypatch, capsys):
-        """main() should return 0 or 1 without raising."""
-        repo_root = tmp_path / "repo"
-        scripts_dir = repo_root / "scripts"
-        scripts_dir.mkdir(parents=True)
-        fake_doctor = scripts_dir / "doctor.py"
-        fake_doctor.write_text("# test-only shim for __file__ resolution\n")
+def _fake_checkout(tmp_path: Path, monkeypatch) -> Path:
+    """Point doctor at an empty checkout under ``tmp_path``.
 
-        monkeypatch.chdir(repo_root)
-        monkeypatch.setattr(doctor, "__file__", str(fake_doctor))
+    The harness's legacy config fallback is pinned to the same checkout, so
+    whether the real repository has a ``config.yaml`` cannot leak in.
+    """
+    from deerflow.config import app_config
+
+    repo_root = tmp_path / "repo"
+    scripts_dir = repo_root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    fake_doctor = scripts_dir / "doctor.py"
+    fake_doctor.write_text("# test-only shim for __file__ resolution\n")
+
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setattr(doctor, "__file__", str(fake_doctor))
+    monkeypatch.setattr(
+        app_config,
+        "_legacy_config_candidates",
+        lambda: (repo_root / "backend" / "config.yaml", repo_root / "config.yaml"),
+    )
+    return repo_root
+
+
+class TestMainExitCode:
+    def test_returns_int(self, tmp_path, runtime_path_env, capsys):
+        """main() should return 0 or 1 without raising."""
+        monkeypatch = runtime_path_env
+        _fake_checkout(tmp_path, monkeypatch)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
@@ -892,3 +998,63 @@ class TestMainExitCode:
         assert output
         assert "config.yaml" in output
         assert ".env" in output
+
+
+class TestMainConfigResolution:
+    def test_missing_config_path_env_fails_even_with_a_checkout_config(self, tmp_path, runtime_path_env, capsys):
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        (repo_root / "config.yaml").write_text("config_version: 5\nmodels: []\n")
+        runtime_path_env.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "missing.yaml"))
+
+        exit_code = doctor.main()
+
+        output = capsys.readouterr().out
+        assert exit_code == 1
+        assert "✗ config.yaml found" in output
+        assert "DEER_FLOW_CONFIG_PATH" in output
+        # The checkout's config.yaml is not the one the Gateway would read, so
+        # nothing is reported about it.
+        assert "— config.yaml loadable" in output
+        assert "— models configured" in output
+
+    def test_checks_the_config_named_by_config_path_env(self, tmp_path, runtime_path_env, capsys):
+        _fake_checkout(tmp_path, runtime_path_env)
+        cfg = tmp_path / "custom.yaml"
+        cfg.write_text("config_version: 5\nmodels: []\n")
+        runtime_path_env.setenv("DEER_FLOW_CONFIG_PATH", str(cfg))
+
+        doctor.main()
+
+        output = capsys.readouterr().out
+        assert "✓ config.yaml found" in output
+        assert "✗ models configured  (no models found)" in output
+
+    def test_defaults_project_root_to_the_checkout_like_make_dev(self, tmp_path, runtime_path_env, capsys):
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        # `make dev` runs from backend/, but serve.sh pins the runtime root to
+        # the checkout, so the Gateway prefers <checkout>/config.yaml over the
+        # legacy backend/config.yaml. Resolving from the cwd would pick the
+        # backend copy instead.
+        backend_dir = repo_root / "backend"
+        backend_dir.mkdir()
+        runtime_path_env.chdir(backend_dir)
+        (backend_dir / "config.yaml").write_text("config_version: 5\nmodels: []\n")
+        (repo_root / "config.yaml").write_text("config_version: 5\nmodels:\n  - name: checkout-model\n")
+
+        doctor.main()
+
+        output = capsys.readouterr().out
+        assert "✓ config.yaml found" in output
+        assert "✓ models configured  (1 model(s))" in output
+
+    def test_missing_project_root_env_fails(self, tmp_path, runtime_path_env, capsys):
+        repo_root = _fake_checkout(tmp_path, runtime_path_env)
+        (repo_root / "config.yaml").write_text("config_version: 5\nmodels: []\n")
+        runtime_path_env.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path / "missing-root"))
+
+        exit_code = doctor.main()
+
+        output = capsys.readouterr().out
+        assert exit_code == 1
+        assert "✗ config.yaml found" in output
+        assert "DEER_FLOW_PROJECT_ROOT" in output

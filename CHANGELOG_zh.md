@@ -332,6 +332,15 @@
 
 ### 修复
 
+- **doctor：** `make doctor` 现在检查 Gateway 实际加载的配置文件。此前它
+  固定检查 `<checkout>/config.yaml`，忽略 `DEER_FLOW_CONFIG_PATH` 与
+  `DEER_FLOW_PROJECT_ROOT`：指向不存在路径、会让 Gateway 无法启动的覆盖值仍会
+  显示 `✓ config.yaml found` 与 `✓ config.yaml loadable`，而指向其他有效文件的
+  覆盖值则会让它检查错误的文件。现在 doctor 通过 harness 自身的解析器确定路径，
+  并像 `make dev` 一样把 `DEER_FLOW_PROJECT_ROOT` 默认设为仓库根目录；Gateway
+  会拒绝的覆盖值会让 `config.yaml found` 失败并给出 Gateway 的错误，其余配置
+  检查随之跳过。
+
 - **调度器：** 修改间隔任务的标题或 prompt 不再返回 500。编辑对话框总是把 `schedule_spec` 与被修改的
   字段一起发送；当节奏没有变化时，`PATCH /api/scheduled-tasks/{id}` 会沿用任务原有的 `next_run_at`——
   而这个值是仓储以 ISO 字符串序列化后返回的。`ScheduledTaskRepository.update()` 原样把它赋给

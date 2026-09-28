@@ -327,6 +327,16 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **doctor:** `make doctor` now checks the config file the Gateway actually
+  loads. It always inspected `<checkout>/config.yaml` and ignored
+  `DEER_FLOW_CONFIG_PATH` and `DEER_FLOW_PROJECT_ROOT`, so a missing override
+  that stops the Gateway from starting still reported `✓ config.yaml found`
+  and `✓ config.yaml loadable`, and a valid override pointing elsewhere got
+  the wrong file checked. Doctor now resolves the path through the harness's
+  own resolver, defaulting `DEER_FLOW_PROJECT_ROOT` to the checkout as
+  `make dev` does; an override the Gateway would reject fails
+  `config.yaml found` with the Gateway's error, and the config checks skip.
+
 - **scheduler:** Editing an interval task's title or prompt no longer fails with
   a 500. The edit dialog always sends `schedule_spec` beside the changed field,
   and when the cadence is unchanged `PATCH /api/scheduled-tasks/{id}` keeps

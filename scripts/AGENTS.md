@@ -40,6 +40,17 @@ where `make up` replaced the operator's secret with a generated one.
 its real-Compose cases run against the installed `docker` CLI and against any
 standalone binaries listed in `DEER_FLOW_TEST_COMPOSE_BINARIES`.
 
+`doctor.py` checks the config file the Gateway would load, not a fixed
+`<checkout>/config.yaml`. After loading `.env` it defaults
+`DEER_FLOW_PROJECT_ROOT` to the checkout, as `serve.sh` does, then asks the
+harness (`AppConfig.resolve_config_path`) instead of re-implementing its
+order. An override the Gateway would reject (`DEER_FLOW_CONFIG_PATH` missing,
+`DEER_FLOW_PROJECT_ROOT` not a directory) fails `config.yaml found` with the
+Gateway's error, and the config-dependent checks skip. An unimportable
+harness is reported as a failure, never raised: doctor diagnoses broken
+environments. Pinned by
+`backend/tests/test_doctor.py::TestMainConfigResolution`.
+
 Root `make install` runs pre-commit through uv, so uv's tool bin directory
 need not be on `PATH`.
 
