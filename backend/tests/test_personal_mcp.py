@@ -24,6 +24,8 @@ def personal_client(tmp_path, monkeypatch):
     from deerflow.config.paths import Paths
 
     monkeypatch.setattr("deerflow.mcp.user_config.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.mcp.personal_access._admin_checker", AsyncMock(return_value=True))
+    monkeypatch.setattr("app.gateway.personal_mcp_access._is_current_admin", AsyncMock(return_value=True))
     app = FastAPI()
 
     @app.middleware("http")

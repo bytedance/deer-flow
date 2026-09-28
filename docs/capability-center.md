@@ -243,3 +243,12 @@ ordinary users may configure public HTTP/SSE endpoints and the fixed bundled
 business launchers. Arbitrary stdio commands, internal endpoints and OAuth token
 endpoints still require an administrator. Public endpoints are checked again on
 HTTP requests, with redirects and environment proxies disabled.
+
+Connections saved with administrator privileges require the owner's current
+administrator role during discovery and before every tool call, including
+durable submit, poll and cancel calls. Demotion, account deletion or an authority
+lookup failure blocks those connections even if tools or callers are cached.
+The owner can save a compatible connection again under ordinary-user policy.
+Gateway workers query current account records; standalone hosts must install
+an authority lookup to use privileged personal definitions. Already admitted
+operations are not forcibly terminated by a subsequent role change.

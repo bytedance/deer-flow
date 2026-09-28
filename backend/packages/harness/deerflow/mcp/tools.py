@@ -871,12 +871,14 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
     if personal_user_id is None:
         validate_mcp_task_config_snapshot(extensions_config)
     else:
+        from deerflow.mcp.personal_access import authorized_personal_config
         from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
         from deerflow.mcp.user_config import load_user_mcp_config
 
         current = await asyncio.to_thread(load_user_mcp_config, personal_user_id)
         if current != extensions_config:
             raise McpTaskConfigurationError("Personal MCP configuration changed during discovery; retry the run")
+        extensions_config = current = await authorized_personal_config(personal_user_id, current)
         if any(server.task_toolsets for server in current.mcp_servers.values()) and not is_mcp_task_runtime_available():
             raise McpTaskConfigurationError("Personal MCP task toolsets require the platform's durable task runtime")
     servers_config = build_servers_config(extensions_config)

@@ -172,6 +172,30 @@ def test_lifespan_sweeps_upload_staging_files_on_startup():
     stop_channel_service.assert_awaited_once()
 
 
+def test_personal_mcp_authority_spans_runtime_startup_and_shutdown():
+    from deerflow.mcp import personal_access
+
+    events = []
+    previous = personal_access._admin_checker
+
+    @asynccontextmanager
+    async def checked_runtime(_app, _config):
+        checker = personal_access._admin_checker
+        assert checker is not None and checker is not previous
+        events.append("start")
+        try:
+            yield
+        finally:
+            assert personal_access._admin_checker is checker
+            events.append("stop")
+
+    with patch(f"{__name__}._noop_langgraph_runtime", checked_runtime):
+        asyncio.run(_run_lifespan_with_upload_staging_cleanup())
+
+    assert events == ["start", "stop"]
+    assert personal_access._admin_checker is previous
+
+
 async def _run_lifespan_with_mcp_task_config_snapshot() -> None:
     from app.gateway.app import lifespan
     from deerflow.config.extensions_config import ExtensionsConfig

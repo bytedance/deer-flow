@@ -8,6 +8,7 @@ import threading
 
 from langchain_core.tools import ToolException
 
+from deerflow.mcp.personal_access import require_personal_mcp_access
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, load_user_mcp_config, load_user_mcp_config_if_changed
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import get_mcp_source
@@ -19,19 +20,21 @@ def _guard(tool, owner: str, server_name: str):
     snapshot: PersonalMcpConfigSnapshot | None = None
     snapshot_lock = threading.Lock()
 
-    def connection_is_current() -> bool:
+    def current_connection():
         nonlocal snapshot
         with snapshot_lock:
             snapshot = load_user_mcp_config_if_changed(owner, snapshot)
             server = snapshot.config.mcp_servers.get(server_name)
-            return server is not None and server.enabled
+            return server if server is not None and server.enabled else None
 
     @functools.wraps(original)
     async def invoke(*args, **kwargs):
         if resolve_runtime_user_id(kwargs.get("runtime")) != owner:
             raise ToolException("This MCP connection belongs to another user")
-        if not await asyncio.to_thread(connection_is_current):
+        server = await asyncio.to_thread(current_connection)
+        if server is None:
             raise ToolException("This personal MCP connection was changed, disabled or removed; start a new run")
+        await require_personal_mcp_access(owner, server)
         return await original(*args, **kwargs)
 
     return tool.model_copy(update={"coroutine": invoke, "func": make_sync_tool_wrapper(invoke, tool.name)})

@@ -19,6 +19,7 @@ from deerflow.mcp.context_headers import build_context_headers_interceptor
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
+from deerflow.mcp.personal_access import require_personal_mcp_access
 from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, load_user_mcp_config_if_changed
 from deerflow.mcp_scope import mcp_session_scope_key
@@ -119,6 +120,7 @@ class McpTaskToolCaller:
         """
         if connection_scope == "personal":
             caller = await asyncio.to_thread(self._personal_caller_for, user_id, server_name)
+            await require_personal_mcp_access(user_id, caller._extensions_config.mcp_servers[server_name])
             return await caller._call_configured_tool(
                 server_name=server_name,
                 tool_name=tool_name,
