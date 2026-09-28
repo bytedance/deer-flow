@@ -332,6 +332,12 @@
 
 ### 修复
 
+- **数据库：** `DatabaseConfig` 现在严格校验 `pool_size`、`pool_recycle` 与
+  `command_timeout`。此前，YAML 布尔值（`true`/`false`）会被强制转换为 `1`/`0`，
+  导致 `pool_size: true`（变成仅 1 个连接）和 `command_timeout: true`（变成 1 秒超时）
+  静默通过配置加载；`pool_size` 还接受非正数（`0`、`-1`），`command_timeout` 接受
+  `inf`（导致超时机制永不触发）。现在 `pool_size` 和 `pool_recycle` 强制要求正整数，
+  `command_timeout` 拒绝布尔值与非有限浮点数，同时保留 `null` 显式禁用超时。
 - **前端：** 文件上传完成后，乐观显示的用户消息气泡不再丢失引用与对话
   引用标签。上传完成时的更新会用仅含已上传文件的对象替换气泡的
   `additional_kwargs`，因此在服务端回传该消息之前这些标签会消失；随本次

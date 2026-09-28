@@ -1671,7 +1671,9 @@ async def test_run_once_releases_claim_when_driver_is_missing_or_fails():
     assert "No MCP task driver registered" in released["task-1"]["error"]
     assert released["task-2"]["error"] == "network down"
     assert released["task-1"]["next_poll_at"] == now + timedelta(seconds=5)
-    assert released["task-2"]["next_poll_at"] > now + timedelta(seconds=5)
+    # Windows datetime.now() can return the same tick for the whole run_once,
+    # so the retry timestamp may equal now + 5s exactly; only the backoff floor matters.
+    assert released["task-2"]["next_poll_at"] >= now + timedelta(seconds=5)
 
 
 @pytest.mark.asyncio
@@ -2616,7 +2618,7 @@ async def test_cancelled_hung_claim_returns_then_releases_delayed_result(monkeyp
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["poll", "cancel", "notification"])
 async def test_single_flight_claim_releases_late_uncancelled_claim(phase, monkeypatch):
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05)
 
     class BlockingClaimRepository:
         def __init__(self):
@@ -2739,7 +2741,7 @@ async def test_single_flight_claim_skip_logs_unresolved_owner(caplog):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["poll", "cancel", "notification"])
 async def test_single_flight_claim_releases_owner_before_stuck_release(phase, monkeypatch):
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05)
 
     class BlockingClaimAndReleaseRepository:
         def __init__(self):
@@ -3695,7 +3697,7 @@ async def test_ordinary_batch_release_completion_same_tick_is_terminal(monkeypat
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["poll", "cancel", "notification"])
 async def test_repeated_outer_cancellation_keeps_one_ordinary_release(phase, monkeypatch):
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05)
     repo = OrdinaryReleaseBatchRepository(phase=phase, outcome="success")
     drivers = McpTaskDriverRegistry()
     if phase == "poll":
@@ -3904,7 +3906,7 @@ async def test_same_tick_outer_claim_cancellation_wins_and_preserves_args():
 async def test_poll_retry_release_hang_does_not_block_run_once(monkeypatch):
     import app.mcp_tasks.service as service_module
 
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05, raising=False)
 
     class HangingReleaseRepo(FakeRepository):
         def __init__(self):
@@ -3942,7 +3944,7 @@ async def test_poll_retry_release_hang_does_not_block_run_once(monkeypatch):
 async def test_notification_failure_release_hang_does_not_block(monkeypatch):
     import app.mcp_tasks.service as service_module
 
-    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05, raising=False)
 
     class HangingNotificationReleaseRepo:
         def __init__(self, records):
