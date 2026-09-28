@@ -1212,3 +1212,10 @@ def test_package_exports_image_search_tool():
     from deerflow.community.serper.tools import image_search_tool as direct_image_search_tool
 
     assert image_search_tool is direct_image_search_tool
+
+
+def test_coerce_max_results_inf_falls_back_to_default():
+    """A YAML `.inf` max_results must fall back to the default, not crash."""
+    import deerflow.community.serper.tools as serper_mod
+
+    assert serper_mod._coerce_max_results(float("inf")) == 5

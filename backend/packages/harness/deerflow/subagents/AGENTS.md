@@ -1,13 +1,12 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+**JSON**: See README. Authorize before local metadata and reads; inaccessible paths stay UNVERIFIED.
+
 Apply each subagent's prompt overlay after assembling its full SystemMessage.
 Registry overrides must not mutate `BUILTIN_SUBAGENTS`.
 Durable batch specs store overlays as JSON and restore them before execution.
 
-**Empty remote artifacts**: Acceptance probes treat GNU `stat -c %F` labels
-`regular file` and `regular empty file` as regular files. Empty files satisfy
-`exists`/`file_written` but fail `non-empty`; symlink leaves, directories, and
-FIFOs remain rejected.
+**Remote empty files**: GNU stat's `regular file`/`regular empty file` are regular files. Empty files pass exists/file_written, fail non-empty; reject symlinks, directories, FIFOs.
 
 **Context**: Capture after validation, before setup. Keep genuine replies, even hidden clarifications; exclude framework state and unpaired calls. Mark unserializable media as omitted.
 

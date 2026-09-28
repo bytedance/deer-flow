@@ -40,7 +40,7 @@ def _coerce_max_results(value: object, default: int = 5, max_allowed: int = _SER
     """Coerce config/parameter input into a bounded positive result count."""
     try:
         count = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     if count <= 0:
         return default

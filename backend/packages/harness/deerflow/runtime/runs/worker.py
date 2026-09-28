@@ -98,9 +98,9 @@ from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
-from .manager import RunManager, RunRecord, RunStartOutcome
+from .manager import ConflictError, RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
-from .schemas import RunStatus
+from .schemas import RunStatus, ThreadOperationKind
 
 logger = logging.getLogger(__name__)
 _THREAD_INCARNATION_UNSET = object()
@@ -933,6 +933,7 @@ async def run_agent(
     runnable_configs: list[dict[str, Any]] = [config]
     goal_evaluator_model: Any | None = None
     delivery_content: dict[str, Any] | None = None
+    goal_completion: _GoalCompletionCandidate | None = None
     produced_output_paths: list[str] | None = None
     # Journal construction moved ahead of preflight so every terminal run can
     # emit a receipt. Completion persistence keeps its prior boundary: before
@@ -1460,6 +1461,9 @@ async def run_agent(
                 extensions=extensions,
                 run_stop_reason=runtime.context.get("stop_reason") if isinstance(runtime.context, dict) else None,
             )
+            if isinstance(continuation_input, _GoalCompletionCandidate):
+                goal_completion = continuation_input
+                break
             if continuation_input is None or record.abort_event.is_set():
                 break
             await _stream_once(continuation_input, _continuation_runnable_config())
@@ -1688,6 +1692,24 @@ async def run_agent(
                 except Exception:
                     logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
+            # A satisfied evaluator is only a candidate until artifact delivery,
+            # receipt persistence and durable cancellation arbitration have ended.
+            # Status writes are best-effort in single-worker mode: confirm the
+            # existing outcome before deleting recoverable goal state.
+            if goal_completion is not None and record.status == RunStatus.success and not record.abort_event.is_set() and not record.ownership_lost:
+                try:
+                    if await run_manager.persist_current_status(run_id):
+                        await _clear_completed_goal(
+                            candidate=goal_completion,
+                            record=record,
+                            run_manager=run_manager,
+                            bridge=bridge,
+                            accessor=accessor,
+                            checkpointer=checkpointer,
+                        )
+                except Exception:
+                    logger.warning("Could not finalize satisfied goal for thread %s", thread_id, exc_info=True)
+
             if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
                 try:
                     await run_manager.wait_for_prior_finalizing(thread_id, run_id)
@@ -1819,6 +1841,7 @@ async def run_agent(
                 rollback_point = None
                 subagent_events = None
                 goal_evaluator_model = None
+                goal_completion = None
                 task_store = None
                 task_info = None
                 pre_run_workspace_snapshot = None
@@ -1843,6 +1866,73 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _GoalCompletionCandidate:
+    goal: GoalState
+    conversation_signature: str
+
+
+async def _clear_completed_goal(
+    *,
+    candidate: _GoalCompletionCandidate,
+    record: RunRecord,
+    run_manager: RunManager,
+    bridge: StreamBridge,
+    accessor: CheckpointStateAccessor,
+    checkpointer: Any,
+) -> None:
+    """Clear only the evaluated goal after the run has successfully finalized."""
+    try:
+        # Terminal status has released the run's admission. Use the same durable
+        # reservation as other out-of-run checkpoint writers; a peer that already
+        # admitted a new run wins, even before it has written any checkpoint.
+        async with (
+            goal_thread_lock(record.thread_id),
+            run_manager.reserve_thread_operation(record.thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=record.user_id),
+        ):
+            checkpoint_tuple = await _call_checkpointer_method(
+                checkpointer,
+                "aget_tuple",
+                "get_tuple",
+                {"configurable": {"thread_id": record.thread_id, "checkpoint_ns": ""}},
+            )
+            if checkpoint_tuple is None:
+                logger.debug("Skipping goal completion for run %s: checkpoint is unavailable", record.run_id)
+                return
+            # Full equality is intentional: even same-instance goal updates must win over clearing.
+            if _read_checkpoint_goal(checkpoint_tuple) != candidate.goal:
+                logger.debug("Skipping goal completion for run %s: goal snapshot changed", record.run_id)
+                return
+            messages = await _materialized_checkpoint_messages(accessor, record.thread_id)
+            if visible_conversation_signature(messages) != candidate.conversation_signature:
+                logger.debug("Skipping goal completion for run %s: visible conversation changed", record.run_id)
+                return
+            if record.status != RunStatus.success or record.abort_event.is_set() or record.ownership_lost:
+                logger.debug(
+                    "Skipping goal completion for run %s: status=%s, aborted=%s, ownership_lost=%s",
+                    record.run_id,
+                    record.status.value,
+                    record.abort_event.is_set(),
+                    record.ownership_lost,
+                )
+                return
+            # Duration bookkeeping may advance the checkpoint after evaluation.
+            # Compare goal/conversation above, then guard against stale writes.
+            values = await write_thread_goal(
+                checkpointer,
+                record.thread_id,
+                None,
+                as_node="goal_evaluator",
+                expected_checkpoint_id=_checkpoint_id(checkpoint_tuple),
+            )
+            await bridge.publish(record.run_id, "values", serialize(values, mode="values"))
+    except GoalWriteConflict:
+        logger.debug("Skipping goal completion for run %s: checkpoint changed before the goal write", record.run_id)
+        return
+    except ConflictError:
+        return
 
 
 def _checkpoint_id(checkpoint_tuple: Any) -> str | None:
@@ -2023,8 +2113,8 @@ async def _prepare_goal_continuation_input(
     task_store: Any | None = None,
     extensions: Any | None = None,
     run_stop_reason: str | None = None,
-) -> dict[str, Any] | None:
-    """Evaluate the active goal and return a hidden continuation input if needed.
+) -> dict[str, Any] | _GoalCompletionCandidate | None:
+    """Return a continuation input or a completion candidate for finalization.
 
     NOTE: The re-reads below catch a racing user message or ``/goal clear``
     before we queue a continuation. Goal writes then serialize per thread and
@@ -2145,32 +2235,7 @@ async def _prepare_goal_continuation_input(
         return None
 
     if evaluation["satisfied"]:
-        try:
-            async with goal_thread_lock(thread_id):
-                latest_checkpoint_tuple = await _call_checkpointer_method(
-                    checkpointer,
-                    "aget_tuple",
-                    "get_tuple",
-                    {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
-                )
-                if latest_checkpoint_tuple is None:
-                    return None
-                latest_goal = _read_checkpoint_goal(latest_checkpoint_tuple)
-                if latest_goal is None or not _goal_instance_matches(goal, latest_goal):
-                    return None
-                values = await write_thread_goal(
-                    checkpointer,
-                    thread_id,
-                    None,
-                    as_node="goal_evaluator",
-                    expected_checkpoint_id=_checkpoint_id(latest_checkpoint_tuple),
-                )
-            await bridge.publish(run_id, "values", serialize(values, mode="values"))
-        except GoalWriteConflict:
-            return None
-        except Exception:
-            logger.warning("Could not clear satisfied goal for thread %s", thread_id, exc_info=True)
-        return None
+        return _GoalCompletionCandidate(copy.deepcopy(current_goal), conversation_signature_before)
 
     stand_down_reason = _stand_down_reason(goal, evaluation, no_progress_count)
     if stand_down_reason is None and run_stop_reason == "token_capped":
