@@ -252,6 +252,8 @@ def load_codex_cli_credential() -> CodexCliCredential | None:
 
     access_token = data.get("access_token") or data.get("token") or tokens.get("access_token", "")
     account_id = data.get("account_id") or tokens.get("account_id", "")
+    if isinstance(access_token, str):
+        access_token = access_token.strip()
     if not isinstance(account_id, str):
         logger.debug("Codex CLI credentials file has a non-string account_id; using no account")
         account_id = ""

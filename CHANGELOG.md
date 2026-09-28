@@ -338,6 +338,15 @@ This release closes that milestone with **181 merged pull requests**.
   `DEER_FLOW_PROJECT_ROOT` becomes the checkout. An override the Gateway
   would reject fails `config.yaml found` with the Gateway's error, and the
   config checks skip. ([#5987])
+- **database:** `DatabaseConfig` now validates `pool_size`, `pool_recycle`, and
+  `command_timeout` strictly. Previously, YAML booleans (`true`/`false`) were
+  coerced to `1`/`0` respectively, allowing `pool_size: true` (pool size 1) and
+  `command_timeout: true` (a 1-second statement timeout) to silently pass
+  configuration loading. `pool_size` also accepted non-positive values (`0`,
+  `-1`), and `command_timeout` accepted `inf` (which never times out).
+  `pool_size` and `pool_recycle` now enforce positive integers, and
+  `command_timeout` rejects booleans and non-finite floats while retaining
+  `null` to disable timeouts.
 - **frontend:** The optimistic human bubble keeps its quote and conversation
   reference chips once a file upload finishes. The upload-complete update
   replaced the bubble's `additional_kwargs` with only the uploaded files, so

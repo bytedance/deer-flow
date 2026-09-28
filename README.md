@@ -645,6 +645,9 @@ Signed-in users' notification toggle, default model, conversation mode, and reas
 
 Capability Center groups plugins by office collaboration, documents and knowledge, search and research, business and data, and development and operations. The directory includes setup references alongside existing MCP configurations and Lark. Recommended integrations and built-in support do not imply an installed or verified connection; the Installed filter shows configured MCP entries and installed Lark only.
 
+Personal MCP connections configured in the web interface are persisted per user.
+Deployment tools remain shared. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
+
 For plugin manifests, adapter registration, and Agent capability selection, see
 [Capability Center integration contract](docs/capability-center.md).
 
@@ -655,7 +658,7 @@ contacts. Saving configuration performs no external write. These plugins reuse
 the existing MCP lifecycle and require no separate plugin service. See the
 integration contract above for required fields, scopes, and feature boundaries.
 
-Plugin brand icons are bundled locally. When adding or editing one MCP plugin, administrators can upload a PNG, JPG, or WebP image (up to 2 MB), preview it, or restore the default icon. Changes take effect only after Save; custom icons persist across browsers as a normalized 128px PNG in the server entry's display-only `presentation.icon` metadata. They are not sent to the MCP transport.
+Plugin brand icons are bundled locally. When adding or editing one personal MCP plugin, users can upload a PNG, JPG, or WebP image (up to 2 MB), preview it, or restore the default icon. Changes take effect only after Save; custom icons persist across browsers as a normalized 128px PNG in the server entry's display-only `presentation.icon` metadata. They are not sent to the MCP transport.
 
 Capability Center > Plugins adds, replaces, and deletes one MCP server at a time through targeted mutations that preserve concurrent sibling changes; deletes use a bodyless URL-addressed request. An invalid stdio command on one server no longer blocks toggling another, while enabling that invalid server remains protected by the command allowlist and surfaces the backend validation message in the UI.
 Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport` field for SSE/HTTP servers.
@@ -2248,7 +2251,7 @@ deerflow --tui-transparent                    # use the terminal's default backg
 deerflow --continue                           # resume the most recent thread
 deerflow --resume THREAD                      # resume a thread by id
 deerflow --print "summarize this repo"        # headless one-shot answer to stdout
-deerflow --json  "hello"                       # headless newline-delimited StreamEvents
+deerflow --json  "hello"                       # headless newline-delimited StreamEvents; failure -> one {"type": "error"} record, exit 1
 deerflow --recursion-limit 250 --print "task" # override the headless agent-loop limit
 ```
 
