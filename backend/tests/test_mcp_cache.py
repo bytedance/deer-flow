@@ -531,6 +531,15 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
         def retire_all(self) -> None:
             self.retired = True
 
+        def has_any_binding(self) -> bool:
+            # No bindings are modelled beyond the sessions this fake records.
+            return bool(self.sessions)
+
+        def reconcile_existing_bindings(self, active):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(entries=(), inflight=())
+
     real_reset_session_pool = session_pool_module.reset_session_pool
     monkeypatch.setattr(session_pool_module, "MCPSessionPool", FakeSessionPool)
     real_reset_session_pool()

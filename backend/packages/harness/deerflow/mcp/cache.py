@@ -217,6 +217,12 @@ class _McpReconciliationPlan:
     active: dict[str, str]
     removed: frozenset[str]
     force_rebind: frozenset[str] = frozenset()
+    #: Reconcile only the bindings the pool already holds, without seeding any
+    #: name it has not seen. Used when no applied revision exists yet.
+    reconcile_existing_only: bool = False
+    #: Bump the cache generation so a superseded in-flight discovery cannot
+    #: publish its stale result, without retiring the pool.
+    void_in_flight_initialization: bool = False
 
 
 @dataclass(frozen=True)
@@ -639,6 +645,44 @@ def _classify_against_applied(incoming: _McpIncomingRevision) -> _McpReconciliat
     )
 
 
+def _baseline_less_reconciliation_plan(
+    *,
+    incoming: _McpIncomingRevision | None = None,
+    void_in_flight_initialization: bool = False,
+) -> _McpReconciliationPlan | None:
+    """Plan a reconciliation that only touches bindings the pool already holds.
+
+    Before any tool cache is published the pool can still carry bindings: a
+    failed or cancelled cold discovery seeds them before the remote call, and
+    ``McpTaskToolCaller`` shares the same pool and can create one before the
+    first publication. Those are *pool* state, not cache state, so "no applied
+    baseline" must mean neither "nothing to reconcile" nor "reset the whole
+    pool" -- the latter would close live sessions this process never owned.
+
+    Returns ``None`` when the pool holds nothing, so a deployment without MCP
+    still pays no config-hashing cost.
+    """
+    from deerflow.mcp.session_pool import get_session_pool
+
+    if not get_session_pool().has_any_binding():
+        return None
+    if incoming is None:
+        current_path, current_signature = _current_config_state()
+        if current_path is None or current_signature is None:
+            return None
+        incoming = _read_stable_mcp_revision(current_path, current_signature)
+        if incoming is None:
+            return None
+    return _McpReconciliationPlan(
+        transition=_McpCacheTransition(frozenset(), frozenset()),
+        incoming=incoming,
+        active=dict(incoming.connections),
+        removed=frozenset(),
+        reconcile_existing_only=True,
+        void_in_flight_initialization=void_in_flight_initialization,
+    )
+
+
 def _plan_cache_transition(*, fence_in_flight_initialization: bool = False) -> _McpReconciliationPlan | None:
     """Classify the on-disk effective MCP config against the applied baseline.
 
@@ -656,7 +700,11 @@ def _plan_cache_transition(*, fence_in_flight_initialization: bool = False) -> _
     # Nothing has been published or reconciled yet: never stale,
     # and deployments without MCP pay no config-hashing cost.
     if not _cache_initialized and _mcp_applied_servers is None:
-        if fence_in_flight_initialization and _initializing_generation is not None:
+        superseded = fence_in_flight_initialization and _initializing_generation is not None
+        plan = _baseline_less_reconciliation_plan(void_in_flight_initialization=superseded)
+        if plan is not None:
+            return plan
+        if superseded:
             logger.info("MCP initialization is in flight with no applied baseline; voiding the superseded initialization")
             return _full_reset_plan()
         return None
@@ -733,6 +781,9 @@ def _plan_explicit_reconciliation(names: frozenset[str]) -> _McpReconciliationPl
     whole-pool reset.
     """
     if _mcp_applied_servers is None or _mcp_applied_order is None or _mcp_applied_connections is None:
+        plan = _baseline_less_reconciliation_plan(void_in_flight_initialization=_initializing_generation is not None)
+        if plan is not None:
+            return plan
         if _initializing_generation is not None:
             logger.info("MCP initialization is in flight with no applied baseline; voiding the superseded initialization")
             return _full_reset_plan()
@@ -819,7 +870,11 @@ def _plan_from_incoming_revision(incoming: _McpIncomingRevision, *, fence_in_fli
     it just persisted.
     """
     if not _cache_initialized and _mcp_applied_servers is None:
-        if fence_in_flight_initialization and _initializing_generation is not None:
+        superseded = fence_in_flight_initialization and _initializing_generation is not None
+        plan = _baseline_less_reconciliation_plan(incoming=incoming, void_in_flight_initialization=superseded)
+        if plan is not None:
+            return plan
+        if superseded:
             logger.info("MCP initialization is in flight with no applied baseline; voiding the superseded initialization")
             return _full_reset_plan()
         return None
@@ -857,6 +912,18 @@ def _apply_reconciliation_locked(plan: _McpReconciliationPlan) -> _PendingTeardo
         from deerflow.mcp.tasks.runtime import validate_mcp_task_config_snapshot
 
         validate_mcp_task_config_snapshot(incoming.config)
+
+    if plan.reconcile_existing_only:
+        # No applied revision yet: only the bindings the pool already holds are
+        # compared, so an unrelated live session (including a durable-task
+        # session) is preserved and discovery still seeds the rest.
+        pool = get_session_pool()
+        prepared = pool.reconcile_existing_bindings(plan.active)
+        if plan.void_in_flight_initialization:
+            # Bump the generation so a superseded in-flight discovery cannot
+            # publish a stale result. The pool itself is not retired.
+            _reset_mcp_tools_cache_state()
+        return _PendingTeardown(pool=pool, prepared=prepared)
 
     if plan.transition.retire_servers is None:
         retired_pool = reset_session_pool()
@@ -988,7 +1055,6 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     post_snapshot = None
     post_revision = None
     init_succeeded = False
-    failed_initialization_teardown = None
     try:
         logger.info("Initializing MCP tools...")
         # Read the exact revision we hand to discovery. Comparing pre/post file
@@ -1043,24 +1109,16 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         init_succeeded = True
     finally:
         if not init_succeeded:
+            # Do NOT roll the pool back here. A failed discovery does not own the
+            # whole pool: it shares it with the durable-task caller, and with any
+            # applied baseline whose unrelated servers must keep their sessions.
+            # The residual bindings this attempt seeded are reconciled against
+            # the next configuration instead (see
+            # ``_baseline_less_reconciliation_plan``).
             with _init_condition:
-                if _initializing_generation == claim_generation and _cache_generation == claim_generation:
-                    # Discovery seeds/validates every stdio binding *before* the
-                    # remote call, so a failed or cancelled cold discovery can
-                    # leave bindings behind with no applied baseline. Neither the
-                    # explicit nor the lazy reconciler sees them (both
-                    # short-circuit while the cache is unpublished), and the next
-                    # discovery would fence itself on the now-stale fingerprint.
-                    # Retire the pool this attempt left behind -- but only while
-                    # this attempt still owns BOTH generations, so a late failure
-                    # cannot tear down a pool a newer revision already installed.
-                    failed_initialization_teardown = _apply_reconciliation_locked(_full_reset_plan())
                 if _initializing_generation == claim_generation:
                     _initializing_generation = None
                 _init_condition.notify_all()
-            # Outside ``_init_condition``: detaching and signalling happened
-            # above, and the blocking owner teardown must not run under the lock.
-            _run_pending_teardown(failed_initialization_teardown)
 
     retired_pool = None
     with _init_condition:

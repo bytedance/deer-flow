@@ -439,6 +439,67 @@ class MCPSessionPool:
 
         return PreparedRetirement(entries=tuple(entries), inflight=tuple(inflight))
 
+    def has_any_binding(self) -> bool:
+        """Whether this pool currently holds any server binding.
+
+        A cheap in-process probe so callers can skip a config read when there is
+        genuinely nothing to reconcile.
+        """
+        with self._lock:
+            return bool(self._bindings)
+
+    def reconcile_existing_bindings(self, active: Mapping[str, str]) -> PreparedRetirement:
+        """Reconcile only the bindings this pool *already* holds.
+
+        Used when no applied revision exists yet. The pool can still carry
+        bindings from an unpublished/failed discovery or from the durable-task
+        caller, and those are pool state, not cache state -- so they must be
+        compared against the incoming connections instead of being ignored.
+
+        Unlike :meth:`reconcile_bindings` this never seeds a name the pool has
+        not seen: discovery owns that. A binding whose fingerprint changed is
+        re-bound (fresh epoch, owner detached); a binding whose server is gone
+        from *active* is tombstoned; an unchanged fingerprint is left completely
+        untouched, so an unrelated live session -- including a durable-task
+        session -- survives.
+
+        Detach and close-signal happen in one ``_lock`` critical section, so a
+        caller cancelled before it awaits the returned teardown cannot strand an
+        owner. No awaits happen here.
+        """
+        entries: list[tuple[ClientSession, asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event]] = []
+        inflight: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[ClientSession], asyncio.Task[Any], asyncio.Event]] = []
+        changed: list[str] = []
+        with self._lock:
+            self._binding_lifecycle_servers.update(active)
+            for server_name, fingerprint in active.items():
+                current = self._bindings.get(server_name)
+                if current is None or current.fingerprint == fingerprint:
+                    continue  # Not seeded here, or unchanged: never touched.
+                self._install_binding_locked(server_name, fingerprint)
+                changed.append(server_name)
+            for server_name in list(self._bindings):
+                if server_name in active:
+                    continue
+                if self._bindings[server_name].fingerprint is None:
+                    continue  # Already tombstoned.
+                self._install_binding_locked(server_name, None)
+                changed.append(server_name)
+
+            for server_name in changed:
+                for entry_key in [k for k in self._entries if k[0] == server_name]:
+                    entries.append(self._entries.pop(entry_key))
+                for inflight_key in [k for k in self._inflight if k[0] == server_name]:
+                    inflight.append(self._inflight.pop(inflight_key))
+
+            for _session, loop, _task, close_evt in entries:
+                self._signal_close(loop, close_evt)
+            for loop, ent_ready, task, close_evt in inflight:
+                self._signal_close(loop, close_evt)
+                self._cancel_owner(loop, task, ent_ready)
+
+        return PreparedRetirement(entries=tuple(entries), inflight=tuple(inflight))
+
     def retire_all(self) -> None:
         """Fence the whole pool; a retired pool must not mint fresh bindings."""
         with self._lock:
