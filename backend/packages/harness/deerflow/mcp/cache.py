@@ -988,6 +988,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     post_snapshot = None
     post_revision = None
     init_succeeded = False
+    failed_initialization_teardown = None
     try:
         logger.info("Initializing MCP tools...")
         # Read the exact revision we hand to discovery. Comparing pre/post file
@@ -1043,9 +1044,23 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     finally:
         if not init_succeeded:
             with _init_condition:
+                if _initializing_generation == claim_generation and _cache_generation == claim_generation:
+                    # Discovery seeds/validates every stdio binding *before* the
+                    # remote call, so a failed or cancelled cold discovery can
+                    # leave bindings behind with no applied baseline. Neither the
+                    # explicit nor the lazy reconciler sees them (both
+                    # short-circuit while the cache is unpublished), and the next
+                    # discovery would fence itself on the now-stale fingerprint.
+                    # Retire the pool this attempt left behind -- but only while
+                    # this attempt still owns BOTH generations, so a late failure
+                    # cannot tear down a pool a newer revision already installed.
+                    failed_initialization_teardown = _apply_reconciliation_locked(_full_reset_plan())
                 if _initializing_generation == claim_generation:
                     _initializing_generation = None
                 _init_condition.notify_all()
+            # Outside ``_init_condition``: detaching and signalling happened
+            # above, and the blocking owner teardown must not run under the lock.
+            _run_pending_teardown(failed_initialization_teardown)
 
     retired_pool = None
     with _init_condition:

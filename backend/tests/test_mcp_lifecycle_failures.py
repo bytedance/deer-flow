@@ -19,7 +19,7 @@ import logging
 import threading
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -1136,3 +1136,167 @@ def test_client_mcp_update_rejects_a_frozen_task_config_before_writing(cache_glo
     assert pool.active_binding("reports") == binding
     assert _entry(pool, "reports", owner_loop)[0] is session
     assert session.closed is False
+
+
+# ---------------------------------------------------------------------------
+# A failed or cancelled cold discovery must not strand server bindings
+# ---------------------------------------------------------------------------
+
+
+def _mock_remote_discovery(
+    monkeypatch,
+    *,
+    failing: set[str] | None = None,
+    started: Any = None,
+    release: Any = None,
+    tools_by_server: dict[str, list[str]] | None = None,
+) -> list[str]:
+    """Mock ONLY the remote call; the real ``get_mcp_tools()`` still runs.
+
+    Replacing ``deerflow.mcp.tools.get_mcp_tools`` wholesale would skip the
+    pre-discovery ``ensure_binding`` pass, which is exactly the state under
+    test here.
+    """
+    from langchain_core.tools import StructuredTool
+    from langchain_mcp_adapters.client import MultiServerMCPClient
+    from pydantic import BaseModel
+
+    class _Args(BaseModel):
+        value: int = 1
+
+    def _tool(name: str) -> Any:
+        return StructuredTool(name=name, description="test", args_schema=_Args, coroutine=AsyncMock(), response_format="content_and_artifact")
+
+    failing = failing if failing is not None else set()
+    tools_by_server = tools_by_server or {}
+    seen: list[str] = []
+
+    def _get_tools(self, *, server_name, **_kwargs):
+        async def _discover():
+            seen.append(server_name)
+            if started is not None:
+                started.set()
+            if release is not None:
+                await release.wait()
+            if server_name in failing:
+                raise RuntimeError(f"remote discovery failed for {server_name}")
+            # ``tool_name_prefix=True`` on the client, so the adapter-style name
+            # is what ``_raw_mcp_tool_name`` strips back to the configured raw name.
+            return [_tool(f"{server_name}_{raw}") for raw in tools_by_server.get(server_name, [])]
+
+        return _discover()
+
+    monkeypatch.setattr(MultiServerMCPClient, "get_tools", _get_tools)
+    return seen
+
+
+_TASK_SERVER_B = _stdio(
+    "uvx",
+    task_toolsets=[{"name": "reports", "submit_tool": "submit", "status_tool": "status", "cancel_tool": "cancel"}],
+)
+
+
+def test_failed_cold_discovery_releases_bindings_so_a_gateway_write_recovers(cache_globals, monkeypatch, tmp_path) -> None:
+    """A failed first discovery must not fence the next configuration update.
+
+    B is task-enabled, so its failed discovery leaves the configured raw tools
+    missing and the task-toolset validation aborts the whole initialization --
+    after the pre-discovery pass already seeded bindings for A and B.
+    """
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(cfg, {"A": _stdio("npx"), "B": _TASK_SERVER_B})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    failing = {"B"}
+    seen = _mock_remote_discovery(monkeypatch, failing=failing, tools_by_server={"B": ["submit", "status", "cancel"]})
+
+    with pytest.raises(McpTaskConfigurationError):
+        asyncio.run(cache_module.initialize_mcp_tools())
+
+    # The attempt seeded bindings before the remote call; they must not survive it.
+    assert get_session_pool().active_binding("A") is None
+    assert get_session_pool().active_binding("B") is None
+
+    # A Gateway write can now rebuild from a fresh pool, and the retry succeeds.
+    failing.clear()
+    _allow_router_admin(monkeypatch)
+    asyncio.run(update_mcp_server_state(None, McpServerStateUpdateRequest(server_name="A", enabled=True)))
+    asyncio.run(cache_module.initialize_mcp_tools())
+
+    # Both servers discover on the same fresh pool, with no residual binding.
+    # (The two servers are gathered concurrently, so only the multiset is fixed.)
+    assert sorted(seen) == ["A", "A", "B", "B"]
+
+    pool = get_session_pool()
+    assert pool.active_binding("A") is not None
+    assert pool.active_binding("B") is not None
+
+
+def test_failed_cold_discovery_does_not_block_a_lazy_recovery(cache_globals, monkeypatch, tmp_path) -> None:
+    """An out-of-band config change must still recover on the next tool assembly."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(cfg, {"A": _stdio("npx"), "B": _TASK_SERVER_B})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    failing = {"B"}
+    _mock_remote_discovery(monkeypatch, failing=failing, tools_by_server={"B": ["submit", "status", "cancel"]})
+
+    with pytest.raises(McpTaskConfigurationError):
+        asyncio.run(cache_module.initialize_mcp_tools())
+
+    # Change A's base connection on disk without any explicit reconciliation in
+    # this process, then let the lazy path recover.
+    _write_config(cfg, {"A": _stdio("npx", args=["--changed"]), "B": _TASK_SERVER_B})
+    failing.clear()
+
+    tools = cache_module.get_cached_mcp_tools()
+    assert [tool.name for tool in tools] == ["B_submit"]
+    assert cache_module._cache_initialized is True
+    # A is re-bound against its NEW connection on the fresh pool.
+    assert get_session_pool().active_binding("A") is not None
+
+
+def test_cancelled_cold_discovery_retires_the_pool_it_seeded(cache_globals, monkeypatch, tmp_path) -> None:
+    """Cancelling after the binding pass must retire the seeded pool."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    started = asyncio.Event()
+    release = asyncio.Event()
+    _mock_remote_discovery(monkeypatch, started=started, release=release)
+
+    async def _run() -> None:
+        owner = asyncio.create_task(cache_module.initialize_mcp_tools())
+        await asyncio.wait_for(started.wait(), timeout=2)
+        seeded_pool = get_session_pool()
+        assert seeded_pool.active_binding("A") is not None
+
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert get_session_pool() is not seeded_pool
+        assert cache_module._initializing_generation is None
+        assert cache_module._cache_initialized is False
+
+    asyncio.run(_run())
+
+
+def test_concurrent_cold_starts_still_share_one_successful_discovery(cache_globals, monkeypatch, tmp_path) -> None:
+    """The failure cleanup must not turn ordinary concurrent reads into resets."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(cfg, {"A": _stdio("npx"), "B": _stdio("uvx")})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    seen = _mock_remote_discovery(monkeypatch)
+
+    async def _run() -> tuple[list[Any], list[Any]]:
+        return await asyncio.gather(
+            asyncio.create_task(cache_module.initialize_mcp_tools()),
+            asyncio.create_task(cache_module.initialize_mcp_tools()),
+        )
+
+    first, second = asyncio.run(_run())
+
+    assert first == second == []
+    # One shared discovery, not one per caller.
+    assert sorted(seen) == ["A", "B"]
+    assert cache_module._cache_initialized is True
+    assert cache_module._initializing_generation is None
