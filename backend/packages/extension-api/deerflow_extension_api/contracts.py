@@ -20,6 +20,7 @@ from deerflow_extension_api.state import ExtensionData
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from deerflow_extension_api.assembly import AgentAssemblyObserver
     from deerflow_extension_api.compaction import ContextCompactionObserver
+    from deerflow_extension_api.model_invocation import ModelInvoker
     from deerflow_extension_api.placement import AgentBuildContext, MiddlewarePlacement
     from deerflow_extension_api.run_evidence import RunEvidenceReader
 
@@ -167,6 +168,7 @@ class ExtensionRuntimeDeps:
     policy: HostPolicySnapshot = field(default_factory=HostPolicySnapshot)
     session_factory: Any | None = None
     run_evidence_reader: RunEvidenceReader | None = None
+    model_invoker: ModelInvoker | None = None
 
 
 class ExtensionService(Protocol):

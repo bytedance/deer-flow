@@ -1116,14 +1116,20 @@ class SubagentExecutor:
                     supports_vision=False,
                 )
             deferred_names = deferred_setup.deferred_names if deferred_setup is not None else frozenset()
+            # Subagents request thinking off; the model's reasoning contract
+            # decides what that means (a required-thinking model stays on), and
+            # the descriptor reports the effective policy the factory applied.
+            from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
+
+            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=False, reasoning_effort=None)
             descriptor = build_assembly_descriptor(
                 namespace="deerflow",
                 agent_name=self.config.name,
                 requested_model=(self.config.model if self.config.model != "inherit" else self.parent_model),
                 effective_model=self.model_name,
                 model_config=model_config,
-                thinking_enabled=False,
-                reasoning_effort=None,
+                thinking_enabled=effective_reasoning.thinking_enabled,
+                reasoning_effort=effective_reasoning.reasoning_effort,
                 rendered_base_prompt=self._assembled_system_prompt,
                 prompt_template_id="deerflow-subagent-v1",
                 tools=tools,
@@ -1335,7 +1341,7 @@ class SubagentExecutor:
 
         messages: list[Any] = []
         if system_parts:
-            self._assembled_system_prompt = "\n\n".join(system_parts)
+            self._assembled_system_prompt = self.config.prompt_overlay.apply("\n\n".join(system_parts))
             messages.append(SystemMessage(content=self._assembled_system_prompt))
 
         if self.context_snapshot is not None:
@@ -1658,6 +1664,16 @@ class SubagentExecutor:
                 )
                 try:
                     await close_agent_stream(stream)
+                except asyncio.CancelledError as exc:
+                    close_failure = exc.__cause__
+                    if isinstance(close_failure, Exception):
+                        logger.warning(
+                            "[trace=%s] Could not close interrupted subagent stream %s",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=(type(close_failure), close_failure, close_failure.__traceback__),
+                        )
+                    raise
                 except Exception:
                     cancel_requested = cancel_requested or result.cancel_event.is_set()
                     if active_error is None and not cancel_requested:

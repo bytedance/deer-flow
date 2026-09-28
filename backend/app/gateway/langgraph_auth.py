@@ -101,6 +101,7 @@ async def _read_standalone_thread(thread_id, ctx) -> dict | None:
 
 async def _ensure_standalone_thread_incarnation(
     thread_id,
+    assistant_id,
     ctx,
     *,
     create_if_missing: bool,
@@ -124,12 +125,26 @@ async def _ensure_standalone_thread_incarnation(
             raise RuntimeError("Standalone LangGraph thread has an invalid incarnation")
         return stored
 
+    from langgraph_api.utils import AuthContext as RuntimeAuthContext
     from langgraph_runtime.database import connect
-    from langgraph_runtime.ops import Threads
+    from langgraph_runtime.ops import Assistants, Threads
 
     token = _allow_thread_incarnation_write.set(True)
     try:
         async with connect() as conn:
+            auth_token = RuntimeAuthContext.set(None)
+            try:
+                assistant_rows = await Assistants.get(conn, assistant_id, ctx=None)
+                assistant = await anext(assistant_rows, None)
+            finally:
+                RuntimeAuthContext.reset(auth_token)
+            if assistant is None:
+                raise HTTPException(status_code=404, detail="Assistant not found")
+            if assistant.get("metadata", {}).get("created_by") != "system":
+                authorized_rows = await Assistants.get(conn, assistant_id, ctx=ctx)
+                if await anext(authorized_rows, None) is None:
+                    raise HTTPException(status_code=404, detail="Assistant not found")
+
             rows = await Threads.put(
                 conn,
                 thread_id,
@@ -173,6 +188,7 @@ async def _bind_standalone_run_incarnation(ctx, value: dict) -> None:
         }
         incarnation = await _ensure_standalone_thread_incarnation(
             thread_id,
+            value["assistant_id"],
             ctx,
             create_if_missing=value.get("if_not_exists") == "create",
             creation_metadata=creation_metadata,

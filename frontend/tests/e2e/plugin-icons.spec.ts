@@ -48,7 +48,7 @@ test("brand icons load locally for both recommendations and configured MCP serve
     .context()
     .addCookies([{ name: "locale", value: "zh-CN", url: baseURL! }]);
   mockLangGraphAPI(page);
-  await page.route("**/api/mcp/config", (route) =>
+  await page.route("**/api/mcp/personal/config", (route) =>
     route.fulfill({
       json: {
         mcp_servers: {
@@ -137,10 +137,10 @@ test("upload previews, cancellation, save, reload, restore default, and create a
     },
   };
   let writes = 0;
-  await page.route("**/api/mcp/config", (route) =>
+  await page.route("**/api/mcp/personal/config", (route) =>
     route.fulfill({ json: { mcp_servers: servers } }),
   );
-  await page.route("**/api/mcp/config/server", async (route) => {
+  await page.route("**/api/mcp/personal/config/server", async (route) => {
     writes++;
     const body = route.request().postDataJSON() as {
       server_name: string;
@@ -149,7 +149,7 @@ test("upload previews, cancellation, save, reload, restore default, and create a
     servers[body.server_name] = body.server;
     await route.fulfill({ json: { mcp_servers: servers } });
   });
-  await page.route("**/api/mcp/config/servers", async (route) => {
+  await page.route("**/api/mcp/personal/config/servers", async (route) => {
     writes++;
     const body = route.request().postDataJSON() as {
       mcp_servers: Record<string, MCPServerConfig>;
@@ -254,7 +254,7 @@ test("invalid or oversized uploads do not replace the existing icon", async ({
   page,
 }) => {
   mockLangGraphAPI(page);
-  await page.route("**/api/mcp/config", (route) =>
+  await page.route("**/api/mcp/personal/config", (route) =>
     route.fulfill({
       json: {
         mcp_servers: {
@@ -322,7 +322,7 @@ test("a custom MCP name does not impersonate a catalog brand in rows or editing"
   page,
 }) => {
   mockLangGraphAPI(page);
-  await page.route("**/api/mcp/config", (route) =>
+  await page.route("**/api/mcp/personal/config", (route) =>
     route.fulfill({
       json: {
         mcp_servers: {

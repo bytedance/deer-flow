@@ -8,7 +8,7 @@
 
 - DeerFlow 有**两条并行**的流式路径：**Gateway 路径**（async / HTTP SSE / JSON 序列化）服务浏览器和 IM 渠道；**DeerFlowClient 路径**（sync / in-process / 原生 LangChain 对象）服务 Jupyter、脚本、测试。它们**无法合并**——消费者模型不同。
 - 两条路径都从 `create_agent()` 工厂出发，核心都是订阅 LangGraph 的 `stream_mode=["values", "messages", "custom"]`。`values` 是节点级 state 快照，`messages` 是 LLM token 级 delta，`custom` 是显式 `StreamWriter` 事件。DeerFlow 内置 custom 事件同时通过 callback dispatch 暴露为 `astream_events(version="v2")` 的 `on_custom_event`，供 AG-UI 等 callback 型消费者使用。**这些接口不是详细程度的梯度，而是独立事件源**，消费者必须订阅自己需要的接口。
-- 嵌入式 client 为每个 `stream()` 调用维护三个 `set[str]`：`seen_ids` / `streamed_ids` / `counted_usage_ids`。三者看起来相似但管理**三个独立的不变式**，不能合并。
+- 嵌入式 client 为每个 `stream()` 调用维护四个 `set[str]`：`seen_ids` / `streamed_ids` / `counted_usage_ids` / `historical_message_ids`。前三者分别负责去重与用量幂等；最后一个隔离续聊时的历史消息。
 
 ---
 
@@ -219,27 +219,29 @@ return "".join(chunks.get(last_id, ()))
 
 ---
 
-## 三个 id set 为什么不能合并
+## 消息 id set 为什么不能合并
 
-`DeerFlowClient.stream()` 在一次调用生命周期内维护三个 `set[str]`：
+`DeerFlowClient.stream()` 在一次调用生命周期内维护四个 `set[str]`：
 
 ```python
 seen_ids: set[str] = set()           # values 路径内部 dedup
 streamed_ids: set[str] = set()       # messages → values 跨模式 dedup
 counted_usage_ids: set[str] = set()  # usage_metadata 幂等计数
+historical_message_ids: set[str] = set()  # 续聊时隔离先前回合
 ```
 
-乍看像是"三份几乎一样的东西"，实际每个管**不同的不变式**。
+乍看用途相近，实际每个管**不同的不变式**。
 
 | Set | 负责的不变式 | 被谁填充 | 被谁查询 |
 |---|---|---|---|
 | `seen_ids` | 连续两个 `values` 快照里同一条 message 只生成一个 `messages-tuple` 事件 | values 分支每处理一条消息就加入 | values 分支处理下一条消息前检查 |
 | `streamed_ids` | 如果一条消息已经通过 `messages` 模式 token 级流过，values 快照到达时**不要**再合成一次完整 `messages-tuple` | messages 分支每发一个 AI/tool 事件就加入 | values 分支看到消息时检查 |
 | `counted_usage_ids` | 同一个 `usage_metadata` 在 messages 末尾 chunk 和 values 快照的 final AIMessage 里各带一份，**累计总量只算一次** | `_account_usage()` 每次接受 usage 就加入 | `_account_usage()` 每次调用时检查 |
+| `historical_message_ids` | 续聊时旧消息不再作为本轮增量事件，也不计入本轮 `end.usage` | values 快照里当前用户消息之前的 id | messages 和 values 分支发射前检查 |
 
 ### 为什么不能只用一个 set
 
-关键观察：**同一个 message id 在这三个 set 里的加入时机不同**。
+关键观察：`seen_ids`、`streamed_ids`、`counted_usage_ids` 对**本轮消息**的加入时机不同；`historical_message_ids` 专门划定旧回合边界。
 
 ```mermaid
 sequenceDiagram

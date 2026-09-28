@@ -7,11 +7,13 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import yaml
 
 from deerflow.agents.memory.backends.honcho.client import HonchoClient, HonchoRequestError
 from deerflow.agents.memory.backends.honcho.config import HonchoConfig, sanitize_id
 from deerflow.agents.memory.backends.honcho.honcho_manager import HonchoMemoryManager, _stable_id
 from deerflow.agents.memory.manager import MemoryManagerError, MemoryReadError
+from deerflow.config.app_config import AppConfig
 
 
 class TestHonchoConfig:
@@ -55,9 +57,109 @@ class TestHonchoConfig:
         cfg = HonchoConfig.from_backend_config({"base_url": "http://internal:8000", "api_key": "sk-x", "allow_insecure_http": True})
         assert cfg.api_key == "sk-x"
 
+    def test_allow_insecure_http_false_keeps_the_guard(self):
+        """An explicit ``False`` must not read as an opt-in."""
+        with pytest.raises(ValueError, match="allow_insecure_http"):
+            HonchoConfig.from_backend_config({"base_url": "http://internal:8000", "api_key": "sk-x", "allow_insecure_http": False})
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("false", False),
+            ("f", False),
+            ("F", False),
+            ("n", False),
+            ("no", False),
+            ("off", False),
+            ("0", False),
+            ("FALSE", False),
+            ("true", True),
+            ("t", True),
+            ("T", True),
+            ("y", True),
+            ("Y", True),
+            ("yes", True),
+            ("on", True),
+            ("1", True),
+        ],
+    )
+    def test_allow_insecure_http_from_environment(self, monkeypatch, tmp_path, value, expected):
+        """``$VAR`` substitution yields the raw environment string, so the knob
+        must be validated as a boolean: string truthiness turns ``"false"`` into
+        ``True`` and silently sends the API key over plaintext HTTP. The
+        accepted literals are Pydantic's boolean vocabulary, so the documented
+        list is pinned here rather than in prose only."""
+        monkeypatch.setenv("TEST_HONCHO_ALLOW_INSECURE", value)
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "models": [],
+                    "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                    "memory": {
+                        "backend_config": {
+                            "base_url": "http://internal:8000",
+                            "api_key": "sk-x",
+                            "allow_insecure_http": "$TEST_HONCHO_ALLOW_INSECURE",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        config = AppConfig.from_file(config_path)
+        backend_config = config.memory.backend_config
+        assert backend_config["allow_insecure_http"] == value
+
+        if expected:
+            assert HonchoConfig.from_backend_config(backend_config).allow_insecure_http is True
+        else:
+            # The opt-in stays off, so the plaintext-http key guard still fires.
+            with pytest.raises(ValueError, match="allow_insecure_http"):
+                HonchoConfig.from_backend_config(backend_config)
+
+    @pytest.mark.parametrize("value", ["not-a-boolean", "2", "", [], "tru"])
+    def test_allow_insecure_http_rejects_a_non_boolean(self, value):
+        with pytest.raises(ValueError, match="allow_insecure_http must be a boolean"):
+            HonchoConfig.from_backend_config({"base_url": "http://internal:8000", "allow_insecure_http": value})
+
     def test_http_without_api_key_is_fine(self):
         cfg = HonchoConfig.from_backend_config({"base_url": "http://host.docker.internal:8000"})
         assert cfg.api_key is None
+
+    @pytest.mark.parametrize("value", ["localhost:8000", "honcho.internal", "not a url", "", "ftp://localhost:8000", "http://", "http://:8000", "https://:8000", 12345])
+    def test_malformed_base_url_rejected_as_config_error(self, value):
+        with pytest.raises(ValueError, match="base_url must be an absolute"):
+            HonchoConfig.from_backend_config({"base_url": value})
+
+    @pytest.mark.parametrize("value", ["localhost:8000", "http://", "http://:8000", "ftp://localhost:8000"])
+    def test_direct_construction_hits_the_same_guard(self, value):
+        """The guard sits in ``__post_init__`` exactly so this path is covered: a
+        caller that builds ``HonchoConfig`` without ``from_backend_config`` must
+        not end up with a base_url httpx can never resolve."""
+        with pytest.raises(ValueError, match="base_url must be an absolute"):
+            HonchoConfig(base_url=value)
+
+    @pytest.mark.parametrize("value", ["HTTP://internal:8000", "HtTp://internal:8000", "http://internal:8000"])
+    def test_http_scheme_case_does_not_bypass_the_insecure_key_guard(self, value):
+        """``urlsplit`` lowercases the scheme and httpx sends such a URL over plain
+        HTTP, so the api_key guard has to read the parsed scheme rather than a
+        case-sensitive ``http://`` prefix."""
+        with pytest.raises(ValueError, match="allow_insecure_http"):
+            HonchoConfig.from_backend_config({"base_url": value, "api_key": "sk-x"})
+        cfg = HonchoConfig.from_backend_config(
+            {"base_url": value, "api_key": "sk-x", "allow_insecure_http": True},
+        )
+        assert cfg.api_key == "sk-x"
+
+    @pytest.mark.parametrize("value", ["http://localhost:8000", "https://api.honcho.dev", "http://host.docker.internal:8000", "https://honcho.internal:8443"])
+    def test_absolute_base_urls_still_accepted(self, value):
+        assert HonchoConfig.from_backend_config({"base_url": f"{value}/"}).base_url == value
+
+    def test_manager_from_config_fails_fast_on_malformed_base_url(self):
+        with pytest.raises(ValueError, match="base_url must be an absolute"):
+            HonchoMemoryManager.from_config({"base_url": "localhost:8000"})
 
     def test_empty_override_values_rejected(self):
         """An override entry with an empty/null value is a config mistake: silently

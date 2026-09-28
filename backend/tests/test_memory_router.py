@@ -587,3 +587,19 @@ def test_reload_memory_route_returns_501_when_read_also_unsupported() -> None:
         with TestClient(app) as client:
             response = client.post("/api/memory/reload")
     assert response.status_code == 501
+
+
+def test_import_blank_fact_returns_400_without_replacing_saved_memory(tmp_path):
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    before = manager.import_memory(_sample_memory(facts=[{"id": "keep", "content": "Saved preference"}]), user_id="alice")
+    payload = _sample_memory(facts=[{**before["facts"][0], "content": "   "}])
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/memory/import", json=payload)
+    assert response.status_code == 400
+    assert manager.get_memory(user_id="alice") == before

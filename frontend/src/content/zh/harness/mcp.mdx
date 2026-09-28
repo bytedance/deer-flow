@@ -63,7 +63,11 @@ DeerFlow 服务器启动时调用 `initialize_mcp_tools()`。这连接到所有�
 
 ### 缓存失效
 
-MCP 工具缓存追踪 `extensions_config.json` 的修改时间（`mtime`）。当文件更改时——例如通过 Gateway API 启用或禁用服务器时——缓存被标记为过时，下次请求时重新加载工具。
+MCP 工具缓存追踪 `extensions_config.json` 的解析路径和 `(mtime, size, sha256)` 内容签名。签名变化只是触发重新比对的信号：缓存会比较已启用服务器的解析后配置与全局 `mcpInterceptors` 列表，只有该有效切片真正变化时才会淘汰已缓存的工具和会话池。
+
+因此仅修改 Skills 或 middleware 不会重建工具或关闭会话；切换到另一份 MCP 配置完全相同的配置文件同样保留会话。启用、禁用或修改某个服务器会在下次请求时重新加载工具。当没有启用任何 MCP 服务器时，工具组装会回收此前已初始化的缓存与会话，但不会发起新的工具发现。
+
+Gateway 的显式 **重置 MCP 工具缓存**（`POST /api/mcp/cache/reset`）与此自动检查相互独立，始终清理缓存和会话池。
 
 这意味着 MCP 服务器更改无需重启 DeerFlow 服务器即可生效。
 
@@ -104,7 +108,7 @@ OAuth 流程对 Lead Agent 是透明的——它只是调用工具，DeerFlow �
 MCP 服务器可以通过多种方式管理：
 
 - **通过 DeerFlow 应用界面**：扩展面板显示已连接的 MCP 服务器，允许你启用/禁用它们。
-- **通过 Gateway API**：`POST /api/extensions/mcp/{name}/enable` 和 `/disable`。
+- **通过 Gateway API**：`PATCH /api/mcp/config`，请求体为 `{"server_name": "<name>", "enabled": true}`（禁用时为 `false`；仅管理员）。
 - **直接编辑 `extensions_config.json`**：适用于脚本化或程序化配置。
 
 由于基于文件 mtime 的缓存失效机制，更改会自动被检测到。

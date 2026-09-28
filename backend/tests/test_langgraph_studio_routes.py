@@ -496,6 +496,98 @@ def test_studio_implicit_thread_creation_preserves_searchable_metadata(
     assert response.json()["metadata"] == metadata
 
 
+def test_rejected_implicit_run_does_not_leave_an_orphan_thread(
+    studio_client: httpx.Client,
+):
+    assistant_id = str(uuid4())
+    with httpx.Client(
+        base_url=studio_client.base_url,
+        timeout=10,
+        trust_env=False,
+    ) as owner_client:
+        response = owner_client.post(
+            "/assistants",
+            json={"assistant_id": assistant_id, "graph_id": "test_graph"},
+        )
+        assert response.status_code == 200, response.text
+
+    thread_id = str(uuid4())
+    response = studio_client.post(
+        f"/threads/{thread_id}/runs/wait",
+        json={
+            "assistant_id": assistant_id,
+            "if_not_exists": "create",
+            "input": {"messages": []},
+            "context": {"preserved_context_probe": "kept"},
+        },
+    )
+    assert response.status_code == 404, response.text
+
+    response = studio_client.get(f"/threads/{thread_id}")
+    assert response.status_code == 404, response.text
+
+
+def test_assistant_owner_can_implicitly_create_thread(
+    studio_client: httpx.Client,
+):
+    assistant_id = str(uuid4())
+    thread_id = str(uuid4())
+    with httpx.Client(
+        base_url=studio_client.base_url,
+        timeout=10,
+        trust_env=False,
+    ) as owner_client:
+        response = owner_client.post(
+            "/assistants",
+            json={"assistant_id": assistant_id, "graph_id": "test_graph"},
+        )
+        assert response.status_code == 200, response.text
+
+        response = owner_client.post(
+            f"/threads/{thread_id}/runs/wait",
+            json={
+                "assistant_id": assistant_id,
+                "if_not_exists": "create",
+                "input": {"messages": []},
+                "context": {"preserved_context_probe": "kept"},
+            },
+        )
+        assert response.status_code == 200, response.text
+
+        response = owner_client.get(f"/threads/{thread_id}")
+        assert response.status_code == 200, response.text
+
+    metadata = response.json()["metadata"]
+    assert metadata["user_id"] != "langgraph-studio-user"
+    assert metadata["thread_incarnation"]
+
+
+def test_non_studio_user_can_implicitly_create_for_system_assistant(
+    studio_client: httpx.Client,
+):
+    thread_id = str(uuid4())
+    with httpx.Client(
+        base_url=studio_client.base_url,
+        timeout=10,
+        trust_env=False,
+    ) as client:
+        scope = _run_scope(
+            client,
+            thread_id,
+            if_not_exists="create",
+        )
+        response = client.get(f"/threads/{thread_id}")
+
+    assert response.status_code == 200, response.text
+    metadata = response.json()["metadata"]
+    assert metadata["user_id"] != "langgraph-studio-user"
+    assert scope == mcp_session_scope_key(
+        user_id=metadata["user_id"],
+        thread_id=thread_id,
+        thread_incarnation=metadata["thread_incarnation"],
+    )
+
+
 def test_studio_stateless_runs_get_distinct_mcp_scopes(
     studio_client: httpx.Client,
 ):

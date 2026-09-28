@@ -54,6 +54,7 @@ from deerflow.config.paths import get_paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
+from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
 from deerflow.runtime import CheckpointStateAccessor
 from deerflow.runtime.checkpoint_mode import (
     ensure_checkpoint_mode_compatible,
@@ -246,6 +247,7 @@ class DeerFlowClient:
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
         self._agent_config_key: tuple | None = None
+        self._effective_model_name: str | None = None
         self._loaded_agent_config_key: tuple[str, str] | None = None
         self._loaded_agent_config = None
 
@@ -258,6 +260,7 @@ class DeerFlowClient:
         """
         self._agent = None
         self._agent_config_key = None
+        self._effective_model_name = None
         self._loaded_agent_config_key = None
         self._loaded_agent_config = None
 
@@ -486,6 +489,7 @@ class DeerFlowClient:
 
         self._agent = create_agent(**kwargs)
         self._agent_config_key = key
+        self._effective_model_name = model_name
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
 
     @staticmethod
@@ -857,8 +861,10 @@ class DeerFlowClient:
 
         Tool calls and tool results are still emitted once per logical
         message.  ``values`` events continue to carry full state snapshots
-        after each graph node finishes; AI text already delivered via the
-        ``messages`` stream is **not** re-synthesized from the snapshot to
+        after each graph node finishes. On resumed threads, historical messages
+        remain in those snapshots, but are not emitted again as per-message
+        events or counted in this turn's usage. AI text already delivered via
+        the ``messages`` stream is **not** re-synthesized from the snapshot to
         avoid duplicate deliveries. When a later node replaces a delivered AI
         message under the same id and appends to its text (a guard's stop
         notice), only the appended text is emitted, as one more delta for that
@@ -963,7 +969,6 @@ class DeerFlowClient:
             if key in kwargs:
                 context[key] = kwargs[key]
 
-        configurable = config.get("configurable") or {}
         deerflow_trace_id = ensure_trace_id()
         effective_user_id = context.get("user_id") or get_effective_user_id()
         # Materialize the storage owner in runtime context in every auth mode.
@@ -971,17 +976,18 @@ class DeerFlowClient:
         # survives worker/isolated-loop boundaries and matches the identity
         # used by prompt assembly and the agent cache.
         context["user_id"] = effective_user_id
+        self._ensure_agent(config, context=context)
+        configurable = config.get("configurable") or {}
+        effective_model_name = getattr(self, "_effective_model_name", None)
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
             user_id=effective_user_id,
             assistant_id=self._agent_name or "lead-agent",
-            model_name=configurable.get("model_name") or self._model_name,
+            model_name=effective_model_name or configurable.get("model_name") or self._model_name,
             environment=self._environment or os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
             deerflow_trace_id=deerflow_trace_id,
         )
-
-        self._ensure_agent(config, context=context)
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
         context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
@@ -998,6 +1004,9 @@ class DeerFlowClient:
         # Cross-mode handoff: ids already streamed via LangGraph ``messages``
         # mode so the ``values`` path skips re-synthesis of the same message.
         streamed_ids: set[str] = set()
+        # A resumed thread's values snapshots include prior turns. They remain
+        # in the full-state event, but must not become new deltas or usage.
+        historical_message_ids: set[str] = set()
         # AI messages whose tool calls arrived as streamed fragments. The
         # arguments only parse once the message is complete, so their
         # tool_calls event is emitted from the values snapshot instead.
@@ -1075,6 +1084,8 @@ class DeerFlowClient:
                     msg_chunk = chunk
 
                 msg_id = getattr(msg_chunk, "id", None)
+                if msg_id and msg_id in historical_message_ids:
+                    continue
 
                 if isinstance(msg_chunk, AIMessage):
                     text = self._extract_text(msg_chunk.content)
@@ -1119,8 +1130,17 @@ class DeerFlowClient:
             # mode == "values"
             messages = chunk.get("messages", [])
 
-            for msg in messages:
+            current_user_index = next(
+                (index for index, msg in enumerate(messages) if isinstance(msg, HumanMessage) and (getattr(msg, "additional_kwargs", None) or {}).get("run_id") == run_id),
+                None,
+            )
+            if current_user_index is not None:
+                historical_message_ids.update(msg_id for msg in messages[:current_user_index] if (msg_id := getattr(msg, "id", None)))
+
+            for index, msg in enumerate(messages):
                 msg_id = getattr(msg, "id", None)
+                if (current_user_index is not None and index < current_user_index) or (msg_id and msg_id in historical_message_ids):
+                    continue
                 if msg_id and msg_id in seen_messages:
                     if seen_messages[msg_id] is msg:
                         continue
@@ -1262,6 +1282,7 @@ class DeerFlowClient:
                     "description": getattr(model, "description", None),
                     "supports_thinking": getattr(model, "supports_thinking", False),
                     "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
+                    "reasoning": reasoning_capabilities_payload(resolve_reasoning_contract(model)),
                 }
                 for model in self._app_config.models
             ],
@@ -1334,6 +1355,7 @@ class DeerFlowClient:
             "description": getattr(model, "description", None),
             "supports_thinking": getattr(model, "supports_thinking", False),
             "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
+            "reasoning": reasoning_capabilities_payload(resolve_reasoning_contract(model)),
         }
 
     # ------------------------------------------------------------------

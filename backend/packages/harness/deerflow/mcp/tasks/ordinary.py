@@ -34,6 +34,7 @@ class McpTaskToolCaller(Protocol):
         thread_id: str,
         thread_incarnation: str | None = None,
         request_scoped_headers: bool = False,
+        connection_scope: Literal["deployment", "personal"] = "deployment",
     ) -> Any: ...
 
 
@@ -84,6 +85,14 @@ def _tool_name(data: dict[str, Any], role: str) -> str:
     if not isinstance(value, str) or not value:
         raise McpTaskProtocolError(f"Task driver_data is missing required {role!r}")
     return value
+
+
+def _connection_scope(data: dict[str, Any]) -> Literal["deployment", "personal"]:
+    # Older task rows predate personal connections and are deployment-owned.
+    scope = data.get("connection_scope", "deployment")
+    if scope not in ("deployment", "personal"):
+        raise McpTaskProtocolError("Task driver_data has an invalid connection scope")
+    return scope
 
 
 def _first_error_text(call_result: Any) -> str | None:
@@ -165,6 +174,7 @@ class OrdinaryMcpTaskDriver:
             # durable-task call that can carry the run's request-scoped
             # credentials; status and cancel run after that run ended.
             request_scoped_headers=True,
+            connection_scope=_connection_scope(request.driver_data),
         )
         payload = _parse(
             _SubmitPayload,
@@ -187,6 +197,7 @@ class OrdinaryMcpTaskDriver:
             user_id=task.user_id,
             thread_id=task.thread_id,
             thread_incarnation=task.thread_incarnation,
+            connection_scope=_connection_scope(task.driver_data),
         )
         payload = _parse(
             _StatusPayload,
@@ -206,6 +217,7 @@ class OrdinaryMcpTaskDriver:
             user_id=task.user_id,
             thread_id=task.thread_id,
             thread_incarnation=task.thread_incarnation,
+            connection_scope=_connection_scope(task.driver_data),
         )
         payload = _parse(
             _CancelPayload,
