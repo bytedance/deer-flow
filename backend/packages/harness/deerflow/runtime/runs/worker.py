@@ -1005,7 +1005,23 @@ async def run_agent(
             await run_manager.set_finalizing(run_id, True)
         try:
             if not checkpoint_rollback_completed:
-                checkpoint_rollback_completed = await _join_owned_restore(ensure_checkpoint_restored())
+                restore_task = ensure_checkpoint_restored()
+                try:
+                    await _join_owned_restore(restore_task)
+                except asyncio.CancelledError as exc:
+                    current = asyncio.current_task()
+                    if current is None or current.cancelling() == 0:
+                        raise
+                    # The waiter was cancelled, but the owned restore itself may
+                    # have completed successfully: that outcome still has to drive
+                    # the client-side sync before the deferred cancellation is
+                    # re-raised. Only a failed/cancelled child is a failure.
+                    if restore_task.done() and not restore_task.cancelled() and restore_task.exception() is None:
+                        checkpoint_rollback_completed = bool(restore_task.result())
+                    if deferred_finalization_interrupt is None:
+                        deferred_finalization_interrupt = exc
+                else:
+                    checkpoint_rollback_completed = bool(restore_task.result())
             if checkpoint_rollback_completed and not restored_values_published:
                 # Record the attempt before awaiting: a publish that fails after
                 # delivering must not be retried by the other barrier and emit a

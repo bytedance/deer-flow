@@ -4926,3 +4926,200 @@ async def test_prestart_cancellation_does_not_consume_a_future_restore(monkeypat
     assert publish_values.await_count == 0
     assert agent_factory.call_count == 0
     assert record.status == RunStatus.error
+
+
+@pytest.mark.anyio
+async def test_edit_replay_final_restore_cancelled_after_success_still_publishes_values(monkeypatch):
+    """A restore that succeeds must still publish its values when the waiter is cancelled.
+
+    Sequence: the graph succeeds, the first barrier skips, the final durable CAS
+    turns the run into ``interrupted``, the last barrier starts the owned restore
+    and a host cancellation arrives while it runs. The restore itself succeeds,
+    so the client-side ``values`` sync must still happen exactly once and before
+    the end frame; only the cancellation is deferred.
+    """
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(
+        store=run_store,
+        run_ownership_config=RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        ),
+    )
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+
+    class DummyCheckpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": "checkpoint-1",
+                    }
+                },
+                checkpoint={"id": "checkpoint-1", "channel_values": {}},
+                metadata={"source": "loop"},
+                pending_writes=[],
+            )
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": []},
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": "checkpoint-1",
+                    }
+                },
+                parent_config=None,
+                metadata={},
+                next=(),
+                tasks=(),
+                created_at=None,
+            )
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": []}
+
+    order: list[str] = []
+    bridge = SimpleNamespace(
+        publish=AsyncMock(side_effect=lambda _run_id, event_type, _payload=None: order.append(f"publish:{event_type}")),
+        publish_end=AsyncMock(side_effect=lambda _run_id: order.append("publish_end")),
+        cleanup=AsyncMock(),
+    )
+    restore_started = asyncio.Event()
+    release_restore = asyncio.Event()
+
+    async def gated_restore(**_kwargs):
+        restore_started.set()
+        await release_restore.wait()
+        return True
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint", gated_restore)
+
+    async def spy_publish_values(**_kwargs):
+        order.append("restored:values")
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._publish_restored_checkpoint_values", spy_publish_values)
+
+    # The cancel is accepted only after the success CAS already staged success,
+    # so it is observed by the final CAS rather than the earlier one.
+    receipt_started = asyncio.Event()
+    release_receipt = asyncio.Event()
+
+    async def gated_receipt(*_args, **_kwargs):
+        receipt_started.set()
+        await release_receipt.wait()
+        return True
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._persist_delivery_receipt", gated_receipt)
+
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=DummyCheckpointer(), event_store=MemoryRunEventStore()),
+            agent_factory=lambda *, config: DummyAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    try:
+        await asyncio.wait_for(receipt_started.wait(), timeout=5)
+        await run_store.request_cancel(record.run_id, action="interrupt")
+        release_receipt.set()
+
+        await asyncio.wait_for(restore_started.wait(), timeout=5)
+        # Host cancellation while the owned restore is in flight.
+        task.cancel()
+        await asyncio.sleep(0.05)
+        release_restore.set()
+        await asyncio.gather(task, return_exceptions=True)
+    finally:
+        release_receipt.set()
+        release_restore.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert order.count("restored:values") == 1
+    assert order.index("restored:values") < order.index("publish_end")
+    assert record.status == RunStatus.interrupted
+
+
+@pytest.mark.anyio
+async def test_edit_replay_restore_failure_does_not_publish_restored_values(monkeypatch):
+    """A restore that fails must never be reported as a completed recovery."""
+    run_manager = RunManager()
+    record = await run_manager.create(
+        "thread-1",
+        metadata={"replay_kind": "edit", "regenerate_from_run_id": "source-run"},
+    )
+
+    class DummyCheckpointer:
+        async def aget_tuple(self, _config):
+            return SimpleNamespace(
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": "checkpoint-1",
+                    }
+                },
+                checkpoint={"id": "checkpoint-1", "channel_values": {}},
+                metadata={"source": "loop"},
+                pending_writes=[],
+            )
+
+    class DummyAgent:
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": []},
+                config={
+                    "configurable": {
+                        "thread_id": "thread-1",
+                        "checkpoint_ns": "",
+                        "checkpoint_id": "checkpoint-1",
+                    }
+                },
+                parent_config=None,
+                metadata={},
+                next=(),
+                tasks=(),
+                created_at=None,
+            )
+
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            raise RuntimeError("edit replay failed")
+            if False:
+                yield  # pragma: no cover - keep this an async generator
+
+    async def failing_restore(**_kwargs):
+        raise RuntimeError("checkpoint restore failed")
+
+    publish_values = AsyncMock()
+    monkeypatch.setattr("deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint", failing_restore)
+    monkeypatch.setattr("deerflow.runtime.runs.worker._publish_restored_checkpoint_values", publish_values)
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=DummyCheckpointer()),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert publish_values.await_count == 0
+    assert record.status == RunStatus.error
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
