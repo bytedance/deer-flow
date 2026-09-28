@@ -56,6 +56,9 @@ test("unprobed mutation status preserves runtime fields from the authoritative G
   });
   const mutationStatus: LarkIntegrationStatus = {
     ...status,
+    // Different mode from the cached status, so the assertions below prove
+    // the runtime fields came from the cache rather than the mutation.
+    sandbox_runtime_mode: "gateway-download",
     sandbox_runtime_probed: false,
     sandbox_runtime_ready: false,
     sandbox_runtime_detail: null,

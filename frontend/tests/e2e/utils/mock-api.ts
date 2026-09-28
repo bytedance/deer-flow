@@ -381,7 +381,8 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     sandbox_runtime_mode: "init-container" as
       | "none"
       | "gateway-download"
-      | "init-container",
+      | "init-container"
+      | "broker",
     sandbox_runtime_probed: true,
     sandbox_runtime_ready: false,
     sandbox_runtime_detail:
