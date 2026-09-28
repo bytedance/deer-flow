@@ -64,10 +64,7 @@ test("unprobed mutation status preserves runtime fields from the authoritative G
   cacheLarkMutationStatus(queryClient, mutationStatus);
 
   expect(
-    queryClient.getQueryData<LarkIntegrationStatus>([
-      "integrations",
-      "lark",
-    ]),
+    queryClient.getQueryData<LarkIntegrationStatus>(["integrations", "lark"]),
   ).toMatchObject({
     auth: { verified: true },
     sandbox_runtime_mode: "init-container",
@@ -90,10 +87,7 @@ test("explicitly probed unready status does not depend on detail text", () => {
   cacheLarkMutationStatus(queryClient, mutationStatus);
 
   expect(
-    queryClient.getQueryData<LarkIntegrationStatus>([
-      "integrations",
-      "lark",
-    ]),
+    queryClient.getQueryData<LarkIntegrationStatus>(["integrations", "lark"]),
   ).toMatchObject({
     sandbox_runtime_probed: true,
     sandbox_runtime_ready: false,
@@ -117,10 +111,7 @@ test("probed mutation status replaces older runtime fields", () => {
   cacheLarkMutationStatus(queryClient, mutationStatus);
 
   expect(
-    queryClient.getQueryData<LarkIntegrationStatus>([
-      "integrations",
-      "lark",
-    ]),
+    queryClient.getQueryData<LarkIntegrationStatus>(["integrations", "lark"]),
   ).toMatchObject({
     sandbox_runtime_mode: "broker",
     sandbox_runtime_probed: true,
