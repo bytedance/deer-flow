@@ -330,7 +330,8 @@ This release closes that milestone with **181 merged pull requests**.
   attachments staged with the send were also missing from the bubble, both
   while uploading and after. The submitted message was always intact. The
   optimistic copy (before and after the upload) and the submit now build
-  `additional_kwargs` through one helper, `buildHumanMessageAdditionalKwargs`.
+  `additional_kwargs` through one helper,
+  `buildHumanMessageAdditionalKwargs`. ([#5982])
 
 - **gateway:** `GET /api/skills`, `GET /api/skills/custom` and
   `GET /api/skills/{name}` no longer walk the skill directories on the event
@@ -6228,4 +6229,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934
 [#5935]: https://github.com/bytedance/deer-flow/pull/5935
 [#5945]: https://github.com/bytedance/deer-flow/pull/5945
+[#5982]: https://github.com/bytedance/deer-flow/pull/5982
 

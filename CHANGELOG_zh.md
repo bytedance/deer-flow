@@ -333,7 +333,7 @@
   `additional_kwargs`，因此在服务端回传该消息之前这些标签会消失；随本次
   发送一起暂存的项目附件在上传中和上传后也都不会显示在气泡中。实际提交的
   消息始终完整。乐观副本（上传前后）与提交现在通过同一个辅助函数
-  `buildHumanMessageAdditionalKwargs` 构建 `additional_kwargs`。
+  `buildHumanMessageAdditionalKwargs` 构建 `additional_kwargs`。([#5982])
 
 - **网关：** `GET /api/skills`、`GET /api/skills/custom` 与 `GET /api/skills/{name}` 不再在事件循环上
   遍历技能目录。三者此前都内联调用 `load_skills()`：它会解析调用者的存储、扫描所有公共与自定义
@@ -5278,3 +5278,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934
 [#5935]: https://github.com/bytedance/deer-flow/pull/5935
 [#5945]: https://github.com/bytedance/deer-flow/pull/5945
+[#5982]: https://github.com/bytedance/deer-flow/pull/5982
