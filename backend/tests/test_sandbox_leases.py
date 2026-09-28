@@ -71,6 +71,10 @@ class _LeaseProvider(SandboxProvider):
     def get(self, sandbox_id):
         return self.sandbox if sandbox_id == self.sandbox.id else None
 
+    def get_scoped(self, sandbox_id, *, thread_id, user_id):
+        del thread_id, user_id
+        return self.get(sandbox_id)
+
     def release(self, sandbox_id):
         self.release_calls.append(sandbox_id)
 
@@ -88,6 +92,10 @@ class _UnhashableLeaseProvider(SandboxProvider):
 
     def get(self, sandbox_id):
         return self.sandbox if sandbox_id == self.sandbox.id else None
+
+    def get_scoped(self, sandbox_id, *, thread_id, user_id):
+        del thread_id, user_id
+        return self.get(sandbox_id)
 
     def release(self, sandbox_id):
         self.release_calls.append(sandbox_id)

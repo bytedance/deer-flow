@@ -24,6 +24,7 @@ from deerflow.uploads.manager import (
     UPLOAD_STAGING_SUFFIX,
     PathTraversalError,
     UnsafeUploadPathError,
+    apply_upload_sandbox_permits,
     claim_unique_filename,
     delete_file_safe,
     enrich_file_listing,
@@ -50,6 +51,7 @@ router = APIRouter(prefix="/api/threads/{thread_id}/uploads", tags=["uploads"])
 # project-shelf attach route. They are re-exported deliberately — do not
 # prune them as "unused".
 __all__ = [
+    "CONVERTIBLE_EXTENSIONS",
     "UnsafeUploadPathError",
     "claim_unique_filename",
     "convert_file_to_markdown",
@@ -122,16 +124,11 @@ def _make_file_sandbox_writable(file_path: os.PathLike[str] | str) -> None:
     In AIO sandbox mode, the gateway writes the authoritative host-side file
     first, then the sandbox runtime may rewrite the same mounted path. Granting
     world-writable access here prevents permission mismatches between the
-    gateway user and the sandbox runtime user.
+    gateway user and the sandbox runtime user. Delegates to the shared
+    apply_upload_sandbox_permits helper so the change stays bound to the
+    validated upload inode (O_NOFOLLOW + fchmod).
     """
-    file_stat = os.lstat(file_path)
-    if stat.S_ISLNK(file_stat.st_mode):
-        logger.warning("Skipping sandbox chmod for symlinked upload path: %s", file_path)
-        return
-
-    writable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH | stat.S_IRGRP | stat.S_IROTH
-    chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
-    os.chmod(file_path, writable_mode, **chmod_kwargs)
+    apply_upload_sandbox_permits(file_path, stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH | stat.S_IRGRP | stat.S_IROTH)
 
 
 def _make_file_sandbox_readable(file_path: os.PathLike[str] | str) -> None:
@@ -141,16 +138,10 @@ def _make_file_sandbox_readable(file_path: os.PathLike[str] | str) -> None:
     permissions, then bind-mounts the host directory into the container. The
     sandbox process inside the container runs as a non-root user and cannot
     read those files without group/other read bits. This function adds
-    ``S_IRGRP | S_IROTH`` so the sandbox can read the uploaded content.
+    ``S_IRGRP | S_IROTH`` so the sandbox can read the uploaded content, via the
+    shared apply_upload_sandbox_permits helper (O_NOFOLLOW + fchmod).
     """
-    file_stat = os.lstat(file_path)
-    if stat.S_ISLNK(file_stat.st_mode):
-        logger.warning("Skipping sandbox chmod for symlinked upload path: %s", file_path)
-        return
-
-    readable_mode = stat.S_IMODE(file_stat.st_mode) | stat.S_IRGRP | stat.S_IROTH
-    chmod_kwargs = {"follow_symlinks": False} if os.chmod in os.supports_follow_symlinks else {}
-    os.chmod(file_path, readable_mode, **chmod_kwargs)
+    apply_upload_sandbox_permits(file_path, stat.S_IRGRP | stat.S_IROTH)
 
 
 def _uses_thread_data_mounts(sandbox_provider: SandboxProvider) -> bool:
@@ -242,7 +233,13 @@ def _prepare_upload_destination(uploads_dir: os.PathLike[str] | str, display_fil
     return _UploadTempFile(file_path=file_path, temp_path=temp_path, handle=handle)
 
 
-def _link_staged_no_overwrite(staged_path: Path, uploads_dir: os.PathLike[str] | str, display_filename: str) -> Path:
+def _link_staged_no_overwrite(
+    staged_path: Path,
+    uploads_dir: os.PathLike[str] | str,
+    display_filename: str,
+    *,
+    unlink_staged: bool = True,
+) -> Path:
     """Worker: publish *staged_path* under *display_filename* atomically, never overwriting.
 
     The ``os.link`` itself is the whole no-overwrite guard: it fails with
@@ -256,9 +253,16 @@ def _link_staged_no_overwrite(staged_path: Path, uploads_dir: os.PathLike[str] |
     happens AFTER the atomic failure: an existing non-regular file (a planted
     symlink — symlinks are excluded from the seeded listing, so one could
     only come from outside) stays an unsafe destination; anything else is a
-    plain collision to retry. Any other failure removes the staged file and
-    propagates; success unlinks it. Staging and destination are co-located in
-    the uploads dir, so the hard link is always same-filesystem.
+    plain collision to retry. Any other failure removes the staged file
+    best-effort and propagates; success also removes it best-effort. Staging and destination
+    are co-located in the uploads dir, so the hard link is always same-filesystem.
+
+    ``unlink_staged=False`` publishes the link but leaves the staged name in
+    place, for a caller that still holds a descriptor on the staged inode and
+    therefore must remove it itself. Windows refuses to remove a file that
+    has an open handle, so the removal cannot happen here in that case; the
+    caller owns the staged path from the moment this returns — including on
+    the failure arms below, which leave it for that caller's own cleanup.
     """
     file_path = _pure_destination(uploads_dir, display_filename)
     try:
@@ -271,25 +275,49 @@ def _link_staged_no_overwrite(staged_path: Path, uploads_dir: os.PathLike[str] |
             pass  # The winner vanished between link and lstat — plain retry.
         raise
     except Exception:
-        try:
-            os.unlink(staged_path)
-        except FileNotFoundError:
-            pass
+        if unlink_staged:
+            _remove_staged_file(staged_path)
         raise
-    os.unlink(staged_path)
+    if unlink_staged:
+        _remove_staged_file(staged_path)
     return file_path
 
 
-def _commit_upload_temp_no_overwrite(upload_temp: _UploadTempFile, uploads_dir: os.PathLike[str] | str, display_filename: str) -> Path:
+def _commit_upload_temp_no_overwrite(
+    upload_temp: _UploadTempFile,
+    uploads_dir: os.PathLike[str] | str,
+    display_filename: str,
+    *,
+    unlink_staged: bool = True,
+) -> Path:
     """Worker: close the staged handle and publish the ``.part`` atomically via ``os.link``.
 
     Same no-overwrite contract as :func:`_link_staged_no_overwrite`:
     :class:`FileExistsError` leaves the staged part in place for a
     next-suffix retry (the handle's second ``close`` is idempotent); any
-    other failure removes it.
+    other failure removes the staged name only when this call owns it.
+    ``unlink_staged=False`` leaves the name for the caller on every exit,
+    including the failure arms: that caller still holds a descriptor on the
+    inode and removes it itself (``_abort_upload_temp`` on its error path).
     """
     upload_temp.handle.close()
-    return _link_staged_no_overwrite(upload_temp.temp_path, uploads_dir, display_filename)
+    return _link_staged_no_overwrite(upload_temp.temp_path, uploads_dir, display_filename, unlink_staged=unlink_staged)
+
+
+def _remove_staged_file(staged_path: os.PathLike[str] | str) -> None:
+    """Worker: remove a staged ``.part`` name whose inode is no longer held open.
+
+    The deferred half of ``unlink_staged=False``. Removal is best-effort: the
+    name is already unreachable through the uploads listing, and failing an
+    otherwise-committed upload over leftover staging bytes would be worse than
+    leaving them for the startup sweep.
+    """
+    try:
+        os.unlink(staged_path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning("Failed to remove staged upload file: %s", staged_path, exc_info=True)
 
 
 def _write_upload_chunk(upload_temp: _UploadTempFile, chunk: bytes) -> None:
@@ -300,10 +328,11 @@ def _abort_upload_temp(upload_temp: _UploadTempFile) -> None:
     try:
         upload_temp.handle.close()
     finally:
-        try:
-            os.unlink(upload_temp.temp_path)
-        except FileNotFoundError:
-            pass
+        # Best-effort, not ``os.unlink``: an abandoned duplication worker can
+        # still hold this inode open (Windows refuses to remove it then), and
+        # raising here would replace the caller's cancellation or original
+        # failure with a secondary permission error.
+        _remove_staged_file(upload_temp.temp_path)
 
 
 def _make_uploaded_paths_sandbox_readable(paths: list[os.PathLike[str] | str]) -> None:
@@ -329,7 +358,7 @@ def _list_uploaded_files_for_thread(thread_id: str, user_id: str) -> dict:
 
 def _delete_uploaded_file_for_thread(thread_id: str, filename: str, user_id: str) -> dict:
     uploads_dir = get_uploads_dir(thread_id, user_id=user_id)
-    return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
+    return delete_file_safe(uploads_dir, filename)
 
 
 async def _stream_upload_file(file: UploadFile) -> AsyncIterator[bytes]:

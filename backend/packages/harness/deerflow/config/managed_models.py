@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from deerflow.config.extensions_config import extensions_config_file_lock
 from deerflow.config.file_signature import get_config_signature
+from deerflow.config.managed_model_providers import resolve_managed_model_provider
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.runtime_paths import runtime_home
 
@@ -59,16 +60,16 @@ class ManagedModel(BaseModel):
         return {**self.model_dump(exclude={"api_key"}), "has_api_key": bool(self.api_key and self.api_key.get_secret_value()), "source": "managed"}
 
     def runtime_config(self) -> ModelConfig:
+        api_key = self.api_key.get_secret_value() if self.api_key else None
         return ModelConfig(
             name=self.name,
             display_name=self.display_name or self.name,
-            use="langchain_openai:ChatOpenAI",
             model=self.model,
-            base_url=self.base_url,
-            api_key=self.api_key.get_secret_value() if self.api_key and self.api_key.get_secret_value() else "not-required",
+            api_key=api_key or "not-required",
             supports_vision=self.supports_vision,
             context_window=self.context_window,
             max_tokens=self.max_tokens,
+            **resolve_managed_model_provider(self.base_url),
         )
 
 

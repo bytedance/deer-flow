@@ -1,5 +1,11 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+`list_uploaded_files` 的续页契约见 [FILE_UPLOAD.md](../../../../docs/FILE_UPLOAD.md)。
+游标绑定可信用户/线程、规范化过滤条件、本轮上传排除集合和目录元数据；身份与目录
+始终由 runtime 解析，游标只负责一致性校验。先过滤，再按修改时间降序和原始文件名
+排序分页；失效返回 `restart_required`，不得静默回到第一页或伪报末页。
+页大小及大纲选项不参与清单绑定；`total_count` 表示完整过滤结果，摘要只统计剩余项。
+
 `conversation.py` supplies the optional `read_conversation` tool. Ordinary lead
 assembly opts in only with a host reader; default, bootstrap, embedded and
 subagent assembly withhold it. The tool requires the worker-owned
@@ -23,7 +29,7 @@ Only standalone tool discovery without a model falls back to the base profile.
 3. **Built-in tools**:
    - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`); virtual paths use `resolve_runtime_user_id(runtime)` so validation resolves the same user-scoped outputs directory established by `ThreadDataMiddleware`
    - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware, which preserves text fallback and adds `artifact.human_input` for Web UI Human Input Cards). Beyond free text and single choice, the request-side v2 protocol supports `fields` (structured form card collecting several values at once; field types: text/textarea/number/select/multi_select/checkbox/date, validated and normalized server-side in the middleware — invalid entries are dropped, unknown types degrade to `text`; a standalone multi-select question is a one-field form). Replies stay on the v1 response protocol (`text`/`option`): the form card submits a readable text summary
-   - `view_image` - Read image bytes for vision-capable models; live sandbox bytes win for the same sandbox generation, replacement-sandbox recovery uses only SHA-256-verified synchronized host bytes, and async tool invocation drains blocking reads before cancellation may release the sandbox lease
+   - `view_image` - Read image bytes for vision-capable models; both sync and async entry points require `sandbox:execute` before any host or sandbox read. Live sandbox bytes win for the same sandbox generation, replacement-sandbox recovery uses only SHA-256-verified synchronized host bytes, and async tool invocation drains blocking reads before cancellation may release the sandbox lease
    - `setup_agent` - Bootstrap-only: persist a custom agent's `SOUL.md` and `config.yaml`. Re-bootstrapping preserves the owner's existing `display_name`. Bound only when `is_bootstrap=True`.
    - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
 4. **Subagent tool** (if enabled):

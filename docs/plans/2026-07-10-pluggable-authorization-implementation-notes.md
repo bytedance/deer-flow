@@ -483,6 +483,221 @@ Phase 1 最低验证要求：
   各追加条目。前端 effective-permissions 展示剩余项；management route 的 provider
   迁移（沿袭前阶段延期项）。
 
+### 2026-09-24 — Phase 5 / PR1 — 插件资源授权管道（targets、决策层、action 检查、management 守卫）
+
+- **背景：** 设计文档 `2026-09-23-extension-tool-authorization-coverage-gaps.md` 与实施规格
+  `2026-09-24-extension-tool-authorization-spec.md`（rev 5）把「插件工具/页面授权覆盖缺口」
+  切成三个 PR：PR1 = 插件管道（target 编码、provenance 展示、`plugin_authz`、action 检查、
+  management 守卫、provider 生命周期、公开 helper + 一次契约版本提升），PR2 = 工具链路
+  （middleware 声明工具、identity-bound exemption），PR3 = 页面切片。本条记录 PR1。
+- **决策（target 编码）：** 新增 `deerflow/authz/plugin_targets.py`，复合 target 一律
+  `"{namespace}/{part}"`，由唯一 `_join` 校验器编码：namespace 字符集与
+  `config/plugin_settings.py` 一致，action / surface id / management part 分别镜像 registry、
+  浏览器 surface 规则和两个模块常量。三个构造器各带 kind 检查，调用点禁止字符串拼接；
+  非法输入抛 `PluginTargetError`（`ValueError` 子类），绝不返回 best-effort 字符串。
+- **决策（RBAC 别名）：** `_RESOURCE_POLICY_KEYS` 新增 `"plugin_action" → "plugin_actions"`
+  与 `"plugin_management" → "plugin_management"`（自映射，合法，同 `sandbox`）。左值仍是请求
+  `resource`，右值是 `config.yaml` 键；把 `plugin_action` 当作 config 键会在构造期被拒
+  （reserved request alias）。`plugin_page → plugin_pages` 随 PR3 落地——该 PR 才产生
+  `plugin_page` 资源，缺 key = 不受限仍是不变的语义。
+- **决策（决策层）：** 新增 `deerflow/authz/plugin_authz.py`：六个决策函数 +
+  `PluginAuthorizationError`（携带 resource / target / reason_code / fail_closed）。disabled →
+  no-op；显式 deny 抛错；provider 异常、解析失败、malformed decision、无 principal 一律按
+  `fail_closed` 抛错或 warning 放行（镜像 sandbox gate 的语义，而不是工具过滤器的静默集合
+  语义）。异步批量决策用 `asyncio.to_thread(filter_resources)`，因此
+  `AuthorizationProvider.filter_resources` 的 docstring 增加一句线程安全要求（仅文档，
+  三个方法和签名不变）。
+- **决策（provider 生命周期）：** 插件请求路径**不**复用既有 route provider cache（同步、
+  在事件循环上构造、仅按 config identity 命中，且无 blocking-IO anchor）。新增按
+  `(config signature, loop_key)` 键的缓存：同步调用者用私有 `_SYNC_SLOT`，异步按
+  `id(asyncio.get_running_loop())`；两者互不串用，也不跨 loop 复用；config 读取与
+  `resolve_authorization_provider_spec` 在线程中执行，`construct_authorization_provider`
+  保持在调用方 loop 上；无 single-flight 锁（允许并发冷启动重复构造，已文档化）；
+  写入时清理已关闭 loop 的条目。
+- **决策（公开 helper + 契约版本）：** `deerflow_extension_api.auth` 新增
+  `EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY`、`EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY` 与
+  `require_plugin_management` / `arequire_plugin_management`（只读 `request.app.state`，保持
+  契约包不依赖 `deerflow`）。两者 fail closed：解析器缺失/失败/返回 `None`、未知 namespace、
+  非 `True` 答案都抛 `PermissionError`；`authorization.enabled: false` 时宿主回答 `True`
+  （no-op），因此不会开始拒绝企业路由，需要无条件底线的企业仍叠加 `require_admin`。同步形式
+  供 FastAPI `def` 端点（线程池）使用，异步端点使用 `a` 版本。契约版本 `0.2.3 → 0.2.4`
+  （`API_VERSION`、包 version、harness 精确 pin、lockfile、契约测试四处同步）。
+- **决策（action 检查）：** `POST /api/plugins/{ns}/actions/{name}` 在 action 解析之后
+  （未知 action 仍是 404，不改变存在性预言）、读取请求体之前插入一次 `plugin_action` 决策；
+  deny → `403 "Plugin action not permitted for your role."`，handler 不被调用，被拒调用者
+  无法占用 256 KiB 输入预算。
+- **证据：** 新增 `tests/test_plugin_targets.py`（字符集、跨 kind 同形 target、
+  management part、非法输入）、`tests/test_tool_provenance.py`（plugin tag 往返、错配 tag 被丢弃、
+  MCP 优先级、`deerflow_tool_source` 与模块回退标签保持）、
+  `tests/test_plugin_action_authorization.py`（allow/deny/未授权先于 body、
+  fail_closed/fail_open、disabled no-op、未知 action 404、internal 身份）、
+  `tests/test_plugin_management_guard.py`（helper 的 fail-closed 矩阵、宿主解析器安装与
+  未知 namespace、disabled 放行、loop 生命周期与只读投影前置）、
+  `tests/blocking_io/test_plugin_authorization.py`（config/discovery 不在事件循环上，
+  含 red→green teeth）；扩展 `test_rbac_authorization_provider.py`、`test_plugin_tools.py`、
+  `test_extension_api_contracts.py`。
+- **兼容性：** `authorization.enabled: false` 时 action 路由与 management helper 均为 no-op；
+  既有工具 resource 名与 `AuthorizationProvider` Protocol 未变；`config_version` 47 → 49
+  （与主线的并发 bump 竞争后按「每次更新 PR 前的固定清单」重取下一个可用号，见下方合并记录；
+  `config.example.yaml` + Helm values + Helm README 三处同步）；`config.example.yaml`
+  roles 新增 `plugin_actions` / `plugin_management` 两行并注明「省略 key = 该资源不受限」。
+- **否决方案：** 不为节省一次构造而复用 route cache（会把一个 loop 上的 loop-affine provider
+  交给另一个 loop）；不在请求边界拼接 target（必须走 `plugin_targets`）；不在 PR1 引入
+  `plugin_page` 别名（没有生产者，属 PR3）；不把插件检查做成第二个常开 gate。
+- **延期：** PR2（工具链路：middleware 声明工具、`LayerOneOutcome` 种子、build-local view、
+  identity-bound infrastructure exemption、`GuardrailRequest.tool_provenance`/`tool_identity`）、
+  PR3（`pages`/`shared_operation` 声明门、`extensions/catalog.py`、`/api/plugins` 只读投影、
+  前端页面 gate、企业示例与剩余文档）。
+
+### 2026-09-24 — Phase 5 / PR1 review round 1（PR #5842，willem-bd）
+
+- **背景：** 静态审查对 PR1 提出两条授权缺陷：P1 —— 决策层为了判断 `enabled`/`fail_closed`
+  会**第二次**读取配置，而 Gateway 已经用可读配置解析出 provider/principal；这次重读若在
+  热重载窗口内失败（文件缺失/暂时非法），`_enabled_config(None)` 会把「配置不可用」当作
+  「授权已关闭」，于是受保护的插件 action/management 请求在未询问 `fail_closed` 的情况下被放行。
+  P2 —— `AuthzDecision` 是普通 dataclass，自定义 provider 可以返回
+  `AuthzDecision(allow="false")`；`isinstance` 校验通过后真值字符串被当作 allow。
+- **决策（P1，采纳审查建议的第一种修法）：** 决策层不再自行读取配置。`plugin_authz` 的六个函数
+  把 `app_config` 改为**必填**，语义是「调用方用于解析 provider 的那个请求级快照」；
+  §5.3-C 的两个 Gateway 解析辅助函数改为返回 `(provider, principal, app_config)` 三元组，
+  并把同一快照交给执行层，因此一次请求只有一次配置读取，也不存在两次读取之间的状态漂移。
+  快照为 `None`（调用方完全读不到配置）时，视为**不可用**而非「已关闭」：
+  以 `authz.config_unavailable` + `fail_closed=True` 失败关闭（能放行的那个开关本身读不到）。
+  同时 Gateway 侧新增 `_plugin_app_config[_async]`，把「不存在 config.yaml」(`FileNotFoundError`
+  → 今日行为，无门禁) 与「配置存在但当前读不了/解析不了」（异常上抛 → 拒绝）区分开；
+  后者不再被 `safe_app_config` 的宽泛 `except Exception` 吞掉。
+- **决策（P2）：** 新增 `_validated_decision`，要求返回值是 `AuthzDecision` 且
+  `type(decision.allow) is bool`（同步 `authorize` 与异步 `aauthorize` 两条路径都走它）；
+  非 bool 的 `allow` 与 `AuthzDecision` 类型错误一样按 provider 失败处理，遵循 `fail_closed`。
+- **证据：** 新增回归测试并做了反证（revert 修复后必须变红）——
+  `test_unreadable_config_denies_the_action`（200 vs 403）、
+  `test_installed_resolver_denies_when_the_config_cannot_be_read`（True vs False）、
+  `test_a_non_bool_allow_is_a_malformed_decision[...]`（12 项红）与对应异步/路由用例、
+  `test_installed_resolver_allows_when_no_config_exists`（不存在 config.yaml 仍为放行）、
+  `test_no_config_at_all_keeps_todays_behavior`。全部 95 项插件套件在修复后通过。
+- **兼容性：** `authorization.enabled: false` 与「没有 config.yaml」两种情形行为不变；
+  harness 内部函数签名由「可选 app_config」变为「必填快照」，属 PR1 内的内部契约调整，
+  不涉及 `deerflow_extension_api` 公开面（公开 helper 的 fail-closed 语义只在“宿主读不到配置”
+  时更严格）。
+- **延期：** 不变（工具链路 PR2、页面切片 PR3）。
+
+### 2026-09-25 — Phase 5 / PR1 review round 2（PR #5842，willem-bd）
+
+- **背景：** 静态审查对当前 head（`62197d96`）再提两条：P1 —— `_plugin_app_config` 仍把
+  `FileNotFoundError`（请求时刻文件不在）映射成「授权从未启用」并返回 `None`，调用方据此放行
+  受保护的插件 action 与 management 路由；但真实 Gateway 不可能在没有可读 `config.yaml` 的情况下
+  启动（`app/gateway/app.py` 的 `lifespan` 用同一个访问器读配置，失败即 `RuntimeError`），
+  因此请求期的「缺失」只意味着这份配置在运行中变得不可用（热重载 / 原子替换窗口）。
+  P2 —— `_deny_reason_code` 在 provider 校验的 `try` 之外遍历 `decision.reasons`，
+  自定义 provider 返回 `AuthzDecision(allow=False, reasons=None)`（或任何不可迭代对象）时抛
+  `TypeError`，把一次拒绝变成未捕获错误，而不是配置好的授权失败（403）。
+- **决策（P1，采纳审查建议的第一种修法）：** 用「这个进程是否在跑一份配置」区分「不可用」与「未配置」，
+  而不是用异常类型或无条件失败关闭：
+  - 读取失败且进程**从未加载过配置**（`peek_loaded_app_config() is None`；`deerflow.config.app_config`
+    新增只读访问器，覆盖 `get_app_config()` 成功缓存与 `set_app_config()` 注入两种来源）：授权只能由
+    配置开启，故**无门禁**放行——与同一文件里的 `_get_route_authorization_config()`
+    （`(FileNotFoundError, RuntimeError)` → disabled）和 `sandbox_authz.safe_app_config()`
+    （“no readable config ⇒ the sandbox gate is a no-op … CI runners and direct-call tests”）同一条规则。
+    挂载 plugins router 的 e2e 宿主（`backend/extension_test_fixtures/bookmark_plugin_gateway.py`）
+    正属此类。
+  - 读取失败且进程**正在跑一份配置**：这是「可用但当前读不到」，异常上抛，
+    `resolve_/aresolve_plugin_authorization` 以 `_PluginAuthorizationUnavailable(fail_closed=…)`
+    失败处理，标志由**那份配置自己**给出（`enabled` 非 `True` → 无门禁；enabled → 取该策略的
+    `fail_closed`，默认 `true`）。于是启用授权且 fail-closed 的宿主在窗口内返回 403 / `False`，
+    不再像以前那样被当成「授权从未开启」放行。
+  - 文件存在但读不了/解析不了（非 `FileNotFoundError`）：无已加载配置时沿用 round 1 的 fail-closed
+    （能放行的那个开关读不到）；有已加载配置时同样取该策略的 `fail_closed`。
+  *被取代的规则：* round 1 记录的「不存在 `config.yaml` → 今日行为，无门禁」，以及本轮中间版本的
+  「任何读取失败都无条件失败关闭（`fail_closed=True`）」。
+- **修正记录：** 本轮先按审查字面实现「缺失即无条件失败关闭」，本地与 CI e2e 立刻变红
+  （`frontend/tests/e2e/bookmark-plugin.spec.ts` 的 save action 由 200 变 403——该宿主本来就
+  没有 `config.yaml`），且与 `_get_route_authorization_config()`、`safe_app_config()` 的既有规则
+  冲突。随后改为上面的「按进程已加载的配置」判定：没有配置的宿主行为不变，丢失配置的宿主不再被
+  当成未配置。
+- **决策（P2）：** 拒绝码提取改为全函数：`reasons` 不可迭代时直接退化为 `authz.denied`，
+  元素校验额外要求 `reason.code` 是非空 `str`。刻意**不**并入 `_validated_decision` 的「畸形判决」
+  判定：`allow` 已是真正的 `bool`，这条判决本身是合法拒绝；若按畸形判决走 `fail_closed`，
+  在 `fail_closed: false` 下会把明确拒绝翻成放行。
+- **证据：** 新增/改写回归测试并做了反证（修复前必须变红）——
+  `test_installed_resolver_allows_when_no_config_exists`（无配置宿主：True）、
+  `test_installed_resolver_applies_the_running_policy_when_the_config_disappears[True/False]`、
+  `test_installed_async_resolver_denies_when_the_config_disappears`、
+  `test_installed_resolver_stays_noop_when_the_lost_config_had_authorization_off`、
+  `test_a_lost_config_follows_the_running_policy[403/200]`、`test_no_config_at_all_keeps_todays_behavior`、
+  `test_peek_loaded_app_config_survives_a_missing_file`（文件删除后 `peek_loaded_app_config()`
+  仍返回已加载配置），以及 round 1 的 `test_unreadable_config_denies_the_action` /
+  `test_installed_resolver_denies_when_the_config_cannot_be_read`（非 `FileNotFoundError` 仍然 fail-closed）；
+  P2 侧 `test_malformed_reasons_keep_the_denial[...]` / `test_async_malformed_reasons_keep_the_denial[...]`
+  （`TypeError: 'NoneType' object is not iterable`，`plugin_authz.py:113`）。
+  e2e 层面复现了 spec 的后端一半：拉起 `extension_test_fixtures.bookmark_plugin_gateway` 后
+  POST `/api/plugins/community.bookmarks/actions/save`，中间版本 `403`（与 CI 的 3 个 bookmark 用例
+  失败一致），最终版本 `200`。验证：配置模块测试 41 项、插件/extension + blocking-IO 429 项、
+  `ruff check` 与 `format --check` 全绿。
+- **否决方案：** ①「缺失即无条件失败关闭」：与既有 `safe_app_config` / `_get_route_authorization_config`
+  规则冲突，并打断 e2e 宿主的插件 action（见上）。②「Gateway 侧发布 startup 快照」：状态要手动接线、
+  且只反映启动那一刻的策略（热重载后的新策略不会生效），改用配置模块自己缓存的「最后一次成功加载」
+  更准确且无需额外生命周期钩子。
+- **兼容性：** 没有配置的宿主（CI runner、直接调用、只挂 plugins router 的宿主）行为完全不变；
+  配置可读且 `authorization.enabled: false` 时不变（no-op）；只有「运行中配置消失/读不了」由
+  静默放行改为按该策略的 `fail_closed` 处理（默认拒绝）。
+- **延期：** 不变（工具链路 PR2、页面切片 PR3）。相邻风险已记录但未改：同一文件里的
+  `_get_route_authorization_config()`（model / skill / sandbox 路由门）对读取失败仍一律回退到
+  disabled，存在同类窗口；如需同样收紧应另开一条（影响面覆盖全部路由门，超出本轮范围）。
+
+### 2026-09-25 — Phase 5 / PR1 review round 3（PR #5842，willem-bd）
+
+- **背景：** 静态审查对当前 head（`a891e704`）追加一条 P3 —— round 2 的 P2 修复只挡住了
+  「`reasons` 不是 `Iterable`」，遍历本身仍在 provider 校验的 `try` 之外：生成器或自定义可迭代
+  对象可以满足 `isinstance(reasons, Iterable)`，却在 `__iter__`/`__next__` 中抛错，于是一次明确
+  拒绝仍会以未捕获错误（500）逃逸，而不是按配置的授权失败退化为 `authz.denied`。
+- **决策（采纳审查建议的第一种修法）：** `_deny_reason_code` 的**整段提取**（取属性、`Iterable`
+  判定、遍历）包进一个窄 `try/except Exception`，任何异常都降级为 `authz.denied`，并记一条
+  `logger.debug(..., exc_info=True)`；函数签名、返回值域与「拒绝仍是拒绝」的语义不变。
+  不采纳第二种修法（把 `reasons` 校验成声明的具体 list 形状）：合法 provider 返回 tuple 或生成器
+  形态的 `AuthzReason` 时，那会把**本来可读**的拒绝码一并降级为 `authz.denied`，属无谓的行为收窄；
+  「`Iterable` 判定 + 全函数提取」既保留合法可迭代对象，又对抛错对象收敛。
+- **证据：** 红先验证（修复前必须变红）——管理器层
+  `test_malformed_reasons_keep_the_denial[True|False-reasons2|reasons3]`（4 项）与异步
+  `test_async_malformed_reasons_keep_the_denial[reasons2|reasons3]`（2 项）修复前抛
+  `RuntimeError: reasons.__iter__ failed` / `RuntimeError: reasons.__next__ failed`
+  （`plugin_authz.py:127`），修复后降级为
+  `PluginAuthorizationError(reason_code="authz.denied")`；新增的 `_ExplodingReasons` 覆盖两种形态：
+  `__iter__` 直接抛，以及先产出一个非 `AuthzReason` 再从 `__next__` 抛。路由层
+  `test_unreadable_reasons_deny_instead_of_erroring[True|False]` 修复前让异常穿出路由（未捕获），
+  修复后 `403` 且 handler 未被调用——两种 `fail_closed` 取值下都保持拒绝
+  （`fail_closed: false` 不得把明确拒绝翻成放行）。验证：两个插件测试文件 115 项、
+  `tests/blocking_io` 163 项、`ruff check` 与 `ruff format --check` 全绿。
+- **兼容性：** 拒绝码提取的返回值域不变（`str`，无法读取时为 `authz.denied`）；只有「可迭代对象在
+  遍历时抛错」这一种输入从 500 变为降级后的 403。
+- **延期：** 不变（工具链路 PR2、页面切片 PR3）。相邻同类风险已记录但未改：
+  `deerflow/authz/adapter.py` 的 `_to_guardrail` 仍直接遍历 `d.reasons`，而消费它的
+  `GuardrailMiddleware` 把 provider 异常按 `fail_closed` 处理，因此 `fail_closed: false` 时
+  「显式拒绝 + reasons 遍历抛错」可能被翻成放行；该文件不在本 PR 面内（工具链路），
+  如需同样收敛应随 PR2 一并处理。
+
+### 2026-09-25 — Phase 5 / PR1 合并主线 `3a862780`（config_version 竞争）
+
+- **背景：** 合并最新 `upstream/main`（`3a862780`）时只有 `config.example.yaml` 一处文本冲突：
+  冲突块本身是主线新增的 `lead_prompt_overlay` 注释段（本 PR 该位置为空），取主线即可。
+  真正的语义问题是 `config_version`：merge-base 为 47，本 PR 与主线**各自** bump 到同一个 48
+  （本 PR 为 `authorization` / roles 新增字段，主线为 prompt overlay 等）。该字段只驱动
+  `AppConfig._check_config_version()` 的过期提示（`backend/docs/CONFIGURATION.md`），两边同号会让
+  「已从主线 48 升级过的 `config.yaml`」收不到缺 `authorization` 字段的提示。
+- **决策：** 按本文件「每次更新 PR 前的固定清单」执行：先 fetch 最新 `upstream/main`、读最新值
+  （48），取下一个可用号 **49**，并在三处镜像同步（`config.example.yaml`、
+  `deploy/helm/deer-flow/values.yaml`、`deploy/helm/deer-flow/README.md`）；
+  `frontend/src/content/{en,zh}/harness/checkpoints/reference.mdx` 里「current `config_version`」
+  也一并改为 49（该文档由主线新增，写成时值为 47）。冲突块取主线；本 PR 的 `authorization:`
+  段与 `peek_loaded_app_config()` 均在自动合并结果中保留。
+- **证据：** `scripts/check_config_version.sh` 通过（example=49 / chart=49）；
+  `backend/tests/test_config_version.py` 全绿（含用真实 `scripts/config-upgrade.sh` 跑
+  v26 → 当前版本的升级用例，其 `expected_version` 直接读 `config.example.yaml`）。
+- **兼容性：** 仅提示语义变化，运行时行为不变。已按主线 48 升级的 `config.yaml` 会收到一次
+  “outdated” 提示，可 `make config-upgrade` 合并 `authorization` 默认段——这正是版本号存在的目的。
+- **延期：** 不变（工具链路 PR2、页面切片 PR3）。相邻且非本轮产生的文档漂移未改：上述
+  checkpoints 文档里的 `appcfg:531-575` / `appcfg:570-575` 行号引用在主线自己新增 prompt overlay
+  后已失准（当前 `_check_config_version` 位于 `appcfg:534-576`），不属本 PR 面内。
+
 ### 新记录模板
 
 ```markdown

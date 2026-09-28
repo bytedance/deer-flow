@@ -20,6 +20,7 @@ from collections.abc import AsyncIterator
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, get_stream_bridge_config
+from deerflow.utils.file_io import await_drained
 
 from .base import DEFAULT_HEARTBEAT_INTERVAL_SECONDS, StreamBridge
 
@@ -71,7 +72,7 @@ async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterat
         try:
             yield bridge
         finally:
-            await bridge.close()
+            await await_drained(bridge.close())
         return
 
     if config.type == "redis":
@@ -95,7 +96,7 @@ async def make_stream_bridge(app_config: AppConfig | None = None) -> AsyncIterat
         try:
             yield bridge
         finally:
-            await bridge.close()
+            await await_drained(bridge.close())
         return
 
     raise ValueError(f"Unknown stream bridge type: {config.type!r}")

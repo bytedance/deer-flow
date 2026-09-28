@@ -81,7 +81,11 @@ async def _auto_create_postgres_db(url: str) -> None:
             await conn.execute(text(f'CREATE DATABASE "{db_name}"'))
         logger.info("Auto-created PostgreSQL database: %s", db_name)
     finally:
-        await maint_engine.dispose()
+        # Drain: the maintenance engine is local to this helper, so an
+        # abandoned dispose leaves its pool to the ``postgres`` database with
+        # nothing left to close it. Host cancellation must therefore be
+        # delivered only after disposal actually finishes.
+        await await_drained(maint_engine.dispose())
 
 
 async def init_engine(

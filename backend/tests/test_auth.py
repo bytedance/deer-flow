@@ -425,6 +425,31 @@ def test_sqlite_round_trip_new_fields():
     asyncio.run(_run())
 
 
+def test_user_repository_lists_registered_user_ids(tmp_path):
+    import asyncio
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        await init_engine(
+            "sqlite",
+            url=f"sqlite+aiosqlite:///{tmp_path}/scratch.db",
+            sqlite_dir=str(tmp_path),
+        )
+        try:
+            repo = SQLiteUserRepository(get_session_factory())
+            first = await repo.create_user(User(email="first@test.com", password_hash="hash"))
+            second = await repo.create_user(User(email="second@test.com", password_hash="hash"))
+
+            assert await repo.list_user_ids() == [str(first.id), str(second.id)]
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
 # ── IntegrityError classification (OAuth conflict vs. everything else) ──────
 #
 # Regression coverage for a misclassification bug: create_user's

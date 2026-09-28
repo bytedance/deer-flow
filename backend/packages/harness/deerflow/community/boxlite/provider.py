@@ -115,7 +115,18 @@ class _EventLoopThread:
     def run(self, coro: Awaitable[T], *, timeout: float | None = None) -> T:
         if self._loop is None:
             raise RuntimeError("BoxLite event loop is not ready")
-        return asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)
+        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        try:
+            return future.result(timeout)
+        except TimeoutError:
+            # If the bridge wait itself timed out, stop the loop-affine
+            # operation instead of letting it keep mutating the sandbox after
+            # the synchronous caller has already observed a timeout. A
+            # coroutine that completed by raising its own TimeoutError is
+            # already done and must not be reclassified here.
+            if not future.done():
+                future.cancel()
+            raise
 
     def close(self) -> None:
         if self._loop is None:

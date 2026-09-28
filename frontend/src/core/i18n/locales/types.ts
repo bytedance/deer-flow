@@ -6,7 +6,34 @@ export interface Translations {
     localName: string;
   };
 
+  extensions: {
+    title: string;
+    navigation: string;
+    search: string;
+    loading: string;
+    pageLoading: string;
+    unavailable: string;
+    retry: string;
+    reload: string;
+    reloadAll: string;
+    all: string;
+    notInstalled: string;
+    enabledManaged: string;
+    disabledManaged: string;
+    deploymentHint: string;
+    moduleUnavailable: string;
+    noResults: string;
+    pageUnavailable: string;
+    pageUnavailableHint: string;
+    viewAll: string;
+    viewFailed: string;
+    actionFailed: string;
+    view: (name: string) => string;
+    open: (name: string) => string;
+  };
+
   capabilities: {
+    toolsAndIntegrations: string;
     icon: {
       title: string;
       upload: string;
@@ -131,6 +158,19 @@ export interface Translations {
     showArtifacts: string;
     browser: string;
     showBrowser: string;
+  };
+
+  skillUsage: {
+    used: string;
+    title: string;
+    name: string;
+    description: string;
+    builtIn: string;
+    custom: string;
+    integration: string;
+    legacy: string;
+    copy: string;
+    partial: string;
   };
 
   runDuration: {
@@ -308,6 +348,10 @@ export interface Translations {
     reasoningEffortMediumDescription: string;
     reasoningEffortHigh: string;
     reasoningEffortHighDescription: string;
+    reasoningEffortXhigh: string;
+    reasoningEffortXhighDescription: string;
+    reasoningEffortMax: string;
+    reasoningEffortMaxDescription: string;
     surpriseMe: string;
     surpriseMePrompt: string;
     followupLoading: string;
@@ -1176,6 +1220,7 @@ export interface Translations {
         work: string;
         personal: string;
         topOfMind: string;
+        cognitiveStyle: string;
         historyBackground: string;
         recentMonths: string;
         earlierContext: string;
@@ -1194,6 +1239,7 @@ export interface Translations {
           };
           content: string;
           source: string;
+          unknown: string;
           createdAt: string;
           view: string;
         };
@@ -1407,6 +1453,7 @@ export interface Translations {
       exportOptional: string;
       exportRequired: string;
       exportUndeclared: string;
+      exportNone: string;
       exportScope: string;
       exportWarnings: string;
       exportWarningDescription: string;

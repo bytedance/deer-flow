@@ -1499,6 +1499,8 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
+    # Validate external roles before materializing a graph or reserving a write.
+    values = strip_server_owned_state_metadata(dict(body.values or {}))
     if body.checkpoint_id is not None:
         if not body.checkpoint_id:
             raise HTTPException(status_code=404, detail="Checkpoint not found")
@@ -1526,12 +1528,6 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         as_node=mutation_node,
         checkpoint_id=body.checkpoint_id,
     )
-    # These values go straight into a checkpoint, so they need the same
-    # server-owned-metadata stripping the run path gets inside normalize_input.
-    # Without it an authenticated client can persist forged provenance and
-    # transform trails, which later readers are entitled to treat as facts
-    # about what the host itself did.
-    values = strip_server_owned_state_metadata(dict(body.values or {}))
     writable_channels = graph_writable_channels(getattr(accessor, "graph", None))
     if writable_channels is not None:
         unknown_fields = sorted(set(values) - writable_channels)

@@ -7,10 +7,13 @@ import pytest
 
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.subagents import batch_service as service_module
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
 from deerflow.subagents.batch_service import SubagentBatchService
 from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+_MISSING = object()
 
 
 class FakeStatus(Enum):
@@ -70,7 +73,65 @@ async def test_submit_keeps_batch_running_limit_separate_from_one_process_capaci
 
 
 @pytest.mark.asyncio
-async def test_execute_item_marks_real_running_then_persists_terminal_result(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"max_running_items": 0}, "max_running_items must be between 1 and 64"),
+        ({"max_live_items": 1, "max_running_items": 0}, "max_running_items must be between 1 and 64"),
+        ({"max_live_items": 0}, "max_live_items must be between 1 and 1000"),
+    ],
+)
+async def test_submit_reports_an_explicit_zero_limit_by_name(overrides: dict[str, int], expected: str) -> None:
+    repository = SimpleNamespace(create_batch=AsyncMock(return_value={"id": "batch-1"}))
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+
+    with pytest.raises(ValueError, match=expected):
+        await service.submit(_request(**overrides))
+
+    repository.create_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "live", "running"),
+    [
+        ({}, 100, 3),
+        ({"max_live_items": 40}, 40, 3),
+        ({"max_live_items": 40, "max_running_items": 5}, 40, 5),
+    ],
+)
+async def test_submit_defaults_only_the_limits_the_caller_omitted(overrides: dict[str, int], live: int, running: int) -> None:
+    repository = SimpleNamespace(create_batch=AsyncMock(return_value={"id": "batch-1"}))
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+    )
+
+    await service.submit(_request(**overrides))
+
+    kwargs = repository.create_batch.await_args.kwargs
+    assert (kwargs["max_live_items"], kwargs["max_running_items"]) == (live, running)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("thread_incarnation", "expected_present"),
+    [
+        ("incarnation-1", True),
+        (None, True),
+        (_MISSING, False),
+    ],
+)
+async def test_execute_item_marks_real_running_then_persists_terminal_result(
+    monkeypatch,
+    thread_incarnation,
+    expected_present,
+) -> None:
     result = SimpleNamespace(
         status=FakeStatus.RUNNING,
         result=None,
@@ -78,6 +139,10 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
         stop_reason=None,
         token_usage_records=None,
     )
+
+    execution_spec = dict(_request().execution_spec)
+    if thread_incarnation is not _MISSING:
+        execution_spec[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
 
     class Repository:
         def __init__(self) -> None:
@@ -95,7 +160,7 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
                         "thread_id": "thread-1",
                         "user_id": "user-1",
                         "run_id": "run-1",
-                        "execution_spec": _request().execution_spec,
+                        "execution_spec": execution_spec,
                     },
                 }
             ]
@@ -152,6 +217,9 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
         "mode": "selected",
         "dataset_ids": ["dataset-1"],
     }
+    assert (THREAD_INCARNATION_CONTEXT_KEY in executor_kwargs) is expected_present
+    if expected_present:
+        assert executor_kwargs[THREAD_INCARNATION_CONTEXT_KEY] is thread_incarnation
 
 
 @pytest.mark.asyncio

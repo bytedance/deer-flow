@@ -54,9 +54,20 @@ services:
       - "${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
-    command: >
-      sh -c "cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
-      && nginx -g 'daemon off;'"
+    # Same launcher as the dev compose file and the Helm chart: nginx.conf
+    # listens on [::]:2026 as well, and on a host with IPv6 disabled that
+    # listen makes nginx exit at startup (socket() ... 97: Address family not
+    # supported by protocol), so the container restart-loops and `make up`
+    # never becomes healthy. Strip the IPv6 listen when the kernel has no
+    # IPv6, and exec nginx so it is PID 1 for signal handling.
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
+        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026[[:space:]]/d' /etc/nginx/nginx.conf
+        exec nginx -g 'daemon off;'
     depends_on:
       frontend:
         condition: service_started

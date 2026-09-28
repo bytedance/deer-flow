@@ -28,7 +28,11 @@ patches keep binding to the one pipeline both callers use.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import shutil
+import tempfile
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -37,7 +41,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 
 from deerflow.config.app_config import AppConfig
-from deerflow.utils.file_io import run_file_io
+from deerflow.utils.file_io import await_drained, run_file_io
 
 if TYPE_CHECKING:
     from fastapi import Request
@@ -46,6 +50,58 @@ if TYPE_CHECKING:
     from app.gateway.routers.uploads import UploadLimits
 
 logger = logging.getLogger(__name__)
+
+
+def _close_fd(fd: int | None) -> None:
+    """Close a conversion-source descriptor, tolerating an already-closed one."""
+    if fd is None:
+        return
+    try:
+        os.close(fd)
+    except OSError:
+        logger.warning("Failed to close upload conversion descriptor", exc_info=True)
+
+
+def _close_abandoned_fd(duplication: asyncio.Future) -> None:
+    """Close a descriptor whose owner was cancelled before it could take it."""
+    if duplication.cancelled() or duplication.exception() is not None:
+        return
+    _close_fd(duplication.result())
+
+
+async def _dup_for_conversion(fileno: int) -> int:
+    """Duplicate *fileno* off-thread so cancellation cannot strand the copy.
+
+    ``run_file_io`` cannot interrupt its worker: cancelling the await only
+    abandons the result, and here that result is an open descriptor nothing
+    would ever close — repeated cancellations would exhaust the Gateway's
+    descriptor limit and pin the staged bytes of every unlinked upload. The
+    duplication therefore runs as its own task, shielded from the caller's
+    cancellation, and closes itself if the caller is gone by the time the
+    worker finishes.
+    """
+    duplication = asyncio.ensure_future(run_file_io(os.dup, fileno))
+    try:
+        return await asyncio.shield(duplication)
+    except BaseException:
+        duplication.add_done_callback(_close_abandoned_fd)
+        raise
+
+
+def _copy_fd_to_path(fd: int, dest: Path) -> None:
+    """Copy the bytes behind *fd* to *dest*, then close *fd*.
+
+    Reads through the descriptor, not the name it was committed under, so the
+    copy is the content this request wrote even if the name has since been
+    replaced.
+    """
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        with open(dest, "wb") as out:
+            while chunk := os.read(fd, 1 << 20):
+                out.write(chunk)
+    finally:
+        _close_fd(fd)
 
 
 def _uploads() -> Any:
@@ -142,7 +198,7 @@ class ThreadUploadIngestionService:
                 user_id=self._user_id,
                 app_config=self._config,
                 owner_prefix="gateway:upload",
-                release_on_last=False,
+                release_on_last=True,
             )
             self._sandbox = self._sandbox_lease.sandbox
             if not self._sandbox_lease.denied and self._sandbox is None:
@@ -192,6 +248,8 @@ class ThreadUploadIngestionService:
 
         file_size = 0
         upload_temp = None
+        convert_source_fd: int | None = None
+        deferred_staged_path: Path | None = None
         try:
             upload_temp = await run_file_io(uploads._prepare_upload_destination, self._uploads_dir, safe_filename)
             async for chunk in chunks:
@@ -202,21 +260,48 @@ class ThreadUploadIngestionService:
                 if self._total_size > self._limits.max_total_size:
                     raise HTTPException(status_code=413, detail="Total upload size too large")
                 await run_file_io(uploads._write_upload_chunk, upload_temp, chunk)
+            if self._auto_convert and Path(safe_filename).suffix.lower() in uploads.CONVERTIBLE_EXTENSIONS:
+                # Conversion must read the bytes this request staged. Once the
+                # name is committed a sandbox process can replace it with a
+                # symlink, and converting by name would then pull a host file
+                # into this thread's uploads. A descriptor on the staged inode
+                # cannot be redirected that way.
+                convert_source_fd = await _dup_for_conversion(upload_temp.handle.fileno())
             # Link-commit with collision retry: the FileExistsError arm
             # leaves the staged part in place for the retry under the next
             # suffix (the handle's second close is idempotent).
+            #
+            # The conversion descriptor above keeps the staged inode open, and
+            # Windows refuses to remove a file that still has an open handle.
+            # Publishing is therefore split from removing the staged name:
+            # this request keeps ownership of the staged path and removes it
+            # once the descriptor is released below.
             while True:
                 try:
-                    file_path = await run_file_io(uploads._commit_upload_temp_no_overwrite, upload_temp, self._uploads_dir, safe_filename)
+                    file_path = await run_file_io(
+                        uploads._commit_upload_temp_no_overwrite,
+                        upload_temp,
+                        self._uploads_dir,
+                        safe_filename,
+                        unlink_staged=convert_source_fd is None,
+                    )
                     break
                 except FileExistsError:
                     safe_filename = uploads.claim_unique_filename(safe_filename, self._seen_filenames)
+            if convert_source_fd is not None:
+                deferred_staged_path = upload_temp.temp_path
             upload_temp = None
         except uploads.UnsafeUploadPathError as exc:
+            _close_fd(convert_source_fd)
             if upload_temp is not None:
                 await run_file_io(uploads._abort_upload_temp, upload_temp)
             raise UnsafeUploadDestinationError(safe_filename) from exc
-        except Exception:
+        except BaseException:
+            # BaseException, not Exception: a cancellation between the
+            # duplication and the commit would otherwise leave the descriptor
+            # open, and nothing downstream owns it yet.
+            _close_fd(convert_source_fd)
+            convert_source_fd = None
             if upload_temp is not None:
                 await run_file_io(uploads._abort_upload_temp, upload_temp)
             raise
@@ -237,7 +322,7 @@ class ThreadUploadIngestionService:
             file_info["original_filename"] = original_filename
         logger.info(f"Saved file: {safe_filename} ({file_size} bytes) to {file_info['path']}")
 
-        if self._auto_convert and file_path.suffix.lower() in uploads.CONVERTIBLE_EXTENSIONS:
+        if convert_source_fd is not None:
             # The companion gets the same atomic no-overwrite commit as the
             # original: staged under the hidden .part pattern, link-committed
             # with next-suffix retry — conversion can never silently truncate
@@ -246,12 +331,39 @@ class ThreadUploadIngestionService:
             provisional_md_name = Path(safe_filename).with_suffix(".md").name
             unique_md_name = uploads.claim_unique_filename(provisional_md_name, self._seen_filenames)
             md_staging = self._uploads_dir / f"{uploads.UPLOAD_STAGING_PREFIX}{uuid.uuid4().hex}{uploads.UPLOAD_STAGING_SUFFIX}"
+            # The staged bytes are copied out of the sandbox-writable tree and
+            # converted there; the uploads dir only ever receives the result.
+            # Creating that directory belongs inside the cleanup scope: it can
+            # fail on its own (a full or unwritable temporary filesystem), and
+            # the descriptor is already owned here — leaking it would also hold
+            # the unlinked staged bytes until the process exits.
+            private_dir: Path | None = None
             try:
-                md_staged = await uploads.convert_file_to_markdown(file_path, output_path=md_staging)
+                private_dir = Path(await run_file_io(tempfile.mkdtemp, "-deerflow-convert"))
+                conversion_source = private_dir / safe_filename
+                # Hand the descriptor over before the call: the copy closes it
+                # even when it fails, so this scope must not close it again and
+                # risk closing an unrelated descriptor that reused the number.
+                # await_drained, not a bare await: a cancelled await would
+                # cancel the queued executor job before its worker — and its
+                # closing finally — ever ran, and draining also keeps the
+                # worker from writing into a private directory this scope has
+                # already removed.
+                staged_fd, convert_source_fd = convert_source_fd, None
+                await await_drained(run_file_io(_copy_fd_to_path, staged_fd, conversion_source))
+                md_staged = await uploads.convert_file_to_markdown(conversion_source, output_path=md_staging)
             except Exception:
                 self._seen_filenames.discard(unique_md_name)
                 await run_file_io(md_staging.unlink, True)
                 raise
+            finally:
+                _close_fd(convert_source_fd)
+                if deferred_staged_path is not None:
+                    # The descriptor that pinned the staged inode is released
+                    # by now, so the deferred staged-name removal can land.
+                    await run_file_io(uploads._remove_staged_file, deferred_staged_path)
+                if private_dir is not None:
+                    await run_file_io(shutil.rmtree, private_dir, True)
             if not md_staged:
                 # Conversion failed and wrote nothing (or a partial staged
                 # file, removed here): release the claim; holding it would

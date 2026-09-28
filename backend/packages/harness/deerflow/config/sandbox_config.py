@@ -1,12 +1,18 @@
 import ipaddress
+import math
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
 SandboxNetworkMode = Literal["open", "isolated", "allowlist"]
 SandboxNetworkApproval = Literal["deny", "prompt"]
+
+# Redis converts relative PX values to absolute Unix-millisecond timestamps.
+# Reserving half the signed range for that timestamp keeps accepted TTLs usable
+# without making config validation depend on the current clock.
+_REDIS_MAX_SAFE_TTL_MILLISECONDS = (2**63 - 1) // 2
 
 
 class SandboxNetworkConfig(BaseModel):
@@ -110,6 +116,19 @@ class SandboxOwnershipConfig(BaseModel):
         default="deerflow:sandbox:owner",
         description="Redis key prefix for ownership leases. Only applies to the redis ownership type.",
     )
+
+    @model_validator(mode="after")
+    def validate_lease_ttl(self) -> "SandboxOwnershipConfig":
+        lease_ttl_seconds = self.renewal_interval_seconds * self.ttl_multiplier
+        if not math.isfinite(lease_ttl_seconds):
+            raise ValueError("sandbox.ownership lease TTL must be finite")
+        if self.type == "redis":
+            lease_ttl_milliseconds = lease_ttl_seconds * 1000
+            if lease_ttl_milliseconds < 1:
+                raise ValueError("sandbox.ownership Redis lease TTL must be at least 1 millisecond")
+            if lease_ttl_milliseconds > _REDIS_MAX_SAFE_TTL_MILLISECONDS:
+                raise ValueError("sandbox.ownership Redis lease TTL must fit the signed 64-bit millisecond range with absolute-expiry headroom")
+        return self
 
 
 class VolumeMountConfig(BaseModel):
@@ -258,13 +277,19 @@ class SandboxConfig(BaseModel):
         ge=0,
         description="Maximum characters to keep from ls tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
     )
-    bash_command_timeout: int = Field(
+    bash_command_timeout: float = Field(
         default=600,
         gt=0,
+        allow_inf_nan=False,
         description=(
-            "Maximum wall-clock seconds a bash command may run before it is terminated. LocalSandboxProvider applies it to the host process group; "
-            "OpenSandboxProvider forwards it to the remote exec service when a call has no explicit timeout. Keeps a blocking foreground command "
-            "(e.g. an un-backgrounded server) from hanging the turn; background `&` processes return immediately."
+            "Provider command deadline. AIO images on the supported semver line "
+            "(1.9.3+, recommended 1.11.0) enforce it server-side through "
+            "`hard_timeout`; the frozen legacy `all-in-one-sandbox:latest` image "
+            "only gets the bounded host-side request. `bash_command_timeout` is "
+            "used by providers that explicitly wire this setting (currently "
+            "LocalSandbox, AioSandbox, and OpenSandbox). Other providers retain "
+            "their provider-specific command defaults unless a caller supplies an "
+            "explicit timeout."
         ),
     )
 

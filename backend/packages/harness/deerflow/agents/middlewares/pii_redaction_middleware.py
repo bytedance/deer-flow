@@ -2,33 +2,38 @@
 
 Detects personally identifiable information in the two untrusted-content entry
 points — genuine user messages and remote-content tool results — and rewrites
-it to irreversible placeholders (``[EMAIL_1]`` …) before it reaches the model.
+it to keyed, value-derived placeholders (128-bit HMAC digests over base-26
+letters, keyed by the deployment-scoped ``token_secret``) before it reaches
+the model.
 Complements the structural guardrails: ``InputSanitizationMiddleware``
 neutralizes injection tags in user input and ``ToolResultSanitizationMiddleware``
 does the same for remote tool results; neither inspects *content* for PII.
 
 v1 is deterministic-only: fixed regex detectors with checksum validation where
 the identifier format defines one (Luhn for card numbers, mod-11 for CN resident
-IDs and CPF), no model calls, no new dependencies. Redaction is irreversible —
-no mapping table is stored, so there is nothing to protect and no
-re-identification path.
+IDs and CPF), no model calls, no new dependencies. Placeholders are HMAC-keyed
+with the deployment-scoped ``token_secret`` (required whenever redaction is
+enabled) and no mapping table is stored, so tokens cannot be re-derived
+offline — neither from the repository nor from an observed token.
 
 Scope model (mirrors the structural guardrails):
 
 * the user-message rewrite is request-scoped — thread state keeps the raw text,
   so the UI still shows the original message and the whole conversation is
-  re-redacted on every model call. Existing summary/message placeholders reserve
-  their indices before new values are assigned, avoiding collisions after
-  compaction. Without a persisted mapping, a repeated raw value cannot be
-  linked to a placeholder whose source was compacted away;
+  re-redacted on every model call. Placeholders are value-derived
+  (a 128-bit HMAC of the value under the deployment secret): the same raw
+  value always renders the same token, so identities stay stable across
+  turns, compaction, enqueues, and downstream content-signature
+  deduplication — without any stored mapping;
 * tool-result redaction runs at the tool boundary (``wrap_tool_call``) with the
   same allowlist as ``ToolResultSanitizationMiddleware`` (first-party web tools
   by name, MCP tools via their ``deerflow_mcp`` tag), so redacted text is what
-  enters model context in the first place; placeholders restart per result;
+  enters model context in the first place;
 * subagents are covered because ``build_subagent_runtime_middlewares`` reuses
   this base;
-* NOT covered in v1: the memory-extraction path (follow-up slice per the issue
-  discussion). Allowlisted tool results are redacted before budget externalization.
+* The memory-enqueue path is covered by the follow-up slice (#5577):
+  ``redact_queued_messages`` (memory middleware) applies the same configured
+  policy to the extraction payloads queued for the memory backend.
 * The compaction and durable-context seams run outside ``wrap_model_call``;
   :func:`redact_text` is the shared entry point they call, wired from
   SummarizationMiddleware (compaction input) and DurableContextMiddleware
@@ -45,6 +50,8 @@ gates did not claim.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
@@ -202,55 +209,74 @@ def redact_text(text: str | None, config: PiiRedactionConfig | None) -> str | No
     """
     if config is None or not config.enabled or not isinstance(text, str) or not text:
         return text
-    return _Redactor(active_pii_detectors(config)).redact(text)
+    return _make_redactor(config).redact(text)
 
 
 def redact_texts(texts: Sequence[str], config: PiiRedactionConfig | None) -> list[str]:
-    """Redact related text fields with one allocation scope, before truncation."""
-    redactor = _Redactor(active_pii_detectors(config))
-    for text in texts:
-        redactor.reserve(text)
+    """Redact related text fields, before truncation."""
+    redactor = _make_redactor(config)
     return [redactor.redact(text) for text in texts]
 
 
-# Bound the numeric field before int() conversion; generated indices are tiny.
-_PLACEHOLDER_PATTERN = re.compile(r"\[(EMAIL|API_KEY|NATIONAL_ID|CREDIT_CARD|PHONE)_([1-9][0-9]{0,19})\]")
+def _make_redactor(config: PiiRedactionConfig | None) -> _Redactor:
+    """Build the scan redactor: active detectors + the configured token key."""
+    if config is None:
+        return _Redactor((), None)
+    return _Redactor(active_pii_detectors(config), config.token_secret)
+
+
+def _placeholder_token(category: str, value: str, token_key: str) -> str:
+    """Value-derived, deterministic placeholder (128-bit HMAC digest, base-26 letters).
+
+    Three properties the token format must uphold:
+
+    * **Value-derived** — sequential allocation is order-dependent: the same
+      unchanged message re-redacted in a later batch can get a different
+      token, which breaks downstream content-signature deduplication (e.g.
+      OpenViking capture) and cross-turn identity. A pure function of the
+      matched value keeps the token stable across batches, seams, and
+      enqueues, with no shared state and no stored mapping;
+    * **Letters-only** — the digest is encoded over ``a-z`` instead of hex, so
+      a minted token contains no digit runs and can never satisfy the
+      digit-anchored detectors that run later in the pinned order (no nested
+      ``[EMAIL_…[PHONE_…]…`` corruption);
+    * **Deployment-scoped linkability** — the digest is an HMAC over the
+      deployment-scoped ``token_secret``: tokens are linkable only within one
+      deployment and cannot be re-derived offline without the secret. The
+      config model rejects enabling redaction without a non-empty secret, and
+      the empty-key guard below is the backstop that keeps every code path on
+      keyed digests (an unkeyed digest would be a publicly computable
+      fingerprint, linkable across deployments and confirmable by guessing
+      for low-entropy values). 128 bits keep distinct identities
+      collision-free at any realistic volume.
+    """
+    if not token_key:
+        raise ValueError("placeholder tokens require the configured non-empty token_secret")
+    key_bytes = token_key.encode("utf-8")
+    digest = hmac.new(key_bytes, f"{category}\x00{value}".encode(), hashlib.sha256).digest()
+    alphabet = "abcdefghijklmnopqrstuvwxyz"
+    number = int.from_bytes(digest[:16], "big")
+    letters = []
+    for _ in range(27):
+        number, rem = divmod(number, 26)
+        letters.append(alphabet[rem])
+    return f"[{category.upper()}_{''.join(letters)}]"  # noqa: FS003
 
 
 class _Redactor:
-    """Per-scan redaction state: one stable placeholder per distinct value.
+    """Applies the active detectors, in pinned order, to one piece of text.
 
-    A single instance covers one scan (one model request, or one tool result),
-    so identical raw values in that scan render the same placeholder. Existing
-    tokens reserve indices but cannot recover compacted raw-value identities. Placeholders are irreversible — the mapping lives only as
-    long as this instance.
+    Stateless by design: the placeholder is a pure function of the matched
+    value (see :func:`_placeholder_token`), so identical values render the
+    same token within a scan, across scans, across enqueues, and across every
+    seam that shares this module.
     """
 
-    def __init__(self, detectors: Sequence[_Detector]) -> None:
+    def __init__(self, detectors: Sequence[_Detector], token_key: str | None = None) -> None:
         self._detectors = detectors
-        self._tokens: dict[tuple[str, str], str] = {}
-        self._counts: dict[str, int] = {}
-
-    def reserve(self, content: object) -> None:
-        """Reserve visible placeholders before assigning any new values.
-
-        Only placeholder counters survive compaction, never raw-value mappings.
-        Pre-scan all fields so a token in a later block cannot collide with a
-        new value in an earlier one.
-        """
-        if isinstance(content, str):
-            for match in _PLACEHOLDER_PATTERN.finditer(content):
-                name, index = match.groups()
-                self._counts[name.lower()] = max(self._counts.get(name.lower(), 0), int(index))
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, str):
-                    self.reserve(block)
-                elif isinstance(block, dict) and block.get("type") == "text":
-                    self.reserve(block.get("text"))
+        self._token_key = token_key
 
     def redact(self, text: str) -> str:
-        self.reserve(text)
         for detector in self._detectors:
             text = detector.pattern.sub(self._replacer(detector), text)
         return text
@@ -260,13 +286,7 @@ class _Redactor:
             value = match.group(0)
             if detector.validator is not None and not detector.validator(value):
                 return value
-            key = (detector.name, value)
-            token = self._tokens.get(key)
-            if token is None:
-                self._counts[detector.name] = self._counts.get(detector.name, 0) + 1
-                token = f"[{detector.name.upper()}_{self._counts[detector.name]}]"
-                self._tokens[key] = token
-            return token
+            return _placeholder_token(detector.name, value, self._token_key)
 
         return replace
 
@@ -275,10 +295,12 @@ def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]
     """Redact *content*, preserving its shape. Returns ``(content, changed)``.
 
     Handles the two shapes message content takes — plain ``str`` and a list of
-    content blocks. Non-text blocks (images, etc.) pass through untouched.
-    The input is never mutated.
+    content blocks. Blocks pass through untouched except for any string-valued
+    ``text`` field they carry: lenient downstream consumers (e.g. DeerMem's
+    ``format_conversation_for_update``) read ``p.get("text")`` regardless of
+    the block type, so a non-text block must not smuggle raw PII past the
+    helper. The input is never mutated.
     """
-    redactor.reserve(content)
     if isinstance(content, str):
         redacted = redactor.redact(content)
         return redacted, redacted != content
@@ -291,7 +313,7 @@ def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]
             redacted = redactor.redact(block)
             changed = changed or redacted != block
             new_content.append(redacted)
-        elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+        elif isinstance(block, dict) and isinstance(block.get("text"), str):
             redacted = redactor.redact(block["text"])
             if redacted != block["text"]:
                 new_content.append({**block, "text": redacted})
@@ -314,6 +336,7 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
 
     def __init__(self, config: PiiRedactionConfig) -> None:
         self._detectors = active_pii_detectors(config)
+        self._token_key = config.token_secret if config else None
 
     def release_policy_parameters(self) -> dict[str, object]:
         """Declare the behaviour-affecting settings (middleware module guide)."""
@@ -325,13 +348,10 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
     # -- model-call boundary: genuine user messages ---------------------------
 
     def _process_request(self, request: ModelRequest) -> ModelRequest:
-        redactor = _Redactor(self._detectors)
+        redactor = _Redactor(self._detectors, self._token_key)
         messages = list(request.messages)
         state = getattr(request, "state", None) or {}
         summary = state.get("summary_text")
-        redactor.reserve(summary)
-        for message in messages:
-            redactor.reserve(message.content)
         redacted_summary = redactor.redact(summary) if isinstance(summary, str) else summary
         changed = False
         for index, msg in enumerate(messages):
@@ -407,16 +427,13 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
         spans the whole result, so placeholder numbering stays continuous
         across every ToolMessage the result carries.
         """
-        redactor = _Redactor(self._detectors)
+        redactor = _Redactor(self._detectors, self._token_key)
         if isinstance(result, ToolMessage):
             return self._redact_tool_message(result, redactor)
         update = getattr(result, "update", None)
         if isinstance(update, dict):
             messages = update.get("messages")
             if isinstance(messages, list) and any(isinstance(m, ToolMessage) for m in messages):
-                for message in messages:
-                    if isinstance(message, ToolMessage):
-                        redactor.reserve(message.content)
                 new_messages = [self._redact_tool_message(m, redactor) if isinstance(m, ToolMessage) else m for m in messages]
                 if new_messages != messages:
                     return dc_replace(result, update={**update, "messages": new_messages})

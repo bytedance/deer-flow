@@ -99,6 +99,8 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from deerflow.utils.file_io import await_drained
+
 logger = logging.getLogger(__name__)
 
 
@@ -505,12 +507,12 @@ def _run_baseline_create_all_sync(sync_conn: Any) -> None:
 
 
 def _stamp(cfg: AlembicConfig, revision: str) -> None:
-    """Synchronous alembic stamp; callers must wrap in ``asyncio.to_thread``."""
+    """Synchronous alembic stamp; callers must drain via ``await_drained(asyncio.to_thread(...))``."""
     alembic_command.stamp(cfg, revision)
 
 
 def _upgrade(cfg: AlembicConfig, revision: str) -> None:
-    """Synchronous alembic upgrade; callers must wrap in ``asyncio.to_thread``."""
+    """Synchronous alembic upgrade; callers must drain via ``await_drained(asyncio.to_thread(...))``."""
     alembic_command.upgrade(cfg, revision)
 
 
@@ -556,7 +558,7 @@ async def _postgres_lock(engine: AsyncEngine):
             yield
         finally:
             try:
-                await conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _PG_LOCK_KEY})
+                await await_drained(conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _PG_LOCK_KEY}))
             except Exception:  # noqa: BLE001
                 logger.warning("bootstrap: pg_advisory_unlock raised; session close will release", exc_info=True)
 
@@ -609,7 +611,8 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
 
     Branch dispatch is documented at module top. ``alembic.command.stamp`` and
     ``alembic.command.upgrade`` are synchronous and would block the event
-    loop; both are wrapped in ``asyncio.to_thread``.
+    loop; both are wrapped in ``await_drained(asyncio.to_thread(...))`` so the
+    worker finishes before the bootstrap lock is released on cancellation.
 
     *postgres_schema*, when set, is forwarded to the alembic config so the
     alembic-spawned engine pins its ``search_path`` to that schema. The target
@@ -629,7 +632,7 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
             logger.info("bootstrap: branch=empty -> create_all + stamp head (%s)", head)
             async with engine.begin() as conn:
                 await conn.run_sync(_run_create_all_sync)
-            await asyncio.to_thread(_stamp, cfg, head)
+            await await_drained(asyncio.to_thread(_stamp, cfg, head))
 
         elif decision == "legacy":
             logger.info(
@@ -649,8 +652,8 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
             # columns those revisions would add.
             async with engine.begin() as conn:
                 await conn.run_sync(_run_baseline_create_all_sync)
-            await asyncio.to_thread(_stamp, cfg, _BASELINE_REVISION)
-            await asyncio.to_thread(_upgrade, cfg, "head")
+            await await_drained(asyncio.to_thread(_stamp, cfg, _BASELINE_REVISION))
+            await await_drained(asyncio.to_thread(_upgrade, cfg, "head"))
 
         elif decision == "versioned":
             # The same revision id once named a different out-of-tree schema.
@@ -667,7 +670,7 @@ async def bootstrap_schema(engine: AsyncEngine, *, backend: str, postgres_schema
                     head,
                 )
                 try:
-                    await asyncio.to_thread(_upgrade, cfg, "head")
+                    await await_drained(asyncio.to_thread(_upgrade, cfg, "head"))
                 except CommandError:
                     # SQLite has no cross-process bootstrap mutex. Another
                     # process may advance 0018 to the reviewed 0019 after this

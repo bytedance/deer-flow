@@ -42,6 +42,10 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+)
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -99,6 +103,26 @@ from .naming import resolve_root_run_name
 from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
+_THREAD_INCARNATION_UNSET = object()
+
+
+def _log_cancelled_stream_close_failure(
+    exc: asyncio.CancelledError,
+    *,
+    run_id: str,
+    abort_requested: bool,
+) -> None:
+    close_failure = exc.__cause__
+    if not isinstance(close_failure, Exception):
+        return
+    log = logger.warning if abort_requested else logger.debug
+    message = "Could not close aborted agent stream for run %s" if abort_requested else "Could not close agent stream for run %s"
+    log(
+        message,
+        run_id,
+        exc_info=(type(close_failure), close_failure, close_failure.__traceback__),
+    )
+
 
 _checkpoint_locks = AsyncKeyedLockTable[str]()
 
@@ -514,6 +538,8 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
             CONVERSATION_READER_CONTEXT_KEY,
+            THREAD_INCARNATION_CONTEXT_KEY,
+            THREAD_INCARNATION_METADATA_GUARD_KEY,
             "is_subagent",
             "agent_id",
             "__run_loop_detection_recorder",
@@ -538,6 +564,8 @@ def _build_runtime_context(
     task_store: Any | None = None,
     extensions: Any | None = None,
     conversation_reader: Any | None = None,
+    *,
+    thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -552,6 +580,8 @@ def _build_runtime_context(
     ``langgraph.pregel.main`` where ``parent_runtime.merge(...)`` is invoked.
     """
     runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
+    if thread_incarnation is not _THREAD_INCARNATION_UNSET:
+        runtime_ctx[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
     if isinstance(caller_context, dict):
         for key, value in caller_context.items():
             if key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
@@ -679,6 +709,17 @@ def _agent_graph(agent_result: Any) -> Any:
     return unwrap_agent_graph(agent_result)
 
 
+def _assembled_model_name(agent_result: Any) -> str | None:
+    """Return the selected model only for the trusted lead assembly result."""
+    try:
+        from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+    except Exception:
+        return None
+    if isinstance(agent_result, LeadAgentAssembly):
+        return agent_result.effective_model
+    return None
+
+
 class _SubagentEventBuffer:
     """Buffer subagent ``task_*`` step events and flush them in one locked batch (#3779).
 
@@ -732,13 +773,40 @@ class _SubagentEventBuffer:
             return
         batch = self._pending
         self._pending = []
-        try:
-            await self._event_store.put_batch(batch)
-        except Exception:
+        write_task = asyncio.create_task(self._event_store.put_batch(batch))
+        cancellation: asyncio.CancelledError | None = None
+        failure: Exception | None = None
+        while True:
+            try:
+                await asyncio.shield(write_task)
+                break
+            except asyncio.CancelledError as exc:
+                host_task = asyncio.current_task()
+                if host_task is None or not host_task.cancelling():
+                    # The store task itself was cancelled. It did not confirm
+                    # durability, so retain the batch for a later flush.
+                    self._pending = batch + self._pending
+                    raise
+                if cancellation is None:
+                    cancellation = exc
+                while host_task.cancelling():
+                    host_task.uncancel()
+            except Exception as exc:
+                failure = exc
+                break
+
+        if failure is not None:
             # Re-buffer the failed batch (ahead of any events queued since) so a
             # transient store error does not silently drop subagent step events.
             self._pending = batch + self._pending
-            logger.warning("Run %s: failed to persist %d subagent step event(s)", self._run_id, len(batch), exc_info=True)
+            logger.warning(
+                "Run %s: failed to persist %d subagent step event(s)",
+                self._run_id,
+                len(batch),
+                exc_info=(type(failure), failure, failure.__traceback__),
+            )
+        if cancellation is not None:
+            raise cancellation
 
 
 def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
@@ -806,6 +874,7 @@ async def run_agent(
     agent_factory: Any,
     graph_input: dict,
     config: dict,
+    thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     stream_modes: list[str] | None = None,
     stream_subgraphs: bool = False,
     interrupt_before: list[str] | Literal["*"] | None = None,
@@ -946,9 +1015,13 @@ async def run_agent(
         # cancellation cannot strand a pending RunRecord or stream subscriber.
         if ctx.mcp_task_repo is not None and record.user_id is not None:
             try:
+                if thread_incarnation is _THREAD_INCARNATION_UNSET:
+                    raise RuntimeError("MCP task projection requires a server-owned thread incarnation")
+                assert thread_incarnation is None or isinstance(thread_incarnation, str)
                 task_rows = await ctx.mcp_task_repo.list_by_thread(
                     thread_id,
                     user_id=record.user_id,
+                    thread_incarnation=thread_incarnation,
                     limit=20,
                 )
                 graph_input = {
@@ -1074,6 +1147,7 @@ async def run_agent(
             task_store,
             extensions,
             ctx.conversation_reader,
+            thread_incarnation=thread_incarnation,
         )
         # Bind every checkpoint produced by this run to the effective agent
         # identity that produced its state. Manual compaction uses only this
@@ -1109,20 +1183,6 @@ async def run_agent(
         if journal is not None:
             config.setdefault("callbacks", []).append(journal)
 
-        # Inject Langfuse trace-attribute metadata so the langchain CallbackHandler
-        # can lift session_id / user_id / trace_name / tags onto the root trace.
-        # Shared helper with ``DeerFlowClient.stream`` so both entry points stay
-        # in sync; caller-provided metadata wins via setdefault inside the helper.
-        inject_langfuse_metadata(
-            config,
-            thread_id=thread_id,
-            user_id=resolve_runtime_user_id(runtime),
-            assistant_id=record.assistant_id,
-            model_name=record.model_name,
-            environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
-            deerflow_trace_id=deerflow_trace_id,
-        )
-
         # Resolve after runtime context installation so context/configurable reflect
         # the agent name that this run will actually execute.
         config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
@@ -1150,7 +1210,22 @@ async def run_agent(
             # get_available_tools(), which may block on MCP cache
             # initialization — it must not stall the calling event loop
             # (issue #5172).
-            agent = _agent_graph(await run_assembly(agent_factory, **agent_factory_kwargs))
+            agent_result = await run_assembly(agent_factory, **agent_factory_kwargs)
+            agent = _agent_graph(agent_result)
+
+        # Assembly resolves request, agent, and authorization fallbacks. Trace the
+        # model that will run, rather than the model name originally requested.
+        effective_model = _assembled_model_name(agent_result) or record.model_name
+        for trace_config in (config, initial_runnable_config):
+            inject_langfuse_metadata(
+                trace_config,
+                thread_id=thread_id,
+                user_id=resolve_runtime_user_id(runtime),
+                assistant_id=record.assistant_id,
+                model_name=effective_model,
+                environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+                deerflow_trace_id=deerflow_trace_id,
+            )
 
         accessor = CheckpointStateAccessor.bind(
             agent,
@@ -1278,6 +1353,13 @@ async def run_agent(
                             close_error = sys.exception()
                             try:
                                 await close_agent_stream(stream)
+                            except asyncio.CancelledError as exc:
+                                _log_cancelled_stream_close_failure(
+                                    exc,
+                                    run_id=run_id,
+                                    abort_requested=broke_on_abort or record.abort_event.is_set(),
+                                )
+                                raise
                             except Exception:
                                 abort_requested = broke_on_abort or record.abort_event.is_set()
                                 if close_error is None and not abort_requested:
@@ -1327,6 +1409,13 @@ async def run_agent(
                         close_error = sys.exception()
                         try:
                             await close_agent_stream(stream)
+                        except asyncio.CancelledError as exc:
+                            _log_cancelled_stream_close_failure(
+                                exc,
+                                run_id=run_id,
+                                abort_requested=broke_on_abort or record.abort_event.is_set(),
+                            )
+                            raise
                         except Exception:
                             abort_requested = broke_on_abort or record.abort_event.is_set()
                             if close_error is None and not abort_requested:
@@ -1723,6 +1812,7 @@ async def run_agent(
                 # Drop graph and per-run payload references before the terminal
                 # worker task itself becomes collectable.
                 agent = None
+                agent_result = None
                 accessor = None
                 runtime = None
                 runtime_ctx = None

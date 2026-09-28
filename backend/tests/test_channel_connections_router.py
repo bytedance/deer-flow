@@ -1226,7 +1226,7 @@ def test_disconnect_connection_is_current_user_scoped(tmp_path):
     anyio.run(repo.close)
 
 
-@pytest.mark.parametrize("worker_env", [{}, {"GATEWAY_WORKERS": "1"}, {"WEB_CONCURRENCY": "1"}])
+@pytest.mark.parametrize("worker_env", [{}, {"GATEWAY_WORKERS": "1"}, {"WEB_CONCURRENCY": "1"}, {"GATEWAY_WORKERS": ""}])
 def test_wechat_qr_login_saves_credentials_without_exposing_token(monkeypatch, worker_env):
     from app.channels.wechat_qr_login import WechatQRLogin
 
@@ -1366,7 +1366,17 @@ def test_wechat_qr_confirmation_preserves_bot_id_unless_replaced(monkeypatch, re
     assert saved == expected
 
 
-@pytest.mark.parametrize("worker_env", [{"GATEWAY_WORKERS": "2"}, {"GATEWAY_WORKERS": "4"}, {"WEB_CONCURRENCY": "2"}, {"GATEWAY_WORKERS": "invalid"}])
+@pytest.mark.parametrize(
+    "worker_env",
+    [
+        {"GATEWAY_WORKERS": "2"},
+        {"GATEWAY_WORKERS": "4"},
+        {"WEB_CONCURRENCY": "2"},
+        {"GATEWAY_WORKERS": "invalid"},
+        # A blank GATEWAY_WORKERS is unset, so WEB_CONCURRENCY still decides.
+        {"GATEWAY_WORKERS": "", "WEB_CONCURRENCY": "2"},
+    ],
+)
 @pytest.mark.parametrize("method,suffix", [("POST", ""), ("POST", "/session/poll"), ("DELETE", "/session")])
 def test_wechat_qr_routes_reject_unsupported_workers_before_session_access(monkeypatch, worker_env, method, suffix):
     from app.channels.wechat_qr_login import WechatQRLogin

@@ -13,6 +13,7 @@ import pytest_asyncio
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.paths import Paths
+from deerflow.config.prompt_overlay import PromptOverlay
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
@@ -104,16 +105,24 @@ async def _execute(env):
 async def test_tool_preserves_per_item_criteria_and_legacy_shape(env, monkeypatch):
     module = importlib.import_module("deerflow.tools.builtins.batch_task_tool")
     monkeypatch.setattr(module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
-    monkeypatch.setattr(module, "get_subagent_config", lambda *args, **kwargs: SubagentConfig(name="general-purpose", description="Worker"))
+    monkeypatch.setattr(
+        module,
+        "get_subagent_config",
+        lambda *args, **kwargs: SubagentConfig(name="general-purpose", description="Worker", prompt_overlay=PromptOverlay(prepend="First", append="Last")),
+    )
     tools = {tool.name: tool for tool in bind_batch_tools(env.service)}
     runtime = SimpleNamespace(state={}, context={"thread_id": "thread-1", "user_id": "user-1"}, config={"metadata": {}})
     command = await tools["batch_task"].coroutine(
         runtime=runtime, title="Batch", items=[BatchTaskItem(key="one", prompt="p", acceptance_criteria=["file:../outputs/report.md exists"]), BatchTaskItem(key="two", prompt="q")], subagent_type="general-purpose", tool_call_id="c1"
     )
-    batch_id = command.update["messages"][0].additional_kwargs["subagent_batch_id"]
+    result = command.update["messages"][0]
+    assert "subagent_batch_id" in result.additional_kwargs, result.content
+    batch_id = result.additional_kwargs["subagent_batch_id"]
     items = await env.repo.list_items(batch_id, user_id="user-1")
     assert items[0]["acceptance_criteria"] == ["file:../outputs/report.md exists"]
     assert items[1]["acceptance_criteria"] is None
+    await _execute(env)
+    assert env.calls[0]["config"].prompt_overlay.apply("core") == "First\n\ncore\n\nLast"
 
 
 @pytest.mark.asyncio

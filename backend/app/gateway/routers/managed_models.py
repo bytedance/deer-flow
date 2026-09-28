@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict
 from app.gateway.deps import require_admin_user
 from deerflow.config.app_config import get_app_config
 from deerflow.config.managed_models import ManagedModel, ManagedModelStore
+from deerflow.reflection import resolve_class
 
 router = APIRouter(prefix="/api/managed-models", tags=["models"])
 _ADMIN = "Admin privileges are required to manage shared models."
@@ -70,16 +71,24 @@ def _probe_config(body: SaveModelRequest):
     return profile.runtime_config()
 
 
+def _build_probe(body: SaveModelRequest):
+    """Resolve credentials and construct provider clients off the event loop."""
+    config = _probe_config(body)
+    settings = config.model_dump(include={"model", "api_key", "base_url", "api_base"}, exclude_none=True)
+    # Forced tool selection requires thinking off on DeepSeek. Reuse the resolved
+    # profile's disable settings without changing the saved chat configuration.
+    settings.update(config.when_thinking_disabled or {})
+    settings.update(timeout=15, max_retries=0, max_tokens=32)
+    model = resolve_class(config.use)(**settings)
+    return model.bind_tools([{"type": "function", "function": {"name": "connection_check", "description": "Check the connection", "parameters": {"type": "object", "properties": {}}}}], tool_choice="connection_check")
+
+
 @router.post("/test")
 async def test_model(request: Request, body: SaveModelRequest):
     """Send a bounded streaming tool-call probe without saving the profile."""
     await require_admin_user(request, detail=_ADMIN)
     try:
-        config = await asyncio.to_thread(_probe_config, body)
-        from langchain_openai import ChatOpenAI
-
-        model = ChatOpenAI(model=config.model, base_url=config.base_url, api_key=config.api_key, timeout=15, max_retries=0, max_tokens=32)
-        probe = model.bind_tools([{"type": "function", "function": {"name": "connection_check", "description": "Check the connection", "parameters": {"type": "object", "properties": {}}}}], tool_choice="connection_check")
+        probe = await asyncio.to_thread(_build_probe, body)
         response = None
         async with asyncio.timeout(20):
             async for chunk in probe.astream([HumanMessage(content="Call connection_check.")], config={"callbacks": []}):

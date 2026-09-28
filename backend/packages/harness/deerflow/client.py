@@ -52,7 +52,9 @@ from deerflow.config.extensions_config import (
 )
 from deerflow.config.paths import get_paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
+from deerflow.models.reasoning import reasoning_capabilities_payload, resolve_reasoning_contract
 from deerflow.runtime import CheckpointStateAccessor
 from deerflow.runtime.checkpoint_mode import (
     ensure_checkpoint_mode_compatible,
@@ -240,10 +242,12 @@ class DeerFlowClient:
         self._available_skills = set(available_skills) if available_skills is not None else None
         self._middlewares = list(middlewares) if middlewares else []
         self._environment = environment
+        self._thread_incarnations: dict[str, str] = {}
 
         # Lazy agent — created on first call, recreated when config changes.
         self._agent = None
         self._agent_config_key: tuple | None = None
+        self._effective_model_name: str | None = None
         self._loaded_agent_config_key: tuple[str, str] | None = None
         self._loaded_agent_config = None
 
@@ -256,6 +260,7 @@ class DeerFlowClient:
         """
         self._agent = None
         self._agent_config_key = None
+        self._effective_model_name = None
         self._loaded_agent_config_key = None
         self._loaded_agent_config = None
 
@@ -324,6 +329,9 @@ class DeerFlowClient:
                 self._loaded_agent_config_key = loaded_config_key
                 self._loaded_agent_config = agent_config
         memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
+        mcp_plugins = getattr(agent_config, "mcp_plugins", None)
+        # Delegation reads this run's metadata, including when the graph is cached.
+        config.setdefault("metadata", {})["mcp_plugins"] = mcp_plugins
 
         authorization_identity = None
         if self._app_config.authorization.enabled:
@@ -349,6 +357,7 @@ class DeerFlowClient:
             cfg.get("max_total_subagents"),
             self._agent_name,
             memory_enabled,
+            frozenset(mcp_plugins) if mcp_plugins is not None else None,
             frozenset(self._available_skills) if self._available_skills is not None else None,
             self._checkpoint_channel_mode,
             self._checkpoint_snapshot_frequency,
@@ -390,7 +399,7 @@ class DeerFlowClient:
         )
         max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
 
-        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins)
 
         # Add framework-provided tools before authorization so Layer 1 sees
         # every capability that can become model-visible.
@@ -480,14 +489,15 @@ class DeerFlowClient:
 
         self._agent = create_agent(**kwargs)
         self._agent_config_key = key
+        self._effective_model_name = model_name
         logger.info("Agent created: agent_name=%s, model=%s, thinking=%s", self._agent_name, model_name, thinking_enabled)
 
     @staticmethod
-    def _get_tools(*, model_name: str | None, subagent_enabled: bool):
+    def _get_tools(*, model_name: str | None, subagent_enabled: bool, mcp_plugins: list[str] | None = None):
         """Lazy import to avoid circular dependency at module level."""
         from deerflow.tools import get_available_tools
 
-        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled)
+        return get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins)
 
     @staticmethod
     def _serialize_tool_calls(tool_calls) -> list[dict]:
@@ -851,8 +861,10 @@ class DeerFlowClient:
 
         Tool calls and tool results are still emitted once per logical
         message.  ``values`` events continue to carry full state snapshots
-        after each graph node finishes; AI text already delivered via the
-        ``messages`` stream is **not** re-synthesized from the snapshot to
+        after each graph node finishes. On resumed threads, historical messages
+        remain in those snapshots, but are not emitted again as per-message
+        events or counted in this turn's usage. AI text already delivered via
+        the ``messages`` stream is **not** re-synthesized from the snapshot to
         avoid duplicate deliveries. When a later node replaces a delivered AI
         message under the same id and appends to its text (a guard's stop
         notice), only the appended text is emitted, as one more delta for that
@@ -944,12 +956,19 @@ class DeerFlowClient:
             config["callbacks"] = [*existing_callbacks, *tracing_callbacks]
 
         run_id = str(uuid.uuid4())
-        context: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
+        thread_incarnations = getattr(self, "_thread_incarnations", None)
+        if thread_incarnations is None:
+            thread_incarnations = self._thread_incarnations = {}
+        thread_incarnation = thread_incarnations.setdefault(thread_id, uuid.uuid4().hex)
+        context: dict[str, Any] = {
+            "thread_id": thread_id,
+            "run_id": run_id,
+            THREAD_INCARNATION_CONTEXT_KEY: thread_incarnation,
+        }
         for key in _EMBEDDED_AUTHORIZATION_CONTEXT_KEYS:
             if key in kwargs:
                 context[key] = kwargs[key]
 
-        configurable = config.get("configurable") or {}
         deerflow_trace_id = ensure_trace_id()
         effective_user_id = context.get("user_id") or get_effective_user_id()
         # Materialize the storage owner in runtime context in every auth mode.
@@ -957,17 +976,18 @@ class DeerFlowClient:
         # survives worker/isolated-loop boundaries and matches the identity
         # used by prompt assembly and the agent cache.
         context["user_id"] = effective_user_id
+        self._ensure_agent(config, context=context)
+        configurable = config.get("configurable") or {}
+        effective_model_name = getattr(self, "_effective_model_name", None)
         inject_langfuse_metadata(
             config,
             thread_id=thread_id,
             user_id=effective_user_id,
             assistant_id=self._agent_name or "lead-agent",
-            model_name=configurable.get("model_name") or self._model_name,
+            model_name=effective_model_name or configurable.get("model_name") or self._model_name,
             environment=self._environment or os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
             deerflow_trace_id=deerflow_trace_id,
         )
-
-        self._ensure_agent(config, context=context)
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
         context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
@@ -984,6 +1004,9 @@ class DeerFlowClient:
         # Cross-mode handoff: ids already streamed via LangGraph ``messages``
         # mode so the ``values`` path skips re-synthesis of the same message.
         streamed_ids: set[str] = set()
+        # A resumed thread's values snapshots include prior turns. They remain
+        # in the full-state event, but must not become new deltas or usage.
+        historical_message_ids: set[str] = set()
         # AI messages whose tool calls arrived as streamed fragments. The
         # arguments only parse once the message is complete, so their
         # tool_calls event is emitted from the values snapshot instead.
@@ -1061,6 +1084,8 @@ class DeerFlowClient:
                     msg_chunk = chunk
 
                 msg_id = getattr(msg_chunk, "id", None)
+                if msg_id and msg_id in historical_message_ids:
+                    continue
 
                 if isinstance(msg_chunk, AIMessage):
                     text = self._extract_text(msg_chunk.content)
@@ -1105,8 +1130,17 @@ class DeerFlowClient:
             # mode == "values"
             messages = chunk.get("messages", [])
 
-            for msg in messages:
+            current_user_index = next(
+                (index for index, msg in enumerate(messages) if isinstance(msg, HumanMessage) and (getattr(msg, "additional_kwargs", None) or {}).get("run_id") == run_id),
+                None,
+            )
+            if current_user_index is not None:
+                historical_message_ids.update(msg_id for msg in messages[:current_user_index] if (msg_id := getattr(msg, "id", None)))
+
+            for index, msg in enumerate(messages):
                 msg_id = getattr(msg, "id", None)
+                if (current_user_index is not None and index < current_user_index) or (msg_id and msg_id in historical_message_ids):
+                    continue
                 if msg_id and msg_id in seen_messages:
                     if seen_messages[msg_id] is msg:
                         continue
@@ -1248,6 +1282,7 @@ class DeerFlowClient:
                     "description": getattr(model, "description", None),
                     "supports_thinking": getattr(model, "supports_thinking", False),
                     "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
+                    "reasoning": reasoning_capabilities_payload(resolve_reasoning_contract(model)),
                 }
                 for model in self._app_config.models
             ],
@@ -1320,6 +1355,7 @@ class DeerFlowClient:
             "description": getattr(model, "description", None),
             "supports_thinking": getattr(model, "supports_thinking", False),
             "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
+            "reasoning": reasoning_capabilities_payload(resolve_reasoning_contract(model)),
         }
 
     # ------------------------------------------------------------------
@@ -1687,14 +1723,18 @@ class DeerFlowClient:
                     provisional_md_name = Path(dest_name).with_suffix(".md").name
                     unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
                     try:
-                        # Convert outside the sandbox-writable uploads dir, then
-                        # publish without following a symlink at the companion name.
+                        # Convert the caller's own file, not the copy that just
+                        # landed in the sandbox-writable uploads dir: a sandbox
+                        # that swaps that name for a symlink would otherwise have
+                        # a host file converted into this thread's uploads. Write
+                        # the result outside uploads too, then publish it without
+                        # following a symlink at the companion name.
                         with tempfile.TemporaryDirectory() as md_dir:
                             md_output = Path(md_dir) / unique_md_name
                             if conversion_pool is not None:
-                                converted = conversion_pool.submit(_convert_in_thread, dest, md_output).result()
+                                converted = conversion_pool.submit(_convert_in_thread, src_path, md_output).result()
                             else:
-                                converted = asyncio.run(convert_file_to_markdown(dest, output_path=md_output))
+                                converted = asyncio.run(convert_file_to_markdown(src_path, output_path=md_output))
                             md_path = None
                             if converted is not None:
                                 # copy, not write_bytes: the companion keeps the
@@ -1770,10 +1810,9 @@ class DeerFlowClient:
             PermissionError: If path traversal is detected.
         """
         validate_thread_id(thread_id)
-        from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS
 
         uploads_dir = get_uploads_dir(thread_id)
-        return delete_file_safe(uploads_dir, filename, convertible_extensions=CONVERTIBLE_EXTENSIONS)
+        return delete_file_safe(uploads_dir, filename)
 
     # ------------------------------------------------------------------
     # Public API — artifacts

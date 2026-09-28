@@ -3,7 +3,7 @@
 The harness resolves a `RunInteractionPolicy` from the run context and uses it
 as the single source for lead-agent tool visibility, clarification middleware
 behavior, sandbox network approval eligibility, and system-prompt guidance.
-The implementation lives in `deerflow/agents/interaction_policy.py`.
+The implementation lives in `../packages/harness/deerflow/agents/interaction_policy.py`.
 
 ## Modes and precedence
 

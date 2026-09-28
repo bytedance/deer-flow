@@ -5,6 +5,10 @@ The client helper selects credentials by tool name: search defaults to
 `TAVILY_API_KEY` fallback. Keep credential regressions in `backend/tests/test_tavily_tools.py`
 on the real helper and SDK constructor, mocking only search/extract calls.
 
+Each tool owns its per-call async client and awaits `close()` in `finally`,
+including request failures and cancellation. Lifecycle regressions exercise
+the real SDK connection pool without network requests.
+
 Search forwards `include_domains` and `exclude_domains` only when present in
 the `web_search` tool config's `model_extra`, alongside `max_results` and optional
 `time_range`. Preserve explicit empty lists (no restriction of that kind) and

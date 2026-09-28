@@ -210,6 +210,7 @@ class McpServerConfig(BaseModel):
     type: str = Field(default="stdio", description="Transport type: 'stdio', 'sse', or 'http'")
     command: str | None = Field(default=None, description="Command to execute to start the MCP server (for stdio type)")
     args: list[str] = Field(default_factory=list, description="Arguments to pass to the command (for stdio type)")
+    cwd: str | None = Field(default=None, description="Working directory for the MCP server process (for stdio type)")
     env: dict[str, str] = Field(default_factory=dict, description="Environment variables for the MCP server")
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")

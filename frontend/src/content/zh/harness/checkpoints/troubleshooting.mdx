@@ -1,0 +1,219 @@
+---
+title: 故障排查
+description: 按现象索引的检查点常见问题。模式不匹配与需要重启的错误、看似被忽略的配置、没有缩小的存储、重新生成与历史回放缺陷、Postgres 与 redis 故障、集成被拒、始终不命中的缓存计数器，每条给出原因、处理办法与上游 issue。
+---
+
+import { Callout } from "nextra/components";
+
+# 故障排查
+
+本章按**你看到的现象**组织。每条给出原因、处理办法，以及（当某种行为属于上游缺陷时）对应的上游 issue 与依赖版本，方便对照你的构建。
+
+## 症状索引
+
+| 症状 | 最可能的原因 | 章节 |
+| --- | --- | --- |
+| 状态/历史/线程读接口返回 `409` | full 模式进程读取了 delta 线程 | [delta 线程上的 HTTP 409](#delta-线程上的-http-409) |
+| run 请求在准入前返回 `500` | 线程的 run event 流为空，播种读取落在模式门下 | [delta 线程上的 HTTP 409](#delta-线程上的-http-409) |
+| run 失败并带重启要求信息 | 配置改动在被冻结的进程构建图时被拒绝 | [改完配置后 run 失败](#改完配置后-run-失败) |
+| 配置改动似乎被忽略 | 模式与节奏在构建 agent 时已冻结 | [配置改动似乎没有生效](#配置改动似乎没有生效) |
+| 历史缓存改动似乎被忽略 | 缓存在启动时随 checkpointer 一起构造 | [历史缓存的改动没有生效](#历史缓存的改动没有生效) |
+| 重新生成接口返回 `500` | run-runs 路由没有映射模式错误 | [重新生成接口返回 500 而不是 409](#重新生成接口返回-500-而不是-409) |
+| delta 没有缩小存储 | 仍在 full 模式，或没统计 writes 表 | [delta 没有缩小存储](#delta-没有缩小存储) |
+| 物化变慢 | 快照节奏调得过高 | [提高节奏后物化变慢](#提高节奏后物化变慢) |
+| 重新生成后被替换的回答复活 | delta 分叉回放（#4458） | [重新生成后旧回答复活](#重新生成后旧回答复活) |
+| 历史顺序与实时不一致 | 上游回放顺序缺陷（#8382） | [历史顺序与实时运行不一致](#历史顺序与实时运行不一致) |
+| Postgres 物化旧检查点为空 | 上游分页回走缺陷（#8448） | [Postgres 物化旧检查点为空](#postgres-物化旧检查点为空) |
+| TUI 上 `redis` 缓存被拒 | 同步路径只支持 `memory` | [TUI 或内嵌路径拒绝 redis 缓存](#tui-或内嵌路径拒绝-redis-缓存) |
+| 缓存计数器始终不命中 | 缓存被禁用、模式不对，或每次读的都是新检查点 | [缓存计数器始终不命中](#缓存计数器始终不命中) |
+| `create_deerflow_agent` 拒绝 delta | delta 加检查点器会被拒绝 | [`create_deerflow_agent` 拒绝 delta 加检查点器](#create_deerflow_agent-拒绝-delta-加检查点器) |
+
+## 模式门与配置
+
+### delta 线程上的 HTTP 409
+
+**症状**：状态、历史或线程读接口返回 `409`，内容为
+
+```
+{"detail": "Thread <thread_id>: Thread requires delta mode; materialize and convert its checkpoints before using full mode."}
+```
+
+**原因**：一个运行在 `full` 的进程读取了以 `delta` 写入检查点的线程。读门在物化之前抛出 `CheckpointModeMismatchError`，因此 full 模式进程绝不会静默返回空状态。返回 `409` 的路由是 `GET /api/threads/{thread_id}`、`GET` 与 `POST /api/threads/{thread_id}/state`、`POST /api/threads/{thread_id}/history`（均有测试覆盖）；`POST /api/threads/{thread_id}/branches` 与 `POST .../compact` 在代码路径上以同样方式门禁。`compact` 也会因另一原因返回 `409`，detail 为 `Context compaction is disabled.`
+
+threads 路由不会对创建 run 提前门禁，因此那里的不匹配改为异步失败：`POST .../runs` 返回 `200` run 记录，随后变为 `status: error`；`POST .../runs/stream` 返回 `200 text/event-stream` 后发出 `event: error` 帧；`POST .../runs/wait` 返回 `200` JSON，内容为 `{"status": "error", "error": "<不匹配文本>"}`。不过有一条 run 路径会在准入前读取检查点：当线程的 run event 流为空但存在检查点头部时，`ensure_checkpoint_history_seeded` 会在 `start_run` 内物化该头部，而那里只映射 `ConflictError` 与 `UnsupportedStrategyError`，因此不匹配会以未处理的 `500` 逃出，作用于 `POST /api/threads/{thread_id}/runs`、`/runs/stream` 与 `/runs/wait`。默认的 `run_events.backend: memory` 会让 Gateway 重启后每个既有线程的流都变空，所以这条分支在重启后可达。
+
+在内嵌 TUI 里，client 在图开始流式输出前就在进程内抛出：Textual runner 会把它变成 `AssistantError` 与 `RunEnded` 的组合，而无头的 `--print`、`--json` runner 没有对应处理器，会打印未捕获的 traceback，而不是状态码。
+
+**处理**：二选一。
+
+1. 让进程运行在 `delta`：设置 `database.checkpoint_channel_mode: delta`，并重启共享该数据库的每个进程。delta 进程可以透明读取遗留的 full 检查点，所以 full → delta 是受支持的方向。
+2. 让进程保持 `full`，这需要先物化并转换该线程的检查点。错误文本点明了这一步，但仓库不提供任何转换命令，而 full 模式直接读 delta 检查点只会看到哨兵 —— 不要靠删行来绕过。
+
+标记语义见[通道模式](/docs/harness/checkpoints/modes)，切换步骤见[快速上手](/docs/harness/checkpoints/quick-start)。
+
+### 改完配置后 run 失败
+
+**症状**：在未重启的情况下改完 `config.yaml` 后，下一次 run 失败，其 run 记录、SSE `error` 帧或 worker 日志行 `Run %s failed: %s` 中出现下二者之一
+
+```
+checkpoint_channel_mode is restart-required and cannot change in a running process
+checkpoint_delta.snapshot_frequency is restart-required and cannot change in a running process
+```
+
+**原因**：`CheckpointModeReconfigurationError`。进程在启动时冻结了模式与节奏，而某处用不同的值构建了图 —— 即一次与启动冻结值分歧的配置热重载。只有 Gateway 启动、`make_lead_agent` 与 `DeerFlowClient.__init__` 会调用冻结辅助函数，而没有任何状态、历史或线程路由会构建 agent（这些路由读取启动时冻结的 `app.state` 值），所以这是 run 侧的失败：它们都不会因配置改动返回 `503`。路由层的 `503` 映射为该错误类而存在，但 threads 路由中没有任何路径会抛出它。
+
+两个开关的行为不同：
+
+- `database.checkpoint_channel_mode`：完全不会失败。run worker 会把冻结的模式注入 run 配置，而 agent 工厂优先采用该注入值而非请求期配置，因此改动在重启前被忽略 —— 即[配置改动似乎没有生效](#配置改动似乎没有生效)。
+- `database.checkpoint_delta.snapshot_frequency`：下一次 run 会失败，因为节奏没有注入覆盖，agent 工厂会按重载后的配置冻结它。
+
+**处理**：重启进程以冻结新值，然后重跑。快照节奏也参与其中，因为它被编译进每张图的通道表，同样需要重启。
+
+### 配置改动似乎没有生效
+
+**症状**：你改了 `database.checkpoint_channel_mode` 或 `database.checkpoint_delta.snapshot_frequency`，但线程行为照旧。
+
+**原因**：模式在进程首次构建 agent 时按启动快照全局冻结；节奏随之一起冻结。首次冻结时，客户端传入的 `configurable.__deerflow_checkpoint_channel_mode` 会被忽略；一旦冻结，任何不同的值都会 fail-closed。内嵌 `DeerFlowClient` 也以同样方式冻结模式与节奏。另注意 `checkpoint_delta.*` 在 full 模式下被忽略。
+
+**处理**：重启共享该检查点数据库的每个进程；它们必须使用相同的值。通过读取线程标记确认切换（见[可观测性](/docs/harness/checkpoints/observability)）。只有一个相关键会在运行期重新读取：`database.checkpoint_graph_cache.accessor_graph_max`（每次淘汰检查时）。`database.checkpoint_cache.*` **不冻结**——它不会损坏线程，也允许多 worker 取值不同——但它同样不是热重载，见[下一条](#历史缓存的改动没有生效)。
+
+### 历史缓存的改动没有生效
+
+**症状**：你改了 `database.checkpoint_cache.max_entries`、把 `type` 换成 `redis`，或改了 `redis_url`、`ttl_seconds`、`key_prefix`，但运行中的 Gateway 行为照旧——容量没变、没有 redis 流量、仍是原来的键前缀。
+
+**原因**：历史缓存不是热重载。`langgraph_runtime()` 用启动时的 `AppConfig` 快照只构造一次 checkpointer，delta saver 就被包在当时 `make_checkpoint_cache()` 返回的对象上（`backend/app/gateway/deps.py`、`backend/packages/harness/deerflow/runtime/checkpointer/async_provider.py`），因此后端、容量、连接、TTL 与前缀都被捕获到进程生命周期结束。整个 `database` 段被登记为 startup-only 正是这个原因（`backend/packages/harness/deerflow/config/reload_boundary.py`）。
+
+这不属于「为正确性而冻结」：缓存不会损坏线程，禁用后结果完全相同，共享同一检查点数据库的多个 worker 也可以安全地使用不同设置。区别只在于它只在启动时被读取一次。
+
+**处理**：改完该段后重启 Gateway；内嵌或 TUI 路径则重启那个进程，因为它的 checkpointer 单例同样只创建一次并一直复用。只有 `database.checkpoint_graph_cache.accessor_graph_max` 无需重启，因为它在每次淘汰检查时都会重读。
+
+### 重新生成接口返回 500 而不是 409
+
+**症状**：重新生成准备返回 `500`，detail 为 `"Failed to read latest checkpoint"` 或 `"Failed to inspect checkpoint history"`，而同一线程在别处却返回 `409`。
+
+**原因**：`POST /api/threads/{thread_id}/runs/regenerate/prepare`（以及 `/runs/edit-regenerate/prepare`）在任何 `try` 之外构建状态访问器，而该模块不映射检查点模式错误，于是不匹配表现为未处理的 `500`。日志行为
+
+```
+Failed to read latest checkpoint for regenerate thread %s
+Failed to list checkpoints for regenerate thread %s
+```
+
+另有两个接口因同样原因更安静地失败：`GET /api/threads/{thread_id}/token-usage` 返回 `200` 且 `context_usage: null`（只记录 `Failed to load checkpoint for context usage on thread %s`），`/runs/wait` 返回 `200` 错误体而不是 `409`。
+
+**处理**：把该 `500` 读作模式不匹配。检查线程标记，然后在与线程匹配的模式下重启进程。本地没有把这些变成 `409` 的修法。
+
+## 存储与物化
+
+### delta 没有缩小存储
+
+**症状**：你切到了 delta（或自认为切了），但数据库体积不变甚至更大。
+
+**原因**：通常是下列之一。
+
+- 进程仍在 `full`（默认值）—— 键从未设置，或设置了但未重启。`checkpoint_delta.*` 在 full 模式下不起作用，历史缓存也只在 delta 模式下包裹 saver。
+- 你比较错了表。delta 把每步载荷移入 writes 表，因此公平的比较要同时统计检查点载荷字节**与** writes 行。存储守卫测试断言 delta 至多保留一个快照 blob，而 full 至少保留四个。
+
+一个相关提醒：任何保留策略在删除中间检查点时，都不得删掉保留下来的检查点与最近 `_DeltaSnapshot` 之间的祖先检查点或 writes，否则 delta 通道会静默重建为空且不报错。DeerFlow 不提供 `prune`/`aprune` 的生产触发点，因此这只是对接线方式的约束，不是现网故障。
+
+**处理**：从线程标记确认模式，必要时重启，并比较检查点载荷加 writes 行。见[历史缓存](/docs/harness/checkpoints/history-cache)与[运维检查点](/docs/harness/checkpoints/operations)。
+
+### 提高节奏后物化变慢
+
+**症状**：调高 `snapshot_frequency` 后，读取与状态物化变慢。
+
+**原因**：`snapshot_frequency`（默认 `10`）是两次完整快照之间的逐步写入次数。越大表示快照更少更小，但物化任意检查点需要回走的链更长。物化结果两者相同，只有体积与读取成本在权衡。
+
+**处理**：调低 `snapshot_frequency`，用检查点体积换回读取速度。它与模式一样需要重启。对同一检查点的重复物化正是历史缓存要吸收的，所以也检查它的计数器（见下）。
+
+## 历史与回放
+
+### 重新生成后旧回答复活
+
+**症状**：在分叉线程里重新生成后，刷新页面时被替换掉的助手消息和新回答并列存在，且当种子行共用一个 run id 时分支历史可能损坏（[#4458](https://github.com/bytedance/deer-flow/issues/4458)）。
+
+**原因**：delta 无法正确分叉 —— 分叉本身会被接受，坏的是读取。从较旧的检查点恢复会分叉谱系，而 delta 历史回走会收集每条在路径上的祖先的**全部** `pending_writes` —— 但共享父级还带着被放弃的兄弟孩子的写入，于是这些写入被回放进分叉，run 从一份仍包含「本应被替换掉的回答」的消息列表开始。已在 Postgres、SQLite 与内存 saver 上复现；full 模式不受影响，因为它的检查点携带完整通道值。
+
+**处理**：DeerFlow 改为线性化而不分叉。它物化所选检查点的状态，以替换语义写到当前 head（head 没有其他孩子），把只存在于较新 head 的通道重置为 schema 默认值或 `None`，消费掉选择器，然后线性续跑。当模式为 full、没有 checkpointer、选择器已经指向 head，或命名空间非根时，线性化是空操作；它**fail-closed**，绝不回退到分叉：
+
+```
+Run {run_id} could not materialize resume checkpoint {checkpoint_id}
+```
+
+上游修复是 PR [#8548](https://github.com/langchain-ai/langgraph/pull/8548)（修复上游 [#8443](https://github.com/langchain-ai/langgraph/issues/8443)；镜像 #8551），仍未合并，这正是本地线性化被保留的原因。见[恢复与回滚](/docs/harness/checkpoints/resume-and-rollback)。
+
+### 历史顺序与实时运行不一致
+
+**症状**：在并行扇出向同一 delta 通道写入的同一个 super-step 中，实时 run 按路径顺序返回写入，但 `get_state` / 恢复以不同顺序回放。
+
+**原因**：已固定的上游缺陷（[langgraph #8382](https://github.com/langchain-ai/langgraph/issues/8382)），open，修复 PR [#8544](https://github.com/langchain-ai/langgraph/pull/8544) 未合并，无已发布版本。delta 回放按哈希后的 `(task_id, idx)` 排序写入，而不是实时 `apply_writes` 使用的路径顺序，于是同一 super-step 的写入被重排。存在于 `langgraph-checkpoint 4.2.0`；已在 memory、SQLite 与 Postgres 上复现。
+
+**处理**：本地无解。DeerFlow 的测试断言正确契约，并在缺陷存在时触发 skip，同时点名该 issue：
+
+```
+upstream langgraph#8382 unfixed in langgraph-checkpoint 4.2.0: delta replay orders writes by hashed (task_id, idx) instead of the path order apply_writes used live, so get_state/resume reorders same-superstep writes
+```
+
+如果你的消费方在意同一 super-step 内的顺序，请避免把并行写入扇出到同一个 delta 通道。
+
+### Postgres 物化旧检查点为空
+
+**症状**：在 Postgres 上，较旧的 delta 检查点物化为空，较新的却正常。
+
+**原因**：已固定的上游缺陷（[langgraph #8448](https://github.com/langchain-ai/langgraph/issues/8448)），open，修复 PR #8556 未合并。当目标检查点不在第一页分页结果里时，`PostgresSaver.get_delta_channel_history` 会永久污染其回走游标：未修补的游标取自一个尚未加载的父级，永久停在 `None`，于是旧检查点物化为空。只有 Postgres 对其 stage-1 扫描分页。存在于 `langgraph-checkpoint-postgres 3.1.2`。
+
+**处理**：本地无解；Postgres 用例触发 skip，并点名该 issue：
+
+```
+upstream langgraph#8448 unfixed in langgraph-checkpoint-postgres 3.1.2: the paged delta walk poisons the channel cursor for a target past the first stage-1 page, hydrating old checkpoints empty
+```
+
+节奏约束回放深度，因此更小的 `snapshot_frequency` 能让回走更短；这是本仓库暴露的唯一杠杆，而不是对该游标缺陷的修复。
+
+## 缓存
+
+### TUI 或内嵌路径拒绝 redis 缓存
+
+**症状**：TUI 或无头的 `--print` / `--json` 运行在构造检查点器时失败：
+
+```
+database.checkpoint_cache.type 'redis' is not supported on the sync checkpointer path (TUI/embedded); use 'memory'.
+```
+
+**原因**：TUI 与无头模式构建的是 `DeerFlowClient(checkpointer=get_checkpointer())` —— **同步**单例检查点器 —— 而同步路径只支持 `memory` 后端（它本来就是进程本地的）。因此对 Gateway 有效的配置可能让 TUI 起不来。
+
+**处理**：设置 `database.checkpoint_cache.type: memory`。仅跑 Gateway 的部署可以保留 `redis`，它是异步路径的共享缓存。
+
+### 缓存计数器始终不命中
+
+**症状**：`hits` 一直是 `0` 而 `misses` 持续增长，或者 `compose_hits` 与 `full_walks` 看起来不对劲。
+
+**原因**：有若干合理原因。
+
+- 缓存只在 delta 模式、异步/Gateway 路径上安装。full 模式下根本没有 `CachedHistorySaver`。
+- `max_entries: 0` 统一禁用缓存，被禁用的缓存直接透传，不做组合。
+- wrapper 从不缓存「最新检查点」的解析结果：它先把目标解析成不可变的检查点 id，因此只读最新检查点的客户端按设计就是 miss。
+- 组合深度有上限（`_COMPOSE_MAX_DEPTH = 8`），冷链会回退到一次内层回走；在加入递归组合之前，实测单层组合在 500 步 SQLite run 上得到 `0` 次缓存命中。
+- `max_entries: 1` 的 LRU 每次读都会抖动 —— 结果正确，但没有命中。
+- redis 后端只报告 `hits` 与 `misses`；它的 `evictions` 与 `entries` 恒为 `0`。
+
+**处理**：确认处于 delta 模式且 `max_entries > 0`——并且在根据设置改动下结论前先重启，因为缓存只在启动构造时被读取一次。然后读 `compose_hits` 与 `full_walks`，判断是否由组合（而非顶层缓存）在承担工作。解释 `hits`/`misses` 时要与这两个计数器一起看，而不是单独看。见[缓存计数器](/docs/harness/checkpoints/observability)。
+
+## 集成
+
+### `create_deerflow_agent` 拒绝 delta 加检查点器
+
+**症状**：调用 `create_deerflow_agent(..., checkpoint_channel_mode="delta", checkpointer=...)` 抛出 `ValueError`：
+
+```
+create_deerflow_agent does not support checkpoint_channel_mode='delta' with a checkpointer: persisted graphs built here bypass checkpoint mode marker injection and the fail-closed compatibility gate (see deerflow.runtime.checkpoint_mode), so a mixed-mode store would silently corrupt thread state.  Use the guarded application paths (make_lead_agent or DeerFlowClient) for delta persistence; delta without a checkpointer is ephemeral and allowed.
+```
+
+**原因**：这样直接构建的图绕过了标记注入与 fail-closed 兼容门，混合模式的存储可能静默破坏线程状态。**不带**检查点器的 delta 是临时的，允许使用。
+
+**处理**：需要 delta 持久化时走受保护路径 —— `make_lead_agent` 或 `DeerFlowClient`。若只需一个临时的 delta 图，去掉 checkpointer 即可。
+
+<Callout type="tip">
+  排查任何症状前先拿到两个事实：进程的冻结模式（来自 `config.yaml`
+  以及它是否重启过）与线程的标记（来自其 `metadata`）。两者一致后，
+  上面几乎所有条目都会消解。
+</Callout>
