@@ -61,6 +61,27 @@ class JsonlRunEventStore(RunEventStore):
             self._write_locks[thread_id] = lock
         return lock
 
+    @staticmethod
+    async def _await_owned_task[T](task: asyncio.Task[T]) -> T:
+        """Keep owned work attached until it settles, then propagate cancellation."""
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
+            except Exception:
+                # Retrieve the failure below after the owned work has settled.
+                break
+        if cancellation is not None:
+            try:
+                task.result()
+            except Exception as exc:
+                raise cancellation from exc
+            raise cancellation
+        return task.result()
+
     async def _run_mutation[T](self, thread_id: str, operation: Callable[[], Coroutine[Any, Any, T]]) -> T:
         """Drain an admitted mutation before propagating caller cancellation.
 
@@ -71,24 +92,7 @@ class JsonlRunEventStore(RunEventStore):
         """
         async with self._get_write_lock(thread_id):
             task = asyncio.create_task(operation(), name=f"jsonl-mutation:{thread_id}")
-            cancellation: asyncio.CancelledError | None = None
-            while not task.done():
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError as exc:
-                    if cancellation is None:
-                        cancellation = exc
-                except Exception:
-                    # Retrieve the failure below, after preserving any earlier
-                    # cancellation. The operation has already finished rollback.
-                    break
-            if cancellation is not None:
-                try:
-                    task.result()
-                except Exception as exc:
-                    raise cancellation from exc
-                raise cancellation
-            return task.result()
+            return await self._await_owned_task(task)
 
     @staticmethod
     def _validate_id(value: str, label: str) -> str:
@@ -343,7 +347,11 @@ class JsonlRunEventStore(RunEventStore):
         # single-process writers. Without the write lock, reading run files one
         # by one can mix events from opposite sides of a concurrent append.
         async with self._get_write_lock(thread_id):
-            events = await asyncio.to_thread(self._read_thread_events, thread_id)
+            task = asyncio.create_task(
+                asyncio.to_thread(self._read_thread_events, thread_id),
+                name=f"jsonl-snapshot:{thread_id}",
+            )
+            events = await self._await_owned_task(task)
         result: dict[str, str] = {}
         for event in reversed(events):
             match = match_ai_message_run_id(event, pending)

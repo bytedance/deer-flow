@@ -859,7 +859,7 @@ def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypa
     monkeypatch.setattr(
         lead_agent_module,
         "MemoryMiddleware",
-        lambda agent_name=None, *, memory_config: captured.setdefault("memory_config", memory_config) or "memory-middleware",
+        lambda agent_name=None, *, memory_config, pii_redaction_config=None: captured.setdefault("memory_config", memory_config) or "memory-middleware",
     )
 
     middlewares = lead_agent_module.build_middlewares(
@@ -900,7 +900,7 @@ def test_build_middlewares_passes_run_model_name_to_summarization(monkeypatch):
     )
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
     monkeypatch.setattr(lead_agent_module, "TitleMiddleware", lambda *, app_config, extensions: "title-middleware")
-    monkeypatch.setattr(lead_agent_module, "MemoryMiddleware", lambda agent_name=None, *, memory_config: "memory-middleware")
+    monkeypatch.setattr(lead_agent_module, "MemoryMiddleware", lambda agent_name=None, *, memory_config, pii_redaction_config=None: "memory-middleware")
 
     lead_agent_module.build_middlewares(
         {"configurable": {"is_plan_mode": False, "subagent_enabled": False}},

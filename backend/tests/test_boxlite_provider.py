@@ -18,9 +18,11 @@ import time
 import types
 
 import pytest
+from pydantic import ValidationError
 
 from deerflow.community.boxlite.box import BoxliteBox
 from deerflow.community.boxlite.provider import BoxliteProvider, _import_simplebox
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.trace_context import get_current_trace_id, request_trace_context
 
 _LEGACY_COLLIDING_IDENTITIES = (
@@ -541,6 +543,25 @@ async def test_acquire_async_propagates_request_trace_context(monkeypatch):
         # _fake_run uses asyncio.run, which cannot run inside this test's event
         # loop thread; shut down on a worker thread so box close() completes.
         await asyncio.to_thread(provider.shutdown)
+
+
+@pytest.mark.parametrize("value", [float("inf"), "1e999"])
+def test_sandbox_config_rejects_non_finite_health_check_skip_seconds(value):
+    """`ge=0` alone lets a non-finite skip window through.
+
+    `health_check_skip_seconds: 1e999` in config.yaml loads as the string
+    "1e999" and pydantic's float coercion turns it into inf; `ge=0` accepts
+    inf (inf >= 0). At the warm-reuse site the check `skip_seconds > 0 and
+    (now - released_at) < skip_seconds` then holds forever, so recently
+    released boxes are promoted without the health check permanently instead
+    of failing fast at config load. `allow_inf_nan=False` (as already set on
+    the sibling sandbox float fields) makes the config layer reject it.
+    """
+    with pytest.raises(ValidationError):
+        SandboxConfig(
+            use="deerflow.community.boxlite.provider:BoxliteProvider",
+            health_check_skip_seconds=value,
+        )
 
 
 def test_explicit_recent_reclaim_skip_avoids_health_check(monkeypatch):

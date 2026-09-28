@@ -296,6 +296,7 @@ def _make_provider(tmp_path):
         provider._acquire_epoch_counter = 0
         provider._acquire_inflight = {}
         provider._acquire_serializer = AcquireSerializer(thread_name_prefix="aio-sandbox-lock-wait")
+        provider._acquire_worker_executor = aio_mod.ThreadPoolExecutor(thread_name_prefix="aio-sandbox-owned-worker-test")
         provider._lock = MagicMock()
         provider._idle_checker_stop = MagicMock()
         provider._renewal_stop = MagicMock()
@@ -938,6 +939,332 @@ async def test_discover_or_create_with_lock_async_offloads_lock_file_open_and_cl
 
 
 @pytest.mark.anyio
+async def test_discover_or_create_with_lock_async_cancellation_aborts_flock_wait(tmp_path, monkeypatch):
+    """A cancelled waiter must not park until a peer releases the cross-process flock."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._discover_or_create_with_lock_async = aio_mod.AioSandboxProvider._discover_or_create_with_lock_async.__get__(
+        provider,
+        aio_mod.AioSandboxProvider,
+    )
+    provider._backend = SimpleNamespace(discover=MagicMock(return_value=None))
+
+    peer_lock = threading.Lock()
+    peer_lock.acquire()
+    attempt_seen = threading.Event()
+    closed = threading.Event()
+
+    class TrackedLockFile:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def close(self):
+            self._inner.close()
+            closed.set()
+
+    def open_lock_file(lock_path):
+        return TrackedLockFile(open(lock_path, "a", encoding="utf-8"))
+
+    def try_lock(_lock_file) -> bool:
+        attempt_seen.set()
+        return peer_lock.acquire(blocking=False)
+
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "_open_lock_file", open_lock_file)
+    monkeypatch.setattr(aio_mod, "_try_lock_file_exclusive", try_lock)
+
+    owner = asyncio.create_task(
+        provider._discover_or_create_with_lock_async(
+            "thread-cancel-flock-wait",
+            "sandbox-cancel-flock-wait",
+            user_id="default",
+        )
+    )
+    try:
+        assert await asyncio.to_thread(attempt_seen.wait, 2)
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(owner, timeout=0.5)
+        assert closed.is_set()
+        provider._backend.discover.assert_not_called()
+    finally:
+        peer_lock.release()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_discover_or_create_with_lock_async_cancellation_keeps_file_lock_until_worker_finishes(tmp_path, monkeypatch):
+    """Caller cancellation must not release the cross-process lock over an admitted worker."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._discover_or_create_with_lock_async = aio_mod.AioSandboxProvider._discover_or_create_with_lock_async.__get__(
+        provider,
+        aio_mod.AioSandboxProvider,
+    )
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    discover_started = threading.Event()
+    allow_discover = threading.Event()
+    contender_acquired = threading.Event()
+    release_contender = threading.Event()
+    cross_process_lock = threading.Lock()
+
+    def blocking_discover(_sandbox_id: str):
+        discover_started.set()
+        assert allow_discover.wait(timeout=2)
+        return None
+
+    create_calls: list[tuple[str | None, str, str | None]] = []
+
+    async def fake_create(thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
+        create_calls.append((thread_id, sandbox_id, user_id))
+        return sandbox_id
+
+    def contend_for_lock() -> None:
+        cross_process_lock.acquire()
+        try:
+            contender_acquired.set()
+            assert release_contender.wait(timeout=2)
+        finally:
+            cross_process_lock.release()
+
+    provider._backend = SimpleNamespace(discover=blocking_discover)
+    monkeypatch.setattr(provider, "_create_sandbox_async", fake_create)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "_try_lock_file_exclusive", lambda _lock_file: cross_process_lock.acquire(blocking=False))
+    monkeypatch.setattr(aio_mod, "_unlock_file", lambda _lock_file: cross_process_lock.release())
+
+    owner = asyncio.create_task(
+        provider._discover_or_create_with_lock_async(
+            "thread-cancel-flock",
+            "sandbox-cancel-flock",
+            user_id="default",
+        )
+    )
+    contender = None
+    try:
+        assert await asyncio.to_thread(discover_started.wait, 2)
+        owner.cancel()
+        contender = asyncio.create_task(asyncio.to_thread(contend_for_lock))
+
+        await asyncio.sleep(0.05)
+        assert not contender_acquired.is_set(), "cross-process lock released while discover worker was still running"
+
+        allow_discover.set()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert await asyncio.to_thread(contender_acquired.wait, 2)
+        assert create_calls == []
+    finally:
+        allow_discover.set()
+        release_contender.set()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+        if contender is not None:
+            await contender
+
+
+@pytest.mark.anyio
+async def test_discover_or_create_with_lock_async_cancellation_drains_create_before_unlock(tmp_path, monkeypatch):
+    """Cancellation during create must finish the async lifecycle before releasing the flock."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._discover_or_create_with_lock_async = aio_mod.AioSandboxProvider._discover_or_create_with_lock_async.__get__(
+        provider,
+        aio_mod.AioSandboxProvider,
+    )
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    create_started = asyncio.Event()
+    allow_create = asyncio.Event()
+    create_finished = asyncio.Event()
+    contender_acquired = threading.Event()
+    release_contender = threading.Event()
+    cross_process_lock = threading.Lock()
+
+    async def fake_create(thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
+        assert thread_id == "thread-cancel-create"
+        assert sandbox_id == "sandbox-cancel-create"
+        assert user_id == "default"
+        create_started.set()
+        await allow_create.wait()
+        create_finished.set()
+        return sandbox_id
+
+    def contend_for_lock() -> None:
+        cross_process_lock.acquire()
+        try:
+            contender_acquired.set()
+            assert release_contender.wait(timeout=2)
+        finally:
+            cross_process_lock.release()
+
+    provider._backend = SimpleNamespace(discover=MagicMock(return_value=None))
+    monkeypatch.setattr(provider, "_create_sandbox_async", fake_create)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "_try_lock_file_exclusive", lambda _lock_file: cross_process_lock.acquire(blocking=False))
+    monkeypatch.setattr(aio_mod, "_unlock_file", lambda _lock_file: cross_process_lock.release())
+
+    owner = asyncio.create_task(
+        provider._discover_or_create_with_lock_async(
+            "thread-cancel-create",
+            "sandbox-cancel-create",
+            user_id="default",
+        )
+    )
+    contender = None
+    try:
+        await asyncio.wait_for(create_started.wait(), timeout=2)
+        owner.cancel()
+        contender = asyncio.create_task(asyncio.to_thread(contend_for_lock))
+
+        await asyncio.sleep(0.05)
+        assert not contender_acquired.is_set(), "flock released before the async create lifecycle finished"
+
+        allow_create.set()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert create_finished.is_set()
+        assert await asyncio.to_thread(contender_acquired.wait, 2)
+    finally:
+        allow_create.set()
+        release_contender.set()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+        if contender is not None:
+            await contender
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("blocked_step", ["create", "register"])
+async def test_discover_or_create_with_lock_async_cancellation_drains_create_lifecycle_steps(
+    blocked_step,
+    tmp_path,
+    monkeypatch,
+):
+    """Create/register workers must settle before cancellation releases the flock."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._discover_or_create_with_lock_async = aio_mod.AioSandboxProvider._discover_or_create_with_lock_async.__get__(
+        provider,
+        aio_mod.AioSandboxProvider,
+    )
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+    provider._config = {"command_timeout": 600.0, "idle_timeout": 600, "replicas": 3}
+
+    step_started = threading.Event()
+    allow_step = threading.Event()
+    step_finished = threading.Event()
+    register_called = threading.Event()
+    contender_acquired = threading.Event()
+    release_contender = threading.Event()
+    cross_process_lock = threading.Lock()
+
+    info = aio_mod.SandboxInfo(
+        sandbox_id="sandbox-cancel-lifecycle",
+        sandbox_url="http://sandbox",
+    )
+
+    def create(*_args, **_kwargs):
+        if blocked_step == "create":
+            step_started.set()
+            assert allow_step.wait(timeout=2)
+            step_finished.set()
+        return info
+
+    def register(*_args, **_kwargs):
+        register_called.set()
+        if blocked_step == "register":
+            step_started.set()
+            assert allow_step.wait(timeout=2)
+            step_finished.set()
+        return info.sandbox_id
+
+    async def ready(*_args, **_kwargs):
+        return True
+
+    def contend_for_lock() -> None:
+        cross_process_lock.acquire()
+        try:
+            contender_acquired.set()
+            assert release_contender.wait(timeout=2)
+        finally:
+            cross_process_lock.release()
+
+    provider._backend = SimpleNamespace(
+        create=create,
+        destroy=MagicMock(),
+        discover=MagicMock(return_value=None),
+    )
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(provider, "_lark_integration_active", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(provider, "_lark_broker_active", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(provider, "_local_config_mount_exclusion_root", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(provider, "_replica_count", lambda: (3, 0))
+    monkeypatch.setattr(provider, "_register_created_sandbox", register)
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready_async", ready)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(aio_mod, "_try_lock_file_exclusive", lambda _lock_file: cross_process_lock.acquire(blocking=False))
+    monkeypatch.setattr(aio_mod, "_unlock_file", lambda _lock_file: cross_process_lock.release())
+
+    owner = asyncio.create_task(
+        provider._discover_or_create_with_lock_async(
+            "thread-cancel-lifecycle",
+            info.sandbox_id,
+            user_id="default",
+        )
+    )
+    contender = None
+    try:
+        assert await asyncio.to_thread(step_started.wait, 2)
+        owner.cancel()
+        contender = asyncio.create_task(asyncio.to_thread(contend_for_lock))
+
+        await asyncio.sleep(0.05)
+        assert not contender_acquired.is_set()
+
+        allow_step.set()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert step_finished.is_set()
+        assert register_called.is_set()
+        assert await asyncio.to_thread(contender_acquired.wait, 2)
+    finally:
+        allow_step.set()
+        release_contender.set()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+        if contender is not None:
+            await contender
+
+
+@pytest.mark.anyio
 async def test_acquire_async_lock_wait_uses_dedicated_executor(tmp_path, monkeypatch):
     """Per-thread lock waits should not consume the default asyncio.to_thread pool."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
@@ -1049,6 +1376,244 @@ async def test_acquire_async_cancelled_waiter_does_not_block_successor(tmp_path,
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("blocked_step", ["reuse", "reclaim"])
+async def test_acquire_async_cancellation_keeps_serializer_until_started_worker_finishes(
+    blocked_step,
+    tmp_path,
+    monkeypatch,
+):
+    """A cancelled same-key acquire must not overlap an already-started worker."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    first_started = threading.Event()
+    allow_first_finish = threading.Event()
+    successor_started = threading.Event()
+    state_lock = threading.Lock()
+    active = 0
+    max_active = 0
+    calls = 0
+
+    monkeypatch.setattr(provider, "_ensure_skills_projection", lambda _user_id: None)
+
+    def blocked_worker(result):
+        nonlocal active, max_active, calls
+        with state_lock:
+            calls += 1
+            call_number = calls
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            if call_number == 1:
+                first_started.set()
+                assert allow_first_finish.wait(timeout=2)
+            else:
+                successor_started.set()
+            return result
+        finally:
+            with state_lock:
+                active -= 1
+
+    def reuse(*_args, **_kwargs):
+        if blocked_step == "reuse":
+            return blocked_worker("sandbox-reused")
+        return None
+
+    def reclaim(*_args, **_kwargs):
+        if blocked_step == "reclaim":
+            return blocked_worker("sandbox-reclaimed")
+        raise AssertionError("warm reclaim should not run after cached reuse succeeds")
+
+    monkeypatch.setattr(provider, "_reuse_in_process_sandbox", reuse)
+    monkeypatch.setattr(provider, "_reclaim_warm_pool_sandbox", reclaim)
+
+    owner = asyncio.create_task(provider.acquire_async("thread-owned-worker", user_id="default"))
+    successor = None
+    try:
+        assert await asyncio.to_thread(first_started.wait, 2)
+        owner.cancel()
+        successor = asyncio.create_task(provider.acquire_async("thread-owned-worker", user_id="default"))
+
+        await asyncio.sleep(0.05)
+        assert not successor_started.is_set(), "serializer released while cancelled worker was still running"
+
+        allow_first_finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        assert await asyncio.to_thread(successor_started.wait, 2)
+        expected = "sandbox-reused" if blocked_step == "reuse" else "sandbox-reclaimed"
+        assert await asyncio.wait_for(successor, timeout=1) == expected
+        assert max_active == 1
+    finally:
+        allow_first_finish.set()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+        if successor is not None and not successor.done():
+            successor.cancel()
+            await asyncio.gather(successor, return_exceptions=True)
+        provider.reset()
+
+
+@pytest.mark.anyio
+async def test_acquire_async_cancellation_cancels_queued_reclaim_before_it_runs(tmp_path, monkeypatch):
+    """Cancellation must not force a not-yet-started reclaim to run later."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
+    provider._acquire_worker_executor = aio_mod.ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="aio-owned-worker-test",
+    )
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+
+    blocker_started = threading.Event()
+    allow_blocker = threading.Event()
+    reclaim_submitted = threading.Event()
+    reclaim_calls = 0
+
+    executor = provider._acquire_worker_executor
+    original_submit = executor.submit
+    submit_count = 0
+
+    def occupy_lifecycle_executor():
+        blocker_started.set()
+        assert allow_blocker.wait(timeout=2)
+
+    def reuse(*_args, **_kwargs):
+        # We are running on the owned-lifecycle executor. Queue the blocker
+        # behind this worker before returning None; with max_workers=1 it starts
+        # immediately after reuse returns and before the event loop can submit
+        # warm reclaim.
+        original_submit(occupy_lifecycle_executor)
+        return None
+
+    def reclaim(*_args, **_kwargs):
+        nonlocal reclaim_calls
+        reclaim_calls += 1
+        return "sandbox-reclaimed"
+
+    def tracking_submit(*args, **kwargs):
+        nonlocal submit_count
+        submit_count += 1
+        future = original_submit(*args, **kwargs)
+        # Submission 1 runs cached reuse; submission 2 is warm reclaim,
+        # now queued behind occupy_lifecycle_executor.
+        if submit_count == 2:
+            reclaim_submitted.set()
+        return future
+
+    monkeypatch.setattr(provider, "_ensure_skills_projection", lambda _user_id: None)
+    monkeypatch.setattr(provider, "_reuse_in_process_sandbox", reuse)
+    monkeypatch.setattr(provider, "_reclaim_warm_pool_sandbox", reclaim)
+    monkeypatch.setattr(executor, "submit", tracking_submit)
+
+    owner = asyncio.create_task(provider.acquire_async("thread-queued-reclaim", user_id="default"))
+    try:
+        assert await asyncio.to_thread(blocker_started.wait, 2)
+        assert await asyncio.to_thread(reclaim_submitted.wait, 2)
+
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+
+        allow_blocker.set()
+        await asyncio.sleep(0.05)
+        assert reclaim_calls == 0
+    finally:
+        allow_blocker.set()
+        if not owner.done():
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+        provider._acquire_serializer.close()
+        provider._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
+
+
+@pytest.mark.anyio
+async def test_acquire_async_lock_waiters_do_not_starve_holder_worker(tmp_path, monkeypatch):
+    """Lock waiters must not occupy the executor needed by the lock holder."""
+    provider = _make_provider(tmp_path)
+    provider._acquire_serializer.close()
+    provider._acquire_serializer = AcquireSerializer(
+        max_workers=2,
+        thread_name_prefix="aio-holder-deadlock-test",
+    )
+
+    projection_started = threading.Event()
+    allow_projection = threading.Event()
+    waiter_workers_started = threading.Event()
+    count_lock = threading.Lock()
+    started_workers = 0
+    projection_calls = 0
+
+    executor = provider._acquire_serializer.executor
+    original_submit = executor.submit
+
+    def tracking_submit(func, /, *args, **kwargs):
+        def tracked():
+            nonlocal started_workers
+            with count_lock:
+                started_workers += 1
+                if started_workers >= 3:
+                    waiter_workers_started.set()
+            return func(*args, **kwargs)
+
+        return original_submit(tracked)
+
+    def ensure_projection(_user_id):
+        nonlocal projection_calls
+        projection_calls += 1
+        if projection_calls == 1:
+            projection_started.set()
+            assert allow_projection.wait(timeout=2)
+
+    monkeypatch.setattr(executor, "submit", tracking_submit)
+    monkeypatch.setattr(provider, "_ensure_skills_projection", ensure_projection)
+    monkeypatch.setattr(
+        provider,
+        "_reuse_in_process_sandbox",
+        lambda *_args, **_kwargs: "sandbox-cached",
+    )
+
+    owner = asyncio.create_task(provider.acquire_async("thread-holder-deadlock", user_id="default"))
+    successors: list[asyncio.Task[str]] = []
+    try:
+        assert await asyncio.to_thread(projection_started.wait, 2)
+        successors = [asyncio.create_task(provider.acquire_async("thread-holder-deadlock", user_id="default")) for _ in range(2)]
+        # Submission 1 acquired the holder's key. Submissions 2 and 3 are now
+        # both running in the bounded serializer pool, blocked on that same key.
+        assert await asyncio.to_thread(waiter_workers_started.wait, 2)
+
+        allow_projection.set()
+        assert await asyncio.wait_for(owner, timeout=1) == "sandbox-cached"
+        assert await asyncio.wait_for(
+            asyncio.gather(*successors),
+            timeout=1,
+        ) == ["sandbox-cached", "sandbox-cached"]
+    finally:
+        allow_projection.set()
+        if not owner.done():
+            owner.cancel()
+        for task in successors:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(owner, *successors, return_exceptions=True)
+        provider.reset()
+
+
+@pytest.mark.anyio
 async def test_acquire_internal_async_offloads_cached_reuse_health_check(tmp_path, monkeypatch):
     """Async cached reuse must keep backend health checks off the event loop."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
@@ -1069,7 +1634,6 @@ async def test_acquire_internal_async_offloads_cached_reuse_health_check(tmp_pat
     assert sandbox_id == "sandbox-cached-async"
     assert to_thread_calls == [
         (provider._ensure_skills_projection, ("default",)),
-        (provider._reuse_in_process_sandbox, ("thread-cached-async",)),
     ]
 
 
@@ -1283,6 +1847,29 @@ def _make_provider_with_active_sandbox(tmp_path, sandbox_id: str):
     sandbox.requires_container_recycle = False
     provider._sandboxes = {sandbox_id: sandbox}
     return provider, sandbox, aio_mod
+
+
+def test_reused_active_sandbox_requires_matching_releases(tmp_path):
+    """The execution lease manager keeps AIO clients active until the final holder exits."""
+    from deerflow.sandbox.lease import SandboxLeaseManager
+
+    provider, sandbox, _ = _make_provider_with_active_sandbox(tmp_path, "sandbox-lease")
+    manager = SandboxLeaseManager(provider)
+    try:
+        for owner in ("active-run", "temporary-upload"):
+            manager.retain(owner, "sandbox-lease", thread_id="thread-lease", user_id="owner-upload")
+
+        manager.release("temporary-upload")
+        assert "sandbox-lease" in provider._sandboxes
+        assert "sandbox-lease" not in provider._warm_pool
+        sandbox.close.assert_not_called()
+
+        manager.release("active-run")
+        assert "sandbox-lease" not in provider._sandboxes
+        assert "sandbox-lease" in provider._warm_pool
+        sandbox.close.assert_called_once_with()
+    finally:
+        manager.close()
 
 
 def test_release_closes_cached_sandbox_client(tmp_path):

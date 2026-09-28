@@ -2,6 +2,14 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+## Lark CLI blocking-I/O fixtures
+
+`blocking_io/test_integrations_router.py` uses a real local CLI stub: a `.cmd`
+script on Windows and an executable shell script on POSIX. Resolve it through
+the production PATH lookup, including a directory containing spaces. Seed fake
+app credentials so auth completion reaches the CLI instead of returning early,
+and keep fixture filesystem work behind `asyncio.to_thread`.
+
 ## Shared sandbox search contracts
 
 `test_sandbox_search_contract.py` runs shared `ls`/`glob`/`grep` scenarios through
@@ -84,7 +92,9 @@ Load the example through `load_extensions()` and the host isolation wrapper, as 
 requests, the task-store handover between the tool wrapper and `before_model`, copy
 semantics, fail-open provider errors and isolation diagnostics for local bugs. It
 also pins per-message classification: a benign first message in a `Command` must
-not take the flag of an injected later one.
+not take the flag of an injected later one, and a malformed, compressed or slow
+answer for one message must not cancel or hide another's flag. The loopback test
+uses a real local server behind an unreachable proxy variable.
 `test_jev_screening_pipeline.py` runs real lead/subagent graphs to a recording model
 with a task store bound under the runtime-context key the Gateway worker uses; cover
 the redacted excerpt, error metadata/receipts, budget, one-time warnings including

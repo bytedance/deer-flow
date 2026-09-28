@@ -17,6 +17,16 @@ import pytest
 from deerflow.integrations import lark_broker
 from deerflow.integrations.lark_broker import BrokerConfig, run_lark_cli, serve
 
+# Several tests execute the broker's POSIX artifacts directly: the fake
+# ``lark-cli`` binary, the shim, and the launcher are ``#!`` scripts (the real
+# ones target POSIX sandbox images), and Windows CreateProcess cannot execute a
+# shebang script (WinError 193 / ENOEXEC). CI runs on Linux and keeps the
+# coverage; Windows dev hosts skip these instead of hard-failing.
+_skip_windows = pytest.mark.skipif(
+    os.name == "nt",
+    reason="spawns '#!' scripts (fake lark-cli / shim / launcher) that only a POSIX host can execute",
+)
+
 
 def _fake_lark_cli(tmp_path: Path) -> str:
     """A stub 'lark-cli' that echoes argv, stdin, and the credential env.
@@ -58,6 +68,7 @@ def _config(tmp_path: Path, port: int = 0) -> BrokerConfig:
 # ── run_lark_cli (in-process, no server) ───────────────────────────────────
 
 
+@_skip_windows
 def test_run_lark_cli_forwards_argv_stdin_and_credential_env(tmp_path: Path) -> None:
     config = _config(tmp_path)
     result = run_lark_cli(config, ["auth", "status", "--json"], b"piped-input")
@@ -72,11 +83,13 @@ def test_run_lark_cli_forwards_argv_stdin_and_credential_env(tmp_path: Path) -> 
     assert result.stderr == b"ERR:auth status --json\n"
 
 
+@_skip_windows
 def test_run_lark_cli_propagates_exit_code(tmp_path: Path) -> None:
     result = run_lark_cli(_config(tmp_path), ["do", "--boom"], b"")
     assert result.exit_code == 7
 
 
+@_skip_windows
 def test_run_lark_cli_never_shell_interprets_args(tmp_path: Path) -> None:
     # A shell metacharacter must reach the binary as one literal arg, not run a
     # second command (shell=False, argv list).
@@ -120,6 +133,7 @@ def _post_exec(host: str, port: int, body: dict) -> tuple[int, dict]:
     return resp.status, parsed
 
 
+@_skip_windows
 def test_exec_endpoint_round_trips(broker_server) -> None:
     host, port = broker_server
     status, body = _post_exec(host, port, {"args": ["ping"], "stdin_b64": base64.b64encode(b"hi").decode()})
@@ -130,6 +144,7 @@ def test_exec_endpoint_round_trips(broker_server) -> None:
     assert payload["stdin"] == "hi"
 
 
+@_skip_windows
 def test_exec_endpoint_ignores_client_supplied_credential_paths(broker_server) -> None:
     host, port = broker_server
     # Even if a malicious client tries to smuggle env-like args, the broker sets
@@ -171,6 +186,7 @@ def test_exec_endpoint_returns_500_json_on_unexpected_error(broker_server, monke
 # ── Shim script ─────────────────────────────────────────────────────────────
 
 
+@_skip_windows
 def test_shim_forwards_and_replays_exit_code(broker_server, tmp_path: Path) -> None:
     host, port = broker_server
     shim = tmp_path / "lark-cli"
@@ -230,6 +246,7 @@ def test_install_shim_writes_runtime_layout(tmp_path: Path) -> None:
     assert marker == {"version": "v1.0.65", "kind": "shim"}
 
 
+@_skip_windows
 def test_launcher_resolves_python_and_forwards(broker_server, tmp_path: Path) -> None:
     """The /bin/sh launcher finds python3 on PATH and execs the shim body."""
     host, port = broker_server
@@ -253,6 +270,7 @@ def test_launcher_resolves_python_and_forwards(broker_server, tmp_path: Path) ->
     assert b"ERR:do --boom" in completed.stderr
 
 
+@_skip_windows
 def test_launcher_can_pin_interpreter_via_env(broker_server, tmp_path: Path) -> None:
     """DEERFLOW_LARK_BROKER_PYTHON pins the interpreter for images with no python3
     on PATH (the launcher must not silently ENOEXEC)."""
@@ -276,6 +294,7 @@ def test_launcher_can_pin_interpreter_via_env(broker_server, tmp_path: Path) -> 
     assert completed.returncode == 0
 
 
+@_skip_windows
 def test_launcher_fails_loudly_without_python(tmp_path: Path) -> None:
     """With no python interpreter resolvable, the launcher exits 127 with an
     actionable message rather than an opaque ENOEXEC."""
@@ -344,6 +363,7 @@ def test_denied_subcommand_matches_through_leading_flags(tmp_path: Path) -> None
     assert result.exit_code == 126
 
 
+@_skip_windows
 def test_allowed_subcommand_still_runs_with_denylist(tmp_path: Path) -> None:
     config = BrokerConfig(
         lark_cli_path=_fake_lark_cli(tmp_path),

@@ -100,6 +100,7 @@ class LeadAgentAssembly:
 
     graph: Any
     descriptor: Any
+    effective_model: str | None = None
 
 
 def unwrap_agent_graph(agent_result: Any) -> Any:
@@ -608,6 +609,7 @@ def build_middlewares(
         DurableContextMiddleware(
             skills_container_path=resolved_app_config.skills.container_path,
             skill_file_read_tool_names=resolved_app_config.summarization.skill_file_read_tool_names,
+            inject_tool_artifacts=resolved_app_config.tool_artifacts.enabled and resolved_app_config.tool_artifacts.inject_model_context,
             task_continuity_enabled=getattr(getattr(resolved_app_config, "task_continuity", None), "enabled", False) is True,
             pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None),
         )
@@ -649,11 +651,23 @@ def build_middlewares(
             from deerflow.agents.memory.manager import backend_requires_passive_writes_in_tool_mode
 
             if backend_requires_passive_writes_in_tool_mode(resolved_app_config.memory.manager_class):
-                middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+                middlewares.append(
+                    MemoryMiddleware(
+                        agent_name=agent_name,
+                        memory_config=resolved_app_config.memory,
+                        pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None),
+                    )
+                )
         else:
             if resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
                 logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
-            middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+            middlewares.append(
+                MemoryMiddleware(
+                    agent_name=agent_name,
+                    memory_config=resolved_app_config.memory,
+                    pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None),
+                )
+            )
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
@@ -885,7 +899,7 @@ def _complete_assembly(
 
     resolved_extensions = get_agent_build_extensions()
     if not resolved_extensions.has_agent_assembly_observers:
-        return LeadAgentAssembly(graph=graph, descriptor=None)
+        return LeadAgentAssembly(graph=graph, descriptor=None, effective_model=effective_model)
 
     from deerflow.agents.assembly_descriptor import build_assembly_descriptor
     from deerflow.extensions.notify import notify_agent_assembled
@@ -912,7 +926,7 @@ def _complete_assembly(
         effective_policies=resolved_policies,
     )
     notify_agent_assembled(descriptor, resolved_extensions)
-    return LeadAgentAssembly(graph=graph, descriptor=descriptor)
+    return LeadAgentAssembly(graph=graph, descriptor=descriptor, effective_model=effective_model)
 
 
 def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> LeadAgentAssembly:

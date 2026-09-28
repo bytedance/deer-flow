@@ -19,6 +19,27 @@ synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
 
+`deploy.sh` never sources the repo-root `.env`; Compose reads it via
+`--env-file`, and shell exports outrank that file during interpolation (an
+exported-but-empty variable still wins). So `BETTER_AUTH_SECRET` and
+`DEER_FLOW_INTERNAL_AUTH_TOKEN` resolve shell → `.env` → persisted file under
+`DEER_FLOW_HOME` → freshly generated, and a `.env`-provided value is left
+unexported so Compose parses it itself. Whether `.env` provides one is
+Compose's answer, not a `KEY=VALUE` grep: Compose also accepts `KEY: VALUE`
+lines and interpolates `${VAR}` inside values, so the script renders a stub
+project whose only environment entry is `${KEY}` through
+`docker compose config` (same `--env-file`, stub on stdin, project directory
+`docker/`) and reads the value back; `""` means empty or unset and falls
+through to the persisted/generated secret. This works on every Compose v2
+(the README floor is 2.24; `config --environment` would need 2.28), and a
+failing probe stops the script rather than guessing. `read_dotenv_value`
+stays for the end-of-run summary only. Do not export a value the script read
+from `.env`: that shadows Compose's own dotenv parsing and re-creates the bug
+where `make up` replaced the operator's secret with a generated one.
+`backend/tests/test_deploy_dotenv_secrets.py` pins the order and the probe;
+its real-Compose cases run against the installed `docker` CLI and against any
+standalone binaries listed in `DEER_FLOW_TEST_COMPOSE_BINARIES`.
+
 Root `make install` runs pre-commit through uv, so uv's tool bin directory
 need not be on `PATH`.
 
@@ -274,3 +295,7 @@ bounded, drop-oldest frame queue. WebSocket clients that request
 The legacy no-parameter protocol still base64-encodes frames into JSON at the
 Gateway boundary for backward compatibility. Unknown `frame_format` values
 receive a JSON error and close code 1008.
+
+The support bundle's `extensions_config.json` reader accepts UTF-8 with or
+without a leading BOM, matching the runtime loader. Preserve redaction and
+avoid flagging a valid BOM-prefixed file as a syntax error in triage output.

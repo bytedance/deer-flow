@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -548,12 +549,19 @@ async def get_user_profile(request: Request) -> UserProfileResponse:
         UserProfileResponse with content=None if USER.md does not exist yet.
     """
     _require_agents_api_enabled()
+    user_id = get_effective_user_id()
+
+    # Path resolution (``get_paths()`` lazily builds absolute paths) and the
+    # stat/read are filesystem work; keep them off the event loop like every
+    # other handler in this router.
+    def _read_profile() -> str | None:
+        user_md_path = get_paths().user_md_file(user_id)
+        if not user_md_path.exists():
+            return None
+        return user_md_path.read_text(encoding="utf-8").strip()
 
     try:
-        user_md_path = get_paths().user_md_file(get_effective_user_id())
-        if not user_md_path.exists():
-            return UserProfileResponse(content=None)
-        raw = user_md_path.read_text(encoding="utf-8").strip()
+        raw = await asyncio.to_thread(_read_profile)
         return UserProfileResponse(content=raw or None)
     except Exception as e:
         logger.error(f"Failed to read user profile: {e}", exc_info=True)
@@ -583,12 +591,16 @@ async def update_user_profile(body: UserProfileUpdateRequest, request: Request) 
         UserProfileResponse with the saved content.
     """
     _require_agents_api_enabled()
+    user_id = get_effective_user_id()
 
-    try:
-        paths = get_paths()
-        user_md_path = paths.user_md_file(get_effective_user_id())
+    def _write_profile() -> Path:
+        user_md_path = get_paths().user_md_file(user_id)
         user_md_path.parent.mkdir(parents=True, exist_ok=True)
         user_md_path.write_text(body.content, encoding="utf-8")
+        return user_md_path
+
+    try:
+        user_md_path = await asyncio.to_thread(_write_profile)
         logger.info(f"Updated USER.md at {user_md_path}")
         return UserProfileResponse(content=body.content or None)
     except Exception as e:

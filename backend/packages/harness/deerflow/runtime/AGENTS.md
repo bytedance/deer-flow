@@ -26,6 +26,11 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Message sequence placement:** Keep backend and frontend message identity rules aligned. Details: `backend/docs/runtime-guidance-details.md`.
 
+**Human-input capture** (`runtime/journal.py`): track capture separately from
+the optional display summary. Image-only input has no text but must still stop
+the batch scan and later model calls from appending another human-input event.
+`tests/test_run_journal.py` covers callback and full/delta graph paths.
+
 **LLM response callback coalescing** (`runtime/journal.py`): a provider may fire
 `on_llm_end` twice for one LangChain run id, first without usage (or with all token
 counts zero) and immediately again with usage populated. The first callback's generation
@@ -48,7 +53,7 @@ from `on_llm_end` before inspecting the response or touching any run state.
 **Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
 answers for paginated history. See `docs/skill-usage-ui.md`.
 
-**Run delivery receipts:** Journal artifact evidence and terminal status must finalize in order. Details: `backend/docs/runtime-guidance-details.md`.
+**Run delivery receipts:** Journal artifact evidence and terminal status must finalize before a satisfied goal is cleared. Goal cleanup uses a durable checkpoint-write reservation; delivery failure retains the goal without another continuation. Details: `backend/docs/runtime-guidance-details.md`.
 
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
@@ -93,7 +98,11 @@ contract. Its default implementation walks `list_messages()` backward in
 `before_seq` cursor, and raises when a full page has no safe progressing `seq`.
 Memory and database stores use that bounded path; the JSONL store overrides it
 with one complete thread-log read because each JSONL page would otherwise
-rescan every run file. The default and JSONL paths share the public
+rescan every run file. That JSONL snapshot task is named `jsonl-snapshot:{thread_id}` for
+asyncio task dumps and retains the per-thread lock until its off-thread full-log
+read settles even through caller cancellation. It deliberately has no drain
+timeout: releasing ownership while the worker can still read files would let a
+writer enter the supposedly stable snapshot. The default and JSONL paths share the public
 `normalize_message_ids()` and `match_ai_message_run_id()` helpers from
 `events/store/base.py`. Database owner filtering is inherited on every page.
 

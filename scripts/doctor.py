@@ -552,6 +552,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "firecrawl": "FIRECRAWL_API_KEY",
                 "fastcrw": "CRW_API_KEY",
                 "sofya": "SOFYA_API_KEY",
+                "unbrowse": "UNBROWSE_API_KEY",
             },
             "image_search": {
                 "brave": "BRAVE_SEARCH_API_KEY",

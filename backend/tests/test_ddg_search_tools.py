@@ -22,6 +22,8 @@ from deerflow.community.ddg_search import tools
         pytest.param("$DDG_TEST_MAX_RESULTS", "abc", {"max_results": 2}, 5, True, id="invalid-env"),
         pytest.param("$DDG_TEST_MAX_RESULTS", "", {"max_results": 2}, 5, True, id="empty-env"),
         pytest.param("$DDG_TEST_MAX_RESULTS", "3.5", {"max_results": 2}, 5, True, id="fractional-env"),
+        pytest.param(3.5, "3", {"max_results": 2}, 5, True, id="fractional-config"),
+        pytest.param(True, "3", {"max_results": 2}, 5, True, id="boolean-config"),
         pytest.param("$DDG_TEST_MAX_RESULTS", "0", {"max_results": 2}, 5, True, id="zero-env"),
         pytest.param("$DDG_TEST_MAX_RESULTS", "-2", {"max_results": 2}, 5, True, id="negative-env"),
         pytest.param(0, "3", {}, 5, True, id="zero-config"),
