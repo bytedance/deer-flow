@@ -11,7 +11,7 @@ import pytest
 import yaml
 from support.shell import find_script_bash
 
-from deerflow.config.app_config import AppConfig
+from deerflow.config.app_config import AppConfig, _legacy_config_candidates
 from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
 from deerflow.tools.tools import get_available_tools
 
@@ -636,15 +636,16 @@ def _run_config_upgrade_in_checkout(checkout: Path, **env_overrides: str):
     cleared so the developer's shell cannot pick the file under test.
 
     The harness's legacy fallback is anchored to its install location, which
-    here is the real repository, so every run must resolve before reaching it:
-    otherwise the script would upgrade the developer's own ``config.yaml``.
+    here is the real repository, so a run may only reach it when no legacy
+    candidate exists: otherwise the script would upgrade the developer's own
+    ``config.yaml``.
     """
     import shutil
     import subprocess
 
     project_root = Path(env_overrides.get("DEER_FLOW_PROJECT_ROOT", checkout))
-    if "DEER_FLOW_CONFIG_PATH" not in env_overrides and project_root.is_dir():
-        assert (project_root / "config.yaml").is_file(), "would fall back to the real repository's config.yaml"
+    if "DEER_FLOW_CONFIG_PATH" not in env_overrides and project_root.is_dir() and not (project_root / "config.yaml").is_file():
+        assert not any(path.exists() for path in _legacy_config_candidates()), "would fall back to the real repository's config.yaml"
 
     repo_root = Path(__file__).resolve().parents[2]
     (checkout / "scripts").mkdir(parents=True, exist_ok=True)
@@ -761,3 +762,17 @@ def test_config_upgrade_resolves_relative_deer_flow_config_path_from_backend(tmp
     upgraded = yaml.safe_load((checkout / "backend" / "custom.yaml").read_text(encoding="utf-8"))
     assert upgraded["config_version"] > 1
     assert (checkout / "config.yaml").read_text(encoding="utf-8") == checkout_text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_creates_checkout_config_when_none_exists(tmp_path):
+    """With no config anywhere, the resolver miss is not an error: the example seeds <checkout>/config.yaml."""
+    if any(path.exists() for path in _legacy_config_candidates()):
+        pytest.skip("the resolver's legacy fallback would find this repository's own config.yaml")
+    checkout = tmp_path / "checkout"
+
+    result = _run_config_upgrade_in_checkout(checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert "creating from example" in result.stdout
+    assert (checkout / "config.yaml").read_bytes() == (checkout / "config.example.yaml").read_bytes()
