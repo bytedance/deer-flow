@@ -166,7 +166,8 @@ def _effective_mcp_config_snapshot(config) -> str:
 class _McpCacheTransition:
     """Per-server classification of an effective MCP-config change.
 
-    ``retire_servers is None`` is the conservative whole-pool reset (a config
+    ``retire_servers is None`` is the conservative whole deployment-domain
+    retirement (a config
     path switch with a changed MCP slice, ``mcpInterceptors`` change,
     unreadable/unstable config, or a missing applied baseline). Otherwise
     ``retire_servers`` names exactly the servers
@@ -454,7 +455,7 @@ def _record_applied_revision(revision: _McpIncomingRevision) -> None:
 
 
 def _clear_applied_revision() -> None:
-    """Drop the applied baseline (whole-pool resets only, not cache clears)."""
+    """Drop the applied baseline (deployment-domain retirements only, not cache clears)."""
     global _mcp_applied_servers, _mcp_applied_order, _mcp_applied_connections
     global _mcp_applied_interceptors, _mcp_applied_path, _mcp_applied_signature
     global _mcp_applied_lifecycle, _mcp_applied_lifecycle_invalid
@@ -501,7 +502,7 @@ def _revision_matches_applied_baseline(revision: _McpIncomingRevision) -> bool:
 
 
 def _full_reset_plan() -> _McpReconciliationPlan:
-    """The conservative whole-pool reset plan."""
+    """The conservative whole deployment-domain retirement plan."""
     return _McpReconciliationPlan(
         transition=_McpCacheTransition(frozenset(), None),
         incoming=None,
@@ -552,7 +553,7 @@ def _lifecycle_transition(incoming: _McpIncomingRevision) -> tuple[bool, frozens
     if incoming_lifecycle.lifecycle_id != applied.lifecycle_id:
         # The trusted baseline was re-established, so the intervening history
         # cannot be proven even when the counters happen to match the applied
-        # ones. Fail closed for the whole pool.
+        # ones. Fail closed for the whole deployment domain.
         return True, frozenset()
     if incoming_lifecycle.global_generation != applied.global_generation:
         # Whole-pool advance, and a regression is equally unverifiable.
@@ -564,7 +565,7 @@ def _lifecycle_transition(incoming: _McpIncomingRevision) -> tuple[bool, frozens
         after = incoming_lifecycle.server_generations.get(name, 0)
         if after < before:
             # A regression (or lost history) can never be trusted to preserve
-            # identity: fail closed for the whole pool.
+            # identity: fail closed for the whole deployment domain.
             return True, frozenset()
         if after > before:
             advanced.add(name)
@@ -576,7 +577,7 @@ def _classify_against_applied(incoming: _McpIncomingRevision) -> _McpReconciliat
 
     The effective-content diff and the shared lifecycle classification are two
     independent signals that are union-ed: either one can require a rebuild, a
-    per-server retirement, or a whole-pool reset.
+    per-server retirement, or a whole deployment-domain retirement.
 
     This classifier does not mutate cache state. When neither signal fires, it
     returns ``None``; the caller then adopts the new file signature (and the
@@ -711,7 +712,7 @@ def _plan_cache_transition(*, fence_in_flight_initialization: bool = False) -> _
 
     if _mcp_applied_servers is None or _mcp_applied_order is None or _mcp_applied_connections is None:
         # The tool cache claims to be published but no trustworthy applied
-        # baseline survives: only a whole-pool reset is safe.
+        # baseline survives: only a whole deployment-domain retirement is safe.
         return _full_reset_plan()
 
     current_path, current_signature = _current_config_state()
@@ -753,7 +754,7 @@ def _plan_cache_transition(*, fence_in_flight_initialization: bool = False) -> _
     incoming = _read_stable_mcp_revision(current_path, current_signature)
     if incoming is None:
         # Unreadable config, or one that changed while it was being read: no
-        # revision can be trusted, so the whole pool is reset.
+        # revision can be trusted, so the whole deployment domain is retired.
         logger.info("MCP config could not be read as a single stable revision; resetting the whole MCP cache")
         return _full_reset_plan()
 
@@ -778,7 +779,7 @@ def _plan_explicit_reconciliation(names: frozenset[str]) -> _McpReconciliationPl
     the write to disk. Names the config does not know about are a no-op unless
     the full on-disk diff reveals a missed change; a changed MCP slice at a
     new path or a changed ``mcpInterceptors`` list still takes the conservative
-    whole-pool reset.
+    whole deployment-domain retirement.
     """
     if _mcp_applied_servers is None or _mcp_applied_order is None or _mcp_applied_connections is None:
         plan = _baseline_less_reconciliation_plan(void_in_flight_initialization=_initializing_generation is not None)
@@ -881,7 +882,7 @@ def _plan_from_incoming_revision(incoming: _McpIncomingRevision, *, fence_in_fli
 
     if _mcp_applied_servers is None or _mcp_applied_order is None or _mcp_applied_connections is None:
         # The tool cache claims to be published but no trustworthy applied
-        # baseline survives: only a whole-pool reset is safe.
+        # baseline survives: only a whole deployment-domain retirement is safe.
         return _full_reset_plan()
 
     path_changed = incoming.path != _mcp_applied_path
@@ -997,7 +998,8 @@ def _classify_cache_transition() -> _McpCacheTransition | None:
 
     Returns:
         ``None`` when nothing MCP-relevant changed, otherwise the per-server
-        transition to apply. ``retire_servers is None`` means the whole pool must
+        transition to apply. ``retire_servers is None`` means the whole
+        deployment domain must
         be reset.
     """
     plan = _plan_cache_transition()

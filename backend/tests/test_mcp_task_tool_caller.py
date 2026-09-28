@@ -1021,3 +1021,60 @@ async def test_sse_task_session_timeout_closes_real_connection(monkeypatch, phas
         results = await asyncio.gather(*handlers, return_exceptions=True)
         await server.wait_closed()
         assert all(not isinstance(result, BaseException) or isinstance(result, asyncio.CancelledError) for result in results), results
+
+
+@pytest.mark.asyncio
+async def test_personal_task_call_resolves_in_the_personal_domain(monkeypatch, tmp_path):
+    """A personal task call must not be fenced by a same-name deployment binding.
+
+    A deployment server may legally use the personal runtime name, so the caller
+    must resolve the personal connection in its own ownership domain. Only the
+    transport is mocked -- the real ``_call_configured_tool`` runs, so this covers
+    the domain that ``connection_scope="personal"`` selects being carried into the
+    binding, the pooled session and the disconnect cleanup.
+    """
+    from deerflow.mcp import task_tool_caller as caller_module
+    from deerflow.mcp.session_pool import get_session_pool, reset_session_pool
+    from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, personal_server_name
+
+    personal_connection = {"type": "stdio", "command": "npx", "args": []}
+    runtime_name = personal_server_name("alice", "notes", personal_connection)
+    assert runtime_name.startswith("personal_")
+
+    # Deployment legitimately owns the same runtime name with a DIFFERENT
+    # connection, so the two domains collide on the name alone.
+    deployment_config = ExtensionsConfig.model_validate({"mcpServers": {runtime_name: {"type": "stdio", "command": "uvx", "args": []}}})
+    personal_config = ExtensionsConfig.model_validate({"mcpServers": {runtime_name: dict(personal_connection)}})
+
+    reset_session_pool()
+    pool = get_session_pool()
+    deployment_binding = pool.ensure_binding(runtime_name, "deployment-fp")
+
+    snapshot = PersonalMcpConfigSnapshot(path=tmp_path / "mcp.json", signature=None, config=personal_config)
+    monkeypatch.setattr(caller_module, "load_user_mcp_config_if_changed", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr(caller_module, "require_personal_mcp_access", AsyncMock())
+
+    session = SimpleNamespace(initialize=AsyncMock(), call_tool=AsyncMock(return_value="ok"))
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr("langchain_mcp_adapters.sessions.create_session", lambda *_args, **_kwargs: session_cm)
+
+    caller = McpTaskToolCaller(deployment_config)
+    result = await caller.call_tool(
+        server_name=runtime_name,
+        tool_name="status_report",
+        arguments={},
+        user_id="alice",
+        thread_id="thread-1",
+        connection_scope="personal",
+    )
+
+    assert result == "ok"
+    # The personal call resolved in its OWN domain...
+    personal_binding = pool.active_binding(runtime_name, domain="personal")
+    assert personal_binding is not None
+    assert personal_binding.resource == MCPPoolResource(domain="personal", server_name=runtime_name)
+    assert personal_binding.fingerprint != deployment_binding.fingerprint
+    # ...and the deployment binding for the colliding name is untouched.
+    assert pool.active_binding(runtime_name) == deployment_binding
