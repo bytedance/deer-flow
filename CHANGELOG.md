@@ -336,6 +336,7 @@ This release closes that milestone with **181 merged pull requests**.
   own resolver, defaulting `DEER_FLOW_PROJECT_ROOT` to the checkout as
   `make dev` does; an override the Gateway would reject fails
   `config.yaml found` with the Gateway's error, and the config checks skip.
+  ([#5987])
 
 - **scheduler:** Editing an interval task's title or prompt no longer fails with
   a 500. The edit dialog always sends `schedule_spec` beside the changed field,
@@ -6204,4 +6205,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5945]: https://github.com/bytedance/deer-flow/pull/5945
 [#5964]: https://github.com/bytedance/deer-flow/pull/5964
 [#5981]: https://github.com/bytedance/deer-flow/pull/5981
+[#5987]: https://github.com/bytedance/deer-flow/pull/5987
 
