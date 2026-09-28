@@ -1911,7 +1911,11 @@ def install_lark_integration(
     # Install does not change credentials, but it shares the mutation-status
     # discipline: snapshot the credential-derived fields under the credential
     # lock so a concurrent app switch or auth flow landing during the unlocked
-    # runtime probe cannot mix newer credential state into this response.
+    # runtime probe cannot mix newer credential state into this response. The
+    # snapshot's auth probe runs `lark-cli auth status` as a subprocess
+    # (worst case its 8s timeout), so a concurrent same-user mutation may now
+    # wait on the lock for that duration — an accepted trade-off since install
+    # itself never mutates credentials.
     with _lark_credential_lock(user_id):
         credential_snapshot = _read_lark_credential_snapshot(user_id, verify_auth=False)
     status = _get_lark_mutation_status(user_id, config, credential_snapshot=credential_snapshot)

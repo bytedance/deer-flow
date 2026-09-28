@@ -36,11 +36,11 @@ const status: LarkIntegrationStatus = {
   sandbox_runtime_detail: null,
 };
 
-test("mutation status cancels stale reads before populating an empty cache", () => {
+test("mutation status cancels stale reads before populating an empty cache", async () => {
   const queryClient = new QueryClient();
   const cancelQueries = rs.spyOn(queryClient, "cancelQueries");
 
-  cacheLarkMutationStatus(queryClient, status);
+  await cacheLarkMutationStatus(queryClient, status);
 
   expect(cancelQueries).toHaveBeenCalledWith({
     queryKey: ["integrations", "lark"],
@@ -48,8 +48,9 @@ test("mutation status cancels stale reads before populating an empty cache", () 
   expect(queryClient.getQueryData(["integrations", "lark"])).toEqual(status);
 });
 
-test("unprobed mutation status preserves runtime fields from the authoritative GET", () => {
+test("unprobed mutation status preserves runtime fields from the authoritative GET", async () => {
   const queryClient = new QueryClient();
+  const invalidateQueries = rs.spyOn(queryClient, "invalidateQueries");
   queryClient.setQueryData(["integrations", "lark"], {
     ...status,
     auth: { ...status.auth, verified: false },
@@ -64,7 +65,7 @@ test("unprobed mutation status preserves runtime fields from the authoritative G
     sandbox_runtime_detail: null,
   };
 
-  cacheLarkMutationStatus(queryClient, mutationStatus);
+  await cacheLarkMutationStatus(queryClient, mutationStatus);
 
   expect(
     queryClient.getQueryData<LarkIntegrationStatus>(["integrations", "lark"]),
@@ -75,9 +76,40 @@ test("unprobed mutation status preserves runtime fields from the authoritative G
     sandbox_runtime_ready: true,
     sandbox_runtime_detail: null,
   });
+  // Unprobed mutation responses self-heal: the cancelled in-flight GET is
+  // refetched so the conservative fallback cannot linger.
+  expect(invalidateQueries).toHaveBeenCalledWith({
+    queryKey: ["integrations", "lark"],
+  });
 });
 
-test("explicitly probed unready status does not depend on detail text", () => {
+test("missing sandbox_runtime_probed (older backend) is treated as unprobed", async () => {
+  const queryClient = new QueryClient();
+  const invalidateQueries = rs.spyOn(queryClient, "invalidateQueries");
+  queryClient.setQueryData(["integrations", "lark"], status);
+  // Simulate a pre-field backend response: the key is absent at runtime even
+  // though the type marks it required.
+  const mutationStatus = { ...status } as Partial<LarkIntegrationStatus>;
+  delete mutationStatus.sandbox_runtime_probed;
+
+  await cacheLarkMutationStatus(
+    queryClient,
+    mutationStatus as LarkIntegrationStatus,
+  );
+
+  expect(
+    queryClient.getQueryData<LarkIntegrationStatus>(["integrations", "lark"]),
+  ).toMatchObject({
+    sandbox_runtime_mode: "init-container",
+    sandbox_runtime_probed: true,
+    sandbox_runtime_ready: true,
+  });
+  expect(invalidateQueries).toHaveBeenCalledWith({
+    queryKey: ["integrations", "lark"],
+  });
+});
+
+test("explicitly probed unready status does not depend on detail text", async () => {
   const queryClient = new QueryClient();
   queryClient.setQueryData(["integrations", "lark"], status);
   const mutationStatus: LarkIntegrationStatus = {
@@ -87,7 +119,7 @@ test("explicitly probed unready status does not depend on detail text", () => {
     sandbox_runtime_detail: null,
   };
 
-  cacheLarkMutationStatus(queryClient, mutationStatus);
+  await cacheLarkMutationStatus(queryClient, mutationStatus);
 
   expect(
     queryClient.getQueryData<LarkIntegrationStatus>(["integrations", "lark"]),
@@ -98,7 +130,7 @@ test("explicitly probed unready status does not depend on detail text", () => {
   });
 });
 
-test("probed mutation status replaces older runtime fields", () => {
+test("probed mutation status replaces older runtime fields", async () => {
   const queryClient = new QueryClient();
   queryClient.setQueryData(["integrations", "lark"], {
     ...status,
@@ -111,7 +143,7 @@ test("probed mutation status replaces older runtime fields", () => {
     sandbox_runtime_probed: true,
   };
 
-  cacheLarkMutationStatus(queryClient, mutationStatus);
+  await cacheLarkMutationStatus(queryClient, mutationStatus);
 
   expect(
     queryClient.getQueryData<LarkIntegrationStatus>(["integrations", "lark"]),

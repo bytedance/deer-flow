@@ -23,7 +23,7 @@ export function useInstallLarkIntegration() {
   return useMutation({
     mutationFn: installLarkIntegration,
     onSuccess: async (result) => {
-      cacheLarkMutationStatus(queryClient, result.status);
+      await cacheLarkMutationStatus(queryClient, result.status);
       await queryClient.invalidateQueries({
         queryKey: larkIntegrationQueryKey,
       });

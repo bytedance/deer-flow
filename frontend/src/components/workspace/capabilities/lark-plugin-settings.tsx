@@ -304,7 +304,7 @@ function LarkIntegrationCard() {
       {
         onSuccess: (result) => {
           if (!isActiveFlow(generation)) return;
-          cacheLarkMutationStatus(queryClient, result.status);
+          void cacheLarkMutationStatus(queryClient, result.status);
           toast.success(t.settings.integrations.lark.connectionReady);
           setPendingFlow(null);
           startUserAuth(
@@ -382,7 +382,7 @@ function LarkIntegrationCard() {
       {
         onSuccess: (result) => {
           if (!isActiveFlow(generation)) return;
-          cacheLarkMutationStatus(queryClient, result.status);
+          void cacheLarkMutationStatus(queryClient, result.status);
           toast.success(t.settings.integrations.lark.changeAppSwitched);
           setChangeAppSecret("");
           setShowChangeApp(false);
@@ -487,7 +487,7 @@ function LarkIntegrationCard() {
           if (automatic && attemptId !== authAttemptIdRef.current) {
             return;
           }
-          cacheLarkMutationStatus(queryClient, result.status);
+          void cacheLarkMutationStatus(queryClient, result.status);
           if (result.success) {
             clearAuthRetryTimer();
             toast.success(result.message, toastOptions);

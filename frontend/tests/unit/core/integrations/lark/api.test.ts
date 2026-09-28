@@ -386,4 +386,29 @@ describe("lark integration api", () => {
       },
     );
   });
+
+  test("status load defaults sandbox_runtime_probed to false when the backend omits it", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { installed: false, version: "v1.0.65" }),
+    );
+
+    const result = await loadLarkIntegrationStatus();
+
+    expect(result.sandbox_runtime_probed).toBe(false);
+  });
+
+  test("mutation responses default sandbox_runtime_probed to false when the backend omits it", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        success: true,
+        installed_skills: ["lark-doc"],
+        message: "Installed 1 Lark/Feishu skills.",
+        status: { installed: true, version: "v1.0.65" },
+      }),
+    );
+
+    const result = await installLarkIntegration();
+
+    expect(result.status.sandbox_runtime_probed).toBe(false);
+  });
 });
