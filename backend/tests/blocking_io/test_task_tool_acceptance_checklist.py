@@ -159,7 +159,7 @@ async def test_acceptance_checklist_file_leaf_is_offloaded(monkeypatch, tmp_path
 
 @pytest.mark.parametrize("permitted", [True, False])
 async def test_json_acceptance_check_is_offloaded(monkeypatch, tmp_path, permitted):
-    """普通委托在线程中授权后读取 JSON，拒绝时仍附带未验证结论。"""
+    """Ordinary delegation authorizes JSON reads in a worker thread and reports an unverified verdict on denial."""
     from deerflow.authz.rbac import RbacAuthorizationProvider
     from deerflow.config.authorization_config import AuthorizationConfig
 

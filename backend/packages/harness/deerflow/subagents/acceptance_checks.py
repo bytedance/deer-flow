@@ -8,9 +8,9 @@ requirement.
 
 Leaf families:
 
-- ``file:<path> json-valid`` — 显式 UTF-8 JSON 语法检查，最大 50,000 字节。
-  读取上限加一字节并校验完整性；超限、截断或解析资源限制保留 UNVERIFIED。
-  拒绝 NaN/Infinity，不校验 Schema 或业务语义。
+- ``file:<path> json-valid`` — explicit UTF-8 JSON syntax check, capped at 50,000 bytes.
+  Read up to the cap plus one byte and verify completeness; oversize, truncated reads
+  and parser resource limits remain UNVERIFIED. Reject NaN/Infinity; no schema or semantic validation.
 - ``file:<path> exists`` / ``file:<path> non-empty`` — read through
   ``read_current_file_content`` (the ``ReadBeforeWriteMiddleware``
   precedent), **scoped to the shared thread workspace**: the path must
@@ -389,7 +389,7 @@ def _probe_file_readable(runtime: Any, resolved: str, thread_data: Mapping[str, 
     return None
 
 
-# 文件内容与读取退出码一起编码；外层完成标记可识别提供方截断，文件本身不能伪造退出码。
+# Encode content with the read exit code; the outer marker detects provider truncation, and file content cannot forge the exit code.
 _JSON_READ_INNER_SCRIPT = (
     '[ -e "$1" ] || { echo NOFILE; exit 0; }; '
     't=$(/usr/bin/stat -c %F -- "$1") || exit 1; '
@@ -404,7 +404,7 @@ _JSON_READ_INNER_SCRIPT = (
 
 
 def _read_bounded_json_content(runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None) -> bytes | None:
-    """读取上限加一字节以检测增长；不能证明完整读取时返回 None。"""
+    """Read up to the cap plus one byte to detect growth; return None if completeness is uncertain."""
     from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
     from deerflow.sandbox.tools import _resolve_local_read_path, ensure_sandbox_initialized, is_local_sandbox
 
@@ -431,7 +431,7 @@ def _read_bounded_json_content(runtime: Any, resolved: str, thread_data: Mapping
         except (binascii.Error, ValueError):
             return None
         return payload[:-4] if payload.endswith(b"\n000") else None
-    # 与沙箱工具复用实时授权；持久化的本地沙箱 ID 不能绕过已撤销的权限。
+    # Reuse live sandbox authorization; persisted local sandbox IDs cannot bypass revoked permissions.
     authorize_sandbox_execution(context=getattr(runtime, "context", None) or {}, app_config=safe_app_config())
     host_path = _resolve_local_read_path(resolved, thread_data)
     if host_path == resolved:
@@ -441,7 +441,7 @@ def _read_bounded_json_content(runtime: Any, resolved: str, thread_data: Mapping
         if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
             return None
         content = bytearray()
-        # 禁止缓冲预读；短读继续直到 EOF 或上限加一，才可区分完整与截断。
+        # Disable buffered read-ahead; continue short reads to EOF or cap plus one to distinguish complete from truncated content.
         while len(content) <= _FILE_CONTENT_READ_CAP_BYTES:
             chunk = handle.read(_FILE_CONTENT_READ_CAP_BYTES + 1 - len(content))
             if not chunk:
@@ -451,7 +451,7 @@ def _read_bounded_json_content(runtime: Any, resolved: str, thread_data: Mapping
 
 
 class _NonStandardJSONConstant(ValueError):
-    """区分非标准常量与解析器资源限制。"""
+    """Distinguish nonstandard constants from parser resource limits."""
 
 
 def _reject_json_constant(value: str) -> None:
@@ -459,7 +459,7 @@ def _reject_json_constant(value: str) -> None:
 
 
 def _check_json_file(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None, probed_size: int) -> AcceptanceLeaf:
-    """仅对完整、有界的 UTF-8 文档判断 JSON 语法。"""
+    """Check JSON syntax only for complete UTF-8 documents within the read cap."""
     from deerflow.sandbox.exceptions import SandboxError, SandboxFileNotFoundError
 
     if probed_size > _FILE_CONTENT_READ_CAP_BYTES:
@@ -478,7 +478,7 @@ def _check_json_file(base: AcceptanceLeaf, runtime: Any, resolved: str, thread_d
         base["detail"] = "complete JSON content unavailable within the read cap"
         return base
     try:
-        # 只校验数字语法，不做大整数转换或浮点溢出运算。
+        # Validate numeric syntax without converting large integers or overflowing floating-point values.
         json.loads(content.decode("utf-8"), parse_constant=_reject_json_constant, parse_int=str, parse_float=str)
     except (UnicodeDecodeError, json.JSONDecodeError, _NonStandardJSONConstant):
         base["checked"] = True

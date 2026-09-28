@@ -1664,17 +1664,23 @@ The lead agent can spawn sub-agents on the fly — each with its own scoped cont
 
 For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
 
-需要 JSON 语法验收时，可在 `task` 或 `batch_task` 条目的 `acceptance_criteria` 中显式填写
-`["file:../outputs/report.json json-valid"]`。检查仅限共享工作区内不超过 **50,000 字节**的
-完整 UTF-8 JSON：合法语法返回 `holds`，空文件、语法错误、非 UTF-8 或 `NaN`/`Infinity`
-返回 `does not hold`；超限、无法完整读取、路径范围外或解析器资源限制返回 `UNVERIFIED`。
-读取最多 50,001 字节以检测超限，远程返回会校验完整标记、读取退出码及探测大小；
-不支持所需探测工具的远程提供方保留不确定状态，不回退全文读取。同尺寸并发改写不构成原子快照。
-本地读取文件内容前会重新检查沙箱权限；权限被撤销时返回 `UNVERIFIED`，不读取文件内容。
-UTF-8 BOM 不被接受；顶层标量、重复键及语法合法的大数可以通过，但不代表 Schema、字段或
-业务语义正确。其他文件条件不变，也不会自动校验所有 `.json` 文件。
-相比每次让 Agent 自行编写 bash/Python 检查，这一条件统一了验收结果、路径和读取边界，
-并明确展示证据不足；执行完成状态和自动重试策略不受影响。
+To request JSON syntax validation, explicitly set a `task` or `batch_task` item's
+`acceptance_criteria` to `["file:../outputs/report.json json-valid"]`. Checks cover only
+complete UTF-8 JSON files within the shared workspace, up to **50,000 bytes**.
+Valid syntax returns `holds`; empty files, syntax errors, non-UTF-8 content, or
+`NaN`/`Infinity` return `does not hold`. Oversize files, incomplete reads, out-of-scope
+paths, or parser resource limits return `UNVERIFIED`.
+Reads are capped at 50,001 bytes to detect oversize content. Remote results are checked
+for a completion marker, the read exit code, and the probed size. Remote providers lacking
+the required probe tools leave the result unverified rather than falling back to full-content
+reads. Concurrent writes of the same size do not yield an atomic snapshot.
+Local reads recheck sandbox permissions before accessing file content; revoked permissions
+return `UNVERIFIED` without reading the content. UTF-8 BOMs are rejected. Top-level scalars,
+duplicate keys, and syntactically valid large numbers can pass, without validating schemas,
+fields, or business semantics. Other file criteria are unchanged, and `.json` files are not
+checked automatically. This criterion standardizes verdicts, path boundaries, and read limits
+instead of requiring ad hoc bash/Python checks, and makes insufficient evidence explicit.
+Execution completion status and automatic retry policy are unchanged.
 
 Content-less sub-agent final messages report `No response generated` instead of the literal text `None`. A content-less provider-error fallback reports its structured error detail when available.
 

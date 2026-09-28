@@ -159,7 +159,7 @@ async def test_completed_batch_records_mixed_checks_and_exports_after_reopen(env
 
 @pytest.mark.asyncio
 async def test_json_criterion_survives_batch_execution_and_storage(env):
-    """批次使用同一文件准入与验收，并独立保存执行状态和语法结论。"""
+    """Batches share file admission and acceptance checks, storing execution status separately from syntax verdicts."""
     output = env.paths.sandbox_outputs_dir("thread-1", user_id="user-1") / "report.json"
     output.write_bytes(b'{"incomplete":')
     batch = await _submit(env, ["file:../outputs/report.json json-valid"])

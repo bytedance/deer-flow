@@ -1,4 +1,4 @@
-"""显式 JSON 文件条件在公开验收入口的行为。"""
+"""Explicit JSON file criteria through the public acceptance entry point."""
 
 import base64
 import os
@@ -15,7 +15,7 @@ from deerflow.subagents.acceptance_checks import check_acceptance_criteria, pars
 @pytest.mark.parametrize("sandbox_id", ["local", "local:thread-1"])
 @pytest.mark.parametrize("content", [b"{}", b"{invalid"])
 def test_local_json_rechecks_revoked_sandbox_grant(tmp_path, monkeypatch, sandbox_id, content):
-    """保留沙箱 ID 不保留授权；撤销后不得打开文件或产生语法结论。"""
+    """Retained sandbox IDs do not retain grants; revocation prevents file reads and syntax verdicts."""
     from deerflow.authz.rbac import RbacAuthorizationProvider
     from deerflow.config.authorization_config import AuthorizationConfig
 
@@ -77,7 +77,7 @@ def test_nonstandard_constants_do_not_hold(tmp_path, content):
 @pytest.fixture
 def remote_sandbox(tmp_path, monkeypatch):
     if os.name == "nt":
-        pytest.skip("需要 Linux 沙箱工具")
+        pytest.skip("Requires Linux sandbox tools")
 
     class ShellSandbox:
         transform = staticmethod(lambda output: output)
@@ -94,7 +94,7 @@ def remote_sandbox(tmp_path, monkeypatch):
             return self.transform(output)
 
         def read_file(self, *args, **kwargs):
-            pytest.fail("JSON 验收不能回退到无界全文接口")
+            pytest.fail("JSON acceptance must not fall back to unbounded full-content reads")
 
     sandbox = ShellSandbox()
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime=None: sandbox)
@@ -151,7 +151,7 @@ def test_missing_file_is_negative(check_file):
 
 
 def test_parser_depth_limit_is_uncertain(check_file):
-    # CPython 3.12 的 C 解析器限制与 sys.setrecursionlimit 并非同一边界。
+    # CPython 3.12's C parser limit differs from the boundary set by sys.setrecursionlimit.
     verdict = check_file(b"[" * 20_000 + b"0" + b"]" * 20_000)
     assert verdict["leaves"][0]["checked"] is False
     assert "resource limit" in verdict["leaves"][0]["detail"]
@@ -185,7 +185,7 @@ def test_directory_is_uncertain(check_file, tmp_path):
     assert check_file(None)["leaves"][0]["checked"] is False
 
 
-@pytest.mark.skipif(os.name == "nt", reason="需要 POSIX 符号链接")
+@pytest.mark.skipif(os.name == "nt", reason="Requires POSIX symlinks")
 def test_symlink_escape_is_uncertain(check_file, tmp_path):
     outside = tmp_path.parent / "outside.json"
     outside.write_bytes(b"{}")
@@ -193,7 +193,7 @@ def test_symlink_escape_is_uncertain(check_file, tmp_path):
     assert check_file(None)["leaves"][0]["checked"] is False
 
 
-@pytest.mark.skipif(os.name == "nt", reason="需要 POSIX FIFO")
+@pytest.mark.skipif(os.name == "nt", reason="Requires POSIX FIFOs")
 def test_fifo_is_uncertain_without_opening(check_file, tmp_path):
     os.mkfifo(tmp_path / "report.json")
     assert check_file(None)["leaves"][0]["checked"] is False
@@ -240,7 +240,7 @@ def test_normalized_spellings_use_same_json_family(check_file, criterion):
 
 def test_remote_oversize_does_not_read_content(tmp_path, remote_sandbox):
     (tmp_path / "report.json").write_bytes(b" " * 50_001)
-    remote_sandbox.before_read = lambda: pytest.fail("超限文件不应读取内容")
+    remote_sandbox.before_read = lambda: pytest.fail("Oversize files must not have their content read")
     verdict = check_acceptance_criteria(["file:report.json json-valid"], runtime=SimpleNamespace(state=None), thread_data={"workspace_path": str(tmp_path)})
     assert verdict["leaves"][0]["checked"] is False
 
@@ -253,7 +253,7 @@ def test_remote_file_grows_after_size_probe(tmp_path, remote_sandbox):
     assert verdict["leaves"][0]["checked"] is False
 
 
-@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="需要非 root 的 POSIX 权限")
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="Requires non-root POSIX permissions")
 def test_remote_permission_denied_is_uncertain(tmp_path, remote_sandbox):
     path = tmp_path / "report.json"
     path.write_bytes(b"{}")
