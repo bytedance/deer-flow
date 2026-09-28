@@ -327,6 +327,14 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **agents:** Loop-detection integer thresholds now reject YAML booleans instead
+  of coercing `true` to `1`. A configuration such as `warn_threshold: true`
+  and `hard_limit: true` previously made the first tool-call set meet the hard
+  limit and forced the agent to stop; booleans on the tracking-window,
+  per-tool-frequency, and per-tool override fields similarly collapsed their
+  limits to one. All integer threshold fields now fail configuration loading
+  with a field-specific error while valid integers and numeric strings retain
+  their existing behavior.
 - **database:** `DatabaseConfig` now validates `pool_size`, `pool_recycle`, and
   `command_timeout` strictly. Previously, YAML booleans (`true`/`false`) were
   coerced to `1`/`0` respectively, allowing `pool_size: true` (pool size 1) and

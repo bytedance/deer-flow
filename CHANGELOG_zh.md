@@ -332,6 +332,12 @@
 
 ### 修复
 
+- **智能体：** 循环检测的整数阈值现在会拒绝 YAML 布尔值，而不是把
+  `true` 静默转换为 `1`。此前若配置 `warn_threshold: true` 和
+  `hard_limit: true`，第一组工具调用就会达到硬上限并强制终止智能体；
+  跟踪窗口、工具频率和按工具覆盖项中的布尔值也会把对应限制缩小为
+  1。现在所有整数阈值字段都会在配置加载阶段按字段名报错，同时保持
+  有效整数和数字字符串的既有行为。
 - **数据库：** `DatabaseConfig` 现在严格校验 `pool_size`、`pool_recycle` 与
   `command_timeout`。此前，YAML 布尔值（`true`/`false`）会被强制转换为 `1`/`0`，
   导致 `pool_size: true`（变成仅 1 个连接）和 `command_timeout: true`（变成 1 秒超时）

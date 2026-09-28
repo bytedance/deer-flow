@@ -1,6 +1,6 @@
 """Configuration for loop detection middleware."""
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 
 class ToolFreqOverride(BaseModel):
@@ -13,6 +13,13 @@ class ToolFreqOverride(BaseModel):
 
     warn: int = Field(ge=1)
     hard_limit: int = Field(ge=1)
+
+    @field_validator("warn", "hard_limit", mode="before")
+    @classmethod
+    def reject_boolean_thresholds(cls, value: object, info: ValidationInfo) -> object:
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must be an integer, not a boolean")
+        return value
 
     @model_validator(mode="after")
     def _validate(self) -> "ToolFreqOverride":
@@ -62,6 +69,21 @@ class LoopDetectionConfig(BaseModel):
         default_factory=dict,
         description=("Per-tool overrides for tool_freq_warn / tool_freq_hard_limit, keyed by tool name. Values can be higher or lower than the global defaults. Commonly used to raise thresholds for high-frequency tools like bash."),
     )
+
+    @field_validator(
+        "warn_threshold",
+        "hard_limit",
+        "window_size",
+        "max_tracked_threads",
+        "tool_freq_warn",
+        "tool_freq_hard_limit",
+        mode="before",
+    )
+    @classmethod
+    def reject_boolean_thresholds(cls, value: object, info: ValidationInfo) -> object:
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must be an integer, not a boolean")
+        return value
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> "LoopDetectionConfig":
