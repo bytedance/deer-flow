@@ -1216,6 +1216,18 @@ tools:
   #   use: deerflow.community.sofya.tools:web_fetch_tool
   #   # api_key: $SOFYA_API_KEY
 
+  # Web fetch tool (uses Unbrowse, requires UNBROWSE_API_KEY)
+  # Returns the page as markdown. Fetches over plain HTTP when that is enough and
+  # falls back to a hosted cloud browser for pages that need JavaScript.
+  # Get a key at https://unbrowse.ai/app.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.unbrowse.tools:web_fetch_tool
+  #   # render: auto                  # auto | never (plain HTTP only) | always (cloud browser)
+  #   # api_key: $UNBROWSE_API_KEY
+
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
   - name: image_search
