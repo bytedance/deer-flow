@@ -287,6 +287,34 @@ describe("extractCitationSources", () => {
     ]);
   });
 
+  it("does not open a fence from a marker indented four columns at the top level", () => {
+    // Four columns past the container's content column is an indented code
+    // block, not a fence opener, so the citation below it renders as a link.
+    const markdown = [
+      "    ```md",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("still opens a fence from a marker indented three columns at the top level", () => {
+    // The limit is three columns, so the next case up pins the boundary rather
+    // than overshooting it.
+    const markdown = [
+      "   ```md",
+      "[citation:Fake](https://example.com/fake)",
+      "   ```",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
   it("does not open a fence from a list marker with no space after it", () => {
     // `-` has to be followed by indentation to start a list item, so `-```md`
     // is ordinary paragraph text and nothing behind it is code.

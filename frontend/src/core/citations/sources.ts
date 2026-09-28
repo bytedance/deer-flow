@@ -229,11 +229,19 @@ function maskFencedCodeBlocks(markdown: string): string {
     if (item && position.indent - (items[items.length - 1] ?? 0) <= 3) {
       items.push(position.indent + item[0].length);
     }
-    if (opener) {
-      openMarker = opener[2]!;
+    // The opener gets the same three-column budget as the closer: four columns
+    // past the container's content column is an indented code block, so a marker
+    // there cannot open a fence and everything after it keeps rendering.
+    const openerMarker = opener?.[2];
+    const containerColumn = items[items.length - 1] ?? 0;
+    if (
+      openerMarker &&
+      fenceMarkerColumn(line, openerMarker) - containerColumn <= 3
+    ) {
+      openMarker = openerMarker;
       fence = {
         quoteDepth: position.quoteDepth,
-        column: items[items.length - 1] ?? 0,
+        column: containerColumn,
       };
       lines[i] = maskKeepingNewlines(line);
     }
