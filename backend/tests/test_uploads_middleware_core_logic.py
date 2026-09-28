@@ -435,6 +435,31 @@ class TestBeforeAgent:
         assert updated_kwargs.get("files") == files_meta
         assert updated_kwargs.get("element") == "task"
 
+    def test_preserves_response_metadata_when_uploads_are_injected(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "img.png").write_bytes(b"png")
+        files_meta = [{"filename": "img.png", "size": 3, "path": "/mnt/user-data/uploads/img.png"}]
+        original = HumanMessage(
+            content="check image",
+            id="user-turn",
+            name="caller",
+            additional_kwargs={"files": files_meta},
+            response_metadata={"external": "value"},
+        )
+
+        result = mw.before_agent(self._state(original), _runtime())
+
+        assert result is not None
+        updated = result["messages"][-1]
+        assert updated.id == "user-turn"
+        assert updated.name == "caller"
+        assert updated.response_metadata == {"external": "value"}
+        assert updated.additional_kwargs["files"] == files_meta
+        assert updated.additional_kwargs[ORIGINAL_USER_CONTENT_KEY] == "check image"
+        assert original.content == "check image"
+        assert ORIGINAL_USER_CONTENT_KEY not in original.additional_kwargs
+
     def test_preserves_original_user_content_before_upload_context(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)

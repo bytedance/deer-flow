@@ -340,6 +340,12 @@
   并像 `make dev` 一样把 `DEER_FLOW_PROJECT_ROOT` 默认设为仓库根目录；Gateway
   会拒绝的覆盖值会让 `config.yaml found` 失败并给出 Gateway 的错误，其余配置
   检查随之跳过。([#5987])
+- **前端：** 文件上传完成后，乐观显示的用户消息气泡不再丢失引用与对话
+  引用标签。上传完成时的更新会用仅含已上传文件的对象替换气泡的
+  `additional_kwargs`，因此在服务端回传该消息之前这些标签会消失；随本次
+  发送一起暂存的项目附件在上传中和上传后也都不会显示在气泡中。实际提交的
+  消息始终完整。乐观副本（上传前后）与提交现在通过同一个辅助函数
+  `buildHumanMessageAdditionalKwargs` 构建 `additional_kwargs`。([#5982])
 
 - **调度器：** 修改间隔任务的标题或 prompt 不再返回 500。编辑对话框总是把 `schedule_spec` 与被修改的
   字段一起发送；当节奏没有变化时，`PATCH /api/scheduled-tasks/{id}` 会沿用任务原有的 `next_run_at`——
@@ -5267,4 +5273,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5945]: https://github.com/bytedance/deer-flow/pull/5945
 [#5964]: https://github.com/bytedance/deer-flow/pull/5964
 [#5981]: https://github.com/bytedance/deer-flow/pull/5981
+[#5982]: https://github.com/bytedance/deer-flow/pull/5982
 [#5987]: https://github.com/bytedance/deer-flow/pull/5987
