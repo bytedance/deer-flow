@@ -1377,3 +1377,42 @@ def test_failed_cold_discovery_preserves_a_durable_task_session(cache_globals, m
     assert pool.active_binding("B") == binding_b
     assert _entry(pool, "B", owner_loop)[0] is session_b
     assert session_b.closed is False
+
+
+def test_baseline_less_reconciliation_preserves_personal_mcp_bindings(cache_globals, monkeypatch, tmp_path, owner_loop) -> None:
+    """Personal MCP shares the pool but is outside the deployment reconciler.
+
+    A personal runtime name never appears in the deployment's incoming
+    connections. Treating that as "removed deployment server" would tombstone
+    it -- and because the runtime name is stable, the tombstone would fence the
+    same connection permanently instead of letting discovery re-resolve it.
+    """
+    from deerflow.mcp.user_config import personal_server_name
+
+    cfg = tmp_path / "extensions_config.json"
+    _write_config(cfg, {"A": _stdio("npx"), "B": _TASK_SERVER_B})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    # Alice's personal stdio server is discovered before any deployment publish.
+    personal_name = personal_server_name("alice", "notes", {"type": "stdio", "command": "npx", "args": []})
+    assert personal_name.startswith("personal_")
+    pool = get_session_pool()
+    personal_fp = normalized_connection_fingerprint({"transport": "stdio", "command": "npx", "args": []})
+    binding = pool.ensure_binding(personal_name, personal_fp)
+    session = _open_session(owner_loop, pool, personal_name)
+
+    # A deployment write with no applied baseline runs the baseline-less
+    # reconciliation over the shared pool.
+    mcp_router._apply_mcp_server_config_update(
+        McpServerConfigUpdateRequest(
+            server_name="A",
+            server=McpServerConfigResponse(enabled=True, type="stdio", command="npx", args=["--a2"]),
+        )
+    )
+
+    assert get_session_pool() is pool
+    assert pool.active_binding(personal_name) == binding
+    assert _entry(pool, personal_name, owner_loop)[0] is session
+    assert session.closed is False
+    # Re-resolving the SAME personal connection must stay idempotent.
+    assert pool.ensure_binding(personal_name, personal_fp) == binding
