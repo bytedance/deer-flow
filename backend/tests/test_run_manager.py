@@ -2389,3 +2389,50 @@ async def test_renewal_success_after_the_confirmed_deadline_is_not_adopted():
         release.set()
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_renewal_rejected_with_inflight_proofs_fences(monkeypatch):
+    """A rejected renewal with in-flight terminal proofs must still fence.
+
+    The rejection path kept the single-``Future`` interface after the proof
+    registry became a set, so any run with an in-flight terminal write raised
+    ``AttributeError`` there: no bounded wait, no attributable proof and no
+    fencing.
+    """
+    import deerflow.runtime.runs.manager as manager_module
+
+    monkeypatch.setattr(manager_module, "_TERMINAL_COMMIT_ACK_TIMEOUT_SECONDS", 0.05, raising=False)
+
+    entered = asyncio.Event()
+    never = asyncio.Event()
+
+    class StuckCasLostLeaseStore(LostLeaseRunStore):
+        async def finalize_if_not_cancelled(self, run_id, *, status, error=None, stop_reason=None):
+            entered.set()
+            await never.wait()
+            return await super().finalize_if_not_cancelled(
+                run_id,
+                status=status,
+                error=error,
+                stop_reason=stop_reason,
+            )
+
+    store = StuckCasLostLeaseStore()
+    manager, _ = _ownership_manager(store)
+    record, task = await _live_record(manager, store, status=RunStatus.success)
+    cas = None
+    try:
+        cas = asyncio.create_task(manager.set_status_if_not_cancelled(record.run_id, RunStatus.success))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+
+        await manager._renew_leases()
+
+        # No attributable proof arrived, so the run fails closed.
+        assert record.ownership_lost is True
+    finally:
+        never.set()
+        if cas is not None:
+            await asyncio.gather(cas, return_exceptions=True)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

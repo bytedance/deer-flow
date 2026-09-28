@@ -2431,16 +2431,15 @@ class RunManager:
             still_active = self._runs.get(run_id) is record and self._needs_lease(record)
         if still_active:
             # Our own terminal CAS may still be in flight. Join this process's own
-            # commit attempt within the remaining deadline; if it does not prove
-            # a commit, fail closed. A store re-read is never treated as proof:
-            # a peer takeover writes the same status while keeping our owner id.
-            inflight = self._terminal_commit_inflight.get(run_id)
-            if inflight is not None and not inflight.done():
-                remaining = (confirmed_deadline - datetime.now(UTC)).total_seconds()
-                if remaining > 0:
-                    done, _ = await asyncio.wait({inflight}, timeout=remaining)
-                    if done and inflight.result():
-                        still_active = False
+            # commit attempts within a bounded budget; only an attributable
+            # success keeps the run alive, otherwise fail closed. A store re-read
+            # is never treated as proof: a peer takeover writes the same status
+            # while keeping our owner id.
+            if await self._await_own_terminal_commit(
+                self._own_terminal_commit_attempts(run_id),
+                budget=_TERMINAL_COMMIT_ACK_TIMEOUT_SECONDS,
+            ):
+                still_active = False
             async with self._lock:
                 still_active = self._runs.get(run_id) is record and self._needs_lease(record)
         if still_active:
