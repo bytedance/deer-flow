@@ -333,6 +333,17 @@ This release closes that milestone with **181 merged pull requests**.
   the cadence worked, because that path computes a fresh datetime. The
   repository now coerces every serialized timestamp it accepts in `update()`,
   as `update_after_launch()` already did. ([#5964])
+- **gateway:** `GET /api/skills`, `GET /api/skills/custom` and
+  `GET /api/skills/{name}` no longer walk the skill directories on the event
+  loop. Each called `load_skills()` inline, which resolves the caller's
+  storage, scans every public and custom skill directory and parses each
+  `SKILL.md` — filesystem work that grows with the number of installed
+  skills. #5747 moved that same call off the loop for the custom-skill
+  content route and documented why; these three routes were missed, so the
+  strict Blockbuster gate raised `BlockingError` on them and, in production,
+  a large or slow skills tree stalled every other request on the worker for
+  the duration of the scan. All three now offload the load with
+  `asyncio.to_thread` through one shared helper. ([#5945])
 - **gateway:** `GET` and `PUT /api/user-profile` no longer run their
   filesystem work on the event loop. Both handlers resolved the per-user
   `USER.md` path (which builds absolute paths on every call), stat'ed, read,
@@ -6217,5 +6228,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5928]: https://github.com/bytedance/deer-flow/pull/5928
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934
 [#5935]: https://github.com/bytedance/deer-flow/pull/5935
+[#5945]: https://github.com/bytedance/deer-flow/pull/5945
 [#5964]: https://github.com/bytedance/deer-flow/pull/5964
 
