@@ -959,6 +959,60 @@ def test_install_lark_integration_reports_content_change_on_reinstall(monkeypatc
     reset_skill_storage()
 
 
+def test_install_lark_integration_snapshots_credentials_under_lock(monkeypatch, tmp_path) -> None:
+    reset_skill_storage()
+    _patch_paths(monkeypatch, tmp_path / "home")
+    skills_root = tmp_path / "skills"
+    (skills_root / "public").mkdir(parents=True)
+    (skills_root / "custom").mkdir()
+    config = _config(skills_root)
+    archive = _make_lark_cli_source_zip(tmp_path)
+
+    lock_state = {"active": False}
+    snapshot_lock_states: list[bool] = []
+    status_lock_states: list[bool] = []
+
+    class _CredentialLock:
+        def __enter__(self):
+            assert lock_state["active"] is False
+            lock_state["active"] = True
+            return self
+
+        def __exit__(self, *_args):
+            lock_state["active"] = False
+
+    monkeypatch.setattr(lark_cli, "_lark_credential_lock", lambda _user_id: _CredentialLock())
+    monkeypatch.setattr(lark_cli, "probe_lark_cli", lambda: lark_cli.LarkCliProbe(available=True, path="/usr/bin/lark-cli", version="v1.0.65"))
+
+    def _credential_snapshot(_user_id, *, verify_auth):
+        snapshot_lock_states.append(lock_state["active"])
+        return lark_cli._LarkCredentialSnapshot(
+            app_config={"configured": True, "app_id": "cli_test", "brand": "feishu"},
+            auth=lark_cli.LarkAuthProbe(status="authenticated", user="Alice", verified=False),
+        )
+
+    monkeypatch.setattr(lark_cli, "_read_lark_credential_snapshot", _credential_snapshot)
+
+    real_status = lark_cli.get_lark_integration_status
+
+    def _status(_user_id, _config, **kwargs):
+        status_lock_states.append(lock_state["active"])
+        assert kwargs.get("check_runtime") is True
+        assert kwargs.get("credential_snapshot") is not None
+        return real_status(_user_id, _config, **kwargs)
+
+    monkeypatch.setattr(lark_cli, "get_lark_integration_status", _status)
+
+    result = lark_cli.install_lark_integration("alice", config, source_archive=archive)
+
+    assert result.success is True
+    assert result.status.app_id == "cli_test"
+    assert result.status.auth.status == "authenticated"
+    assert snapshot_lock_states == [True]
+    assert status_lock_states == [False]
+    reset_skill_storage()
+
+
 def test_install_lark_integration_rejects_zip_slip_member(monkeypatch, tmp_path):
     _patch_paths(monkeypatch, tmp_path / "home")
     config = _config(tmp_path / "skills")

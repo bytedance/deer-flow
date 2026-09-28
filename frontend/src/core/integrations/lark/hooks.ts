@@ -9,7 +9,7 @@ import {
   startLarkAuthorization,
   startLarkConfiguration,
 } from "./api";
-import { larkIntegrationQueryKey } from "./cache";
+import { cacheLarkMutationStatus, larkIntegrationQueryKey } from "./cache";
 
 export function useLarkIntegrationStatus() {
   return useQuery({
@@ -23,7 +23,7 @@ export function useInstallLarkIntegration() {
   return useMutation({
     mutationFn: installLarkIntegration,
     onSuccess: async (result) => {
-      queryClient.setQueryData(larkIntegrationQueryKey, result.status);
+      cacheLarkMutationStatus(queryClient, result.status);
       await queryClient.invalidateQueries({
         queryKey: larkIntegrationQueryKey,
       });

@@ -1156,11 +1156,12 @@ no hostPath/PVC runtime mount. Publish the image under
 [`docker/lark-cli-init`](docker/lark-cli-init/README.md) and set
 `LARK_CLI_INIT_IMAGE` on the provisioner; it stays off (legacy behavior) when
 unset. The Lark integration status (`GET /api/integrations/lark/status`) reports
-`sandbox_runtime_mode`, `sandbox_runtime_probed`, and `sandbox_runtime_ready` so
-the Settings UI can distinguish an untested conservative fallback from a
-confirmed unavailable runtime and show whether `lark-cli` will actually be
-present in the sandbox at chat time, rather than a green status hiding a later
-`command not found`.
+`sandbox_runtime_mode`, `sandbox_runtime_probed`, and `sandbox_runtime_ready`.
+The status API distinguishes an untested conservative fallback from a probed
+result, and the Settings mutation cache honors that distinction by keeping the
+last probed runtime fields instead of overwriting them with a fallback — so the
+Settings UI shows whether `lark-cli` will actually be present in the sandbox at
+chat time, rather than a green status hiding a later `command not found`.
 
 If a trusted operator manages the configured skills directory through an external mount such as MinIO, NFS, or CSI, an administrator can call `POST /api/skills/reload` after changing files. This invalidates skill prompt caches for the current Gateway process and waits up to the bounded refresh timeout so subsequent runs rescan the latest files; running tasks are unchanged. A loader-level filesystem failure returns a generic server error and preserves the last successfully loaded process cache rather than publishing an empty catalog. Uvicorn workers and Kubernetes Pods must each be targeted separately. Direct mount writes bypass the validation, SkillScan, and history applied by DeerFlow's install/edit APIs, so only operator-controlled systems should have write access.
 

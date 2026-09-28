@@ -1908,7 +1908,13 @@ def install_lark_integration(
         sandbox_version = str(installed_manifest.get("version") or resolved_version or FALLBACK_LARK_CLI_VERSION)
         _ensure_managed_sandbox_lark_cli(sandbox_version)
 
-    status = _get_lark_mutation_status(user_id, config)
+    # Install does not change credentials, but it shares the mutation-status
+    # discipline: snapshot the credential-derived fields under the credential
+    # lock so a concurrent app switch or auth flow landing during the unlocked
+    # runtime probe cannot mix newer credential state into this response.
+    with _lark_credential_lock(user_id):
+        credential_snapshot = _read_lark_credential_snapshot(user_id, verify_auth=False)
+    status = _get_lark_mutation_status(user_id, config, credential_snapshot=credential_snapshot)
     content_changed = previous_content_sha is not None and previous_content_sha != content_sha
     message = f"Installed {len(installed_skills)} Lark/Feishu skills."
     if content_changed:
