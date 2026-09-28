@@ -46,7 +46,7 @@ import { Callout } from "nextra/components";
 设计目标只有一个：**换记忆后端时，DeerFlow 其余代码零改动**。
 
 - **契约只管“做什么”，不管“怎么做”**。`get_context()` 只要求返回一段可注入提示的文本——是本地文件加载还是远程检索，由后端自行决定；契约甚至不假设记忆一定是“事实”的集合。
-- **按实现成本分层**。只有两个方法是必须实现的（写入 `add`、读取注入 `get_context`）；其余管理操作（搜索、清空、导入、事实增删改等）都带默认的“不支持”实现，后端实现多少能力就暴露多少能力。
+- **按实现成本分层**。必须实现的只有三个：类方法 `from_config`（组装实例）、`add`（写入）和 `get_context`（读取注入）；搜索、清空、导入和事实增删改默认“不支持”，缓冲写入相关的 `add_nowait` / `shutdown_flush` / `cancel_by_agent` 默认直接透传，后端实现多少能力就暴露多少能力。
 - **失败要响亮，不要静默**。记忆是持久化数据，配错后端、写坏文件时系统会直接报错（如构建时抛出 `ValueError`、写冲突返回 HTTP 409），绝不悄悄回退到另一个存储——那等于把你的数据写到了错误的地方。
 - **宿主与后端解耦**。追踪（Langfuse span）、默认 LLM、提取指标等宿主能力以“钩子”形式注入后端，后端按需消费，因此后端代码包本身不依赖任何 DeerFlow 特有概念，可以独立发布。
 
@@ -54,7 +54,7 @@ import { Callout } from "nextra/components";
 
 | 分层 | 方法 | 作用 |
 | --- | --- | --- |
-| 必须实现 | `add` / `get_context` | 写入对话（防抖排队）/ 返回注入就绪的记忆文本 |
+| 必须实现 | `from_config` / `add` / `get_context` | 根据 `backend_config` 和宿主钩子组装实例 / 写入对话（防抖排队）/ 返回注入就绪的记忆文本 |
 | 管理操作 | `search`、`get_memory`、`clear_memory`、`import_memory`、`create_fact` / `update_fact` / `delete_fact`、`add_nowait`、`cancel_by_agent`、`shutdown_flush` | 搜索与查看、清空与导入、工具模式的事实增删改、摘要压缩前的紧急冲刷、取消挂起的提取、优雅停机排水 |
 | 可选钩子 | `warm`、`reload_memory`、`on_pre_compress` / `on_turn_start` 及 async 变体 | 启动预热、缓存重载、面向未来的扩展点 |
 
@@ -75,7 +75,7 @@ memory:
 | `manager_class` | 类型 | 定位 |
 | --- | --- | --- |
 | `deermem` | 本地（默认） | 自带的完整记忆实现：Markdown 事实存储、摘要、全文检索与事实生命周期管理 |
-| `openviking` | 远程 | 接入独立的 OpenViking 记忆服务器，通过官方 `langchain-openviking` 适配器回记 |
+| `openviking` | 远程 | 接入独立的 OpenViking 记忆服务器，通过官方 `langchain-openviking` 适配器召回 |
 | `mem0` / `honcho` | 远程 | 接入 Mem0 / Honcho 记忆产品的适配器 |
 | `noop` | 本地 | 空实现：保留记忆调用点但什么都不做 |
 
@@ -91,7 +91,7 @@ deermem 是默认后端，完整实现了契约的全部能力：
 - 工厂 `get_memory_manager()` 读取 `manager_class: deermem`，把 `backend_config` 连同一组**宿主钩子**（Langfuse 追踪回调、默认提取 LLM、隐藏消息过滤、提取指标回调）一起传给 `DeerMem.from_config()` 装配实例。
 - 存储按 `(用户, Agent)` 双维度分桶：`memory.json` 只存共享摘要与修订元数据，每条事实是独立的 Markdown 文件（带 YAML front matter），并维护 SQLite FTS5 全文索引供 `memory_search` 使用。
 - 写入侧由 `MemoryMiddleware` 在每轮结束后调用 `add()` 排队（防抖批量处理），摘要压缩前通过 `add_nowait()` 紧急冲刷，避免被压缩掉的内容丢失。
-- 在此之上提供可选的事实治理能力（按需开启）：写侧近重复去重（`fact_dedup_enabled`）、陈旧性复核（`staleness_review_enabled`）、合并巩固（`consolidation_enabled`）、容量淘汰策略（`fact_eviction_policy: hybrid-v1`）以及相关性感知检索（`retrieval_relevance_enabled`）。
+- 在此之上提供事实治理能力，全部配置在 `memory.backend_config` 下：陈旧性复核（`staleness_review_enabled`，默认开启），以及按需开启的写侧近重复去重（`fact_dedup_enabled`）、合并巩固（`consolidation_enabled`）、容量淘汰策略（`fact_eviction_policy: hybrid-v1`，默认为 `confidence`）和相关性感知检索（`retrieval_relevance_enabled`）。
 
 ### openviking 是怎么接入的
 
@@ -102,13 +102,13 @@ memory:
   enabled: true
   injection_enabled: true
   manager_class: openviking
-  mode: middleware           # 建议保持 middleware 模式
+  mode: middleware           # 必须：openviking 只支持 middleware 模式
   backend_config:
     base_url: http://openviking:1933
     owner_user_id: default   # 未开启认证时用 default
     api_key_env: OPENVIKING_API_KEY
     failure_policy:
-      read: fail_open        # 读取失败时返回空结果（fail_closed 则中断）
+      read: fail_open        # 读取失败时返回空结果（raise 则中断本轮）
       write: log_and_drop
     retrieval:
       top_k: 8
@@ -163,12 +163,15 @@ class MyMemoryManager(MemoryManager):
 
 | 想支持的能力 | 覆盖的方法 | 备注 |
 | --- | --- | --- |
-| 工具模式（`memory_search` 等） | `search()`，并设 `supports_search = True` | 声明与实现的一致性在实例化时强制校验 |
-| 记忆的查看 / 清空 / 导入 | `get_memory()` / `clear_memory()` / `import_memory()` | 不实现则调用时报“不支持” |
-| 事实级增删改 | `create_fact()` / `update_fact()` / `delete_fact()` | 工具模式的 `memory_add` / `memory_update` / `memory_delete` 走这里 |
+| 工具模式（`memory_search` 等） | `search()` 并设 `supports_search = True`，另需 `get_memory()` 和下方的事实增删改方法 | 声明与实现的一致性在实例化时强制校验。工具模式不安装 `MemoryMiddleware`，除非设 `requires_passive_writes_in_tool_mode = True`，否则每轮结束后的 `add()` 写入不会发生（摘要压缩前的 `add_nowait()` 冲刷仍会执行，其默认实现会调用 `add()`）；`memory_add` 会先读 `get_memory()` 再调 `create_fact()` |
+| 记忆的查看 / 清空 / 导入 | `get_memory()` / `clear_memory()` / `import_memory()` | 不实现则调用时报“不支持”。返回值须是 DeerMem 的文档结构，Gateway 会把它转成 `MemoryResponse`（`version`、`lastUpdated`、`user`、`history`，以及每条都带 `id` 和 `content` 的 `facts`） |
+| 事实级增删改 | `create_fact()` / `update_fact()` / `delete_fact()` | 工具模式的 `memory_add` / `memory_update` / `memory_delete` 走这里。`create_fact` 返回 `(memory_data, fact_id)`；事实 id 不存在时抛 `KeyError`（HTTP 404） |
+| 缓冲写入 | `add_nowait()` / `shutdown_flush()` / `cancel_by_agent()` | 默认实现只会调用 `add()`、直接报告冲刷完成、什么也不取消；如果你的 `add()` 带缓冲，需要自己覆盖 |
 | 启动预热（建索引、加载编码器等） | `warm()`，返回 `True` / `False` / `None` | `None` 表示无事可做，日志会如实记录“跳过” |
 | 释放连接等外部资源 | `close()` | 优雅停机时调用 |
 | 缓存重载 | `reload_memory()` | 供带缓存的后端在带外修改后刷新 |
+
+DeerMem 的返回结构和常见坑见 `backend/packages/harness/deerflow/agents/memory/backends/README.md`，`backends/noop/` 是可以直接复制的模板。
 
 ### 第 3 步：声明失败与冲突语义
 

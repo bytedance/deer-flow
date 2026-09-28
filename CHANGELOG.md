@@ -140,6 +140,10 @@ This release closes that milestone with **181 merged pull requests**.
 
 #### Models & integrations
 
+- **community:** New Unbrowse `web_fetch` provider - returns a page as
+  markdown over plain HTTP, or through Unbrowse's hosted cloud browser for
+  JavaScript-heavy pages (`render: auto|never|always`). One JSON-RPC POST per
+  fetch, no new dependencies. ([#5981])
 - **models:** Administrators can manage shared models from Settings → Models
   without editing server configuration. New administrator-only
   `GET/PUT /api/managed-models` and `POST /api/managed-models/test` endpoints
@@ -323,6 +327,27 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **scheduler:** Editing an interval task's title or prompt no longer fails with
+  a 500. The edit dialog always sends `schedule_spec` beside the changed field,
+  and when the cadence is unchanged `PATCH /api/scheduled-tasks/{id}` keeps
+  the task's existing `next_run_at` — a value the repository had handed back
+  serialized as an ISO string. `ScheduledTaskRepository.update()` assigned it
+  to the `DateTime` column untouched, so SQLite raised `StatementError`
+  ("only accepts Python datetime") and Postgres a `DataError`; only changing
+  the cadence worked, because that path computes a fresh datetime. The
+  repository now coerces every serialized timestamp it accepts in `update()`,
+  as `update_after_launch()` already did. ([#5964])
+- **gateway:** `GET /api/skills`, `GET /api/skills/custom` and
+  `GET /api/skills/{name}` no longer walk the skill directories on the event
+  loop. Each called `load_skills()` inline, which resolves the caller's
+  storage, scans every public and custom skill directory and parses each
+  `SKILL.md` — filesystem work that grows with the number of installed
+  skills. #5747 moved that same call off the loop for the custom-skill
+  content route and documented why; these three routes were missed, so the
+  strict Blockbuster gate raised `BlockingError` on them and, in production,
+  a large or slow skills tree stalled every other request on the worker for
+  the duration of the scan. All three now offload the load with
+  `asyncio.to_thread` through one shared helper. ([#5945])
 - **gateway:** `GET` and `PUT /api/user-profile` no longer run their
   filesystem work on the event loop. Both handlers resolved the per-user
   `USER.md` path (which builds absolute paths on every call), stat'ed, read,
@@ -375,6 +400,34 @@ This release closes that milestone with **181 merged pull requests**.
   directory such as `assets` also slipped through path validation and raised
   `IsADirectoryError`. Non-text content is now recorded as no previous text,
   and a directory path is a validation error instead of a crash. ([#5893])
+- **models:** `when_thinking_enabled` and `when_thinking_disabled` no longer
+  replace a profile's whole `extra_body` on the legacy (no `reasoning:` block)
+  path. Both templates were applied with a shallow `dict.update`, so a profile
+  carrying `extra_body: {tool_stream: true}` beside
+  `when_thinking_enabled.extra_body.thinking` / `when_thinking_disabled`
+  templates — the shape of most `extra_body`-based examples in
+  `config.example.yaml` — lost `tool_stream` in both directions, while the
+  synthesized disable payloads and the contract path already deep-merged. Both
+  legacy templates now deep-merge the same way. The merge semantics are: keys
+  are never removed, a template can only add or override, nested mappings
+  inherit the profile's other keys, and template values win on conflicts. The
+  merge also keeps the template's vLLM switch authoritative across its two
+  spellings: when a profile spells the switch differently from its template
+  (`chat_template_kwargs.enable_thinking: false` beside the legacy
+  `thinking: true` alias), the template's value is mirrored onto the profile's
+  spelling, so `VllmChatModel` and plain OpenAI-compatible classes alike send
+  the template's intent under whichever key the server reads — on both the
+  legacy and the contract path, in both directions. Non-mapping template
+  values are forwarded unchanged. Migration note: because keys are never
+  removed, a `when_thinking_disabled` template can no longer clear a key the
+  profile's base `extra_body` sets — a base
+  `extra_body.thinking: {type: enabled, budget_tokens: 4096}` now reaches the
+  provider as `{type: disabled, budget_tokens: 4096}` when thinking is off,
+  which Anthropic-style APIs reject. Enable-only keys such as `budget_tokens`
+  belong in `when_thinking_enabled`, not in the base `extra_body`; the
+  synthesized disable payloads and the contract path already behaved this
+  way. Templates are also deep-copied as they are merged, so constructor
+  kwargs never alias the cached profile. ([#5894])
 - **projects:** The conversation-files view no longer shows an empty heading
   for a member thread that has no title yet. A thread's `display_name` is
   `null` on the wire until title generation has run (or if it never does), but
@@ -1319,6 +1372,30 @@ This release closes that milestone with **181 merged pull requests**.
   some later edit. The loader now reads once through a shared
   `file_signature.read_config_with_signature()` helper that signs exactly the
   returned bytes; a racing edit can only cost one extra reload. ([#5848])
+- **dev:** `make stop` / `make dev` can now reclaim dev ports held by a sibling
+  worktree whose path contains spaces. `serve.sh` built its worktree-root list
+  with `awk '{print $2}'` over `git worktree list --porcelain`, whose paths are
+  unquoted, so `.../deer flow two` was recorded as `.../deer`; a Gateway or
+  frontend started from that worktree was never recognised as deer-flow's and
+  the start aborted with "port already in use". The whole path is kept now. ([#5856])
+- **uploads:** A malformed `files[*].size` in a run's message metadata no
+  longer fails the whole run. `UploadsMiddleware` validated every other field
+  of a client-supplied file entry fail-soft but passed `size` straight to
+  `int()`, so a value such as `"abc"` or a list raised out of `before_agent`
+  before the model was called — and again on every edit or regenerate of that
+  message, since the entry is carried over verbatim. The size only feeds the
+  human-readable line in `<current_uploads>`; unusable values now fall back to
+  `0`, the same as a missing size, while numeric strings keep working. ([#5855])
+- **release:** Bumping the version no longer leaves `backend/uv.lock` behind.
+  `scripts/bump_version.sh` rewrote `backend/pyproject.toml`, `frontend/package.json`
+  and the Helm chart, but the lockfile records the root package's own version too
+  (uv keeps its PEP 440 form, so `2.1.0-rc0` is stored as `2.1.0rc0`). The
+  documented release step therefore produced a commit whose lock CI rejects:
+  `uv lock --check` fails on the stale lock and `uv sync --locked` refuses the
+  tree, and with pre-commit installed it broke a step earlier on the
+  `uv-lock-check` hook. The script now refreshes the lock with `uv lock` and exits
+  before editing anything when `uv` is missing, instead of leaving a half-bumped
+  working tree behind. Only the root package's version line moves. ([#5859])
 
 ### Security
 
@@ -2480,71 +2557,6 @@ This release closes that milestone with **772 merged pull requests**.
 
 ### Fixed
 
-- **dev:** `make stop` / `make dev` can now reclaim dev ports held by a sibling
-  worktree whose path contains spaces. `serve.sh` built its worktree-root list
-  with `awk '{print $2}'` over `git worktree list --porcelain`, whose paths are
-  unquoted, so `.../deer flow two` was recorded as `.../deer`; a Gateway or
-  frontend started from that worktree was never recognised as deer-flow's and
-  the start aborted with "port already in use". The whole path is kept now. ([#5856])
-- **uploads:** A malformed `files[*].size` in a run's message metadata no
-  longer fails the whole run. `UploadsMiddleware` validated every other field
-  of a client-supplied file entry fail-soft but passed `size` straight to
-  `int()`, so a value such as `"abc"` or a list raised out of `before_agent`
-  before the model was called — and again on every edit or regenerate of that
-  message, since the entry is carried over verbatim. The size only feeds the
-  human-readable line in `<current_uploads>`; unusable values now fall back to
-  `0`, the same as a missing size, while numeric strings keep working. ([#5855])
-- **release:** Bumping the version no longer leaves `backend/uv.lock` behind.
-  `scripts/bump_version.sh` rewrote `backend/pyproject.toml`, `frontend/package.json`
-  and the Helm chart, but the lockfile records the root package's own version too
-  (uv keeps its PEP 440 form, so `2.1.0-rc0` is stored as `2.1.0rc0`). The
-  documented release step therefore produced a commit whose lock CI rejects:
-  `uv lock --check` fails on the stale lock and `uv sync --locked` refuses the
-  tree, and with pre-commit installed it broke a step earlier on the
-  `uv-lock-check` hook. The script now refreshes the lock with `uv lock` and exits
-  before editing anything when `uv` is missing, instead of leaving a half-bumped
-  working tree behind. Only the root package's version line moves. ([#5859])
-- **config:** A `config.yaml` edit that lands while the previous edit is still
-  being loaded is no longer lost until the next edit. `get_app_config()`'s
-  loader parsed the file and then hashed it again to record the cache
-  signature, so a write between those two reads left the cache holding the
-  older content under the newer content's signature — a state the signature
-  comparison can never detect. The loader now reads the file once and signs
-  the bytes it parsed; a write that races the load just triggers one more
-  reload on the next call. ([#5848])
-- **config:** `request_admission.requests_per_minute` and `max_queue_size` now
-  accept `$VAR` environment references like every other field. Both are strict
-  integers so a bool or float is still rejected, but `$VAR` substitution always
-  produces a string, so `requests_per_minute: $RPM` failed the whole config load
-  with "Input should be a valid integer" even when `RPM=60`. A decimal literal
-  delivered as a string is now converted before the strict check; any other
-  string is still rejected. ([#5838])
-- **scheduler:** Pausing a scheduled task no longer loses the pause when a
-  dispatch is in flight on SQLite. `release_dispatch_lease` guards on the lease
-  owner — which pausing clears — but read the row without taking SQLite's
-  writer, so a stale read passed the guard and wrote the task back to
-  `enabled` with `next_run_at` untouched, leaving the scheduler firing a task
-  the API had reported as paused. The read now takes the writer first, as every
-  other mutating path in that repository does. PostgreSQL was unaffected.
-  ([#5777])
-- **mcp:** Lazy MCP initialization no longer runs tool discovery twice when
-  discovery itself raises a `RuntimeError` such as `McpTaskConfigurationError`.
-  The `asyncio.run` fallback in `get_cached_mcp_tools()` was meant only for
-  `get_event_loop()` failing, but it also caught discovery errors and
-  re-spawned every stdio server (and re-fetched OAuth tokens) before giving
-  up; inside a running loop it also logged a misleading "asyncio.run() cannot
-  be called from a running event loop" traceback instead of the real cause.
-- **uploads:** Deleting an uploaded document no longer deletes the converted
-  Markdown beside it. Conversion names a companion after the document's stem
-  and falls back to a `_N` suffix when that name is taken, so the `.md` next to
-  a document can belong to another document sharing the stem, or to the user:
-  uploading `a.docx` and `a.pdf` produced `a.md` and `a_1.md`, and deleting
-  `a.pdf` destroyed `a.docx`'s companion. Companions now survive their
-  document, stay listed, and can be deleted on their own. ([#5673])
-- **subagents:** Recognize zero-byte regular deliverables in remote sandbox
-  acceptance checks. Readable empty files now satisfy `exists` and
-  `file_written` and deterministically fail `non-empty`, instead of remaining
-  UNVERIFIED. ([#5559])
 - **frontend:** Keep the `…` (kebab) menu on project chat rows inside the
   sidebar. In the sidebar's grouped Projects mode the indented nested menus
   kept `SidebarMenu`'s `w-full` while carrying an extra `ml-4`, so they were
@@ -6174,8 +6186,12 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5881]: https://github.com/bytedance/deer-flow/pull/5881
 [#5884]: https://github.com/bytedance/deer-flow/pull/5884
 [#5893]: https://github.com/bytedance/deer-flow/pull/5893
+[#5894]: https://github.com/bytedance/deer-flow/pull/5894
 [#5900]: https://github.com/bytedance/deer-flow/pull/5900
 [#5928]: https://github.com/bytedance/deer-flow/pull/5928
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934
 [#5935]: https://github.com/bytedance/deer-flow/pull/5935
+[#5945]: https://github.com/bytedance/deer-flow/pull/5945
+[#5964]: https://github.com/bytedance/deer-flow/pull/5964
+[#5981]: https://github.com/bytedance/deer-flow/pull/5981
 

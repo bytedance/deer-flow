@@ -47,7 +47,7 @@ At the core of the memory feature is a **backend-neutral `MemoryManager`** (defi
 The design goal is a single sentence: **swapping the memory backend requires zero changes anywhere else in DeerFlow**.
 
 - **The contract says what, not how.** `get_context()` only has to return injection-ready text — whether that comes from a local file load or a remote retrieval call is the backend's own business. The contract does not even assume memory is a set of "facts".
-- **Tiered by implementation cost.** Only two methods are mandatory (write via `add`, read-and-inject via `get_context`); every other management operation (search, clear, import, fact CRUD, etc.) ships with a default "unsupported" implementation, so a backend exposes exactly as much capability as it implements.
+- **Tiered by implementation cost.** Only three members are mandatory: the `from_config` classmethod (assembly), `add` (write) and `get_context` (read-and-inject). Search, clear, import and fact CRUD ship with a default "unsupported" implementation, and the buffered-write helpers (`add_nowait`, `shutdown_flush`, `cancel_by_agent`) default to simple pass-throughs, so a backend exposes exactly as much capability as it implements.
 - **Fail loud, never silently.** Memory is persistent data. A misconfigured backend or a corrupted file raises directly (e.g. `ValueError` at build time, HTTP 409 on write conflicts) instead of quietly falling back to another store — which would silently write your data to the wrong place.
 - **Host and backend decoupled.** Host capabilities (Langfuse spans, the default LLM, extraction metrics) are injected as hooks that backends consume as needed, so the backend package itself never depends on a DeerFlow-specific concept and can be shipped independently.
 
@@ -55,7 +55,7 @@ The `MemoryManager` contract at a glance:
 
 | Tier | Methods | Purpose |
 | --- | --- | --- |
-| Mandatory | `add` / `get_context` | Queue conversations for write (debounced) / return injection-ready memory text |
+| Mandatory | `from_config` / `add` / `get_context` | Build the instance from `backend_config` and host hooks / queue conversations for write (debounced) / return injection-ready memory text |
 | Management ops | `search`, `get_memory`, `clear_memory`, `import_memory`, `create_fact` / `update_fact` / `delete_fact`, `add_nowait`, `cancel_by_agent`, `shutdown_flush` | Search & inspect, clear & import, fact CRUD for tool mode, emergency flush before summarization, cancel pending extraction, bounded drain on graceful shutdown |
 | Optional hooks | `warm`, `reload_memory`, `on_pre_compress` / `on_turn_start`, plus async variants | Startup warm-up, cache reload, future extension points |
 
@@ -92,7 +92,7 @@ deermem is the default backend and implements the full contract:
 - The factory `get_memory_manager()` reads `manager_class: deermem` and passes `backend_config` plus a set of **host hooks** (Langfuse tracing callbacks, the default extraction LLM, hidden-message filtering, extraction metrics) to `DeerMem.from_config()`, which assembles the instance.
 - Storage is bucketed per `(user, agent)`: `memory.json` holds only shared summaries and revision metadata, every fact is its own Markdown file (with YAML front matter), and a SQLite FTS5 full-text index backs `memory_search`.
 - Writes are queued by `MemoryMiddleware` calling `add()` after each turn (debounced and batched); summarization triggers an `add_nowait()` emergency flush so compacted content is never lost.
-- On top of that sit opt-in fact-governance capabilities: write-side near-duplicate merging (`fact_dedup_enabled`), staleness review (`staleness_review_enabled`), consolidation (`consolidation_enabled`), capacity eviction policy (`fact_eviction_policy: hybrid-v1`), and relevance-aware retrieval (`retrieval_relevance_enabled`).
+- On top of that sit fact-governance capabilities, all set under `memory.backend_config`: staleness review (`staleness_review_enabled`, on by default), plus opt-in write-side near-duplicate merging (`fact_dedup_enabled`), consolidation (`consolidation_enabled`), a capacity eviction policy (`fact_eviction_policy: hybrid-v1`; the default is `confidence`), and relevance-aware retrieval (`retrieval_relevance_enabled`).
 
 ### How openviking is integrated
 
@@ -103,13 +103,13 @@ memory:
   enabled: true
   injection_enabled: true
   manager_class: openviking
-  mode: middleware           # middleware mode is recommended
+  mode: middleware           # required: openviking supports middleware mode only
   backend_config:
     base_url: http://openviking:1933
     owner_user_id: default   # use default when auth is disabled
     api_key_env: OPENVIKING_API_KEY
     failure_policy:
-      read: fail_open        # read failure returns empty results (fail_closed aborts)
+      read: fail_open        # read failure returns empty results (raise aborts the turn)
       write: log_and_drop
     retrieval:
       top_k: 8
@@ -165,12 +165,15 @@ Only `from_config` + `add` + `get_context` are mandatory. Everything else is opt
 
 | Capability you want | Method to override | Notes |
 | --- | --- | --- |
-| Tool mode (`memory_search` etc.) | `search()`, and set `supports_search = True` | Flag/implementation consistency is enforced at instantiation |
-| Inspect / clear / import memory | `get_memory()` / `clear_memory()` / `import_memory()` | Unimplemented ops raise "not supported" |
-| Fact-level CRUD | `create_fact()` / `update_fact()` / `delete_fact()` | Backs `memory_add` / `memory_update` / `memory_delete` in tool mode |
+| Tool mode (`memory_search` etc.) | `search()` with `supports_search = True`, plus `get_memory()` and the fact CRUD methods below | Flag/implementation consistency is enforced at instantiation. Tool mode does not install `MemoryMiddleware`, so the per-turn `add()` writes stop unless you set `requires_passive_writes_in_tool_mode = True` (the `add_nowait()` flush before summarization still runs, and by default it calls `add()`); `memory_add` reads `get_memory()` before calling `create_fact()` |
+| Inspect / clear / import memory | `get_memory()` / `clear_memory()` / `import_memory()` | Unimplemented ops raise "not supported". Return the DeerMem document shape, which the Gateway casts to `MemoryResponse` (`version`, `lastUpdated`, `user`, `history`, and `facts` whose entries carry `id` and `content`) |
+| Fact-level CRUD | `create_fact()` / `update_fact()` / `delete_fact()` | Backs `memory_add` / `memory_update` / `memory_delete` in tool mode. `create_fact` returns `(memory_data, fact_id)`; raise `KeyError` for an unknown fact id (HTTP 404) |
+| Buffered writes | `add_nowait()` / `shutdown_flush()` / `cancel_by_agent()` | The defaults only call `add()`, report the flush as done, and cancel nothing; override them if your `add()` buffers |
 | Startup warm-up (indexing, encoders, …) | `warm()`, returning `True` / `False` / `None` | `None` means nothing to warm; the log says "skipped" honestly |
 | Releasing connections and other resources | `close()` | Called on graceful shutdown |
 | Cache reload | `reload_memory()` | For caching backends after out-of-band edits |
+
+`backend/packages/harness/deerflow/agents/memory/backends/README.md` explains the DeerMem return shape and common pitfalls, and `backends/noop/` is a working template to copy.
 
 ### Step 3: Declare failure and conflict semantics
 
