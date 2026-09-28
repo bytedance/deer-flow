@@ -249,6 +249,48 @@ def test_load_claude_code_credential_falls_back_to_default_file_when_override_is
     assert cred.source == "claude-cli-file"
 
 
+@pytest.mark.parametrize("invalid_bytes", [b"\xff", b'{"access_token": "fake-secret"}\xc3'])
+def test_load_claude_code_credential_falls_back_after_decode_error(tmp_path, monkeypatch, caplog, invalid_bytes):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    override_path = tmp_path / "credentials.json"
+    override_path.write_bytes(invalid_bytes)
+    monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(override_path))
+
+    default_path = tmp_path / ".claude" / ".credentials.json"
+    default_path.parent.mkdir()
+    default_path.write_text(json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat01-default"}}), encoding="utf-8")
+
+    model = ClaudeChatModel(model="claude-sonnet-4-6")
+
+    assert model._is_oauth is True
+    assert model._client.auth_token == "sk-ant-oat01-default"
+    assert "Failed to read Claude Code credentials" in caplog.text
+    assert "fake-secret" not in caplog.text
+    assert "sk-ant-oat01-default" not in caplog.text
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_credential_loader_skips_undecodable_file(tmp_path, monkeypatch, caplog, provider):
+    _clear_claude_code_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cred_path = tmp_path / "credentials.json"
+    cred_path.write_bytes(b'{"access_token": "fake-secret"}\xff')
+
+    if provider == "claude":
+        monkeypatch.setenv("CLAUDE_CODE_CREDENTIALS_PATH", str(cred_path))
+        assert load_claude_code_credential() is None
+    else:
+        monkeypatch.setenv("CODEX_AUTH_PATH", str(cred_path))
+        assert load_codex_cli_credential() is None
+        with pytest.raises(ValueError, match="Codex CLI credential not found"):
+            CodexChatModel(model="gpt-5.4")
+
+    assert "Failed to read" in caplog.text
+    assert "fake-secret" not in caplog.text
+
+
 @pytest.mark.parametrize(
     "payload",
     [

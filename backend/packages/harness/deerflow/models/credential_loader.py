@@ -92,8 +92,8 @@ def _load_json_file(path: Path, label: str) -> dict[str, Any] | None:
         return None
 
     try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as e:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
         logger.warning(f"Failed to read {label}: {e}")
         return None
 

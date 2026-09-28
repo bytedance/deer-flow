@@ -284,6 +284,7 @@ It is disabled by default; see the linked guide to enable it.
 
    - Codex CLI reads `~/.codex/auth.json`
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
+   - CLI credential JSON files are read as UTF-8. Unreadable or malformed files are skipped with a warning; an invalid Claude Code override file still allows fallback to `~/.claude/.credentials.json`.
    - ACP agent entries are separate from model providers — if you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`
    - MiniMax Code speaks ACP directly. Install and authenticate it, then add it as an ACP agent:
 
