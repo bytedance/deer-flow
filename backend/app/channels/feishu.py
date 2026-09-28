@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import stat
 import threading
 import time
 from typing import Any, Literal
@@ -27,7 +28,12 @@ from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-from deerflow.uploads.manager import claim_unique_filename, normalize_filename, write_upload_file_no_symlink
+from deerflow.uploads.manager import (
+    apply_upload_sandbox_permits,
+    claim_unique_filename,
+    normalize_filename,
+    write_upload_file_no_symlink,
+)
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
@@ -488,6 +494,10 @@ class FeishuChannel(Channel):
 
         try:
             resolved_target = await asyncio.to_thread(_persist)
+            # Root-written uploads are 0o600, which the non-root sandbox cannot
+            # read on a bind-mounted thread dir; grant group/other read like the
+            # channel manager's inbound-file path and the HTTP upload route.
+            await asyncio.to_thread(apply_upload_sandbox_permits, resolved_target, stat.S_IRGRP | stat.S_IROTH)
         except (OSError, ValueError, RuntimeError):
             logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", safe_filename, type)
             return f"Failed to obtain the [{type}]"
