@@ -20,6 +20,9 @@ concurrent future's completion, never on awaiter cancellation: timed-out workers
 still consume slots, including after their submitting loop closes. Preserve
 ContextVars and return `ContextInjectionBusyError` without submitting on
 saturation. Do not route memory injection through the default or file-I/O pool.
+Saturation and timeout preserve the middleware's memory read-failure policy:
+strict or unknown fails closed; fail-open skips injection. Opt-out cleanup
+precedes admission; date-only subagent injection stays independent.
 
 ### Uploaded Document Summaries
 
