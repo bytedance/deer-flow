@@ -11,6 +11,26 @@ from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 
 
+def _tool_result_to_text(content: object) -> str:
+    """Flatten a tool result without discarding structured content blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text", "")
+                parts.append(text if isinstance(text, str) else json.dumps(text, ensure_ascii=False, default=str))
+            else:
+                parts.append(json.dumps(block, ensure_ascii=False, default=str))
+        return "".join(parts)
+    if content is None:
+        return ""
+    return json.dumps(content, ensure_ascii=False, default=str)
+
+
 def _fix_messages(messages: list) -> list:
     """Sanitize incoming messages for MindIE compatibility.
 
@@ -21,6 +41,15 @@ def _fix_messages(messages: list) -> list:
     """
     fixed = []
     for msg in messages:
+        # Tool results may use structured blocks (for example a JSON result).
+        # Preserve those blocks before the generic text-only flattening below;
+        # dropping them makes the next model turn see an empty tool response.
+        if isinstance(msg, ToolMessage):
+            tool_result_text = _tool_result_to_text(msg.content)
+            tool_result_text = f"<tool_response>\n{html.escape(tool_result_text, quote=False)}\n</tool_response>"
+            fixed.append(HumanMessage(content=tool_result_text))
+            continue
+
         # Flatten content if it's a list of blocks
         if isinstance(msg.content, list):
             parts = []
@@ -41,17 +70,6 @@ def _fix_messages(messages: list) -> list:
                 xml_parts.append(f"<tool_call> <function={html.escape(str(tool['name']), quote=False)}> {args_xml} </function> </tool_call>")
             full_text = f"{text}\n" + "\n".join(xml_parts) if text else "\n".join(xml_parts)
             fixed.append(AIMessage(content=full_text.strip() or " "))
-            continue
-
-        # Wrap tool execution results in XML tags and convert to HumanMessage.
-        # Escape the tool output so a result containing a literal "</tool_response>"
-        # (e.g. from read_file on an untrusted file, bash output, or an MCP tool the
-        # ToolResultSanitizationMiddleware allowlist does not cover) cannot close the
-        # framing early and inject trailing text into the turn — matching the escaping
-        # already applied to tool-call names/args above.
-        if isinstance(msg, ToolMessage):
-            tool_result_text = f"<tool_response>\n{html.escape(text, quote=False)}\n</tool_response>"
-            fixed.append(HumanMessage(content=tool_result_text))
             continue
 
         # Fallback to prevent completely empty message content

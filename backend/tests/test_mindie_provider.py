@@ -153,6 +153,19 @@ class TestFixMessages:
         assert isinstance(result[0], HumanMessage)
         assert "result" in result[0].content
 
+    def test_tool_message_preserves_structured_content_blocks(self):
+        """Structured tool results must remain visible to the next model turn."""
+        msg = ToolMessage(
+            content=[{"type": "json", "json": {"temperature": 21, "unit": "C"}}],
+            tool_call_id="call_structured",
+        )
+
+        result = _fix_messages([msg])
+
+        assert isinstance(result[0], HumanMessage)
+        assert '"temperature": 21' in result[0].content
+        assert '"unit": "C"' in result[0].content
+
     def test_tool_message_escapes_tool_response_breakout(self):
         # Tool output is untrusted (read_file on an untrusted file, bash output, or an
         # MCP tool the ToolResultSanitizationMiddleware allowlist doesn't cover). A literal
