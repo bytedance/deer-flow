@@ -378,3 +378,37 @@ def test_model_post_init_accepts_null_account_id(tmp_path, monkeypatch):
     model = CodexChatModel(model="gpt-5.4", reasoning_effort="medium")
 
     assert model._account_id == ""
+
+def test_load_codex_cli_credential_rejects_whitespace_only_token(tmp_path, monkeypatch):
+    """Whitespace-only tokens must not become usable credentials."""
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"access_token": "   "}))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    from deerflow.models.credential_loader import load_codex_cli_credential
+
+    assert load_codex_cli_credential() is None
+
+
+def test_load_codex_cli_credential_rejects_whitespace_only_nested_token(tmp_path, monkeypatch):
+    """The nested tokens.access_token shape is normalized the same way."""
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"tokens": {"access_token": " \t "}}))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    from deerflow.models.credential_loader import load_codex_cli_credential
+
+    assert load_codex_cli_credential() is None
+
+
+def test_load_codex_cli_credential_strips_padded_token(tmp_path, monkeypatch):
+    """A valid token with surrounding whitespace is normalized, not dropped."""
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"access_token": "  tok-test  "}))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    from deerflow.models.credential_loader import load_codex_cli_credential
+
+    cred = load_codex_cli_credential()
+    assert cred is not None
+    assert cred.access_token == "tok-test"

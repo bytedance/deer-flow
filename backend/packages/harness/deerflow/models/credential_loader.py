@@ -255,6 +255,11 @@ def load_codex_cli_credential() -> CodexCliCredential | None:
     if not isinstance(account_id, str):
         logger.debug("Codex CLI credentials file has a non-string account_id; using no account")
         account_id = ""
+    if isinstance(access_token, str):
+        # Normalize before validating: surrounding whitespace is padding, and a
+        # whitespace-only value must not become a credential that later builds
+        # an invalid Authorization header.
+        access_token = access_token.strip()
     if not isinstance(access_token, str) or not access_token:
         logger.debug("Codex CLI credentials file exists but no string token found")
         return None
