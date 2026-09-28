@@ -632,6 +632,11 @@ def build_middlewares(
             inject_tool_artifacts=resolved_app_config.tool_artifacts.enabled and resolved_app_config.tool_artifacts.inject_model_context,
             task_continuity_enabled=getattr(getattr(resolved_app_config, "task_continuity", None), "enabled", False) is True,
             pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None),
+            # The rendered "Active skills" reminder hides entries the provider
+            # denies; decisions are published per step by the activation
+            # middleware under the shared chain token.
+            skill_authorization=skill_authorization,
+            entry_decisions_owner_token=slash_source_owner_token,
         )
     )
 

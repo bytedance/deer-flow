@@ -582,26 +582,36 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request_secrets = extract_request_secrets(context)
         sources: list[tuple[str, tuple[SecretRequirement, ...]]] = []
         if request_secrets:
-            # Registry selection for this call:
-            # - a snapshot from the async prepass (``awrap_model_call``) — the
-            #   decision map was keyed by this snapshot's names, so resolving
-            #   the entry sources against it makes a map miss impossible by
-            #   construction (no silent divergence to the sync provider API);
-            # - ``_REGISTRY_LOAD_FAILED`` — the prepass already attempted the
-            #   load and failed. Entries must bind nothing (an empty registry
-            #   resolves no paths) rather than silently recover via a fresh
-            #   load whose names would miss the map. The slash source keeps
-            #   its validated-at-activation status: it does not consult the
-            #   decision map, so it resolves against a fresh registry;
-            # - ``None`` (sync chain / prepass not run) — the historical
-            #   fresh per-call load, re-read so an operator disabling a skill
-            #   revokes its binding on the very next model call.
+            # Two secret sources, two deliberately DIFFERENT registry
+            # reference points:
+            #
+            # Slash source — always a fresh, post-activation registry. Its
+            # binding must match the skill content the activation just read;
+            # the prepass snapshot is taken BEFORE the aauthorize awaits, so
+            # resolving the slash source from it would activate NEW_KEY
+            # content while binding OLD_KEY when a skill's declared secrets
+            # change in that window (review: keep the fresh slash lookup
+            # separate from the entry snapshot). The slash source never
+            # consults the decision map, so snapshot consistency buys nothing
+            # here.
+            slash_registry = self._load_skill_registry_by_path()
+            # Entry sources — the snapshot the decision map was keyed by
+            # (a map miss is impossible by construction), or an empty
+            # registry after a failed prepass (bind nothing rather than
+            # silently recover with a fresh load whose names would miss the
+            # map and fall back to the sync provider API). ``None`` (sync
+            # chain / prepass not run) falls back to the same fresh registry
+            # the slash source uses — on the sync chain the synchronous
+            # authorize() is the correct API, so no divergence exists there.
             if entry_registry is _REGISTRY_LOAD_FAILED:
-                slash_registry = self._load_skill_registry_by_path()
                 entry_registry_effective: dict[str, Skill] = {}
+            elif entry_registry is not None:
+                entry_registry_effective = entry_registry
             else:
-                slash_registry = entry_registry if entry_registry is not None else self._load_skill_registry_by_path()
                 entry_registry_effective = slash_registry if slash_registry is not None else {}
+            # The two sources resolve independently — a transient failure of
+            # the fresh slash lookup must not zero the entry sources (they
+            # have their own snapshot and never consult that registry).
             if slash_registry is not None:
                 # Slash source: exempt from the ``secrets-autonomous`` opt-out
                 # (explicit ceremony), but still enabled + allowlist checked.
@@ -609,7 +619,10 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 slash_skill = self._resolve_registry_skill(slash_registry, slash_path, require_autonomous=False)
                 if slash_skill is not None:
                     sources.append((slash_skill.name, tuple(slash_skill.required_secrets)))
-                sources.extend(self._in_context_secret_sources(request, entry_registry_effective, activation_decisions=activation_decisions))
+            # Entry sources resolve independently; a skill already bound by the
+            # slash source (activation era) does not contribute an entry view.
+            slash_bound = frozenset(name for name, _ in sources)
+            sources.extend(self._in_context_secret_sources(request, entry_registry_effective, activation_decisions=activation_decisions, exclude_names=slash_bound))
 
         injected: dict[str, str] = {}
         bound_skills: set[str] = set()
@@ -701,7 +714,14 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return None
         return skill
 
-    def _in_context_secret_sources(self, request: ModelRequest, registry: dict[str, Skill], *, activation_decisions: dict[str, bool] | None = None) -> list[tuple[str, tuple[SecretRequirement, ...]]]:
+    def _in_context_secret_sources(
+        self,
+        request: ModelRequest,
+        registry: dict[str, Skill],
+        *,
+        activation_decisions: dict[str, bool] | None = None,
+        exclude_names: frozenset[str] = frozenset(),
+    ) -> list[tuple[str, tuple[SecretRequirement, ...]]]:
         """Map ``ThreadState.skill_context`` entries to declared-secret sources.
 
         Entries are references to skills the model actually loaded in this
@@ -711,6 +731,13 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         ``skill:activate`` decision is re-checked here as well: ``skill_context``
         persists across runs, and an entry stamped under an earlier policy must
         not keep binding secrets after the provider starts denying activation.
+
+        *exclude_names* carries the slash-activated skill names: explicit slash
+        activation dominates for the rest of the run (the same rule the
+        tool-policy middleware applies), and the slash source is resolved from
+        a fresher registry than the entry snapshot — letting the same skill
+        contribute both sources would bind two eras of its declarations when
+        they change across the prepass→activation window.
         """
         state = getattr(request, "state", None) or {}
         try:
@@ -725,6 +752,10 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 continue
             skill = self._resolve_registry_skill(registry, entry.get("path"), require_autonomous=True)
             if skill is None or skill.name in seen:
+                continue
+            if skill.name in exclude_names:
+                # The slash source already binds this skill's activation-era
+                # declaration; its entry view must not widen or stale it.
                 continue
             if not self._activation_allowed(skill.name, activation_decisions=activation_decisions):
                 continue
@@ -770,10 +801,58 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelResponse | AIMessage:
+        # Sync-chain twin of the async publication: when authorization is
+        # enabled and persisted entries exist, resolve one registry snapshot
+        # plus the synchronous authorize() decisions and publish the path-keyed
+        # map for the durable renderer. Passive steps (no entries) publish
+        # nothing and pay no I/O, mirroring the async empty-paths guard.
+        if self._skill_authorization is not None:
+            _, entry_paths = self._candidate_activation_targets(request)
+            if entry_paths:
+                names, registry = self._canonical_names_for_paths(entry_paths)
+                decisions = self._collect_sync_activation_decisions(names)
+                self._publish_entry_decisions(request, entry_paths, registry, decisions)
         prepared, activation = self._handle_model_request(request, hook="wrap_model_call")
         if isinstance(prepared, AIMessage):
             return prepared
         return self._stamp_usage(handler(prepared), activation)
+
+    def _publish_entry_decisions(
+        self,
+        request: ModelRequest,
+        entry_paths: list[str],
+        entry_registry: dict[str, Skill] | object | None,
+        activation_decisions: dict[str, bool] | None,
+    ) -> None:
+        """Publish per-step ``skill:activate`` decisions keyed by entry path.
+
+        The durable-context renderer consumes this map so the model-visible
+        "Active skills" reminder stops advertising skills the provider now
+        denies. Keyed by normalized container path (the renderer's entry
+        identity); a prepass registry failure, an unresolvable path, or a
+        missing decision all publish ``False`` — hide rather than advertise.
+        """
+        run_context = self._run_context(request)
+        if run_context is None:
+            return
+        from deerflow.runtime.secret_context import write_skill_entry_decisions
+
+        decisions: dict[str, bool] = {}
+        registry = entry_registry if isinstance(entry_registry, dict) else {}
+        collected = activation_decisions or {}
+        for path in entry_paths:
+            normalized = posixpath.normpath(path)
+            skill = registry.get(normalized)
+            decisions[normalized] = collected.get(skill.name, False) if skill is not None else False
+        write_skill_entry_decisions(run_context, decisions, owner_token=self._slash_source_owner_token)
+
+    def _collect_sync_activation_decisions(self, names: list[str]) -> dict[str, bool] | None:
+        """Synchronous authorize() decisions for *names* (sync chain only)."""
+        if self._skill_authorization is None or not names:
+            return None
+        from deerflow.authz.skill_filter import skill_activation_allowed
+
+        return {name: skill_activation_allowed(self._skill_authorization, name) for name in names}
 
     @override
     async def awrap_model_call(
@@ -798,6 +877,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             slash_names, entry_paths = self._candidate_activation_targets(request)
             canonical_names, entry_registry = await asyncio.to_thread(self._canonical_names_for_paths, entry_paths)
             activation_decisions = await self._collect_activation_decisions([*slash_names, *canonical_names])
+            self._publish_entry_decisions(request, entry_paths, entry_registry, activation_decisions)
         else:
             activation_decisions = None
         prepared, activation = await asyncio.to_thread(

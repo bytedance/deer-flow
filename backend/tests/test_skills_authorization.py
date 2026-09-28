@@ -1333,17 +1333,36 @@ def test_extract_skills_skips_denied_reads_without_warning(caplog):
 def test_lead_runtime_chain_forwards_skill_authorization_to_stamp_gate():
     """build_lead_runtime_middlewares hands the resolved skill authorization to
     ToolErrorHandlingMiddleware so the skill-read stamp gate runs with the same
-    provider instance the activation middleware uses."""
+    provider instance the activation middleware uses — and the effective user
+    id, so the stamp gate canonicalizes read paths against the same
+    user-scoped registry the activation/policy middlewares resolve (a global
+    registry would fall back to path-derived names for per-user custom
+    skills, producing a wrong authorization target)."""
     from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware, build_lead_runtime_middlewares
 
     provider = _rbac_provider({"user": {"skills": {"allow": "*"}}})
     resolved = _resolved_skill_authorization(provider, fail_closed=True)
 
-    middlewares = build_lead_runtime_middlewares(app_config=_make_app_config(), skill_authorization=resolved)
+    middlewares = build_lead_runtime_middlewares(app_config=_make_app_config(), skill_authorization=resolved, user_id="user-123")
 
     stampers = [m for m in middlewares if isinstance(m, ToolErrorHandlingMiddleware)]
     assert len(stampers) == 1
     assert stampers[0]._skill_authorization is resolved
+    assert stampers[0]._user_id == "user-123"
+
+
+def test_subagent_runtime_chain_forwards_user_id_to_stamp_gate():
+    """build_subagent_runtime_middlewares hands the effective user id to
+    ToolErrorHandlingMiddleware: the subagent stamp gate must canonicalize
+    skill-read paths against the user-scoped registry, matching the
+    activation middleware constructed in the same builder."""
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware, build_subagent_runtime_middlewares
+
+    middlewares = build_subagent_runtime_middlewares(app_config=_make_app_config(), user_id="user-456")
+
+    stampers = [m for m in middlewares if isinstance(m, ToolErrorHandlingMiddleware)]
+    assert len(stampers) == 1
+    assert stampers[0]._user_id == "user-456"
 
 
 def test_subagent_executor_shares_one_skill_authorization_instance(monkeypatch):
@@ -2016,15 +2035,15 @@ def test_async_secret_binding_preserves_prepass_failure(tmp_path, monkeypatch):
     slash_skill = _skill("slash-skill", "SLASH_KEY")
     entry_skill = _skill("entry-skill", "ENTRY_KEY")
 
-    # Load order under the snapshot design: #1 call-1 prepass (snapshot —
-    # the binding resolution reuses it, no extra load), #2 call-1 slash
-    # activation, #3 call-2 prepass (FAILS), #4 call-2 slash-source
-    # resolution against a fresh registry (recovers).
+    # Load order: #1 call-1 prepass snapshot, #2 call-1 slash activation,
+    # #3 call-1 fresh slash-source lookup, #4 call-2 prepass (FAILS),
+    # #5 call-2 fresh slash-source lookup (recovers; entries bind nothing
+    # from the sentinel, the slash binding survives).
     load_calls = {"count": 0}
 
     def _flaky_load(*, enabled_only):
         load_calls["count"] += 1
-        if load_calls["count"] == 3:
+        if load_calls["count"] == 4:
             raise RuntimeError("transient registry failure")
         return [slash_skill, entry_skill]
 
@@ -2076,7 +2095,7 @@ def test_async_secret_binding_preserves_prepass_failure(tmp_path, monkeypatch):
     )
     asyncio.run(middleware.awrap_model_call(second, _identity))
 
-    assert load_calls["count"] == 4
+    assert load_calls["count"] == 5
     assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) == {"SLASH_KEY": "slash-value"}, "entry must bind nothing after the prepass failure; the slash binding must survive it"
 
 
@@ -2298,6 +2317,588 @@ def test_async_model_call_without_skill_refs_skips_registry_scan(tmp_path, monke
 
     assert load_calls["count"] == 0
     assert provider.async_calls == []
+
+
+def test_slash_secret_binding_uses_post_activation_registry(tmp_path, monkeypatch):
+    """[P2 regression] The slash source's secret binding resolves from a
+    fresh, post-activation registry — never the prepass snapshot. The
+    snapshot is taken before the aauthorize awaits; a skill whose declared
+    secrets change in that window would otherwise activate NEW_KEY content
+    while binding OLD_KEY (the just-activated skill misses the credential
+    it declares and receives one it no longer does)."""
+    import asyncio
+    import dataclasses
+
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.middlewares import skill_activation_middleware as activation_module
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY
+    from deerflow.skills.types import Skill as SkillObject
+    from deerflow.skills.types import SkillCategory
+
+    skill_dir = tmp_path / "foo-skill"
+    skill_dir.mkdir(exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("---\ndescription: d\n---\n# foo", encoding="utf-8")
+
+    def _skill(secret_name: str) -> SkillObject:
+        skill = SkillObject(
+            name="foo-skill",
+            description="d",
+            license=None,
+            skill_dir=skill_dir,
+            skill_file=skill_dir / "SKILL.md",
+            relative_path=Path("foo-skill"),
+            category=SkillCategory.CUSTOM,
+            enabled=True,
+        )
+        object.__setattr__(skill, "required_secrets", [SimpleNamespace(name=secret_name, optional=False)])
+        object.__setattr__(skill, "secrets_autonomous", True)
+        return skill
+
+    old_version = _skill("OLD_KEY")
+    new_version = dataclasses.replace(old_version, required_secrets=[SimpleNamespace(name="NEW_KEY", optional=False)])
+
+    # A persisted (unrelated) entry makes the async prepass actually snapshot
+    # the registry; load #1 (prepass) sees the OLD declaration, the
+    # activation-era loads (#2 _resolve_activation, #3 slash binding) see NEW.
+    load_calls = {"count": 0}
+
+    def _mutating_load(*, enabled_only):
+        load_calls["count"] += 1
+        return [old_version] if load_calls["count"] == 1 else [new_version]
+
+    storage = SimpleNamespace(
+        load_skills=_mutating_load,
+        get_container_root=lambda: "/mnt/skills",
+        get_skills_root_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr(activation_module, "get_or_new_skill_storage", lambda **kw: storage)
+
+    provider = _AsyncOnlyProvider()
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = SkillActivationMiddleware(
+        available_skills={"foo-skill", "other-skill"},
+        skill_authorization=resolved,
+        slash_source_owner_token="test-token",
+    )
+
+    other_path = "/mnt/skills/custom/other-skill/SKILL.md"
+    run_context: dict = {"secrets": {"OLD_KEY": "old-value", "NEW_KEY": "new-value"}}
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    request = _Request(
+        messages=[HumanMessage(content="/foo-skill go")],
+        state={"skill_context": [{"name": "other-skill", "path": other_path}]},
+        runtime=SimpleNamespace(context=run_context),
+    )
+
+    async def _identity(prepared):
+        return prepared
+
+    asyncio.run(middleware.awrap_model_call(request, _identity))
+
+    # The activation read NEW; the binding must have followed it, not the
+    # prepass snapshot: NEW_KEY injected, OLD_KEY not. The slash decision
+    # itself came from aauthorize (not bypassed).
+    assert provider.async_calls == ["foo-skill"]
+    assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) == {"NEW_KEY": "new-value"}
+
+
+def test_snapshot_entries_bind_while_slash_fresh_load_fails(tmp_path, monkeypatch):
+    """The two secret sources fail independently, each against its own
+    reference point: a transient failure of the fresh post-activation load
+    binds nothing for the slash source while the entry sources keep binding
+    from the prepass snapshot their decisions were keyed by."""
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.middlewares import skill_activation_middleware as activation_module
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY
+    from deerflow.skills.types import Skill as SkillObject
+    from deerflow.skills.types import SkillCategory
+
+    def _skill(name: str, secret: str) -> SkillObject:
+        skill_dir = tmp_path / name
+        skill_dir.mkdir(exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(f"# {name}", encoding="utf-8")
+        skill = SkillObject(
+            name=name,
+            description="d",
+            license=None,
+            skill_dir=skill_dir,
+            skill_file=skill_dir / "SKILL.md",
+            relative_path=Path(name),
+            category=SkillCategory.CUSTOM,
+            enabled=True,
+        )
+        object.__setattr__(skill, "required_secrets", [SimpleNamespace(name=secret, optional=False)])
+        object.__setattr__(skill, "secrets_autonomous", True)
+        return skill
+
+    slash_skill = _skill("slash-skill", "SLASH_KEY")
+    entry_skill = _skill("entry-skill", "ENTRY_KEY")
+
+    # Load #1: prepass snapshot (both skills). Load #2: activation-era
+    # (_resolve_activation). Load #3: fresh slash lookup — FAILS transiently.
+    load_calls = {"count": 0}
+
+    def _flaky_fresh_load(*, enabled_only):
+        load_calls["count"] += 1
+        if load_calls["count"] == 3:
+            raise RuntimeError("transient fresh-load failure")
+        return [slash_skill, entry_skill]
+
+    storage = SimpleNamespace(
+        load_skills=_flaky_fresh_load,
+        get_container_root=lambda: "/mnt/skills",
+        get_skills_root_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr(activation_module, "get_or_new_skill_storage", lambda **kw: storage)
+
+    provider = _AsyncOnlyProvider()
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = SkillActivationMiddleware(
+        available_skills={"slash-skill", "entry-skill"},
+        skill_authorization=resolved,
+        slash_source_owner_token="test-token",
+    )
+
+    entry_path = posixpath_normpath(entry_skill.get_container_file_path("/mnt/skills"))
+    run_context: dict = {"secrets": {"SLASH_KEY": "slash-value", "ENTRY_KEY": "entry-value"}}
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    request = _Request(
+        messages=[HumanMessage(content="/slash-skill go")],
+        state={"skill_context": [{"name": "entry-skill", "path": entry_path}]},
+        runtime=SimpleNamespace(context=run_context),
+    )
+
+    async def _identity(prepared):
+        return prepared
+
+    asyncio.run(middleware.awrap_model_call(request, _identity))
+
+    assert load_calls["count"] == 3
+    # Both candidates were authorized via aauthorize (prepass succeeded); the
+    # fresh-load failure then gates only the slash source's resolution.
+    assert provider.async_calls == ["entry-skill", "slash-skill"]
+    assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) == {"ENTRY_KEY": "entry-value"}
+
+
+def test_slash_era_dominates_entry_source_for_same_skill(tmp_path, monkeypatch):
+    """[construction-audit regression] When the same skill is BOTH the
+    slash-activated source (resolved from the fresh, post-activation registry)
+    and a persisted skill_context entry (resolved from the older prepass
+    snapshot), only the activation-era declaration binds. Unioning both
+    sources would inject a secret the skill no longer declares across the
+    prepass-to-activation window — the same staleness shape the slash-fresh
+    fix closed, arriving via the entry path. Mirrors the tool-policy rule:
+    explicit slash activation dominates for the run."""
+    import asyncio
+    import dataclasses
+
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.middlewares import skill_activation_middleware as activation_module
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY
+    from deerflow.skills.types import Skill as SkillObject
+    from deerflow.skills.types import SkillCategory
+
+    skill_dir = tmp_path / "foo"
+    skill_dir.mkdir(exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("---\ndescription: d\n---\n# foo", encoding="utf-8")
+
+    def _skill(secret: str) -> SkillObject:
+        base = SkillObject(
+            name="foo",
+            description="d",
+            license=None,
+            skill_dir=skill_dir,
+            skill_file=skill_dir / "SKILL.md",
+            relative_path=Path("foo"),
+            category=SkillCategory.CUSTOM,
+            enabled=True,
+        )
+        object.__setattr__(base, "required_secrets", [SimpleNamespace(name=secret, optional=False)])
+        object.__setattr__(base, "secrets_autonomous", True)
+        return dataclasses.replace(base, required_secrets=[SimpleNamespace(name=secret, optional=False)])
+
+    old_version = _skill("OLD_KEY")
+    new_version = _skill("NEW_KEY")
+
+    # Load #1 (prepass snapshot) sees the OLD declaration; the activation-era
+    # loads (#2 activation, #3 fresh slash lookup) see NEW.
+    load_calls = {"count": 0}
+
+    def _mutating_load(*, enabled_only):
+        load_calls["count"] += 1
+        return [old_version] if load_calls["count"] == 1 else [new_version]
+
+    storage = SimpleNamespace(
+        load_skills=_mutating_load,
+        get_container_root=lambda: "/mnt/skills",
+        get_skills_root_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr(activation_module, "get_or_new_skill_storage", lambda **kw: storage)
+
+    provider = _AsyncOnlyProvider()
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = SkillActivationMiddleware(
+        available_skills={"foo"},
+        skill_authorization=resolved,
+        slash_source_owner_token="test-token",
+    )
+
+    foo_path = posixpath_normpath(old_version.get_container_file_path("/mnt/skills"))
+    run_context: dict = {"secrets": {"OLD_KEY": "old-value", "NEW_KEY": "new-value"}}
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    request = _Request(
+        messages=[HumanMessage(content="/foo go")],
+        state={"skill_context": [{"name": "foo", "path": foo_path}]},
+        runtime=SimpleNamespace(context=run_context),
+    )
+
+    async def _identity(prepared):
+        return prepared
+
+    asyncio.run(middleware.awrap_model_call(request, _identity))
+
+    # Only the activation-era declaration binds — not the union of both eras;
+    # the slash decision was authorized via aauthorize.
+    assert provider.async_calls == ["foo"]
+    assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) == {"NEW_KEY": "new-value"}
+
+
+def test_sync_chain_secret_binding_uses_sync_api_and_canonical_names(tmp_path, monkeypatch):
+    """[Round-1 audit gap] The SYNC chain (wrap_model_call) with authorization
+    enabled resolves entry sources against a fresh registry and consults the
+    synchronous authorize() — the correct API there — with the canonical
+    declared name. The async snapshot path has regressions; this branch had
+    none, so a regression in the entry_registry=None fallback would pass the
+    whole suite."""
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.middlewares import skill_activation_middleware as activation_module
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.runtime.secret_context import ACTIVE_SECRETS_CONTEXT_KEY
+    from deerflow.skills.types import Skill as SkillObject
+    from deerflow.skills.types import SkillCategory
+
+    skill_dir = tmp_path / "vercel-deploy-claimable"
+    skill_dir.mkdir(exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("---\ndescription: d\n---\n# x", encoding="utf-8")
+    skill = SkillObject(
+        name="vercel-deploy",
+        description="d",
+        license=None,
+        skill_dir=skill_dir,
+        skill_file=skill_dir / "SKILL.md",
+        relative_path=Path("vercel-deploy-claimable"),
+        category=SkillCategory.PUBLIC,
+        enabled=True,
+    )
+    object.__setattr__(skill, "required_secrets", [SimpleNamespace(name="API_KEY", optional=False)])
+    object.__setattr__(skill, "secrets_autonomous", True)
+
+    load_calls = {"count": 0}
+
+    def _load(*, enabled_only):
+        load_calls["count"] += 1
+        return [skill]
+
+    storage = SimpleNamespace(
+        load_skills=_load,
+        get_container_root=lambda: "/mnt/skills",
+        get_skills_root_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr(activation_module, "get_or_new_skill_storage", lambda **kw: storage)
+
+    provider = _ActionAwareProvider(denied_activate=set())
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    middleware = SkillActivationMiddleware(
+        available_skills={"vercel-deploy"},
+        skill_authorization=resolved,
+        slash_source_owner_token="test-token",
+    )
+
+    skill_path = posixpath_normpath(skill.get_container_file_path("/mnt/skills"))
+    run_context: dict = {"secrets": {"API_KEY": "v"}}
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    request = _Request(
+        messages=[HumanMessage(content="plain task")],
+        state={"skill_context": [{"name": "vercel-deploy-claimable", "path": skill_path}]},
+        runtime=SimpleNamespace(context=run_context),
+    )
+
+    def _handler(prepared):
+        return prepared
+
+    middleware.wrap_model_call(request, _handler)
+
+    # Two legitimate sync-API calls on the sync chain: the render-decision
+    # publication (path-keyed entry decisions) and the binding re-authorization.
+    assert provider.sync_calls == ["vercel-deploy", "vercel-deploy"]
+    assert provider.async_calls == []
+    assert run_context.get(ACTIVE_SECRETS_CONTEXT_KEY) == {"API_KEY": "v"}
+    # Two loads on the sync chain with active entries: the render-decision
+    # publication scan and the binding's fresh registry.
+    assert load_calls["count"] == 2
+
+
+def _durable_render_setup(tmp_path, monkeypatch, *, provider):
+    """Composed activation(outer) -> durable(inner) pair over two skills."""
+    from deerflow.agents.middlewares import skill_activation_middleware as activation_module
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.skills.types import Skill as SkillObject
+    from deerflow.skills.types import SkillCategory
+
+    made = []
+    for name in ("demo-skill", "ok-skill"):
+        skill_dir = tmp_path / name
+        skill_dir.mkdir(exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(f"# {name}", encoding="utf-8")
+        made.append(
+            SkillObject(
+                name=name,
+                description=f"Description for {name}",
+                license=None,
+                skill_dir=skill_dir,
+                skill_file=skill_dir / "SKILL.md",
+                relative_path=Path(name),
+                category=SkillCategory.CUSTOM,
+                enabled=True,
+            )
+        )
+    demo_skill, ok_skill = made
+
+    load_calls = {"count": 0}
+
+    def _load(*, enabled_only):
+        load_calls["count"] += 1
+        return made
+
+    storage = SimpleNamespace(
+        load_skills=_load,
+        get_container_root=lambda: "/mnt/skills",
+        get_skills_root_path=lambda: tmp_path,
+    )
+    monkeypatch.setattr(activation_module, "get_or_new_skill_storage", lambda **kw: storage)
+
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+    token = "test-token"
+    activation = SkillActivationMiddleware(
+        available_skills={"demo-skill", "ok-skill"},
+        skill_authorization=resolved,
+        slash_source_owner_token=token,
+    )
+    durable = DurableContextMiddleware(
+        skills_container_path="/mnt/skills",
+        skill_authorization=resolved,
+        entry_decisions_owner_token=token,
+    )
+    entries = [
+        {"name": "demo-skill", "path": posixpath_normpath(demo_skill.get_container_file_path("/mnt/skills")), "description": "d", "loaded_at": 0},
+        {"name": "ok-skill", "path": posixpath_normpath(ok_skill.get_container_file_path("/mnt/skills")), "description": "o", "loaded_at": 1},
+    ]
+    return activation, durable, entries, load_calls
+
+
+def _rendered_skill_names(prepared) -> set[str]:
+    text = "\n".join(str(getattr(m, "content", "")) for m in prepared.messages)
+    return {name for name in ("demo-skill", "ok-skill") if f"- {name}" in text}
+
+
+def test_durable_render_hides_denied_entries_async(tmp_path, monkeypatch):
+    """The model-visible 'Active skills' reminder stops advertising skills the
+    provider denies (async chain): the activation middleware publishes the
+    per-step path-keyed decisions from its prepass (zero extra registry
+    scans) and the durable renderer consumes them."""
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+
+    provider = _ActionAwareProvider(denied_activate={"demo-skill"})
+    activation, durable, entries, load_calls = _durable_render_setup(tmp_path, monkeypatch, provider=provider)
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    request = _Request(
+        messages=[HumanMessage(content="plain task")],
+        state={"skill_context": entries},
+        runtime=SimpleNamespace(context={}),
+    )
+
+    async def _inner(prepared):
+        return await durable.awrap_model_call(prepared, _async_identity)
+
+    async def _async_identity(prepared):  # noqa: ARG001
+        return prepared
+
+    prepared = asyncio.run(activation.awrap_model_call(request, _inner))
+
+    assert _rendered_skill_names(prepared) == {"ok-skill"}
+    assert load_calls["count"] == 1, "the renderer must reuse the prepass publication, not scan"
+
+
+def test_durable_render_hides_denied_entries_sync(tmp_path, monkeypatch):
+    """Same filter on the sync chain: the activation middleware's sync hook
+    publishes the decisions (one scan + sync authorize per entry name)."""
+    from langchain_core.messages import HumanMessage
+
+    provider = _ActionAwareProvider(denied_activate={"demo-skill"})
+    activation, durable, entries, load_calls = _durable_render_setup(tmp_path, monkeypatch, provider=provider)
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    request = _Request(
+        messages=[HumanMessage(content="plain task")],
+        state={"skill_context": entries},
+        runtime=SimpleNamespace(context={}),
+    )
+
+    def _inner(prepared):
+        return durable.wrap_model_call(prepared, _sync_identity)
+
+    def _sync_identity(prepared):  # noqa: ARG001
+        return prepared
+
+    prepared = activation.wrap_model_call(request, _inner)
+
+    assert _rendered_skill_names(prepared) == {"ok-skill"}
+    assert load_calls["count"] == 1
+
+
+def test_durable_render_unfiltered_without_authorization(tmp_path, monkeypatch):
+    """Authorization disabled: nothing is published and the reminder renders
+    every persisted entry — the absent-is-permissive carrier contract."""
+    import asyncio
+
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+
+    activation, durable, entries, load_calls = _durable_render_setup(tmp_path, monkeypatch, provider=_ActionAwareProvider(denied_activate=set()))
+    # Rebuild both without authorization, sharing the fixture's storage/skills.
+    activation = SkillActivationMiddleware(available_skills={"demo-skill", "ok-skill"}, slash_source_owner_token="test-token")
+    durable = DurableContextMiddleware(skills_container_path="/mnt/skills")
+
+    class _Request(SimpleNamespace):
+        def override(self, **kwargs):
+            updates = dict(self.__dict__)
+            updates.update(kwargs)
+            return _Request(**updates)
+
+    request = _Request(
+        messages=[HumanMessage(content="plain task")],
+        state={"skill_context": entries},
+        runtime=SimpleNamespace(context={}),
+    )
+
+    async def _inner(prepared):
+        return await durable.awrap_model_call(prepared, _identity)
+
+    async def _identity(prepared):
+        return prepared
+
+    prepared = asyncio.run(activation.awrap_model_call(request, _inner))
+
+    assert _rendered_skill_names(prepared) == {"demo-skill", "ok-skill"}
+
+
+def test_lead_chain_wires_durable_render_filter():
+    """The lead chain's DurableContextMiddleware receives the resolved skill
+    authorization AND the same owner token as the chain's activation
+    middleware, and is constructed AFTER it (publication must precede
+    consumption in the wrap order). Dropping either silently disables the
+    rendered-reminder filter — nothing else fails."""
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+
+    provider = _rbac_provider({"user": {"skills": {"allow": "*"}}})
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+
+    middlewares = build_middlewares({"configurable": {}}, model_name="gpt-4", skill_authorization=resolved, user_id="user-123")
+
+    activations = [m for m in middlewares if isinstance(m, SkillActivationMiddleware)]
+    durables = [m for m in middlewares if isinstance(m, DurableContextMiddleware)]
+    assert len(activations) == 1 and len(durables) == 1
+    assert durables[0]._skill_authorization is resolved
+    assert durables[0]._entry_decisions_owner_token == activations[0]._slash_source_owner_token
+    assert middlewares.index(activations[0]) < middlewares.index(durables[0]), "activation must wrap outside durable so the per-step decisions are published before the renderer reads them"
+
+
+def test_subagent_chain_wires_durable_render_filter():
+    """Same wiring contract for the subagent builder's DurableContextMiddleware."""
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+
+    provider = _rbac_provider({"user": {"skills": {"allow": "*"}}})
+    resolved = _resolved_skill_authorization(provider, fail_closed=True)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=_make_app_config(), user_id="user-456", skill_authorization=resolved)
+
+    activations = [m for m in middlewares if isinstance(m, SkillActivationMiddleware)]
+    durables = [m for m in middlewares if isinstance(m, DurableContextMiddleware)]
+    assert len(activations) == 1 and len(durables) == 1
+    assert durables[0]._skill_authorization is resolved
+    assert durables[0]._entry_decisions_owner_token == activations[0]._slash_source_owner_token
+    assert middlewares.index(activations[0]) < middlewares.index(durables[0])
+
+
+def test_entry_decisions_carrier_is_redaction_listed():
+    """The per-step entry-decisions run-context carrier is stripped by
+    ``redact_secret_context_keys`` — the redaction allowlist must enumerate
+    every run-context key the middlewares add (paths and decisions are not
+    secrets, but the carrier must never leak onto observable surfaces)."""
+    from deerflow.runtime.secret_context import redact_secret_context_keys, write_skill_entry_decisions
+
+    context: dict = {"secrets": {"K": "v"}, "__skill_entry_activation_decisions": {"decisions": {}, "owner_token": "t"}, "keep": 1}
+    write_skill_entry_decisions(context, {"/mnt/skills/custom/foo/SKILL.md": True}, owner_token="t")
+
+    redacted = redact_secret_context_keys(context)
+    assert "__skill_entry_activation_decisions" not in redacted
+    assert "secrets" not in redacted
+    assert redacted.get("keep") == 1
+    # redacted, not suppressed: the source carrier itself is untouched.
+    assert context["__skill_entry_activation_decisions"]["decisions"] == {"/mnt/skills/custom/foo/SKILL.md": True}
 
 
 def posixpath_normpath(path: str) -> str:

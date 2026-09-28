@@ -737,6 +737,11 @@ def build_subagent_runtime_middlewares(
             skill_file_read_tool_names=app_config.summarization.skill_file_read_tool_names,
             inject_tool_artifacts=app_config.tool_artifacts.enabled and app_config.tool_artifacts.inject_model_context,
             pii_redaction_config=getattr(app_config, "pii_redaction", None),
+            # The rendered "Active skills" reminder hides entries the provider
+            # denies; decisions are published per step by the activation
+            # middleware under the shared chain token.
+            skill_authorization=skill_authorization,
+            entry_decisions_owner_token=slash_source_owner_token,
         )
     )
 

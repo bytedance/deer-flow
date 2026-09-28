@@ -964,6 +964,153 @@ Phase 1 最低验证要求：
   `_resolve_secret_bindings` 走历史新鲜加载，行为不变；同步链完全不变；
   policy 中间件注册表参数以 `_RegistryArg` 别名收编退化联合类型。
 
+### 2026-09-27 — PR #4541 review（willem-bd R9）：slash 绑定参照点纠正与来源独立性
+
+- **背景：** R8 的快照设计把 slash 来源也统一到了预扫描快照上——快照在
+  `aauthorize()` await **之前**拍摄，slash 激活在其后重新加载当前技能；窗口内
+  技能声明秘密 OLD_KEY→NEW_KEY 变化时，激活展示 NEW 内容而绑定注入 OLD（刚激活的
+  技能拿不到它声明的凭据、反而拿到已不声明的）。R8 的"一步一载"附送优化在此翻车。
+- **决策（两个来源、两个参照点）：** slash 来源永远走**激活后的新鲜加载**
+  （`_load_skill_registry_by_path()`）——绑定必须与激活刚读到的内容一致；slash
+  来源不查决策 map，快照一致性对它无价值。条目来源保留快照（map 键 = 快照名，
+  miss 构造不可能）；哨兵失败条目归零；`None`（同步链）回退同一新鲜注册表（同步
+  authorize 在同步链是正确 API，无分叉）。两来源解析**相互独立**——新鲜加载瞬时
+  失败只归零 slash，条目继续按自己的快照绑定（审查自查发现初版修复把条目嵌在
+  slash 守卫下，该场景会误杀条目绑定，已独立成行并由回归钉住）。
+- **复盘（为什么多轮自查仍漏）：** 五轮 review 中 reviewer 找的几乎全是"上一轮
+  修复新创造的面"；R9 的根源是快照统一这个**未被点名的附送优化**逃过了新面计价，
+  以及"新鲜度"论证用了错误参照点（对照文档契约"下一步调用"而非"同调用内的激活
+  读"）且被写进文档后视为已封闭。已入 review-lessons 清单第 36–38 条（读取对×
+  变化窗口×参照点；附送优化单独计价；已记录论证可再攻击）。
+- **四轴构造审计（举一反四，模拟 reviewer 方法）**：① 读取对×窗口——
+  prepass↔activation 有意分离（各有参照点，代码注释记录）；activation↔binding
+  为两次新鲜加载、窗口为文件读+哈希（无 await，µs 级），reviewer 措辞
+  "fresh/activation-era metadata" 明示 fresh 可接受，且该窗口 PR 之前即存在，
+  完全封闭需将 Skill 对象穿透 `_Activation`，记录为已知窗口不扩面；跨中间件
+  双快照（activation 与 policy 各自预扫描）无共享决策消费，良性。② 返回值×
+  消费者——`(names, dict|sentinel|None)` 三值 × 唯一调用链全部处理，空 dict
+  快照构造性绑定归零。③ I/O 失败文法——异步有密步加载 {#1 prepass, #2 激活,
+  #3 slash 新鲜}×失败：#1 失败钉（既有）、#3 失败钉（本轮新增）、#2 失败
+  `_resolve_activation` 未捕获存储异常直接打断 run——**PR 之前既有**、不在本
+  diff，记录不搭车。④ 边界——快照 dict 跨线程只读共享，无变异点。
+- **证据：** `tests/test_skills_authorization.py` 54→56：
+  `test_slash_secret_binding_uses_post_activation_registry`（预扫描成功+窗口内
+  slash 声明 OLD→NEW：注入 NEW、不注入 OLD）；`test_snapshot_entries_bind_while_
+  slash_fresh_load_fails`（新鲜加载瞬时失败：slash 归零、条目仍按快照绑定）。
+  突变 M4（slash 回退快照）、M5（条目重嵌 slash 守卫）逐一还原必红；上一轮双调用
+  测试加载计数按新序列更新（#5）。
+- **兼容性：** 同步链与授权禁用路径不变；"一步一载"附送收益放弃（回到 PR 前
+  加载计数），一致性优先；无新增 rider。
+
+### 2026-09-27（第二轮自查）— 同技能双来源的"两个时代并集"与 slash 支配规则
+
+- **背景：** 修复 R9 后按 reviewer 的构造审计法再读最终代码，构造出下一个场景并实证：
+  同一技能既是 slash 来源（新鲜注册表，v2/NEW_KEY）又有持久条目（预扫描快照，
+  v1/OLD_KEY）时，两来源并集同时注入两个时代的钥匙（复现输出
+  `{OLD_KEY, NEW_KEY}`）——OLD_KEY 正是"技能已不再声明却仍被注入"的形态，
+  与 R9 同型、经条目路径到达。工具策略中间件已有先例语言"Explicit slash
+  activation dominates for the rest of that run"，秘密绑定对同一技能未对齐。
+- **决策（对齐先例）：** `_in_context_secret_sources` 新增 `exclude_names`——
+  已由 slash 来源绑定（激活时代）的技能名不再贡献条目视图。slash 是显式仪式且
+  解析自更新的注册表，同名条目视图只能使其过期或加宽；不同技能的条目照常
+  叠加（秘密是加法语义，与工具策略的排他语义不同——该不对称是既有设计，不动）。
+- **证据：** `test_slash_era_dominates_entry_source_for_same_skill`（快照 v1 +
+  激活/新鲜 v2：仅注入 NEW_KEY）；突变 M6（移除排除）必红（并集
+  `{OLD_KEY, NEW_KEY}` 回归）。套件 56→57。
+- **兼容性：** 仅同名支配；异名 slash+条目叠加行为不变（既有双调用回归覆盖）。
+
+### 2026-09-27（双角色审查轮）— 同步链授权分支的覆盖缺口
+
+- **背景：** 双角色（找问题/解决问题）审查第 1 轮：异步快照路径有 8 个回归，但
+  **同步链 + 授权开启**（`wrap_model_call` + `skill_authorization` + 持久条目 +
+  secrets，走 `entry_registry=None` 新鲜回退分支）零覆盖——重构该分支的回归不会
+  红任何测试。行为先实证正确（规范名经同步 `authorize()`、绑定成功、恰一次
+  加载——同步 API 在同步链是正确契约）。
+- **决策：** 补 `test_sync_chain_secret_binding_uses_sync_api_and_canonical_names`
+  （`sync_calls == ["vercel-deploy"]`、`async_calls == []`、绑定生效、loads == 1）；
+  突变 M7（`entry_registry=None` 回退改空 dict）必红。
+- **第 2 轮（换角度重扫）**：声明↔代码对齐逐条核（slash 不查 map、条目 map miss
+  构造不可能、支配排除先于激活检查）；`tool_search` 确认在
+  `ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES` 中（skill 策略层不破坏 deferral，既有
+  设计已覆盖）；秘密日志仅记录名字。无新发现，枚举空间记为已穷尽。
+
+### 2026-09-27（第三轮自查，willem-bd 视角扫未审面）— user_id 接线回归缺口
+
+- **背景：** 换到他从未审查的面：`container_registry.py` 新模块本身、`user_id`
+  穿线的接线回归、Command 路径细节。代码接线正确（`_build_runtime_middlewares`
+  把 `user_id` 传给 `ToolErrorHandlingMiddleware`，L514），但唯一接线测试
+  （`test_lead_runtime_chain_forwards_skill_authorization_to_stamp_gate`）只断言
+  `_skill_authorization`——**删掉 user_id 传递不会红任何测试**：stamp 门会静默
+  解析进程全局注册表，per-user 自定义技能的读路径回退路径推导名 → 错误授权
+  目标。subagent builder 同型缺口。
+- **决策：** lead 接线测试补 `user_id="user-123"` 断言；新增
+  `test_subagent_runtime_chain_forwards_user_id_to_stamp_gate`。突变 M8（构造
+  调用去 user_id）双测试必红。
+- **其他面：** `container_registry.py` 全文精读（40 行）——键规范化双向、
+  thread 纪律入档、`enabled_only=False` 理由明确，无发现。Command 路径 N-scan
+  与 activation↔binding µs 窗口维持既有记录。
+- **证据：** 套件 58→59；ruff 干净。
+
+### 2026-09-27（第四轮自查，willem-bd 视角扫未审面）— 持久条目的模型可见渲染不复授权
+
+- **背景：** 未审面清单再推进：`DurableContextMiddleware` 渲染的 "Active skills"
+  提醒直接来自 `state["skill_context"]`，**无任何 `skill:activate` 复授权**（grep
+  实证）。provider 翻转为 deny 后：工具与秘密的消费点正确跳过（R6/R7 修复），
+  `describe_skill` 也过滤被拒技能（R5 修复）——但模型可见的持久提醒仍宣传该技能的
+  名字与路径，直到条目离开 `skill_context`。
+- **定性：** 执行面无洞（模型重读 → stamp 门拒 → 不建新条目；声明工具/秘密均被
+  policy/secret 门拦下）——这是**声明精度问题 + 表面不一致**：早期记录中"被拒的是
+  激活（策略/秘密/持久上下文）"的"持久上下文"一词过度声明，精确表述应为"被拒读取
+  不产生新持久条目；既有条目的**消费**（工具/秘密）复授权，但其**模型可见渲染**
+  不过滤"。`DurableContextMiddleware` 属上游模块，渲染过滤记为 follow-up，不在本
+  PR 扩面（对齐清单第 35 条）。
+- **证据：** grep 复授权关键词在该文件为空；渲染调用链
+  `render_skill_context(state.skill_context)` 无条件透传。
+- **同轮其他未审面：** `release_policy_parameters` 契约（assembly_descriptor 的
+  可选鸭子类型；激活中间件发布的 `available_skills` 已是授权过滤后集合）——无发现。
+
+### 2026-09-27（第五轮）— 渲染过滤落地：持久条目决策发布与 durable 消费
+
+- **背景：** 第四轮将渲染过滤记为 follow-up 后，用户指令授权扩面实现。
+- **决策（发布/消费分离）：** `SkillActivationMiddleware` 每步发布**路径键**的
+  ``skill:activate`` 决策到 run context（`__skill_entry_activation_decisions`，
+  复用 slash source 的 owner-token 认证契约；已加入 `REDACTED_CONTEXT_KEYS`）：
+  异步 hook 复用预扫描快照（零新增 I/O，失败/不可解析发布 False=隐藏）；同步
+  hook 仅在有条件目时一次扫描 + 同步 authorize（被动步零 I/O，对齐 P2-B 先例）。
+  `DurableContextMiddleware` 纯消费——按发布决策过滤**渲染副本**（state 不动），
+  自身不做任何 provider/storage 工作；未发布（授权禁用/无条目/非法载体）= 照旧
+  渲染（absent-is-permissive，与其他 run-context 载体一致）。lead 与 subagent
+  两链均接线 `skill_authorization` + 共享 token。
+- **证据：** 3 个新测试（异步组合断言过滤生效且 `load_calls == 1`（渲染复用发布、
+  不自扫）；同步组合同断言；授权禁用渲染不变）。突变 M9（消费端不过滤）、
+  M10（异步不发布）、M11（同步不发布）逐一必红。同步链既有测试的 sync_calls /
+  load 计数按新的合法双调用更新。
+- **兼容性：** 授权禁用路径零变化；`release_policy_parameters` 新增
+  `skill_entry_render_filter` 布尔；state 不被渲染过滤触碰。
+
+### 2026-09-27（第六轮自查）— 渲染过滤的链级接线回归
+
+- **背景：** 渲染过滤落地后的新面上再执行"他式"检查：链级 wiring（token 配对、
+  `skill_authorization` 传递、activation 先于 durable 的构造顺序——发布必须先于
+  消费）无任何测试；任一被静默删除，过滤失效且无测试变红（与 M8 同类）。
+- **决策：** 两个链级接线测试（lead `build_middlewares` / subagent
+  `build_subagent_runtime_middlewares`）：断言 durable 拿到同一 resolved 实例、
+  token 与链上 activation 中间件相等、`index(activation) < index(durable)`。
+  突变 M12（lead 去 token）/ M13（subagent 去 authz）各自必红。
+- **证据：** 套件 62→64；受影响面 302 passed；ruff 干净。
+
+### 2026-09-27（第二次 38 条全清单重跑）— 新面增验
+
+- **重跑范围：** 渲染过滤落地后的 7 文件改动面。新增取证：新符号出现点枚举
+  （`_publish_entry_decisions` 双调用点=同步/异步 hook；`_renderable_skills`
+  单消费；write/read 单写单读；key 三用途=写/读/redaction 清单）；上游漂移
+  **累计 21 个新提交**（`827acf51d..52a3e2564`）——提交前合并义务加重。
+- **发现并补齐 [第 5/24 条]：** 新载体 key 无 redaction 断言——补
+  `test_entry_decisions_carrier_is_redaction_listed`（断言剥离 + "redacted,
+  not suppressed"：源载体保持完整）。
+- **维持：** M9–M13 突变全红记录、发布/消费构造保证、接线/顺序双测试、
+  fail_closed=True（生产默认）方向覆盖。套件 64→65。
+
 ### 新记录模板
 
 ```markdown
