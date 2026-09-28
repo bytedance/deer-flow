@@ -141,6 +141,10 @@
 
 #### 模型与集成
 
+- **社区工具：** 新增 Unbrowse `web_fetch` provider——以 Markdown 形式返回页面
+  内容：普通 HTTP 足够时直接抓取，需要 JavaScript 的页面则在 Unbrowse 托管的
+  云端浏览器中渲染（`render: auto|never|always`）。每次抓取仅一次 JSON-RPC
+  POST，不引入新依赖。([#5981])
 - **模型：** 管理员现在可以从“设置 → 模型”管理共享模型，
   无需编辑服务器配置。新的仅管理员端点
   `GET/PUT /api/managed-models` 与
@@ -5264,3 +5268,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5928]: https://github.com/bytedance/deer-flow/pull/5928
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934
 [#5935]: https://github.com/bytedance/deer-flow/pull/5935
+[#5981]: https://github.com/bytedance/deer-flow/pull/5981

@@ -140,6 +140,10 @@ This release closes that milestone with **181 merged pull requests**.
 
 #### Models & integrations
 
+- **community:** New Unbrowse `web_fetch` provider - returns a page as
+  markdown over plain HTTP, or through Unbrowse's hosted cloud browser for
+  JavaScript-heavy pages (`render: auto|never|always`). One JSON-RPC POST per
+  fetch, no new dependencies. ([#5981])
 - **models:** Administrators can manage shared models from Settings → Models
   without editing server configuration. New administrator-only
   `GET/PUT /api/managed-models` and `POST /api/managed-models/test` endpoints
@@ -6207,4 +6211,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5928]: https://github.com/bytedance/deer-flow/pull/5928
 [#5934]: https://github.com/bytedance/deer-flow/pull/5934
 [#5935]: https://github.com/bytedance/deer-flow/pull/5935
+[#5981]: https://github.com/bytedance/deer-flow/pull/5981
 
