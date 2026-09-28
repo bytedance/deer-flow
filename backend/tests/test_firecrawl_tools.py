@@ -118,3 +118,79 @@ class TestFirecrawlBaseUrl:
         await web_search_tool.ainvoke({"query": "test query"})
 
         mock_firecrawl_cls.assert_called_once_with(api_key="firecrawl-key", api_url="http://192.168.0.47:3002")
+
+
+class TestPerCallClientTeardown:
+    """Every tool call builds a fresh client; its pooled async HTTP client must be closed."""
+
+    @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
+    @patch("deerflow.community.firecrawl.tools.get_app_config")
+    @pytest.mark.anyio
+    async def test_search_closes_the_per_call_client(self, mock_get_app_config, mock_firecrawl_cls):
+        search_config = MagicMock()
+        search_config.model_extra = {"api_key": "firecrawl-search-key"}
+        mock_get_app_config.return_value.get_tool_config.return_value = search_config
+
+        mock_result = MagicMock()
+        mock_result.web = []
+        mock_firecrawl_cls.return_value.search = AsyncMock(return_value=mock_result)
+        mock_firecrawl_cls.return_value._v2_client.async_http_client.close = AsyncMock()
+
+        from deerflow.community.firecrawl.tools import web_search_tool
+
+        await web_search_tool.ainvoke({"query": "test query"})
+
+        mock_firecrawl_cls.return_value._v2_client.async_http_client.close.assert_awaited_once()
+
+    @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
+    @patch("deerflow.community.firecrawl.tools.get_app_config")
+    @pytest.mark.anyio
+    async def test_fetch_closes_the_per_call_client(self, mock_get_app_config, mock_firecrawl_cls):
+        fetch_config = MagicMock()
+        fetch_config.model_extra = {"api_key": "firecrawl-fetch-key"}
+        mock_get_app_config.return_value.get_tool_config.return_value = fetch_config
+
+        mock_scrape_result = MagicMock()
+        mock_scrape_result.markdown = "Fetched markdown"
+        mock_scrape_result.metadata = MagicMock(title="Fetched Page")
+        mock_firecrawl_cls.return_value.scrape = AsyncMock(return_value=mock_scrape_result)
+        mock_firecrawl_cls.return_value._v2_client.async_http_client.close = AsyncMock()
+
+        from deerflow.community.firecrawl.tools import web_fetch_tool
+
+        await web_fetch_tool.ainvoke({"url": "https://example.com"})
+
+        mock_firecrawl_cls.return_value._v2_client.async_http_client.close.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_teardown_closes_the_real_sdk_pool(self):
+        from firecrawl import AsyncFirecrawlApp as RealApp
+
+        from deerflow.community.firecrawl.tools import _aclose_firecrawl_client
+
+        client = RealApp(api_key="test-key")
+        assert client._v2_client.async_http_client._client.is_closed is False
+
+        await _aclose_firecrawl_client(client)
+
+        assert client._v2_client.async_http_client._client.is_closed is True
+
+    @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
+    @patch("deerflow.community.firecrawl.tools.get_app_config")
+    @pytest.mark.anyio
+    async def test_teardown_survives_a_client_without_v2_attributes(self, mock_get_app_config, mock_firecrawl_cls):
+        """Older SDKs in the declared range have no _v2_client; teardown must be a no-op."""
+        search_config = MagicMock()
+        search_config.model_extra = {"api_key": "firecrawl-search-key"}
+        mock_get_app_config.return_value.get_tool_config.return_value = search_config
+
+        mock_result = MagicMock()
+        mock_result.web = []
+        mock_firecrawl_cls.return_value.search = AsyncMock(return_value=mock_result)
+        del mock_firecrawl_cls.return_value._v2_client
+
+        from deerflow.community.firecrawl.tools import web_search_tool
+
+        result = await web_search_tool.ainvoke({"query": "test query"})
+
+        assert result == "[]"
