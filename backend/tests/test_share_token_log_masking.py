@@ -568,3 +568,70 @@ def test_nginx_login_location_is_non_retaining(config_path: Path) -> None:
     directives = re.findall(r"error_log\s+([^;]+);", block)
     assert directives == ["/dev/null crit"], f"{config_path.name} /login: expected exactly one error_log to /dev/null crit, got {directives}"
     assert "proxy_pass" in block
+
+
+def _emit_header_parse_warning_with_share_token(*, json_format: bool) -> str:
+    """Drive urllib3's own header-parse warning through the deployed config.
+
+    ``configure_logging`` is the entry point a Gateway process calls, so the
+    filter order under test is the one a deployment installs (share-token filter
+    first, URL redaction second). The malformed block carries a share URL in
+    ``Referer`` — a field the URL redactor's credential list does not name — so
+    the token reaches the record through the formatted message *and* through the
+    ``exc_text`` copy that a formatter appends to every record carrying
+    ``exc_info``.
+    """
+    import http.client
+
+    from urllib3.exceptions import HeaderParsingError
+    from urllib3.util.response import assert_header_parsing
+
+    raw = b"bad line\r\nReferer: /share/" + _TOKEN.encode() + b"\r\nSet-Cookie: session=HeaderSecret\r\n\r\n"
+    headers = http.client.parse_headers(io.BytesIO(raw))
+
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    stream = io.StringIO()
+    root.handlers = [logging.StreamHandler(stream)]
+    root.setLevel(logging.WARNING)
+    try:
+        configure_logging(
+            SimpleNamespace(
+                log_level="warning",
+                logging=SimpleNamespace(enhance=SimpleNamespace(enabled=True, format="json" if json_format else "text")),
+            )
+        )
+        try:
+            assert_header_parsing(headers)
+            raise AssertionError("expected HeaderParsingError")
+        except (HeaderParsingError, TypeError) as hpe:
+            logging.getLogger("urllib3.connection").warning(
+                "Failed to parse headers (url=%s): %s",
+                "https://cdn.example/tenant/report?sig=SignedUrlSecret",
+                hpe,
+                exc_info=True,
+            )
+        return stream.getvalue()
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+
+
+@pytest.mark.parametrize("json_format", [False, True], ids=["text", "json"])
+def test_header_parse_warning_never_renders_a_share_token(_restore_filters, json_format):
+    """A traceback that repeats the dump must not re-open the token leak.
+
+    ``UrlRedactionFilter`` pre-populates ``exc_text`` for this warning so the
+    traceback's second copy of the block collapses with the message pass. It
+    must build on the text an earlier filter already masked instead of
+    reformatting the exception from scratch: recomputing discards the share mask
+    and the text formatter then appends the raw bearer to the line.
+    """
+    output = _emit_header_parse_warning_with_share_token(json_format=json_format)
+
+    assert _TOKEN not in output
+    assert _TOKEN[4:] not in output  # the body never rides without its prefix
+    assert "dfs_***" in output  # masked, not silently dropped
+    assert "unparsed data: " in output  # the defect stays diagnosable
+    assert "HeaderSecret" not in output  # the URL/header redaction still applies
+    assert "SignedUrlSecret" not in output

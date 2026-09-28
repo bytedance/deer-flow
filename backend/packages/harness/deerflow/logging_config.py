@@ -376,7 +376,18 @@ class UrlRedactionFilter(logging.Filter):
             # interpolates the exception into it, so the marker is the same
             # signal, and no other error record pays for formatting a traceback
             # this filter would leave untouched anyway.
-            record.exc_text = self._redact_message(logging.Formatter().formatException(record.exc_info))
+            #
+            # Build on whatever `exc_text` already holds instead of
+            # reformatting the exception: an earlier filter may have masked the
+            # same warning (``ShareTokenRedactionFilter`` collapses bearer URLs
+            # in both the message and this traceback copy), and recomputing from
+            # ``formatException`` would discard that mask and re-emit the
+            # credential — ``Formatter.format`` appends ``exc_text`` to every
+            # record carrying ``exc_info``, whatever the format string says. The
+            # URL passes below run over the reused text, so both masks survive
+            # whichever filter runs first.
+            exception_text = record.exc_text or logging.Formatter().formatException(record.exc_info)
+            record.exc_text = self._redact_message(exception_text)
         return True
 
 

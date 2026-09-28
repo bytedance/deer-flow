@@ -475,18 +475,22 @@ def _merge_missing(target: dict, source: dict) -> None:
 
 
 def test_conversation_sharing_bumped_config_version():
-    """Sharing must advance past the merge parent's released v46 schema —
-    a stale `>` bound passed vacuously once main moved past it, leaving
-    v46 installs un-warned and `make config-upgrade` a no-op before the
-    sharing defaults merged (bot round, 09-14 05:00)."""
+    """Sharing must advance past the merge parent's released v50 schema.
+
+    The bound had been left at v47 while main released v50, so it passed
+    vacuously a second time: a v50 install that predates the sharing keys is
+    told it is current, and ``make config-upgrade`` has nothing to merge them
+    from. The bound tracks the schema the branch has to advance past, not the
+    one it was written against."""
     example = _load_repo_example()
-    assert example.get("config_version", 0) >= 47
+    assert example.get("config_version", 0) > 50
     assert example["conversation_sharing"]["enabled"] is False
 
 
-@pytest.mark.parametrize("previous_version", [37, 46])
+@pytest.mark.parametrize("previous_version", [37, 46, 50])
 def test_config_upgrade_adds_conversation_sharing_preserving_user_values(tmp_path, caplog, previous_version):
-    """Both the original baseline and current main acquire sharing defaults."""
+    """The original baseline, main's v46 and main's current v50 all acquire
+    sharing defaults, and every one of them is actually advanced."""
     import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -521,7 +525,9 @@ def test_config_upgrade_adds_conversation_sharing_preserving_user_values(tmp_pat
     # Existing user keys untouched.
     assert upgraded["models"]["fake"] is True
     assert upgraded["config_version"] == example["config_version"]
-    assert upgraded["config_version"] > 37
+    # Advanced past the version the user arrived with, not merely the oldest
+    # baseline: a vacuous lower bound is how the v47→v50 drift went unnoticed.
+    assert upgraded["config_version"] > previous_version
 
 
 def test_security_fail_closed_bumped_config_version():
