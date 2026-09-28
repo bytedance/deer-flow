@@ -9,3 +9,13 @@ When `database.postgres_schema` is configured, both async ORM connections and th
 Alembic stamp/upgrade workers started inside `bootstrap_schema()` remain owned by the bootstrap critical section until the worker finishes. Drain those `asyncio.to_thread()` calls across host cancellation before releasing the in-process SQLite bootstrap lock or PostgreSQL advisory lock; otherwise another bootstrap can overlap a still-running migration worker.
 
 On SQLite, `BEGIN IMMEDIATE` takes the database-wide write lock, so every unrelated writer (run status, thread metadata, the scheduler) waits for the transaction and fails with `database is locked` after `busy_timeout` (30s). Do slow work such as document conversion before opening a locked transaction; lock only to revalidate and publish, as `ProjectDocumentRepository.publish_under_live_lock` does. `tests/test_project_document_tools.py::TestConversionSerialization` pins this.
+
+## JSON integer filters
+
+Stored JSON integers are not bounded by the signed-64-bit filter input contract.
+SQLite predicates must check the extracted SQL value's `typeof`, not only JSON
+`json_type`, to exclude oversized integers decoded as REAL. PostgreSQL predicates
+compare integer text (including `-0` for zero) without casting arbitrary stored
+numbers to BIGINT or NUMERIC. Preserve integer/float/boolean/string distinctions.
+`tests/test_json_integer_matching.py` exercises both dialects; PostgreSQL opts in
+with `DEERFLOW_TEST_POSTGRES_URL` and uses connection-local temporary tables.
