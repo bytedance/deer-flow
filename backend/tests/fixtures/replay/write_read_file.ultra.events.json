@@ -17,6 +17,8 @@
         "delegations",
         "messages",
         "skill_context",
+        "tool_artifact_processed",
+        "tool_artifacts",
         "viewed_images"
       ]
     },
@@ -29,6 +31,8 @@
         "messages",
         "skill_context",
         "thread_data",
+        "tool_artifact_processed",
+        "tool_artifacts",
         "viewed_images"
       ]
     },
@@ -41,6 +45,8 @@
         "messages",
         "skill_context",
         "thread_data",
+        "tool_artifact_processed",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -54,6 +60,8 @@
         "messages",
         "skill_context",
         "thread_data",
+        "tool_artifact_processed",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -67,6 +75,8 @@
         "messages",
         "skill_context",
         "thread_data",
+        "tool_artifact_processed",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -81,6 +91,8 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifact_processed",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -95,6 +107,8 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifact_processed",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -110,6 +124,8 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifact_processed",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -125,6 +141,8 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifact_processed",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -140,6 +158,8 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifact_processed",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -155,6 +175,8 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifact_processed",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -170,6 +192,8 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifact_processed",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -185,6 +209,42 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifact_processed",
+        "tool_artifacts",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "background_tasks",
+        "delegations",
+        "messages",
+        "sandbox",
+        "skill_context",
+        "thread_data",
+        "title",
+        "tool_artifact_processed",
+        "tool_artifacts",
+        "uploaded_files",
+        "viewed_images"
+      ]
+    },
+    {
+      "event": "values",
+      "keys": [
+        "artifacts",
+        "background_tasks",
+        "delegations",
+        "messages",
+        "sandbox",
+        "skill_context",
+        "thread_data",
+        "title",
+        "tool_artifact_processed",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]

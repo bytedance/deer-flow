@@ -275,9 +275,9 @@ def _rewrite_unique_bare_filenames(
 
     rewritten = text
     for name in sorted(unique, key=len, reverse=True):
-        # Do not rewrite inside longer paths/words. A final sentence period is
-        # allowed, but ".bak" or another path segment is not.
-        pattern = re.compile(rf"(?<![\w./-]){re.escape(name)}(?!(?:[\w/-]|\.[\w]))")
+        # Do not rewrite inside longer paths/words, with either path separator.
+        # A final sentence period is allowed, but ".bak" or another segment is not.
+        pattern = re.compile(rf"(?<![\w./\\-]){re.escape(name)}(?!(?:[\w/\\-]|\.[\w]))")
         # A callable replacement, not a template: the virtual path is built from
         # the real file's relative path, where a backslash is an ordinary
         # character, so it must never be read as a regex escape.
@@ -726,6 +726,7 @@ def _make_background_submit_tool(
     submit_tool: str,
     status_tool: str,
     cancel_tool: str,
+    connection_scope: str,
 ) -> BaseTool:
     background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
 
@@ -755,6 +756,7 @@ def _make_background_submit_tool(
                     "submit_tool": submit_tool,
                     "status_tool": status_tool,
                     "cancel_tool": cancel_tool,
+                    "connection_scope": connection_scope,
                 },
             ),
         )
@@ -780,6 +782,7 @@ def _configure_task_tools_for_server(
     server_name: str,
     server_config: McpServerConfig,
     tool_name_prefix: bool,
+    connection_scope: str = "deployment",
 ) -> list[BaseTool]:
     """Hide driver-only tools and replace submit with a durable wrapper."""
     if not server_config.task_toolsets:
@@ -829,12 +832,13 @@ def _configure_task_tools_for_server(
                 submit_tool=toolset.submit_tool,
                 status_tool=toolset.status_tool,
                 cancel_tool=toolset.cancel_tool,
+                connection_scope=connection_scope,
             )
         )
     return configured
 
 
-async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> list[BaseTool]:
+async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, personal_user_id: str | None = None) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
@@ -864,7 +868,19 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> li
         # reflected when initializing MCP tools. Callers that need to prove which
         # revision produced these tools pass the instance they snapshotted instead.
         extensions_config = ExtensionsConfig.from_file()
-    validate_mcp_task_config_snapshot(extensions_config)
+    if personal_user_id is None:
+        validate_mcp_task_config_snapshot(extensions_config)
+    else:
+        from deerflow.mcp.personal_access import authorized_personal_config
+        from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
+        from deerflow.mcp.user_config import load_user_mcp_config
+
+        current = await asyncio.to_thread(load_user_mcp_config, personal_user_id)
+        if current != extensions_config:
+            raise McpTaskConfigurationError("Personal MCP configuration changed during discovery; retry the run")
+        extensions_config = current = await authorized_personal_config(personal_user_id, current)
+        if any(server.task_toolsets for server in current.mcp_servers.values()) and not is_mcp_task_runtime_available():
+            raise McpTaskConfigurationError("Personal MCP task toolsets require the platform's durable task runtime")
     servers_config = build_servers_config(extensions_config)
 
     if not servers_config:
@@ -1022,6 +1038,7 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None) -> li
                     server_name=source_name,
                     server_config=server_cfg,
                     tool_name_prefix=tool_name_prefix,
+                    connection_scope="personal" if personal_user_id is not None else "deployment",
                 )
             wrapped_tools.extend(current_server_tools)
 

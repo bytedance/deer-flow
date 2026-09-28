@@ -15,7 +15,7 @@ for (const { viewport, name } of [
     await page.setViewportSize(viewport);
     mockLangGraphAPI(page);
     const server = { enabled: false, command: "npx", args: ["example"] };
-    await page.route("**/api/mcp/config", (route) =>
+    await page.route("**/api/mcp/personal/config", (route) =>
       route.fulfill({ json: { mcp_servers: { [name]: server } } }),
     );
     await page.goto("/workspace/capabilities");
@@ -109,7 +109,7 @@ for (const viewport of [
         Array.from({ length: 60 }, (_, index) => [`TEST_${index}`, "example"]),
       ),
     };
-    await page.route("**/api/mcp/config", (route) =>
+    await page.route("**/api/mcp/personal/config", (route) =>
       route.fulfill({ json: { mcp_servers: { github: server } } }),
     );
     await page.goto("/workspace/capabilities");
@@ -196,14 +196,14 @@ test.describe("MCP server settings", () => {
       | { server_name: string; server: (typeof servers)["remote"] }
       | undefined;
 
-    await page.route("**/api/mcp/config", async (route) => {
+    await page.route("**/api/mcp/personal/config", async (route) => {
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({ mcp_servers: servers }),
       });
     });
-    await page.route("**/api/mcp/config/server", async (route) => {
+    await page.route("**/api/mcp/personal/config/server", async (route) => {
       if (route.request().method() !== "PUT") {
         await route.fallback();
         return;

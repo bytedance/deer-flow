@@ -104,7 +104,7 @@ class CandidateScanner:
                     if scanned.decision == "block" or (executable and scanned.decision != "allow"):
                         return ScanVerdict("reject", "MODEL_SCAN_REJECTED", policy)
             return ScanVerdict("allow", "CHECK_PASSED", policy)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, TimeoutError):
             raise
         except Exception:
             # Error details can include model/provider content. Return codes only.

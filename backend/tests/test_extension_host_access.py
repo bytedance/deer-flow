@@ -131,3 +131,36 @@ def test_mutation_bundles_and_capabilities_detach_mutable_constructor_values():
     assert bundle.baseline[0].content == b"original"
     assert caps.operations == ("stage",)
     assert proposal.source_refs == ("s",)
+
+
+@pytest.mark.asyncio
+async def test_model_and_evolution_grants_compose_in_same_service(monkeypatch):
+    from deerflow.extensions.gateway import start_services, stop_services
+
+    received = []
+
+    class Service:
+        async def start(self, deps):
+            received.append(deps)
+
+        async def stop(self):
+            pass
+
+    def install(registry, config):
+        registry.service(Service())
+
+    monkeypatch.setattr("deerflow.extensions.loader.resolve_variable", lambda _: install)
+    access = granted().host_access.model_dump()
+    access["model_invocation"] = {"roles": {"default": "host-model"}}
+    spec = ExtensionSpec(use="example:install", name="evolution", host_access=access)
+    loaded, diagnostics = load_extensions([spec])
+    assert not diagnostics
+    evidence, mutations = object(), object()
+    try:
+        diagnostics = await start_services(loaded, SimpleNamespace(), None, host_capabilities={spec.use: (evidence, mutations)})
+        assert not diagnostics
+        assert received[0].model_invoker is not None
+        assert received[0].completed_run_evidence is evidence
+        assert received[0].skill_mutations is mutations
+    finally:
+        await stop_services(loaded)

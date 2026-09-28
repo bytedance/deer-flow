@@ -224,6 +224,8 @@ async def _skill_manage_impl(
             if path is None or content is None:
                 raise ValueError("path and content are required for write_file.")
             target = await _to_thread(skill_storage.ensure_safe_support_path, name, path)
+            if await _to_thread(target.is_dir):
+                raise ValueError(f"Supporting file path '{path}' is a directory, not a file.")
             from deerflow.skills.mutations.guard import read_optional_text
 
             prev_content = await _to_thread(read_optional_text, skill_storage, target)

@@ -110,11 +110,7 @@ class SkillMutationRecovery:
 
     def recover_operation(self, operation_id):
         operation = self.get_operation(operation_id)
-        try:
-            self.recover_owner(operation.owner_id)
-        except HostCapabilityError as exc:
-            if exc.code != "NEEDS_REPAIR":
-                raise
+        self.recover_owner(operation.owner_id)
         return self.get_operation(operation_id)
 
     def recover_all(self):

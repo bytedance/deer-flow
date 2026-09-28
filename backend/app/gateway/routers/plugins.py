@@ -116,6 +116,13 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
         raise HTTPException(503, "Plugin settings unavailable.") from exc
     if settings["enabled"] is not True:
         raise HTTPException(403, "Plugin disabled by administrator.")
+    # Authorize after the action is resolved (so the target is a host-validated
+    # declared name and an unknown action stays a 404) and before the body is
+    # streamed (so a denied caller cannot consume the input budget or reach the
+    # handler). No provider decision happens when authorization is disabled.
+    from app.gateway.authz import authorize_plugin_action_for_request
+
+    await authorize_plugin_action_for_request(request, namespace=namespace, action_name=action_name)
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)

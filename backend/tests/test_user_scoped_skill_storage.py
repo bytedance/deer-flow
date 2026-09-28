@@ -165,6 +165,32 @@ class TestSkillLoading:
         assert alice_skill.enabled is False
         assert bob_skill.enabled is True
 
+    @pytest.mark.parametrize("nested_name", ["fixture-example", "public-skill"])
+    def test_integration_skill_package_children_are_not_registered(self, user_storage: UserScopedSkillStorage, skills_root: Path, nested_name: str):
+        public_dir = skills_root / "public" / "public-skill"
+        public_dir.mkdir(parents=True)
+        (public_dir / "SKILL.md").write_text(_skill_content("public-skill", "Public version"), encoding="utf-8")
+
+        provider_dir = user_storage.get_integrations_root() / "lark-cli"
+        package_dir = provider_dir / "lark-doc"
+        fixture_dir = package_dir / "evals" / "fixtures" / "example"
+        fixture_dir.mkdir(parents=True)
+        (package_dir / "SKILL.md").write_text(_skill_content("lark-doc"), encoding="utf-8")
+        (fixture_dir / "SKILL.md").write_text(_skill_content(nested_name, "Support data"), encoding="utf-8")
+
+        sibling_dir = provider_dir / "tools" / "lark-sheet"
+        sibling_dir.mkdir(parents=True)
+        (sibling_dir / "SKILL.md").write_text(_skill_content("lark-sheet"), encoding="utf-8")
+
+        by_name = {skill.name: skill for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert set(by_name) == {"public-skill", "lark-doc", "lark-sheet"}
+        assert by_name["public-skill"].category == SkillCategory.PUBLIC
+        assert by_name["public-skill"].description == "Public version"
+        assert by_name["lark-doc"].category == SkillCategory.INTEGRATION
+        assert by_name["lark-doc"].get_container_file_path() == "/mnt/skills/integrations/lark-cli/lark-doc/SKILL.md"
+        assert by_name["lark-sheet"].get_container_file_path() == "/mnt/skills/integrations/lark-cli/tools/lark-sheet/SKILL.md"
+
     def test_public_skill_package_children_are_not_registered(self, user_storage: UserScopedSkillStorage, skills_root: Path):
         public_dir = skills_root / "public" / "reviewer"
         fixture_dir = public_dir / "evals" / "fixtures" / "injection"

@@ -200,6 +200,7 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     assert upgraded["verification"]["judge_model_name"] is None
 
 
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
     """The v46 migration keeps provider settings on the RAGFlow tool entry."""
     import subprocess
@@ -234,7 +235,7 @@ def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
 
     env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
     result = subprocess.run(
-        ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        [SCRIPT_BASH, str(repo_root / "scripts" / "config-upgrade.sh")],
         env=env,
         capture_output=True,
         text=True,
@@ -254,6 +255,7 @@ def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
     assert tool["api_key"] == "$CURRENT_RAGFLOW_API_KEY"
 
 
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_path):
     """Tools-only legacy configs must not be disabled by the new capability gate."""
     import subprocess
@@ -282,7 +284,7 @@ def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_p
 
     env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
     result = subprocess.run(
-        ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        [SCRIPT_BASH, str(repo_root / "scripts" / "config-upgrade.sh")],
         env=env,
         capture_output=True,
         text=True,
@@ -517,3 +519,109 @@ def test_config_upgrade_adds_security_fail_closed_preserving_user_values():
     assert user["skill_evolution"]["enabled"] is True
     assert user["skill_evolution"]["moderation_model_name"] == "custom-moderation-model"
     assert user["config_version"] == example["config_version"]
+
+
+def test_version_46_pii_enabled_config_reported_outdated_against_example(caplog):
+    """token_secret became mandatory for enabled redaction in v47; a v46
+    deployment with redaction on must be flagged outdated so the upgrade
+    warning fires instead of a raw startup validation error with no guidance."""
+    example = _load_repo_example()
+    example_version = example["config_version"]
+    assert example_version >= 47, "config.example.yaml must be bumped past 46 for the mandatory token_secret"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = _make_config_files(
+            Path(tmpdir),
+            user_config={"config_version": 46, "pii_redaction": {"enabled": True}},
+            example_config=example,
+        )
+        with caplog.at_level(logging.WARNING, logger="deerflow.config.app_config"):
+            AppConfig._check_config_version({"config_version": 46}, config_path)
+        assert "outdated" in caplog.text
+        assert "(version 46)" in caplog.text
+        assert f"version is {example_version}" in caplog.text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_version_46_pii_enabled_config_upgrade_generates_token_secret(tmp_path):
+    """Upgrading a v46 config with redaction enabled persists a generated
+    token_secret, leaving the deployment startable under the v47 mandatory
+    validation instead of failing startup after the version bump."""
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example_src = repo_root / "config.example.yaml"
+    expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
+    assert expected_version >= 47
+
+    config_path = tmp_path / "config.yaml"
+    (tmp_path / "config.example.yaml").write_text(example_src.read_text(encoding="utf-8"), encoding="utf-8")
+    config_path.write_text(
+        yaml.dump(
+            {
+                "config_version": 46,
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "pii_redaction": {"enabled": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
+    result = subprocess.run(
+        [SCRIPT_BASH, str(repo_root / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "token_secret generated" in result.stdout
+
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version
+    assert upgraded["pii_redaction"]["enabled"] is True
+    secret = upgraded["pii_redaction"]["token_secret"]
+    assert isinstance(secret, str) and len(secret) >= 16
+
+    # The upgraded deployment passes the now-mandatory validation.
+    app_config = AppConfig.model_validate(upgraded)
+    assert app_config.pii_redaction.token_secret == secret
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_version_46_pii_disabled_config_upgrade_skips_token_secret(tmp_path):
+    """The migration must not invent a secret when redaction is off."""
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example_src = repo_root / "config.example.yaml"
+    expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
+    assert expected_version >= 47
+
+    config_path = tmp_path / "config.yaml"
+    (tmp_path / "config.example.yaml").write_text(example_src.read_text(encoding="utf-8"), encoding="utf-8")
+    config_path.write_text(
+        yaml.dump(
+            {
+                "config_version": 46,
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "pii_redaction": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
+    result = subprocess.run(
+        [SCRIPT_BASH, str(repo_root / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version
+    assert "token_secret" not in upgraded["pii_redaction"]
+    AppConfig.model_validate(upgraded)

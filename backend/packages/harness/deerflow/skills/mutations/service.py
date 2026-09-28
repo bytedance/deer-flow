@@ -338,13 +338,6 @@ class HostSkillMutationService:
         cached, package = await self._work(reserve)
         if cached:
             return cached
-        try:
-            async with asyncio.timeout(120):
-                verdict = await self.scanner.scan(package, proposal.name)
-        except (Exception, asyncio.CancelledError):
-            from deerflow.skills.mutations.scanner import ScanVerdict
-
-            verdict = ScanVerdict("unavailable", "SCANNER_UNAVAILABLE", policy)
 
         def finish(check):
             with skill_projection_read_lock(self.storage_factory(proposal.owner_id), check=check), self.repository.sessions.begin() as session:
@@ -355,10 +348,32 @@ class HostSkillMutationService:
                 row.check_result = {"decision": verdict.decision, "reason_code": verdict.reason_code, "policy_version": verdict.policy_version, "expires_at": time.time() + 900}
                 return check_view(row)
 
+        def cleanup(_check):
+            try:
+                with skill_projection_read_lock(self.storage_factory(proposal.owner_id)), self.repository.sessions.begin() as session:
+                    row = session.get(SkillProposalRow, proposal_id)
+                    if row is not None and (row.check_result or {}).get("token") == token:
+                        # An interrupted attempt is not an authoritative verdict.
+                        # Never clear a newer worker's lease or completed result.
+                        row.check_result = None
+            finally:
+                release_scan(self.repository, token)
+
         try:
+            try:
+                async with asyncio.timeout(120):
+                    verdict = await self.scanner.scan(package, proposal.name)
+            except TimeoutError:
+                raise
+            except Exception:
+                from deerflow.skills.mutations.scanner import ScanVerdict
+
+                verdict = ScanVerdict("unavailable", "SCANNER_UNAVAILABLE", policy)
             return await self._work(finish)
         finally:
-            await self.workers.run(lambda _: release_scan(self.repository, token))
+            from deerflow.utils.file_io import await_drained
+
+            await await_drained(self.workers.run(cleanup))
 
     def _existing_operation(self, session, method, key, request):
         row = session.scalar(select(SkillOperationRow).where(SkillOperationRow.plugin_id == self.binding.plugin_id, SkillOperationRow.method == method, SkillOperationRow.idempotency_key == key))

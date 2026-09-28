@@ -287,10 +287,15 @@ async def test_recovery_classifies_disk_without_replaying(host, monkeypatch, dis
     operation = await host.service.find_operation(idempotency_key="crash")
     assert operation.publication == "PREPARED"
     host.storage.get_custom_skill_file("example").write_text(disk, encoding="utf-8")
-    recovered = host.recovery.recover_operation(operation.operation_id)
+    if expected == "NEEDS_REPAIR":
+        with pytest.raises(HostCapabilityError, match="NEEDS_REPAIR"):
+            host.recovery.recover_operation(operation.operation_id)
+        recovered = host.recovery.get_operation(operation.operation_id)
+    else:
+        recovered = host.recovery.recover_operation(operation.operation_id)
+        assert host.recovery.recover_operation(operation.operation_id) == recovered
     assert recovered.publication == expected
     assert host.storage.get_custom_skill_file("example").read_text() == disk
-    assert host.recovery.recover_operation(operation.operation_id) == recovered
     if expected == "NEEDS_REPAIR":
         with pytest.raises(HostCapabilityError, match="NEEDS_REPAIR"):
             host.recovery.recover_owner("owner")
@@ -379,7 +384,9 @@ async def test_recovery_does_not_claim_applied_when_durability_barrier_fails(hos
         raise OSError("disk error")
 
     monkeypatch.setattr("deerflow.skills.mutations.publication.os.fsync", failed_fsync)
-    assert host.recovery.recover_operation(operation.operation_id).publication == "PREPARED"
+    with pytest.raises(HostCapabilityError, match="NEEDS_REPAIR"):
+        host.recovery.recover_operation(operation.operation_id)
+    assert host.recovery.get_operation(operation.operation_id).publication == "PREPARED"
 
 
 def test_replace_collision_does_not_remove_existing_file(host):
@@ -573,7 +580,9 @@ async def test_recovery_quarantines_missing_or_corrupt_blobs(host, monkeypatch, 
     with host.sessions.begin() as session:
         setattr(session.get(SkillOperationRow, operation.operation_id), field, blob)
     host.storage.get_custom_skill_file("example").write_text(NEW, encoding="utf-8")
-    recovered = host.recovery.recover_operation(operation.operation_id)
+    with pytest.raises(HostCapabilityError, match="NEEDS_REPAIR"):
+        host.recovery.recover_operation(operation.operation_id)
+    recovered = host.recovery.get_operation(operation.operation_id)
     assert recovered.publication == "NEEDS_REPAIR"
     assert recovered.error_code == "BLOB_INTEGRITY_ERROR"
     assert host.storage.get_custom_skill_file("example").read_text() == NEW
@@ -628,3 +637,93 @@ async def test_legacy_writer_immediately_supersedes_old_operation_view(host):
     old = await host.service.get_operation(operation_id=operation.operation_id)
     assert old.views == "SUPERSEDED"
     assert old.superseded_by_generation == host.runtime.repository.generation("owner")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [asyncio.CancelledError, TimeoutError])
+async def test_interrupted_check_clears_lease_without_caching_unavailable(host, failure):
+    from deerflow.persistence.skill_mutations.model import SkillScanAttemptRow
+
+    proposal = await stage(host)
+    scan = host.scanner.scan
+
+    async def interrupted(*args):
+        raise failure()
+
+    host.scanner.scan = interrupted
+    with pytest.raises(failure):
+        await host.service.check(proposal_id=proposal.proposal_id)
+    with host.sessions() as session:
+        assert session.get(SkillProposalRow, proposal.proposal_id).check_result is None
+        attempts = session.scalars(select(SkillScanAttemptRow)).all()
+        assert len(attempts) == 1  # Interrupted scans still consume cost quota.
+        assert attempts[0].lease_until == 0
+    host.scanner.scan = scan
+    assert (await host.service.check(proposal_id=proposal.proposal_id)).decision == "allow"
+    assert (await host.service.commit(proposal_id=proposal.proposal_id, idempotency_key="after-interruption")).publication == "APPLIED"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_check_waiter_preserves_shared_scan(host):
+    proposal = await stage(host)
+    entered, release = asyncio.Event(), asyncio.Event()
+    scan = host.scanner.scan
+
+    async def blocked(*args):
+        entered.set()
+        await release.wait()
+        return await scan(*args)
+
+    host.scanner.scan = blocked
+    first = asyncio.create_task(host.service.check(proposal_id=proposal.proposal_id))
+    second = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        second = asyncio.create_task(host.service.check(proposal_id=proposal.proposal_id))
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        release.set()
+        assert (await second).decision == "allow"
+        assert host.scanner.calls == 1
+    finally:
+        release.set()
+        await asyncio.gather(first, *([second] if second else []), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_admin_recovery_reports_unresolved_barrier_and_allows_retry(host, monkeypatch):
+    import httpx
+    from fastapi import FastAPI, Request
+
+    from app.gateway.routers.skill_mutations import router
+
+    def interrupted(*_):
+        raise RuntimeError("simulated process exit after PREPARED")
+
+    monkeypatch.setattr("deerflow.skills.mutations.service.publish_prepared", interrupted)
+    proposal = await stage(host)
+    await host.service.check(proposal_id=proposal.proposal_id)
+    operation = await host.service.commit(proposal_id=proposal.proposal_id, idempotency_key="recover-retry")
+    path = host.storage.get_custom_skill_file("example")
+    path.write_text(NEW + "external", encoding="utf-8")
+    app = FastAPI()
+    app.state.skill_mutation_host = SimpleNamespace(workers=host.service.workers, recovery=host.recovery)
+
+    @app.middleware("http")
+    async def identity(request: Request, call_next):
+        request.state.user = SimpleNamespace(id="admin", system_role="admin")
+        return await call_next(request)
+
+    app.include_router(router)
+    url = f"/api/skill-mutations/operations/{operation.operation_id}"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(url + "/recover")
+        assert response.status_code == 409
+        assert response.json()["detail"] == "NEEDS_REPAIR"
+        assert (await client.get(url)).json()["publication"] == "NEEDS_REPAIR"
+        path.write_text(NEW, encoding="utf-8")
+        response = await client.post(url + "/recover")
+        assert response.status_code == 200
+        assert response.json()["publication"] == "APPLIED"
+        assert response.json()["views"] == "READY"

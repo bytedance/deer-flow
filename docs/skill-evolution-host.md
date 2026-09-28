@@ -6,7 +6,7 @@ and product UI belong to the extension and are not included in this feature.
 
 ## Enable deliberately
 
-Use `deerflow-extension-api==0.2.2`. Existing extensions need no changes: both
+Use `deerflow-extension-api==0.2.5`. Existing extensions need no changes: both
 `ExtensionRuntimeDeps.completed_run_evidence` and `.skill_mutations` default to
 `None`. The older cross-user `run_evidence_reader` is unchanged.
 
@@ -111,6 +111,13 @@ operations per owner; files above 8 MiB, lines above 64 KiB, or malformed histor
 are left untouched. The operation database remains authoritative even if the
 display mirror is unavailable.
 
+A cancelled scan or expired scan deadline propagates to the caller and releases
+its proposal/scan leases without caching an `unavailable` verdict for 15 minutes.
+The attempt still counts against scan-cost quotas. Retrying `check()` starts a
+fresh scan; cancelling one waiter alone leaves a shared in-flight scan running
+for its other waiters. Completed unavailable/rejected verdicts retain the normal
+cache policy.
+
 ## Publication, recovery, and rollback
 
 Publication and derived-view readiness are separate. `APPLIED` means canonical
@@ -136,7 +143,12 @@ or view operations through paginated `GET /api/skill-mutations/operations`
 `POST /api/skill-mutations/operations/{operation_id}/recover`, or reconcile an
 owner's interrupted managed writes through
 `POST /api/skill-mutations/owners/{owner_id}/recover`. Ordinary users and personal
-access tokens cannot use these endpoints. There is no force-overwrite endpoint.
+access tokens cannot use these endpoints. If reconciliation cannot clear the
+owner's readiness barrier, either recovery endpoint returns HTTP 409 with
+`detail: "NEEDS_REPAIR"`; query the operation to inspect its durable state and
+retry after repairing the underlying storage problem. A successful response
+still requires inspecting `views`, since a projection rebuild can record
+`views=ERROR` independently of publication. There is no force-overwrite endpoint.
 
 `revert(operation_id=..., expected_current_revision=..., idempotency_key=...)`
 creates a new forward revision only if that operation is still the asset's
@@ -154,11 +166,23 @@ for 256 files / 16,711,473 bytes. These are package-processing measurements, not
 model latency or a deployment throughput guarantee. Reproduce with
 `uv run pytest tests/test_skill_mutation_package_cost.py -q -s` from `backend/`.
 
-Live PostgreSQL concurrency was not available in the local implementation
-environment. `tests/test_skill_mutation_postgres.py` is opt-in via
-`DEERFLOW_TEST_POSTGRES_URL`; it creates and removes its own uniquely named test
-schema. Validate PostgreSQL and same-host multi-worker deployment before enabling
-that topology; SQLite tests do not establish PostgreSQL lock behavior.
+Live PostgreSQL validation on 2026-09-23 used PostgreSQL 17.11 (aarch64,
+`READ COMMITTED`), one pytest host process and two concurrent actors sharing a
+disposable database schema: a publication-fence worker thread holding the source
+run's `SELECT ... FOR SHARE` lock, and an async `RunRepository.delete()` worker.
+The opt-in regression passed six times (five repetitions plus the related suite);
+deletion waited for the share lock, then removed both the run and its completed
+snapshot. The related mutation/evidence/host suite passed 209 tests. See the
+[recorded validation](https://github.com/bytedance/deer-flow/pull/5645#issuecomment-5791306188)
+for the command, environment and cleanup.
+
+This verifies the source-fence/deletion interleaving, not a multi-process
+PostgreSQL soak. Idempotency, recovery, scan-budget and lease behavior were
+covered by deterministic suites, not by concurrent PostgreSQL Gateway workers.
+`tests/test_skill_mutation_postgres.py` remains opt-in via
+`DEERFLOW_TEST_POSTGRES_URL` and creates/removes its own uniquely named schema.
+Validate the intended same-host worker deployment before enabling it; SQLite
+results alone do not establish PostgreSQL lock behavior.
 
 ## Upgrade and operational rollback
 

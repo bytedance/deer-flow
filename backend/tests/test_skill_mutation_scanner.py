@@ -61,3 +61,12 @@ async def test_scanner_resource_limit_is_not_partial_approval(monkeypatch):
     result = await CandidateScanner(configuration).scan(package, "example")
     assert result.decision == "unavailable"
     model.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_host_scan_timeout_propagates_without_authoritative_verdict(monkeypatch):
+    from deerflow.skills.mutations.scanner import CandidateScanner
+
+    monkeypatch.setattr("deerflow.skills.mutations.scanner.CHECK_TIMEOUT_SECONDS", 0)
+    with pytest.raises(TimeoutError):
+        await CandidateScanner(configuration).scan(PackageSnapshot((PackageFile("SKILL.md", CONTENT, False),)), "example")

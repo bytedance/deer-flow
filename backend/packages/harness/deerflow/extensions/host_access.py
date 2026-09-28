@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from deerflow.extensions.model_access import ExtensionHostAccess
+
 
 class EvidenceAccess(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -48,7 +50,7 @@ class SkillMutationAccess(EvidenceAccess):
         return values
 
 
-class HostAccess(BaseModel):
+class HostAccess(ExtensionHostAccess):
     model_config = ConfigDict(extra="forbid", frozen=True)
     evidence: EvidenceAccess = Field(default_factory=EvidenceAccess)
     skill_mutations: SkillMutationAccess = Field(default_factory=SkillMutationAccess)

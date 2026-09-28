@@ -52,8 +52,10 @@ def managed_global_read(storage):
 
 def read_optional_text(storage, path):
     """Canonical reads for existing edit/rollback audit paths, inside readiness."""
+    from deerflow.skills.storage.skill_storage import read_text_or_none
+
     with managed_read(storage):
-        return path.read_text(encoding="utf-8") if path.exists() else None
+        return read_text_or_none(path) if path.exists() else None
 
 
 @contextmanager

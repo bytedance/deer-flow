@@ -74,6 +74,7 @@ def test_upload_files_writes_thread_storage_and_skips_local_sandbox_sync(tmp_pat
     assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello uploads"
 
     sandbox.update_file.assert_not_called()
+    provider.release.assert_not_called()
 
 
 def test_upload_and_list_response_models_expose_size_as_int(tmp_path):
@@ -542,6 +543,22 @@ def test_link_staged_preserves_original_error_when_cleanup_fails(tmp_path):
     assert not (tmp_path / "report.pdf").exists()
 
 
+def test_link_staged_failure_leaves_staged_file_for_caller_when_not_owning(tmp_path):
+    staged_path = tmp_path / "upload.part"
+    staged_path.write_bytes(b"upload bytes")
+    original_error = OSError(errno.EIO, "original link failure")
+    with (
+        patch.object(os, "link", side_effect=original_error),
+        patch.object(uploads, "_remove_staged_file") as remove_mock,
+        pytest.raises(OSError) as exc_info,
+    ):
+        uploads._link_staged_no_overwrite(staged_path, tmp_path, "report.pdf", unlink_staged=False)
+
+    assert exc_info.value is original_error
+    remove_mock.assert_not_called()
+    assert staged_path.read_bytes() == b"upload bytes"
+
+
 def test_upload_files_does_not_adjust_permissions_for_local_sandbox(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
@@ -600,6 +617,7 @@ def test_upload_files_acquires_non_local_sandbox_before_writing(tmp_path):
     provider.acquire.assert_not_called()
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
     sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/notes.txt", b"hello uploads")
+    provider.release.assert_called_once_with("aio-1")
 
 
 def test_upload_files_fails_before_writing_when_non_local_sandbox_unavailable(tmp_path):
@@ -623,6 +641,7 @@ def test_upload_files_fails_before_writing_when_non_local_sandbox_unavailable(tm
     assert file.read_calls == []
     provider.acquire.assert_not_called()
     provider.get.assert_not_called()
+    provider.release.assert_not_called()
 
 
 def test_upload_files_rejects_too_many_files_before_writing(tmp_path):
@@ -814,6 +833,7 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_total_size_exceeds_li
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
     assert provider.get.call_count == 2
     assert all(call.args == ("aio-1",) for call in provider.get.call_args_list)
+    provider.release.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
 
 
@@ -844,8 +864,76 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
     provider.acquire_async.assert_awaited_once_with("thread-aio", user_id="owner-upload")
     assert provider.get.call_count == 2
     assert all(call.args == ("aio-1",) for call in provider.get.call_args_list)
+    provider.release.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
     assert not (thread_uploads_dir / "report.pdf").exists()
+
+
+@pytest.mark.parametrize("failure", ["lookup", "sync"])
+def test_upload_files_releases_non_local_sandbox_when_sync_fails(tmp_path, failure):
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = False
+    provider.acquire_async = AsyncMock(return_value="aio-1")
+    sandbox = provider.get.return_value
+    if failure == "lookup":
+        provider.get.return_value = None
+    else:
+        sandbox.update_file.side_effect = RuntimeError("sync failed")
+    file = ChunkedUpload("notes.txt", [b"hello uploads"])
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=tmp_path),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        with pytest.raises(HTTPException if failure == "lookup" else RuntimeError):
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    provider.release.assert_called_once_with("aio-1")
+    if failure == "lookup":
+        assert file.read_calls == []
+        assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("run_finishes_during_sync", [False, True])
+def test_upload_files_keeps_active_run_sandbox_until_last_holder_finishes(tmp_path, run_finishes_during_sync):
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager
+
+    async def go():
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = False
+        provider.acquire_async = AsyncMock(return_value="aio-1")
+        sandbox = provider.get.return_value
+        manager = get_sandbox_lease_manager(provider)
+        await manager.acquire_async("active-run", "thread-aio", user_id="owner-upload")
+
+        def sync_file(path, content):
+            assert path == "/mnt/user-data/uploads/notes.txt"
+            assert content == b"hello uploads"
+            if run_finishes_during_sync:
+                manager.release("active-run")
+            provider.release.assert_not_called()
+
+        sandbox.update_file.side_effect = sync_file
+        try:
+            with (
+                patch.object(uploads, "get_effective_user_id", return_value="owner-upload"),
+                patch.object(uploads, "ensure_uploads_dir", return_value=tmp_path),
+                patch.object(uploads, "get_sandbox_provider", return_value=provider),
+            ):
+                file = UploadFile(filename="notes.txt", file=BytesIO(b"hello uploads"))
+                result = await call_unwrapped(uploads.upload_files, "thread-aio", request=MagicMock(), files=[file], config=SimpleNamespace())
+
+            assert result.success
+            if not run_finishes_during_sync:
+                provider.release.assert_not_called()
+                assert manager.binding_for("active-run") == "aio-1"
+                await manager.release_async("active-run")
+            provider.release.assert_called_once_with("aio-1")
+        finally:
+            await manager.release_async("active-run")
+            discard_sandbox_lease_manager(provider)
+
+    asyncio.run(go())
 
 
 def test_make_file_sandbox_writable_adds_write_bits_for_regular_files(tmp_path):
@@ -959,6 +1047,33 @@ def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
 
     # Only the safely normalised file should exist
     assert [f.name for f in thread_uploads_dir.iterdir()] == ["passwd"]
+
+
+def test_upload_files_skips_nul_filename_without_rolling_back_valid_file(tmp_path):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    provider = _mounted_provider()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[
+                    UploadFile(filename="valid.txt", file=BytesIO(b"kept")),
+                    UploadFile(filename="report\x00.pdf", file=BytesIO(b"invalid")),
+                ],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert [file.filename for file in result.files] == ["valid.txt"]
+    assert (thread_uploads_dir / "valid.txt").read_bytes() == b"kept"
 
 
 def test_upload_files_rejects_preexisting_symlink_destination(tmp_path):
@@ -1529,6 +1644,23 @@ def test_upload_limits_accept_legacy_config_keys():
     limits = uploads._get_upload_limits(cfg)
 
     assert limits == uploads.UploadLimits(max_files=7, max_file_size=123, max_total_size=456)
+
+
+@pytest.mark.parametrize(
+    ("key", "default"),
+    [
+        ("max_files", uploads.DEFAULT_MAX_FILES),
+        ("max_file_size", uploads.DEFAULT_MAX_FILE_SIZE),
+        ("max_total_size", uploads.DEFAULT_MAX_TOTAL_SIZE),
+    ],
+)
+def test_upload_limits_reject_boolean_values(key, default):
+    cfg = MagicMock()
+    cfg.uploads = {key: True}
+
+    limits = uploads._get_upload_limits(cfg)
+
+    assert getattr(limits, key) == default
 
 
 def test_upload_files_uses_configured_file_count_limit(tmp_path):

@@ -17,6 +17,7 @@ from deerflow_extension_api import API_VERSION
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from deerflow.extensions.host_access import HostAccess, bind_host_access
+from deerflow.extensions.model_access import ModelInvocationScope
 from deerflow.extensions.registry import ExtensionRegistry, LoadedExtensions
 from deerflow.persistence.migrations._env_filters import register_extension_table_prefix
 from deerflow.reflection import resolve_variable
@@ -248,7 +249,9 @@ def load_extensions(specs: Sequence[ExtensionSpec]) -> tuple[LoadedExtensions, l
         # installed instance that happens to share this spec's `use`.
         mark = registry.mark()
         try:
-            with registry.attributed_to(spec.use):
+            grant = spec.host_access.model_invocation
+            scope = ModelInvocationScope(spec.use, grant) if grant is not None else None
+            with registry.attributed_to(spec.use, model_access=scope):
                 install(registry, _frozen_config(spec.config))
         except Exception as exc:
             registry.rollback_to(mark)

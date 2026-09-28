@@ -83,6 +83,17 @@ one accumulated receipt across multiple goal-continuation `_stream_once` calls;
 journal tests drive LangChain's real async callback dispatcher against a single
 journal to pin serialized, deduplicated parallel tool callbacks.
 
+A satisfied goal evaluation remains a run-local completion candidate until
+delivery, receipt persistence and terminal cancellation arbitration finish.
+The worker confirms successful status persistence before clearing the goal;
+delivery failure leaves goal state and continuation counters unchanged. Final
+clearing holds the goal lock and the existing durable `checkpoint_write`
+reservation, rechecks the complete goal snapshot and visible conversation,
+then guards the write with the latest checkpoint ID. If another run has already
+been admitted, the old completion leaves the goal alone. This allows duration
+bookkeeping while preserving newer goal or conversation changes. Delivery
+failure does not itself queue a hidden continuation.
+
 **Extension changed-run discovery** (`runtime/runs/store/` and
 `extensions/run_evidence.py`) orders public run-record changes by the
 backend-owned `(change_seq, run_id)` key rather than timestamps or per-thread

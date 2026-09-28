@@ -1,13 +1,13 @@
 ---
 title: 参考
-description: deerflow-extension-api 0.2.3 中的每一个公开名称，按主题分组，附签名、字段和默认值。另含兼容性规则和契约的版本历史。
+description: deerflow-extension-api 0.2.4 中的每一个公开名称，按主题分组，附签名、字段和默认值。另含兼容性规则和契约的版本历史。
 ---
 
 import { Callout } from "nextra/components";
 
 # 参考
 
-本页列出契约版本 **0.2.3** 中 `deerflow_extension_api.__all__` 的每一个名称。请从包根导入：
+本页列出契约版本 **0.2.4** 中 `deerflow_extension_api.__all__` 的每一个名称。请从包根导入：
 
 ```python
 from deerflow_extension_api import ExtensionRegistry, MiddlewarePlacement, Placement
@@ -346,6 +346,26 @@ Gateway 的实现接受 1 到 2000 的 `limit` 和非负的 `after_seq`，否则
 
 `"deerflow_extension_principal_resolver"`。宿主安装解析器所用的 `app.state` 属性名，由宿主拥有。
 
+### `require_plugin_management(request: object, namespace: str, *, scope: Literal["read", "write"] = "read") -> ExtensionPrincipal`
+
+当调用者对已安装插件的 *namespace* 拥有 `plugin_management` 的指定 **scope** 时返回该主体，否则抛出 `PermissionError`。在自有的管理路由里，读取（`scope="read"`）或修改（`scope="write"`）企业自己的策略存储之前调用它。宿主会用调用者的可信身份询问其配置的授权 provider，因此读和写是两个独立决策，且都不由页面访问或工具授权隐含。
+
+它按失败关闭（fail closed）：未知 namespace、匿名调用者、宿主解析器缺失或失败、以及非允许的决策都会抛 `PermissionError`。宿主正在运行一份配置、但当前读不到它时，走配置的失败策略——默认 `fail_closed: true` 即拒绝。当宿主 `authorization.enabled: false`，或宿主根本没有配置时，答案恒为「允许」，因此该 helper 是 no-op，不会开始拒绝路由；需要无条件底线的企业仍应同时调用 `require_admin`。`scope` 不是 `"read"`/`"write"`，或 namespace 不符合 `[a-z][a-z0-9_.-]{0,95}`，都会在任何决策之前抛 `ValueError`。
+
+这是同步形式。请在 FastAPI 的 `def` 端点（在线程池中执行）中调用，不要在 async 端点中使用。
+
+### `arequire_plugin_management(request: object, namespace: str, *, scope: Literal["read", "write"] = "read") -> ExtensionPrincipal`
+
+`require_plugin_management` 的异步形式，供 `async def` 端点使用。它 await 宿主的异步解析器，且从不回退到同步解析器，因此宿主的配置读取始终不占用事件循环。
+
+### `EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY`
+
+`"deerflow_extension_plugin_authz_resolver"`。宿主安装同步 `plugin_management` 解析器所用的 `app.state` 属性名，签名为 `(request, namespace, scope) -> bool | None`。由宿主拥有。
+
+### `EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY`
+
+`"deerflow_extension_plugin_authz_resolver_async"`。对应的异步解析器，签名为 `async (request, namespace, scope) -> bool | None`。由宿主拥有。
+
 ## 消息来源标记
 
 注入消息的中间件会给消息打上标记，这样观察者无需匹配措辞就能区分注入的消息和用户自己的消息。
@@ -400,7 +420,7 @@ class ReleasePolicyProvider(Protocol):
 ## 全栈插件（实验性）
 
 <Callout type="warning">
-  插件契约在 0.2.3 中是实验性的。务必检查 `registry.plugin(...)` 的返回值。见[插件](/docs/harness/extensions/plugins)。
+  插件契约在 0.2.4 中是实验性的。务必检查 `registry.plugin(...)` 的返回值。见[插件](/docs/harness/extensions/plugins)。
 </Callout>
 
 ### `PluginContribution`
@@ -481,14 +501,14 @@ class ReleasePolicyProvider(Protocol):
 
 ### `API_VERSION`
 
-宿主的契约版本，为点分字符串，本页描述的契约是 `"0.2.3"`。始终等于 `backend/packages/extension-api/pyproject.toml` 中的包版本。
+宿主的契约版本，为点分字符串，本页描述的契约是 `"0.2.4"`。始终等于 `backend/packages/extension-api/pyproject.toml` 中的包版本。
 
 ## 兼容性规则
 
 - **增量演进。** 每个 Protocol 方法都有默认实现，每个可选的 dataclass 字段都有默认值。新增方法或字段的契约发布不会破坏基于更早版本构建的扩展。
 - **1.0 之前**，minor 版本可以有不兼容变更，patch 版本只做增量。**1.0 之后**，不兼容变更会升 major。
 - **`@extension(api=...)` 检查。** install 函数带有标记时，宿主只在以下情况接受它：
-  - 1.0 之前：major 和 minor 相同，且宿主版本不低于声明版本（`0.2.3` 宿主接受 `0.2.0` 到 `0.2.3`，拒绝 `0.2.4`、`0.1.x` 和 `0.3.x`）；
+  - 1.0 之前：major 和 minor 相同，且宿主版本不低于声明版本（`0.2.4` 宿主接受 `0.2.0` 到 `0.2.4`，拒绝 `0.2.5`、`0.1.x` 和 `0.3.x`）；
   - 1.0 之后：major 相同，且宿主版本不低于声明版本。
 
   不是点分数字字符串的标记会被拒绝。没有标记的 install 函数不做检查。
@@ -506,5 +526,6 @@ class ReleasePolicyProvider(Protocol):
 | 0.2.1 | [#5405](https://github.com/bytedance/deer-flow/pull/5405) | `ExtensionRuntimeDeps.run_evidence_reader`，以及 `RunEvidenceReader`、`RunPage`、`RunEventPage`、`RunStatusView`、`RunEventView`、`InvalidRunEvidenceCursor` |
 | 0.2.2 | [#5647](https://github.com/bytedance/deer-flow/pull/5647) | 实验性的 `registry.plugin()`，以及 `PluginContribution`、`BrowserModule`、`BackendAction`、`ModelTool`、`ActionContext`、`ToolContext`、`SettingsField` |
 | 0.2.3 | [#5727](https://github.com/bytedance/deer-flow/pull/5727)、[#5685](https://github.com/bytedance/deer-flow/pull/5685) | 请求级运行证据：`resolve_run_evidence_reader`、`require_run_evidence_reader`、`RUN_EVIDENCE_READER_RESOLVER_KEY`（#5727）。打包的浏览器资源：`BrowserAssets`，`PluginContribution.frontend` 也接受它（#5685） |
+| 0.2.4 | [#5842](https://github.com/bytedance/deer-flow/pull/5842) | 插件资源授权：`require_plugin_management`、`arequire_plugin_management`、`EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY`、`EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY` |
 
 至今没有任何版本移除过公开名称。
