@@ -178,7 +178,7 @@ LLM_PROVIDERS: list[LLMProvider] = [
     LLMProvider(
         name="zai",
         display_name="Z.AI GLM-5.3-Flash",
-        description="GLM-5.3-Flash with required thinking and native vision",
+        description="GLM-5.3-Flash with required thinking, low/high/max effort, and native vision",
         use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
         models=["glm-5.3-flash"],
         default_model="glm-5.3-flash",
@@ -192,25 +192,28 @@ LLM_PROVIDERS: list[LLMProvider] = [
             "top_p": 0.95,
             "max_tokens": 131072,
             "context_window": 1000000,
-            "supports_thinking": True,
-            # GLM-5.3-Flash only accepts low/high/max, while DeerFlow's current
-            # generic UI can emit minimal/medium. Keep provider effort control
-            # disabled until model-specific reasoning capabilities are exposed.
-            "supports_reasoning_effort": False,
             "supports_vision": True,
-            # The model cannot disable thinking. This unconditional base payload
-            # deliberately avoids when_thinking_enabled/disabled so background
-            # callers that request thinking_enabled=False cannot synthesize an
-            # invalid disabled/minimal combination in the model factory.
-            "extra_body": {
-                "thinking": {
-                    "type": "enabled",
-                    # Avoid preserved-thinking history requirements until the
-                    # reasoning-history abstraction handles summarization.
-                    "clear_thinking": True,
+            # Declarative reasoning contract (issue #5073). GLM-5.3-Flash cannot
+            # disable thinking and only accepts low/high/max effort, so the
+            # contract keeps thinking on for every foreground and background
+            # call, maps DeerFlow's generic minimal/medium presets onto the
+            # provider vocabulary, and serializes clear_thinking=true so the
+            # model does not require exact reasoning replay after summarization.
+            # `default` also governs callers that never choose an effort
+            # (summarization, title generation, subagents), so it stays at
+            # `high` rather than the provider's deepest `max`; `max` remains
+            # selectable in the composer.
+            "reasoning": {
+                "thinking": "required",
+                "dialect": "openai_extra_body",
+                "history": "clear",
+                "effort": {
+                    "values": ["low", "high", "max"],
+                    "default": "high",
+                    "aliases": {"minimal": "low", "medium": "high"},
                 },
-                "tool_stream": True,
             },
+            "extra_body": {"tool_stream": True},
             # Z.AI streams terminal usage without requiring OpenAI's undocumented
             # stream_options.include_usage request field.
             "stream_usage": False,

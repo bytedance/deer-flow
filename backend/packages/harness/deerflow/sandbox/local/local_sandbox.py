@@ -770,7 +770,32 @@ class LocalSandbox(Sandbox):
 
     def list_dir(self, path: str, max_depth=2) -> list[str]:
         resolved_path = self._resolve_path(path)
-        entries = list_dir(resolved_path, max_depth)
+        container_path = path.rstrip("/")
+        virtual_children: list[PathMapping] = []
+        for mapping in self.path_mappings:
+            if not mapping.container_path.startswith(container_path + "/"):
+                continue
+            child_rel = mapping.container_path[len(container_path) + 1 :]
+            if "/" in child_rel:
+                continue
+            try:
+                if os.path.isdir(self._resolved_local_paths[mapping]):
+                    virtual_children.append(mapping)
+            except OSError:
+                pass
+
+        try:
+            entries = list_dir(resolved_path, max_depth)
+        except FileNotFoundError:
+            # The requested path may exist only in the container, as the
+            # parent of mounted sub-directories (e.g. /mnt/skills with only
+            # per-category mounts and no aggregate root mapping). Continue
+            # with virtual children only when the resolved host path is
+            # missing. An existing file is not a directory and must still
+            # raise, as must a path without direct virtual children.
+            if not virtual_children or os.path.exists(resolved_path):
+                raise
+            entries = []
         # Reverse resolve local paths back to container paths and preserve
         # list_dir's trailing "/" marker for directories.
         result: list[str] = []
@@ -785,28 +810,16 @@ class LocalSandbox(Sandbox):
         # the ``list_dir`` utility skips them for security. We patch those
         # missing virtual children back in so the agent can discover them via
         # ``ls /mnt/skills``.
-        container_path = path.rstrip("/")
         existing_dirs = {e.rstrip("/") for e in result if e.endswith("/")}
-        for mapping in self.path_mappings:
-            # A mapping is a virtual child if:
-            # 1. Its container_path is a direct child of the requested path
-            # 2. It is NOT already present in the result (was skipped by list_dir)
-            if mapping.container_path.startswith(container_path + "/"):
-                child_rel = mapping.container_path[len(container_path) + 1 :]
-                # Only direct children (no further slashes), e.g. "public", "custom".
-                # Compare the mapping's full container path -- not the bare child
-                # name -- against existing_dirs, which holds full paths (e.g.
-                # "/mnt/user-data/workspace"). Comparing the bare name here would
-                # never match, so an already-listed mount (the common case: real
-                # nested workspace/uploads/outputs subdirectories under
-                # /mnt/user-data) would be appended a second time.
-                if "/" not in child_rel and mapping.container_path.rstrip("/") not in existing_dirs:
-                    # Verify the host path exists so we don't add phantom entries
-                    try:
-                        if os.path.isdir(os.path.realpath(mapping.local_path)):
-                            result.append(f"{mapping.container_path}/")
-                    except OSError:
-                        pass
+        for mapping in virtual_children:
+            # Compare the mapping's full container path -- not the bare child
+            # name -- against existing_dirs, which holds full paths (e.g.
+            # "/mnt/user-data/workspace"). Comparing the bare name here would
+            # never match, so an already-listed mount (the common case: real
+            # nested workspace/uploads/outputs subdirectories under
+            # /mnt/user-data) would be appended a second time.
+            if mapping.container_path.rstrip("/") not in existing_dirs:
+                result.append(f"{mapping.container_path}/")
 
         return sorted(result)
 

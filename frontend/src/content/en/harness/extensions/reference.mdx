@@ -1,13 +1,13 @@
 ---
 title: Reference
-description: Every public name in deerflow-extension-api 0.2.3, grouped by topic, with signatures, fields, and defaults. Also covers the compatibility rules and the contract's version history.
+description: Every public name in deerflow-extension-api 0.2.4, grouped by topic, with signatures, fields, and defaults. Also covers the compatibility rules and the contract's version history.
 ---
 
 import { Callout } from "nextra/components";
 
 # Reference
 
-This page lists every name in `deerflow_extension_api.__all__` for contract version **0.2.3**. Import them from the package root:
+This page lists every name in `deerflow_extension_api.__all__` for contract version **0.2.4**. Import them from the package root:
 
 ```python
 from deerflow_extension_api import ExtensionRegistry, MiddlewarePlacement, Placement
@@ -346,6 +346,26 @@ Return the principal if it is an administrator, otherwise raise `PermissionError
 
 `"deerflow_extension_principal_resolver"`. The `app.state` attribute the host installs its resolver under. Host-owned.
 
+### `require_plugin_management(request: object, namespace: str, *, scope: Literal["read", "write"] = "read") -> ExtensionPrincipal`
+
+Return the caller when it holds `plugin_management` **scope** for an installed plugin *namespace*; otherwise raise `PermissionError`. Use it in a contributed management route before reading (`scope="read"`) or changing (`scope="write"`) the enterprise's own policy store. The host asks its configured authorization provider with the caller's trusted identity, so read and write are separate decisions and neither is implied by page access or by a tool grant.
+
+It fails closed: an unknown namespace, an anonymous caller, a missing or failing host resolver, and a non-allowed decision all raise `PermissionError`. A host that is running on a configuration and can no longer read it follows the configured failure policy — denied under the default `fail_closed: true`. A host with `authorization.enabled: false`, or one with no configuration at all, answers "allow", so the helper is a no-op and does not start rejecting routes; an enterprise that needs an unconditional floor keeps calling `require_admin` as well. A `scope` other than `"read"`/`"write"`, or a namespace outside `[a-z][a-z0-9_.-]{0,95}`, raises `ValueError` before any decision.
+
+This form is synchronous. Call it from a FastAPI `def` endpoint (executed in the thread pool), not from an async endpoint.
+
+### `arequire_plugin_management(request: object, namespace: str, *, scope: Literal["read", "write"] = "read") -> ExtensionPrincipal`
+
+The async form of `require_plugin_management`, for `async def` endpoints. It awaits the host's async resolver and never falls back to the synchronous one, so the host's configuration read stays off the event loop.
+
+### `EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY`
+
+`"deerflow_extension_plugin_authz_resolver"`. The `app.state` attribute the host installs the synchronous `plugin_management` resolver under, answering `(request, namespace, scope) -> bool | None`. Host-owned.
+
+### `EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY`
+
+`"deerflow_extension_plugin_authz_resolver_async"`. The async counterpart, answering `async (request, namespace, scope) -> bool | None`. Host-owned.
+
 ## Message provenance
 
 Middleware that injects messages stamps them, so an observer can tell an injected message from the user's own without matching on wording.
@@ -400,7 +420,7 @@ SHA-256 hex digest of `canonical_json(value)` encoded as UTF-8.
 ## Full-stack plugins (experimental)
 
 <Callout type="warning">
-  The plugin contract is experimental in 0.2.3. Always check the return value of
+  The plugin contract is experimental in 0.2.4. Always check the return value of
   `registry.plugin(...)`. See [Plugins](/docs/harness/extensions/plugins).
 </Callout>
 
@@ -482,14 +502,14 @@ Frozen dataclass describing one non-secret deployment setting.
 
 ### `API_VERSION`
 
-The host's contract version as a dotted string, `"0.2.3"` for the contract this page describes. Always equal to the package version in `backend/packages/extension-api/pyproject.toml`.
+The host's contract version as a dotted string, `"0.2.4"` for the contract this page describes. Always equal to the package version in `backend/packages/extension-api/pyproject.toml`.
 
 ## Compatibility rules
 
 - **Additive growth.** Every Protocol method has a default implementation and every optional dataclass field has a default. A contract release that adds a method or field does not break extensions built against an earlier one.
 - **Before 1.0**, a minor release may break extensions and a patch release is additive. **From 1.0 on**, breaking changes bump the major.
 - **The `@extension(api=...)` check.** When an install function carries a marker, the host refuses it unless:
-  - before 1.0: the same major and minor, and the host's version is at least the declared one (a `0.2.3` host accepts `0.2.0` through `0.2.3`, and rejects `0.2.4`, `0.1.x`, and `0.3.x`);
+  - before 1.0: the same major and minor, and the host's version is at least the declared one (a `0.2.4` host accepts `0.2.0` through `0.2.4`, and rejects `0.2.5`, `0.1.x`, and `0.3.x`);
   - from 1.0: the same major, and the host's version is at least the declared one.
 
   A marker that is not a dotted numeric string is refused. An install function without a marker is not checked.
@@ -507,5 +527,6 @@ The host's contract version as a dotted string, `"0.2.3"` for the contract this 
 | 0.2.1 | [#5405](https://github.com/bytedance/deer-flow/pull/5405) | `ExtensionRuntimeDeps.run_evidence_reader` with `RunEvidenceReader`, `RunPage`, `RunEventPage`, `RunStatusView`, `RunEventView`, `InvalidRunEvidenceCursor` |
 | 0.2.2 | [#5647](https://github.com/bytedance/deer-flow/pull/5647) | Experimental `registry.plugin()` with `PluginContribution`, `BrowserModule`, `BackendAction`, `ModelTool`, `ActionContext`, `ToolContext`, `SettingsField` |
 | 0.2.3 | [#5727](https://github.com/bytedance/deer-flow/pull/5727), [#5685](https://github.com/bytedance/deer-flow/pull/5685) | Request-scoped run evidence: `resolve_run_evidence_reader`, `require_run_evidence_reader`, `RUN_EVIDENCE_READER_RESOLVER_KEY` (#5727). Packaged browser resources: `BrowserAssets`, and `PluginContribution.frontend` also accepts it (#5685) |
+| 0.2.4 | [#5842](https://github.com/bytedance/deer-flow/pull/5842) | Plugin resource authorization: `require_plugin_management`, `arequire_plugin_management`, `EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY`, `EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY` |
 
 No release has removed a public name.

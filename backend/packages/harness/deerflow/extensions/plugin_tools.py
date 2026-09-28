@@ -19,6 +19,7 @@ from langchain_core.tools import StructuredTool, ToolException
 
 from deerflow.config.plugin_settings import defaults
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.tools.tool_provenance import tag_plugin_tool
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,9 @@ def _build_tool(source, plugin, declaration):
             logger.warning("Plugin tool failed: %s/%s (%s)", plugin.namespace, declaration.name, type(exc).__name__)
             raise ToolException("Plugin tool unavailable or input rejected.") from None
 
-    return StructuredTool(name=plugin_tool_name(plugin.namespace, declaration.name), description=declaration.description, args_schema=schema, coroutine=invoke, handle_tool_error=True)
+    tool = StructuredTool(name=plugin_tool_name(plugin.namespace, declaration.name), description=declaration.description, args_schema=schema, coroutine=invoke, handle_tool_error=True)
+    tag_plugin_tool(tool, namespace=plugin.namespace, declaration=declaration.name, installation=source)
+    return tool
 
 
 def build_plugin_tools(loaded, *, groups=None, reserved_names=()):

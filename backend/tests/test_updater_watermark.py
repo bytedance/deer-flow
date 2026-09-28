@@ -309,6 +309,69 @@ def test_persist_then_clear_before_coverage_registers_exclusion() -> None:
     assert llm.invoke_count == 0
 
 
+class _SkipVerdict:
+    """Pre-screen verdict that consumes the batch without an extraction call."""
+
+    skip = True
+    hints: frozenset[str] = frozenset()
+    payload = None
+
+
+def _skip_messages() -> list[Any]:
+    return [
+        HumanMessage(content="I live in Shanghai", id="h-shanghai"),
+        AIMessage(content="Noted Shanghai.", id="a-shanghai"),
+        HumanMessage(content="The weather is fine", id="h-weather"),
+        AIMessage(content="Glad to hear it.", id="a-weather"),
+    ]
+
+
+def test_prescreen_skip_excludes_older_prefix_after_clear() -> None:
+    """A skip must publish every identity, not only the conversation tail.
+
+    Summarization then flushes just the older prefix. After a clear, that
+    prefix has to stay out of extraction even though the skipped tail is absent.
+    """
+    llm = _FakeLLM()
+    updater = MemoryUpdater(_config(judge=lambda _context: _SkipVerdict()), _FakeStorage(), llm)
+    msgs = _skip_messages()
+    key = ("t1", "u", "a")
+
+    assert updater.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u") is True
+    assert llm.invoke_count == 0
+    assert updater._extracted_coverages.get(key) == frozenset(_message_identity(msg) for msg in msgs)
+
+    updater.promote_clear_exclusions(user_id="u", agent_name="a")
+    assert updater.update_memory(msgs[:2], thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True) is True
+    assert llm.invoke_count == 0
+
+
+def test_prescreen_skip_excludes_batch_when_clear_lands_during_judge() -> None:
+    """Promote during the judge runs before skip coverage exists.
+
+    The completion path has to register the exclusion itself, including for a
+    later flush that carries only the older prefix.
+    """
+    llm = _FakeLLM()
+    storage = _GenerationStorage()
+    holder: dict[str, MemoryUpdater] = {}
+
+    def judge_then_clear(_context: object) -> _SkipVerdict:
+        storage.simulate_clear()
+        holder["updater"].promote_clear_exclusions(user_id="u", agent_name="a")
+        return _SkipVerdict()
+
+    updater = MemoryUpdater(_config(judge=judge_then_clear), storage, llm)
+    holder["updater"] = updater
+    msgs = _skip_messages()
+
+    assert updater.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u") is True
+    assert llm.invoke_count == 0
+
+    assert updater.update_memory(msgs[:2], thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True) is True
+    assert llm.invoke_count == 0
+
+
 def test_drop_excluded_does_not_cut_prefix_on_content_identity() -> None:
     """A repeated assistant wording is not a position boundary when there is no id."""
     remember = "I will remember your preference."

@@ -1132,6 +1132,23 @@ describe("human message internal context stripping", () => {
     expect(stripInternalMarkers(indented)).toBe(indented);
   });
 
+  test("stripInternalMarkers keeps a fence open across a line with an info string", () => {
+    // CommonMark: a closing fence cannot carry an info string, so "```python"
+    // is content of the outer fence. Treating it as the closer exposes the
+    // following block and the export silently deletes real user content.
+    const content = [
+      "Fence tutorial:",
+      "```",
+      "```python",
+      '<project name="x">keep me</project>',
+      "```",
+      "```",
+      "Export me",
+    ].join("\n");
+
+    expect(stripInternalMarkers(content)).toBe(content);
+  });
+
   test("stripInternalMarkers still removes an injected block whose content contains a fence", () => {
     const content = [
       "<memory>",

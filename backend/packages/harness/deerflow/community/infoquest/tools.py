@@ -1,3 +1,5 @@
+import asyncio
+
 from langchain.tools import tool
 
 from deerflow.config import get_app_config
@@ -44,7 +46,7 @@ def _get_infoquest_client() -> InfoQuestClient:
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str) -> str:
+async def web_search_tool(query: str) -> str:
     """Search the web.
 
     Args:
@@ -52,11 +54,11 @@ def web_search_tool(query: str) -> str:
     """
 
     client = _get_infoquest_client()
-    return client.web_search(query)
+    return await client.web_search(query)
 
 
 @tool("web_fetch", parse_docstring=True)
-def web_fetch_tool(url: str) -> str:
+async def web_fetch_tool(url: str) -> str:
     """Fetch the contents of a web page at a given URL.
     Only fetch EXACT URLs that have been provided directly by the user or have been returned in results from the web_search and web_fetch tools.
     This tool can NOT access content that requires authentication, such as private Google Docs or pages behind login walls.
@@ -67,15 +69,15 @@ def web_fetch_tool(url: str) -> str:
         url: The URL to fetch the contents of.
     """
     client = _get_infoquest_client()
-    result = client.fetch(url)
+    result = await client.fetch(url)
     if result.startswith("Error: "):
         return result
-    article = readability_extractor.extract_article(result, url=url)
+    article = await asyncio.to_thread(readability_extractor.extract_article, result, url=url)
     return article.to_markdown()[:4096]
 
 
 @tool("image_search", parse_docstring=True)
-def image_search_tool(query: str) -> str:
+async def image_search_tool(query: str) -> str:
     """Search for images online. Use this tool BEFORE image generation to find reference images for characters, portraits, objects, scenes, or any content requiring visual accuracy.
 
     **When to use:**
@@ -90,4 +92,4 @@ def image_search_tool(query: str) -> str:
         query: The query to search for images.
     """
     client = _get_infoquest_client()
-    return client.image_search(query)
+    return await client.image_search(query)

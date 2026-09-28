@@ -454,7 +454,8 @@ def _normalize_input_messages(
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and sanitize caller-supplied state values before checkpointing.
 
-    The server-owned ``sandbox`` channel is rejected. The ``messages`` channel
+    The server-owned ``sandbox``, ``thread_data``, and ``viewed_images`` channels
+    are rejected. The ``messages`` channel
     is canonicalized to a list of ``BaseMessage``
     objects, rejects external system/developer roles with HTTP 400, and strips
     server-owned metadata. Other channels keep their existing shapes while
@@ -466,10 +467,12 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
     transform trails, or privileged message roles. Every channel is walked
     because middleware-contributed channels can also carry message-like values.
     """
-    if "sandbox" in values:
+    server_owned_channels = {"sandbox", "thread_data", "viewed_images"}
+    rejected = server_owned_channels.intersection(values)
+    if rejected:
         raise HTTPException(
             status_code=400,
-            detail="External sandbox state is not allowed",
+            detail=f"External {sorted(rejected)[0]} state is not allowed",
         )
 
     stripped: dict[str, Any] = {}
@@ -501,9 +504,10 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
 
-    The ``sandbox`` channel is also server-owned. External callers cannot select
-    a provider resource by id; trusted internal run admission may carry the
-    server's own restored value.
+    The ``sandbox``, ``thread_data``, and ``viewed_images`` channels are also
+    server-owned. External callers cannot select a provider resource by id or
+    supply host image paths; trusted internal run admission may carry restored
+    values.
 
     ``original_user_content``, dynamic-context reminder markers, the transient
     view-image context marker, the execution-only knowledge-scope marker, tool
@@ -527,11 +531,14 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     """
     if raw_input is None:
         return {}
-    if not trusted_internal and "sandbox" in raw_input:
-        raise HTTPException(
-            status_code=400,
-            detail="External sandbox state is not allowed",
-        )
+    if not trusted_internal:
+        server_owned_channels = {"sandbox", "thread_data", "viewed_images"}
+        rejected = server_owned_channels.intersection(raw_input)
+        if rejected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"External {sorted(rejected)[0]} state is not allowed",
+            )
     result = raw_input
     messages = raw_input.get("messages")
     if messages is not None:

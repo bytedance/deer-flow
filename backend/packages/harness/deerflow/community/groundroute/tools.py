@@ -55,7 +55,7 @@ def _get_api_key(tool_name: str) -> str | None:
 def _coerce_max_results(value: object, *, default: int = _DEFAULT_MAX_RESULTS) -> int:
     try:
         coerced = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         logger.warning("Invalid GroundRoute max_results=%r; using default %s", value, default)
         coerced = default
     return max(1, min(coerced, _MAX_RESULTS_CAP))

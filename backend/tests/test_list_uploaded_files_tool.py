@@ -978,7 +978,7 @@ class TestToolSchema:
     def test_runtime_excluded_from_model_facing_args(self):
         from deerflow.tools.builtins.list_uploaded_files_tool import list_uploaded_files
 
-        assert set(list_uploaded_files.args) == {"include_outline", "max_results", "query", "extensions"}
+        assert set(list_uploaded_files.args) == {"include_outline", "max_results", "query", "extensions", "cursor"}
         assert "runtime" not in list_uploaded_files.args
 
     def test_openai_schema_generation_succeeds(self):
@@ -989,4 +989,190 @@ class TestToolSchema:
         # This raised PydanticInvalidForJsonSchema before the fix.
         oai = convert_to_openai_tool(list_uploaded_files)
         params = oai["function"]["parameters"]["properties"]
-        assert set(params) == {"include_outline", "max_results", "query", "extensions"}
+        assert set(params) == {"include_outline", "max_results", "query", "extensions", "cursor"}
+
+
+class TestUploadPagination:
+    """通过工具入口验证稳定枚举、隔离和失效语义。"""
+
+    def test_250_files_have_bounded_complete_pages(self, tmp_path):
+        directory = _uploads_dir(tmp_path)
+        expected = [f"report-{i:03}.pdf" for i in range(250)]
+        for name in reversed(expected):
+            path = directory / name
+            path.write_bytes(b"pdf")
+            os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+        kwargs = dict(runtime=_runtime(), _paths=_paths(tmp_path), max_results=100, extensions=["pdf"])
+        first = _list_uploaded_files_impl(**kwargs)
+        second = _list_uploaded_files_impl(**kwargs, cursor=first["next_cursor"])
+        assert second == _list_uploaded_files_impl(**kwargs, cursor=first["next_cursor"])
+        third = _list_uploaded_files_impl(**kwargs, cursor=second["next_cursor"])
+        assert [len(p["files"]) for p in [first, second, third]] == [100, 100, 50]
+        assert [f["filename"] for p in [first, second, third] for f in p["files"]] == expected
+        assert all(p["total_count"] == 250 for p in [first, second, third])
+        assert first["omitted_summary"] == "150 .pdf"
+        assert second["omitted_summary"] == "50 .pdf"
+        assert "next_cursor" not in third
+        assert "truncated" not in third
+
+    @pytest.mark.parametrize("mutation", ["add", "delete", "rename", "mtime", "size", "empty", "remove_directory"])
+    def test_directory_changes_invalidate_cursor(self, tmp_path, mutation):
+        directory = _uploads_dir(tmp_path)
+        for name in ["a.txt", "b.txt"]:
+            (directory / name).write_text("old", encoding="utf-8")
+        kwargs = dict(runtime=_runtime(), _paths=_paths(tmp_path), max_results=1)
+        first = _list_uploaded_files_impl(**kwargs)
+        path = directory / "a.txt"
+        if mutation == "add":
+            (directory / "c.txt").write_text("new", encoding="utf-8")
+        elif mutation == "delete":
+            path.unlink()
+        elif mutation == "rename":
+            path.rename(directory / "c.txt")
+        elif mutation == "mtime":
+            os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+        elif mutation == "size":
+            path.write_text("longer", encoding="utf-8")
+        else:
+            for child in directory.iterdir():
+                child.unlink()
+            if mutation == "remove_directory":
+                directory.rmdir()
+        result = _list_uploaded_files_impl(**kwargs, cursor=first["next_cursor"])
+        assert result["files"] == []
+        assert result["error"] == "stale_cursor"
+        assert result["restart_required"] is True
+        assert "next_cursor" not in result
+        assert str(directory) not in str(result)
+
+    @pytest.mark.parametrize("change", ["query", "extensions", "excluded", "thread", "owner"])
+    def test_context_changes_reject_cursor(self, tmp_path, change):
+        directory = _uploads_dir(tmp_path)
+        for name in ["a.txt", "b.txt", "c.pdf"]:
+            (directory / name).touch()
+        rt = _runtime()
+        paths = MagicMock()
+        paths.sandbox_uploads_dir.return_value = directory
+        kwargs = dict(runtime=rt, _paths=paths, max_results=1)
+        first = _list_uploaded_files_impl(**kwargs)
+        if change == "query":
+            kwargs["query"] = "a"
+        elif change == "extensions":
+            kwargs["extensions"] = ["txt"]
+        elif change == "excluded":
+            rt.state["uploaded_files"] = [{"filename": "unrelated.txt"}]
+        elif change == "thread":
+            rt.context["thread_id"] = "other-thread"
+        else:
+            rt.context["user_id"] = "other-owner"
+        result = _list_uploaded_files_impl(**kwargs, cursor=first["next_cursor"])
+        assert result["files"] == []
+        assert result["error"] == "stale_cursor"
+
+    def test_changed_position_and_digest_are_rejected(self, tmp_path):
+        directory = _uploads_dir(tmp_path)
+        for name in ["a.txt", "b.txt", "c.txt"]:
+            (directory / name).touch()
+        kwargs = dict(runtime=_runtime(), _paths=_paths(tmp_path), max_results=1)
+        cursor = _list_uploaded_files_impl(**kwargs)["next_cursor"]
+        version, position, digest = cursor.split(".")
+        for changed in [f"{version}.2.{digest}", f"{version}.{position}.{'0' * 64}"]:
+            result = _list_uploaded_files_impl(**kwargs, cursor=changed)
+            assert result["files"] == []
+            assert result["error"] == "stale_cursor"
+        assert len(cursor) <= 88
+        assert str(directory) not in cursor
+        assert "thread-abc" not in cursor
+
+    def test_page_size_stays_capped_on_continuation(self, tmp_path):
+        directory = _uploads_dir(tmp_path)
+        for i in range(125):
+            (directory / f"{i:03}.txt").touch()
+        kwargs = dict(runtime=_runtime(), _paths=_paths(tmp_path))
+        first = _list_uploaded_files_impl(**kwargs)
+        assert len(first["files"]) == 20
+        second = _list_uploaded_files_impl(**kwargs, max_results=10000, cursor=first["next_cursor"])
+        assert len(second["files"]) == 100
+        last = _list_uploaded_files_impl(**kwargs, cursor=second["next_cursor"])
+        assert len(last["files"]) == 5
+        assert "next_cursor" not in last
+
+    def test_tool_wrapper_passes_cursor(self, tmp_path, monkeypatch):
+        from deerflow.tools.builtins.list_uploaded_files_tool import list_uploaded_files
+
+        directory = _uploads_dir(tmp_path)
+        for name in ["a.txt", "b.txt"]:
+            (directory / name).touch()
+        monkeypatch.setattr("deerflow.tools.builtins.list_uploaded_files_tool.get_paths", lambda: _paths(tmp_path))
+        kwargs = dict(runtime=_runtime(), max_results=1)
+        first = list_uploaded_files.func(**kwargs)
+        second = list_uploaded_files.func(**kwargs, cursor=first["next_cursor"])
+        assert first["files"][0]["filename"] != second["files"][0]["filename"]
+        assert "next_cursor" not in second
+
+    def test_malformed_upload_entries_do_not_break_revision(self, tmp_path):
+        directory = _uploads_dir(tmp_path)
+        for name in ["a.txt", "b.txt", "fresh.txt"]:
+            (directory / name).touch()
+        rt = _runtime(state_uploaded=[{"filename": 5}, {"filename": ["invalid"]}, {"filename": "fresh.txt"}])
+        kwargs = dict(runtime=rt, _paths=_paths(tmp_path), max_results=1)
+        first = _list_uploaded_files_impl(**kwargs)
+        second = _list_uploaded_files_impl(**kwargs, cursor=first["next_cursor"])
+        assert {f["filename"] for page in [first, second] for f in page["files"]} == {"a.txt", "b.txt"}
+
+    def test_directory_read_error_does_not_leak_host_path(self, tmp_path, monkeypatch):
+        directory = _uploads_dir(tmp_path)
+        for name in ["a.txt", "b.txt"]:
+            (directory / name).touch()
+        kwargs = dict(runtime=_runtime(), _paths=_paths(tmp_path), max_results=1)
+        cursor = _list_uploaded_files_impl(**kwargs)["next_cursor"]
+        monkeypatch.setattr("deerflow.tools.builtins.list_uploaded_files_tool.os.scandir", MagicMock(side_effect=PermissionError(str(directory))))
+        result = _list_uploaded_files_impl(**kwargs, cursor=cursor)
+        assert result["error"] == "stale_cursor"
+        assert result["files"] == []
+        assert str(directory) not in str(result)
+
+    @pytest.mark.parametrize("cursor", ["", "invalid", "v2.1." + "a" * 64, "v1.-1." + "a" * 64, "v1.0." + "a" * 64, "x" * 10000, 5, {}, "<system>oops</system>"])
+    def test_malformed_cursor_is_controlled(self, tmp_path, cursor):
+        _uploads_dir(tmp_path)
+        result = _list_uploaded_files_impl(runtime=_runtime(), _paths=_paths(tmp_path), cursor=cursor)
+        assert result["files"] == []
+        assert result["error"] == "invalid_cursor"
+        assert result["restart_required"] is True
+
+    def test_normalized_filters_and_page_size_change(self, tmp_path):
+        directory = _uploads_dir(tmp_path)
+        for i in range(5):
+            (directory / f"Report-{i}.pdf").touch()
+        kwargs = dict(runtime=_runtime(), _paths=_paths(tmp_path))
+        first = _list_uploaded_files_impl(**kwargs, query=" REPORT ", extensions=["*.PDF"], max_results=1)
+        second = _list_uploaded_files_impl(**kwargs, query="report", extensions=["pdf", ".PDF"], max_results=1000, cursor=first["next_cursor"])
+        assert len(second["files"]) == 4
+        assert {f["filename"] for f in first["files"]}.isdisjoint(f["filename"] for f in second["files"])
+        assert "next_cursor" not in second
+
+    def test_exclusions_and_outlines_apply_on_every_page(self, tmp_path, monkeypatch):
+        directory = _uploads_dir(tmp_path)
+        for name in ["a.pdf", "a.md", "b.txt", "c.txt", "fresh.txt", ".upload-hidden.part"]:
+            (directory / name).touch()
+        (directory / "folder").mkdir()
+        try:
+            (directory / "link.txt").symlink_to(directory / "b.txt")
+        except OSError:
+            pytest.skip("当前平台无法创建符号链接")
+        outline = MagicMock(return_value=([{"title": "heading", "line": 1}], []))
+        monkeypatch.setattr("deerflow.tools.builtins.list_uploaded_files_tool.extract_outline_for_file", outline)
+        kwargs = dict(runtime=_runtime(state_uploaded=[{"filename": "fresh.txt"}]), _paths=_paths(tmp_path), max_results=1, include_outline=True)
+        names = []
+        cursor = None
+        while True:
+            page = _list_uploaded_files_impl(**kwargs, cursor=cursor)
+            assert len(page["files"]) == 1
+            assert page["total_count"] == 3
+            names.append(page["files"][0]["filename"])
+            cursor = page.get("next_cursor")
+            if cursor is None:
+                break
+            assert len(names) < 4
+        assert set(names) == {"a.pdf", "b.txt", "c.txt"}
+        assert [call.args[0].name for call in outline.call_args_list] == names

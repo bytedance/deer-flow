@@ -7,10 +7,12 @@ Covers:
   additional_kwargs, historical files from uploads dir, edge-cases)
 """
 
+import math
 import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
@@ -159,6 +161,30 @@ class TestFilesFromKwargs:
         assert result is not None
         assert result[0]["size"] == 0
 
+    @pytest.mark.parametrize(
+        "size",
+        ["abc", "12.5", "", [1], {"n": 1}, None, True, -5, math.inf, math.nan],
+        ids=["word", "decimal-string", "empty-string", "list", "dict", "none", "bool", "negative", "inf", "nan"],
+    )
+    def test_unusable_size_falls_back_to_zero_instead_of_raising(self, tmp_path, size):
+        """``files[*].size`` is client-supplied display metadata; every other field in this loop is validated fail-soft."""
+        mw = _middleware(tmp_path)
+        msg = _human("hi", files=[{"filename": "f.txt", "size": size, "path": "/mnt/user-data/uploads/f.txt"}])
+        result = mw._files_from_kwargs(msg)
+        assert result is not None
+        assert result[0]["filename"] == "f.txt"
+        assert result[0]["size"] == 0
+        assert type(result[0]["size"]) is int
+
+    @pytest.mark.parametrize("size, expected", [(2048, 2048), ("2048", 2048), (2048.0, 2048), (" 2048 ", 2048)], ids=["int", "string", "float", "padded-string"])
+    def test_usable_size_is_kept(self, tmp_path, size, expected):
+        mw = _middleware(tmp_path)
+        msg = _human("hi", files=[{"filename": "f.txt", "size": size, "path": "/mnt/user-data/uploads/f.txt"}])
+        result = mw._files_from_kwargs(msg)
+        assert result is not None
+        assert result[0]["size"] == expected
+        assert type(result[0]["size"]) is int
+
     def test_skips_upload_staging_filenames(self, tmp_path):
         mw = _middleware(tmp_path)
         msg = _human("hi", files=[{"filename": ".upload-active.part", "size": 5, "path": "/mnt/user-data/uploads/.upload-active.part"}])
@@ -248,6 +274,22 @@ class TestBeforeAgent:
         state = self._state(_human("plain message"))
         result = mw.before_agent(state, _runtime())
         assert result == {"uploaded_files": []}
+
+    def test_unusable_size_does_not_fail_the_run(self, tmp_path):
+        """A malformed size on an existing upload must still inject the file, not abort before the model is called."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "present.txt").write_text("hello", encoding="utf-8")
+        msg = _human("hi", files=[{"filename": "present.txt", "size": "abc", "path": "/mnt/user-data/uploads/present.txt"}])
+        state = self._state(msg)
+
+        result = mw.before_agent(state, _runtime())
+
+        assert result is not None
+        assert [f["filename"] for f in result["uploaded_files"]] == ["present.txt"]
+        assert result["uploaded_files"][0]["size"] == 0
+        block = _current_uploads_block(result["messages"][0].content)
+        assert "present.txt" in block
 
     def test_clears_uploaded_files_when_all_files_missing_from_disk(self, tmp_path):
         mw = _middleware(tmp_path)

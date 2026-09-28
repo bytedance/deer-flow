@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -1206,3 +1207,117 @@ def test_unverifiable_signature_is_not_treated_as_stable(cache_globals, monkeypa
 
     assert cache_module._read_stable_mcp_snapshot(cfg, incomplete) is None
     assert cache_module._is_cache_stale() is True
+
+
+class TestLazyInitializationFailure:
+    """``get_cached_mcp_tools()`` must run discovery exactly once per call.
+
+    The ``except RuntimeError`` fallback exists for ``asyncio.get_event_loop()``
+    raising when no loop is set (non-main thread, or Python 3.14+). It must not
+    also catch a ``RuntimeError`` raised *by* ``initialize_mcp_tools()`` itself —
+    ``McpTaskConfigurationError`` is one, and it is deliberately re-raised by
+    ``get_mcp_tools`` — because the fallback then re-runs a full discovery pass
+    (respawning every stdio server, re-fetching OAuth tokens) before giving up.
+    """
+
+    @staticmethod
+    def _install_failing_discovery(monkeypatch, tmp_path: Path) -> list[str]:
+        cfg = tmp_path / "extensions_config.json"
+        _write_extensions_config(cfg, {"srv1": _server()})
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+        calls: list[str] = []
+
+        async def _fake_tools(**_kwargs):
+            calls.append(threading.current_thread().name)
+            raise RuntimeError("discovery failed")
+
+        monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+        return calls
+
+    def test_runtime_error_from_discovery_without_running_loop_runs_once(self, cache_globals, monkeypatch, tmp_path, caplog):
+        calls = self._install_failing_discovery(monkeypatch, tmp_path)
+
+        with caplog.at_level("ERROR", logger="deerflow.mcp.cache"):
+            assert cache_module.get_cached_mcp_tools() == []
+
+        assert calls == [threading.current_thread().name]
+        assert cache_module._cache_initialized is False
+        logged = [record for record in caplog.records if record.exc_info]
+        assert len(logged) == 1
+        assert str(logged[0].exc_info[1]) == "discovery failed"
+
+    def test_runtime_error_from_discovery_inside_running_loop_runs_once(self, cache_globals, monkeypatch, tmp_path, caplog):
+        calls = self._install_failing_discovery(monkeypatch, tmp_path)
+
+        async def _call_from_running_loop():
+            return cache_module.get_cached_mcp_tools()
+
+        with caplog.at_level("ERROR", logger="deerflow.mcp.cache"):
+            assert asyncio.run(_call_from_running_loop()) == []
+
+        assert len(calls) == 1
+        assert cache_module._cache_initialized is False
+        # The logged failure must be the discovery error, not a misleading
+        # "asyncio.run() cannot be called from a running event loop".
+        logged = [record for record in caplog.records if record.exc_info]
+        assert len(logged) == 1
+        assert str(logged[0].exc_info[1]) == "discovery failed"
+
+    def test_thread_without_event_loop_still_initializes_once(self, cache_globals, monkeypatch, tmp_path):
+        """The no-loop fallback stays intact: a worker thread with no loop set initializes via ``asyncio.run``."""
+        cfg = tmp_path / "extensions_config.json"
+        _write_extensions_config(cfg, {"srv1": _server()})
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+        calls: list[str] = []
+
+        async def _fake_tools(**_kwargs):
+            calls.append(threading.current_thread().name)
+            return []
+
+        monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+        outcome: dict[str, object] = {}
+
+        def _worker():
+            # ``Thread.join`` does not propagate exceptions: capture them so a
+            # regression surfaces its real traceback instead of a bare KeyError.
+            try:
+                with pytest.raises(RuntimeError):
+                    asyncio.get_event_loop()
+                outcome["result"] = cache_module.get_cached_mcp_tools()
+            except BaseException:
+                outcome["error"] = sys.exc_info()
+
+        worker = threading.Thread(target=_worker, name="mcp-no-loop-worker")
+        worker.start()
+        worker.join(timeout=10)
+        assert not worker.is_alive()
+        if "error" in outcome:
+            _, exc, tb = outcome["error"]
+            raise exc.with_traceback(tb)
+
+        assert outcome["result"] == []
+        assert len(calls) == 1
+        assert cache_module._cache_initialized is True
+
+    def test_closed_current_loop_falls_back_to_fresh_loop(self, cache_globals, monkeypatch, tmp_path):
+        """A closed loop left as the current loop must not be driven; fall back to ``asyncio.run``."""
+        cfg = tmp_path / "extensions_config.json"
+        _write_extensions_config(cfg, {"srv1": _server()})
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+        calls: list[str] = []
+
+        async def _fake_tools(**_kwargs):
+            calls.append(threading.current_thread().name)
+            return []
+
+        monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+        closed_loop = asyncio.new_event_loop()
+        closed_loop.close()
+        asyncio.set_event_loop(closed_loop)
+        try:
+            assert cache_module.get_cached_mcp_tools() == []
+        finally:
+            asyncio.set_event_loop(None)
+
+        assert len(calls) == 1
+        assert cache_module._cache_initialized is True

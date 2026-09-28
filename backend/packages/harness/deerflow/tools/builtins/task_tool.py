@@ -49,6 +49,7 @@ from deerflow.subagents.status_contract import (
     format_subagent_result_message,
     make_subagent_additional_kwargs,
 )
+from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
 from deerflow.utils.assembly_io import run_assembly
@@ -436,9 +437,10 @@ def bind_task_tool(
     """Return a task tool bound to one explicit SDK runtime capacity.
 
     The copied tool keeps the original name, description, and argument schema;
-    only its coroutine is wrapped. ``ContextVar`` keeps concurrent direct
-    factories isolated while the resolved capacity is passed into the executor
-    before work crosses to the persistent subagent event loop.
+    its coroutine and sync func are wrapped around the bound coroutine.
+    ``ContextVar`` keeps concurrent direct factories isolated while the
+    resolved capacity is passed into the executor before work crosses to the
+    persistent subagent event loop.
     """
 
     original_coroutine = task_tool.coroutine
@@ -454,7 +456,15 @@ def bind_task_tool(
             _explicit_app_config.reset(config_token)
             _explicit_execution_capacity.reset(capacity_token)
 
-    return task_tool.model_copy(update={"coroutine": bound_coroutine})
+    # The source tool may carry a sync func around the unbound coroutine (set
+    # in place by _ensure_sync_invocable_tool) or none at all; either way the
+    # copy's sync path must go through the bound coroutine.
+    return task_tool.model_copy(
+        update={
+            "coroutine": bound_coroutine,
+            "func": make_sync_tool_wrapper(bound_coroutine, task_tool.name),
+        }
+    )
 
 
 def _schedule_deferred_subagent_cleanup(

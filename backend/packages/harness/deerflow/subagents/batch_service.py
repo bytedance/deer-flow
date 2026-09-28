@@ -196,7 +196,12 @@ class SubagentBatchService:
             batch = item["batch"]
             self._item_batches[item_id] = batch["id"]
             spec = batch["execution_spec"]
-            config = SubagentConfig(**spec["subagent_config"])
+            config_data = spec["subagent_config"]
+            if "prompt_overlay" in config_data:
+                from deerflow.config.prompt_overlay import PromptOverlay
+
+                config_data = {**config_data, "prompt_overlay": PromptOverlay.model_validate(config_data["prompt_overlay"])}
+            config = SubagentConfig(**config_data)
             app_config = self._app_config or get_app_config()
             from deerflow.tools import get_available_tools
 

@@ -766,14 +766,23 @@ def test_factory_attaches_memory_flush_hook_by_default(monkeypatch):
     fake_model.with_config.return_value = fake_model
     monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: fake_model)
 
+    pii_redaction = object()
     app_config = SimpleNamespace(
         summarization=SummarizationConfig(enabled=True),
         memory=MemoryConfig(enabled=True),
+        pii_redaction=pii_redaction,
     )
     middleware = create_summarization_middleware(app_config=app_config)
 
     assert middleware is not None
-    assert memory_flush_hook in middleware._before_summarization_hooks
+    # The hook is wrapped in functools.partial to carry the pii_redaction
+    # config; unwrap it for the identity check. The async counterpart must
+    # stay attached, because partial() does not copy as_async by itself.
+    hooks = [h for h in middleware._before_summarization_hooks if getattr(h, "func", h) is memory_flush_hook]
+    assert len(hooks) == 1
+    assert getattr(hooks[0].as_async, "func", None) is amemory_flush_hook
+    assert hooks[0].keywords["pii_redaction_config"] is pii_redaction
+    assert hooks[0].as_async.keywords["pii_redaction_config"] is pii_redaction
 
 
 def test_factory_skip_memory_flush_omits_hook(monkeypatch):

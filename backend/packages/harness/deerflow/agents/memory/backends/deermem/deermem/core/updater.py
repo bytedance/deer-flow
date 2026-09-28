@@ -1540,14 +1540,21 @@ class MemoryUpdater:
         agent_name: str | None,
         signals: frozenset[str],
         user_id: str | None = None,
+        conversation_text: str | None = None,
     ) -> tuple[dict[str, Any], list[Any]] | None:
-        """Load memory and build the update prompt for a conversation."""
+        """Load memory and build the update prompt for a conversation.
+
+        ``conversation_text`` lets the caller hand over the formatted text it
+        already produced for the memory judge, so the conversation is formatted
+        once per batch instead of twice.
+        """
         config = self._config
         if not messages:
             return None
 
         current_memory = self.get_memory_data(agent_name, user_id=user_id)
-        conversation_text = format_conversation_for_update(messages)
+        if conversation_text is None:
+            conversation_text = format_conversation_for_update(messages)
         if not conversation_text.strip():
             return None
 
@@ -1590,6 +1597,16 @@ class MemoryUpdater:
             "consolidation_section": consolidation_section,
         }
         prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name, prompts_dir=self._prompts_dir)
+        if config.prompt_prepend or config.prompt_append:
+            # Extend trusted instructions only, after formatting the original
+            # template. Conversation/memory data stays in its human message.
+            for index, message in enumerate(prompt):
+                if message.type == "system":
+                    content = "\n\n".join(part for part in (config.prompt_prepend, message.content, config.prompt_append) if part)
+                    prompt[index] = message.model_copy(update={"content": content})
+                    break
+            else:
+                raise ValueError("Memory prompt overlays require a system message in the configured chat template")
         return current_memory, prompt
 
     def _has_manual_facts(self, memory: dict[str, Any]) -> bool:
@@ -1630,6 +1647,50 @@ class MemoryUpdater:
             callback(payload)
         except Exception:
             logger.warning("extraction_callback raised; ignoring", exc_info=True)
+
+    def _judge_batch(
+        self,
+        hook: Any,
+        *,
+        batch_text: str,
+        signals: frozenset[str],
+        thread_id: str | None,
+        agent_name: str | None,
+        user_id: str | None,
+        trace_id: str | None,
+        bypass_watermark: bool,
+        message_count: int,
+    ) -> Any:
+        """Ask an injected memory judge about this batch; ``None`` when unjudged.
+
+        The hook is a plain callable over a mapping -- the same convention as
+        ``extraction_callback``'s payload -- so DeerMem stays host-agnostic (it
+        imports no host judging types) while the host owns what a verdict means.
+
+        A judge failure is logged and treated as "no opinion": pre-screening must
+        never lose a memory and signal classification must never block one, so
+        this path can only ever fall back to today's behaviour (design L2 / S2).
+        """
+        if hook is None:
+            return None
+        try:
+            return hook(
+                {
+                    "batch_text": batch_text,
+                    "signals": signals,
+                    "staleness_review_enabled": bool(self._config.staleness_review_enabled),
+                    "consolidation_enabled": bool(self._config.consolidation_enabled),
+                    "bypass_watermark": bypass_watermark,
+                    "thread_id": thread_id,
+                    "user_id": user_id,
+                    "agent_name": agent_name,
+                    "trace_id": trace_id,
+                    "message_count": message_count,
+                }
+            )
+        except Exception:
+            logger.warning("Memory judge failed; extracting as usual", exc_info=True)
+            return None
 
     def _finalize_update(
         self,
@@ -1673,7 +1734,6 @@ class MemoryUpdater:
                     user_id=user_id,
                     capacity_decisions=capacity_decisions,
                 )
-                updated_memory = _strip_upload_mentions_from_memory(updated_memory)
                 current_by_id = {str(fact.get("id")): fact for fact in current_memory.get("facts", [])}
                 updated_by_id = {str(fact.get("id")): fact for fact in updated_memory.get("facts", [])}
                 change_set = {
@@ -1730,7 +1790,6 @@ class MemoryUpdater:
             user_id=user_id,
             capacity_decisions=capacity_decisions,
         )
-        updated_memory = _strip_upload_mentions_from_memory(updated_memory)
         saved = self._storage.save(
             updated_memory,
             agent_name,
@@ -1759,6 +1818,7 @@ class MemoryUpdater:
         bypass_watermark: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
         sequence: int | None = None,
+        judge: bool = True,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -1779,6 +1839,7 @@ class MemoryUpdater:
             bypass_watermark=bypass_watermark,
             expected_clear_generation=expected_clear_generation,
             sequence=sequence,
+            judge=judge,
         )
 
     def _do_update_memory_sync(
@@ -1793,6 +1854,7 @@ class MemoryUpdater:
         bypass_watermark: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
         sequence: int | None = None,
+        judge: bool = True,
     ) -> bool:
         """Pure-sync memory update; bind ``trace_id`` into the request-trace
         ContextVar for the worker thread, then delegate to the impl.
@@ -1818,6 +1880,7 @@ class MemoryUpdater:
                     bypass_watermark=bypass_watermark,
                     expected_clear_generation=expected_clear_generation,
                     sequence=sequence,
+                    judge=judge,
                 )
         return self._do_update_memory_sync_impl(
             messages=messages,
@@ -1829,6 +1892,7 @@ class MemoryUpdater:
             bypass_watermark=bypass_watermark,
             expected_clear_generation=expected_clear_generation,
             sequence=sequence,
+            judge=judge,
         )
 
     def _watermark_get(self, key: tuple[str | None, str | None, str | None]) -> tuple[str, ...] | None:
@@ -2211,6 +2275,7 @@ class MemoryUpdater:
         bypass_watermark: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
         sequence: int | None = None,
+        judge: bool = True,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
@@ -2280,11 +2345,83 @@ class MemoryUpdater:
             # served their purpose (backpressure admission at enqueue); the hint
             # is a soft nudge and must not point at turns the watermark excluded.
             feed_signals = detect_signals(feed_messages, patterns_dir=self._config.patterns_dir)
+            # The judge's L3 veto reads the whole batch, not the hint window: a skip
+            # consumes every turn fed here (it advances the watermark), so an explicit
+            # signal anywhere in the batch has to keep that batch out of judging. The
+            # extraction hint above keeps the default 6-message window -- a hint points
+            # at recent turns, a veto answers for the batch.
+            batch_signals = detect_signals(feed_messages, patterns_dir=self._config.patterns_dir, window=None)
+            batch_text = format_conversation_for_update(feed_messages)
+            # The memory judge (when the host injected one) runs here: still off the
+            # turn path, before any LLM call, on exactly the text the extractor would
+            # see -- no second truncation. ``judge=False`` (the shutdown drain) and a
+            # ``None`` hook both leave the batch unjudged.
+            verdict = self._judge_batch(
+                self._config.judge if judge else None,
+                batch_text=batch_text,
+                signals=frozenset(batch_signals),
+                thread_id=thread_id,
+                agent_name=agent_name,
+                user_id=user_id,
+                trace_id=trace_id,
+                bypass_watermark=bypass_watermark,
+                message_count=len(feed_messages),
+            )
+            verdict_payload = getattr(verdict, "payload", None)
+            if isinstance(verdict_payload, dict):
+                metrics.update({key: value for key, value in verdict_payload.items() if value is not None})
+            if getattr(verdict, "skip", False):
+                # The pre-screen decided this batch is not worth a call: consume it
+                # the same way a successful extraction does. Publish every identity,
+                # not only the tail, so a later clear can exclude an older
+                # summarization prefix. Advancing the watermark is what makes the
+                # saving real; leaving it put would re-judge a longer batch every
+                # turn and the digest-keyed cache could never hit. Re-check the
+                # fence after the judge returns: a clear that landed during the
+                # request already ran promote, before this coverage existed.
+                self._mark_feed_consumed(
+                    watermark_key,
+                    messages,
+                    bypass_watermark=bypass_watermark,
+                    sequence=sequence,
+                )
+                newer_clear = self._peek_newer_clear(
+                    fence_generation,
+                    agent_name,
+                    user_id,
+                    on_peek_error="Failed to re-check clear generation after a pre-screen skip; leaving exclusion to a later promote",
+                )
+                if newer_clear is not None:
+                    logger.info(
+                        "Registering clear exclusion after pre-screen skip because a newer clear completed (user_id=%s agent_name=%s expected=%s current=%s)",
+                        user_id,
+                        agent_name,
+                        fence_generation,
+                        newer_clear,
+                    )
+                    self._mark_feed_consumed(
+                        watermark_key,
+                        messages,
+                        bypass_watermark=bypass_watermark,
+                        sequence=sequence,
+                        exclude_cleared=True,
+                    )
+                success = True
+                # The judge record is this batch's only trace, so emit it even though
+                # no LLM call happened (the finally-block gate reads this flag).
+                attempted = True
+                logger.info("Memory extraction skipped by the pre-screen (thread=%s)", thread_id)
+                return True
+            model_hints = getattr(verdict, "hints", None)
             prepared = self._prepare_update_prompt(
                 messages=feed_messages,
                 agent_name=agent_name,
-                signals=feed_signals,
+                # Hint text takes the union (deterministic + model hints); the
+                # reinforcement evidence gate below still reads the deterministic
+                # set only, so a model verdict can never confirm a fact (S4).
+                signals=frozenset(feed_signals) | (model_hints if isinstance(model_hints, frozenset) else frozenset()),
                 user_id=user_id,
+                conversation_text=batch_text,
             )
             if prepared is None:
                 return False
@@ -2419,6 +2556,14 @@ class MemoryUpdater:
             # pre-attempt early returns (no new messages, empty conversation, no
             # model) do not emit, matching the prior behavior.
             if attempted:
+                if not success:
+                    # A failed extraction persisted nothing, so the apply-site
+                    # counter must not be published. The evaluation script scores a
+                    # present counter even on ``success=False`` (it is treated as an
+                    # outcome, not a censored failure), which would register a
+                    # rejected commit as a missed memory. Absent + failed is censored
+                    # -- the honest reading (persistent-mutation contract).
+                    metrics.pop("mutations_accepted", None)
                 self._emit_extraction_metrics(
                     metrics,
                     thread_id=thread_id,
@@ -2472,6 +2617,7 @@ class MemoryUpdater:
         bypass_watermark: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
         sequence: int | None = None,
+        judge: bool = True,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -2479,6 +2625,10 @@ class MemoryUpdater:
         separate connection pool from the async ``AsyncClient`` shared by
         the lead agent.  This eliminates the cross-loop connection-reuse
         bug described in issue #2615.
+
+        ``judge=False`` forbids this batch from being judged by the injected
+        memory judge (the shutdown-drain path sets it: the drain budget belongs
+        to persistence, not to a cost optimization).
 
         When called from within a running event loop (e.g. from a LangGraph
         node), the blocking sync call is offloaded to a thread pool so the
@@ -2526,6 +2676,7 @@ class MemoryUpdater:
                     bypass_watermark=bypass_watermark,
                     expected_clear_generation=expected_clear_generation,
                     sequence=sequence,
+                    judge=judge,
                 )
                 return future.result()
             except Exception:
@@ -2542,6 +2693,7 @@ class MemoryUpdater:
             bypass_watermark=bypass_watermark,
             expected_clear_generation=expected_clear_generation,
             sequence=sequence,
+            judge=judge,
         )
 
     def _apply_updates(
@@ -2571,6 +2723,13 @@ class MemoryUpdater:
         """
         config = self._config
         now = utc_now_iso_z()
+        # Mutations that actually landed, counted at their real apply sites. New
+        # facts are counted only after they survive capacity enforcement (and any
+        # consolidation pass), not at the append. This is the pre-screen's "worth
+        # remembering" signal: a batch whose only effect was a summary rewrite
+        # counts zero, so a skip that dropped it is not a missed memory
+        # (pre-screening design §5).
+        mutations_accepted = 0
         scope_gate_rejections: dict[str, dict[str, int]] = {
             "facts": {"missing": 0, "scope": 0, "durability": 0, "authority": 0},
             "summaries": {"missing": 0, "scope": 0, "authority": 0},
@@ -2593,6 +2752,11 @@ class MemoryUpdater:
                 for entry in update_data.get("factsToReinforce", [])
                 if isinstance(entry, dict) and entry.get("scope") == "user" and isinstance(entry.get("reason"), str) and entry["reason"].strip() and isinstance(entry.get("id"), str)
             }
+            # Only an id that actually exists can be confirmed. A nonexistent
+            # target changes nothing, so counting it would report an accepted
+            # mutation that never landed (the pre-screen evaluation reads the
+            # counter as "worth remembering").
+            reinforced_ids &= {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
             if reinforced_ids:
                 current_memory["facts"] = [
                     {
@@ -2604,6 +2768,7 @@ class MemoryUpdater:
                     else fact
                     for fact in current_memory.get("facts", [])
                 ]
+                mutations_accepted += len(reinforced_ids)
 
         # Update user sections
         user_updates = update_data.get("user", {})
@@ -2749,6 +2914,18 @@ class MemoryUpdater:
         # persisted-fact count.
         passed_threshold = 0
         replacement_fact_keys: dict[int, str] = {}
+        # Fact IDs appended by this pass. They count as accepted mutations only
+        # if they survive to the final fact set (see the metrics block): capacity
+        # enforcement can evict one immediately, and a later consolidation can
+        # consume one as a source.
+        added_fact_ids: list[str] = []
+        # Existing fact IDs a near-duplicate merge actually changed (confidence
+        # raised). Counted under the same survival rule: a no-op merge (proposed
+        # confidence not higher) changed nothing and must not count.
+        changed_merge_ids: set[str] = set()
+        # Legacy id-less facts cannot be matched by id, so they are tracked by
+        # object identity; the target dicts stay alive in the memory being edited.
+        changed_merge_facts: dict[int, dict[str, Any]] = {}
         # A correction must keep its proposed content, not inherit an older
         # paraphrase. Also avoid strengthening any proposed removal target,
         # including stale targets retained by candidate guards or the cap.
@@ -2805,6 +2982,14 @@ class MemoryUpdater:
                     if confidence > existing_confidence:
                         merge_target["confidence"] = confidence
                         merge_target["source"] = thread_id or "unknown"
+                        # This merge persisted a change to an existing fact, so it
+                        # is a mutation outcome too -- but only once we know the
+                        # target survives (the count below checks the final set).
+                        merge_target_id = merge_target.get("id")
+                        if isinstance(merge_target_id, str):
+                            changed_merge_ids.add(merge_target_id)
+                        else:
+                            changed_merge_facts[id(merge_target)] = merge_target
                     if metrics is not None:
                         metrics["facts_merged_dedup"] = metrics.get("facts_merged_dedup", 0) + 1
                     # New proposals have no durable ID yet. Log their batch
@@ -2841,6 +3026,7 @@ class MemoryUpdater:
                 fact_entry["expected_valid_days"] = min(evd, creation_cap)
             current_memory["facts"].append(fact_entry)
             existing_fact_keys.add(fact_key)
+            added_fact_ids.append(fact_entry["id"])
 
         # Enforce one capacity policy across automatic, manual, and import
         # writes. Usage comes from a separate sidecar, so scoring never rewrites
@@ -2882,7 +3068,14 @@ class MemoryUpdater:
             fact_ids_to_remove.add(fact_id)
 
         if fact_ids_to_remove:
-            current_memory["facts"] = [fact for fact in current_memory.get("facts", []) if fact.get("id") not in fact_ids_to_remove]
+            # Count only targets that actually existed: a scope-valid removal of
+            # a nonexistent id deletes nothing, so counting it would report an
+            # accepted mutation that never landed (the pre-screen evaluation
+            # reads the counter as "worth remembering").
+            landed_removals = fact_ids_to_remove & {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
+            if landed_removals:
+                current_memory["facts"] = [fact for fact in current_memory.get("facts", []) if fact.get("id") not in landed_removals]
+                mutations_accepted += len(landed_removals)
 
         # ── Memory consolidation ──
         # Runs after the max_facts trim so source facts that were just evicted
@@ -3057,6 +3250,29 @@ class MemoryUpdater:
                 if ids_consumed:
                     current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in ids_consumed]
                     current_memory["facts"].extend(new_consolidated)
+                    mutations_accepted += merge_count
+
+        # Finalization scrubs upload-event facts (session-scoped) from the memory it
+        # persists; apply that here, before scoring survival, so a fact accepted by
+        # the apply but dropped by the scrub is not counted as a landed mutation
+        # (the shadow evaluation reads a positive count on a skip as a lost memory).
+        current_memory = _strip_upload_mentions_from_memory(current_memory)
+
+        # Count new facts and changed near-duplicate targets only once they survive
+        # capacity enforcement. A proposed fact can pass the confidence gate and be
+        # appended, then be immediately evicted by _select_for_capacity; a merge
+        # target can be evicted the same way. Counting either would report an
+        # accepted mutation even though the persistent facts are unchanged, and the
+        # pre-screen evaluation reads any positive mutations_accepted on a skip as a
+        # lost memory (memory/AGENTS.md, "worth remembering"). Scoring against the
+        # final fact set also excludes a fact a later consolidation consumed as a
+        # source, whose merge is counted separately.
+        final_fact_ids = {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
+        mutations_accepted += sum(1 for fact_id in added_fact_ids if fact_id in final_fact_ids)
+        mutations_accepted += sum(1 for fact_id in changed_merge_ids if fact_id in final_fact_ids)
+        if changed_merge_facts:
+            surviving_objects = {id(fact) for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
+            mutations_accepted += sum(1 for object_id in changed_merge_facts if object_id in surviving_objects)
 
         if metrics is not None:
             metrics["facts_passed_confidence"] = passed_threshold
@@ -3064,5 +3280,6 @@ class MemoryUpdater:
             metrics["facts_passed_scope_gate"] = len(new_facts) - sum(scope_gate_rejections["facts"].values())
             metrics["rejected_by_scope_gate"] = sum(count for reasons in scope_gate_rejections.values() for count in reasons.values())
             metrics["scope_gate_rejections"] = scope_gate_rejections
+            metrics["mutations_accepted"] = mutations_accepted
 
         return current_memory
