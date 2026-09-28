@@ -166,3 +166,13 @@ the admitted group keeps its records on success or completes rollback on failure
 This is a store-local guarantee, not a change to RunJournal cancellation policy or
 JSONL's single-process deployment constraint. Regression coverage is in
 `tests/test_jsonl_event_store_cancellation.py`.
+
+## JSONL tail recovery
+
+All append paths use `_append_records` to separate an unterminated existing tail
+from new records. Read and decode physical byte lines individually so incomplete
+UTF-8/JSON records do not hide intact records or block sequence recovery. Preserve
+Unicode separators within strings, existing bytes, and per-thread mutation
+ownership. Batch rollback must restore the pre-append byte size, including removal
+of a newly inserted separator. Tests live in `test_jsonl_event_store_tail_recovery.py`;
+this does not add multi-process support or guarantee crash-atomic batches.

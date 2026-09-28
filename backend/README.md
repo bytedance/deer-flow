@@ -94,6 +94,13 @@ Async task delegation with concurrent execution:
 - **Execution**: Background thread pools with status tracking and SSE events
 - **Flow**: Agent calls `task()` tool → executor runs subagent in background → polls for completion → returns result
 
+### Event History
+
+For the single-process JSONL event store, a missing final newline or an incomplete
+UTF-8/JSON record no longer hides intact history or swallows the next appended
+event. Incomplete records are skipped on replay; their original bytes remain on
+disk. This recovery does not make a batch atomic across process crashes.
+
 ### Memory System
 
 LLM-powered persistent context retention across conversations:
