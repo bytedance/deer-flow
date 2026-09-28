@@ -1898,12 +1898,25 @@ async def _clear_completed_goal(
                 "get_tuple",
                 {"configurable": {"thread_id": record.thread_id, "checkpoint_ns": ""}},
             )
-            if checkpoint_tuple is None or _read_checkpoint_goal(checkpoint_tuple) != candidate.goal:
+            if checkpoint_tuple is None:
+                logger.debug("Skipping goal completion for run %s: checkpoint is unavailable", record.run_id)
+                return
+            # Full equality is intentional: even same-instance goal updates must win over clearing.
+            if _read_checkpoint_goal(checkpoint_tuple) != candidate.goal:
+                logger.debug("Skipping goal completion for run %s: goal snapshot changed", record.run_id)
                 return
             messages = await _materialized_checkpoint_messages(accessor, record.thread_id)
             if visible_conversation_signature(messages) != candidate.conversation_signature:
+                logger.debug("Skipping goal completion for run %s: visible conversation changed", record.run_id)
                 return
             if record.status != RunStatus.success or record.abort_event.is_set() or record.ownership_lost:
+                logger.debug(
+                    "Skipping goal completion for run %s: status=%s, aborted=%s, ownership_lost=%s",
+                    record.run_id,
+                    record.status.value,
+                    record.abort_event.is_set(),
+                    record.ownership_lost,
+                )
                 return
             # Duration bookkeeping may advance the checkpoint after evaluation.
             # Compare goal/conversation above, then guard against stale writes.
@@ -1915,7 +1928,10 @@ async def _clear_completed_goal(
                 expected_checkpoint_id=_checkpoint_id(checkpoint_tuple),
             )
             await bridge.publish(record.run_id, "values", serialize(values, mode="values"))
-    except (GoalWriteConflict, ConflictError):
+    except GoalWriteConflict:
+        logger.debug("Skipping goal completion for run %s: checkpoint changed before the goal write", record.run_id)
+        return
+    except ConflictError:
         return
 
 
