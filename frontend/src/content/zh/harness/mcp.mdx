@@ -108,7 +108,7 @@ OAuth 流程对 Lead Agent 是透明的——它只是调用工具，DeerFlow �
 MCP 服务器可以通过多种方式管理：
 
 - **通过 DeerFlow 应用界面**：扩展面板显示已连接的 MCP 服务器，允许你启用/禁用它们。
-- **通过 Gateway API**：`POST /api/extensions/mcp/{name}/enable` 和 `/disable`。
+- **通过 Gateway API**：`PATCH /api/mcp/config`，请求体为 `{"server_name": "<name>", "enabled": true}`（禁用时为 `false`；仅管理员）。
 - **直接编辑 `extensions_config.json`**：适用于脚本化或程序化配置。
 
 由于基于文件 mtime 的缓存失效机制，更改会自动被检测到。

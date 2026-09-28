@@ -26,8 +26,8 @@ Launch modes:
 | `deerflow chat` | Same TUI conversation surface |
 | `deerflow --continue` | Resume the most recent thread |
 | `deerflow --resume THREAD` | Resume a thread by id |
-| `deerflow --print "question"` | Headless one-shot answer to stdout |
-| `deerflow --json "question"` | Headless newline-delimited `StreamEvent`s |
+| `deerflow --print "question"` | Headless one-shot answer to stdout; on failure a concise stderr line and exit 1 |
+| `deerflow --json "question"` | Headless newline-delimited `StreamEvent`s; on failure one terminal `{"type": "error"}` record and exit 1 |
 | `deerflow --recursion-limit 250 --print "question"` | Set the headless agent-loop super-step limit |
 | `echo "q" \| deerflow --print` | Read the message from stdin |
 | `DEER_FLOW_TUI=1 deerflow` | Force the TUI via environment |

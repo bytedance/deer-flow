@@ -32,7 +32,6 @@ import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
-import type { UploadedFileInfo } from "../uploads";
 import {
   promptInputFilePartToFile,
   toSubmittedMessageFiles,
@@ -176,6 +175,29 @@ export function hasToolResult(messages: Message[], toolName: string): boolean {
   );
 }
 
+/**
+ * `additional_kwargs` of this turn's visible human message. The optimistic
+ * display copy (before and after the upload) and the submitted message all
+ * build it here, so caller metadata such as quotes and conversation
+ * references stays on the bubble through the upload. Files staged out-of-band
+ * (e.g. a project document attached to this thread and carried in
+ * ``additionalKwargs.files``) ride alongside ``files`` instead of being
+ * overwritten by them.
+ */
+export function buildHumanMessageAdditionalKwargs(
+  additionalKwargs: Record<string, unknown> | undefined,
+  files: FileInMessage[],
+): Record<string, unknown> {
+  const stagedFiles = Array.isArray(additionalKwargs?.files)
+    ? (additionalKwargs.files as FileInMessage[])
+    : [];
+  const allFiles = [...stagedFiles, ...files];
+  return {
+    ...additionalKwargs,
+    ...(allFiles.length > 0 ? { files: allFiles } : {}),
+  };
+}
+
 export function buildThreadSubmitMessages({
   text,
   additionalKwargs,
@@ -194,13 +216,6 @@ export function buildThreadSubmitMessages({
    */
   humanMessageId?: string;
 }): Message[] {
-  // Files staged out-of-band (e.g. a project document attached to this
-  // thread and carried in ``additionalKwargs.files``) ride alongside the
-  // freshly uploaded files instead of being overwritten by them.
-  const stagedFiles = Array.isArray(additionalKwargs?.files)
-    ? (additionalKwargs.files as FileInMessage[])
-    : [];
-  const allFiles = [...stagedFiles, ...filesForSubmit];
   return [
     ...additionalInputMessages,
     {
@@ -212,10 +227,10 @@ export function buildThreadSubmitMessages({
           text,
         },
       ],
-      additional_kwargs: {
-        ...additionalKwargs,
-        ...(allFiles.length > 0 ? { files: allFiles } : {}),
-      },
+      additional_kwargs: buildHumanMessageAdditionalKwargs(
+        additionalKwargs,
+        filesForSubmit,
+      ),
     } as Message,
   ];
 }
@@ -2482,18 +2497,16 @@ export function useThreadStream({
         }),
       );
 
-      const optimisticAdditionalKwargs = {
-        ...options?.additionalKwargs,
-        ...(optimisticFiles.length > 0 ? { files: optimisticFiles } : {}),
-      };
-
       const newOptimistic: Message[] = [];
       if (!hideFromUI) {
         newOptimistic.push({
           type: "human",
           id: humanMessageId,
           content: text ? [{ type: "text", text }] : "",
-          additional_kwargs: optimisticAdditionalKwargs,
+          additional_kwargs: buildHumanMessageAdditionalKwargs(
+            options?.additionalKwargs,
+            optimisticFiles,
+          ),
         });
       }
 
@@ -2512,7 +2525,9 @@ export function useThreadStream({
 
       listeners.current.onSend?.(threadId);
 
-      let uploadedFileInfo: UploadedFileInfo[] = [];
+      // Shared by the optimistic bubble and the submit, so the files the
+      // user sees are exactly the files that are sent.
+      let uploadedFiles: FileInMessage[] = [];
 
       try {
         // Upload files first if any
@@ -2541,18 +2556,19 @@ export function useThreadStream({
 
             if (files.length > 0) {
               const uploadResponse = await uploadFiles(threadId, files);
-              uploadedFileInfo = uploadResponse.files;
+              uploadedFiles = toSubmittedMessageFiles(uploadResponse.files);
 
               // Update optimistic human message with uploaded status + paths
-              const uploadedFiles: FileInMessage[] =
-                toSubmittedMessageFiles(uploadedFileInfo);
               setOptimisticMessages((messages) => {
                 if (messages.length > 1 && messages[0]) {
                   const humanMessage: Message = messages[0];
                   return [
                     {
                       ...humanMessage,
-                      additional_kwargs: { files: uploadedFiles },
+                      additional_kwargs: buildHumanMessageAdditionalKwargs(
+                        options?.additionalKwargs,
+                        uploadedFiles,
+                      ),
                     },
                     ...messages.slice(1),
                   ];
@@ -2575,17 +2591,13 @@ export function useThreadStream({
           }
         }
 
-        // Build files metadata for submission (included in additional_kwargs)
-        const filesForSubmit: FileInMessage[] =
-          toSubmittedMessageFiles(uploadedFileInfo);
-
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
               text,
               additionalKwargs: options?.additionalKwargs,
               additionalInputMessages: options?.additionalInputMessages,
-              filesForSubmit,
+              filesForSubmit: uploadedFiles,
               humanMessageId,
             }),
           },

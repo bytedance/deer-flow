@@ -16,6 +16,7 @@ from typing import Any, Literal
 from deerflow_extension_api import API_VERSION
 from pydantic import BaseModel, ConfigDict, Field
 
+from deerflow.extensions.model_access import ExtensionHostAccess, ModelInvocationScope
 from deerflow.extensions.registry import ExtensionRegistry, LoadedExtensions
 from deerflow.persistence.migrations._env_filters import register_extension_table_prefix
 from deerflow.reflection import resolve_variable
@@ -43,6 +44,7 @@ class ExtensionSpec(BaseModel):
         description="Installed Python distribution recorded by the extension manager",
     )
     use: str = Field(description="Entry point path, e.g. 'my_extension:install'")
+    host_access: ExtensionHostAccess = Field(default_factory=ExtensionHostAccess)
     config: dict[str, Any] = Field(
         default_factory=dict,
         description="Extension-private configuration, passed to install() verbatim",
@@ -237,7 +239,9 @@ def load_extensions(specs: Sequence[ExtensionSpec]) -> tuple[LoadedExtensions, l
         # installed instance that happens to share this spec's `use`.
         mark = registry.mark()
         try:
-            with registry.attributed_to(spec.use):
+            grant = spec.host_access.model_invocation
+            scope = ModelInvocationScope(spec.use, grant) if grant is not None else None
+            with registry.attributed_to(spec.use, model_access=scope):
                 install(registry, _frozen_config(spec.config))
         except Exception as exc:
             registry.rollback_to(mark)
