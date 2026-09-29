@@ -340,6 +340,50 @@ describe("extractCitationSources", () => {
     ]);
   });
 
+  it("does not let a marker with an info string close the fence", () => {
+    // A closing fence is bare, so ` ```text ` here is literal content and the
+    // citation after it stays inside the block instead of becoming a source.
+    const markdown = [
+      "```md",
+      "```text",
+      "[citation:Fake](https://example.com/fake)",
+      "```",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("does not open a backtick fence whose info string holds a backtick", () => {
+    // ` ```md `x` ` is paragraph text, so the citation below it is a link the
+    // reader can reach and must not be masked away.
+    const markdown = [
+      "```md `x`",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("opens a tilde fence whatever its info string says", () => {
+    // Tilde fences take backticks in the info string, so the boundary above is
+    // about the marker character rather than a blanket rule.
+    const markdown = [
+      "~~~md `x`",
+      "[citation:Fake](https://example.com/fake)",
+      "~~~",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
   it("uses the source domain when the citation label is generic", () => {
     const markdown = "See [citation:Source](https://www.example.com/path).";
 

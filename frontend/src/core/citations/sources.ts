@@ -165,6 +165,13 @@ function fenceMarkerColumn(line: string, marker: string): number {
   return rest.indexOf(marker);
 }
 
+// What follows a fence marker on its line. Two CommonMark rules live there: a
+// closing fence is bare, and a backtick fence's info string carries no backtick.
+// Both are what the scanner in core/messages/utils.ts already enforces.
+function fenceTail(line: string, match: RegExpExecArray): string {
+  return line.slice(match[0].length);
+}
+
 type OpenFence = { quoteDepth: number; column: number };
 
 function maskFencedCodeBlocks(markdown: string): string {
@@ -199,8 +206,14 @@ function maskFencedCodeBlocks(markdown: string): string {
       } else {
         lines[i] = maskKeepingNewlines(line);
         const closer = opener?.[2];
+        // A closer is only a closer when nothing but whitespace follows the
+        // marker: ` ```text ` inside a ` ``` ` block is literal content, so
+        // blanking it as a fence end would let a citation on the following
+        // lines surface as a phantom source.
+        const closerTail = opener ? fenceTail(line, opener) : "";
         if (
           closer &&
+          closerTail.trim() === "" &&
           position.quoteDepth === fence!.quoteDepth &&
           fenceMarkerColumn(line, closer) - fence!.column <= 3 &&
           closer.startsWith(openMarker.charAt(0)) &&
@@ -234,8 +247,18 @@ function maskFencedCodeBlocks(markdown: string): string {
     // there cannot open a fence and everything after it keeps rendering.
     const openerMarker = opener?.[2];
     const containerColumn = items[items.length - 1] ?? 0;
+    // A backtick fence's info string cannot hold a backtick, so ` ```md `x` `
+    // is paragraph text with an inline span rather than an opener; opening a
+    // fence there would blank a citation the reader can actually click. Tilde
+    // fences take any info string.
+    const openerTail = opener ? fenceTail(line, opener) : "";
+    const infoAllowed =
+      !openerMarker ||
+      openerMarker.startsWith("~") ||
+      !openerTail.includes("`");
     if (
       openerMarker &&
+      infoAllowed &&
       fenceMarkerColumn(line, openerMarker) - containerColumn <= 3
     ) {
       openMarker = openerMarker;
