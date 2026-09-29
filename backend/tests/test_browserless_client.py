@@ -354,20 +354,74 @@ class TestBrowserlessTools:
         assert "Error:" not in result
         mock_client.fetch_html_with_status.assert_called_once()
 
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_allows_public_browser_backend_without_acknowledgement(self, mock_get_client):
+        """Public Browserless SaaS remains usable without an isolation acknowledgement."""
+        cfg = {"base_url": "https://production-sfo.browserless.io"}
+        mock_client = MagicMock()
+        mock_client.fetch_html_with_status = AsyncMock(
+            return_value=BrowserlessFetchResult(
+                html="<html><body><article>public</article></body></html>",
+                target_status_code="200",
+                target_status="OK",
+            )
+        )
+        mock_get_client.return_value = mock_client
+
+        with patch("deerflow.community.browserless.tools._get_tool_config", return_value=cfg) as mock_cfg:
+            result = await tools.web_fetch_tool.ainvoke("https://example.com/article")
+
+        assert "Error:" not in result
+        mock_cfg.assert_called_once_with("web_fetch")
+        mock_get_client.assert_called_once_with(cfg)
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_allows_private_backend_when_private_addresses_enabled(self, mock_get_client):
+        cfg = {
+            "base_url": "http://127.0.0.1:3032",
+            "allow_private_addresses": True,
+        }
+        mock_client = MagicMock()
+        mock_client.fetch_html_with_status = AsyncMock(
+            return_value=BrowserlessFetchResult(
+                html="<html><body><article>internal</article></body></html>",
+                target_status_code="200",
+                target_status="OK",
+            )
+        )
+        mock_get_client.return_value = mock_client
+
+        with patch("deerflow.community.browserless.tools._get_tool_config", return_value=cfg):
+            result = await tools.web_fetch_tool.ainvoke("http://10.0.0.5/dashboard")
+
+        assert "Error:" not in result
+        mock_get_client.assert_called_once_with(cfg)
+
+    @pytest.mark.parametrize(
+        "cfg",
+        [
+            {"base_url": "ftp://browserless.example.com", "network_isolation_confirmed": True},
+            {"base_url": "browserless.example.com:3032", "allow_private_addresses": True},
+        ],
+    )
+    async def test_web_fetch_rejects_invalid_backend_scheme_despite_bypass(self, cfg):
+        with patch("deerflow.community.browserless.tools._get_tool_config", return_value=cfg):
+            with patch("deerflow.community.browserless.tools._get_browserless_client") as mock_get_client:
+                result = await tools.web_fetch_tool.ainvoke("https://example.com/article")
+
+        assert "Only http:// and https:// URLs are supported" in result
+        mock_get_client.assert_not_called()
+
     async def test_get_browserless_client_uses_env_token_fallback(self):
         """Browserless tools use BROWSERLESS_TOKEN when config omits token."""
-        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
-            mock_cfg.return_value = {"base_url": "https://production-sfo.browserless.io"}
-            with patch.dict("os.environ", {"BROWSERLESS_TOKEN": "env-token"}, clear=True):
-                client = tools._get_browserless_client("web_capture")
+        with patch.dict("os.environ", {"BROWSERLESS_TOKEN": "env-token"}, clear=True):
+            client = tools._get_browserless_client({"base_url": "https://production-sfo.browserless.io"})
 
         assert client.token == "env-token"
 
     def _client_with_config(self, cfg: dict):
-        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
-            mock_cfg.return_value = cfg
-            with patch.dict("os.environ", {}, clear=True):
-                return tools._get_browserless_client("web_capture")
+        with patch.dict("os.environ", {}, clear=True):
+            return tools._get_browserless_client(cfg)
 
     async def test_timeout_s_config_key_is_honored(self):
         """The documented `timeout_s` key keeps working (back-compat)."""
@@ -733,21 +787,20 @@ class TestBrowserlessTools:
             )
         )
         mock_get_client.return_value = mock_client
+        capture_cfg = {
+            "network_isolation_confirmed": True,
+            "full_page": False,
+            "output_format": "png",
+            "viewport_width": 1024,
+            "viewport_height": 768,
+            "wait_for_selector": "main",
+            "wait_for_selector_timeout_ms": 4000,
+            "wait_for_timeout_ms": 250,
+            "best_attempt": True,
+        }
 
         with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
-            mock_cfg.side_effect = lambda name: {
-                "web_capture": {
-                    "network_isolation_confirmed": True,
-                    "full_page": False,
-                    "output_format": "png",
-                    "viewport_width": 1024,
-                    "viewport_height": 768,
-                    "wait_for_selector": "main",
-                    "wait_for_selector_timeout_ms": 4000,
-                    "wait_for_timeout_ms": 250,
-                    "best_attempt": True,
-                }
-            }.get(name)
+            mock_cfg.side_effect = lambda name: {"web_capture": capture_cfg}.get(name)
 
             with patch(
                 "deerflow.community.browserless.tools._resolve_host_addresses",
@@ -765,7 +818,8 @@ class TestBrowserlessTools:
         written = outputs_dir / "Dashboard_Capture.png"
         assert written.read_bytes() == b"\x89PNG\r\n\x1a\nimage"
         assert result.update["messages"][0].content == "Captured screenshot: /mnt/user-data/outputs/Dashboard_Capture.png"
-        mock_cfg.assert_any_call("web_capture")
+        mock_cfg.assert_called_once_with("web_capture")
+        mock_get_client.assert_called_once_with(capture_cfg)
         mock_client.capture_screenshot.assert_called_once_with(
             url="https://example.com/dashboard",
             full_page=False,

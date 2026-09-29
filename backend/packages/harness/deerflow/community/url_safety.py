@@ -97,16 +97,17 @@ def validate_delegated_fetch_backend(
     Public SaaS backends are outside the DeerFlow deployment trust boundary and
     remain usable without the self-hosted isolation acknowledgement.
     """
-    if allow_private_addresses or network_isolation_confirmed:
-        return None
-
+    bypass_private_address_check = allow_private_addresses or network_isolation_confirmed
     error = validate_public_http_url(
         backend_url,
+        allow_private_addresses=bypass_private_address_check,
         action=f"connect to the {service_name} backend at",
         resolver=resolver,
     )
     if error is None:
         return None
+    if bypass_private_address_check:
+        return error
     return (
         f"Error: Refusing to delegate URL fetching to {service_name} at a "
         "private or unverifiable network address. Initial URL validation cannot "

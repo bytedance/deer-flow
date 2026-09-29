@@ -79,8 +79,8 @@ def _resolve_timeout(cfg: dict, default: float) -> float:
     return default
 
 
-def _get_browserless_client(tool_name: str = "web_fetch") -> BrowserlessClient:
-    cfg = _get_tool_config(tool_name)
+def _get_browserless_client(cfg: dict | None = None) -> BrowserlessClient:
+    """Build a client from the config snapshot already validated by the caller."""
     base_url = "http://localhost:3032"
     token = os.getenv("BROWSERLESS_TOKEN", "")
     timeout_s = 30.0
@@ -292,7 +292,7 @@ async def web_fetch_tool(url: str) -> str:
         wait_for_selector = cfg.get("wait_for_selector", wait_for_selector)
         wait_for_selector_timeout_ms = _as_int(cfg.get("wait_for_selector_timeout_ms"), wait_for_selector_timeout_ms)
 
-        client = _get_browserless_client("web_fetch")
+        client = _get_browserless_client(cfg)
         result = await client.fetch_html_with_status(
             url=url,
             wait_for_event=wait_for_event,
@@ -367,7 +367,7 @@ async def web_capture_tool(
 
         output_name = _safe_capture_filename(filename, url, final_format)
 
-        client = _get_browserless_client("web_capture")
+        client = _get_browserless_client(cfg)
         result = await client.capture_screenshot(
             url=url,
             full_page=final_full_page,
