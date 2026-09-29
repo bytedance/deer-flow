@@ -556,7 +556,7 @@ def _lifecycle_transition(incoming: _McpIncomingRevision) -> tuple[bool, frozens
         # ones. Fail closed for the whole deployment domain.
         return True, frozenset()
     if incoming_lifecycle.global_generation != applied.global_generation:
-        # Whole-pool advance, and a regression is equally unverifiable.
+        # Whole-deployment-domain advance, and a regression is equally unverifiable.
         return True, frozenset()
 
     advanced: set[str] = set()
@@ -598,7 +598,7 @@ def _classify_against_applied(incoming: _McpIncomingRevision) -> _McpReconciliat
     incoming_connections = incoming.connections
 
     if whole_pool:
-        logger.info("MCP lifecycle identity is unverifiable or changed; the whole MCP session pool must be reset")
+        logger.info("MCP lifecycle identity is unverifiable or changed; every deployment MCP session must be retired")
         return _McpReconciliationPlan(
             transition=_McpCacheTransition(frozenset(), None),
             incoming=incoming,
@@ -607,7 +607,7 @@ def _classify_against_applied(incoming: _McpIncomingRevision) -> _McpReconciliat
         )
 
     if incoming.interceptors != _mcp_applied_interceptors:
-        logger.info("MCP interceptors changed; the whole MCP session pool must be reset")
+        logger.info("MCP interceptors changed; every deployment MCP session must be retired")
         return _McpReconciliationPlan(
             transition=_McpCacheTransition(frozenset(), None),
             incoming=incoming,
@@ -657,15 +657,16 @@ def _baseline_less_reconciliation_plan(
     failed or cancelled cold discovery seeds them before the remote call, and
     ``McpTaskToolCaller`` shares the same pool and can create one before the
     first publication. Those are *pool* state, not cache state, so "no applied
-    baseline" must mean neither "nothing to reconcile" nor "reset the whole
+    baseline" must mean neither "nothing to reconcile" nor "retire the whole
     pool" -- the latter would close live sessions this process never owned.
 
-    Returns ``None`` when the pool holds nothing, so a deployment without MCP
-    still pays no config-hashing cost.
+    Returns ``None`` when the *deployment* domain holds no binding, so a
+    deployment without MCP still pays no config-hashing cost -- and personal
+    bindings alone never trigger a deployment reconciliation.
     """
     from deerflow.mcp.session_pool import get_session_pool
 
-    if not get_session_pool().has_any_binding():
+    if not get_session_pool().has_any_binding(domain="deployment"):
         return None
     if incoming is None:
         current_path, current_signature = _current_config_state()
@@ -799,7 +800,7 @@ def _plan_explicit_reconciliation(names: frozenset[str]) -> _McpReconciliationPl
 
     whole_pool, lifecycle_retire = _lifecycle_transition(incoming)
     if whole_pool:
-        logger.info("MCP lifecycle identity is unverifiable or changed; the whole MCP session pool must be reset")
+        logger.info("MCP lifecycle identity is unverifiable or changed; every deployment MCP session must be retired")
         return _McpReconciliationPlan(
             transition=_McpCacheTransition(frozenset(), None),
             incoming=incoming,
@@ -1148,8 +1149,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
             )
             if not publish:
                 logger.warning("MCP config changed during initialization; discarding stale result")
-                retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
-                discard_teardown = retired_pool
+                discard_teardown = _reset_state_and_retire_deployment_domain_locked()
             else:
                 _mcp_tools_cache = loaded_tools
                 _cache_initialized = True
@@ -1244,7 +1244,7 @@ def refresh_mcp_cache_if_active() -> bool:
 
     Tool assembly skips ``get_cached_mcp_tools()`` when no MCP server is
     enabled, so a config change that disables the last server would otherwise
-    leave the previous pool and its persistent sessions alive. This entry point
+    leave the previous deployment sessions alive. This entry point
     performs only the staleness check:
 
     * it returns immediately when no MCP state was ever initialized and no
@@ -1379,7 +1379,7 @@ def _reset_mcp_tools_cache_state() -> None:
     _init_condition.notify_all()
 
 
-def _reset_mcp_tools_cache_state_and_retire_pool_locked() -> _PendingTeardown:
+def _reset_state_and_retire_deployment_domain_locked() -> _PendingTeardown:
     """Retire every *deployment* MCP resource and reset cache state under one lock.
 
     Only the deployment ownership domain is retired. Personal MCP servers share
@@ -1426,7 +1426,7 @@ def force_local_mcp_invalidation() -> None:
     """
     try:
         with _init_condition:
-            pending = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+            pending = _reset_state_and_retire_deployment_domain_locked()
     except Exception:
         logger.exception("Could not conservatively invalidate local MCP state: the pool was not retired and the tool cache was not cleared")
         return

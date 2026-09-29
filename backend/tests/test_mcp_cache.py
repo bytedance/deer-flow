@@ -499,7 +499,7 @@ def test_config_change_during_initialization_discards_stale_tools(cache_globals,
     assert calls == 2
 
 
-def test_config_change_during_initialization_retires_pool_for_same_server_connection_change(cache_globals, monkeypatch, tmp_path):
+def test_config_change_during_initialization_retires_the_deployment_domain(cache_globals, monkeypatch, tmp_path):
     """Discarding a mid-load config change must also retire pooled sessions.
 
     A stale load can create a pooled session before ``initialize_mcp_tools``
@@ -531,7 +531,7 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
         def retire_all(self) -> None:
             self.retired = True
 
-        def has_any_binding(self) -> bool:
+        def has_any_binding(self, *, domain=None) -> bool:
             # No bindings are modelled beyond the sessions this fake records.
             return bool(self.sessions)
 
@@ -1492,7 +1492,7 @@ def _install_lifecycle_discovery_pool(monkeypatch, session_pool_module) -> objec
     return session_pool_module.get_session_pool()
 
 
-def test_lifecycle_advance_during_discovery_discards_and_retires_the_pool(cache_globals, monkeypatch, tmp_path):
+def test_lifecycle_advance_during_discovery_discards_and_retires_the_domain(cache_globals, monkeypatch, tmp_path):
     """A lifecycle bump during discovery must void a byte-identical discovery result.
 
     The publish gate must compare against the version captured *before*

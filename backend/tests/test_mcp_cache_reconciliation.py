@@ -482,8 +482,8 @@ def test_equivalent_path_switch_during_in_flight_rediscovery_keeps_sessions(cach
     assert cache_module._mcp_applied_path == other
 
 
-def test_whole_pool_reset_signals_owner_before_background_teardown(cache_globals, monkeypatch, tmp_path):
-    """A whole-pool reset must detach and signal owners before any worker runs."""
+def test_deployment_domain_retirement_signals_owner_before_background_teardown(cache_globals, monkeypatch, tmp_path):
+    """A deployment-domain retirement must detach and signal owners before any worker runs."""
     cfg = tmp_path / "extensions_config.json"
     _publish(monkeypatch, cfg, {"A": _stdio("npx")}, interceptors=["pkg.a:build"])
     pool = get_session_pool()

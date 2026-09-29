@@ -201,7 +201,7 @@ def test_connection_round_trip_a1_a2_a1_is_detected(spawn):
 # ---------------------------------------------------------------------------
 
 
-def test_interceptors_x_y_x_forces_a_whole_pool_reset(spawn):
+def test_interceptors_x_y_x_retires_the_deployment_domain(spawn):
     """An unobserved interceptor round trip still forces the required whole-pool reset."""
     spawn_workers, _config_path = spawn
     servers = {"A": _stdio("npx"), "B": _stdio("uvx")}

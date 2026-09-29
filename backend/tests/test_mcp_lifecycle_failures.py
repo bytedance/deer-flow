@@ -788,7 +788,7 @@ def test_force_local_mcp_invalidation_never_raises(cache_globals, monkeypatch) -
     def _boom():
         raise RuntimeError("conservative reset exploded")
 
-    monkeypatch.setattr(cache_module, "_reset_mcp_tools_cache_state_and_retire_pool_locked", _boom)
+    monkeypatch.setattr(cache_module, "_reset_state_and_retire_deployment_domain_locked", _boom)
 
     cache_module.force_local_mcp_invalidation()  # must not raise
 
