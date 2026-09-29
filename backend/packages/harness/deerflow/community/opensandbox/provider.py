@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import ipaddress
 import logging
+import math
 import os
 import threading
 import time
@@ -91,8 +92,11 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
 
     @staticmethod
     def _positive_float(name: str, value: Any, default: float) -> float:
-        resolved = float(default if value is None else value)
-        if resolved <= 0:
+        try:
+            resolved = float(default if value is None else value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"sandbox.{name} must be positive") from exc
+        if not math.isfinite(resolved) or resolved <= 0:
             raise ValueError(f"sandbox.{name} must be positive")
         return resolved
 
@@ -115,8 +119,11 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         replicas = option("replicas")
         idle_timeout = option("idle_timeout")
         raw_sandbox_timeout = option("sandbox_timeout")
-        sandbox_timeout = float(DEFAULT_SANDBOX_TIMEOUT if raw_sandbox_timeout is None else raw_sandbox_timeout)
-        if sandbox_timeout < 0:
+        try:
+            sandbox_timeout = float(DEFAULT_SANDBOX_TIMEOUT if raw_sandbox_timeout is None else raw_sandbox_timeout)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sandbox.sandbox_timeout must be non-negative") from exc
+        if not math.isfinite(sandbox_timeout) or sandbox_timeout < 0:
             raise ValueError("sandbox.sandbox_timeout must be non-negative")
         return {
             "api_key": api_key,

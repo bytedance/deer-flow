@@ -163,6 +163,8 @@ def _get_upload_limit(app_config: AppConfig, key: str, default: int, *, legacy_k
             value = _get_uploads_config_value(app_config, legacy_key, None)
         if value is None:
             value = default
+        if isinstance(value, bool):
+            raise ValueError
         limit = int(value)
         if limit <= 0:
             raise ValueError

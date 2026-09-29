@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 from langchain.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
@@ -283,6 +285,291 @@ def test_thinking_enabled_merges_when_thinking_enabled_settings(monkeypatch):
 
     assert FakeChatModel.captured_kwargs.get("temperature") == 1.0
     assert FakeChatModel.captured_kwargs.get("max_tokens") == 16000
+
+
+def _legacy_model_with_base_extra_body(when_thinking_enabled: dict, extra_body: dict, when_thinking_disabled: dict | None = None) -> ModelConfig:
+    """A profile without ``reasoning:`` whose base ``extra_body`` carries keys the templates must not clobber."""
+    return ModelConfig(
+        name="legacy-glm",
+        display_name="legacy-glm",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="legacy-glm",
+        supports_thinking=True,
+        extra_body=extra_body,
+        when_thinking_enabled=when_thinking_enabled,
+        when_thinking_disabled=when_thinking_disabled,
+    )
+
+
+@pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
+def test_legacy_when_thinking_disabled_template_deep_merges_like_the_enable_template(monkeypatch, thinking_enabled):
+    """Most ``extra_body``-based profiles in ``config.example.yaml`` declare *both* templates.
+    An operator-provided ``when_thinking_disabled`` was still ``dict.update``-ed, so fixing only
+    the enable branch would have left thinking-off dropping ``tool_stream`` while thinking-on
+    kept it. The same profile must not behave differently depending on the toggle."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+        when_thinking_disabled={"extra_body": {"thinking": {"type": "disabled"}}},
+        extra_body={"tool_stream": True},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=thinking_enabled)
+
+    expected_type = "enabled" if thinking_enabled else "disabled"
+    assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": expected_type}}
+
+
+@pytest.mark.parametrize(
+    "templates",
+    [
+        {"when_thinking_disabled": {"extra_body": {"thinking": {"type": "disabled"}}}},
+        {"when_thinking_enabled": {"extra_body": {"thinking": {"type": "enabled"}}}},
+    ],
+    ids=["operator-disable-template", "synthesized-disable"],
+)
+def test_disable_cannot_clear_enable_only_keys_kept_in_the_base_extra_body(monkeypatch, templates):
+    """Stated migration rule: keys are never removed, so a base
+    ``extra_body.thinking: {type: enabled, budget_tokens: N}`` reaches the provider as
+    ``{type: disabled, budget_tokens: N}`` when thinking is off. The synthesized disable payload
+    (and the contract path) already behaved this way on ``main``; the operator-provided legacy
+    disable template now does too. Enable-only keys belong in ``when_thinking_enabled`` — the
+    changelog, ``models/AGENTS.md`` and ``configuration.mdx`` say so, and this test keeps the
+    behaviour deliberate rather than accidental."""
+    model = ModelConfig(
+        name="legacy-anthropic-proxy",
+        display_name="legacy-anthropic-proxy",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="claude",
+        supports_thinking=True,
+        extra_body={"thinking": {"type": "enabled", "budget_tokens": 4096}},
+        **templates,
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-anthropic-proxy", thinking_enabled=False)
+
+    assert captured["extra_body"]["thinking"] == {"type": "disabled", "budget_tokens": 4096}
+
+
+def _mapping_ids(value: object) -> set[int]:
+    """Identities of every mapping reachable from *value*, for alias checks."""
+    if not isinstance(value, dict):
+        return set()
+    ids = {id(value)}
+    for nested in value.values():
+        ids |= _mapping_ids(nested)
+    return ids
+
+
+@pytest.mark.parametrize(
+    "base_extra_body, template_extra_body",
+    [
+        ({"top_k": 20}, {"chat_template_kwargs": {"thinking": True}}),
+        (None, {"chat_template_kwargs": {"thinking": True}}),
+        ({"top_k": 20}, {"thinking": {"type": "enabled", "options": {"budget_tokens": 1024}}}),
+    ],
+    ids=["template-adds-a-nested-mapping", "profile-has-no-extra_body", "template-adds-two-levels"],
+)
+def test_thinking_templates_are_copied_not_aliased_into_constructor_kwargs(monkeypatch, base_extra_body, template_extra_body):
+    """Wherever the base lacked a key, the merge used to store the template's own mapping by
+    reference, so the constructor kwargs (and any later in-place adjustment, such as the vLLM
+    switch mirroring) pointed at the cached ``ModelConfig``. Every mapping a template
+    contributes, at every depth, must be a copy, and the profile must be unchanged after the
+    build."""
+    template = {"extra_body": template_extra_body}
+    model = _legacy_model_with_base_extra_body(when_thinking_enabled=template, extra_body=base_extra_body)
+    pristine = copy.deepcopy(model.when_thinking_enabled)
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {**(base_extra_body or {}), **template_extra_body}
+    assert _mapping_ids(captured["extra_body"]) & _mapping_ids(model.when_thinking_enabled) == set()
+    assert model.when_thinking_enabled == pristine
+
+
+def test_legacy_templates_only_add_or_override_nested_keys_never_remove_them(monkeypatch):
+    """The flip side of deep-merging: a template cannot drop a base key by omitting it.
+    OpenRouter-style ``reasoning: {exclude: true}`` in the profile survives a template that
+    only sets ``reasoning.effort`` — the operator must clear a key explicitly if that is meant."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"reasoning": {"effort": "high"}}},
+        extra_body={"reasoning": {"exclude": True}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"reasoning": {"exclude": True, "effort": "high"}}
+
+
+@pytest.mark.parametrize(
+    "when_thinking_enabled, expected_extra_body",
+    [
+        ({"extra_body": "oops"}, "oops"),
+        ({"extra_body": {"chat_template_kwargs": True}}, {"chat_template_kwargs": True}),
+    ],
+    ids=["extra_body-not-a-mapping", "chat_template_kwargs-not-a-mapping"],
+)
+def test_legacy_non_mapping_template_values_are_forwarded_not_rejected(monkeypatch, when_thinking_enabled, expected_extra_body):
+    """``ModelConfig.when_thinking_enabled`` is ``dict | None`` with unvalidated nested values,
+    so a non-mapping ``extra_body`` or ``chat_template_kwargs`` is reachable from ``config.yaml``.
+    The factory used to forward it unchanged; the vLLM-switch bookkeeping must not turn that
+    into an ``AttributeError`` / ``TypeError`` inside ``create_chat_model``."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled=when_thinking_enabled,
+        extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == expected_extra_body
+
+
+@pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
+def test_legacy_when_thinking_enabled_deep_merges_into_the_base_extra_body(monkeypatch, thinking_enabled):
+    """The legacy enable path used ``dict.update``, so ``when_thinking_enabled.extra_body``
+    replaced the profile's whole ``extra_body`` and dropped sibling keys such as GLM's
+    ``tool_stream`` — but only when thinking was ON; the disable path already deep-merged.
+    Both directions must keep the operator's keys."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled"}}},
+        extra_body={"tool_stream": True},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=thinking_enabled)
+
+    expected_type = "enabled" if thinking_enabled else "disabled"
+    assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": expected_type}}
+
+
+def test_legacy_when_thinking_enabled_merges_nested_mappings_recursively(monkeypatch):
+    """A vLLM template that only sets ``chat_template_kwargs.enable_thinking`` must keep the
+    profile's other chat-template kwargs, not replace the nested mapping."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}},
+        extra_body={"tool_stream": True, "chat_template_kwargs": {"preserve_thinking": True}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {
+        "tool_stream": True,
+        "chat_template_kwargs": {"preserve_thinking": True, "enable_thinking": True},
+    }
+
+
+def _effective_vllm_switch(captured: dict) -> dict:
+    """What vLLM receives: the provider normalizes the legacy ``thinking`` alias just before sending."""
+    from deerflow.models.vllm_provider import _normalize_vllm_chat_template_kwargs
+
+    payload = {"extra_body": dict(captured["extra_body"])}
+    _normalize_vllm_chat_template_kwargs(payload)
+    return payload["extra_body"]["chat_template_kwargs"]
+
+
+def _vllm_switch_profile(*, base_key: str, template_key: str, base_value: bool, reasoning: dict | None, use: str = "deerflow.models.vllm_provider:VllmChatModel") -> ModelConfig:
+    kwargs: dict = dict(
+        name="qwen",
+        display_name="qwen",
+        description=None,
+        use=use,
+        model="qwen",
+        supports_thinking=True,
+        extra_body={"chat_template_kwargs": {base_key: base_value, "preserve_thinking": True}},
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {template_key: True}}},
+    )
+    if reasoning is not None:
+        kwargs["reasoning"] = reasoning
+    return ModelConfig(**kwargs)
+
+
+@pytest.mark.parametrize("reasoning", [None, {"thinking": "optional", "dialect": "vllm_chat_template"}], ids=["legacy", "contract"])
+@pytest.mark.parametrize("base_key, template_key", [("enable_thinking", "thinking"), ("thinking", "enable_thinking")], ids=["base-enable_thinking/template-thinking", "base-thinking/template-enable_thinking"])
+@pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
+def test_vllm_switch_spelled_by_the_template_wins_over_the_profile_alias(monkeypatch, reasoning, base_key, template_key, thinking_enabled):
+    """vLLM's toggle has two spellings (legacy ``thinking``, current ``enable_thinking``) and the
+    provider maps the alias only when ``enable_thinking`` is absent. A profile that spells the
+    switch differently from its template must not be able to pin the switch after the merge:
+    the template's (or synthesized) spelling decides, in both directions, on both paths."""
+    from deerflow.models.vllm_provider import VllmChatModel
+
+    model = _vllm_switch_profile(base_key=base_key, template_key=template_key, base_value=not thinking_enabled, reasoning=reasoning)
+    captured: dict = {}
+    # Resolve the REAL provider class, so a future class-gated merge is exercised as vLLM.
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(VllmChatModel, captured))
+
+    factory_module.create_chat_model(name="qwen", thinking_enabled=thinking_enabled)
+
+    effective = _effective_vllm_switch(captured)
+    assert effective["enable_thinking"] is thinking_enabled
+    assert effective["preserve_thinking"] is True  # unrelated chat-template kwargs still survive
+
+
+@pytest.mark.parametrize("reasoning", [None, {"thinking": "optional", "dialect": "vllm_chat_template"}], ids=["legacy", "contract"])
+@pytest.mark.parametrize("base_key, template_key", [("enable_thinking", "thinking"), ("thinking", "enable_thinking")], ids=["base-enable_thinking/template-thinking", "base-thinking/template-enable_thinking"])
+@pytest.mark.parametrize("thinking_enabled", [True, False], ids=["thinking-on", "thinking-off"])
+def test_vllm_switch_is_mirrored_onto_the_profile_spelling_for_classes_that_do_not_normalize(monkeypatch, reasoning, base_key, template_key, thinking_enabled):
+    """Only ``VllmChatModel`` maps the ``thinking`` alias onto ``enable_thinking``; a plain
+    ``langchain_openai:ChatOpenAI`` profile pointed at vLLM sends ``chat_template_kwargs`` raw, and
+    the server reads whichever key its chat template honors. Deleting the profile's spelling would
+    remove the only key such a server reads (a base ``enable_thinking: false`` beside a template
+    ``thinking: false`` would leave Qwen3 defaulting to *on*). So the template's value is mirrored
+    onto the profile's spelling instead: both keys carry the template's intent, raw."""
+    from langchain_openai import ChatOpenAI
+
+    model = _vllm_switch_profile(base_key=base_key, template_key=template_key, base_value=not thinking_enabled, reasoning=reasoning, use="langchain_openai:ChatOpenAI")
+    captured: dict = {}
+    # Resolve the REAL ChatOpenAI (not a stand-in), so a merge gated on the vLLM class would fail here.
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(ChatOpenAI, captured))
+
+    factory_module.create_chat_model(name="qwen", thinking_enabled=thinking_enabled)
+
+    raw = captured["extra_body"]["chat_template_kwargs"]  # no normalization: what ChatOpenAI puts on the wire
+    assert raw == {base_key: thinking_enabled, template_key: thinking_enabled, "preserve_thinking": True}
+
+
+def test_vllm_switch_mirroring_never_invents_the_other_spelling(monkeypatch):
+    """A template that spells the switch one way, on a profile that does not spell it at all,
+    must not grow the second key: ``VllmChatModel`` would ignore it, but a chat template that
+    honors only ``thinking`` would suddenly see an ``enable_thinking`` it never asked for."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"chat_template_kwargs": {"thinking": True}}},
+        extra_body={"chat_template_kwargs": {"preserve_thinking": True}},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"]["chat_template_kwargs"] == {"preserve_thinking": True, "thinking": True}
+
+
+def test_legacy_when_thinking_enabled_template_still_wins_on_conflicts(monkeypatch):
+    """Deep-merging must not weaken precedence: a key set in both places takes the template's value."""
+    model = _legacy_model_with_base_extra_body(
+        when_thinking_enabled={"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 4096}}},
+        extra_body={"thinking": {"type": "disabled", "budget_tokens": 1}, "tool_stream": True},
+    )
+    captured: dict = {}
+    _patch_factory(monkeypatch, _make_app_config([model]), model_class=_capturing_class(FakeChatModel, captured))
+
+    factory_module.create_chat_model(name="legacy-glm", thinking_enabled=True)
+
+    assert captured["extra_body"] == {"tool_stream": True, "thinking": {"type": "enabled", "budget_tokens": 4096}}
 
 
 # ---------------------------------------------------------------------------

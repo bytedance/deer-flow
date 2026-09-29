@@ -514,7 +514,7 @@ class ExtensionsConfig(BaseModel):
             return cls(mcp_servers={}, skills={})
 
         try:
-            with open(resolved_path, encoding="utf-8") as f:
+            with open(resolved_path, encoding="utf-8-sig") as f:
                 config_data = json.load(f)
             config_data = cls.resolve_env_variables(config_data)
             return cls.model_validate(config_data)
@@ -710,7 +710,7 @@ def read_raw_extensions_config(path: Path) -> dict[str, Any]:
     that message omits the path so API callers can surface it as-is.
     """
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             raw_data = json.load(f)
     except json.JSONDecodeError as e:
         raise ValueError(f"Extensions configuration is not valid JSON: {e.msg} at line {e.lineno} column {e.colno}") from e

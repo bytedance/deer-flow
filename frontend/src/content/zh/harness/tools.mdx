@@ -204,7 +204,7 @@ tools:
 
 ### 网页内容抓取
 
-<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya"]}>
+<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "Unbrowse"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -259,6 +259,15 @@ tools:
     api_key: $SOFYA_API_KEY
 ```
 以 Markdown 形式返回页面内容。需要 [Sofya](https://sofya.co) API Key。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.unbrowse.tools:web_fetch_tool
+    api_key: $UNBROWSE_API_KEY
+    # render: auto # auto | never（仅普通 HTTP）| always（云端浏览器）
+```
+以 Markdown 形式返回页面内容：普通 HTTP 足够时直接抓取，需要 JavaScript 的页面则在托管浏览器中渲染。需要 [Unbrowse](https://unbrowse.ai) API Key。
   </Tabs.Tab>
 </Tabs>
 

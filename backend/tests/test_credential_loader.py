@@ -509,6 +509,26 @@ def test_load_codex_cli_credential_supports_legacy_top_level_shape(tmp_path, mon
     assert cred.account_id == ""
 
 
+@pytest.mark.parametrize("access_token", ["", "   ", "\t\n"])
+def test_load_codex_cli_credential_ignores_blank_access_token(tmp_path, monkeypatch, access_token):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"access_token": access_token}))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    assert load_codex_cli_credential() is None
+
+
+def test_load_codex_cli_credential_strips_access_token_whitespace(tmp_path, monkeypatch):
+    auth_path = tmp_path / "auth.json"
+    auth_path.write_text(json.dumps({"access_token": "  codex-access-token\n"}))
+    monkeypatch.setenv("CODEX_AUTH_PATH", str(auth_path))
+
+    cred = load_codex_cli_credential()
+
+    assert cred is not None
+    assert cred.access_token == "codex-access-token"
+
+
 @pytest.mark.parametrize("payload", [[], "codex-access-token", 5])
 def test_load_codex_cli_credential_ignores_non_object_auth_file(tmp_path, monkeypatch, payload):
     auth_path = tmp_path / "auth.json"
