@@ -749,6 +749,31 @@ def get_subagent_batch_service(request: Request):
     return val
 
 
+def _run_completion_hook(*, checkpointer: Any, scheduled_task_service: Any | None):
+    """Compose non-fatal checkpoint housekeeping with the scheduler callback."""
+
+    async def handle(record: Any) -> None:
+        try:
+            from app.gateway.checkpoint_retention import enforce_completed_run_retention
+
+            await enforce_completed_run_retention(
+                checkpointer=checkpointer,
+                thread_id=record.thread_id,
+            )
+        except Exception:
+            logger.warning(
+                "Checkpoint retention failed for thread %s after run %s (non-fatal)",
+                record.thread_id,
+                record.run_id,
+                exc_info=True,
+            )
+
+        if scheduled_task_service is not None:
+            await scheduled_task_service.handle_run_completion(record)
+
+    return handle
+
+
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
@@ -759,8 +784,10 @@ def get_run_context(request: Request) -> RunContext:
     captured in :func:`langgraph_runtime` so callers never see a store bound to
     one backend paired with a config pointing at another.
     """
+    checkpointer = get_checkpointer(request)
+    scheduled_task_service = getattr(request.app.state, "scheduled_task_service", None)
     return RunContext(
-        checkpointer=get_checkpointer(request),
+        checkpointer=checkpointer,
         store=get_store(request),
         event_store=get_run_event_store(request),
         run_events_config=getattr(request.app.state, "run_events_config", None),
@@ -770,7 +797,10 @@ def get_run_context(request: Request) -> RunContext:
         mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
-        on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
+        on_run_completed=_run_completion_hook(
+            checkpointer=checkpointer,
+            scheduled_task_service=scheduled_task_service,
+        ),
     )
 
 

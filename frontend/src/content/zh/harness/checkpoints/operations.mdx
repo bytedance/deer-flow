@@ -79,7 +79,7 @@ import { Callout } from "nextra/components";
 - **联合表删除、先算孤儿。** 删除检查点行时必须判定哪些 writes 与 blob 行成了孤儿；只有当**幸存**检查点都不再引用某行时它才算孤儿，且要在整线程范围内计算。真实的仅耗时叶子并非没有负载——它会物化父节点的值——在 Postgres 上它的 blob 行与支撑父节点的正是同一批行。
 - **要么全做，要么不做。** 留下悬空父链接的部分删除会把一次清理变成线程级故障：此后每一轮的分支与重新生成都会响亮失败。
 
-还有一条历史快路径需要排期：尾部的仅耗时叶子同时承载 `run_durations` 与 `run_message_ids` 映射，`get_thread_history` 会从最新检查点读取它们。删掉该叶子会让下一次历史读取退化为扫描事件存储并重新落一份新叶子，因此接线时必须把保留动作与历史读错开，或采用会保留「带缓存的叶子」的策略。
+这里还存在一条历史快路径交互：尾部的仅耗时叶子同时承载 `run_durations` 与 `run_message_ids` 映射，`get_thread_history` 会从最新检查点读取它们。删掉该叶子会让下一次历史读取退化为扫描持久化存储并重新落一份新叶子。生产钩子在 finalizing 屏障内、耗时写入完成后并持有 checkpoint 锁时执行，因此不会与写到一半的缓存叶子竞态。
 
 ### 策略默认值
 
@@ -91,11 +91,11 @@ import { Callout } from "nextra/components";
 | `strict_pending_write_guard` | `True` | 仍持有 writes 行的检查点一律视为受保护 |
 | `max_delete_per_run` | `None` | 单次 run 删除数量的可选上限 |
 
-### 目前没有生产触发点
+### 生产保留触发点
 
-保留服务（`backend/app/gateway/checkpoint_retention.py`）**没有生产触发点**：保留动作从哪里调用——run 结束后钩子、调度器还是显式管理操作——是维护者随契约一起决定的。DeerFlow 中没有任何地方调用它；`prune` 与 `aprune` 也没有生产调用方：在锁定环境中只有基类实现定义了它们，而基类实现直接抛 `NotImplementedError`。
+Gateway 会在每次 run 写完耗时 checkpoint 后、worker 仍持有 finalizing 屏障时调用保守保留策略。该钩子获取与历史写入相同的逐线程 checkpoint 锁，每次最多删除一个已由契约证明安全的末尾纯元数据叶子；失败不会改变 run 结果。它不会删除可恢复的祖先或兄弟分支。saver 层的 `prune` 与 `aprune` 仍没有生产调用方：在锁定环境中只有基类实现定义了它们，而基类实现直接抛 `NotImplementedError`。
 
-请把它当作未完成的工作，而不是安全默认值。可执行契约只在 **full 模式**的状态 schema 上证明了分支祖先、显式恢复目标、待处理写入、叶子耗时、叶子兄弟这几类场景；只有增长基线是增量形态的。增量专属的裁剪安全性既未被测试套件证明，也未被实现。
+生产触发的末尾耗时叶子删除在 **full** 和 **delta** schema 上都有回归测试。更广泛的分支祖先、显式恢复目标、待处理写入和兄弟分支契约仍以 full schema 为主；在没有 rebase/TTL 契约之前，生产策略不会尝试删除这些历史。
 
 ## 仅存的一个补丁
 

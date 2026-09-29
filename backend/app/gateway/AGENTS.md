@@ -28,6 +28,13 @@ its run drain and extension-service teardown can still make MCP calls during
 earlier shutdown hooks. Keep the pool close bounded and failure-isolated, but
 do not move it ahead of those session producers.
 
+Run completion composes checkpoint retention ahead of the scheduled-task
+completion callback. The conservative policy runs while the worker's
+finalizing barrier is still held, takes the shared per-thread checkpoint lock,
+and deletes at most the newly appended metadata-only duration leaf. Retention
+failure is non-fatal and must never suppress scheduled occurrence completion;
+resumable ancestors and sibling branches remain untouched.
+
 `conversation_access.py` grants the opt-in read-only tool only for explicit
 `conversation_references` with effective `runs:read`; never infer grants from
 messages or checkpoints. Pass the callback through `RunContext`, not serialized

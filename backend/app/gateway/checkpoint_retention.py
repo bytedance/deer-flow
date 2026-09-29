@@ -23,24 +23,25 @@ by a deleted checkpoint in the same step (contract "deletion mechanics").
 Postgres ``checkpoint_blobs`` rows are keyed by ``version`` = the id of the
 checkpoint that wrote the blob, so the same join keys clean them.
 
-The service ships **without a production trigger**: where retention is
-invoked from (post-run hook vs scheduler vs explicit admin action) is a
-maintainer decision that lands with the contract itself. Measurement-first:
-reports carry before/after per-thread stats in the same normalized shape as
+The Gateway invokes the conservative production policy from the run-completion
+hook while the worker's finalizing barrier still excludes a same-thread
+replacement.  It removes at most the newly appended trailing duration leaf;
+the sibling-branch shape remains opt-in. Measurement reports carry before/after
+per-thread stats in the same normalized shape as
 ``scripts/benchmark/checkpoint/bench_channels.py``.
 
 History fast-path interaction: the trailing duration-only leaf is also the
 carrier of the run-history metadata cache (``run_durations`` /
-``run_message_ids``) that ``get_thread_history`` reads from the latest
-checkpoint, and the parent it clones does not carry that map. Deleting the
-leaf makes the next history read fall back to store scans and re-persist a
-fresh leaf, so the wiring PR must sequence retention away from history reads
-or adopt a policy that spares cache-carrying leaves — see the contract doc,
-"History fast-path interaction (wiring requirement)".
+``run_message_ids``). The production hook runs only after the worker has
+written that run's duration, so no concurrent history writer can observe a
+half-written leaf. A later history read may fall back to the durable run/event
+stores and repersist the cache; that replacement leaf is eligible again after
+the next completed run.
 """
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field
@@ -55,7 +56,14 @@ from app.gateway.checkpoint_lineage import (
     is_duration_only_checkpoint,
 )
 
-__all__ = ["RetentionPolicy", "RetentionReport", "enforce_thread_retention"]
+__all__ = [
+    "RetentionPolicy",
+    "RetentionReport",
+    "enforce_completed_run_retention",
+    "enforce_thread_retention",
+]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -517,3 +525,40 @@ async def enforce_thread_retention(
         if collect_stats:
             report.stats_after = await _thread_storage_stats(saver, thread_id)
         return report
+
+
+async def enforce_completed_run_retention(*, checkpointer: BaseCheckpointSaver, thread_id: str) -> RetentionReport:
+    """Run the conservative production policy after one run has finalized.
+
+    Successful runs append one metadata-only duration checkpoint.  If it is
+    left in place, the next run forks from it and turns that otherwise
+    disposable leaf into a protected ancestor forever.  The run worker calls
+    this hook while its finalizing barrier still excludes a same-thread
+    replacement, and this function also takes the checkpoint mutation lock so
+    branch/history writers cannot race classification with deletion.
+
+    Only the contract-proven trailing duration leaf is eligible.  Sibling
+    branches and resumable checkpoints remain protected, and the one-row cap
+    keeps terminal housekeeping bounded.
+    """
+    from deerflow.runtime.runs.worker import _checkpoint_thread_lock
+
+    report = await enforce_thread_retention(
+        checkpointer,
+        thread_id,
+        RetentionPolicy(
+            prune_trailing_duration_leaves=True,
+            prune_leaf_sibling_branches=False,
+            strict_pending_write_guard=True,
+            max_delete_per_run=1,
+        ),
+        thread_lock=_checkpoint_thread_lock(thread_id),
+        collect_stats=False,
+    )
+    if report.deleted_checkpoint_ids:
+        logger.debug(
+            "Checkpoint retention removed %d trailing metadata checkpoint(s) for thread %s",
+            len(report.deleted_checkpoint_ids),
+            thread_id,
+        )
+    return report

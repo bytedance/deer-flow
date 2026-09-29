@@ -17,11 +17,13 @@ import copy
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Annotated, Any, TypedDict
 from uuid import uuid4
 
 import pytest
 from langchain_core.messages import AnyMessage, HumanMessage
+from langgraph.channels import DeltaChannel
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -32,13 +34,22 @@ from app.gateway.checkpoint_lineage import find_checkpoint_before_message
 from app.gateway.checkpoint_retention import (
     RetentionPolicy,
     _row_field,
+    enforce_completed_run_retention,
     enforce_thread_retention,
 )
+from deerflow.agents.thread_state import merge_message_writes
 from deerflow.runtime.runs.worker import _new_checkpoint_marker, persist_run_durations
 
 
 class FullState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
+
+
+class DeltaState(TypedDict):
+    messages: Annotated[
+        list[AnyMessage],
+        DeltaChannel(merge_message_writes, snapshot_frequency=2),
+    ]
 
 
 def _thread_id() -> str:
@@ -602,6 +613,78 @@ async def test_empty_thread_reports_the_same_before_and_after_stats(saver_env: _
     without_stats = await enforce_thread_retention(saver_env.saver, thread_id, collect_stats=False)
     assert without_stats.stats_before == {}
     assert without_stats.stats_after == {}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("state_schema", [FullState, DeltaState], ids=["full", "delta"])
+async def test_completed_run_retention_removes_only_the_trailing_duration_leaf(
+    saver_env: _SaverEnv,
+    state_schema: Any,
+) -> None:
+    """The production hook removes the metadata leaf before a later run can
+    make it a permanent ancestor, without touching resumable checkpoints."""
+    graph = _build_graph(state_schema, saver_env.saver)
+    thread_id = _thread_id()
+    await graph.ainvoke({"messages": [HumanMessage(content="hello")]}, _config(thread_id))
+    resumable_head = await saver_env.saver.aget_tuple(_config(thread_id))
+    assert resumable_head is not None
+    resumable_head_id = resumable_head.checkpoint["id"]
+
+    assert await persist_run_durations(
+        checkpointer=saver_env.saver,
+        thread_id=thread_id,
+        durations={"run-1": 3},
+    )
+    duration_head = await saver_env.saver.aget_tuple(_config(thread_id))
+    assert duration_head is not None
+    duration_head_id = duration_head.checkpoint["id"]
+    assert duration_head_id != resumable_head_id
+
+    report = await enforce_completed_run_retention(
+        checkpointer=saver_env.saver,
+        thread_id=thread_id,
+    )
+
+    assert report.deleted_checkpoint_ids == [duration_head_id]
+    assert report.stats_before == {}
+    assert report.stats_after == {}
+    resumed = await saver_env.saver.aget_tuple(_config(thread_id))
+    assert resumed is not None
+    assert resumed.checkpoint["id"] == resumable_head_id
+    materialized = await graph.aget_state(_config(thread_id))
+    assert materialized.values["messages"][-1].content == "hello"
+
+
+@pytest.mark.anyio
+async def test_gateway_completion_hook_keeps_scheduler_notification_after_retention_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retention is best-effort and must not swallow the scheduler's durable
+    occurrence transition when checkpoint storage is temporarily unavailable."""
+    from app.gateway import checkpoint_retention as retention_module
+    from app.gateway.deps import _run_completion_hook
+
+    calls: list[tuple[str, Any]] = []
+
+    async def fail_retention(*, checkpointer: Any, thread_id: str):
+        calls.append(("retention", (checkpointer, thread_id)))
+        raise RuntimeError("checkpoint backend unavailable")
+
+    class _Scheduler:
+        async def handle_run_completion(self, record: Any) -> None:
+            calls.append(("scheduler", record))
+
+    monkeypatch.setattr(retention_module, "enforce_completed_run_retention", fail_retention)
+    checkpointer = object()
+    record = SimpleNamespace(thread_id="thread-1", run_id="run-1")
+
+    await _run_completion_hook(
+        checkpointer=checkpointer,
+        scheduled_task_service=_Scheduler(),
+    )(record)
+
+    assert calls == [
+        ("retention", (checkpointer, "thread-1")),
+        ("scheduler", record),
+    ]
 
 
 # ---------------------------------------------------------------------------

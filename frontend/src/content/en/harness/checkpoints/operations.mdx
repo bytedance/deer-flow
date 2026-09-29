@@ -80,7 +80,7 @@ Two mechanical constraints come with deletion:
 - **Joint table deletion, orphan-first.** Deleting a checkpoint row requires deciding which writes and blob rows are orphaned; a row is an orphan only if no *surviving* checkpoint references it, computed in a whole-thread pass. A real duration-only leaf is not payload-free — it materializes the parent's values — and on Postgres its blob rows are the same rows backing its parent.
 - **All-or-nothing.** A partial deletion that leaves a dangling parent link converts a cleanup into a thread-level outage: branch and regenerate fail loudly for every later turn.
 
-There is also a history fast-path interaction to sequence around: the trailing duration-only leaf carries the `run_durations` and `run_message_ids` maps that `get_thread_history` reads from the latest checkpoint. Deleting the leaf makes the next history read fall back to store scans and re-persist a fresh leaf, so any wiring must sequence retention away from history reads or spare cache-carrying leaves.
+There is also a history fast-path interaction: the trailing duration-only leaf carries the `run_durations` and `run_message_ids` maps that `get_thread_history` reads from the latest checkpoint. Deleting it makes the next history read fall back to durable store scans and re-persist a fresh leaf. The production hook sequences deletion after the duration write under the finalizing barrier and checkpoint lock, so it cannot race a half-written cache leaf.
 
 ### Policy defaults
 
@@ -92,11 +92,11 @@ There is also a history fast-path interaction to sequence around: the trailing d
 | `strict_pending_write_guard` | `True` | Treat any checkpoint that still owns writes rows as protected |
 | `max_delete_per_run` | `None` | Optional cap on deletions per run |
 
-### There is no production trigger yet
+### Production retention trigger
 
-The retention service (`backend/app/gateway/checkpoint_retention.py`) ships **without a production trigger**: where retention is invoked from — post-run hook, scheduler, or explicit admin action — is a maintainer decision that lands with the contract itself. Nothing in DeerFlow calls it, and there is no production caller of `prune` or `aprune` either: in the pinned environment only the base implementation defines them, and it raises `NotImplementedError`.
+The Gateway calls the conservative retention policy after every run has completed its duration-checkpoint write and while the worker's finalizing barrier still blocks a same-thread replacement. The hook takes the same per-thread checkpoint lock as history writers, deletes at most one contract-proven trailing metadata-only leaf, and treats failures as non-fatal. It does not prune resumable ancestors or sibling branches. There is still no production caller of the saver-level `prune` or `aprune`; in the pinned environment only the base implementation defines them, and it raises `NotImplementedError`.
 
-Treat this as unfinished work rather than a safe default. The executable contract proves the branch-ancestor, explicit-resume-target, pending-writes, leaf-duration, and leaf-sibling scenarios against the **full-mode** state schema; only the growth baseline is delta-shaped. Delta-specific prune safety is neither proved by the suite nor implemented.
+The production trailing-duration-leaf deletion has regressions against both **full** and **delta** state schemas. The broader branch-ancestor, explicit-resume-target, pending-writes, and sibling-branch contract is still primarily full-shaped; production does not attempt those deletions without a future rebase/TTL contract.
 
 ## The one remaining patch
 
