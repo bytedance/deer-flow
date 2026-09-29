@@ -553,10 +553,11 @@ def test_remote_provisioner_install_skips_gateway_sandbox_runtime(monkeypatch, t
 def test_status_runtime_mode_none_for_non_aio(monkeypatch, tmp_path) -> None:
     config = _config(tmp_path / "skills")
     config.sandbox = SimpleNamespace(use="deerflow.sandbox.local:LocalSandboxProvider")
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "none"
     assert ready is False
     assert detail
+    assert probed is True
 
 
 def test_status_runtime_mode_gateway_download_ready(monkeypatch, tmp_path) -> None:
@@ -575,20 +576,22 @@ def test_status_runtime_mode_gateway_download_ready(monkeypatch, tmp_path) -> No
         target.write_bytes(b"\x7fELF")
         target.chmod(0o755)
 
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "gateway-download"
     assert ready is True
     assert detail is None
+    assert probed is True
 
 
 def test_status_runtime_mode_gateway_download_not_ready(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
     config = _config(tmp_path / "skills")
     config.sandbox = SimpleNamespace(use="deerflow.community.aio_sandbox:AioSandboxProvider")
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "gateway-download"
     assert ready is False
     assert detail
+    assert probed is True
 
 
 def test_status_runtime_mode_init_container_ready(monkeypatch, tmp_path) -> None:
@@ -598,10 +601,11 @@ def test_status_runtime_mode_init_container_ready(monkeypatch, tmp_path) -> None
         provisioner_url="http://provisioner:8002",
     )
     monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: {"lark_cli_init_image": True, "lark_cli_broker_image": False})
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "init-container"
     assert ready is True
     assert detail is None
+    assert probed is True
 
 
 def test_status_runtime_mode_broker_supersedes_init_container(monkeypatch, tmp_path) -> None:
@@ -612,10 +616,11 @@ def test_status_runtime_mode_broker_supersedes_init_container(monkeypatch, tmp_p
     )
     # Broker (Pattern B) wins even when the init image is also configured.
     monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: {"lark_cli_init_image": True, "lark_cli_broker_image": True})
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "broker"
     assert ready is True
     assert detail is None
+    assert probed is True
 
 
 def test_status_runtime_mode_init_container_not_configured(monkeypatch, tmp_path) -> None:
@@ -625,10 +630,11 @@ def test_status_runtime_mode_init_container_not_configured(monkeypatch, tmp_path
         provisioner_url="http://provisioner:8002",
     )
     monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: {"lark_cli_init_image": False, "lark_cli_broker_image": False})
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "init-container"
     assert ready is False
     assert detail
+    assert probed is True
 
 
 def test_status_runtime_mode_init_container_unreachable(monkeypatch, tmp_path) -> None:
@@ -638,10 +644,11 @@ def test_status_runtime_mode_init_container_unreachable(monkeypatch, tmp_path) -
         provisioner_url="http://provisioner:8002",
     )
     monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", lambda _config: None)
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=True)
     assert mode == "init-container"
     assert ready is False
     assert detail
+    assert probed is True
 
 
 def test_status_runtime_probe_skipped_when_not_requested(monkeypatch, tmp_path) -> None:
@@ -655,10 +662,11 @@ def test_status_runtime_probe_skipped_when_not_requested(monkeypatch, tmp_path) 
         raise AssertionError("provisioner should not be probed when probe=False")
 
     monkeypatch.setattr(lark_cli, "_probe_provisioner_capabilities", _fail)
-    mode, ready, detail = lark_cli._resolve_sandbox_runtime_readiness(config, probe=False)
+    mode, ready, detail, probed = lark_cli._resolve_sandbox_runtime_readiness(config, probe=False)
     assert mode == "init-container"
     assert ready is False
     assert detail is None
+    assert probed is False
 
 
 def test_status_explicitly_reports_remote_runtime_probe_state(monkeypatch, tmp_path) -> None:
@@ -2398,7 +2406,7 @@ def test_complete_lark_auth_status_ignores_credential_changes_during_runtime_pro
         credential_state["app"] = {"configured": True, "app_id": "racer-app", "brand": "feishu"}
         credential_state["auth"] = lark_cli.LarkAuthProbe(status="not_authorized", message="tokens cleared")
         runtime_probes.append(probe)
-        return "init-container", True, None
+        return "init-container", True, None, True
 
     monkeypatch.setattr(lark_cli, "_resolve_sandbox_runtime_readiness", _runtime_probe)
 

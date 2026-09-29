@@ -1617,7 +1617,7 @@ def _resolve_sandbox_runtime_readiness(
     config: AppConfig,
     *,
     probe: bool,
-) -> tuple[str, bool, str | None]:
+) -> tuple[str, bool, str | None, bool]:
     """Resolve the sandbox lark-cli runtime mode and readiness.
 
     Modes:
@@ -1633,31 +1633,37 @@ def _resolve_sandbox_runtime_readiness(
       supersedes ``init-container`` when both are available.
 
     ``probe`` gates the (best-effort, short-timeout) provisioner capability call.
+
+    The fourth element reports whether readiness was actually evaluated. It is
+    False only for the unevaluated remote fallback (``probe=False`` with a
+    remote provisioner) and lives next to that branch so the two can never
+    drift apart; every other mode resolves readiness deterministically or via
+    a real probe, so it reports True.
     """
     if not _uses_aio_sandbox(config):
-        return "none", False, "Sandbox does not run lark-cli in this configuration."
+        return "none", False, "Sandbox does not run lark-cli in this configuration.", True
 
     if _uses_remote_provisioner(config):
         if not probe:
-            return "init-container", False, None
+            return "init-container", False, None, False
         caps = _probe_provisioner_capabilities(config)
         if caps is None:
-            return "init-container", False, "Could not reach the provisioner to confirm the lark-cli runtime image."
+            return "init-container", False, "Could not reach the provisioner to confirm the lark-cli runtime image.", True
         # Pattern B (broker) supersedes Pattern A (init-container binary) when
         # the provisioner has a broker image configured.
         if caps["lark_cli_broker_image"]:
-            return "broker", True, None
+            return "broker", True, None, True
         if caps["lark_cli_init_image"]:
-            return "init-container", True, None
-        return "init-container", False, "The provisioner has no lark-cli runtime image configured (LARK_CLI_INIT_IMAGE / LARK_CLI_BROKER_IMAGE)."
+            return "init-container", True, None, True
+        return "init-container", False, "The provisioner has no lark-cli runtime image configured (LARK_CLI_INIT_IMAGE / LARK_CLI_BROKER_IMAGE).", True
 
     # Local AIO: Gateway-download runtime dir.
     runtime_dir = lark_cli_managed_sandbox_dir()
     try:
         _validate_lark_cli_sandbox_runtime(runtime_dir)
     except (ValueError, OSError):
-        return "gateway-download", False, "The managed sandbox lark-cli runtime is not installed."
-    return "gateway-download", True, None
+        return "gateway-download", False, "The managed sandbox lark-cli runtime is not installed.", True
+    return "gateway-download", True, None, True
 
 
 LARK_BROKER_MODE_TTL_SECONDS = 60
@@ -1757,7 +1763,7 @@ def get_lark_integration_status(
     manifest_version = str(manifest.get("version")) if manifest else None
     cli = probe_lark_cli()
     latest_available = _cached_latest_lark_cli_version() if check_latest else None
-    runtime_mode, runtime_ready, runtime_detail = _resolve_sandbox_runtime_readiness(config, probe=check_runtime)
+    runtime_mode, runtime_ready, runtime_detail, runtime_probed = _resolve_sandbox_runtime_readiness(config, probe=check_runtime)
     return LarkIntegrationStatus(
         installed=bool(manifest) and "lark-shared" in installed_skills,
         version=manifest_version or FALLBACK_LARK_CLI_VERSION,
@@ -1775,7 +1781,7 @@ def get_lark_integration_status(
         cli=cli,
         auth=credential_snapshot.auth,
         sandbox_runtime_mode=runtime_mode,
-        sandbox_runtime_probed=check_runtime or not (_uses_aio_sandbox(config) and _uses_remote_provisioner(config)),
+        sandbox_runtime_probed=runtime_probed,
         sandbox_runtime_ready=runtime_ready,
         sandbox_runtime_detail=runtime_detail,
     )
