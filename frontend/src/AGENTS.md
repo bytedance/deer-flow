@@ -39,13 +39,14 @@ against raw artifact paths before encoding.
    pages; `resolveThreadContext` must neither
    enqueue account writes nor create a fallback thread override that masks a
    later server preference. The
-   Capability Center > Plugins MCP switch calls the targeted `PATCH /api/mcp/config`
+   Capability Center > My plugins MCP switch calls the targeted `PATCH /api/mcp/personal/config`
    mutation, disables switches until that mutation's success refetch completes,
    displays the backend error `detail` through a toast, and invalidates
    `["mcpConfig"]` only after success.
-   Server management uses targeted `POST /api/mcp/config/servers`,
-   `PUT /api/mcp/config/server`, and bodyless
-   `DELETE /api/mcp/config/servers/{server_name}` mutations. Delete names are
+   Personal server management uses targeted `POST /api/mcp/personal/config/servers`,
+   `PUT /api/mcp/personal/config/server`, and bodyless
+   `DELETE /api/mcp/personal/config/servers/{server_name}` mutations. The deployment
+   `/api/mcp/config` endpoints remain operator-only and are not used by this editor. Delete names are
    percent-encoded, including legacy empty and slash-containing names; every
    successful mutation invalidates `["mcpConfig"]` only after the response.
    Current-chat MCP background tasks use `core/background-tasks`: the header
@@ -167,7 +168,7 @@ Array previews coalesce consecutive generated markers only at the end into one o
 Model picker, chat entry pages, branch tree, and browser-control ownership are
 detailed in `frontend/docs/conversation-ui-ownership.md`.
 
-- `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
+- `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission. The optimistic human bubble (before and after upload) and the submitted message all build `additional_kwargs` through `buildHumanMessageAdditionalKwargs`, so quote/reference metadata and staged project files survive the upload; never replace them with only the uploaded files.
 - `src/components/workspace/chats/chat-box.tsx` owns the desktop right-panel layout, and **all three** right panels (artifacts, sidecar, browser) share one `ResizablePanelGroup` — do not fork a non-resizable branch per panel kind, which is how the artifacts divider silently lost its drag handle (#4465). Open/close is `collapse()` / `resize()` on the side panel's imperative handle, not conditional rendering, so the width can animate. Three constraints hold that together: the size transition is applied from the group as `[&>[data-panel]]:transition-[flex-grow]` because the sized flex item is the library's own `[data-panel]` element rather than the child `className` lands on; it is applied only while an open/close is in flight, so a drag is not interpolated frame by frame; and during the animation the panel content is held at its final width in `cqw` and clipped, because a reflowing message list re-runs its scroll-to-bottom (pinned by `tests/e2e/sidecar-chat.spec.ts`'s no-animated-scroll test) and a re-wrapping composer changes which responsive labels it shows. Because the panel is `collapsible`, the library can also collapse it to `0%` on its own when a drag crosses `minSize`, without going through the state that owns it. `onResize` records the last positive size while the pointer moves, but the owning `sidecar` / `browserView` / `artifactsOpen` state must only mirror a final `0%` layout from `onLayoutChanged`, after pointer release; closing on the first `0%` resize frame breaks a continuous drag that reaches the edge and then reverses before release.
 
 `ask_clarification` ToolMessages delimit runs despite hidden human replies; skill
@@ -196,3 +197,5 @@ are sent on save. Custom-agent chat derives its initial selection from the saved
 binding; explicit page-local overrides survive new-thread route replacement and
 reset on conversation changes. Gateway supplies defaults for clients without a
 selector; frontend visibility must not become a runtime enforcement boundary.
+
+MCP editor requests use the personal configuration API. Query keys for personal MCP config and capability installations include the authenticated user ID; remount the editor when that ID changes. Deployment installations remain read-only under Platform provided, alongside deployment setup guides. My plugins contains personal configuration templates, Lark account authorization and the personal MCP editor; a deployment installation must not mark a personal template configured.

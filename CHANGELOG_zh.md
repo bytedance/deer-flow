@@ -332,6 +332,19 @@
 
 ### 修复
 
+- **数据库：** `DatabaseConfig` 现在严格校验 `pool_size`、`pool_recycle` 与
+  `command_timeout`。此前，YAML 布尔值（`true`/`false`）会被强制转换为 `1`/`0`，
+  导致 `pool_size: true`（变成仅 1 个连接）和 `command_timeout: true`（变成 1 秒超时）
+  静默通过配置加载；`pool_size` 还接受非正数（`0`、`-1`），`command_timeout` 接受
+  `inf`（导致超时机制永不触发）。现在 `pool_size` 和 `pool_recycle` 强制要求正整数，
+  `command_timeout` 拒绝布尔值与非有限浮点数，同时保留 `null` 显式禁用超时。
+- **前端：** 文件上传完成后，乐观显示的用户消息气泡不再丢失引用与对话
+  引用标签。上传完成时的更新会用仅含已上传文件的对象替换气泡的
+  `additional_kwargs`，因此在服务端回传该消息之前这些标签会消失；随本次
+  发送一起暂存的项目附件在上传中和上传后也都不会显示在气泡中。实际提交的
+  消息始终完整。乐观副本（上传前后）与提交现在通过同一个辅助函数
+  `buildHumanMessageAdditionalKwargs` 构建 `additional_kwargs`。([#5982])
+
 - **调度器：** 修改间隔任务的标题或 prompt 不再返回 500。编辑对话框总是把 `schedule_spec` 与被修改的
   字段一起发送；当节奏没有变化时，`PATCH /api/scheduled-tasks/{id}` 会沿用任务原有的 `next_run_at`——
   而这个值是仓储以 ISO 字符串序列化后返回的。`ScheduledTaskRepository.update()` 原样把它赋给
@@ -5258,3 +5271,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5945]: https://github.com/bytedance/deer-flow/pull/5945
 [#5964]: https://github.com/bytedance/deer-flow/pull/5964
 [#5981]: https://github.com/bytedance/deer-flow/pull/5981
+[#5982]: https://github.com/bytedance/deer-flow/pull/5982

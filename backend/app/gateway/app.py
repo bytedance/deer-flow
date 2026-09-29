@@ -40,6 +40,7 @@ from app.gateway.routers import (
     mcp_tasks,
     memory,
     models,
+    personal_mcp,
     plugins,
     project_documents,
     project_thread_files,
@@ -526,7 +527,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("Upload staging file cleanup skipped", exc_info=True)
 
     # Initialize LangGraph runtime components (StreamBridge, RunManager, checkpointer, store)
-    async with _runtime_with_mcp_pool_shutdown(app, startup_config):
+    from app.gateway.personal_mcp_access import personal_mcp_authority
+
+    async with personal_mcp_authority(), _runtime_with_mcp_pool_shutdown(app, startup_config):
         logger.info("LangGraph runtime initialised")
 
         # Check admin bootstrap state and migrate orphan threads after admin exists.
@@ -603,7 +606,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             OrdinaryMcpTaskDriver,
         )
         from deerflow.mcp.tasks.runtime import (
-            configured_task_toolset_count,
             set_mcp_task_config_snapshot,
             set_mcp_task_submitter,
             validate_mcp_task_runtime_configuration,
@@ -622,11 +624,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         if mcp_task_repo is not None:
             mcp_task_drivers = McpTaskDriverRegistry()
-            if configured_task_toolset_count(task_extensions_config):
-                mcp_task_drivers.register(
-                    ORDINARY_MCP_TASK_DRIVER,
-                    OrdinaryMcpTaskDriver(McpTaskToolCaller(task_extensions_config)),
-                )
+            mcp_task_drivers.register(
+                ORDINARY_MCP_TASK_DRIVER,
+                OrdinaryMcpTaskDriver(McpTaskToolCaller(task_extensions_config)),
+            )
             mcp_task_service = McpTaskService(
                 repository=mcp_task_repo,
                 drivers=mcp_task_drivers,
@@ -1053,6 +1054,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # MCP API is mounted at /api/mcp
     app.include_router(capabilities.router)
     app.include_router(mcp.router)
+    app.include_router(personal_mcp.router)
 
     # Durable MCP tasks are scoped to their owning thread.
     app.include_router(mcp_tasks.router)

@@ -236,6 +236,7 @@ class SandboxConfig(BaseModel):
     health_check_skip_seconds: float | None = Field(
         default=None,
         ge=0,
+        allow_inf_nan=False,
         description="BoxLite-only reclaim skip window in seconds for boxes recently released by this provider instance. Set to 0 to always validate before warm reuse.",
     )
     ownership: SandboxOwnershipConfig | None = Field(
