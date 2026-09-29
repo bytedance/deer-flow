@@ -33,6 +33,10 @@ def test_agent_name_validation_rejects_trailing_newline(name: str) -> None:
     Only ``fullmatch`` anchors it, so DeerMem's inlined copy of the host's
     agent-name grammar accepted ``"reviewer\\n"`` and used it as a directory
     name — which the host's own strict validator then refuses forever.
+
+    ``"reviewer \\n"`` was already rejected by ``.match`` (the space falls
+    outside the class, so the match never reaches ``$``); it is parametrized
+    here to pin the grammar, not because it regressed.
     """
     with pytest.raises(ValueError, match="Invalid agent name"):
         validate_agent_name(name)
@@ -625,10 +629,12 @@ class TestAgentsAPI:
 
     @pytest.mark.parametrize("name", ["reviewer\n", "reviewer\n\n"])
     def test_trailing_newline_in_agent_name_is_rejected(self, agent_client, name):
-        """The router's ``AGENT_NAME_PATTERN.match`` accepted these and the store 500'd.
+        """The router's ``AGENT_NAME_PATTERN.match`` accepted ``"reviewer\\n"`` and the store 500'd.
 
-        ``$`` matches before a trailing newline, so the name reached the file
-        store, which validates the same grammar with ``fullmatch``.
+        ``$`` matches before a single trailing newline, so that one param reached
+        the file store, which validates the same grammar with ``fullmatch``.
+        ``"reviewer\\n\\n"`` was already rejected by ``.match`` on main; it is
+        parametrized to pin the grammar, not because it regressed.
         """
         assert agent_client.post("/api/agents", json={"name": name}).status_code == 422
         assert agent_client.get("/api/agents").json()["agents"] == []
