@@ -16,10 +16,12 @@ export function MessageReasoning({
   children,
   isLoading,
   durationSeconds,
+  tokenLabel,
 }: {
   children: string;
   isLoading: boolean;
   durationSeconds?: number;
+  tokenLabel?: string | null;
 }) {
   const { t } = useI18n();
 
@@ -30,11 +32,17 @@ export function MessageReasoning({
     >
       <ReasoningTrigger className="group/reasoning w-fit cursor-pointer gap-1.5 rounded-sm focus-visible:outline-2 focus-visible:outline-offset-4">
         {!isLoading && durationSeconds !== undefined ? (
-          <RunDurationLabel durationSeconds={durationSeconds} />
+          <>
+            <RunDurationLabel durationSeconds={durationSeconds} />
+            <span className="sr-only"> {t.runDuration.reasoning}</span>
+          </>
         ) : isLoading ? (
           <Shimmer duration={1}>{t.runDuration.reasoning}</Shimmer>
         ) : (
           <span>{t.runDuration.reasoning}</span>
+        )}
+        {tokenLabel && (
+          <span className="font-mono text-[11px]">{tokenLabel}</span>
         )}
         <ChevronRightIcon className="size-4 transition-transform group-data-[state=open]/reasoning:rotate-90" />
       </ReasoningTrigger>

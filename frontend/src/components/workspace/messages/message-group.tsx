@@ -52,12 +52,14 @@ import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
 import { isSafeHref, UnsafeLink } from "./markdown-link";
+import { MessageReasoning } from "./message-reasoning";
 import { ToolCallDetails } from "./tool-call-details";
 
 interface MessageGroupProps {
   className?: string;
   messages: Message[];
   isLoading?: boolean;
+  durationSeconds?: number;
   deferBrowserPreviews?: boolean;
   tokenDebugSteps?: TokenDebugStep[];
   showTokenDebugSummaries?: boolean;
@@ -69,6 +71,7 @@ function MessageGroupComponent({
   className,
   messages,
   isLoading = false,
+  durationSeconds,
   deferBrowserPreviews = false,
   tokenDebugSteps = [],
   showTokenDebugSummaries = false,
@@ -154,15 +157,10 @@ function MessageGroupComponent({
       aboveLastToolCallSteps.filter((step) => step.type !== "assistantText"),
     [aboveLastToolCallSteps],
   );
-  const lastReasoningStep = useMemo(() => {
-    if (lastToolCallStep) {
-      const index = stepIndexByStep.get(lastToolCallStep) ?? -1;
-      return steps.slice(index + 1).find((step) => step.type === "reasoning");
-    } else {
-      const filteredSteps = steps.filter((step) => step.type === "reasoning");
-      return filteredSteps[filteredSteps.length - 1];
-    }
-  }, [lastToolCallStep, stepIndexByStep, steps]);
+  const lastReasoningStep = useMemo(
+    () => getTrailingReasoningStep(steps),
+    [steps],
+  );
   // Assistant text emitted after the trailing reasoning is the answer that
   // reasoning produced, so it renders below the reasoning disclosure. The
   // settled assistant bubble always paints reasoning above content, and the
@@ -414,55 +412,77 @@ function MessageGroupComponent({
             lastReasoningStep.messageId,
             stepIndexByStep.get(lastReasoningStep) ?? -1,
           )}
-          <Button
-            key={lastReasoningStep.id}
-            className="w-full items-start justify-start text-left"
-            variant="ghost"
-            onClick={() => setShowLastThinking(!showLastThinking)}
-          >
-            <div className="flex w-full items-center justify-between">
-              <ChainOfThoughtStep
-                className="font-normal"
-                label={
-                  <DebugStepLabel
-                    label={t.common.thinking}
-                    token={shouldInlineThinkingToken({
-                      debugStep: lastReasoningDebugStep,
-                      toolCallCount: lastReasoningStep.messageId
-                        ? (toolCallCountByMessageId.get(
-                            lastReasoningStep.messageId,
-                          ) ?? 0)
-                        : 0,
-                      enabled: showTokenDebugSummaries,
-                      thinkingLabel: t.common.thinking,
-                      t,
-                    })}
-                  />
-                }
-                icon={LightbulbIcon}
-              ></ChainOfThoughtStep>
-              <div>
-                <ChevronUp
-                  className={cn(
-                    "text-muted-foreground size-4",
-                    showLastThinking ? "" : "rotate-180",
-                  )}
-                />
-              </div>
-            </div>
-          </Button>
-          {showLastThinking && (
-            <ChainOfThoughtContent className="px-4 pb-2">
-              <ChainOfThoughtStep
+          {!isLoading && durationSeconds !== undefined ? (
+            <MessageReasoning
+              isLoading={false}
+              durationSeconds={durationSeconds}
+              tokenLabel={shouldInlineThinkingToken({
+                debugStep: lastReasoningDebugStep,
+                toolCallCount: lastReasoningStep.messageId
+                  ? (toolCallCountByMessageId.get(
+                      lastReasoningStep.messageId,
+                    ) ?? 0)
+                  : 0,
+                enabled: showTokenDebugSummaries,
+                thinkingLabel: t.common.thinking,
+                t,
+              })}
+            >
+              {lastReasoningStep.reasoning ?? ""}
+            </MessageReasoning>
+          ) : (
+            <>
+              <Button
                 key={lastReasoningStep.id}
-                label={
-                  <MarkdownContent
-                    content={lastReasoningStep.reasoning ?? ""}
-                    isLoading={isLoading}
-                  />
-                }
-              ></ChainOfThoughtStep>
-            </ChainOfThoughtContent>
+                className="w-full items-start justify-start text-left"
+                variant="ghost"
+                onClick={() => setShowLastThinking(!showLastThinking)}
+              >
+                <div className="flex w-full items-center justify-between">
+                  <ChainOfThoughtStep
+                    className="font-normal"
+                    label={
+                      <DebugStepLabel
+                        label={t.common.thinking}
+                        token={shouldInlineThinkingToken({
+                          debugStep: lastReasoningDebugStep,
+                          toolCallCount: lastReasoningStep.messageId
+                            ? (toolCallCountByMessageId.get(
+                                lastReasoningStep.messageId,
+                              ) ?? 0)
+                            : 0,
+                          enabled: showTokenDebugSummaries,
+                          thinkingLabel: t.common.thinking,
+                          t,
+                        })}
+                      />
+                    }
+                    icon={LightbulbIcon}
+                  ></ChainOfThoughtStep>
+                  <div>
+                    <ChevronUp
+                      className={cn(
+                        "text-muted-foreground size-4",
+                        showLastThinking ? "" : "rotate-180",
+                      )}
+                    />
+                  </div>
+                </div>
+              </Button>
+              {showLastThinking && (
+                <ChainOfThoughtContent className="px-4 pb-2">
+                  <ChainOfThoughtStep
+                    key={lastReasoningStep.id}
+                    label={
+                      <MarkdownContent
+                        content={lastReasoningStep.reasoning ?? ""}
+                        isLoading={isLoading}
+                      />
+                    }
+                  ></ChainOfThoughtStep>
+                </ChainOfThoughtContent>
+              )}
+            </>
           )}
           {belowLastReasoningAssistantTextSteps.length > 0 && (
             <ChainOfThoughtContent className="px-4 pb-2">
@@ -501,6 +521,7 @@ function areMessageGroupPropsEqual(
   }
   return (
     previous.className === next.className &&
+    previous.durationSeconds === next.durationSeconds &&
     Boolean(previous.isLoading) === Boolean(next.isLoading) &&
     Boolean(previous.deferBrowserPreviews) ===
       Boolean(next.deferBrowserPreviews) &&
@@ -639,6 +660,7 @@ function ToolCall({
   result,
   isLast = false,
   isLoading = false,
+  durationSeconds,
   deferBrowserPreview = false,
   tokenDebugStep,
   showDetails = false,
@@ -654,6 +676,7 @@ function ToolCall({
   result?: string | Record<string, unknown>;
   isLast?: boolean;
   isLoading?: boolean;
+  durationSeconds?: number;
   deferBrowserPreview?: boolean;
   tokenDebugStep?: TokenDebugStep;
   showDetails?: boolean;
@@ -1053,6 +1076,7 @@ interface GenericCoTStep<T extends string = string> {
 }
 
 interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
+  message: Message;
   reasoning: string | null;
 }
 
@@ -1140,6 +1164,7 @@ function convertToSteps(
           id: message.id,
           messageId: message.id,
           type: "reasoning",
+          message,
           reasoning,
         };
         steps.push(step);
@@ -1193,4 +1218,22 @@ function convertToSteps(
     }
   }
   return steps;
+}
+
+// Use the same selection for rendering and duration ownership: reasoning that
+// precedes the final tool remains inside the execution timeline, not this header.
+function getTrailingReasoningStep(steps: CoTStep[]) {
+  const lastToolCall = [...steps]
+    .reverse()
+    .find((step) => step.type === "toolCall");
+  if (lastToolCall) {
+    return steps
+      .slice(steps.indexOf(lastToolCall) + 1)
+      .find((step) => step.type === "reasoning");
+  }
+  return [...steps].reverse().find((step) => step.type === "reasoning");
+}
+
+export function getMessageGroupReasoningMessage(messages: Message[]) {
+  return getTrailingReasoningStep(convertToSteps(messages))?.message;
 }

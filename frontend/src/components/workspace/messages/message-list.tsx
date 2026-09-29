@@ -101,7 +101,7 @@ import {
   type HumanInputSubmitResult,
 } from "./human-input-card";
 import { MarkdownContent } from "./markdown-content";
-import { MessageGroup } from "./message-group";
+import { MessageGroup, getMessageGroupReasoningMessage } from "./message-group";
 import { MessageListItem } from "./message-list-item";
 import {
   MessageTokenUsageDebugList,
@@ -1148,27 +1148,40 @@ export function MessageList({
               const groupIsLoading =
                 thread.isLoading && groupIndex === lastGroupIndex;
 
-              if (group.type === "human" || group.type === "assistant") {
-                // Reuse the run's single duration anchor in its reasoning
-                // disclosure. Other groups retain a standalone duration header.
-                const reasoningDurations = new Map<
-                  Message,
-                  RunDurationDisplay
-                >();
-                if (group.type === "assistant" && !groupIsLoading) {
-                  for (const display of getGroupRunDurations(
-                    group,
-                    groupIndex,
-                  )) {
-                    const target = group.messages.find(
-                      (message) =>
-                        extractReasoningContentFromMessage(message) &&
-                        (getMessageRunId(message) === display.runId ||
-                          display.runId === `client:${group.id}`),
-                    );
-                    if (target) reasoningDurations.set(target, display);
-                  }
+              // Bind only to reasoning disclosures this renderer actually shows.
+              const reasoningTargets =
+                group.type === "assistant"
+                  ? group.messages.filter((message) =>
+                      extractReasoningContentFromMessage(message),
+                    )
+                  : group.type === "assistant:subagent"
+                    ? group.messages.filter(
+                        (message) =>
+                          hasReasoning(message) &&
+                          getMessageGroupReasoningMessage([message]) ===
+                            message,
+                      )
+                    : group.type === "assistant:processing"
+                      ? [
+                          getMessageGroupReasoningMessage(group.messages),
+                        ].filter((message): message is Message => !!message)
+                      : [];
+              const reasoningDurations = new Map<Message, RunDurationDisplay>();
+              if (!groupIsLoading) {
+                for (const display of getGroupRunDurations(group, groupIndex)) {
+                  const target = reasoningTargets.find(
+                    (message) =>
+                      getMessageRunId(message) === display.runId ||
+                      display.runId === `client:${group.id}`,
+                  );
+                  if (target) reasoningDurations.set(target, display);
                 }
+              }
+              const inlineDurationRunIds = [...reasoningDurations.values()].map(
+                (display) => display.runId,
+              );
+
+              if (group.type === "human" || group.type === "assistant") {
                 return withRunDuration(
                   group,
                   groupIndex,
@@ -1278,9 +1291,7 @@ export function MessageList({
                           : skillUsageByGroupIndex.get(groupIndex),
                       )}
                   </div>,
-                  [...reasoningDurations.values()].map(
-                    (display) => display.runId,
-                  ),
+                  inlineDurationRunIds,
                 );
               } else if (group.type === "assistant:clarification") {
                 const message = group.messages[0];
@@ -1421,6 +1432,9 @@ export function MessageList({
                       <MessageGroup
                         key={"thinking-group-" + message.id}
                         messages={[message]}
+                        durationSeconds={
+                          reasoningDurations.get(message)?.durationSeconds
+                        }
                         isLoading={groupIsLoading}
                         deferBrowserPreviews={thread.isLoading}
                         tokenDebugSteps={getTokenDebugStepsForMessages([
@@ -1466,6 +1480,7 @@ export function MessageList({
                       debugMessageIds: subagentDebugMessageIds,
                     })}
                   </div>,
+                  inlineDurationRunIds,
                 );
               }
               return withRunDuration(
@@ -1474,6 +1489,9 @@ export function MessageList({
                 <div className="w-full">
                   <MessageGroup
                     messages={group.messages}
+                    durationSeconds={
+                      reasoningDurations.values().next().value?.durationSeconds
+                    }
                     isLoading={groupIsLoading}
                     deferBrowserPreviews={thread.isLoading}
                     threadId={threadId}
@@ -1489,6 +1507,7 @@ export function MessageList({
                     inlineDebug: false,
                   })}
                 </div>,
+                inlineDurationRunIds,
               );
             }}
           />

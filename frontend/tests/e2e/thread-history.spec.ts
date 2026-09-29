@@ -442,7 +442,7 @@ test.describe("Thread history", () => {
     await expect(page.getByTestId("run-duration")).toHaveCount(1);
     await expect(page.getByText("Took 1m 54s")).toBeVisible();
     const disclosure = page.getByRole("button", {
-      name: "Took 1m 54s",
+      name: "Took 1m 54s Reasoning",
       exact: true,
     });
     await expect(disclosure).toBeVisible();
