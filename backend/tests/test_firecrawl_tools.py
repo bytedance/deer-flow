@@ -245,11 +245,20 @@ class TestPerCallClientTeardown:
         from deerflow.community.firecrawl.tools import _aclose_firecrawl_client
 
         client = RealApp(api_key="test-key")
-        assert client._v2_client.async_http_client._client.is_closed is False
+        pooled = getattr(getattr(client, "_v2_client", None), "async_http_client", None)
+        inner = getattr(pooled, "_client", None)
+        if inner is None:
+            # The helper deliberately treats a missing or reshaped private
+            # layout as a no-op (the declared >=1.15.0 range includes such
+            # versions); skip instead of hard-asserting one locked version's
+            # internals.
+            pytest.skip("locked firecrawl-py private pool layout not present")
+
+        assert inner.is_closed is False
 
         await _aclose_firecrawl_client(client)
 
-        assert client._v2_client.async_http_client._client.is_closed is True
+        assert inner.is_closed is True
 
     @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
     @patch("deerflow.community.firecrawl.tools.get_app_config")
