@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -31,37 +33,101 @@ def _environment(tmp_path, monkeypatch):
     reset_app_config()
 
 
-async def test_create_managed_subagent_routes_write_through_mutation_drain(monkeypatch):
-    created: list[object] = []
+@pytest.mark.parametrize("operation", ["create", "update", "delete"])
+async def test_managed_subagent_writes_route_through_mutation_drain(monkeypatch, operation):
+    definition = router.ManagedSubagentDefinition(
+        name="planner",
+        description="Plans work",
+        system_prompt="Plan the work.",
+    )
 
     class Store:
-        def create(self, definition):
-            created.append(definition)
+        def create(self, value):
+            return value
+
+        def get(self, name):
+            assert name == "planner"
+            return definition
+
+        def update(self, value):
+            return value
+
+        def delete(self, name):
+            assert name == "planner"
+            return True
 
     store = Store()
-    calls: list[tuple] = []
+    calls: list[tuple[object, tuple[object, ...]]] = []
 
-    async def drained(func, /, *args):
+    async def drained(func, /, *args, **kwargs):
         calls.append((func, args))
-        return func(*args)
+        return func(*args, **kwargs)
 
     monkeypatch.setattr(router, "get_managed_subagent_store", lambda *_: store)
     monkeypatch.setattr(router, "_run_store_mutation", drained)
 
-    response = await router.create_managed_subagent(
-        _request("admin"),
-        router.ManagedSubagentCreateRequest(
-            name="planner",
-            description="Plans work",
-            system_prompt="Plan the work.",
-        ),
-    )
+    if operation == "create":
+        await router.create_managed_subagent(
+            _request("admin"),
+            router.ManagedSubagentCreateRequest(
+                name="planner",
+                description="Plans work",
+                system_prompt="Plan the work.",
+            ),
+        )
+        expected = store.create
+    elif operation == "update":
+        await router.update_managed_subagent(
+            "planner",
+            _request("admin"),
+            router.ManagedSubagentUpdateRequest(enabled=False),
+        )
+        expected = store.update
+    else:
+        await router.delete_managed_subagent("planner", _request("admin"))
+        expected = store.delete
 
-    assert response.name == "planner"
     assert len(calls) == 1
-    assert calls[0][0] == store.create
-    assert calls[0][1][0].name == "planner"
-    assert created[0].name == "planner"
+    assert calls[0][0] == expected
+
+
+async def test_create_managed_subagent_drains_started_write_across_repeated_cancellation(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    class Store:
+        def create(self, _definition):
+            started.set()
+            assert release.wait(timeout=2)
+
+    monkeypatch.setattr(router, "get_managed_subagent_store", lambda *_: Store())
+
+    task = asyncio.create_task(
+        router.create_managed_subagent(
+            _request("admin"),
+            router.ManagedSubagentCreateRequest(
+                name="planner",
+                description="Plans work",
+                system_prompt="Plan the work.",
+            ),
+        )
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_admin_can_create_update_and_delete_managed_subagent():
