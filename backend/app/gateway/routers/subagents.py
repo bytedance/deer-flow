@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -75,9 +76,9 @@ class ManagedSubagentUpdateRequest(BaseModel):
     enabled: bool | None = None
 
 
-async def _run_store_mutation(func, /, *args):
+async def _run_store_mutation[**P, T](func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
     """Drain persistent managed-subagent writes before cancellation propagates."""
-    return await await_drained(asyncio.to_thread(func, *args))
+    return await await_drained(asyncio.to_thread(func, *args, **kwargs))
 
 
 def _validate_model(model: str, app_config) -> None:
