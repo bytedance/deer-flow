@@ -36,10 +36,16 @@ def _coerce_max_results(value: object, default: int) -> int:
         logger.warning("Invalid SearXNG max_results=%r; using default %s", value, default)
         return default
     try:
-        return int(value)
+        coerced = int(value)
     except (TypeError, ValueError, OverflowError):
         logger.warning("Invalid SearXNG max_results=%r; using default %s", value, default)
         return default
+    if coerced <= 0:
+        # SearxngClient treats any non-positive limit as "no cap", so 0/-2 would
+        # unbound the search instead of erroring; fall back to the default.
+        logger.warning("Invalid SearXNG max_results=%r; using default %s", value, default)
+        return default
+    return coerced
 
 
 @tool("web_search", parse_docstring=True)
