@@ -570,3 +570,71 @@ async def test_goal_set_failure_shows_error_tone():
         await pilot.pause()
     errors = [r for r in _system_rows(app) if r.tone == "error"]
     assert any("Could not set goal." in r.text for r in errors)
+
+
+@pytest.mark.asyncio
+async def test_multiline_paste_keeps_leading_indentation_and_trailing_newline():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    pasted = "    def f():\n        return 1\n"
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste(pasted))
+        await pilot.pause()
+        await pilot.press("enter")
+        await _wait_until(lambda: bool(session.client.stream_calls), pilot)
+
+    assert session.client.stream_calls[0][0] == pasted
+    assert app._history.entries() == [pasted]
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_input_is_not_submitted():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste("  \n\t\n"))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert session.client.stream_calls == []
+    assert app._history.entries() == []
+
+
+@pytest.mark.asyncio
+async def test_down_on_last_line_of_multiline_input_falls_back_to_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._history.add("first line\nsecond line")
+        await pilot.press("up")
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        assert composer.value == "first line\nsecond line"
+        assert composer.cursor_location[0] == 1
+
+        # Already on the last document line: Down leaves the recalled entry for the draft.
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == ""
+
+
+@pytest.mark.asyncio
+async def test_slash_command_with_surrounding_whitespace_still_runs_as_command():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste("  /help\n"))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert session.client.stream_calls == []
+    assert app._history.entries() == ["/help"]

@@ -247,10 +247,13 @@ class DeerFlowTUI(App):
     # ----- input --------------------------------------------------------- #
 
     def on_composer_input_submitted(self, event: ComposerInput.Submitted) -> None:
-        text = event.value.strip()
+        # Send pasted documents unchanged (leading indentation, trailing newlines);
+        # only slash commands are trimmed so they still resolve as commands.
+        stripped = event.value.strip()
+        text = stripped if stripped.startswith("/") else event.value
         event.input.value = ""
         self._close_palette()
-        if not text:
+        if not stripped:
             return
         self._history.add(text)
         self._handle_submit(text)

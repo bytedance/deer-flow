@@ -117,13 +117,14 @@ render.py       Rich renderers for header / transcript / status / palette (pure)
 theme.py        palette + symbols
 app.py          Textual App: composes widgets, drives runs on a worker thread,
                 marshals actions back to the UI thread, renders ViewState
+widgets/        Textual widgets (the multiline composer)
 persistence.py  writes threads_meta so sessions appear in the Web UI (below)
 ```
 
 `DeerFlowClient.stream()` is a **synchronous** generator, so the app runs it on a
 Textual worker *thread* and marshals each yielded action back to the UI thread
-via `call_from_thread`. The pure layers (everything except `app.py`) have no
-Textual dependency and are unit-tested directly with synthetic `StreamEvent`s.
+via `call_from_thread`. The pure layers (everything except `app.py` and `widgets/`)
+have no Textual dependency and are unit-tested directly with synthetic `StreamEvent`s.
 
 ## Web UI visibility (shared persistence)
 
