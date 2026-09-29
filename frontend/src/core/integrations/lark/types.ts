@@ -40,6 +40,7 @@ export interface LarkIntegrationStatus {
   cli: LarkCliProbe;
   auth: LarkAuthProbe;
   sandbox_runtime_mode: LarkSandboxRuntimeMode;
+  sandbox_runtime_probed: boolean;
   sandbox_runtime_ready: boolean;
   sandbox_runtime_detail: string | null;
 }

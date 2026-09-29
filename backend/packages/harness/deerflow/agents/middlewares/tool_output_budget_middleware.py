@@ -342,7 +342,9 @@ def _resolve_sandbox(request: ToolCallRequest) -> Sandbox | None:
     state = getattr(runtime, "state", None)
     if not isinstance(state, dict):
         return None
-    sandbox_state = state.get("sandbox")
+    from deerflow.sandbox.overwrite import unwrap_sandbox
+
+    sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
     if not isinstance(sandbox_state, dict):
         return None
     sandbox_id = sandbox_state.get("sandbox_id")
