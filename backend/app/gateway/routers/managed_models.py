@@ -10,6 +10,7 @@ from app.gateway.deps import require_admin_user
 from deerflow.config.app_config import get_app_config
 from deerflow.config.managed_models import ManagedModel, ManagedModelStore
 from deerflow.reflection import resolve_class
+from deerflow.utils.file_io import await_drained
 
 router = APIRouter(prefix="/api/managed-models", tags=["models"])
 _ADMIN = "Admin privileges are required to manage shared models."
@@ -57,7 +58,7 @@ def _save(body: SaveModelRequest):
 @router.put("")
 async def save_model(request: Request, body: SaveModelRequest):
     await require_admin_user(request, detail=_ADMIN)
-    return await asyncio.to_thread(_save, body)
+    return await await_drained(asyncio.to_thread(_save, body))
 
 
 def _probe_config(body: SaveModelRequest):
