@@ -511,6 +511,11 @@ export function InputBox({
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
   const pendingDraftSubmissionKeyRef = useRef<string | null>(null);
+  const acceptedDraftRef = useRef<{
+    key: string;
+    text: string;
+    skillName: string | null;
+  } | null>(null);
   const latestDraftRef = useRef<{
     key: string;
     draft: ComposerDraft;
@@ -838,6 +843,19 @@ export function InputBox({
   }, [cancelDraftSaveTimer]);
   const scheduleDraftSave = useCallback(
     (draft: ComposerDraft, key = draftKey) => {
+      // An accepted attachment send keeps its text visible until upload finishes.
+      // Reference cleanup can rerun this effect meanwhile; do not resurrect the
+      // accepted snapshot. Actual input edits release it, even for identical text.
+      const accepted = acceptedDraftRef.current;
+      if (
+        accepted?.key === key &&
+        accepted.text === draft.text &&
+        accepted.skillName === draft.skillName
+      )
+        return null;
+      if (accepted?.key === key && !draft.text && !draft.skillName) {
+        acceptedDraftRef.current = null;
+      }
       if (
         !draft.text &&
         !draft.skillName &&
@@ -928,6 +946,7 @@ export function InputBox({
     setInputPolishUndo(null);
     setHydratedDraftKey(null);
     pendingDraftSubmissionKeyRef.current = null;
+    acceptedDraftRef.current = null;
     latestDraftRef.current = null;
     invalidateDraftSaveTimer();
     return () => {
@@ -1398,6 +1417,14 @@ export function InputBox({
           setMentionQuery(null);
           setMentionButtonOpen(false);
           if (pendingDraftSubmissionKeyRef.current === draftKey) {
+            acceptedDraftRef.current = {
+              key: draftKey,
+              text: textInput.value,
+              skillName:
+                selectedSlashSkill?.kind === "skill"
+                  ? selectedSlashSkill.name
+                  : null,
+            };
             pendingDraftSubmissionKeyRef.current = null;
             latestDraftRef.current = null;
             invalidateDraftSaveTimer();
@@ -2434,6 +2461,7 @@ export function InputBox({
 
   const handlePromptTextareaChange = useCallback(
     (event: ChangeEvent<HTMLTextAreaElement>) => {
+      acceptedDraftRef.current = null;
       updateMentionQuery(
         event.currentTarget.value,
         event.currentTarget.selectionStart,
@@ -2463,6 +2491,7 @@ export function InputBox({
 
   const updateInlineSkillTextInput = useCallback(
     (element: HTMLElement) => {
+      acceptedDraftRef.current = null;
       if (voiceListening) {
         abortVoiceInput();
       }

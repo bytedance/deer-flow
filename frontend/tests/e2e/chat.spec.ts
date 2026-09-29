@@ -452,6 +452,22 @@ test.describe("Chat workspace", () => {
       timeout: 10_000,
     });
 
+    // A new user edit must still save, even when it repeats the accepted text.
+    await page
+      .getByPlaceholder(/how can i assist you/i)
+      .fill("Send this immediately");
+    await expect
+      .poll(() =>
+        page.evaluate(() => Object.values(window.sessionStorage).join("\n")),
+      )
+      .toContain("Send this immediately");
+    await page.getByPlaceholder(/how can i assist you/i).fill("");
+    await expect
+      .poll(() =>
+        page.evaluate(() => Object.values(window.sessionStorage).join("\n")),
+      )
+      .not.toContain("Send this immediately");
+
     await page.reload();
     await expect(page.getByPlaceholder(/how can i assist you/i)).toHaveValue(
       "",

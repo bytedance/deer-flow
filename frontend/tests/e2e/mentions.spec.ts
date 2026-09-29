@@ -135,7 +135,9 @@ test("restores a conversation reference and sends its run-scoped ID", async ({
     (await request).postDataJSON().context.conversation_references,
   ).toEqual([MOCK_THREAD_ID]);
 });
-test("mouse upload entry and mobile picker stay usable", async ({ page }) => {
+test("mouse upload entry and mobile picker stay usable", async ({
+  page,
+}, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/workspace/chats/new");
   await page.getByTestId("mention-button").click();
@@ -144,7 +146,7 @@ test("mouse upload entry and mobile picker stay usable", async ({ page }) => {
   const box = await picker.boundingBox();
   expect(box!.x).toBeGreaterThanOrEqual(0);
   expect(box!.x + box!.width).toBeLessThanOrEqual(390);
-  await page.screenshot({ path: "/private/tmp/mentions-mobile.png" });
+  await page.screenshot({ path: testInfo.outputPath("mentions-mobile.png") });
   const chooser = page.waitForEvent("filechooser");
   await page.getByRole("option", { name: "Upload a file" }).click();
   await (
