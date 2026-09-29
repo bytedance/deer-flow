@@ -793,7 +793,7 @@ def _validate_mcp_update_request(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
                     f"Bundled MCP server '{name}' uses a different Python interpreter. "
-                    f"Edit this server's JSON and set 'command' to {sys.executable!r}. "
+                    f"Edit this server's JSON and set 'command' to '{sys.executable}'. "
                     "Keep its capability metadata and credentials unchanged to preserve Agent selections; do not delete and reinstall it."
                 ),
             )
