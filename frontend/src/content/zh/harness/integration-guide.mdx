@@ -20,11 +20,8 @@ DeerFlow Harness 不仅仅是一个独立应用程序——它是一个可以导
 
 ```python
 from deerflow.client import DeerFlowClient
-from deerflow.config import load_config
 
-# 加载配置（读取 config.yaml 或 DEER_FLOW_CONFIG_PATH）
-load_config()
-
+# 客户端在构造时加载配置（读取 config.yaml 或 DEER_FLOW_CONFIG_PATH）
 client = DeerFlowClient()
 ```
 
@@ -104,9 +101,6 @@ DeerFlow Gateway 本身是一个 FastAPI 应用程序。你可以将其作为子
 
 ```python
 from fastapi import FastAPI
-from deerflow.config import load_config
-
-load_config()
 
 app = FastAPI()
 
@@ -131,8 +125,8 @@ client = DeerFlowClient()
 async def chat(thread_id: str, body: dict):
     def generate():
         for event in client.stream(message=body["message"], thread_id=thread_id):
-            # Serialise the `StreamEvent` dataclass; a raw f-string of the object
-            # would ship its `repr()`, which no SSE client can parse.
+            # 序列化 `StreamEvent` 数据类；直接对对象做 f-string 会发送它的
+            # `repr()`，SSE 客户端无法解析。
             yield f"event: {event.type}\ndata: {json.dumps(event.data)}\n\n"
     return StreamingResponse(generate(), media_type="text/event-stream")
 ```
@@ -145,15 +139,15 @@ async def chat(thread_id: str, body: dict):
 import os
 os.environ["DEER_FLOW_CONFIG_PATH"] = "/path/to/my-deerflow-config.yaml"
 
-from deerflow.config import load_config
-load_config()
+from deerflow.client import DeerFlowClient
+client = DeerFlowClient()
 ```
 
 或直接传递路径：
 
 ```python
-from deerflow.config import load_config
-load_config(config_path="/path/to/my-deerflow-config.yaml")
+from deerflow.client import DeerFlowClient
+client = DeerFlowClient(config_path="/path/to/my-deerflow-config.yaml")
 ```
 
 <Cards num={2}>

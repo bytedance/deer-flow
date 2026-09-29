@@ -49,14 +49,12 @@ tools:
 ```python
 import os
 from deerflow.client import DeerFlowClient
-from deerflow.config import load_config
 
 # 设置 API Key
 os.environ["OPENAI_API_KEY"] = "sk-..."
 
-# 加载配置
-load_config()
-
+# 客户端自行加载 config.yaml（默认解析路径，或 DEER_FLOW_CONFIG_PATH）；
+# 如需指定文件，传入 config_path=...
 client = DeerFlowClient()
 
 for event in client.stream(
@@ -82,8 +80,8 @@ uv run python my_agent.py
 
 ```python
 StreamEvent(type="messages-tuple", data={"type": "ai", "content": "def fibonacci...", "id": "m1"})
-StreamEvent(type="values",         data={"title": "Python Fibonacci Function", "messages": [...]})
-StreamEvent(type="end",            data={"usage": {"total_tokens": 412}})
+StreamEvent(type="values",         data={"title": "Python Fibonacci Function", "messages": [...], "artifacts": [...], "summary_text": None})
+StreamEvent(type="end",            data={"usage": {"input_tokens": 1180, "output_tokens": 412, "total_tokens": 1592}})
 ```
 
 ```python

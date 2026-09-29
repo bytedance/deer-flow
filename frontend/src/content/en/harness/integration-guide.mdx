@@ -21,11 +21,9 @@ The primary integration point is `DeerFlowClient`. It wraps the LangGraph runtim
 
 ```python
 from deerflow.client import DeerFlowClient
-from deerflow.config import load_config
 
-# Load configuration (reads config.yaml or DEER_FLOW_CONFIG_PATH)
-load_config()
-
+# The client loads configuration on construction (reads config.yaml
+# or DEER_FLOW_CONFIG_PATH)
 client = DeerFlowClient()
 ```
 
@@ -106,9 +104,6 @@ DeerFlow Gateway is itself a FastAPI application. You can mount it as a sub-appl
 
 ```python
 from fastapi import FastAPI
-from deerflow.config import load_config
-
-load_config()
 
 app = FastAPI()
 
@@ -159,15 +154,15 @@ When embedded in another application, set the config path explicitly to avoid am
 import os
 os.environ["DEER_FLOW_CONFIG_PATH"] = "/path/to/my-deerflow-config.yaml"
 
-from deerflow.config import load_config
-load_config()
+from deerflow.client import DeerFlowClient
+client = DeerFlowClient()
 ```
 
 Or pass the path directly:
 
 ```python
-from deerflow.config import load_config
-load_config(config_path="/path/to/my-deerflow-config.yaml")
+from deerflow.client import DeerFlowClient
+client = DeerFlowClient(config_path="/path/to/my-deerflow-config.yaml")
 ```
 
 ## MCP server integration

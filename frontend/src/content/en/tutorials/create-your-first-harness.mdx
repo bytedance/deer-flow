@@ -55,13 +55,11 @@ Create `my_agent.py` in the `backend/` directory:
 ```python
 import os
 from deerflow.client import DeerFlowClient
-from deerflow.config import load_config
 
 os.environ["OPENAI_API_KEY"] = "sk-..."
 
-# Load config.yaml
-load_config()
-
+# The client loads config.yaml itself (default resolution, or
+# DEER_FLOW_CONFIG_PATH); pass config_path=... for a specific file.
 client = DeerFlowClient()
 
 for event in client.stream(
@@ -89,8 +87,8 @@ uv run python my_agent.py
 
 ```python
 StreamEvent(type="messages-tuple", data={"type": "ai", "content": "def fibonacci...", "id": "m1"})
-StreamEvent(type="values",         data={"title": "Python Fibonacci Function", "messages": [...]})
-StreamEvent(type="end",            data={"usage": {"total_tokens": 412}})
+StreamEvent(type="values",         data={"title": "Python Fibonacci Function", "messages": [...], "artifacts": [...], "summary_text": None})
+StreamEvent(type="end",            data={"usage": {"input_tokens": 1180, "output_tokens": 412, "total_tokens": 1592}})
 ```
 
 ```python
