@@ -1,6 +1,8 @@
 """Configuration for tool progress tracking middleware."""
 
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel, Field, field_validator
 
 
 class ToolProgressConfig(BaseModel):
@@ -32,6 +34,7 @@ class ToolProgressConfig(BaseModel):
     )
     min_word_count_for_similarity: int = Field(
         default=10,
+        ge=1,
         description="Minimum unique word count to apply Jaccard check; shorter content skips near-duplicate detection entirely",
     )
     exempt_tools: set[str] = Field(
@@ -43,3 +46,11 @@ class ToolProgressConfig(BaseModel):
         ge=1,
         description="Maximum number of thread histories to keep in memory (LRU eviction)",
     )
+
+    @field_validator("min_word_count_for_similarity", mode="before")
+    @classmethod
+    def reject_boolean_min_word_count(cls, value: Any) -> Any:
+        """Reject booleans before Pydantic coerces them to 1/0."""
+        if isinstance(value, bool):
+            raise ValueError("min_word_count_for_similarity must be a positive integer, not a boolean")
+        return value
