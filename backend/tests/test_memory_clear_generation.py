@@ -87,7 +87,7 @@ def _conversation() -> list[MagicMock]:
 
 
 def _queue_conversation(*, human: str = "Remember that I like Python.", ai: str = "I'll keep that preference in mind.") -> list:
-    return [HumanMessage(content=human), AIMessage(content=ai)]
+    return [HumanMessage(content=human, id=f"human-{human}"), AIMessage(content=ai, id=f"ai-{ai}")]
 
 
 def _updater(storage: FileMemoryStorage, invoke) -> MemoryUpdater:
@@ -1896,11 +1896,11 @@ def test_persist_then_clear_before_coverage_does_not_restore_via_add_nowait(tmp_
     assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
 
 
-def test_identical_no_id_prefix_after_clear_is_not_reextracted(tmp_path: Path) -> None:
-    """A no-id prefix that matches the cleared wording must not be written back.
+def test_identical_no_id_turn_after_clear_is_extracted_again(tmp_path: Path) -> None:
+    """A user who repeats a cleared preference in id-less messages can store it again.
 
-    Repeating a preference is a new message id, or a turn whose text is not
-    already in the exclusion set. Matching text alone is not a new occurrence.
+    Without a message id, the same text cannot tell a fresh post-clear turn
+    from the cleared one, so clear exclusion must not drop it.
     """
     host_llm = MagicMock()
     host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
@@ -1925,8 +1925,8 @@ def test_identical_no_id_prefix_after_clear_is_not_reextracted(tmp_path: Path) -
         manager.add_nowait(thread_id="thread-1", messages=fresh_turn, agent_name="researcher", user_id="alice")
     manager._queue.flush()
 
-    host_llm.invoke.assert_not_called()
-    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+    host_llm.invoke.assert_called_once()
+    assert {fact["content"] for fact in manager.get_memory(agent_name="researcher", user_id="alice")["facts"]} == {"User likes Python"}
 
 
 def test_persist_peek_error_after_clear_does_not_restore_via_add_nowait(tmp_path: Path) -> None:

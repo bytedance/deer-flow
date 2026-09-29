@@ -2193,13 +2193,12 @@ class MemoryUpdater:
         extraction progress, but it must not restore turns a clear already
         consumed. Coverage is the whole cleared prefix. If that prefix's tail
         is still in the feed and the match is a stable message id, everything
-        through the rightmost covered id is dropped. Content-based identities
-        (no message id) are membership-only: a sentence is dropped when that
-        sentence itself is in the set, including when the whole feed matches.
-        They are not a prefix-cut boundary, because a later turn can repeat the
-        same assistant wording. Messages that are not in the set stay eligible.
-        A missing tail is not treated as "no boundary, feed everything" when a
-        stable id still marks the cleared prefix.
+        through the rightmost covered id is dropped. Messages without an id are
+        never dropped: their content identity also matches a fresh post-clear
+        turn with the same text, so it cannot prove the message predates the
+        clear. Messages that are not in the set stay eligible. A missing tail
+        is not treated as "no boundary, feed everything" when a stable id still
+        marks the cleared prefix.
         """
         excluded = self._clear_exclusion_get(watermark_key)
         return self._drop_excluded_identities(excluded, messages)
@@ -2223,13 +2222,13 @@ class MemoryUpdater:
         last_idx = -1
         for i, msg in enumerate(messages):
             identity = _message_identity(msg)
-            # Only a unique message id is a reliable prefix boundary. Content
-            # fallback can collide across turns (the same assistant wording
-            # after a new user message) and must not cut uncovered messages.
-            if identity is not None and identity in excluded and identity[0] == "id":
+            if identity is not None and identity[0] == "id" and identity in excluded:
                 last_idx = i
         remaining = messages[last_idx + 1 :]
-        return [msg for msg in remaining if (identity := _message_identity(msg)) is None or identity not in excluded]
+        # Only a unique message id can prove a message predates the clear. A
+        # content identity also matches a fresh post-clear turn with the same
+        # text, so id-less messages are never dropped here.
+        return [msg for msg in remaining if (identity := _message_identity(msg)) is None or identity[0] != "id" or identity not in excluded]
 
     def _peek_newer_clear(
         self,

@@ -96,9 +96,14 @@ retryable, including for an emergency flush. Pending notes share
 least-recently-used thread's notes are dropped. If a
 summarization flush carries only an older prefix that does not include the previous
 tail, those prefix identities are still dropped; messages that are not in the set
-remain eligible. Content-based identities (no message id) are membership-only --
-they are not a prefix-cut boundary, because a later turn can repeat the same
-assistant wording.
+remain eligible. Clear exclusion only drops messages with an id. A message
+without an id falls back to a `(type, content)` identity, which also matches a
+fresh post-clear turn with the same text, so it is never dropped: a user who
+repeats a cleared preference can store it again. Known gap: resending an
+id-less pre-clear conversation after a clear can re-extract it. Graph state
+assigns ids to every message, so `MemoryMiddleware` and the summarization flush
+always carry them; only direct callers that build id-less messages hit this
+gap. The generation fence still drops in-flight id-less work.
 DeerMem's `aadd` / `aadd_nowait` offload enqueue (including the uncached manifest peek) with
 `asyncio.to_thread`. The lead summarization path fires `memory_flush_hook.as_async`
 (`amemory_flush_hook`) from `acompact_state`. That async hook also offloads

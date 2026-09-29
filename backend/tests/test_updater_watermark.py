@@ -90,8 +90,8 @@ def _config(**overrides: Any) -> DeerMemConfig:
 def _msgs(*texts: str) -> list[Any]:
     out: list[Any] = []
     for t in texts:
-        out.append(HumanMessage(content=t))
-        out.append(AIMessage(content=f"reply-{t}"))
+        out.append(HumanMessage(content=t, id=f"human-{t}"))
+        out.append(AIMessage(content=f"reply-{t}", id=f"ai-{t}"))
     return out
 
 
@@ -629,8 +629,8 @@ def test_prescreen_skip_excludes_batch_when_clear_lands_during_judge() -> None:
     assert llm.invoke_count == 0
 
 
-def test_drop_excluded_drops_identical_no_id_prefix() -> None:
-    """No-id wording that is entirely in the exclusion set is not fed again."""
+def test_drop_excluded_keeps_identical_no_id_messages() -> None:
+    """Matching text alone cannot tell a fresh post-clear turn from a cleared one."""
     remember = "I will remember your preference."
     excluded = frozenset(
         {
@@ -643,7 +643,7 @@ def test_drop_excluded_drops_identical_no_id_prefix() -> None:
         AIMessage(content=remember, id=""),
     ]
     remaining = MemoryUpdater._drop_excluded_identities(excluded, messages)
-    assert remaining == []
+    assert remaining == messages
 
 
 def test_drop_excluded_does_not_cut_prefix_on_content_identity() -> None:
@@ -660,7 +660,7 @@ def test_drop_excluded_does_not_cut_prefix_on_content_identity() -> None:
         AIMessage(content=remember, id=""),
     ]
     remaining = MemoryUpdater._drop_excluded_identities(excluded, messages)
-    assert [msg.content for msg in remaining] == ["I like Rust"]
+    assert [msg.content for msg in remaining] == ["I like Rust", remember]
 
 
 def test_drop_excluded_still_cuts_prefix_at_stable_message_id() -> None:
