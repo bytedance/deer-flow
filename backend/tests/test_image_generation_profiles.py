@@ -277,15 +277,82 @@ def test_web_edit_matching_server_model_at_other_endpoint_requires_new_choice(st
     assert result.startswith("Error: IMAGE_PROFILE_CHOICE_REQUIRED")
 
 
-def test_admin_save_rejects_duplicate_server_model_id(store, monkeypatch):
+def test_admin_save_rejects_duplicate_server_image_settings(store, monkeypatch):
     from app.gateway.routers import image_generation as router
 
-    config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": {"GEMINI_API_KEY": "synthetic-server-key", "GEMINI_IMAGE_MODEL": "same-id"}}})
+    config = AppConfig.model_validate(
+        {
+            "sandbox": {
+                "use": "test",
+                "environment": {
+                    "IMAGE_GENERATION_PROVIDER": "openai",
+                    "IMAGE_GENERATION_API_KEY": "synthetic-server-key",
+                    "IMAGE_GENERATION_MODEL": "same-id",
+                    "IMAGE_GENERATION_BASE_URL": "https://images.example/v1",
+                },
+            }
+        }
+    )
     monkeypatch.setattr(router, "get_app_config", lambda: config)
     with pytest.raises(HTTPException) as denied:
         router._save(router.SaveImageProfileRequest(config=profile(model="same-id")))
     assert denied.value.status_code == 409
     assert store.list() == []
+
+
+@pytest.mark.parametrize(
+    "web_fields",
+    [
+        {"base_url": "https://other.example/v1"},
+        {"provider": "gemini", "base_url": None},
+        {"size": "1024x1024"},
+    ],
+)
+def test_admin_save_allows_same_model_id_with_different_image_settings(store, monkeypatch, web_fields):
+    from app.gateway.routers import image_generation as router
+
+    config = AppConfig.model_validate(
+        {
+            "sandbox": {
+                "use": "test",
+                "environment": {
+                    "IMAGE_GENERATION_PROVIDER": "openai",
+                    "IMAGE_GENERATION_API_KEY": "synthetic-server-key",
+                    "IMAGE_GENERATION_MODEL": "same-id",
+                    "IMAGE_GENERATION_BASE_URL": "https://images.example/v1",
+                },
+            }
+        }
+    )
+    monkeypatch.setattr(router, "get_app_config", lambda: config)
+
+    saved = router._save(router.SaveImageProfileRequest(config=profile(model="same-id", **web_fields)))
+
+    assert saved["model"] == "same-id"
+    assert router._list_profiles()["status"]["choice_required"] is True
+
+
+def test_admin_save_allows_web_profile_when_matching_server_settings_lack_a_key(store, monkeypatch):
+    from app.gateway.routers import image_generation as router
+
+    config = AppConfig.model_validate(
+        {
+            "sandbox": {
+                "use": "test",
+                "environment": {
+                    "IMAGE_GENERATION_PROVIDER": "openai",
+                    "IMAGE_GENERATION_MODEL": "same-id",
+                    "IMAGE_GENERATION_BASE_URL": "https://images.example/v1",
+                },
+            }
+        }
+    )
+    monkeypatch.setattr(router, "get_app_config", lambda: config)
+
+    saved = router._save(router.SaveImageProfileRequest(config=profile(model="same-id")))
+
+    assert saved["model"] == "same-id"
+    assert router._list_profiles()["status"]["choice_required"] is False
 
 
 def test_web_profile_saved_after_server_model_requires_choice_immediately(store, monkeypatch):
