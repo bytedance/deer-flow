@@ -343,6 +343,26 @@
   `DEER_FLOW_PROJECT_ROOT` 无效时，会以 Gateway 相同的错误失败，而不是升级
   回退文件。([#5991])
 
+- **沙箱：** 在中间件（`ToolOutputBudgetMiddleware` 与 `ReadBeforeWriteMiddleware`）
+  中解包 `Overwrite` 包装的沙箱状态。在 delta checkpoint 模式下，分叉或回滚
+  的对话交付的 `sandbox` 通道状态会被 LangGraph 的 `Overwrite` 包装。此前直接判断
+  `isinstance(sandbox_state, dict)` 会返回 `False`，导致大工具输出无法外部化到沙箱而退化为内联
+  硬截断，以及写前读锁作用域丢失有效沙箱 ID。([#6015])
+- **doctor：** `make doctor` 现在检查 Gateway 实际加载的配置文件。此前它
+  固定检查 `<checkout>/config.yaml`，忽略 `DEER_FLOW_CONFIG_PATH` 与
+  `DEER_FLOW_PROJECT_ROOT`：指向不存在路径、会让 Gateway 无法启动的覆盖值仍会
+  显示 `✓ config.yaml found` 与 `✓ config.yaml loadable`，而指向其他有效文件的
+  覆盖值则会让它检查错误的文件。现在 doctor 通过 harness 自身的解析器确定路径，
+  并像 `make dev` 一样处理这两个位置变量：`.env` 中的值覆盖 shell 中的值（未加
+  引号的开头 `~` 会展开），`DEER_FLOW_PROJECT_ROOT` 未设置或为空时取仓库根目录。
+  Gateway 会拒绝的覆盖值会让 `config.yaml found` 失败并给出 Gateway 的错误，
+  其余配置检查随之跳过。([#5987])
+- **数据库：** `DatabaseConfig` 现在严格校验 `pool_size`、`pool_recycle` 与
+  `command_timeout`。此前，YAML 布尔值（`true`/`false`）会被强制转换为 `1`/`0`，
+  导致 `pool_size: true`（变成仅 1 个连接）和 `command_timeout: true`（变成 1 秒超时）
+  静默通过配置加载；`pool_size` 还接受非正数（`0`、`-1`），`command_timeout` 接受
+  `inf`（导致超时机制永不触发）。现在 `pool_size` 和 `pool_recycle` 强制要求正整数，
+  `command_timeout` 拒绝布尔值与非有限浮点数，同时保留 `null` 显式禁用超时。
 - **前端：** 文件上传完成后，乐观显示的用户消息气泡不再丢失引用与对话
   引用标签。上传完成时的更新会用仅含已上传文件的对象替换气泡的
   `additional_kwargs`，因此在服务端回传该消息之前这些标签会消失；随本次
@@ -5277,4 +5297,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5964]: https://github.com/bytedance/deer-flow/pull/5964
 [#5981]: https://github.com/bytedance/deer-flow/pull/5981
 [#5982]: https://github.com/bytedance/deer-flow/pull/5982
+[#5987]: https://github.com/bytedance/deer-flow/pull/5987
 [#5991]: https://github.com/bytedance/deer-flow/pull/5991
+[#6015]: https://github.com/bytedance/deer-flow/pull/6015

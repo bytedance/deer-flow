@@ -42,7 +42,7 @@ This chapter is organized by **what you see**. Each entry gives the cause, the f
 
 The threads router does not pre-gate run creation, so a mismatch there fails asynchronously: `POST .../runs` returns a `200` run record that later turns `status: error`, `POST .../runs/stream` returns `200 text/event-stream` and then an `event: error` frame, and `POST .../runs/wait` returns `200` JSON with `{"status": "error", "error": "<the mismatch text>"}`. One run path reads a checkpoint before admission, though: when a thread's run-event feed is empty but a checkpoint head exists, `ensure_checkpoint_history_seeded` materializes that head inside `start_run`, where only `ConflictError` and `UnsupportedStrategyError` are mapped, so the mismatch escapes as an unhandled `500` on `POST /api/threads/{thread_id}/runs`, `/runs/stream`, and `/runs/wait`. With the default `run_events.backend: memory` a Gateway restart empties every existing thread's feed, so that branch is reachable after a restart.
 
-In the embedded TUI the client raises in-process before the graph streams: the Textual runner turns it into an `AssistantError` plus `RunEnded` pair, while the headless `--print` and `--json` runners have no handler and print an uncaught traceback instead of a status code.
+In the embedded TUI the client raises in-process before the graph streams: the Textual runner turns it into an `AssistantError` plus `RunEnded` pair, and the headless runners handle it the same way — `--print` prints a concise `Error: ...` line on stderr and exits non-zero, while `--json` appends a terminal `{"type": "error"}` record to the NDJSON stream (diagnostics stay on stderr) and exits non-zero.
 
 **Fix**: pick one of two exits.
 

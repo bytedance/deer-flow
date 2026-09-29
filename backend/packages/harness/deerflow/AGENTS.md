@@ -102,6 +102,10 @@ policy or network-mode mismatch; only the provider may replace it after the
 orphan grace, local teardown reservation, and cross-instance teardown lease.
 Destroy the sandbox, sidecar, and both networks together.
 
+### Tenki `sticky`
+
+Env values stay strings; parse booleans before SDK calls (`bool("false")` is true).
+
 ### E2B Mount Uploads
 
 E2B uploads host mounts during sandbox creation using binary file objects.

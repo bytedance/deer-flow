@@ -42,7 +42,7 @@ import { Callout } from "nextra/components";
 
 threads 路由不会对创建 run 提前门禁，因此那里的不匹配改为异步失败：`POST .../runs` 返回 `200` run 记录，随后变为 `status: error`；`POST .../runs/stream` 返回 `200 text/event-stream` 后发出 `event: error` 帧；`POST .../runs/wait` 返回 `200` JSON，内容为 `{"status": "error", "error": "<不匹配文本>"}`。不过有一条 run 路径会在准入前读取检查点：当线程的 run event 流为空但存在检查点头部时，`ensure_checkpoint_history_seeded` 会在 `start_run` 内物化该头部，而那里只映射 `ConflictError` 与 `UnsupportedStrategyError`，因此不匹配会以未处理的 `500` 逃出，作用于 `POST /api/threads/{thread_id}/runs`、`/runs/stream` 与 `/runs/wait`。默认的 `run_events.backend: memory` 会让 Gateway 重启后每个既有线程的流都变空，所以这条分支在重启后可达。
 
-在内嵌 TUI 里，client 在图开始流式输出前就在进程内抛出：Textual runner 会把它变成 `AssistantError` 与 `RunEnded` 的组合，而无头的 `--print`、`--json` runner 没有对应处理器，会打印未捕获的 traceback，而不是状态码。
+在内嵌 TUI 里，client 在图开始流式输出前就在进程内抛出：Textual runner 会把它变成 `AssistantError` 与 `RunEnded` 的组合；无头入口的处理方式一致——`--print` 在 stderr 上打印一行简洁的 `Error: ...` 并以非零码退出，`--json` 向 NDJSON 流追加一条终止性的 `{"type": "error"}` 记录（诊断文字留在 stderr）并以非零码退出。
 
 **处理**：二选一。
 

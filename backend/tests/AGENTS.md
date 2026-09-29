@@ -2,6 +2,13 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+## Router auth fixtures
+
+For owner-scoped route assertions, pass a stable `user_factory` and
+`bind_current_user=True` to `make_authed_test_app`. The default stub stamps
+request state but leaves the ambient user context unchanged; the opt-in binding
+uses the stub user during the request and restores the previous context after it.
+
 ## Lark CLI blocking-I/O fixtures
 
 `blocking_io/test_integrations_router.py` uses a real local CLI stub: a `.cmd`
