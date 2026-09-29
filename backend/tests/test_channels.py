@@ -6131,6 +6131,29 @@ class TestHandleChatWithArtifacts:
 
 
 class TestDiscordChannel:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "x" * 1990 + "\n\n" + "y" * 30,
+            "x" * 2000 + "\n\n\n" + "y" * 30,
+            ("第一段\n\n" + "句" * 1990 + "\n\n最后一段") * 3,
+            "x" * 4500,
+        ],
+    )
+    def test_split_text_preserves_content_within_discord_limit(self, text: str):
+        from app.channels.discord import _DISCORD_MAX_MESSAGE_LEN, DiscordChannel
+
+        chunks = DiscordChannel._split_text(text)
+
+        assert all(0 < len(chunk) <= _DISCORD_MAX_MESSAGE_LEN for chunk in chunks)
+        assert "".join(chunks) == text
+
+    def test_split_text_preserves_empty_and_short_messages(self):
+        from app.channels.discord import DiscordChannel
+
+        assert DiscordChannel._split_text("") == [""]
+        assert DiscordChannel._split_text("hello\n\nworld") == ["hello\n\nworld"]
+
     def test_stop_prevents_queued_typing_starter_from_creating_task(self):
         from app.channels.discord import DiscordChannel
 
