@@ -83,16 +83,12 @@ test("administrators toggle shared MCP globally without changing a same-named pe
     name: "Platform provided",
     exact: true,
   });
-  const personal = page.getByRole("region", {
-    name: "My plugins",
+  const sharedSwitch = page.getByRole("switch", {
+    name: "Enabled github (Platform provided)",
     exact: true,
   });
-  const sharedSwitch = platform.getByRole("switch", {
-    name: "Enabled github",
-    exact: true,
-  });
-  const personalSwitch = personal.getByRole("switch", {
-    name: "Enabled github",
+  const personalSwitch = page.getByRole("switch", {
+    name: "Enabled github (My plugins)",
     exact: true,
   });
   await expect(platform.getByText("github", { exact: true })).toBeVisible();
@@ -156,7 +152,10 @@ test("a rejected platform toggle keeps the stored state and reports the error", 
   await page.goto("/workspace/capabilities");
   const toggle = page
     .getByRole("region", { name: "Platform provided", exact: true })
-    .getByRole("switch", { name: "Enabled github", exact: true });
+    .getByRole("switch", {
+      name: "Enabled github (Platform provided)",
+      exact: true,
+    });
   await expect(toggle).toBeVisible();
   await toggle.click();
   await expect(toggle).toBeDisabled();
@@ -214,7 +213,10 @@ test("administrators add, edit and delete shared MCP using the existing editor",
     exact: true,
   });
   await platform
-    .getByRole("button", { name: "Edit github", exact: true })
+    .getByRole("button", {
+      name: "Edit github (Platform provided)",
+      exact: true,
+    })
     .click();
   const dialog = page.getByRole("dialog");
   const definition = JSON.parse(
@@ -231,7 +233,10 @@ test("administrators add, edit and delete shared MCP using the existing editor",
   expect(servers.github?.headers).toEqual({ Authorization: "***" });
   expect(servers.github?.routing).toEqual({ mode: "prefer" });
   await platform
-    .getByRole("button", { name: "Add MCP plugin", exact: true })
+    .getByRole("button", {
+      name: "Add MCP plugin (Platform provided)",
+      exact: true,
+    })
     .click();
   const added = {
     description: "Team tools",
@@ -245,21 +250,36 @@ test("administrators add, edit and delete shared MCP using the existing editor",
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(
-    platform.getByRole("button", { name: "Edit team-tools", exact: true }),
+    platform.getByRole("button", {
+      name: "Edit team-tools (Platform provided)",
+      exact: true,
+    }),
   ).toBeVisible();
   await platform
-    .getByRole("button", { name: "Delete github", exact: true })
+    .getByRole("button", {
+      name: "Delete github (Platform provided)",
+      exact: true,
+    })
     .click();
   await dialog.getByRole("button", { name: "Delete", exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(
-    platform.getByRole("button", { name: "Edit github", exact: true }),
+    platform.getByRole("button", {
+      name: "Edit github (Platform provided)",
+      exact: true,
+    }),
   ).toHaveCount(0);
   await expect(
-    personal.getByRole("button", { name: "Edit github", exact: true }),
+    personal.getByRole("button", {
+      name: "Edit github (My plugins)",
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
-    personal.getByRole("switch", { name: "Enabled github", exact: true }),
+    personal.getByRole("switch", {
+      name: "Enabled github (My plugins)",
+      exact: true,
+    }),
   ).not.toBeChecked();
   expect(changes).toEqual([
     {

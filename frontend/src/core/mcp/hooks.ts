@@ -38,7 +38,7 @@ interface EnableMCPServerVariables {
 
 export function getEnableMCPServerMutationOptions(
   queryClient: QueryClient,
-  scope: MCPScope = "deployment",
+  scope: MCPScope,
 ) {
   return {
     mutationFn: ({ serverName, enabled }: EnableMCPServerVariables) =>
@@ -77,7 +77,7 @@ export type MCPServerMutationVariables =
 
 export function getMCPServerMutationOptions(
   queryClient: QueryClient,
-  scope: MCPScope = "deployment",
+  scope: MCPScope,
 ) {
   return {
     mutationFn: (variables: MCPServerMutationVariables) => {
