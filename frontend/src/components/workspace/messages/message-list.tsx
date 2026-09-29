@@ -45,7 +45,11 @@ import {
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
-import { getRunDurationDisplaysByGroupIndex } from "@/core/messages/run-duration";
+import {
+  getMessageRunId,
+  getRunDurationDisplaysByGroupIndex,
+  type RunDurationDisplay,
+} from "@/core/messages/run-duration";
 import {
   buildTokenDebugSteps,
   type TokenDebugStep,
@@ -55,6 +59,7 @@ import {
   areStreamMetadataSnapshotsEqual,
   extractContentFromMessage,
   extractPresentFilesFromMessage,
+  extractReasoningContentFromMessage,
   getAssistantTurnCopyData,
   getBranchableAssistantGroupIds,
   getLatestEditableTurn,
@@ -1067,28 +1072,36 @@ export function MessageList({
     return <MessageListSkeleton />;
   }
 
-  const withRunDuration = (
+  const getGroupRunDurations = (
     group: (typeof groupedMessages)[number],
     groupIndex: number,
-    content: ReactNode,
-  ) => {
+  ): RunDurationDisplay[] => {
     const persistedDisplays = runDurationDisplaysByGroupIndex[groupIndex] ?? [];
     const clientDuration =
       !thread.error && group.id
         ? clientDurationsByGroupId.get(`${threadId}:${group.id}`)
         : undefined;
-    const displays =
-      persistedDisplays.length > 0
-        ? persistedDisplays
-        : clientDuration !== undefined
-          ? [
-              {
-                runId: `client:${group.id}`,
-                durationSeconds: clientDuration,
-              },
-            ]
-          : [];
+    return persistedDisplays.length > 0
+      ? persistedDisplays
+      : clientDuration !== undefined
+        ? [
+            {
+              runId: `client:${group.id}`,
+              durationSeconds: clientDuration,
+            },
+          ]
+        : [];
+  };
 
+  const withRunDuration = (
+    group: (typeof groupedMessages)[number],
+    groupIndex: number,
+    content: ReactNode,
+    inlineDurationRunIds: string[] = [],
+  ) => {
+    const displays = getGroupRunDurations(group, groupIndex).filter(
+      (display) => !inlineDurationRunIds.includes(display.runId),
+    );
     if (!content && displays.length === 0) {
       return null;
     }
@@ -1098,13 +1111,13 @@ export function MessageList({
         key={`duration-group:${group.id ?? groupIndex}`}
         className="flex w-full flex-col gap-2"
       >
-        {content}
         {displays.map((display) => (
           <RunDuration
             key={display.runId}
             durationSeconds={display.durationSeconds}
           />
         ))}
+        {content}
       </div>
     );
   };
@@ -1136,6 +1149,26 @@ export function MessageList({
                 thread.isLoading && groupIndex === lastGroupIndex;
 
               if (group.type === "human" || group.type === "assistant") {
+                // Reuse the run's single duration anchor in its reasoning
+                // disclosure. Other groups retain a standalone duration header.
+                const reasoningDurations = new Map<
+                  Message,
+                  RunDurationDisplay
+                >();
+                if (group.type === "assistant" && !groupIsLoading) {
+                  for (const display of getGroupRunDurations(
+                    group,
+                    groupIndex,
+                  )) {
+                    const target = group.messages.find(
+                      (message) =>
+                        extractReasoningContentFromMessage(message) &&
+                        (getMessageRunId(message) === display.runId ||
+                          display.runId === `client:${group.id}`),
+                    );
+                    if (target) reasoningDurations.set(target, display);
+                  }
+                }
                 return withRunDuration(
                   group,
                   groupIndex,
@@ -1162,6 +1195,9 @@ export function MessageList({
                             group.type === "assistant"
                               ? (msg as { run_id?: string }).run_id
                               : undefined
+                          }
+                          durationSeconds={
+                            reasoningDurations.get(msg)?.durationSeconds
                           }
                           showCopyButton={group.type !== "assistant"}
                           showWorkspaceChanges={workspaceChangeAnchorGroupIndices.has(
@@ -1242,6 +1278,9 @@ export function MessageList({
                           : skillUsageByGroupIndex.get(groupIndex),
                       )}
                   </div>,
+                  [...reasoningDurations.values()].map(
+                    (display) => display.runId,
+                  ),
                 );
               } else if (group.type === "assistant:clarification") {
                 const message = group.messages[0];

@@ -201,7 +201,7 @@ export const enUS: Translations = {
   runDuration: {
     reasoning: "Reasoning",
     working: "Working…",
-    completedIn: (duration) => `Completed in ${duration}`,
+    completedIn: (duration) => `Took ${duration}`,
     description:
       "Total task time, including model reasoning, tool calls, and waiting.",
     lessThanSecond: "<1s",

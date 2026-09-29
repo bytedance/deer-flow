@@ -361,7 +361,7 @@ test.describe("Thread history", () => {
       element.scrollTop = element.scrollHeight;
       element.dispatchEvent(new Event("scroll"));
     });
-    await expect(page.getByText("Completed in 11m 44s")).toBeVisible();
+    await expect(page.getByText("Took 11m 44s")).toBeVisible();
 
     const latestPageRequestsBeforeSubmit = latestPageRequestCount;
     const textarea = page.locator("textarea[name='message']");
@@ -380,7 +380,7 @@ test.describe("Thread history", () => {
           (element.scrollHeight - element.clientHeight) * ratio;
         element.dispatchEvent(new Event("scroll"));
       }, step / 12);
-      if (await page.getByText("Completed in 11m 44s").isVisible()) {
+      if (await page.getByText("Took 11m 44s").isVisible()) {
         preservedDurationFound = true;
         break;
       }
@@ -399,7 +399,7 @@ test.describe("Thread history", () => {
     await expect(page.getByText(followUpPrompt)).toBeVisible();
   });
 
-  test("shows a completed run duration once after multi-step history", async ({
+  test("shows a completed run duration once in the final reasoning header", async ({
     page,
   }) => {
     mockLangGraphAPI(page, {
@@ -440,11 +440,25 @@ test.describe("Thread history", () => {
     });
 
     await expect(page.getByTestId("run-duration")).toHaveCount(1);
-    await expect(page.getByText("Completed in 1m 54s")).toBeVisible();
+    await expect(page.getByText("Took 1m 54s")).toBeVisible();
+    const disclosure = page.getByRole("button", {
+      name: "Took 1m 54s",
+      exact: true,
+    });
+    await expect(disclosure).toBeVisible();
+    await expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    await disclosure.click();
+    await expect(page.getByText("Final synthesis reasoning")).toBeVisible();
+    await disclosure.press("Enter");
+    await expect(page.getByText("Final synthesis reasoning")).not.toBeVisible();
+    const headerBox = await disclosure.boundingBox();
+    const answerBox = await page
+      .getByText("Final result", { exact: true })
+      .boundingBox();
+    expect(headerBox!.y + headerBox!.height).toBeLessThan(answerBox!.y);
     await expect(
       page.getByRole("button", { name: "Reasoning", exact: true }),
-    ).toBeVisible();
-    await expect(page.getByText("Thought for 114 seconds")).toHaveCount(0);
+    ).toHaveCount(0);
   });
 
   test("input box recalls previous prompts with arrow keys", async ({
