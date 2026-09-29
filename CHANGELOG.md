@@ -335,6 +335,7 @@ This release closes that milestone with **181 merged pull requests**.
   externalization to fail and fall back to inline truncation, read-before-write
   lock scoping to miss the active sandbox ID, and subagents to receive
   un-unwrapped channel state. ([#4380])
+- **database:** `DatabaseConfig` now validates `pool_size`, `pool_recycle`, and
   `command_timeout` strictly. Previously, YAML booleans (`true`/`false`) were
   coerced to `1`/`0` respectively, allowing `pool_size: true` (pool size 1) and
   `command_timeout: true` (a 1-second statement timeout) to silently pass
@@ -6221,4 +6222,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5964]: https://github.com/bytedance/deer-flow/pull/5964
 [#5981]: https://github.com/bytedance/deer-flow/pull/5981
 [#5982]: https://github.com/bytedance/deer-flow/pull/5982
+[#4380]: https://github.com/bytedance/deer-flow/issues/4380
 

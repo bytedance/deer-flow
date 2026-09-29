@@ -337,6 +337,7 @@
   的对话交付的 `sandbox` 通道状态会被 LangGraph 的 `Overwrite` 包装。此前直接判断
   `isinstance(sandbox_state, dict)` 会返回 `False`，导致大工具输出无法外部化到沙箱而退化为内联
   硬截断、写前读锁作用域丢失有效沙箱 ID、以及子智能体收到未解包的包装对象。([#4380])
+- **数据库：** `DatabaseConfig` 现在严格校验 `pool_size`、`pool_recycle` 与
   `command_timeout`。此前，YAML 布尔值（`true`/`false`）会被强制转换为 `1`/`0`，
   导致 `pool_size: true`（变成仅 1 个连接）和 `command_timeout: true`（变成 1 秒超时）
   静默通过配置加载；`pool_size` 还接受非正数（`0`、`-1`），`command_timeout` 接受
@@ -5276,3 +5277,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5964]: https://github.com/bytedance/deer-flow/pull/5964
 [#5981]: https://github.com/bytedance/deer-flow/pull/5981
 [#5982]: https://github.com/bytedance/deer-flow/pull/5982
+[#4380]: https://github.com/bytedance/deer-flow/issues/4380
