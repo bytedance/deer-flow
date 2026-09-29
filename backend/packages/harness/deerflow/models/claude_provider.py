@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 THINKING_BUDGET_RATIO = 0.8
+MIN_THINKING_BUDGET_TOKENS = 1024
 
 # Billing header required by Anthropic API for OAuth token access.
 # Must be the first system prompt block. Format mirrors Claude Code CLI.
@@ -268,11 +269,20 @@ class ClaudeChatModel(ChatAnthropic):
             return
         if thinking.get("type") != "enabled":
             return
-        if thinking.get("budget_tokens"):
+        max_tokens = payload.get("max_tokens", 8192)
+        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= MIN_THINKING_BUDGET_TOKENS:
+            raise ValueError(f"Claude extended thinking requires max_tokens > {MIN_THINKING_BUDGET_TOKENS}; got {max_tokens}")
+
+        if "budget_tokens" in thinking:
+            budget_tokens = thinking["budget_tokens"]
+            if not isinstance(budget_tokens, int) or isinstance(budget_tokens, bool) or not MIN_THINKING_BUDGET_TOKENS <= budget_tokens < max_tokens:
+                raise ValueError(f"Claude extended thinking requires budget_tokens to be an integer between {MIN_THINKING_BUDGET_TOKENS} and max_tokens ({max_tokens}); got {budget_tokens}")
             return
 
-        max_tokens = payload.get("max_tokens", 8192)
-        thinking["budget_tokens"] = int(max_tokens * THINKING_BUDGET_RATIO)
+        thinking["budget_tokens"] = max(
+            MIN_THINKING_BUDGET_TOKENS,
+            int(max_tokens * THINKING_BUDGET_RATIO),
+        )
 
     @staticmethod
     def _strip_cache_control(payload: dict) -> None:
