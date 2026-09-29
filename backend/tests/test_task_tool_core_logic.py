@@ -683,8 +683,8 @@ def test_task_tool_forwards_is_internal_true_to_executor(monkeypatch):
     assert captured["executor_kwargs"]["is_internal"] is True
 
 
-def test_task_tool_unwraps_overwrite_sandbox_state_for_executor(monkeypatch):
-    """Fork-restored checkpoints wrap sandbox state in Overwrite; task_tool must unwrap it."""
+def test_task_tool_preserves_overwrite_sandbox_state_for_executor(monkeypatch):
+    """Fork-restored checkpoints wrap sandbox state in Overwrite; task_tool must preserve the wrapper so executor retains borrow semantics."""
     from langgraph.types import Overwrite
 
     runtime = _make_runtime()
@@ -711,7 +711,9 @@ def test_task_tool_unwraps_overwrite_sandbox_state_for_executor(monkeypatch):
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
 
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-1")
-    assert captured["executor_kwargs"]["sandbox_state"] == {"sandbox_id": "sb-fork-123"}
+    passed_sandbox = captured["executor_kwargs"]["sandbox_state"]
+    assert isinstance(passed_sandbox, Overwrite)
+    assert passed_sandbox.value == {"sandbox_id": "sb-fork-123"}
 
 
 def test_task_tool_forwards_is_internal_false_to_executor(monkeypatch):

@@ -837,10 +837,7 @@ async def task_tool(
     user_id = None
     deerflow_trace_id = None
     if runtime is not None:
-        from deerflow.sandbox.overwrite import unwrap_sandbox
-
-        raw_sandbox = runtime.state.get("sandbox")
-        sandbox_state, _ = unwrap_sandbox(raw_sandbox)
+        sandbox_state = runtime.state.get("sandbox")
         thread_data = runtime.state.get("thread_data")
         parent_uploaded_files = runtime.state.get("uploaded_files")
         if isinstance(parent_uploaded_files, list) and all(
