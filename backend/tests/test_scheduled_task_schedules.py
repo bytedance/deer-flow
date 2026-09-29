@@ -129,3 +129,48 @@ def test_next_run_at_for_interval_does_not_catch_up_from_a_stale_now():
 def test_parse_interval_seconds_rejects_invalid_spec(spec):
     with pytest.raises(ValueError, match="every_seconds"):
         parse_interval_seconds(spec)
+
+
+def test_next_run_at_for_cron_skips_repeated_hour_on_dst_fall_back():
+    """Regression test for GH#6052.
+
+    On a DST fall-back day a wall-clock time inside the repeated hour occurs
+    twice. A daily cron must fire once, not twice.
+    """
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
+    zone_name = "Europe/Berlin"
+    zone = ZoneInfo(zone_name)
+    spec = {"cron": "30 2 * * *"}
+
+    # Berlin falls back from CEST to CET on 2026-10-25, so 02:30 occurs twice.
+    now = datetime(2026, 10, 24, 12, 0, tzinfo=zone)
+    first = next_run_at("cron", spec, zone_name, now=now)
+    second = next_run_at("cron", spec, zone_name, now=first)
+
+    first_local = first.astimezone(zone)
+    second_local = second.astimezone(zone)
+
+    assert first_local.date() == date(2026, 10, 25)
+    assert (first_local.hour, first_local.minute) == (2, 30)
+    # the repeated occurrence is skipped, so the next run is the following day
+    assert second_local.date() == date(2026, 10, 26)
+    assert (second_local.hour, second_local.minute) == (2, 30)
+
+
+def test_next_run_at_for_cron_outside_repeated_hour_is_unaffected():
+    """A cron outside the repeated hour still advances one day at a time."""
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
+    zone_name = "Europe/Berlin"
+    zone = ZoneInfo(zone_name)
+    spec = {"cron": "30 12 * * *"}
+
+    now = datetime(2026, 10, 24, 0, 0, tzinfo=zone)
+    first = next_run_at("cron", spec, zone_name, now=now)
+    second = next_run_at("cron", spec, zone_name, now=first)
+
+    assert first.astimezone(zone).date() == date(2026, 10, 24)
+    assert second.astimezone(zone).date() == date(2026, 10, 25)

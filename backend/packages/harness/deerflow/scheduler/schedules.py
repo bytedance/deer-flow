@@ -30,6 +30,21 @@ def parse_interval_seconds(schedule_spec: dict[str, object]) -> int:
     return raw
 
 
+def is_repeated_occurrence(moment: datetime) -> bool:
+    """Return True if `moment` is the second, repeated occurrence of an
+    ambiguous wall-clock time.
+
+    On a DST fall-back day the wall clock runs through the same hour twice, so
+    a wall-clock time inside that hour maps to two distinct instants. The first
+    occurrence (``fold == 0``) is the real fire time; the second one
+    (``fold == 1``) is a duplicate that would make a daily task run twice
+    (GH#6052).
+    """
+    if moment.tzinfo is None or moment.fold != 1:
+        return False
+    # An ambiguous time is one whose UTC offset depends on `fold`.
+    return moment.replace(fold=0).utcoffset() != moment.replace(fold=1).utcoffset()
+
 def next_run_at(
     schedule_type: str,
     schedule_spec: dict[str, object],
@@ -63,6 +78,12 @@ def next_run_at(
         next_local = croniter(cron_expr, local_now).get_next(datetime)
         if next_local.tzinfo is None:
             next_local = next_local.replace(tzinfo=zone)
+        # Skip the duplicated occurrence of an ambiguous wall-clock time so a
+        # task never fires twice on the DST fall-back day (GH#6052).
+        while is_repeated_occurrence(next_local):
+            next_local = croniter(cron_expr, next_local).get_next(datetime)
+            if next_local.tzinfo is None:
+                next_local = next_local.replace(tzinfo=zone)
         return next_local.astimezone(UTC)
 
     if schedule_type == "interval":
