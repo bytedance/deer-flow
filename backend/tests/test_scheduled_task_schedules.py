@@ -74,6 +74,43 @@ def test_next_run_at_for_cron_uses_timezone():
     assert result == datetime(2026, 7, 1, 1, 0, tzinfo=UTC)
 
 
+def test_next_run_at_for_cron_skips_duplicate_fixed_hour_run_on_dst_fallback():
+    """A fixed-hour task runs once per day on DST fall-back (Vixie cron contract)."""
+    # Europe/Berlin fall-back: 2026-10-25 03:00 CEST turns back to 02:00 CET.
+    # 02:30 is ambiguous and occurs twice.
+    now = datetime(2026, 10, 24, 12, 0, tzinfo=UTC)
+    first = next_run_at("cron", {"cron": "30 2 * * *"}, "Europe/Berlin", now=now)
+    assert first == datetime(2026, 10, 25, 0, 30, tzinfo=UTC)  # 02:30 CEST (+02:00)
+
+    second = next_run_at("cron", {"cron": "30 2 * * *"}, "Europe/Berlin", now=first)
+    assert second == datetime(2026, 10, 26, 1, 30, tzinfo=UTC)  # 02:30 CET (+01:00) next day
+
+    # America/New_York fall-back: 2026-11-01 02:00 EDT turns back to 01:00 EST.
+    # 01:30 is ambiguous and occurs twice.
+    ny_now = datetime(2026, 10, 31, 12, 0, tzinfo=UTC)
+    ny_first = next_run_at("cron", {"cron": "30 1 * * *"}, "America/New_York", now=ny_now)
+    assert ny_first == datetime(2026, 11, 1, 5, 30, tzinfo=UTC)  # 01:30 EDT (-04:00)
+
+    ny_second = next_run_at("cron", {"cron": "30 1 * * *"}, "America/New_York", now=ny_first)
+    assert ny_second == datetime(2026, 11, 2, 6, 30, tzinfo=UTC)  # 01:30 EST (-05:00) next day
+
+
+def test_next_run_at_for_cron_wildcards_fire_in_repeated_dst_hour():
+    """Wildcard schedules (e.g. hourly) fire in both occurrences of the repeated hour."""
+    now = datetime(2026, 10, 24, 23, 0, tzinfo=UTC)
+    # 02:00 CEST (+02:00) -> 00:00 UTC
+    dt1 = next_run_at("cron", {"cron": "0 * * * *"}, "Europe/Berlin", now=now)
+    assert dt1 == datetime(2026, 10, 25, 0, 0, tzinfo=UTC)
+
+    # 02:00 CET (+01:00) -> 01:00 UTC
+    dt2 = next_run_at("cron", {"cron": "0 * * * *"}, "Europe/Berlin", now=dt1)
+    assert dt2 == datetime(2026, 10, 25, 1, 0, tzinfo=UTC)
+
+    # 03:00 CET (+01:00) -> 02:00 UTC
+    dt3 = next_run_at("cron", {"cron": "0 * * * *"}, "Europe/Berlin", now=dt2)
+    assert dt3 == datetime(2026, 10, 25, 2, 0, tzinfo=UTC)
+
+
 def test_next_run_at_for_interval_adds_seconds_in_utc():
     now = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
     result = next_run_at(
