@@ -650,3 +650,44 @@ async def test_send_control_calls_keep_the_default_outbound_bound() -> None:
     assert len(run_mock.await_args_list) == 2  # stop_typing + one text chunk
     for call in run_mock.await_args_list:
         assert "timeout" not in call.kwargs
+
+
+def test_split_text_keeps_newline_at_boundary() -> None:
+    """Regression test for GH#6055.
+
+    A newline landing on the split boundary used to be dropped, so consecutive
+    messages could not be reassembled by the reader.
+    """
+    text = "A" * 1990 + "\n" + "B" * 20
+    chunks = DiscordChannel._split_text(text)
+
+    assert len(chunks) == 2
+    assert all(len(chunk) <= 2000 for chunk in chunks)
+    # the terminating newline must survive the split
+    assert chunks[0].endswith("\n")
+    assert "".join(chunks) == text
+
+
+def test_split_text_loses_no_content_across_chunks() -> None:
+    """Splitting must never drop characters, however many chunks are needed."""
+    text = "line\n" * 600  # ~3000 characters -> more than one chunk
+    chunks = DiscordChannel._split_text(text)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 2000 for chunk in chunks)
+    assert "".join(chunks) == text
+
+
+def test_split_text_without_newlines_loses_no_content() -> None:
+    """A hard length split must not discard characters either."""
+    text = "A" * 4500
+    chunks = DiscordChannel._split_text(text)
+
+    assert len(chunks) == 3
+    assert all(len(chunk) <= 2000 for chunk in chunks)
+    assert "".join(chunks) == text
+
+
+def test_split_text_leaves_short_text_untouched() -> None:
+    text = "hello\nworld"
+    assert DiscordChannel._split_text(text) == [text]

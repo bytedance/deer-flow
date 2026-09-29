@@ -875,9 +875,16 @@ class DiscordChannel(Channel):
         while len(remaining) > _DISCORD_MAX_MESSAGE_LEN:
             split_at = remaining.rfind("\n", 0, _DISCORD_MAX_MESSAGE_LEN)
             if split_at <= 0:
+                # No usable line break before the limit - split on length.
                 split_at = _DISCORD_MAX_MESSAGE_LEN
-            chunks.append(remaining[:split_at])
-            remaining = remaining[split_at:].lstrip("\n")
+                chunks.append(remaining[:split_at])
+                remaining = remaining[split_at:]
+            else:
+                # Keep the newline that terminates this chunk, otherwise the
+                # line break is dropped and the reader sees the two messages
+                # joined together (GH#6055).
+                chunks.append(remaining[:split_at + 1])
+                remaining = remaining[split_at + 1:]
 
         if remaining:
             chunks.append(remaining)
