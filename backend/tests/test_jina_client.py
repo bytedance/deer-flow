@@ -56,6 +56,31 @@ async def test_crawl_follows_jina_api_redirect(jina_client, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_crawl_strips_api_key_on_cross_host_redirect(jina_client, monkeypatch):
+    """A redirected host must not receive the Jina bearer credential."""
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "r.jina.ai":
+            return httpx.Response(307, headers={"Location": "https://redirect.example/final"})
+        return httpx.Response(200, text="Fetched page")
+
+    original_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=transport, **kwargs))
+    monkeypatch.setenv("JINA_API_KEY", "test-key")
+
+    result = await jina_client.crawl("https://example.com")
+
+    assert result == "Fetched page"
+    assert [request.url.host for request in requests] == ["r.jina.ai", "redirect.example"]
+    assert [request.method for request in requests] == ["POST", "POST"]
+    assert requests[0].headers["Authorization"] == "Bearer test-key"
+    assert "Authorization" not in requests[1].headers
+
+
+@pytest.mark.anyio
 async def test_crawl_non_200_status(jina_client, monkeypatch):
     """Test that non-200 status returns error message."""
 
