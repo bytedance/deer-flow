@@ -496,14 +496,6 @@ integration status reports `sandbox_runtime_mode` / `sandbox_runtime_ready` so
 the Settings UI surfaces a missing runtime instead of a later
 `command not found`.
 
-> An image here does not authenticate anyone by itself. The Gateway only asks
-the provisioner to attach the runtime once the Lark integration pack is
-installed for the user, so the sandbox gets the binary but the per-user
-credentials still follow the normal install/authorize flow. The Lark
-integration status reports `sandbox_runtime_mode` / `sandbox_runtime_ready` so
-the Settings UI surfaces a missing runtime instead of a later
-`command not found`.
-
 ## Lint / dry-run
 
 ```bash
