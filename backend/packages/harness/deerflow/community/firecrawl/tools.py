@@ -1,3 +1,4 @@
+import inspect
 import json
 import logging
 
@@ -22,9 +23,15 @@ async def _aclose_firecrawl_client(client: AsyncFirecrawlApp) -> None:
     if pooled is None:
         return
     try:
-        await pooled.close()
+        close = getattr(pooled, "close", None)
+        if not callable(close):
+            logger.warning("Firecrawl async HTTP pool has no close method")
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
     except Exception:
-        logger.debug("Failed to close the Firecrawl async HTTP pool", exc_info=True)
+        logger.warning("Failed to close the Firecrawl async HTTP pool", exc_info=True)
 
 
 def _get_firecrawl_client(tool_name: str = "web_search") -> AsyncFirecrawlApp:
