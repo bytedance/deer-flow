@@ -635,6 +635,11 @@ class MCPSessionPool:
         sessions and race a concurrent incarnation. Every generation of a
         deleted thread is equally stale, so all of them are closed.
 
+        ``user_id`` must be the same string used by
+        ``resolve_runtime_user_id(runtime)`` when minting the session scope.
+        The Gateway delete route passes ``get_effective_user_id()`` and relies
+        on both resolving to the same identity in its embedded runtime.
+
         Sessions belonging to another user or thread are left untouched.
         """
         with self._lock:

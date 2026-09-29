@@ -16,6 +16,7 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.types import Overwrite
 
 from app.gateway import services as gateway_services
+from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs, threads
 from deerflow.config.paths import Paths
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
@@ -413,15 +414,14 @@ def test_delete_thread_data_rejects_invalid_thread_id(tmp_path):
 
 
 def test_delete_thread_route_cleans_thread_directory(tmp_path):
-    from deerflow.runtime.user_context import get_effective_user_id
-
     paths = Paths(tmp_path)
-    user_id = get_effective_user_id()
+    owner = User(email="thread-owner@example.com", password_hash="x")
+    user_id = str(owner.id)
     thread_dir = paths.thread_dir("thread-route", user_id=user_id)
     paths.sandbox_work_dir("thread-route", user_id=user_id).mkdir(parents=True, exist_ok=True)
     (paths.sandbox_work_dir("thread-route", user_id=user_id) / "notes.txt").write_text("hello", encoding="utf-8")
 
-    app = make_authed_test_app()
+    app = make_authed_test_app(user_factory=lambda: owner, bind_current_user=True)
     app.state.run_manager = _ThreadTestRunManager()
     app.include_router(threads.router)
 
@@ -463,11 +463,10 @@ def test_delete_thread_route_closes_mcp_sessions(tmp_path):
     caller who reuses the id gets fresh MCP server state instead of a retained
     session (and its leaked owner task plus subprocess) — the same invariant the
     browser-session cleanup above guards (#5188)."""
-    from deerflow.runtime.user_context import get_effective_user_id
-
     paths = Paths(tmp_path)
+    owner = User(email="mcp-owner@example.com", password_hash="x")
 
-    app = make_authed_test_app()
+    app = make_authed_test_app(user_factory=lambda: owner, bind_current_user=True)
     app.state.run_manager = _ThreadTestRunManager()
     app.include_router(threads.router)
 
@@ -481,7 +480,7 @@ def test_delete_thread_route_closes_mcp_sessions(tmp_path):
 
     assert response.status_code == 200
     pool.close_thread_scope.assert_awaited_once_with(
-        user_id=get_effective_user_id(),
+        user_id=str(owner.id),
         thread_id="thread-mcp",
     )
 
