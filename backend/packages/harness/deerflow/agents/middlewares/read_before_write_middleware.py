@@ -83,7 +83,7 @@ _ELIDED_PAYLOAD_TEMPLATE = "[payload elided: {chars} chars; this {tool_name} cal
 _UNINSPECTABLE_CONTENT_PREFIX = "Error:"
 
 _BLOCK_MESSAGE = (
-    "Error: {tool_name} blocked — {path} already exists ({line_count} lines) and you have not read its current version. "
+    "Error: {tool_name} blocked — {path} already exists ({line_desc}) and you have not read its current version. "
     "Any write invalidates earlier reads, so re-read before every modification. "
     "Call read_file on it (a ranged read of the relevant section is enough, e.g. the last ~30 lines "
     "before an append), check what is already there, then retry."
@@ -315,9 +315,11 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         if self._latest_mark_hash(request.state, norm_path) == _content_hash(current):
             return None
         tool_name = str(tool_call.get("name", "write"))
-        line_count = current.count("\n") + (1 if current and not current.endswith("\n") else 0) if current else 0
+        # Match editor / wc -l 1-indexed line numbering semantics for model-facing hint
+        line_count = len(current.splitlines())
+        line_desc = f"{line_count} line" if line_count == 1 else f"{line_count} lines"
         return ToolMessage(
-            content=_BLOCK_MESSAGE.format(tool_name=tool_name, path=path, line_count=line_count),
+            content=_BLOCK_MESSAGE.format(tool_name=tool_name, path=path, line_desc=line_desc),
             tool_call_id=str(tool_call.get("id", "")),
             name=tool_name,
             status="error",

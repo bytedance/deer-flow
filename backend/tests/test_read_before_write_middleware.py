@@ -870,6 +870,22 @@ class TestBlockMessageLineCount:
         assert result.status == "error"
         assert f"{self.PATH} already exists (3 lines) and you have not read" in result.content
 
+    def test_block_message_includes_line_count_single_line(self):
+        content = "line1\n"
+        mw = _middleware({self.PATH: content})
+        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
+        result = mw.wrap_tool_call(request, MagicMock())
+        assert result.status == "error"
+        assert f"{self.PATH} already exists (1 line) and you have not read" in result.content
+
+    def test_block_message_includes_line_count_single_line_no_newline(self):
+        content = "line1"
+        mw = _middleware({self.PATH: content})
+        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
+        result = mw.wrap_tool_call(request, MagicMock())
+        assert result.status == "error"
+        assert f"{self.PATH} already exists (1 line) and you have not read" in result.content
+
     def test_block_message_includes_line_count_empty_file(self):
         mw = _middleware({self.PATH: ""})
         request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
