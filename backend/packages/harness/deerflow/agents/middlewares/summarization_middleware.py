@@ -728,7 +728,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 raise SummaryGenerationError("summary generation failed")
             return None
         # Fire hooks only once a replacement summary exists (see compact_state).
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        await self._afire_hooks(messages_to_summarize, preserved_messages, runtime)
         self._record_compaction(
             source_content_hashes,
             summary=summary,
@@ -809,6 +809,20 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 remaining.append(msg)
         return remaining, rescued + preserved_messages
 
+    def _summarization_event(
+        self,
+        messages_to_summarize: list[AnyMessage],
+        preserved_messages: list[AnyMessage],
+        runtime: Runtime,
+    ) -> SummarizationEvent:
+        return SummarizationEvent(
+            messages_to_summarize=tuple(messages_to_summarize),
+            preserved_messages=tuple(preserved_messages),
+            thread_id=_resolve_thread_id(runtime),
+            agent_name=_resolve_agent_name(runtime),
+            runtime=runtime,
+        )
+
     def _fire_hooks(
         self,
         messages_to_summarize: list[AnyMessage],
@@ -818,17 +832,31 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if not self._before_summarization_hooks:
             return
 
-        event = SummarizationEvent(
-            messages_to_summarize=tuple(messages_to_summarize),
-            preserved_messages=tuple(preserved_messages),
-            thread_id=_resolve_thread_id(runtime),
-            agent_name=_resolve_agent_name(runtime),
-            runtime=runtime,
-        )
-
+        event = self._summarization_event(messages_to_summarize, preserved_messages, runtime)
         for hook in self._before_summarization_hooks:
             try:
                 hook(event)
+            except Exception:
+                hook_name = getattr(hook, "__name__", None) or type(hook).__name__
+                logger.exception("before_summarization hook %s failed", hook_name)
+
+    async def _afire_hooks(
+        self,
+        messages_to_summarize: list[AnyMessage],
+        preserved_messages: list[AnyMessage],
+        runtime: Runtime,
+    ) -> None:
+        if not self._before_summarization_hooks:
+            return
+
+        event = self._summarization_event(messages_to_summarize, preserved_messages, runtime)
+        for hook in self._before_summarization_hooks:
+            try:
+                async_hook = getattr(hook, "as_async", None)
+                if callable(async_hook):
+                    await async_hook(event)
+                else:
+                    hook(event)
             except Exception:
                 hook_name = getattr(hook, "__name__", None) or type(hook).__name__
                 logger.exception("before_summarization hook %s failed", hook_name)
@@ -1025,9 +1053,14 @@ def create_summarization_middleware(
     if resolved_app_config.memory.enabled and not skip_memory_flush:
         from functools import partial
 
-        from deerflow.agents.memory.summarization_hook import memory_flush_hook
+        from deerflow.agents.memory.summarization_hook import amemory_flush_hook, memory_flush_hook
 
-        hooks.append(partial(memory_flush_hook, pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None)))
+        pii_redaction_config = getattr(resolved_app_config, "pii_redaction", None)
+        hook = partial(memory_flush_hook, pii_redaction_config=pii_redaction_config)
+        # partial() does not copy attributes, so async compaction would miss
+        # memory_flush_hook.as_async and run the sync hook on the event loop.
+        hook.as_async = partial(amemory_flush_hook, pii_redaction_config=pii_redaction_config)  # type: ignore[attr-defined]
+        hooks.append(hook)
 
     return DeerFlowSummarizationMiddleware(
         **kwargs,

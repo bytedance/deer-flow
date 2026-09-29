@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
@@ -12,7 +13,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.constants import TAG_NOSTREAM
 from pydantic import ValidationError
 
-from deerflow.agents.memory.summarization_hook import memory_flush_hook
+from deerflow.agents.memory.summarization_hook import amemory_flush_hook, memory_flush_hook
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, DynamicContextMiddleware, is_dynamic_context_reminder
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummarizationEvent, SummaryGenerationError, create_summarization_middleware
 from deerflow.agents.thread_state import ThreadState
@@ -478,6 +479,78 @@ def test_memory_flush_hook_passes_runtime_user_id(monkeypatch: pytest.MonkeyPatc
     assert manager.add_nowait.call_args.kwargs["user_id"] == "alice"
 
 
+@pytest.mark.anyio
+async def test_amemory_flush_hook_uses_async_manager_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = MagicMock()
+    manager.aadd_nowait = AsyncMock()
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_config", lambda: MemoryConfig(enabled=True))
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_manager", lambda: manager)
+
+    await amemory_flush_hook(
+        SummarizationEvent(
+            messages_to_summarize=tuple(_messages()[:2]),
+            preserved_messages=(),
+            thread_id="thread-1",
+            agent_name="researcher",
+            runtime=_runtime(agent_name="researcher", user_id="alice"),
+        )
+    )
+
+    manager.aadd_nowait.assert_awaited_once()
+    args, kwargs = manager.aadd_nowait.await_args.args, manager.aadd_nowait.await_args.kwargs
+    assert args[0] == "thread-1"
+    assert [message.content for message in args[1]] == ["user-1", "assistant-1"]
+    assert kwargs["agent_name"] == "researcher"
+    assert kwargs["user_id"] == "alice"
+    manager.add_nowait.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_amemory_flush_hook_resolves_manager_off_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = MagicMock()
+    manager.aadd_nowait = AsyncMock()
+    loop_thread = threading.current_thread()
+    resolved_off_loop: list[bool] = []
+
+    def resolve_manager() -> MagicMock:
+        resolved_off_loop.append(threading.current_thread() is not loop_thread)
+        return manager
+
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_config", lambda: MemoryConfig(enabled=True))
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_manager", resolve_manager)
+
+    await amemory_flush_hook(
+        SummarizationEvent(
+            messages_to_summarize=tuple(_messages()[:2]),
+            preserved_messages=(),
+            thread_id="thread-1",
+            agent_name="researcher",
+            runtime=_runtime(agent_name="researcher", user_id="alice"),
+        )
+    )
+
+    assert resolved_off_loop == [True]
+    manager.aadd_nowait.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_async_compaction_prefers_hook_as_async() -> None:
+    called: list[str] = []
+
+    def sync_hook(event: SummarizationEvent) -> None:
+        called.append("sync")
+
+    async def async_hook(event: SummarizationEvent) -> None:
+        called.append("async")
+
+    sync_hook.as_async = async_hook  # type: ignore[attr-defined]
+    middleware = _middleware(before_summarization=[sync_hook])
+
+    await middleware.abefore_model({"messages": _messages()}, _runtime())
+
+    assert called == ["async"]
+
+
 def test_stale_user_peer_is_compressed_not_rescued() -> None:
     """A stale untagged ``__user`` peer is no longer rescued — only the latest user message is.
 
@@ -693,16 +766,23 @@ def test_factory_attaches_memory_flush_hook_by_default(monkeypatch):
     fake_model.with_config.return_value = fake_model
     monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: fake_model)
 
+    pii_redaction = object()
     app_config = SimpleNamespace(
         summarization=SummarizationConfig(enabled=True),
         memory=MemoryConfig(enabled=True),
+        pii_redaction=pii_redaction,
     )
     middleware = create_summarization_middleware(app_config=app_config)
 
     assert middleware is not None
     # The hook is wrapped in functools.partial to carry the pii_redaction
-    # config; unwrap it for the identity check.
-    assert any(getattr(h, "func", h) is memory_flush_hook for h in middleware._before_summarization_hooks)
+    # config; unwrap it for the identity check. The async counterpart must
+    # stay attached, because partial() does not copy as_async by itself.
+    hooks = [h for h in middleware._before_summarization_hooks if getattr(h, "func", h) is memory_flush_hook]
+    assert len(hooks) == 1
+    assert getattr(hooks[0].as_async, "func", None) is amemory_flush_hook
+    assert hooks[0].keywords["pii_redaction_config"] is pii_redaction
+    assert hooks[0].as_async.keywords["pii_redaction_config"] is pii_redaction
 
 
 def test_factory_skip_memory_flush_omits_hook(monkeypatch):
