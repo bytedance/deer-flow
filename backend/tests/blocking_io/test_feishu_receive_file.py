@@ -54,6 +54,7 @@ class _RemoteProvider:
     def __init__(self) -> None:
         self.sandbox = _RemoteSandbox()
         self.acquire_async_calls: list[tuple[str | None, str | None]] = []
+        self.release_calls: list[str] = []
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         raise AssertionError("Feishu receive_file must use acquire_async")
@@ -64,6 +65,9 @@ class _RemoteProvider:
 
     def get(self, sandbox_id: str):
         return self.sandbox if sandbox_id == "remote-sandbox" else None
+
+    def release(self, sandbox_id: str) -> None:
+        self.release_calls.append(sandbox_id)
 
 
 class _MountedProvider:
@@ -133,6 +137,7 @@ async def test_receive_file_remote_sandbox_does_not_block_event_loop(tmp_path, m
     assert provider.sandbox.updates == [(result, b"DATA")]
     assert provider_lookup_thread_id != loop_thread_id
     assert provider.sandbox.update_thread_id != loop_thread_id
+    assert provider.release_calls == ["remote-sandbox"]
 
 
 async def test_receive_file_mounted_sandbox_skips_redundant_sync(tmp_path, monkeypatch) -> None:
@@ -155,7 +160,8 @@ async def test_receive_file_mounted_sandbox_skips_redundant_sync(tmp_path, monke
     assert await asyncio.to_thread(uploaded.read_bytes) == b"DATA"
 
 
-async def test_cancelled_receive_file_holds_sandbox_lease_until_remote_sync_finishes(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("has_active_run", [False, True])
+async def test_cancelled_receive_file_holds_sandbox_lease_until_remote_sync_finishes(tmp_path, monkeypatch, has_active_run) -> None:
     from deerflow.config.paths import Paths
     from deerflow.sandbox.lease import discard_sandbox_lease_manager, get_sandbox_lease_manager
 
@@ -165,7 +171,8 @@ async def test_cancelled_receive_file_holds_sandbox_lease_until_remote_sync_fini
     monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
     monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
 
-    await manager.acquire_async("active-run", "thread-1", user_id="ou-user")
+    if has_active_run:
+        await manager.acquire_async("active-run", "thread-1", user_id="ou-user")
     receive_task = asyncio.create_task(
         _channel_with_file()._receive_single_file(
             "message-1",
@@ -182,7 +189,8 @@ async def test_cancelled_receive_file_holds_sandbox_lease_until_remote_sync_fini
             await asyncio.sleep(0)
 
         assert not receive_task.done()
-        await manager.release_async("active-run")
+        if has_active_run:
+            await manager.release_async("active-run")
         assert provider.release_calls == []
         assert not provider.sandbox.closed
 

@@ -28,6 +28,14 @@ The standard lead-agent builders (including custom-agent bootstrap) and
 - `history_search`: keyword search over the current messages and compacted source
   batches reachable from the current checkpoint. English words and Chinese
   character bigrams are supported. Returns up to eight 600-character excerpts.
+  The optional `role="user"`, `"assistant"`, or `"tool"` filters by message author
+  type; omission or `null` preserves search across all roles. These values map to
+  internal `human`, `ai`, and `tool` roles; returned role values stay unchanged.
+  Both active and archived history are filtered before the eight-result limit.
+  For example, `history_search(query="replicas", role="user")` narrows the search
+  to user messages about replica counts; use `history_read` to verify the source.
+  Filtering does not change ranking or guarantee retrieval of the latest message.
+  A matching role does not establish truth or grant current authorization.
 - `history_read`: read the exact source ID in 4,000-character pages. Results mark
   truncation and provide `next_offset` while more stored text remains.
 

@@ -842,3 +842,18 @@ class TestBlockedPayloadElision:
         rewritten = self._captured(handler).messages[1]
         assert rewritten.tool_calls[0]["args"]["content"].startswith("[payload elided: 5000 chars")
         assert rewritten.tool_calls[1] == ai.tool_calls[1]
+
+
+def test_lock_scope_resolves_overwrite_wrapped_sandbox():
+    """Fork-restored state wraps sandbox in Overwrite; lock scope must still resolve it."""
+    from langgraph.types import Overwrite
+
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+
+    req = ToolCallRequest(
+        tool_call={"name": "write_file", "args": {}, "id": "tc-1"},
+        tool=None,
+        state={"sandbox": Overwrite({"sandbox_id": "sb-fork-lock"})},
+        runtime=MagicMock(context={}),
+    )
+    assert ReadBeforeWriteMiddleware._lock_scope(req) == "sb-fork-lock"

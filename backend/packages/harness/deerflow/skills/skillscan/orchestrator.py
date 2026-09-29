@@ -114,6 +114,10 @@ _HIDDEN_SENSITIVE_FILES = {
     "config",
 }
 _PLACEHOLDER_VALUES = {"", "x", "xx", "xxx", "xxxx", "changeme", "change-me", "example", "placeholder", "test", "dummy", "your-key", "<your-key>"}
+# `name[:=]value` sweep for line-oriented text (config, shell, YAML, Markdown). Python is
+# analyzed from its AST instead, because a regex cannot tell an annotation from a value.
+_SECRET_ASSIGNMENT_RE = re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)")
+_SECRET_ASSIGNMENT_NAME_RE = re.compile(r"(?i)^(?:token|password|passwd|api[_-]?key|secret|credential)s?$")
 _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
 _EXTERNAL_HTTP_RE = re.compile(r"http://([A-Za-z0-9.-]+)(?::\d+)?(?:/|\b)")
 _URL_RE = re.compile(r"https?://[^\s)'\"<>]+")
@@ -323,13 +327,148 @@ def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
             findings.append(_finding_from_match("secret-cloud-token", rel_path, text, match))
             break
 
-    assignment_re = re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)")
-    for match in assignment_re.finditer(text):
+    if _is_python_path(rel_path, text):
+        findings.extend(_scan_python_secret_assignments(rel_path, text))
+        return findings
+
+    findings.extend(_scan_secret_assignments_by_text(rel_path, text))
+    return findings
+
+
+def _scan_secret_assignments_by_text(rel_path: str, text: str) -> list[SecurityFinding]:
+    """``name[:=]value`` sweep for line-oriented text, and for Python that will not parse."""
+    for match in _SECRET_ASSIGNMENT_RE.finditer(text):
         value = match.group(2).strip()
         if not _looks_like_placeholder(value):
-            findings.append(_finding_from_match("secret-env-assignment", rel_path, text, match))
-            break
-    return findings
+            return [_finding_from_match("secret-env-assignment", rel_path, text, match)]
+    return []
+
+
+def _python_secret_assignment_target(node: ast.expr) -> str | None:
+    """Final identifier bound by a simple assignment target, else None."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+        return node.slice.value
+    return None
+
+
+def _python_secret_bindings(tree: ast.AST) -> list[tuple[str | None, ast.expr]]:
+    """Every ``(bound name, value expression)`` pair the tree binds, in walk order.
+
+    Assignment statements are not the only place a skill can park a credential:
+    a keyword argument, a parameter default and a walrus all read as
+    ``name=value`` to the line-oriented sweep this rule replaced, so a caller
+    that merely moves the assignment into a call escapes the gate.
+    """
+    bindings: list[tuple[str | None, ast.expr]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            bindings.extend((_python_secret_assignment_target(target), node.value) for target in node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+            # A bare annotation binds no value at all, so ``AnnAssign.value`` is None.
+            bindings.append((_python_secret_assignment_target(node.target), node.value))
+        elif isinstance(node, ast.keyword):
+            # ``**spread`` carries ``arg=None`` and binds no name of its own.
+            if node.arg is not None:
+                bindings.append((node.arg, node.value))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            params = [*node.args.posonlyargs, *node.args.args]
+            if node.args.defaults:
+                # Positional defaults align with the trailing parameters.
+                bindings.extend((param.arg, default) for param, default in zip(params[len(params) - len(node.args.defaults) :], node.args.defaults, strict=True))
+            bindings.extend((param.arg, default) for param, default in zip(node.args.kwonlyargs, node.args.kw_defaults, strict=True) if default is not None)
+    return bindings
+
+
+def _python_secret_literal(expr: ast.expr) -> str | None:
+    """Text of a value Python resolves from source alone, else None.
+
+    The pre-AST sweep reported a hardcoded credential that was spelled as a
+    concatenation of literals (``API_KEY = "sk-" + "a1b2c3d4"``), because its
+    line-oriented value capture stopped at the first closing quote. Splitting
+    the quotes is not obfuscation: the bound value is still the same constant,
+    so the shapes the sweep saw stay visible here - a literal, an explicit
+    ``+`` of literals, an implicit (adjacent) literal run, and a placeholder-free
+    f-string. Anything that needs runtime data - a call, a variable,
+    ``%``-formatting of a template - is not a literal this rule can assert on.
+    """
+    texts: list[str] = []
+    for part in _python_secret_literal_parts(expr):
+        text = _python_secret_literal_atom(part)
+        if text is None:
+            return None
+        texts.append(text)
+    return "".join(texts)
+
+
+def _python_secret_literal_parts(expr: ast.expr) -> list[ast.expr]:
+    """Operands of a concatenation, in source order; a single node for anything else.
+
+    A stack loop rather than recursion: the caller reports a finding from this
+    value, and a chain deep enough to pass the recursion limit would raise past
+    the per-file analyzer guard, which drops every other finding for that file.
+    """
+    stack: list[ast.expr] = [expr]
+    parts: list[ast.expr] = []
+    while stack:
+        node = stack.pop()
+        if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
+            parts.append(node)
+            continue
+        # Right goes on first so the left operand is collected first: a
+        # concatenation reads in source order however it is parenthesised.
+        stack.append(node.right)
+        stack.append(node.left)
+    return parts
+
+
+def _python_secret_literal_atom(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Constant):
+        value = node.value
+        if not isinstance(value, (str, bytes, int)):
+            return None
+        return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for part in node.values:
+            if not isinstance(part, ast.Constant) or not isinstance(part.value, str):
+                return None
+            parts.append(part.value)
+        return "".join(parts)
+    return None
+
+
+def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFinding]:
+    """Report embedded Python secrets from real literal bindings, not from raw text.
+
+    A line-oriented sweep cannot tell an annotation (``token: Optional[str]``), a
+    statement colon (``if not api_key:``), or this rule's own remediation
+    (``api_key = os.getenv("X")``) from a literal, and it points at an annotated
+    assignment's annotation rather than at its value.
+
+    What it gains is precision, never less coverage: every binding form the
+    sweep reported stays reported, per ``_python_secret_bindings``, and so does
+    every literal value shape it saw, per ``_python_secret_literal``.
+
+    A file Python cannot parse falls back to that sweep: the AST is only an
+    improvement, and returning nothing would let one syntax error (or a NUL byte)
+    silence a HIGH-severity rule for the whole file.
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return _scan_secret_assignments_by_text(rel_path, text)
+
+    for name, value in _python_secret_bindings(tree):
+        literal = _python_secret_literal(value)
+        if literal is None or _looks_like_placeholder(literal):
+            continue
+        if _SECRET_ASSIGNMENT_NAME_RE.match(name or ""):
+            return [_finding_for_node("secret-env-assignment", rel_path, value, literal)]
+    return []
 
 
 def _scan_declaration(rel_path: str, text: str) -> list[SecurityFinding]:

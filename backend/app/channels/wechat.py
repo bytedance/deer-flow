@@ -767,11 +767,18 @@ class WechatChannel(Channel):
                 return False
             return bool(auth_state.get("bot_token"))
 
+    async def request_login_qrcode(self) -> dict[str, Any]:
+        """Request QR payload without changing the running channel's credentials."""
+        return await self._request_public_get_json("/ilink/bot/get_bot_qrcode", params={"bot_type": self._qrcode_bot_type})
+
+    async def request_login_status(self, qrcode: str, *, timeout: float | None = None, verify_code: str | None = None) -> dict[str, Any]:
+        params = {"qrcode": qrcode}
+        if verify_code:
+            params["verify_code"] = verify_code
+        return await self._request_public_get_json("/ilink/bot/get_qrcode_status", params=params, timeout=timeout)
+
     async def _bind_via_qrcode(self) -> dict[str, Any]:
-        qrcode_data = await self._request_public_get_json(
-            "/ilink/bot/get_bot_qrcode",
-            params={"bot_type": self._qrcode_bot_type},
-        )
+        qrcode_data = await self.request_login_qrcode()
         qrcode = str(qrcode_data.get("qrcode") or "").strip()
         if not qrcode:
             raise RuntimeError("iLink get_bot_qrcode did not return qrcode")
@@ -790,10 +797,7 @@ class WechatChannel(Channel):
 
         deadline = time.monotonic() + max(self._qrcode_poll_timeout, 1.0)
         while time.monotonic() < deadline:
-            status_data = await self._request_public_get_json(
-                "/ilink/bot/get_qrcode_status",
-                params={"qrcode": qrcode},
-            )
+            status_data = await self.request_login_status(qrcode)
             status = str(status_data.get("status") or "").strip().lower()
             if status == "confirmed":
                 token = str(status_data.get("bot_token") or "").strip()

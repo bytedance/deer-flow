@@ -10,6 +10,7 @@ import {
 } from "./settings";
 
 const SETTINGS_SECTIONS = new Set<SettingsSection>([
+  "models",
   "account",
   "appearance",
   "channels",

@@ -399,7 +399,8 @@ def test_create_support_bundle_masks_hardcoded_env_secret(tmp_path):
     assert env["PROJECT_REF"] == "$SUPABASE_PROJECT_REF"
 
 
-def test_create_support_bundle_writes_sanitized_zip(tmp_path):
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_create_support_bundle_writes_sanitized_zip(tmp_path, encoding):
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "config.yaml").write_text(
@@ -439,7 +440,7 @@ channels:
                 },
             }
         ),
-        encoding="utf-8",
+        encoding=encoding,
     )
 
     output_path = tmp_path / "support.zip"
@@ -467,6 +468,13 @@ channels:
     assert "brave-secret" not in all_text
     assert "xoxb-secret" not in all_text
     assert "mcp-secret" not in all_text
+
+    extensions_summary = json.loads(_zip_text(bundle_path, "extensions-summary.json"))
+    assert extensions_summary["mcpServers"]["private"]["env"]["PRIVATE_TOKEN"] == "<redacted>"
+
+    triage = json.loads(_zip_text(bundle_path, "triage.json"))
+    assert triage["signals"]["extensions_config_error"] is False
+    assert not any("fix `extensions_config.json` syntax" in step for step in triage["maintainer_next_steps"])
 
     config_summary = json.loads(_zip_text(bundle_path, "config-summary.json"))
     assert config_summary["models"][0]["api_key"] == "<redacted>"

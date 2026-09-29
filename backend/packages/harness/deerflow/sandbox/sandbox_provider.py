@@ -81,6 +81,22 @@ class SandboxProvider(ABC):
         """
         pass
 
+    def get_scoped(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+    ) -> Sandbox | None:
+        """Return an active sandbox only when it belongs to this identity.
+
+        This hook must remain a non-blocking in-memory lookup. Providers that
+        do not implement identity-aware lookup fail closed; the caller then
+        resolves the canonical sandbox through ``acquire``.
+        """
+        del sandbox_id, thread_id, user_id
+        return None
+
     @abstractmethod
     def release(self, sandbox_id: str) -> None:
         """Release a sandbox environment.
@@ -113,7 +129,10 @@ class SandboxProvider(ABC):
         return []
 
     async def consume_network_policy_events_async(self, sandbox_id: str) -> list[dict[str, object]]:
-        return await asyncio.to_thread(self.consume_network_policy_events, sandbox_id)
+        return await run_sync_lifecycle_operation(
+            self.consume_network_policy_events,
+            sandbox_id,
+        )
 
     def deny_pending_network_policy_events(self, sandbox_id: str) -> bool:
         """Atomically deny all unsurfaced trusted-proxy events for a sandbox."""
@@ -121,7 +140,10 @@ class SandboxProvider(ABC):
         return False
 
     async def deny_pending_network_policy_events_async(self, sandbox_id: str) -> bool:
-        return await asyncio.to_thread(self.deny_pending_network_policy_events, sandbox_id)
+        return await run_sync_lifecycle_operation(
+            self.deny_pending_network_policy_events,
+            sandbox_id,
+        )
 
     def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
         """Apply a user decision to one trusted-proxy event."""
@@ -129,7 +151,12 @@ class SandboxProvider(ABC):
         return False
 
     async def decide_network_policy_request_async(self, sandbox_id: str, request_id: str, decision: str) -> bool:
-        return await asyncio.to_thread(self.decide_network_policy_request, sandbox_id, request_id, decision)
+        return await run_sync_lifecycle_operation(
+            self.decide_network_policy_request,
+            sandbox_id,
+            request_id,
+            decision,
+        )
 
 
 _default_sandbox_provider: SandboxProvider | None = None

@@ -31,14 +31,14 @@ def _validate_thread_id(thread_id: str) -> str:
 
 def _validate_user_id(user_id: str) -> str:
     """Validate a user ID before using it in filesystem paths."""
-    if not _SAFE_USER_ID_RE.match(user_id):
+    if not _SAFE_USER_ID_RE.fullmatch(user_id):
         raise ValueError(f"Invalid user_id {user_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
     return user_id
 
 
 def _validate_integration_id(integration_id: str) -> str:
     """Validate an integration ID before using it in filesystem paths."""
-    if not _SAFE_INTEGRATION_ID_RE.match(integration_id):
+    if not _SAFE_INTEGRATION_ID_RE.fullmatch(integration_id):
         raise ValueError(f"Invalid integration_id {integration_id!r}: only alphanumeric characters, dots, hyphens, and underscores are allowed.")
     # The charset allows dots for names like ``some.integration``; reject the
     # bare ``.``/``..`` path components so a future caller cannot escape the
@@ -50,7 +50,7 @@ def _validate_integration_id(integration_id: str) -> str:
 
 def _validate_project_id(project_id: str) -> str:
     """Validate a project ID before using it in filesystem paths."""
-    if not _SAFE_USER_ID_RE.match(project_id):
+    if not _SAFE_USER_ID_RE.fullmatch(project_id):
         raise ValueError(f"Invalid project_id {project_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
     return project_id
 
@@ -113,18 +113,21 @@ class Paths:
     Directory layout (host side):
         {base_dir}/
         ├── memory.json
-        ├── USER.md          <-- global user profile (injected into all agents)
-        ├── agents/
+        ├── agents/                 <-- legacy shared layout (read-only fallback)
         │   └── {agent_name}/
         │       ├── config.yaml
         │       ├── SOUL.md  <-- agent personality/identity (injected alongside lead prompt)
         │       └── memory.json
-        └── threads/
-            └── {thread_id}/
-                └── user-data/         <-- mounted as /mnt/user-data/ inside sandbox
-                    ├── workspace/     <-- /mnt/user-data/workspace/
-                    ├── uploads/       <-- /mnt/user-data/uploads/
-                    └── outputs/       <-- /mnt/user-data/outputs/
+        ├── users/{user_id}/
+        │   ├── USER.md       <-- per-user profile (storage/retrieval via the user-profile routes)
+        │   ├── agents/...    <-- per-user custom agents (current layout)
+        │   ├── skills/...    <-- per-user custom skills
+        │   └── threads/
+        │       └── {thread_id}/
+        │           └── user-data/  <-- mounted as /mnt/user-data/ inside sandbox
+        │               ├── workspace/     <-- /mnt/user-data/workspace/
+        │               ├── uploads/       <-- /mnt/user-data/uploads/
+        │               └── outputs/       <-- /mnt/user-data/outputs/
 
     BaseDir resolution (in priority order):
         1. Constructor argument `base_dir`
@@ -172,10 +175,13 @@ class Paths:
         """Path to the persisted memory file: `{base_dir}/memory.json`."""
         return self.base_dir / "memory.json"
 
-    @property
-    def user_md_file(self) -> Path:
-        """Path to the global user profile file: `{base_dir}/USER.md`."""
-        return self.base_dir / "USER.md"
+    def user_md_file(self, user_id: str) -> Path:
+        """Path to a user-scoped profile file: `{base_dir}/users/{user_id}/USER.md`.
+
+        The profile is per-user (like custom skills/agents) so one user's
+        prompt context can never be written or injected for another user.
+        """
+        return self.user_dir(user_id) / "USER.md"
 
     @property
     def agents_dir(self) -> Path:

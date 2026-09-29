@@ -4,9 +4,12 @@ Background — see issue bytedance/deer-flow#4271.
 
 Some providers stop generation because the output budget is exhausted and
 surface that through ``finish_reason='length'`` while still returning assistant
-content. DeerFlow preserves visible content, adds a deterministic notice when
-no visible answer was produced, and drops tool calls that may have been
-truncated at the output boundary before they can execute.
+content. DeerFlow preserves visible content, adds a deterministic notice
+whenever tool calls were suppressed (even when partial text survived), and
+drops tool calls that may have been truncated at the output boundary before
+they can execute. The stamped ``model_length_termination`` marker tells
+downstream guards (notably ``TodoMiddleware``) to stand down rather than
+re-engage a capped turn.
 """
 
 from __future__ import annotations
@@ -85,7 +88,7 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
 
         return {
             "suppress_truncated_tool_calls": True,
-            "empty_content_fallback_hash": canonical_hash(_MODEL_LENGTH_CAPPED_CONTENT),
+            "length_notice_hash": canonical_hash(_MODEL_LENGTH_CAPPED_CONTENT),
         }
 
     def _detect(self, message: AIMessage) -> ModelLengthTermination | None:
@@ -153,7 +156,7 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
         }
         replacement = last.model_copy(
             update={
-                "content": (cleaned_content if contains_visible_content else append_visible_text(content_source, _MODEL_LENGTH_CAPPED_CONTENT)),
+                "content": append_visible_text(content_source, _MODEL_LENGTH_CAPPED_CONTENT),
                 "tool_calls": [],
                 "invalid_tool_calls": [],
                 "additional_kwargs": additional_kwargs,

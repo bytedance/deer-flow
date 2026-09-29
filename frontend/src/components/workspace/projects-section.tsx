@@ -91,7 +91,7 @@ function ProjectThreadGroup({
         </CollapsibleTrigger>
       </SidebarMenuItem>
       <CollapsibleContent>
-        <SidebarMenu className="border-sidebar-border ml-4 border-l pl-2">
+        <SidebarMenu className="border-sidebar-border ml-4 w-auto border-l pl-2">
           {branchEntries.map((entry) => (
             <ThreadSidebarItem
               key={entry.thread.thread_id}
@@ -130,7 +130,7 @@ function ArchivedProjectsGroup({
         </CollapsibleTrigger>
       </SidebarMenuItem>
       <CollapsibleContent>
-        <SidebarMenu className="border-sidebar-border ml-4 border-l pl-2">
+        <SidebarMenu className="border-sidebar-border ml-4 w-auto border-l pl-2">
           {projects.map((project) => (
             <ProjectThreadGroup
               key={project.id}

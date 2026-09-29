@@ -1,6 +1,7 @@
 import type { AnchorHTMLAttributes, ComponentProps } from "react";
 
 import { resolveMarkdownArtifactURL } from "@/core/artifacts/utils";
+import { knowledgeSourceId } from "@/core/knowledge/sources";
 import { cn } from "@/lib/utils";
 
 import { CitationLink, extractReactNodeText } from "../citations/citation-link";
@@ -106,6 +107,10 @@ export function createMarkdownLinkComponent(threadId?: string) {
           {children}
         </UnsafeLink>
       );
+    }
+    // Knowledge destinations also appear as ordinary [Title](URL) Sources links.
+    if (knowledgeSourceId(href)) {
+      return <CitationLink {...props} href={href} />;
     }
     // Safe-href check passed — citation links now route through CitationLink.
     const childrenText = extractReactNodeText(props.children);

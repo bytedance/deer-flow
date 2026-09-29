@@ -590,6 +590,46 @@ def test_aio_sandbox_grep_drops_matches_outside_requested_root(monkeypatch) -> N
     assert truncated is False
 
 
+def _grep_files_returning(count: int):
+    """Provider reply holding ``count`` matching lines, none of them cut off."""
+    return lambda **kwargs: SimpleNamespace(
+        data=SimpleNamespace(
+            matches=[SimpleNamespace(file=f"/mnt/user-data/workspace/f{index}.py", line_number=index + 1, line_content="TODO = True") for index in range(count)],
+            truncated=False,
+        )
+    )
+
+
+def test_aio_sandbox_grep_exactly_full_is_not_truncated(monkeypatch) -> None:
+    """A grep whose matches exactly fill max_results is complete.
+
+    The loop used to return as soon as it had collected ``max_results``
+    matches, without looking at the remaining lines, so a search that found
+    exactly that many was reported as cut off even though every line was seen.
+    It now scans one eligible match past the cap, as the ``glob`` branches do.
+    """
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    monkeypatch.setattr(sandbox._client.file, "grep_files", _grep_files_returning(2))
+
+    matches, truncated = sandbox.grep("/mnt/user-data/workspace", "TODO", max_results=2)
+
+    assert [match.path for match in matches] == ["/mnt/user-data/workspace/f0.py", "/mnt/user-data/workspace/f1.py"]
+    assert truncated is False
+
+
+def test_aio_sandbox_grep_reports_a_dropped_match_as_truncated(monkeypatch) -> None:
+    """The counterpart: a match past the cap still reports truncated."""
+    with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
+        sandbox = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+    monkeypatch.setattr(sandbox._client.file, "grep_files", _grep_files_returning(3))
+
+    matches, truncated = sandbox.grep("/mnt/user-data/workspace", "TODO", max_results=2)
+
+    assert [match.path for match in matches] == ["/mnt/user-data/workspace/f0.py", "/mnt/user-data/workspace/f1.py"]
+    assert truncated is True
+
+
 # ---------------------------------------------------------------------------
 # ls_tool — path masking
 # ---------------------------------------------------------------------------

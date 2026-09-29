@@ -259,15 +259,43 @@ def _make_session():
     return open_session(persistence=False)
 
 
+def _error_text(exc: Exception) -> str:
+    """One-line user-facing error, matching the TUI's AssistantError convention."""
+    return str(exc) or type(exc).__name__
+
+
+def _silence_closed_stdout() -> None:
+    """Prevent the interpreter's shutdown flush from raising on a closed pipe.
+
+    A consumer that closes the pipe early (``deerflow --print ... | head``)
+    makes the final stdout write raise BrokenPipeError; Python then re-raises
+    the same error from the interpreter's shutdown flush of sys.stdout unless
+    the descriptor is pointed somewhere harmless first.
+    """
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+    except (OSError, ValueError):
+        pass
+
+
 def _run_print(plan: LaunchPlan) -> int:
     message = _resolve_message(plan)
     if not message:
         print("No message provided.", file=sys.stderr)
         return 2
-    session = _make_session()
-    thread_id = session.resolve_thread(plan)
-    answer = session.client.chat(message, thread_id=thread_id, **_run_overrides(plan))
-    print(answer)
+    try:
+        session = _make_session()
+        thread_id = session.resolve_thread(plan)
+        answer = session.client.chat(message, thread_id=thread_id, **_run_overrides(plan))
+    except Exception as exc:  # noqa: BLE001 - headless boundary: report, never traceback
+        print(f"Error: {_error_text(exc)}", file=sys.stderr)
+        return 1
+    try:
+        print(answer)
+    except BrokenPipeError:
+        _silence_closed_stdout()
+        return 1
     return 0
 
 
@@ -276,12 +304,22 @@ def _run_json(plan: LaunchPlan) -> int:
     if not message:
         print("No message provided.", file=sys.stderr)
         return 2
-    session = _make_session()
-    thread_id = session.resolve_thread(plan)
-    for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan)):
-        payload = {"type": event.type, "data": event.data}
-        sys.stdout.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
-        sys.stdout.flush()
+    try:
+        session = _make_session()
+        thread_id = session.resolve_thread(plan)
+        for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan)):
+            payload = {"type": event.type, "data": event.data}
+            sys.stdout.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+            sys.stdout.flush()
+    except Exception as exc:  # noqa: BLE001 - headless boundary: report, never traceback
+        error_text = _error_text(exc)
+        print(f"Error: {error_text}", file=sys.stderr)
+        try:
+            sys.stdout.write(json.dumps({"type": "error", "data": {"message": error_text}}, ensure_ascii=False, default=str) + "\n")
+            sys.stdout.flush()
+        except BrokenPipeError:
+            _silence_closed_stdout()
+        return 1
     return 0
 
 

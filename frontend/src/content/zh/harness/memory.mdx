@@ -37,6 +37,174 @@ import { Callout } from "nextra/components";
 
 在工具模式中，四个 `memory_*` 工具名是保留名。如果 MCP 服务或自定义工具已经使用 `memory_search`、`memory_add`、`memory_update` 或 `memory_delete`，已有工具会保留该名称，冲突的记忆工具会被跳过并记录告警。
 
+## Memory Manager：可插拔的记忆管理器
+
+记忆功能的核心是一个**后端中立的 `MemoryManager`**（定义在 `backend/packages/harness/deerflow/agents/memory/manager.py`）。它把“记忆能做什么”抽象成一份稳定的契约，而“记忆存在哪、怎么提取、怎么检索”则交由可替换的后端实现。
+
+### 设计思路
+
+设计目标只有一个：**换记忆后端时，DeerFlow 其余代码零改动**。
+
+- **契约只管“做什么”，不管“怎么做”**。`get_context()` 只要求返回一段可注入提示的文本——是本地文件加载还是远程检索，由后端自行决定；契约甚至不假设记忆一定是“事实”的集合。
+- **按实现成本分层**。必须实现的只有三个：类方法 `from_config`（组装实例）、`add`（写入）和 `get_context`（读取注入）；搜索、清空、导入和事实增删改默认“不支持”，缓冲写入相关的 `add_nowait` / `shutdown_flush` / `cancel_by_agent` 默认直接透传，后端实现多少能力就暴露多少能力。
+- **失败要响亮，不要静默**。记忆是持久化数据，配错后端、写坏文件时系统会直接报错（如构建时抛出 `ValueError`、写冲突返回 HTTP 409），绝不悄悄回退到另一个存储——那等于把你的数据写到了错误的地方。
+- **宿主与后端解耦**。追踪（Langfuse span）、默认 LLM、提取指标等宿主能力以“钩子”形式注入后端，后端按需消费，因此后端代码包本身不依赖任何 DeerFlow 特有概念，可以独立发布。
+
+`MemoryManager` 契约一览：
+
+| 分层 | 方法 | 作用 |
+| --- | --- | --- |
+| 必须实现 | `from_config` / `add` / `get_context` | 根据 `backend_config` 和宿主钩子组装实例 / 写入对话（防抖排队）/ 返回注入就绪的记忆文本 |
+| 管理操作 | `search`、`get_memory`、`clear_memory`、`import_memory`、`create_fact` / `update_fact` / `delete_fact`、`add_nowait`、`cancel_by_agent`、`shutdown_flush` | 搜索与查看、清空与导入、工具模式的事实增删改、摘要压缩前的紧急冲刷、取消挂起的提取、优雅停机排水 |
+| 可选钩子 | `warm`、`reload_memory`、`on_pre_compress` / `on_turn_start` 及 async 变体 | 启动预热、缓存重载、面向未来的扩展点 |
+
+### 怎么使用
+
+通过 `config.yaml` 的 `memory.manager_class` 选择后端，后端私有参数全部放在 `memory.backend_config`：
+
+```yaml
+memory:
+  enabled: true
+  mode: middleware          # middleware（默认）| tool（模型直接调用 memory_* 工具）
+  manager_class: deermem    # 后端选择：deermem | mem0 | honcho | openviking | noop
+  backend_config: {}        # 该后端自己的参数，由后端自行解释
+```
+
+内置后端对比：
+
+| `manager_class` | 类型 | 定位 |
+| --- | --- | --- |
+| `deermem` | 本地（默认） | 自带的完整记忆实现：Markdown 事实存储、摘要、全文检索与事实生命周期管理 |
+| `openviking` | 远程 | 接入独立的 OpenViking 记忆服务器，通过官方 `langchain-openviking` 适配器召回 |
+| `mem0` / `honcho` | 远程 | 接入 Mem0 / Honcho 记忆产品的适配器 |
+| `noop` | 本地 | 空实现：保留记忆调用点但什么都不做 |
+
+两点使用须知：
+
+- **工具模式要求后端支持搜索**。`mode: tool` 需要 `memory_search` 工具，因此后端必须实现 `search()`；不支持的后端会在启动时直接报错，而不是运行时静默返回空结果。
+- **自定义后端即插即用**。在 `deerflow/agents/memory/backends/<name>/` 下创建包并暴露 `MANAGER_CLASS = <你的 MemoryManager 子类>`，把 `manager_class` 设为 `<name>` 即可；也支持填点号导入路径（`pkg.mod:Cls`）。
+
+### deermem 是怎么接入的
+
+deermem 是默认后端，完整实现了契约的全部能力：
+
+- 工厂 `get_memory_manager()` 读取 `manager_class: deermem`，把 `backend_config` 连同一组**宿主钩子**（Langfuse 追踪回调、默认提取 LLM、隐藏消息过滤、提取指标回调）一起传给 `DeerMem.from_config()` 装配实例。
+- 存储按 `(用户, Agent)` 双维度分桶：`memory.json` 只存共享摘要与修订元数据，每条事实是独立的 Markdown 文件（带 YAML front matter），并维护 SQLite FTS5 全文索引供 `memory_search` 使用。
+- 写入侧由 `MemoryMiddleware` 在每轮结束后调用 `add()` 排队（防抖批量处理），摘要压缩前通过 `add_nowait()` 紧急冲刷，避免被压缩掉的内容丢失。
+- 在此之上提供事实治理能力，全部配置在 `memory.backend_config` 下：陈旧性复核（`staleness_review_enabled`，默认开启），以及按需开启的写侧近重复去重（`fact_dedup_enabled`）、合并巩固（`consolidation_enabled`）、容量淘汰策略（`fact_eviction_policy: hybrid-v1`，默认为 `confidence`）和相关性感知检索（`retrieval_relevance_enabled`）。
+
+### openviking 是怎么接入的
+
+OpenViking 是远程记忆后端，职责边界划分得很清楚：**DeerFlow 负责捕获时机、召回查询和会话游标；`langchain-openviking` 包负责传输、消息转换、批处理与 Session 提交**。
+
+```yaml
+memory:
+  enabled: true
+  injection_enabled: true
+  manager_class: openviking
+  mode: middleware           # 必须：openviking 只支持 middleware 模式
+  backend_config:
+    base_url: http://openviking:1933
+    owner_user_id: default   # 未开启认证时用 default
+    api_key_env: OPENVIKING_API_KEY
+    failure_policy:
+      read: fail_open        # 读取失败时返回空结果（raise 则中断本轮）
+      write: log_and_drop
+    retrieval:
+      top_k: 8
+      score_threshold: 0.25
+      max_injection_chars: 12000
+```
+
+接入要点：
+
+- **一个 API Key 绑定一个 DeerFlow 拥有者**，访问其他用户会被拒绝；USER Key 放在服务端环境变量（`api_key_env`），不要写进 `config.yaml`。
+- **一个 DeerFlow 线程映射到一个稳定的 OpenViking Session**，会话游标以哈希形式存于 `{storage_path}/openviking/sessions/` 下。
+- 当前版本支持单用户单 Key、middleware 模式；多用户 Key 分发不在本版本范围内。完整边界与启动指南见 `docs/OPENVIKING.md`。
+
+## 实现自己的记忆后端
+
+接入你自己的记忆系统（一个数据库、一个内部服务、或一个新产品）只需要四步，DeerFlow 其余代码一行都不用改。
+
+### 第 1 步：创建后端包
+
+在 `backend/packages/harness/deerflow/agents/memory/backends/` 下新建一个以你的后端命名的目录，只要这个包在 `__init__.py` 里暴露 `MANAGER_CLASS` 属性（一个 `MemoryManager` 子类），它就会被工厂自动发现并注册——目录名就是配置里 `manager_class` 的值。
+
+### 第 2 步：实现契约
+
+新建 `mybackend/manager.py`：
+
+```python
+from deerflow.agents.memory.manager import MemoryManager
+
+
+class MyMemoryManager(MemoryManager):
+    # 声明支持搜索（只有真正覆盖了 search() 才能设 True，
+    # 两者不一致会在实例化时报错，防止声明与实现脱节）
+    supports_search = True
+
+    @classmethod
+    def from_config(cls, backend_config, *, mode="middleware", **host_hooks):
+        # backend_config: 来自 memory.backend_config 的字典，由你自行解释
+        # host_hooks: 宿主注入的可选能力（见下文），不需要就忽略
+        return cls(backend_config=backend_config, mode=mode)
+
+    def add(self, thread_id, messages, *, agent_name=None, user_id=None, trace_id=None):
+        """必须实现：把对话排队写入（怎么过滤、怎么提取是你的私事）"""
+
+    def get_context(self, user_id, *, agent_name=None, thread_id=None, query=None):
+        """必须实现：返回注入就绪的文本（怎么检索、怎么排版由你决定）"""
+
+    def search(self, query, top_k=5, *, user_id=None, agent_name=None, category=None):
+        """可选：返回按相关性排序的事实列表（工具模式必需）"""
+```
+
+必须实现的只有 `from_config` + `add` + `get_context` 三个。其余能力按需追加，全部有合理默认：
+
+| 想支持的能力 | 覆盖的方法 | 备注 |
+| --- | --- | --- |
+| 工具模式（`memory_search` 等） | `search()` 并设 `supports_search = True`，另需 `get_memory()` 和下方的事实增删改方法 | 声明与实现的一致性在实例化时强制校验。工具模式不安装 `MemoryMiddleware`，除非设 `requires_passive_writes_in_tool_mode = True`，否则每轮结束后的 `add()` 写入不会发生（摘要压缩前的 `add_nowait()` 冲刷仍会执行，其默认实现会调用 `add()`）；`memory_add` 会先读 `get_memory()` 再调 `create_fact()` |
+| 记忆的查看 / 清空 / 导入 | `get_memory()` / `clear_memory()` / `import_memory()` | 不实现则调用时报“不支持”。返回值须是 DeerMem 的文档结构，Gateway 会把它转成 `MemoryResponse`（`version`、`lastUpdated`、`user`、`history`，以及每条都带 `id` 和 `content` 的 `facts`） |
+| 事实级增删改 | `create_fact()` / `update_fact()` / `delete_fact()` | 工具模式的 `memory_add` / `memory_update` / `memory_delete` 走这里。`create_fact` 返回 `(memory_data, fact_id)`；事实 id 不存在时抛 `KeyError`（HTTP 404） |
+| 缓冲写入 | `add_nowait()` / `shutdown_flush()` / `cancel_by_agent()` | 默认实现只会调用 `add()`、直接报告冲刷完成、什么也不取消；如果你的 `add()` 带缓冲，需要自己覆盖 |
+| 启动预热（建索引、加载编码器等） | `warm()`，返回 `True` / `False` / `None` | `None` 表示无事可做，日志会如实记录“跳过” |
+| 释放连接等外部资源 | `close()` | 优雅停机时调用 |
+| 缓存重载 | `reload_memory()` | 供带缓存的后端在带外修改后刷新 |
+
+DeerMem 的返回结构和常见坑见 `backend/packages/harness/deerflow/agents/memory/backends/README.md`，`backends/noop/` 是可以直接复制的模板。
+
+### 第 3 步：声明失败与冲突语义
+
+- 读取失败的处理策略通过 `read_failures_are_fatal_for_config()` 声明：默认宽容（失败返回空文本），配置 `backend_config.failure_policy.read: fail_closed` 则让调用方中止而不是降级。
+- 写冲突请抛 `MemoryConflictError`（Gateway 映射为 HTTP 409），存储损坏抛 `MemoryCorruptionError`（HTTP 500），不要靠异常文本匹配。
+
+### 第 4 步：启用
+
+```yaml
+memory:
+  manager_class: mybackend   # 即 backends/<目录名>
+```
+
+也可以不放进 `backends/` 目录，`manager_class` 直接填点号路径：`mypackage.mymodule:MyMemoryManager`。无论哪种方式，解析失败都会在启动时报 `ValueError`，不会静默回退。
+
+### 可用的宿主钩子
+
+`from_config` 收到的 `**host_hooks` 里带有一组宿主默认能力，按需取用：
+
+| 钩子 | 作用 |
+| --- | --- |
+| `callbacks` | `MemoryCallbacks` 实例：在你的 LLM 调用前后触发，默认实现把记忆提取作为独立 span 呈现在 Langfuse |
+| `host_llm_factory` | 宿主默认模型工厂：你没有配置专属提取模型时，用它做零配置提取 |
+| `should_keep_hidden_message` | 隐藏消息过滤：默认只保留带人工澄清回复的消息进入记忆 |
+| `trace_context_manager` | 追踪上下文管理器 |
+| `extraction_callback` | 提取指标回调（token 用量、置信度过滤、拒绝率等） |
+
+不消费任何钩子也完全合法（`noop` 后端就什么都不用）。
+
+### 测试约定
+
+后端专属测试遵循命名约定 `backend/tests/test_<backend>_memory_backend.py`，已有 deermem / mem0 / honcho / openviking 的测试可作参考模板。
+
 ## 配置
 
 ```yaml
@@ -53,8 +221,9 @@ memory:
   # 绝对路径按原样使用，相对路径相对于 base_dir 解析。
   storage_path: memory.json
 
-  # 存储类（默认：基于文件的 JSON 存储）
-  storage_class: deerflow.agents.memory.storage.FileMemoryStorage
+  # 存储类（留空 = FileMemoryStorage，即默认的基于文件的 JSON 存储，不走 importlib；
+  # 自定义实现填 `module.Class` 点号路径）
+  storage_class: ""
 
   # 处理排队记忆更新前等待的秒数（防抖）
   debounce_seconds: 30
@@ -98,14 +267,25 @@ DeerFlow 支持两级记忆：
 
 ## 自定义存储后端
 
-`storage_class` 字段允许你用自定义实现替换默认的基于文件的存储。任何继承 `MemoryStorage` 并实现 `load()`、`reload()` 和 `save()` 方法的类都可以使用：
+> 这一节说的是**替换 DeerMem 内部的存储层**（更轻量，只换“存哪”）。如果想接入一个完全独立的记忆系统，请看上面的[「实现自己的记忆后端」](#实现自己的记忆后端)。
+
+`storage_class` 字段允许你用自定义实现替换默认的基于文件的存储。任何继承 `MemoryStorage`（位于 `deerflow.agents.memory.backends.deermem.deermem.core.storage`）并实现 `load()`、`reload()` 和 `save()` 方法的类都可以使用：
 
 ```yaml
 memory:
-  storage_class: mypackage.storage.RedisMemoryStorage
+  backend_config:
+    storage_class: mypackage.storage.RedisMemoryStorage
 ```
 
-如果配置的类无法加载，系统回退到默认的 `FileMemoryStorage` 并记录错误。
+该值是 `module.Class` 点号路径，且存储类会按 `cls(config)` 构造——完整接口见「自定义」页面的「自定义记忆存储」。
+
+如果配置的类无法导入、不是 `MemoryStorage` 的子类，或无法构造，系统**不会**回退到 `FileMemoryStorage`，而是在构建记忆管理器时直接抛出：
+
+```
+ValueError: backend_config.storage_class='mypackage.storage.NotThere' failed to load: No module named 'mypackage'. Refusing to silently fall back because memory is persistent state.
+```
+
+由于 storage 在 `model_post_init()` 中装配，这个错误会以 pydantic 的 `ValidationError` 形式从 `DeerMem` 构造函数冒出来。
 
 ## 禁用记忆
 

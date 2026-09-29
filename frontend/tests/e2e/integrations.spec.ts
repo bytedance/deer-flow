@@ -30,6 +30,7 @@ function configuredLarkStatus() {
       verified: true,
     },
     sandbox_runtime_mode: "none",
+    sandbox_runtime_probed: true,
     sandbox_runtime_ready: false,
     sandbox_runtime_detail: null,
   };
@@ -43,7 +44,7 @@ test.describe("Integrations settings", () => {
 
     await page.goto("/workspace/capabilities?tab=plugins&plugin=lark");
 
-    const dialog = page.getByRole("dialog", { name: "Plugin settings" });
+    const dialog = page.getByRole("dialog", { name: "Lark / Feishu" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText("Lark / Feishu CLI")).toBeVisible();
   });
@@ -110,7 +111,7 @@ test.describe("Integrations settings", () => {
     );
 
     await page.goto("/workspace/capabilities?tab=plugins&plugin=lark");
-    const dialog = page.getByRole("dialog", { name: "Plugin settings" });
+    const dialog = page.getByRole("dialog", { name: "Lark / Feishu" });
     const popupPromise = page.waitForEvent("popup");
     await dialog.getByRole("button", { name: "Connect Lark" }).click();
     const popup = await popupPromise;
@@ -148,11 +149,11 @@ test.describe("Integrations settings", () => {
 
     // Deep link opens the shared dialog on Integrations.
     await page.goto("/workspace/capabilities?tab=plugins&plugin=lark");
-    const dialog = page.getByRole("dialog", { name: "Plugin settings" });
+    const dialog = page.getByRole("dialog", { name: "Lark / Feishu" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText("Lark / Feishu CLI")).toBeVisible();
     await expect(
-      page.getByRole("dialog", { name: "Plugin settings" }),
+      page.getByRole("dialog", { name: "Lark / Feishu" }),
     ).toHaveCount(1);
 
     // Close the modal before using the sidebar. While the modal is open, the
@@ -160,7 +161,7 @@ test.describe("Integrations settings", () => {
     // click sidebar controls there.
     await page.keyboard.press("Escape");
     await expect(
-      page.getByRole("dialog", { name: "Plugin settings" }),
+      page.getByRole("dialog", { name: "Lark / Feishu" }),
     ).toHaveCount(0);
 
     // Opening again from the nav menu must still use the same shared host, not
@@ -173,7 +174,7 @@ test.describe("Integrations settings", () => {
       page.getByRole("dialog", { name: "Settings", exact: true }),
     ).toHaveCount(1);
     await expect(
-      page.getByRole("dialog", { name: "Plugin settings", exact: true }),
+      page.getByRole("dialog", { name: "Lark / Feishu", exact: true }),
     ).toHaveCount(0);
   });
 
@@ -233,7 +234,7 @@ test.describe("Integrations settings", () => {
     });
 
     await page.goto("/workspace/capabilities?tab=plugins&plugin=lark");
-    const dialog = page.getByRole("dialog", { name: "Plugin settings" });
+    const dialog = page.getByRole("dialog", { name: "Lark / Feishu" });
     await expect(dialog).toBeVisible();
 
     await expect(dialog.getByText("Lark / Feishu CLI")).toBeVisible();
@@ -365,7 +366,7 @@ test.describe("Integrations settings", () => {
 
     await page.goto("/workspace/capabilities?tab=plugins&plugin=lark");
 
-    const dialog = page.getByRole("dialog", { name: "Plugin settings" });
+    const dialog = page.getByRole("dialog", { name: "Lark / Feishu" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText("Lark / Feishu CLI")).toBeVisible();
 
@@ -429,7 +430,7 @@ test.describe("Integrations settings", () => {
     });
 
     await page.goto("/workspace/capabilities?tab=plugins&plugin=lark");
-    const dialog = page.getByRole("dialog", { name: "Plugin settings" });
+    const dialog = page.getByRole("dialog", { name: "Lark / Feishu" });
     await dialog.getByRole("button", { name: "Calendar" }).click();
     await dialog
       .getByLabel("Exact OAuth scope")

@@ -15,10 +15,11 @@ import sqlite3
 import pytest
 import sqlalchemy as sa
 from alembic import command
+from alembic.script import ScriptDirectory
 
 import deerflow.persistence.models  # noqa: F401  -- registers ORM models
 from deerflow.persistence.base import Base
-from deerflow.persistence.bootstrap import _get_alembic_config, _get_head_revision
+from deerflow.persistence.bootstrap import _MIGRATIONS_DIR, _get_alembic_config, _get_head_revision
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
 from deerflow.persistence.run import RunRepository
 
@@ -66,8 +67,12 @@ def _table_and_column_state(db_path) -> tuple[bool, bool, set[str], str | None]:
     return "run_change_clock" in tables, "change_seq" in run_columns, run_indexes, version_row[0] if version_row else None
 
 
-async def test_0025_is_the_chain_head():
-    assert _get_head_revision() == REVISION
+async def test_0025_chains_into_the_single_head():
+    script = ScriptDirectory(str(_MIGRATIONS_DIR))
+    assert len(script.get_heads()) == 1
+    # Later migrations may advance the head without removing this revision.
+    assert REVISION in {revision.revision for revision in script.walk_revisions()}
+    assert script.get_revision(REVISION).down_revision == PREVIOUS
 
 
 async def test_0025_repairs_schema_skipped_by_the_0023_insertion(tmp_path):

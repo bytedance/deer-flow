@@ -830,6 +830,22 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     except Exception:
         logger.debug("Could not close browser session for %s (not critical)", sanitize_log_param(thread_id))
 
+    # Tear down persistent MCP sessions scoped to this user/thread (best-effort).
+    # The same invariant as the browser session above applies, and harder: a
+    # persistent stdio MCP server such as Playwright keeps retained pages and
+    # cookies, and its leaked owner task plus subprocess keep holding memory and
+    # file descriptors. Scope keys encode user/thread/incarnation, so the whole
+    # thread identity is closed across every incarnation -- a legacy
+    # (incarnation-less) scope and a newer versioned scope are both stale once
+    # the thread is gone, and reading the current incarnation here would race a
+    # concurrently minted one. See #5188.
+    try:
+        from deerflow.mcp.session_pool import get_session_pool
+
+        await get_session_pool().close_thread_scope(user_id=user_id, thread_id=thread_id)
+    except Exception:
+        logger.debug("Could not close MCP sessions for %s (not critical)", sanitize_log_param(thread_id))
+
     return response
 
 
@@ -1499,6 +1515,8 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
+    # Validate external roles before materializing a graph or reserving a write.
+    values = strip_server_owned_state_metadata(dict(body.values or {}))
     if body.checkpoint_id is not None:
         if not body.checkpoint_id:
             raise HTTPException(status_code=404, detail="Checkpoint not found")
@@ -1526,12 +1544,6 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         as_node=mutation_node,
         checkpoint_id=body.checkpoint_id,
     )
-    # These values go straight into a checkpoint, so they need the same
-    # server-owned-metadata stripping the run path gets inside normalize_input.
-    # Without it an authenticated client can persist forged provenance and
-    # transform trails, which later readers are entitled to treat as facts
-    # about what the host itself did.
-    values = strip_server_owned_state_metadata(dict(body.values or {}))
     writable_channels = graph_writable_channels(getattr(accessor, "graph", None))
     if writable_channels is not None:
         unknown_fields = sorted(set(values) - writable_channels)

@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  BotIcon,
   BellIcon,
   CableIcon,
   InfoIcon,
@@ -72,6 +73,11 @@ const SubagentSettingsPage = dynamic(
     ),
   { loading: SettingsPageLoading },
 );
+const ModelSettingsPage = dynamic(
+  () =>
+    import("./model-settings-page").then((module) => module.ModelSettingsPage),
+  { loading: SettingsPageLoading },
+);
 const AboutSettingsPage = dynamic(
   () =>
     import("./about-settings-page").then((module) => module.AboutSettingsPage),
@@ -79,6 +85,7 @@ const AboutSettingsPage = dynamic(
 );
 
 export type SettingsSection =
+  | "models"
   | "account"
   | "appearance"
   | "channels"
@@ -107,6 +114,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
 
   const sections = useMemo(
     () => [
+      { id: "models", label: t.settings.sections.models, icon: BotIcon },
       {
         id: "account",
         label: t.settings.sections.account,
@@ -140,6 +148,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       { id: "about", label: t.settings.sections.about, icon: InfoIcon },
     ],
     [
+      t.settings.sections.models,
       t.settings.sections.account,
       t.settings.sections.appearance,
       t.settings.sections.channels,
@@ -191,6 +200,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
           </nav>
           <ScrollArea className="h-full min-h-0 rounded-lg border">
             <div className="space-y-8 p-6">
+              {activeSection === "models" && <ModelSettingsPage />}
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}

@@ -193,28 +193,34 @@ def merge_delegations(existing: list[DelegationEntry] | None, new: list[Delegati
     """Reducer for the delegation ledger.
 
     - new None/empty -> preserve existing.
-    - append entries, replacing same id with the latest version while preserving
-      first-seen order.
+    - append entries, replacing the same (run_id, tool-call id) with the latest
+      version while preserving first-seen order. Provider ids can repeat in
+      later runs of the same thread.
     - terminal status is never overwritten by a non-terminal status.
     """
     if not new:
         return existing or []
 
-    by_id: dict[str, DelegationEntry] = {}
-    order: list[str] = []
+    by_key: dict[tuple[str | None, str], DelegationEntry] = {}
+    order: list[tuple[str | None, str]] = []
     for entry in [*(existing or []), *new]:
         entry_id = entry["id"]
-        previous = by_id.get(entry_id)
+        key = (entry.get("run_id") or None, entry_id)
+        if key[0] is None:
+            # Legacy updates without run_id still update the most recent
+            # matching entry, as they did before run-scoped identities.
+            key = next((prior for prior in reversed(order) if prior[1] == entry_id), key)
+        previous = by_key.get(key)
         if previous is not None and previous["status"] in TERMINAL_STATUSES and entry["status"] not in TERMINAL_STATUSES:
             continue
-        if entry_id not in by_id:
-            order.append(entry_id)
+        if key not in by_key:
+            order.append(key)
         elif previous.get("created_at"):
             entry = {**entry, "created_at": previous["created_at"]}
             if previous.get("run_id") and not entry.get("run_id"):
                 entry["run_id"] = previous["run_id"]
-        by_id[entry_id] = entry
-    merged = [by_id[entry_id] for entry_id in order]
+        by_key[key] = entry
+    merged = [by_key[key] for key in order]
     if len(merged) > _DELEGATION_LEDGER_MAX_ENTRIES:
         merged = merged[-_DELEGATION_LEDGER_MAX_ENTRIES:]
     return merged
@@ -277,6 +283,72 @@ def merge_skill_context(existing: list[SkillEntry] | None, new: list[SkillEntry]
     return merged
 
 
+# Absolute ceiling applied by the reducer itself. The operator-configured cap
+# (`tool_artifacts.max_entries`) is enforced per-agent by
+# ArtifactCaptureMiddleware when it emits updates, so two agents in one process
+# can carry different caps without sharing state.
+_ARTIFACT_MAX_ENTRIES_CEILING = 1000
+
+
+class ArtifactEntry(TypedDict):
+    """A captured artifact reference from a tool result (issue #4676).
+
+    Stored in ``ThreadState.tool_artifacts`` so it survives context compaction.
+    The model sees only the short ``handle``; the real reference (path, URL,
+    task id) lives here and is resolved at tool-call time.
+    """
+
+    handle: str
+    tool_name: str
+    tool_call_id: str
+    call_index: int
+    artifact_type: str
+    display_name: str
+    real_ref: str
+    mime_type: NotRequired[str]
+    created_at: str
+    consumed_by: NotRequired[list[str]]
+
+
+def merge_tool_artifacts(existing: list[ArtifactEntry] | None, new: list[ArtifactEntry] | None) -> list[ArtifactEntry]:
+    """Reducer for the tool-artifact registry channel.
+
+    - new None/empty -> preserve existing.
+    - append entries, replacing same handle with the latest version while
+      preserving first-seen order (latest wins, e.g. for consumption updates).
+    - a trailing ``{"op": "trim_to", "keep": N}`` directive (emitted by the
+      capture middleware) makes the configured cap a sliding window: the
+      oldest entries beyond N are evicted. Without a directive nothing is
+      evicted, so updates stay purely additive.
+    - absolute ceiling of 1000 applies regardless.
+    """
+    if not new:
+        return existing or []
+
+    by_handle: dict[str, ArtifactEntry] = {}
+    order: list[str] = []
+    for entry in [*(existing or []), *new]:
+        if not isinstance(entry, dict) or "handle" not in entry:
+            continue
+        handle = entry["handle"]
+        if handle not in by_handle:
+            order.append(handle)
+        by_handle[handle] = entry
+
+    merged = [by_handle[handle] for handle in order]
+
+    for item in reversed(new):
+        if isinstance(item, dict) and item.get("op") == "trim_to":
+            keep = min(int(item.get("keep", len(merged))), _ARTIFACT_MAX_ENTRIES_CEILING)
+            if keep < len(merged):
+                merged = merged[-keep:]
+            break
+
+    if len(merged) > _ARTIFACT_MAX_ENTRIES_CEILING:
+        merged = merged[-_ARTIFACT_MAX_ENTRIES_CEILING:]
+    return merged
+
+
 class ThreadState(AgentState):
     sandbox: SandboxStateField
     thread_data: NotRequired[ThreadDataState | None]
@@ -289,6 +361,8 @@ class ThreadState(AgentState):
     promoted: Annotated[PromotedTools | None, merge_promoted]
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
+    tool_artifacts: Annotated[list[ArtifactEntry], merge_tool_artifacts]
+    tool_artifact_processed: Annotated[list[str], merge_artifacts]
     task_notes: Annotated[dict | None, TaskNotesChannel(dict | None, merge_task_notes)]
     task_history: NotRequired[dict | None]
     summary_text: NotRequired[str | None]
@@ -408,6 +482,8 @@ THREAD_STATE_REDUCER_FIELDS = frozenset(
         "promoted",
         "delegations",
         "skill_context",
+        "tool_artifacts",
+        "tool_artifact_processed",
         "task_notes",
     }
 )

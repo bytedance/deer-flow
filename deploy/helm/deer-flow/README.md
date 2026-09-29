@@ -135,7 +135,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 46
+  config_version: 50
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -252,17 +252,21 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   (key `database-url`) and injected as `DATABASE_URL`; `config.yaml` references
   it as `$DATABASE_URL` in `database.postgres_url`. Schema is bootstrapped
   automatically on gateway startup (alembic `create_all` + `stamp head`).
-  For real HA, disable the bundled instance and point at a managed DB:
+  For real HA, disable the bundled instance and point at a managed DB with a
+  full DSN (the chart wraps it into the Secret) or with a Secret you manage
+  (key `database-url`):
   ```yaml
   postgresql:
     enabled: false
     external:
-      host: mydb.example.com   # or set databaseUrl / existingSecret
-      port: 5432
-      database: deerflow
-      username: deerflow
-      password: changeme
+      databaseUrl: postgresql://deerflow:changeme@mydb.example.com:5432/deerflow
+      # or: existingSecret: my-deerflow-db   # key `database-url`
   ```
+
+  URL-encode special characters in the DSN password (for example, `@` as
+  `%40`). The chart uses an external `databaseUrl` verbatim and does not
+  rewrite the DSN in a user-managed Secret.
+
 - **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 45s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s). The grace period MUST exceed the Gateway's graceful-shutdown work — channel stop (~5s) plus the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s) plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (channel stop + drain + buffer).
 - **Gateway replicas.** Postgres + the Redis stream bridge together make the
   gateway's *persisted* state (checkpointer + run/thread metadata) and *live

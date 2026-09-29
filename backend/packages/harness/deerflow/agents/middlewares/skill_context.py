@@ -15,7 +15,10 @@ from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 from deerflow.agents.thread_state import _SKILL_DESCRIPTION_MAX_CHARS, SkillEntry
 
 _SKILL_FILE_NAME = "SKILL.md"
-_FRONT_MATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+# `\ufeff` is the UTF-8 byte-order mark a Windows-saved SKILL.md can carry. The loader and
+# validator already tolerate it (see `deerflow.skills.frontmatter._FRONTMATTER_RE`); without it
+# here the match fails on the leading marker and the captured description comes back empty.
+_FRONT_MATTER_RE = re.compile(r"^\ufeff?---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 SKILL_CONTEXT_ENTRY_KEY = "skill_context_entry"
 logger = logging.getLogger(__name__)
 
