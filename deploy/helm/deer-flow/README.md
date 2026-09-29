@@ -262,6 +262,11 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
       databaseUrl: postgresql://deerflow:changeme@mydb.example.com:5432/deerflow
       # or: existingSecret: my-deerflow-db   # key `database-url`
   ```
+
+  URL-encode special characters in the DSN password (for example, `@` as
+  `%40`). The chart uses an external `databaseUrl` verbatim and does not
+  rewrite the DSN in a user-managed Secret.
+
 - **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 45s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s). The grace period MUST exceed the Gateway's graceful-shutdown work — channel stop (~5s) plus the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s) plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (channel stop + drain + buffer).
 - **Gateway replicas.** Postgres + the Redis stream bridge together make the
   gateway's *persisted* state (checkpointer + run/thread metadata) and *live
