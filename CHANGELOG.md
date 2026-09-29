@@ -327,6 +327,18 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **persistence:** A SQLite `checkpointer.connection_string` written as a
+  `file:` URI now fails at startup instead of silently writing somewhere else.
+  LangGraph's SQLite checkpointer and Store open connection strings without
+  `uri=True`, so SQLite treated the URI as a literal filename:
+  `file:checkpoints.db?mode=rwc` created a file with that exact name in the
+  working directory, `file::memory:?cache=shared` persisted to disk, and a
+  `file:///...` URI failed to open. The readiness probe did parse URIs, so it
+  checked a different file than the runtime used and reported in-memory URIs as
+  `not_configured`. All four SQLite checkpointer/Store factories now reject
+  `file:` URIs with an error that names the setting, and `/health/ready` reports
+  them unreachable. Use a filesystem path or `:memory:` instead.
+
 - **config:** `make config-upgrade` (also run by `make dev` / `make start`)
   upgrades the `config.yaml` the Gateway loads. With both
   `<checkout>/config.yaml` and `backend/config.yaml` present, the script

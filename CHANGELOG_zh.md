@@ -332,6 +332,16 @@
 
 ### 修复
 
+- **持久化：** SQLite `checkpointer.connection_string` 若写成 `file:` URI，现在会在
+  启动时报错，而不是悄悄写到别处。LangGraph 的 SQLite checkpointer 与 Store 打开
+  连接串时未传 `uri=True`，SQLite 会把 URI 当作字面文件名：
+  `file:checkpoints.db?mode=rwc` 会在工作目录创建同名文件，
+  `file::memory:?cache=shared` 会持久化到磁盘，`file:///...` 则无法打开。就绪探针
+  却会解析 URI，因此检查的文件与运行时实际使用的不同，并把内存 URI 报告为
+  `not_configured`。现在四个 SQLite checkpointer/Store 工厂都会拒绝 `file:` URI，
+  错误信息会指明该配置项，`/health/ready` 也会将其报告为不可达。请改用文件系统
+  路径或 `:memory:`。
+
 - **配置：** `make config-upgrade`（`make dev` / `make start` 也会执行）现在升级的是
   Gateway 实际加载的 `config.yaml`。当 `<checkout>/config.yaml` 与
   `backend/config.yaml` 同时存在时，脚本升级的是 `backend/` 下的副本，而 Gateway
