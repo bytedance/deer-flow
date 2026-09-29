@@ -22,7 +22,9 @@ The standard lead-agent builders (including custom-agent bootstrap) and
 - `task_note`: save, replace or delete a named note, with at most eight notes,
   750 characters and four source IDs per note. Parallel additions reserve the
   remaining slots for distinct new keys in model tool-call order; repeated keys
-  share a slot. When artifact-handle resolution is enabled, reservations use
+  share a slot. Non-dict sibling arguments are ignored during reservation, so
+  malformed calls neither consume slots nor break valid sibling receipts.
+  When artifact-handle resolution is enabled, reservations use
   resolved keys, so handles and concrete keys referring to one note share a slot.
   Excess additions return `note_capacity` without evicting existing notes or
   reporting `saved` for a write discarded because of capacity. Existing keys can

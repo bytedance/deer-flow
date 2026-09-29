@@ -8,7 +8,8 @@ reservations use the same resolver as execution through the call-local argument
 view supplied by `ArtifactResolutionMiddleware`. Both modules import
 `RESOLVED_TOOL_CALL_ARGS_KEY` from `state.py`. This view stays in the current
 `ToolRuntime.state`, outside messages and checkpoints. Disabled resolution and
-direct tool graphs retain raw arguments.
+direct tool graphs retain raw arguments. Skip non-dict sibling arguments before
+reading note fields so malformed calls cannot break valid sibling receipts.
 
 `history_search` accepts optional `role=user|assistant|tool`, mapped at the tool
 boundary to stored roles `human|ai|tool`; omission/null keeps all roles. Filter

@@ -73,6 +73,8 @@ def _has_note_capacity(runtime: Runtime, notes: dict, key: str) -> bool:
             continue
         # Use middleware-resolved batch arguments when available, matching execution; otherwise use raw arguments.
         args = runtime.state.get(RESOLVED_TOOL_CALL_ARGS_KEY, {}).get(call["id"], call["args"])
+        if not isinstance(args, dict):
+            continue
         candidate = args.get("key")
         content = args.get("content")
         if not isinstance(candidate, str) or not NOTE_KEY_PATTERN.fullmatch(candidate) or not isinstance(content, str) or not content:

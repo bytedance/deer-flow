@@ -11,6 +11,8 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.prebuilt.tool_node import ToolCallRequest, ToolRuntime
+from langgraph.types import Command
 
 from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
 from deerflow.agents.task_continuity.state import RESOLVED_TOOL_CALL_ARGS_KEY
@@ -272,3 +274,47 @@ async def test_disabled_resolution_reserves_literal_keys(async_mode, resolver_mo
     assert set(state["task_notes"]) == set(notebook(7)) | {"art_ab12cd34"}
     assert replies(state)["art_ab12cd34"]["status"] == "saved"
     assert replies(state)["remote-task-42"]["error"] == "note_capacity"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("resolve_handles", [False, True], ids=["raw", "resolved"])
+@pytest.mark.parametrize("malformed_args", [None, '"quoted arguments"', ["not", "a", "mapping"], 42], ids=["null", "string", "list", "number"])
+async def test_malformed_sibling_arguments_preserve_valid_note_receipts(async_mode, resolve_handles, malformed_args):
+    first_key = "art_ab12cd34" if resolve_handles else "new_a"
+    calls = [note_call("invalid"), note_call(first_key, call_id="first"), note_call("overflow")]
+    message = AIMessage(content="", tool_calls=calls)
+    # Inject malformed internal state after AIMessage validation to test this boundary directly.
+    message.tool_calls[0]["args"] = malformed_args
+    initial_notes = notebook(7)
+    state = {
+        "messages": [message],
+        "task_notes": initial_notes,
+        "tool_artifacts": [{"handle": "art_ab12cd34", "artifact_type": "task", "real_ref": "new_a"}],
+    }
+    middleware = ArtifactResolutionMiddleware() if resolve_handles else None
+
+    def execute(request):
+        return task_note.func(request.runtime, **request.tool_call["args"])
+
+    async def aexecute(request):
+        return await task_note.coroutine(request.runtime, **request.tool_call["args"])
+
+    results = []
+    for call in message.tool_calls[1:]:
+        runtime = ToolRuntime(state=state, context={}, config={}, stream_writer=lambda _: None, tool_call_id=call["id"], store=None)
+        request = ToolCallRequest(tool_call=call, tool=task_note, state=state, runtime=runtime)
+        if async_mode:
+            result = await middleware.awrap_tool_call(request, aexecute) if middleware else await aexecute(request)
+        else:
+            result = middleware.wrap_tool_call(request, execute) if middleware else execute(request)
+        results.append(result)
+
+    saved, rejected = results
+    assert isinstance(saved, Command)
+    assert saved.update["task_notes"] == {"new_a": {"content": "new note", "source_ids": [], "authority": "model_report"}}
+    assert json.loads(saved.update["messages"][0].content)["status"] == "saved"
+    assert json.loads(rejected)["error"] == "note_capacity"
+    assert state["task_notes"] == notebook(7)
+    assert message.tool_calls[0]["args"] == malformed_args
+    assert RESOLVED_TOOL_CALL_ARGS_KEY not in state
