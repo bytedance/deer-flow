@@ -113,6 +113,8 @@ def _convert_delta_to_message_chunk_with_reasoning(_dict: Mapping[str, Any], def
         additional_kwargs["function_call"] = function_call
 
     reasoning = _dict.get("reasoning")
+    if reasoning is None:
+        reasoning = _dict.get("reasoning_content")
     if reasoning is not None:
         additional_kwargs["reasoning"] = reasoning
         reasoning_text = _reasoning_to_text(reasoning)
@@ -254,6 +256,8 @@ class VllmChatModel(ChatOpenAI):
             if not isinstance(message, AIMessage):
                 continue
             reasoning = choice.get("message", {}).get("reasoning")
+            if reasoning is None:
+                reasoning = choice.get("message", {}).get("reasoning_content")
             if reasoning is None:
                 continue
             message.additional_kwargs["reasoning"] = reasoning

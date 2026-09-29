@@ -507,3 +507,53 @@ def test_vllm_provider_evicts_only_idle_streams_above_soft_capacity(monkeypatch)
         "chatcmpl-2",
         "chatcmpl-3",
     ]
+
+
+def test_vllm_provider_falls_back_to_reasoning_content_in_chat_result():
+    model = _make_model()
+    result = model._create_chat_result(
+        {
+            "model": "Qwen/QwQ-32B",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "42",
+                        "reasoning_content": "I compared the two numbers directly.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
+
+    message = result.generations[0].message
+    assert message.additional_kwargs["reasoning"] == "I compared the two numbers directly."
+    assert message.additional_kwargs["reasoning_content"] == "I compared the two numbers directly."
+
+
+def test_vllm_provider_falls_back_to_reasoning_content_in_streaming_chunks():
+    model = _make_model()
+    chunk = model._convert_chunk_to_generation_chunk(
+        {
+            "model": "Qwen/QwQ-32B",
+            "choices": [
+                {
+                    "delta": {
+                        "role": "assistant",
+                        "reasoning_content": "First, call the weather tool.",
+                        "content": "Calling tool...",
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        AIMessageChunk,
+        {},
+    )
+
+    assert chunk is not None
+    assert chunk.message.additional_kwargs["reasoning"] == "First, call the weather tool."
+    assert chunk.message.additional_kwargs["reasoning_content"] == "First, call the weather tool."
+    assert chunk.message.content == "Calling tool..."
