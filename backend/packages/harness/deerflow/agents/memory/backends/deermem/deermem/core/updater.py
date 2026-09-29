@@ -18,7 +18,7 @@ import weakref
 from collections import OrderedDict
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 
 from ..config import DeerMemConfig
 from .eviction import (
@@ -866,6 +866,27 @@ def _message_identities(messages: list[Any]) -> frozenset[tuple[str, ...]]:
     return frozenset(identity for msg in messages if (identity := _message_identity(msg)) is not None)
 
 
+class _ClearFencePeek(NamedTuple):
+    """A re-read of the clear fence after a feed's coverage was published.
+
+    ``newer`` is the current generation when it is strictly newer than the
+    fence captured before the model call. ``unreadable`` means that read
+    failed. A failed read is not evidence that no clear happened: the clear's
+    one-time promote already ran and will not see coverage published later.
+    """
+
+    newer: tuple[int, int] | None
+    unreadable: bool
+    # The generation actually read. ``None`` when the fence was missing or the
+    # read failed. Callers use it to settle older pending notes; ``newer``
+    # alone cannot tell an older note from this batch's own fence.
+    current: tuple[int, int] | None = None
+
+
+# One pending note: identities published under a fence, plus call sequence.
+_UncertainClearNote = tuple[frozenset[tuple[str, ...]], int | None]
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -940,6 +961,14 @@ class MemoryUpdater:
         # re-feed turns the user already cleared. Stored as a set and merged
         # by union so a later, shorter emergency subset cannot shrink it.
         self._clear_exclusions: OrderedDict[tuple[str | None, str | None, str | None], tuple[int | None, frozenset[tuple[str, ...]]]] = OrderedDict()
+        # Feeds whose post-publish generation re-read failed. Each captured
+        # generation keeps its own note. A later failure adds a note and does
+        # not replace an older one. Exclusion waits for a later successful
+        # read that is newer than that note's own generation. A single timeout
+        # must not permanently blacklist a batch that was never cleared.
+        # Bounded by ``watermark_max_keys`` (least-recently-used key dropped).
+        # A dropped note loses only the deferred exclusion for that thread.
+        self._uncertain_clear_rechecks: OrderedDict[tuple[str | None, str | None, str | None], dict[tuple[int, int], _UncertainClearNote]] = OrderedDict()
 
     # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
 
@@ -2165,12 +2194,12 @@ class MemoryUpdater:
         consumed. Coverage is the whole cleared prefix. If that prefix's tail
         is still in the feed and the match is a stable message id, everything
         through the rightmost covered id is dropped. Content-based identities
-        are not a position boundary: a later turn can repeat the same wording,
-        so those matches only drop the matching message itself. If the feed is
-        an older subset that does not contain the tail, membership still drops
-        the overlapping identities. Messages that are not in the set stay
-        eligible -- a missing tail is not treated as "no boundary, feed
-        everything".
+        (no message id) are membership-only: a sentence is dropped when that
+        sentence itself is in the set, including when the whole feed matches.
+        They are not a prefix-cut boundary, because a later turn can repeat the
+        same assistant wording. Messages that are not in the set stay eligible.
+        A missing tail is not treated as "no boundary, feed everything" when a
+        stable id still marks the cleared prefix.
         """
         excluded = self._clear_exclusion_get(watermark_key)
         return self._drop_excluded_identities(excluded, messages)
@@ -2209,18 +2238,189 @@ class MemoryUpdater:
         user_id: str | None,
         *,
         on_peek_error: str,
-    ) -> tuple[int, int] | None:
-        """Return the current generation when it is newer than ``fence_generation``."""
+    ) -> _ClearFencePeek:
+        """Return whether a newer clear is visible, and whether the read failed.
+
+        ``unreadable`` means the fence could not be read. Callers that already
+        published coverage must not treat that as proof no clear happened:
+        promote runs once, at clear time, and will not see coverage published
+        afterwards.
+        """
         if fence_generation is None:
-            return None
+            return _ClearFencePeek(None, False, None)
         try:
             current_generation = self.peek_clear_generation(agent_name, user_id=user_id)
         except Exception:
             logger.warning(on_peek_error, exc_info=True)
-            return None
+            return _ClearFencePeek(None, True, None)
         if not is_stale_clear_generation(fence_generation, current_generation):
-            return None
-        return current_generation
+            return _ClearFencePeek(None, False, current_generation)
+        return _ClearFencePeek(current_generation, False, current_generation)
+
+    def _snapshot_uncertain_clears(self, watermark_key: tuple[str | None, str | None, str | None]) -> dict[tuple[int, int], _UncertainClearNote]:
+        """Copy this key's pending notes. Empty when nothing is waiting."""
+        with self._watermark_lock:
+            pending = self._uncertain_clear_rechecks.get(watermark_key)
+            if not pending:
+                return {}
+            return dict(pending)
+
+    def _remember_uncertain_clear(
+        self,
+        watermark_key: tuple[str | None, str | None, str | None],
+        messages: list[Any],
+        *,
+        fence_generation: tuple[int, int],
+        sequence: int | None,
+    ) -> None:
+        """Record this fence without replacing notes from other generations.
+
+        The same fence unions its identities. A later batch that captured a
+        newer generation must not erase an older note whose clear may already
+        have landed.
+        """
+        identities = _message_identities(messages)
+        if not identities:
+            return
+        with self._watermark_lock:
+            pending = self._uncertain_clear_rechecks.setdefault(watermark_key, {})
+            self._uncertain_clear_rechecks.move_to_end(watermark_key)
+            existing = pending.get(fence_generation)
+            if existing is None:
+                pending[fence_generation] = (identities, sequence)
+            else:
+                existing_ids, existing_seq = existing
+                if existing_seq is None:
+                    merged_seq = sequence
+                elif sequence is None:
+                    merged_seq = existing_seq
+                else:
+                    merged_seq = max(existing_seq, sequence)
+                pending[fence_generation] = (existing_ids | identities, merged_seq)
+            cap = self._config.watermark_max_keys
+            while cap > 0 and len(self._uncertain_clear_rechecks) > cap:
+                self._uncertain_clear_rechecks.popitem(last=False)
+
+    def _settle_uncertain_clears(
+        self,
+        watermark_key: tuple[str | None, str | None, str | None],
+        current_generation: tuple[int, int] | None,
+        *,
+        only: dict[tuple[int, int], _UncertainClearNote],
+    ) -> None:
+        """Apply one successful generation read to the notes in ``only``.
+
+        A note is excluded when the read is newer than that note's own fence.
+        A note that is not stale is dropped. A note captured at a newer
+        generation than the read stays pending: this read cannot answer it.
+        Notes that changed after ``only`` was copied are left for a later read.
+        """
+        if current_generation is None or not only:
+            return
+        excluded: list[tuple[int, int]] = []
+        with self._watermark_lock:
+            pending = self._uncertain_clear_rechecks.get(watermark_key)
+            if not pending:
+                return
+            for fence, record in only.items():
+                if pending.get(fence) != record:
+                    continue
+                if is_stale_clear_generation(current_generation, fence):
+                    continue
+                identities, sequence = record
+                del pending[fence]
+                if is_stale_clear_generation(fence, current_generation):
+                    self._union_exclusion_locked(watermark_key, identities, sequence)
+                    excluded.append(fence)
+            if not pending:
+                self._uncertain_clear_rechecks.pop(watermark_key, None)
+        for fence in excluded:
+            logger.info(
+                "Registering deferred clear exclusion after a later generation read (user_id=%s agent_name=%s expected=%s current=%s)",
+                watermark_key[1],
+                watermark_key[2],
+                fence,
+                current_generation,
+            )
+
+    def _resolve_uncertain_clear(
+        self,
+        watermark_key: tuple[str | None, str | None, str | None],
+        agent_name: str | None,
+        user_id: str | None,
+    ) -> None:
+        """Settle pending notes when a read succeeds. A failed read leaves them."""
+        prior = self._snapshot_uncertain_clears(watermark_key)
+        if not prior:
+            return
+        try:
+            current_generation = self.peek_clear_generation(agent_name, user_id=user_id)
+        except Exception:
+            logger.warning(
+                "Failed to re-check clear generation for a deferred exclusion; leaving the feed retryable (user_id=%s agent_name=%s)",
+                user_id,
+                agent_name,
+                exc_info=True,
+            )
+            return
+        self._settle_uncertain_clears(watermark_key, current_generation, only=prior)
+
+    def _sync_clear_exclusion_after_publish(
+        self,
+        watermark_key: tuple[str | None, str | None, str | None],
+        messages: list[Any],
+        *,
+        fence_generation: tuple[int, int] | None,
+        agent_name: str | None,
+        user_id: str | None,
+        bypass_watermark: bool,
+        sequence: int | None,
+        on_peek_error: str,
+        registered_log: str,
+    ) -> None:
+        """Exclude this feed when a newer clear is actually visible.
+
+        A failed re-read does not exclude and does not erase older notes.
+        Promote may already have missed coverage published after its one
+        scan, so this fence stays pending until a later read succeeds.
+        A successful read settles notes copied before the read: an older
+        fence is excluded, a fence this generation does not make stale is
+        dropped, and a newer fence is left alone. This batch is excluded
+        only when the read is newer than its own fence.
+        """
+        prior = self._snapshot_uncertain_clears(watermark_key)
+        peek = self._peek_newer_clear(
+            fence_generation,
+            agent_name,
+            user_id,
+            on_peek_error=on_peek_error,
+        )
+        if peek.unreadable:
+            if fence_generation is not None:
+                self._remember_uncertain_clear(
+                    watermark_key,
+                    messages,
+                    fence_generation=fence_generation,
+                    sequence=sequence,
+                )
+            return
+        self._settle_uncertain_clears(watermark_key, peek.current, only=prior)
+        if peek.newer is None:
+            return
+        logger.info(
+            registered_log,
+            user_id,
+            agent_name,
+            fence_generation,
+            peek.newer,
+        )
+        self._mark_feed_consumed(
+            watermark_key,
+            messages,
+            bypass_watermark=bypass_watermark,
+            sequence=sequence,
+            exclude_cleared=True,
+        )
 
     def _consume_feed_if_stale_clear(
         self,
@@ -2240,20 +2440,21 @@ class MemoryUpdater:
         """
         if not messages:
             return
-        current_generation = self._peek_newer_clear(
+        peek = self._peek_newer_clear(
             fence_generation,
             agent_name,
             user_id,
             on_peek_error="Failed to re-check clear generation after a memory update error; leaving the feed retryable",
         )
-        if current_generation is None:
+        # A failed read must not consume a turn that was never persisted.
+        if peek.unreadable or peek.newer is None:
             return
         logger.info(
             "Consuming memory feed after update failure because a newer clear completed (user_id=%s agent_name=%s expected=%s current=%s)",
             user_id,
             agent_name,
             fence_generation,
-            current_generation,
+            peek.newer,
         )
         self._mark_feed_consumed(
             watermark_key,
@@ -2306,11 +2507,15 @@ class MemoryUpdater:
         watermark_key = (thread_id, user_id, agent_name)
         fence_generation = expected_clear_generation
         try:
+            self._resolve_uncertain_clear(watermark_key, agent_name, user_id)
             if fence_generation is None:
+                prior_uncertain = self._snapshot_uncertain_clears(watermark_key)
                 try:
                     fence_generation = self.peek_clear_generation(agent_name, user_id=user_id)
                 except Exception:
                     fence_generation = None
+                else:
+                    self._settle_uncertain_clears(watermark_key, fence_generation, only=prior_uncertain)
             if bypass_watermark:
                 # Emergency flush: extract the carried subset in full, except
                 # turns already covered by a clear.
@@ -2322,7 +2527,14 @@ class MemoryUpdater:
                 logger.debug("Memory update skipped: no remaining messages to extract (thread=%s)", thread_id)
                 return True
             if expected_clear_generation is not None:
+                prior_uncertain = self._snapshot_uncertain_clears(watermark_key)
                 current_generation = self.peek_clear_generation(agent_name, user_id=user_id)
+                # The opening re-check can time out while this read succeeds.
+                # Settle older notes before the model sees the feed, then drop
+                # sentences that note now excludes. A batch whose own fence is
+                # stale still falls through to the drop below.
+                self._settle_uncertain_clears(watermark_key, current_generation, only=prior_uncertain)
+                feed_messages = self._feed_after_clear_exclusion(watermark_key, feed_messages)
                 if is_stale_clear_generation(expected_clear_generation, current_generation):
                     logger.info(
                         "Dropping memory extraction before LLM invocation because a newer clear completed (user_id=%s agent_name=%s expected=%s current=%s)",
@@ -2339,6 +2551,9 @@ class MemoryUpdater:
                         exclude_cleared=True,
                     )
                     return False
+                if not feed_messages:
+                    logger.debug("Memory update skipped: no remaining messages to extract (thread=%s)", thread_id)
+                    return True
             # Re-detect signals on the post-watermark feed so extraction hints
             # reference only turns the LLM will actually see. The admission-time
             # ``signals`` (detected on the full conversation in DeerMem) already
@@ -2385,27 +2600,17 @@ class MemoryUpdater:
                     bypass_watermark=bypass_watermark,
                     sequence=sequence,
                 )
-                newer_clear = self._peek_newer_clear(
-                    fence_generation,
-                    agent_name,
-                    user_id,
-                    on_peek_error="Failed to re-check clear generation after a pre-screen skip; leaving exclusion to a later promote",
+                self._sync_clear_exclusion_after_publish(
+                    watermark_key,
+                    messages,
+                    fence_generation=fence_generation,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                    bypass_watermark=bypass_watermark,
+                    sequence=sequence,
+                    on_peek_error="Failed to re-check clear generation after a pre-screen skip; leaving the feed retryable until a later read succeeds",
+                    registered_log="Registering clear exclusion after pre-screen skip because a newer clear completed (user_id=%s agent_name=%s expected=%s current=%s)",
                 )
-                if newer_clear is not None:
-                    logger.info(
-                        "Registering clear exclusion after pre-screen skip because a newer clear completed (user_id=%s agent_name=%s expected=%s current=%s)",
-                        user_id,
-                        agent_name,
-                        fence_generation,
-                        newer_clear,
-                    )
-                    self._mark_feed_consumed(
-                        watermark_key,
-                        messages,
-                        bypass_watermark=bypass_watermark,
-                        sequence=sequence,
-                        exclude_cleared=True,
-                    )
                 success = True
                 # The judge record is this batch's only trace, so emit it even though
                 # no LLM call happened (the finally-block gate reads this flag).
@@ -2491,27 +2696,17 @@ class MemoryUpdater:
                 # exclusion -- later emergency flushes must not restore
                 # the just-written, then-cleared turns.
                 self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark, sequence=sequence)
-                newer_clear = self._peek_newer_clear(
-                    fence_generation,
-                    agent_name,
-                    user_id,
-                    on_peek_error="Failed to re-check clear generation after persist; leaving exclusion to a later promote",
+                self._sync_clear_exclusion_after_publish(
+                    watermark_key,
+                    messages,
+                    fence_generation=fence_generation,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                    bypass_watermark=bypass_watermark,
+                    sequence=sequence,
+                    on_peek_error="Failed to re-check clear generation after persist; leaving the feed retryable until a later read succeeds",
+                    registered_log="Registering clear exclusion after persist because a newer clear completed (user_id=%s agent_name=%s expected=%s current=%s)",
                 )
-                if newer_clear is not None:
-                    logger.info(
-                        "Registering clear exclusion after persist because a newer clear completed (user_id=%s agent_name=%s expected=%s current=%s)",
-                        user_id,
-                        agent_name,
-                        fence_generation,
-                        newer_clear,
-                    )
-                    self._mark_feed_consumed(
-                        watermark_key,
-                        messages,
-                        bypass_watermark=bypass_watermark,
-                        sequence=sequence,
-                        exclude_cleared=True,
-                    )
                 success = True
             elif outcome is _CommitOutcome.CONSUMED:
                 self._mark_feed_consumed(

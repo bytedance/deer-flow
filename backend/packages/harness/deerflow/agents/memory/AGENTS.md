@@ -85,7 +85,15 @@ coverage into that set so a later `add_nowait` cannot restore already-extracted,
 then-cleared turns. A persist that finishes, then sees a newer clear, also
 registers exclusion on that completion path: promote only copies coverage that is
 already published, so a clear that lands between persist and publish cannot be the
-only writer of the exclusion set. If a
+only writer of the exclusion set. A failed re-read does not exclude that feed.
+Each captured generation keeps its own pending note: a later failure adds
+another note and does not replace an older one. A successful read settles
+only the notes that generation can answer. A note from an older generation
+is excluded, a note that is not stale is dropped, and a note captured at a
+newer generation stays pending. Until a note is excluded the feed stays
+retryable, including for an emergency flush. Pending notes share
+`watermark_max_keys` with the other per-thread caches: over the cap, the
+least-recently-used thread's notes are dropped. If a
 summarization flush carries only an older prefix that does not include the previous
 tail, those prefix identities are still dropped; messages that are not in the set
 remain eligible. Content-based identities (no message id) are membership-only --

@@ -309,6 +309,263 @@ def test_persist_then_clear_before_coverage_registers_exclusion() -> None:
     assert llm.invoke_count == 0
 
 
+def test_persist_then_clear_peek_error_excludes_on_the_next_successful_read() -> None:
+    """A failed post-persist fence read leaves the feed retryable.
+
+    Promote already scanned before this coverage existed. The failed read does
+    not exclude the batch. The next update that can read the generation sees
+    the newer clear and then keeps the emergency flush from restoring it.
+    """
+    llm = _FakeLLM()
+    storage = _GenerationStorage()
+    updater = MemoryUpdater(_config(), storage, llm)
+    msgs = [
+        HumanMessage(content="I like Python", id="h-python"),
+        AIMessage(content="I'll remember that.", id="a-python"),
+    ]
+    key = ("t1", "u", "a")
+    original_finalize = updater._finalize_update
+    original_peek = storage.peek_clear_generation
+    fail_next = {"armed": False}
+
+    def peek_once(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        if fail_next["armed"]:
+            fail_next["armed"] = False
+            raise TimeoutError("clear generation peek failed")
+        return original_peek(agent_name, user_id=user_id)
+
+    def persist_then_clear(*args: Any, **kwargs: Any) -> Any:
+        outcome = original_finalize(*args, **kwargs)
+        storage.simulate_clear()
+        updater.promote_clear_exclusions(user_id="u", agent_name="a")
+        fail_next["armed"] = True
+        return outcome
+
+    storage.peek_clear_generation = peek_once  # type: ignore[method-assign]
+    updater._finalize_update = persist_then_clear  # type: ignore[method-assign]
+    updater.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u")
+    assert llm.invoke_count == 1
+    assert not fail_next["armed"]
+    assert key not in updater._clear_exclusions
+    assert key in updater._uncertain_clear_rechecks
+
+    llm.invoke_count = 0
+    llm.prompts.clear()
+    assert updater.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True) is True
+    assert llm.invoke_count == 0
+    assert key in updater._clear_exclusions
+    assert key not in updater._uncertain_clear_rechecks
+
+
+def test_persist_peek_error_without_clear_stays_retryable() -> None:
+    """A slow fence read with no clear must not block the emergency flush."""
+    llm = _FakeLLM()
+    storage = _GenerationStorage()
+    updater = MemoryUpdater(_config(), storage, llm)
+    msgs = [
+        HumanMessage(content="I like Python", id="h-python"),
+        AIMessage(content="I'll remember that.", id="a-python"),
+    ]
+    key = ("t1", "u", "a")
+    original_finalize = updater._finalize_update
+    original_peek = storage.peek_clear_generation
+    fail_next = {"armed": False}
+
+    def peek_once(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        if fail_next["armed"]:
+            fail_next["armed"] = False
+            raise TimeoutError("clear generation peek failed")
+        return original_peek(agent_name, user_id=user_id)
+
+    def arm_after_persist(*args: Any, **kwargs: Any) -> Any:
+        outcome = original_finalize(*args, **kwargs)
+        fail_next["armed"] = True
+        return outcome
+
+    storage.peek_clear_generation = peek_once  # type: ignore[method-assign]
+    updater._finalize_update = arm_after_persist  # type: ignore[method-assign]
+    updater.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u")
+    assert llm.invoke_count == 1
+    assert not fail_next["armed"]
+    assert key not in updater._clear_exclusions
+    assert key in updater._uncertain_clear_rechecks
+
+    updater._finalize_update = original_finalize  # type: ignore[method-assign]
+    llm.invoke_count = 0
+    assert updater.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True) is True
+    assert llm.invoke_count == 1
+    assert key not in updater._clear_exclusions
+    assert key not in updater._uncertain_clear_rechecks
+
+
+def test_newer_batch_read_still_excludes_older_uncertain_note() -> None:
+    """A later batch that sees no clear of its own must still retire the older note.
+
+    The opening re-check times out, so the cleared sentences are still in the
+    temporary list. The read just before the model succeeds and matches this
+    batch's own generation. That must exclude the older note, not delete it
+    and let the model see the cleared sentences.
+    """
+    llm = _FakeLLM()
+    storage = _GenerationStorage()
+    updater = MemoryUpdater(_config(), storage, llm)
+    msgs = [
+        HumanMessage(content="I like Python", id="h-python"),
+        AIMessage(content="I'll remember that.", id="a-python"),
+    ]
+    key = ("t1", "u", "a")
+    original_finalize = updater._finalize_update
+    original_peek = storage.peek_clear_generation
+    fail_next = {"armed": False}
+
+    def peek_once(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        if fail_next["armed"]:
+            fail_next["armed"] = False
+            raise TimeoutError("clear generation peek failed")
+        return original_peek(agent_name, user_id=user_id)
+
+    def persist_then_clear(*args: Any, **kwargs: Any) -> Any:
+        outcome = original_finalize(*args, **kwargs)
+        storage.simulate_clear()
+        updater.promote_clear_exclusions(user_id="u", agent_name="a")
+        fail_next["armed"] = True
+        return outcome
+
+    storage.peek_clear_generation = peek_once  # type: ignore[method-assign]
+    updater._finalize_update = persist_then_clear  # type: ignore[method-assign]
+    updater.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u")
+    assert not fail_next["armed"]
+    assert (0, 0) in updater._uncertain_clear_rechecks[key]
+    assert key not in updater._clear_exclusions
+
+    fail_next["armed"] = True
+    llm.invoke_count = 0
+    assert updater.update_memory(msgs, thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True, expected_clear_generation=(0, 1)) is True
+    assert llm.invoke_count == 0
+    assert ("id", "h-python") in updater._clear_exclusions[key][1]
+    assert ("id", "a-python") in updater._clear_exclusions[key][1]
+    assert key not in updater._uncertain_clear_rechecks
+
+
+def test_same_generation_batch_does_not_forget_older_uncertain_note() -> None:
+    """Writing a new sentence must not throw away an older pending note.
+
+    The opening re-check times out. The later read matches this batch's own
+    generation, so this batch itself was not cleared. The older note still
+    has to be excluded, including when this read is the one after persist.
+    """
+    llm = _FakeLLM()
+    storage = _GenerationStorage()
+    updater = MemoryUpdater(_config(), storage, llm)
+    cleared = [
+        HumanMessage(content="I like Python", id="h-python"),
+        AIMessage(content="I'll remember that.", id="a-python"),
+    ]
+    fresh = [
+        HumanMessage(content="I like Rust", id="h-rust"),
+        AIMessage(content="I'll remember Rust.", id="a-rust"),
+    ]
+    key = ("t1", "u", "a")
+    original_finalize = updater._finalize_update
+    original_peek = storage.peek_clear_generation
+    fail_next = {"armed": False}
+
+    def peek_once(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        if fail_next["armed"]:
+            fail_next["armed"] = False
+            raise TimeoutError("clear generation peek failed")
+        return original_peek(agent_name, user_id=user_id)
+
+    def persist_then_clear(*args: Any, **kwargs: Any) -> Any:
+        outcome = original_finalize(*args, **kwargs)
+        storage.simulate_clear()
+        updater.promote_clear_exclusions(user_id="u", agent_name="a")
+        fail_next["armed"] = True
+        return outcome
+
+    storage.peek_clear_generation = peek_once  # type: ignore[method-assign]
+    updater._finalize_update = persist_then_clear  # type: ignore[method-assign]
+    updater.update_memory(cleared, thread_id="t1", agent_name="a", user_id="u")
+    assert (0, 0) in updater._uncertain_clear_rechecks[key]
+
+    updater._finalize_update = original_finalize  # type: ignore[method-assign]
+    fail_next["armed"] = True
+    llm.invoke_count = 0
+    assert updater.update_memory(fresh, thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True, expected_clear_generation=(0, 1)) is True
+    assert llm.invoke_count == 1
+    assert ("id", "h-python") in updater._clear_exclusions[key][1]
+    assert ("id", "h-rust") not in updater._clear_exclusions[key][1]
+
+    llm.invoke_count = 0
+    assert updater.update_memory(cleared, thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True) is True
+    assert llm.invoke_count == 0
+
+
+def test_failed_reread_keeps_a_newer_uncertain_note() -> None:
+    """A failed re-read adds its own note and leaves a newer one in place."""
+    llm = _FakeLLM()
+    storage = _GenerationStorage()
+    updater = MemoryUpdater(_config(), storage, llm)
+    cleared = [
+        HumanMessage(content="I like Python", id="h-python"),
+        AIMessage(content="I'll remember that.", id="a-python"),
+    ]
+    fresh = [
+        HumanMessage(content="I like Rust", id="h-rust"),
+        AIMessage(content="I'll remember Rust.", id="a-rust"),
+    ]
+    key = ("t1", "u", "a")
+    storage._generation = (0, 1)
+    updater._remember_uncertain_clear(key, cleared, fence_generation=(0, 2), sequence=1)
+    original_finalize = updater._finalize_update
+    original_peek = storage.peek_clear_generation
+    fail_next = {"armed": False}
+
+    def peek_once(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        if fail_next["armed"]:
+            fail_next["armed"] = False
+            raise TimeoutError("clear generation peek failed")
+        return original_peek(agent_name, user_id=user_id)
+
+    def arm_after_persist(*args: Any, **kwargs: Any) -> Any:
+        outcome = original_finalize(*args, **kwargs)
+        fail_next["armed"] = True
+        return outcome
+
+    storage.peek_clear_generation = peek_once  # type: ignore[method-assign]
+    updater._finalize_update = arm_after_persist  # type: ignore[method-assign]
+    assert updater.update_memory(fresh, thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True, expected_clear_generation=(0, 1)) is True
+    notes = updater._uncertain_clear_rechecks[key]
+    assert ("id", "h-python") in notes[(0, 2)][0]
+    assert ("id", "h-rust") in notes[(0, 1)][0]
+    assert key not in updater._clear_exclusions
+
+
+def test_uncertain_clear_notes_are_bounded_by_watermark_max_keys() -> None:
+    """Pending notes share ``watermark_max_keys``: the least-recently-used key is dropped.
+
+    A storage outage can leave a note on every thread that saved during it.
+    Threads that never update again must not keep those notes forever.
+    """
+    updater = MemoryUpdater(_config(watermark_max_keys=2), _GenerationStorage(), _FakeLLM())
+    keys = [("t1", "u", "a"), ("t2", "u", "a"), ("t3", "u", "a")]
+    for key in keys[:2]:
+        updater._remember_uncertain_clear(key, _msgs(key[0]), fence_generation=(0, 0), sequence=1)
+    # Touching t1 again makes t2 the least-recently-used key.
+    updater._remember_uncertain_clear(keys[0], _msgs("t1-again"), fence_generation=(0, 0), sequence=2)
+    updater._remember_uncertain_clear(keys[2], _msgs("t3"), fence_generation=(0, 0), sequence=1)
+
+    assert list(updater._uncertain_clear_rechecks) == [keys[0], keys[2]]
+
+
+def test_uncertain_clear_notes_are_unbounded_when_cap_is_zero() -> None:
+    updater = MemoryUpdater(_config(watermark_max_keys=0), _GenerationStorage(), _FakeLLM())
+    for index in range(5):
+        updater._remember_uncertain_clear((f"t{index}", "u", "a"), _msgs(str(index)), fence_generation=(0, 0), sequence=1)
+
+    assert len(updater._uncertain_clear_rechecks) == 5
+
+
 class _SkipVerdict:
     """Pre-screen verdict that consumes the batch without an extraction call."""
 
@@ -370,6 +627,23 @@ def test_prescreen_skip_excludes_batch_when_clear_lands_during_judge() -> None:
 
     assert updater.update_memory(msgs[:2], thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True) is True
     assert llm.invoke_count == 0
+
+
+def test_drop_excluded_drops_identical_no_id_prefix() -> None:
+    """No-id wording that is entirely in the exclusion set is not fed again."""
+    remember = "I will remember your preference."
+    excluded = frozenset(
+        {
+            ("content", "human", "I like Python"),
+            ("content", "ai", remember),
+        }
+    )
+    messages = [
+        HumanMessage(content="I like Python", id=""),
+        AIMessage(content=remember, id=""),
+    ]
+    remaining = MemoryUpdater._drop_excluded_identities(excluded, messages)
+    assert remaining == []
 
 
 def test_drop_excluded_does_not_cut_prefix_on_content_identity() -> None:

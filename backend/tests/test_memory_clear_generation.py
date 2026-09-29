@@ -1896,6 +1896,90 @@ def test_persist_then_clear_before_coverage_does_not_restore_via_add_nowait(tmp_
     assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
 
 
+def test_identical_no_id_prefix_after_clear_is_not_reextracted(tmp_path: Path) -> None:
+    """A no-id prefix that matches the cleared wording must not be written back.
+
+    Repeating a preference is a new message id, or a turn whose text is not
+    already in the exclusion set. Matching text alone is not a new occurrence.
+    """
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    remember = "I will remember your preference."
+    pre_clear = [
+        HumanMessage(content="I like Python", id=""),
+        AIMessage(content=remember, id=""),
+    ]
+    manager.add(thread_id="thread-1", messages=pre_clear, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+    manager.clear_memory(agent_name="researcher", user_id="alice")
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+    host_llm.invoke.reset_mock()
+    fresh_turn = [
+        HumanMessage(content="I like Python", id=""),
+        AIMessage(content=remember, id=""),
+    ]
+    with patch.object(manager._queue, "_schedule_timer"):
+        manager.add_nowait(thread_id="thread-1", messages=fresh_turn, agent_name="researcher", user_id="alice")
+    manager._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_persist_peek_error_after_clear_does_not_restore_via_add_nowait(tmp_path: Path) -> None:
+    """A failed fence re-read does not blacklist the feed; the next read does.
+
+    The clear's promote runs before this feed's coverage is published. If the
+    post-persist peek throws once, the batch stays retryable. The following
+    emergency flush reads the generation successfully, sees the newer clear,
+    and must not write the fact back.
+    """
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User likes Python")))
+    manager = _manager(tmp_path, host_llm)
+    conversation = [
+        HumanMessage(content="Remember that I like Python.", id="human-python"),
+        AIMessage(content="I'll keep that preference in mind.", id="ai-python"),
+    ]
+    original_finalize = manager._updater._finalize_update
+    original_peek = manager._updater.peek_clear_generation
+    fail_next = {"armed": False}
+
+    def peek_once(agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        if fail_next["armed"]:
+            fail_next["armed"] = False
+            raise TimeoutError("clear generation peek failed")
+        return original_peek(agent_name, user_id=user_id)
+
+    def persist_then_clear(*args: Any, **kwargs: Any) -> Any:
+        outcome = original_finalize(*args, **kwargs)
+        manager.clear_memory(agent_name="researcher", user_id="alice")
+        fail_next["armed"] = True
+        return outcome
+
+    manager._updater.peek_clear_generation = peek_once  # type: ignore[method-assign]
+    manager._updater._finalize_update = persist_then_clear  # type: ignore[method-assign]
+    manager.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+
+    assert not fail_next["armed"]
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+    assert ("thread-1", "alice", "researcher") not in manager._updater._clear_exclusions
+    assert ("thread-1", "alice", "researcher") in manager._updater._uncertain_clear_rechecks
+    host_llm.invoke.reset_mock()
+
+    manager.add_nowait(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
+    _stop_debounce(manager)
+    manager._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    assert manager.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
 def test_duplicate_assistant_content_without_ids_does_not_drop_new_user_turn(tmp_path: Path) -> None:
     """No-id content fallback: a repeated assistant reply must not discard the new user turn."""
     remember = "I will remember your preference."
