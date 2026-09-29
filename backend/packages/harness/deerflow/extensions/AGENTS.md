@@ -141,9 +141,10 @@ entry, the manager owns the controlled locked sync.
 
 The public package is `packages/extension-api/` and must never import `deerflow` or carry
 framework dependencies. Extensions declare any FastAPI, LangChain, or LangGraph imports
-themselves. Its registry contract exposes seven contribution kinds: middleware
+themselves. Its registry contract exposes eight contribution kinds: middleware
 contributors, task-lifecycle contributors, system-model-call observers, agent-assembly
-observers, context-compaction observers, Gateway-lifetime services, and eager routers. Middleware contributions declare lead/subagent scope, stable
+observers, context-compaction observers, Gateway-lifetime services, eager routers, and
+experimental full-stack plugins (`registry.plugin()`, see `docs/full-stack-plugins.md`). Middleware contributions declare lead/subagent scope, stable
 order, and a semantic placement (`MODEL_LOGICAL`, `MODEL_PHYSICAL`, `TOOL_VISIBLE`,
 `TOOL_RAW`, or `STANDARD`) rather than a fragile list index. `extensions/stack.py` is the
 single final composition point; do not inject inside
@@ -276,9 +277,34 @@ detached task store, the same fallback `notify_system_model_call` uses when its 
 supplies none.
 
 Gateway services start in registration order after the persistence engine and session
-factory are ready. Each receives the same `ExtensionRuntimeDeps` snapshot containing the
+factory are ready. Ungranted services share an `ExtensionRuntimeDeps` snapshot containing the
 app store, projected host policy, session factory, and optional read-only
-`RunEvidenceReader`. The Gateway constructs the configured run and event stores before
+`RunEvidenceReader`. `plugins[].host_access.model_invocation` optionally binds a model invoker
+to each service via the host-only `ModelInvocationService` adapter. The loader captures
+one `ModelInvocationScope` per installation, not per `use` string, so duplicate sources
+cannot inherit one another's roles. Its semaphore is shared by that installation's
+services; its admission ceiling is twice the concurrency limit, checked before
+payload processing. Provider work is shielded from caller cancellation and retains
+both budgets until actual completion, including synchronous LangChain executor calls
+and offloaded construction. Abandoned construction cannot dispatch a model request.
+Provider-task cancellation is a normalized failure; only a new cancellation of
+the invoking task propagates. Compare cancellation counts against invocation entry
+so previously handled caller cancellations do not mask provider failures.
+Failed-install positional rollback also removes its adapters. The adapter
+receives startup config through `start_with_host`, while extensions receive only the
+neutral invoker in a replaced deps snapshot. No-grant services preserve their old path.
+Failed start and stop revoke the service's handle and cancel queued/in-flight
+callers; they do not release slots owned by still-running provider work. Structured
+schema checks and output validation run in terminable isolated Python children,
+with pipe I/O on admission-bounded dedicated threads (Windows selector-loop compatible,
+independent of a potentially saturated provider executor). Cancellation kills and
+reaps those children before releasing admission.
+Grants and model profiles are startup snapshots; changing them requires restarting the
+Gateway. Calls use the normal model factory and attributed tracing, return plain text,
+usage counts and optionally locally validated JSON objects, and never return raw model
+objects or provider exception chains. See `backend/docs/extension-model-invocation.md`.
+
+The Gateway constructs the configured run and event stores before
 services so the reader is usable from `start()`. Changed-run discovery uses an opaque,
 scope-bound cursor over `(change_seq, run_id)`; a run that changes after it was returned may
 be replayed, but an unreturned run cannot be skipped. Legacy rows start at `change_seq=0`
@@ -287,15 +313,23 @@ covers creations and changes to retained rows only; synchronization consumers mu
 `get_run_status()` for known runs and treat `None` as absent when deletion reconciliation
 is required. A DB run store preserves positions across restarts, while memory only provides
 process-lifetime ordering. Per-run events retain the event store's thread-scoped
-`after_seq` semantics; metadata is secret-redacted, but event content is returned unchanged,
-and status comes from the authoritative run store. The reader passes its fixed scope to
+`after_seq` semantics; metadata has only the legacy `auth_token` key removed (there is no
+other redaction), event content is returned unchanged, and status comes from the
+authoritative run store. The reader passes its fixed scope to
 event reads explicitly, including global `None`, so ambient request identity cannot
 change its visibility. Content and redacted metadata are deep-copied snapshots: DTO
 fields are frozen, but nested containers remain locally mutable without touching host
 storage. The production Gateway injects one
 app-scoped reader with `user_id=None`, deliberately granting trusted operator extensions
-global cross-user visibility because services have no request principal. A host embedding
-the harness may instead bind a reader to one user. This is not a sandbox boundary: services
+global cross-user visibility because services have no request principal. User-facing contributed
+routes must use `resolve_run_evidence_reader(request)` or `require_run_evidence_reader(request)`;
+the Gateway binds that reader to the authenticated principal rather than a caller-supplied user ID.
+The factory rejects empty or whitespace-padded IDs instead of normalizing authorization identities.
+The resolver requires the request's effective `runs:read` permission and never widens admin
+or internal callers to global visibility. Unsupported hosts resolve to `None` (the required
+helper raises `NotImplementedError`); denied access raises `PermissionError`. Extensions map
+these to 503/403 at their HTTP boundary. The public API remains framework-independent.
+A host embedding the harness may instead bind a reader to one user. This is not a sandbox boundary: services
 already retain `session_factory` and execute with Gateway privileges. Empty pages mean
 caught up or not visible, never unsupported -- absence is represented
 by `ExtensionRuntimeDeps.run_evidence_reader is None`, and protocol defaults raise

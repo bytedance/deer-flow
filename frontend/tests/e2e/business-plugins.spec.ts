@@ -31,7 +31,7 @@ for (const plugin of [
     let submission: Record<string, unknown> | undefined;
     let configured = false;
     const connectionName = `team-${plugin.id}`;
-    await page.route("**/api/mcp/config", (route) =>
+    await page.route("**/api/mcp/personal/config", (route) =>
       route.fulfill({
         json: {
           mcp_servers: configured
@@ -82,6 +82,7 @@ for (const plugin of [
       plugin_id: plugin.id,
       name: connectionName,
       configuration: plugin.fields,
+      scope: "user",
     });
     await expect(
       page.locator("article").filter({ hasText: connectionName }),
@@ -113,7 +114,7 @@ test("rejected credentials remain editable and are not marked configured", async
   );
 });
 
-test("ordinary users see each shared connection once and cannot configure credentials", async ({
+test("ordinary users see shared connections read-only and configure their own credentials", async ({
   page,
 }) => {
   mockLangGraphAPI(page);
@@ -141,8 +142,10 @@ test("ordinary users see each shared connection once and cannot configure creden
   };
   // Both adapters project the same MCP installation, not a second account.
   for (const adapter of ["mcp", "business"]) {
-    await page.route(`**/api/capabilities/installations/${adapter}`, (route) =>
-      route.fulfill({ json: { items: [connection], can_manage: false } }),
+    await page.route(
+      `**/api/capabilities/installations/${adapter}?scope=all`,
+      (route) =>
+        route.fulfill({ json: { items: [connection], can_manage: false } }),
     );
   }
   await page.goto("/workspace/capabilities");
@@ -154,12 +157,41 @@ test("ordinary users see each shared connection once and cannot configure creden
   await page.evaluate(() =>
     document.dispatchEvent(new Event("visibilitychange")),
   );
+  const platform = page.getByRole("region", {
+    name: "Platform provided",
+    exact: true,
+  });
+  const personal = page.getByRole("region", {
+    name: "My plugins",
+    exact: true,
+  });
+  await expect(
+    platform.getByRole("button", {
+      name: "Setup guide Firecrawl",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    platform.locator("article").filter({ hasText: "Team CRM" }),
+  ).toHaveCount(1);
+  await expect(
+    personal.locator("article").filter({ hasText: "Team CRM" }),
+  ).toHaveCount(0);
+  await expect(
+    personal.getByRole("button", { name: "Add MCP plugin" }),
+  ).toBeVisible();
+  await expect(
+    personal.locator("article").filter({ hasText: "HubSpot" }),
+  ).toContainText("Not configured");
   await expect(
     page.locator("article").filter({ hasText: "Team CRM" }),
   ).toHaveCount(1);
   await expect(
-    page.getByRole("button", { name: "Add MCP plugin" }),
+    page.locator("article").filter({ hasText: "Team CRM" }).getByRole("switch"),
   ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Add MCP plugin" }),
+  ).toHaveCount(1);
   await page
     .getByRole("button", {
       name: "Configure WeCom group notifications",
@@ -167,9 +199,9 @@ test("ordinary users see each shared connection once and cannot configure creden
     })
     .click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.locator("#plugin-field-webhook_key")).toBeDisabled();
+  await expect(dialog.locator("#plugin-field-webhook_key")).toBeEnabled();
   await expect(dialog.locator("#plugin-field-webhook_key")).toHaveValue("");
   await expect(
     dialog.getByRole("button", { name: "Save configuration" }),
-  ).toBeDisabled();
+  ).toBeEnabled();
 });

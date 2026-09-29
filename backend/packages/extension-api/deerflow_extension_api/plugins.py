@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from deerflow_extension_api.auth import ExtensionPrincipal
@@ -48,14 +49,27 @@ class ModelTool:
 
 @dataclass(frozen=True)
 class BrowserModule:
-    """Experimental single-file browser transport, not the final asset package API.
-
-    A future versioned packaged-asset transport will coexist with this inline
-    form; see docs/full-stack-plugins.md for the compatibility direction.
-    """
+    """Self-contained browser module; use BrowserAssets for relative resources."""
 
     module: str
     code: str
+    public_fields: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "public_fields", tuple(self.public_fields))
+
+
+@dataclass(frozen=True)
+class BrowserAssets:
+    """Versioned manifest and static files inside a trusted installed package.
+
+    The host validates and snapshots the allowlisted files during registration.
+    Relative paths in the manifest are resolved against root, never a request.
+    """
+
+    module: str
+    root: str | Path
+    manifest: str = "ui_manifest.json"
     public_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -67,7 +81,7 @@ class PluginContribution:
     """One identity, one enabled switch, optional settings and implementations.
 
     The host owns the boolean ``enabled`` field. Other fields are non-secret
-    settings, private to the backend unless explicitly projected by BrowserModule.
+    settings, private to the backend unless explicitly projected by its browser declaration.
     Supply at least one browser module, backend action, or model tool. Backend implementations
     are installed through the existing operator-controlled Python loader.
     """
@@ -77,7 +91,7 @@ class PluginContribution:
     description: str = ""
     enabled: bool = False
     fields: tuple[SettingsField, ...] = ()
-    frontend: BrowserModule | None = None
+    frontend: BrowserModule | BrowserAssets | None = None
     backend: tuple[BackendAction, ...] = ()
     api_version: int = 1
     tools: tuple[ModelTool, ...] = ()

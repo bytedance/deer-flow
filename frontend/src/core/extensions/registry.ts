@@ -11,6 +11,7 @@ import {
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
+import { importAssetModule } from "./asset-module";
 import type { FrontendContribution, FrontendExtension } from "./contracts";
 
 export function extensionIcon(name?: string): LucideIcon {
@@ -34,35 +35,50 @@ const importModule: ModuleImporter = (url) =>
 export async function loadFrontendExtensions(
   entries: FrontendContribution[],
   importer: ModuleImporter = importModule,
+  assetImporter: ModuleImporter = importAssetModule,
 ): Promise<LoadedContribution[]> {
   return Promise.all(
     entries.map(async (entry) => {
       if (entry.settings.enabled !== true || entry.module === null)
         return entry;
       try {
-        // Only fetch installed Gateway assets, using the same base and credentials
-        // as discovery/actions. Cross-origin import() would omit session cookies.
-        const expected = `/api/plugins/modules/${entry.module}/`;
-        if (
-          !entry.entry?.startsWith(expected) ||
-          !/^[a-f0-9]{64}\.mjs$/.test(entry.entry.slice(expected.length))
-        )
-          throw new Error("Invalid installed module entry");
-        const response = await fetch(`${getBackendBaseURL()}${entry.entry}`, {
-          cache: "no-store",
-        });
-        if (!response.ok)
-          throw new Error(`Plugin module unavailable (${response.status})`);
-        // BrowserModule is a self-contained ES module; it has no relative imports.
-        const moduleURL = URL.createObjectURL(
-          new Blob([await response.text()], { type: "text/javascript" }),
-        );
         let loadedModule: FrontendExtension;
-        try {
-          loadedModule = (await importer(moduleURL))
-            .default as FrontendExtension;
-        } finally {
-          URL.revokeObjectURL(moduleURL);
+        const transport = entry.transport ?? "inline-v1";
+        if (transport === "assets-v1") {
+          const expected = `/api/plugins/${entry.namespace}/assets/`;
+          if (
+            !entry.entry?.startsWith(expected) ||
+            !/^[a-f0-9]{64}\/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*\/)*[A-Za-z0-9_-][A-Za-z0-9_.-]*\.m?js$/.test(
+              entry.entry.slice(expected.length),
+            )
+          )
+            throw new Error("Invalid installed asset entry");
+          loadedModule = (
+            await assetImporter(`${getBackendBaseURL()}${entry.entry}`)
+          ).default as FrontendExtension;
+        } else if (transport === "inline-v1") {
+          const expected = `/api/plugins/modules/${entry.module}/`;
+          if (
+            !entry.entry?.startsWith(expected) ||
+            !/^[a-f0-9]{64}\.mjs$/.test(entry.entry.slice(expected.length))
+          )
+            throw new Error("Invalid installed module entry");
+          const response = await fetch(`${getBackendBaseURL()}${entry.entry}`, {
+            cache: "no-store",
+          });
+          if (!response.ok)
+            throw new Error(`Plugin module unavailable (${response.status})`);
+          const moduleURL = URL.createObjectURL(
+            new Blob([await response.text()], { type: "text/javascript" }),
+          );
+          try {
+            loadedModule = (await importer(moduleURL))
+              .default as FrontendExtension;
+          } finally {
+            URL.revokeObjectURL(moduleURL);
+          }
+        } else {
+          throw new Error("Unsupported browser asset transport");
         }
         if (
           loadedModule?.apiVersion !== 1 ||

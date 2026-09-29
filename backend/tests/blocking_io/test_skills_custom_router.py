@@ -19,6 +19,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -84,3 +85,23 @@ async def test_rollback_history_read_does_not_block_event_loop() -> None:
 
     assert excinfo.value.status_code == 400
     assert "history_index is out of range" in str(excinfo.value.detail)
+
+
+async def test_rollback_accepted_path_does_not_block_event_loop(monkeypatch) -> None:
+    """The accepted-rollback path (validate → scan → current-content read →
+    write → append → response read) must keep every filesystem operation off
+    the loop (#5747)."""
+    await asyncio.to_thread(_install_skill)
+    await asyncio.to_thread(
+        _write_history,
+        [{"action": "edit", "ts": 1, "prev_content": _SKILL_MD, "new_content": _SKILL_MD}],
+    )
+    monkeypatch.setattr(
+        "app.gateway.routers.skills.scan_skill_content",
+        AsyncMock(return_value=SimpleNamespace(decision="allow", reason="ok", static_findings=[])),
+    )
+    config = AppConfig.model_validate({"sandbox": {"use": "test"}})
+
+    response = await rollback_custom_skill(_SKILL_NAME, SkillRollbackRequest(history_index=0), _admin_request(), config)
+
+    assert response.content == _SKILL_MD

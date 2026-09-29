@@ -18,9 +18,11 @@ import time
 import types
 
 import pytest
+from pydantic import ValidationError
 
 from deerflow.community.boxlite.box import BoxliteBox
 from deerflow.community.boxlite.provider import BoxliteProvider, _import_simplebox
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.trace_context import get_current_trace_id, request_trace_context
 
 _LEGACY_COLLIDING_IDENTITIES = (
@@ -204,6 +206,11 @@ def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch
     assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
     assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
     assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+    # A start past EOF comes back empty rather than raising, and a negative
+    # start reads from the first line instead of wrapping around.
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=99) == ""
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=-1) == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=-1) == ""
     assert all(call == ("cat", "--", "/mnt/user-data/workspace/range.txt") for call in calls)
 
 
@@ -536,6 +543,25 @@ async def test_acquire_async_propagates_request_trace_context(monkeypatch):
         # _fake_run uses asyncio.run, which cannot run inside this test's event
         # loop thread; shut down on a worker thread so box close() completes.
         await asyncio.to_thread(provider.shutdown)
+
+
+@pytest.mark.parametrize("value", [float("inf"), "1e999"])
+def test_sandbox_config_rejects_non_finite_health_check_skip_seconds(value):
+    """`ge=0` alone lets a non-finite skip window through.
+
+    `health_check_skip_seconds: 1e999` in config.yaml loads as the string
+    "1e999" and pydantic's float coercion turns it into inf; `ge=0` accepts
+    inf (inf >= 0). At the warm-reuse site the check `skip_seconds > 0 and
+    (now - released_at) < skip_seconds` then holds forever, so recently
+    released boxes are promoted without the health check permanently instead
+    of failing fast at config load. `allow_inf_nan=False` (as already set on
+    the sibling sandbox float fields) makes the config layer reject it.
+    """
+    with pytest.raises(ValidationError):
+        SandboxConfig(
+            use="deerflow.community.boxlite.provider:BoxliteProvider",
+            health_check_skip_seconds=value,
+        )
 
 
 def test_explicit_recent_reclaim_skip_avoids_health_check(monkeypatch):
@@ -1506,3 +1532,40 @@ def test_grep_single_file_path_with_matching_glob(tmp_path, monkeypatch) -> None
     assert [m.path for m in matches] == [str(target)]
     assert truncated is False
     assert box.grep(str(target), "needle", glob="*.md") == ([], False)
+
+
+def test_event_loop_thread_timeout_cancels_submitted_coroutine() -> None:
+    from concurrent.futures import TimeoutError as FutureTimeoutError
+
+    from deerflow.community.boxlite.provider import _EventLoopThread
+
+    loop_thread = _EventLoopThread()
+    started = threading.Event()
+    cancelled = threading.Event()
+    finished = threading.Event()
+    release_holder: dict[str, asyncio.Event] = {}
+
+    async def blocking_operation() -> None:
+        release = asyncio.Event()
+        release_holder["event"] = release
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        finally:
+            finished.set()
+
+    try:
+        with pytest.raises(FutureTimeoutError):
+            loop_thread.run(blocking_operation(), timeout=0.05)
+
+        assert started.wait(1.0)
+        assert cancelled.wait(1.0), "timed-out BoxLite coroutine kept running on the private loop"
+    finally:
+        release = release_holder.get("event")
+        if release is not None and loop_thread._loop is not None:
+            loop_thread._loop.call_soon_threadsafe(release.set)
+        finished.wait(1.0)
+        loop_thread.close()

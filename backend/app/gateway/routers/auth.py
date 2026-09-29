@@ -790,31 +790,34 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     """Create the first admin account on initial system setup.
 
     Only callable when no admin exists. Returns 409 Conflict if an admin
-    already exists.
+    already exists, including when a concurrent first-boot request won the
+    claim: the account is created through an atomic check-and-insert rather
+    than a count followed by a create.
 
     On success, the admin account is created with ``needs_setup=False`` and
     the session cookie is set.
     """
-    admin_count = await get_local_provider().count_admin_users()
-    if admin_count > 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
-        )
+    already_initialized = HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
+    )
+
+    # Fast path only: an initialized system answers without hashing a
+    # password. The claim below is what actually decides, because a count
+    # read here cannot exclude a request already in flight.
+    if await get_local_provider().count_admin_users() > 0:
+        raise already_initialized
 
     try:
-        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
+        user = await get_local_provider().create_first_admin(email=body.email, password=body.password)
     except ValueError:
-        admin_count = await get_local_provider().count_admin_users()
-        if admin_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
-            )
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
         )
+
+    if user is None:
+        raise already_initialized
 
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request, remember_me=body.remember_me)

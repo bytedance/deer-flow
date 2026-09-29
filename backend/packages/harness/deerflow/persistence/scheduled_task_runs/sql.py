@@ -638,6 +638,18 @@ class ScheduledTaskRunRepository:
             row = await session.get(ScheduledTaskRunRow, run_record_id)
             if row is None:
                 return False
+            # The lease-owner / terminal guards are only as fresh as the row
+            # they read: on SQLite a plain SELECT sees a snapshot that a
+            # concurrent requeue + re-claim can invalidate before this session
+            # commits (the same staleness #5777 fixed for the parent task's
+            # lease release). Take the parent's writer first — the same
+            # task -> run lock order every other mutating path uses — and
+            # re-read the row under it (populate_existing: the identity map
+            # would otherwise serve the pre-lock row back untouched).
+            await self._lock_task(session, row.task_id)
+            row = await session.get(ScheduledTaskRunRow, run_record_id, with_for_update=True, populate_existing=True)
+            if row is None:
+                return False
             if protect_terminal and row.status in TERMINAL_RUN_STATUSES:
                 # The launch-path "running" write lost the race against the
                 # completion hook; keep the terminal status/error and only

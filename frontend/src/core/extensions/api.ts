@@ -10,6 +10,8 @@ const contributions = z.array(
     module: z.string().nullable(),
     backend_actions: z.array(z.string()).optional(),
     entry: z.string().nullable(),
+    // Keep unknown transports so the loader can reject only that contribution.
+    transport: z.string().nullable().optional(),
     title: z.string(),
     description: z.string(),
     settings: z.record(z.union([z.boolean(), z.number(), z.string()])),

@@ -7,7 +7,7 @@ import time
 import pytest
 
 from deerflow.utils import readability as readability_module
-from deerflow.utils.readability import ReadabilityExtractor
+from deerflow.utils.readability import Article, ReadabilityExtractor
 
 
 @pytest.fixture
@@ -148,3 +148,16 @@ def test_probe_waiter_never_blocks_on_inflight_verification(probe_dir, monkeypat
     assert not verifier.is_alive()
     # Once the verification lands, later callers see the settled True.
     assert readability_module._readability_js_ready() is True
+
+
+def test_article_to_message_with_images():
+    """Article.to_message should handle articles containing images without AttributeError."""
+    # Absolute image URL without source url
+    art_abs = Article("Test Image", '<img src="https://example.com/pic.png">')
+    msg_abs = art_abs.to_message()
+    assert any(block.get("type") == "image_url" and block["image_url"]["url"] == "https://example.com/pic.png" for block in msg_abs)
+
+    # Relative image URL with source url
+    art_rel = Article("Test Relative Image", '<img src="/assets/pic.png">', url="https://example.com/base/")
+    msg_rel = art_rel.to_message()
+    assert any(block.get("type") == "image_url" and block["image_url"]["url"] == "https://example.com/assets/pic.png" for block in msg_rel)

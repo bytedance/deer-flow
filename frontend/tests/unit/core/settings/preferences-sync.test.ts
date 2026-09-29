@@ -95,3 +95,23 @@ describe("account preference synchronization", () => {
     expect(state.visible()).toEqual({});
   });
 });
+
+describe("parsePreferences reasoning_effort", () => {
+  it("accepts provider-specific effort tokens such as max", async () => {
+    const { parsePreferences } =
+      await import("@/core/settings/preferences-sync");
+    expect(parsePreferences({ reasoning_effort: "max" })).toEqual({
+      reasoning_effort: "max",
+    });
+    expect(parsePreferences({ reasoning_effort: "xhigh" })).toEqual({
+      reasoning_effort: "xhigh",
+    });
+  });
+
+  it("drops effort values that are not plain tokens", async () => {
+    const { parsePreferences } =
+      await import("@/core/settings/preferences-sync");
+    expect(parsePreferences({ reasoning_effort: "Not Valid!" })).toEqual({});
+    expect(parsePreferences({ reasoning_effort: 42 })).toEqual({});
+  });
+});

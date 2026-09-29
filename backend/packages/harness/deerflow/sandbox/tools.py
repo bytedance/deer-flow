@@ -40,6 +40,14 @@ from deerflow.sandbox.lease import (
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
+from deerflow.sandbox.read_file_contract import (
+    READ_FILE_EMPTY,
+    READ_FILE_EMPTY_RANGE,
+    READ_FILE_INVALID_END_LINE,
+    READ_FILE_INVALID_START_LINE,
+    READ_FILE_START_LINE_EXCEEDS,
+    READ_FILE_TRUNCATION_PREFIX,
+)
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
@@ -1545,22 +1553,44 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             provider = get_sandbox_provider()
             owner_id = sandbox_lease_owner(runtime.context)
             thread_id = _resolve_runtime_thread_id(runtime)
-            if owner_id is not None and thread_id is not None:
-                sandbox_id = get_sandbox_lease_manager(provider).reuse_or_acquire(
-                    owner_id,
-                    sandbox_id,
-                    thread_id=thread_id,
-                    user_id=resolve_runtime_user_id(runtime),
-                    release_on_last=not fork_restored,
-                )
+            user_id = resolve_runtime_user_id(runtime)
+            if thread_id is not None:
+                if owner_id is None:
+                    if not fork_restored:
+                        scoped = provider.get_scoped(
+                            sandbox_id,
+                            thread_id=thread_id,
+                            user_id=user_id,
+                        )
+                        if scoped is None:
+                            sandbox_id = provider.acquire(thread_id, user_id=user_id)
+                elif fork_restored:
+                    # Only the server-created fork wrapper may borrow a sandbox
+                    # from a different thread identity. Ordinary checkpoint ids
+                    # are resolved again from the authenticated user/thread.
+                    sandbox_id = get_sandbox_lease_manager(provider).reuse_or_acquire(
+                        owner_id,
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        release_on_last=False,
+                        allow_unscoped_borrow=True,
+                    )
+                else:
+                    sandbox_id = get_sandbox_lease_manager(provider).reuse_or_acquire(
+                        owner_id,
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    )
                 if not fork_restored:
                     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
-            sandbox = provider.get(sandbox_id)
-            if sandbox is not None:
-                if runtime.context is not None:
-                    runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
-                return sandbox
-            # Sandbox was released, fall through to acquire new one
+                sandbox = provider.get(sandbox_id)
+                if sandbox is not None:
+                    if runtime.context is not None:
+                        runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
+                    return sandbox
+            # Missing thread scope or released sandbox: use the lazy path below.
 
     # Lazy acquisition: get thread_id and acquire sandbox
     thread_id = _resolve_runtime_thread_id(runtime)
@@ -1623,21 +1653,40 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
             provider = get_sandbox_provider()
             owner_id = sandbox_lease_owner(runtime.context)
             thread_id = _resolve_runtime_thread_id(runtime)
-            if owner_id is not None and thread_id is not None:
-                sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
-                    owner_id,
-                    sandbox_id,
-                    thread_id=thread_id,
-                    user_id=resolve_runtime_user_id(runtime),
-                    release_on_last=not fork_restored,
-                )
+            user_id = resolve_runtime_user_id(runtime)
+            if thread_id is not None:
+                if owner_id is None:
+                    if not fork_restored:
+                        scoped = provider.get_scoped(
+                            sandbox_id,
+                            thread_id=thread_id,
+                            user_id=user_id,
+                        )
+                        if scoped is None:
+                            sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+                elif fork_restored:
+                    sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
+                        owner_id,
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        release_on_last=False,
+                        allow_unscoped_borrow=True,
+                    )
+                else:
+                    sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
+                        owner_id,
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                    )
                 if not fork_restored:
                     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
-            sandbox = provider.get(sandbox_id)
-            if sandbox is not None:
-                if runtime.context is not None:
-                    runtime.context["sandbox_id"] = sandbox_id
-                return sandbox
+                sandbox = provider.get(sandbox_id)
+                if sandbox is not None:
+                    if runtime.context is not None:
+                        runtime.context["sandbox_id"] = sandbox_id
+                    return sandbox
 
     thread_id = _resolve_runtime_thread_id(runtime)
     if thread_id is None:
@@ -1868,9 +1917,9 @@ def _read_file_truncation_marker(*, line_offset: int, shown_lines: int, total_li
     span = f"of {total_lines}" if line_offset == 0 else f"of {first}-{line_offset + total_lines}"
     if inside_line is None:
         shown = f"first {shown_lines}" if line_offset == 0 else f"lines {first}-{line_offset + shown_lines}"
-        return f"... [truncated: showing {shown} {span} lines ({kept} of {total} chars). Continue with start_line={line_offset + shown_lines + 1}, or use start_line/end_line to read a specific range] ..."
+        return f"{READ_FILE_TRUNCATION_PREFIX} showing {shown} {span} lines ({kept} of {total} chars). Continue with start_line={line_offset + shown_lines + 1}, or use start_line/end_line to read a specific range] ..."
     line = line_offset + inside_line
-    head = f"\n... [truncated: showing first {kept} of {total} chars, cut inside line {line} {span} lines"
+    head = f"\n{READ_FILE_TRUNCATION_PREFIX} showing first {kept} of {total} chars, cut inside line {line} {span} lines"
     if continuation == "next":
         return f"{head}. Continue with start_line={line}, or use start_line/end_line to read a specific range] ..."
     if continuation == "whole_line":
@@ -1904,7 +1953,7 @@ def _read_file_marker_reserve(*, line_offset: int, total_lines: int, total: int)
 
 # Emitted when the budget cannot even hold a marker: the model must still
 # learn the output was cut and how to read it in pieces.
-_READ_FILE_TINY_BUDGET_MARKER = "... [truncated: {total} chars exceed the {max_chars}-char read limit; use start_line/end_line to read a smaller range] ..."
+_READ_FILE_TINY_BUDGET_MARKER = READ_FILE_TRUNCATION_PREFIX + " {total} chars exceed the {max_chars}-char read limit; use start_line/end_line to read a smaller range] ..."
 
 
 def _truncate_read_file_output(output: str, max_chars: int, *, line_offset: int = 0, joined_lines: bool = False, ends_at_eof: bool = True) -> str:
@@ -2533,12 +2582,12 @@ def read_file_tool(
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         if start_line is not None and start_line < 1:
-            return "(start_line must be >= 1)"
+            return READ_FILE_INVALID_START_LINE
         effective_start = start_line or 1
         if end_line is not None and end_line < 1:
-            return "(end_line must be >= 1)"
+            return READ_FILE_INVALID_END_LINE
         if end_line is not None and effective_start > end_line:
-            return "(start_line > end_line — no lines in range)"
+            return READ_FILE_EMPTY_RANGE
 
         requested_path = path
         use_line_range = start_line is not None or end_line is not None
@@ -2552,9 +2601,9 @@ def read_file_tool(
                 # tell them apart so a continuation named by a truncation
                 # marker is not reported as beyond the file.
                 if _ranged_read_hits_a_line(runtime, path, start_line):
-                    return "(empty)"
-                return "(start_line exceeds file length)"
-            return "(empty)"
+                    return READ_FILE_EMPTY
+                return READ_FILE_START_LINE_EXCEEDS
+            return READ_FILE_EMPTY
         try:
             from deerflow.config.app_config import get_app_config
 

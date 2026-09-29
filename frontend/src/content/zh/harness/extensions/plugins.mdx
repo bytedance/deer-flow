@@ -1,0 +1,554 @@
+---
+title: 全栈插件
+description: 实验性。一个 PluginContribution 可以同时交付带工作区页面和会话动作的浏览器代码、带认证的后端动作和模型工具。本章涵盖每个字段和校验规则、两种浏览器传输方式（内联模块和清单列出的静态资源）、浏览器 API、HTTP 端点与缓存、安全模型，并逐步讲解书签示例。
+---
+
+import { Callout } from "nextra/components";
+
+# 全栈插件
+
+<Callout type="warning" emoji="🧪">
+  **实验性。** 插件契约为 `api_version` 1。内联的 `BrowserModule` 传输方式随
+  `deerflow-extension-api` 0.2.2 引入，基于清单的 `BrowserAssets` 传输方式随 **0.2.3**
+  引入。两者共享页面和动作接口，这些接口在 1.0 之前仍可能变化。
+</Callout>
+
+其他贡献类型改变的是宿主在幕后做的事。**插件**则增加一个用户看得见、用得上的功能：工作区里的一个页面、会话菜单里的一个入口、页面可以调用的后端动作，以及模型可以调用的工具。这一切都来自一个通过常规扩展流程安装的 Python 包，不需要重新构建 DeerFlow 前端，宿主里也没有专门针对某个插件的代码。
+
+## 用户看到什么
+
+| 界面               | 出现位置                                                                                                  |
+| ------------------ | --------------------------------------------------------------------------------------------------------- |
+| **扩展**标签页     | 能力中心（`/workspace/capabilities?tab=extensions`）。每个已安装插件一张只读卡片：标题、描述，以及"已启用 · 由管理员管理"或"已停用 · 由管理员管理" |
+| 工作区页面         | `/workspace/extensions/{namespace}/{surface id}`，可选侧边栏入口。URL 由宿主生成，插件无法占用任意路径        |
+| 会话动作           | 聊天工具栏和侧边栏每个会话菜单里的一个菜单组                                                              |
+| 模型工具           | Agent 常规工具集的一部分，与其他工具一样受分组过滤和策略约束                                               |
+
+界面里没有任何地方能安装、启用或配置插件。目录对所有人都是只读的，包括管理员。浏览器会一直沿用它发现的插件集合，直到用户手动刷新页面。
+
+## 贡献声明
+
+`install()` 构建一个 `PluginContribution` 并传给 `registry.plugin()`：
+
+| 字段          | 类型                     | 默认值       | 含义                                                                                  |
+| ------------- | ------------------------ | ------------ | ------------------------------------------------------------------------------------- |
+| `namespace`   | `str`                    | 必填         | 唯一标识，匹配 `[a-z][a-z0-9_.-]{0,95}`，例如 `community.bookmarks`。用于 URL 和工具名 |
+| `title`       | `str`                    | 必填         | 卡片和页面标题，不能为空                                                               |
+| `description` | `str`                    | `""`         | 卡片文字                                                                              |
+| `enabled`     | `bool`                   | **`False`**  | 插件开关。为 `False` 时动作和工具拒绝运行。见[启用插件](#启用插件)                     |
+| `fields`      | `tuple[SettingsField]`   | `()`         | 非机密的部署设置。见[设置](#设置)                                                      |
+| `frontend`    | `BrowserModule \| BrowserAssets \| None` | `None` | 浏览器代码。见[浏览器代码](#浏览器代码)                                         |
+| `backend`     | `tuple[BackendAction]`   | `()`         | 浏览器代码可以调用的动作                                                               |
+| `tools`       | `tuple[ModelTool]`       | `()`         | 模型可以调用的工具                                                                     |
+| `api_version` | `int`                    | `1`          | 必须为 `1`                                                                            |
+
+一个贡献至少要提供 `frontend`、`backend`、`tools` 之一。注册表会在存储任何内容之前校验整个贡献，遇到第一处违规即抛出 `ValueError`：
+
+| 规则                                                                           | 错误信息                                                      |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| `api_version` 为 `1`                                                           | `Unsupported plugin contract`                                  |
+| 至少有一个浏览器模块、后端动作或工具                                            | `A plugin must contribute a browser module, backend action or tool` |
+| 工具名匹配 `[a-z][a-z0-9_]{0,63}`、互不重复，且有描述和 `async` 处理函数         | `Model tools require unique names, descriptions and async handlers` |
+| 工具 schema 是合法、内联、object 类型的 JSON Schema（见[模型工具](#模型工具)）   | `Invalid plugin object schema`                                 |
+| 动作名匹配 `[a-z][a-z0-9_-]{0,63}`、互不重复，且有 `async` 处理函数              | `Backend actions require unique names and async handlers`      |
+| `frontend` 是 `BrowserModule`、`BrowserAssets` 或 `None`                          | `Unsupported browser transport`                                |
+| 内联代码非空，UTF-8 编码后不超过 512 KiB                                         | `Browser code must be nonempty and at most 512 KiB`            |
+| 资源清单及其列出的每个文件都符合[资源规则](#清单规则)                            | `Unsupported browser asset manifest; ...`、`Browser assets must not contain symlinks` 等 |
+| 命名空间、设置字段和模块标识合法（见[设置](#设置)）                              | `Invalid settings contribution or namespace`、`Invalid or duplicate settings field` 等 |
+| 命名空间和浏览器模块标识在所有已加载插件中唯一                                   | `Duplicate plugin namespace`、`Duplicate browser module`       |
+
+从 `install()` 抛出的任何异常，包括这些 `ValueError`，以及清单列出的文件不存在时抛出的 `FileNotFoundError`，都会让这个扩展整体加载失败：它注册的一切都会回滚，Gateway 日志会记录原因（见[运行时](/docs/harness/extensions/runtime)）。
+
+### 检查返回值
+
+宿主接受贡献时，`registry.plugin()` 返回 `True`。契约的默认实现返回 `False`，不支持插件的旧宿主就是这样。一个离开界面就没有意义的插件应该明确报错，而不是只装上一半：
+
+```python
+if registry.plugin(contribution) is not True:
+    raise RuntimeError("this extension requires a host with full-stack plugin support")
+```
+
+## 启用插件
+
+插件有**两个**开关，都要打开：
+
+- `plugins:` 记录里的 `enabled` 决定 Gateway 是否导入这个包。扩展管理器的 `enable` 和 `disable` 命令切换的就是它。
+- `PluginContribution.enabled` 控制这个贡献本身。它默认为 `False`，而且没有运行时覆盖存储，所以从不设置它的插件会一直处于停用状态：`GET /api/plugins` 报告 `enabled: false`，浏览器不加载它的模块，动作返回 `403 Plugin disabled by administrator.`，它的工具也不会进入任何 Agent。
+
+惯例是从包的私有配置里读取第二个开关，让运维人员在 `config.yaml` 里控制它：
+
+```python
+enabled=config.get("enabled", False) is True,
+```
+
+```yaml
+plugins:
+  - name: notes
+    use: acme_notes:install
+    enabled: true        # 加载这个包
+    config:
+      enabled: true      # 打开这个贡献
+```
+
+两者都只在启动时读取，改动任何一个都需要重启 Gateway。
+
+## 设置
+
+`SettingsField` 声明一个非机密的部署值，动作和工具会收到它，浏览器也可以选择性地看到：
+
+| 字段                  | 默认值   | 含义                                                   |
+| --------------------- | -------- | ------------------------------------------------------ |
+| `key`                 | 必填     | 匹配 `[a-z][a-z0-9_]{0,63}`。`enabled` 是保留键         |
+| `title`               | 必填     | 显示标签                                               |
+| `kind`                | 必填     | `"boolean"`、`"integer"` 或 `"string"`                 |
+| `default`             | 必填     | 取值。必须符合 `kind` 和下面的边界                      |
+| `description`         | `""`     |                                                        |
+| `minimum` / `maximum` | `None`   | 整数边界                                               |
+| `max_length`          | `256`    | 字符串长度上限，1 到 4096                              |
+
+宿主会自己加上布尔字段 `enabled`。算上它，一个插件最多 32 个字段，留给你的是 31 个。取值只来自包本身：`default` 就是每个动作、工具和浏览器收到的值。没有设置 API，也不能在线编辑，所以运维需要调整的值，请在 `install()` 里从 `config` 推导默认值。
+
+<Callout type="warning">
+  设置不是机密存储。不要把凭据放进 `SettingsField`。在 `install()` 里从环境变量或私有
+  `config` 读取机密，并保存在你自己的 Python 对象中。
+</Callout>
+
+浏览器只能看到 `enabled` 和浏览器声明的 `public_fields` 中列出的键（`BrowserModule` 和 `BrowserAssets` 都有这个字段）。列出一个未声明的字段会导致校验失败。
+
+## 后端动作
+
+```python
+BackendAction(name: str, handler: async (payload, context) -> Any)
+```
+
+浏览器经由宿主调用动作，处理函数收到：
+
+- `payload`：从 JSON 请求体解析出的只读映射。宿主只保证它是一个不超过 256 KiB 的 JSON **对象**，每个字段都要自己校验。
+- `context`：一个 `ActionContext`，包含 `principal`（已认证调用方的 `ExtensionPrincipal`：`user_id`、`is_admin`、`is_internal`、`roles`）和 `settings`（只读的设置映射）。
+
+返回值必须可以 JSON 序列化。宿主把结果映射成 HTTP 状态码，不会暴露你的异常文本：
+
+| 结果                                  | 状态码 | 响应体 `detail`                                |
+| ------------------------------------- | ------ | ---------------------------------------------- |
+| 处理函数正常返回                      | `200`  | 你的返回值                                     |
+| 处理函数抛出 `ValueError`             | `422`  | `Invalid plugin action input.`                 |
+| 处理函数抛出其他异常                  | `502`  | `Plugin action failed.`（日志中记录异常类型）  |
+| 处理函数运行超过 30 秒                | `504`  | `Plugin action timed out.`                     |
+| 请求体不是 JSON 对象                  | `422`  | `Plugin action requires a JSON object.`        |
+| 请求体超过 256 KiB                    | `413`  | `Plugin action input exceeds 256 KiB.`         |
+| 插件已停用                            | `403`  | `Plugin disabled by administrator.`            |
+| 未知的命名空间或动作                  | `404`  | `Plugin is not installed.` / `Plugin action is not installed.` |
+| viewer 请求头与会话不一致             | `409`  | `Account changed; reload this plugin view.`    |
+| 没有已认证的调用方                    | `401`  | `Authentication required.`                     |
+
+处理函数无法自己决定状态码，因为就连抛出 `HTTPException` 也会变成 `502`。输入错误时抛出 `ValueError`；浏览器需要错误详情时，把它放在返回体里。超时会取消处理函数，但不会回滚外部副作用，也不会中止已经在工作线程里运行的任务。
+
+**授权由你负责。** 宿主负责认证调用方，但不知道哪些记录属于谁。每次读写都要按 `context.principal.user_id` 限定范围，就像书签示例在每条查询里都带上属主条件一样。
+
+## 模型工具
+
+```python
+ModelTool(name, description, input_schema, handler, group="extensions")
+```
+
+- **名称。** 模型看到的是由命名空间派生的名字：`ext_<namespace>_<name>_<hash>`。其中命名空间被清洗为 `[a-z0-9_]` 并截断到 20 个字符，名称截断到 25 个字符，再加 12 位哈希。例如 `acme.notes` 里的 `count_notes` 会变成 `ext_acme_notes_count_notes_d8aad91f72da`。哈希覆盖完整的命名空间和名称，所以截断不会让两个工具合并；万一两个插件工具仍然同名，工具组装会直接报错而不是二选一。与普通工具重名时，保留普通工具，跳过插件工具并记录警告。
+- **Schema。** `input_schema` 必须是合法的 JSON Schema（draft 2020-12），`"type": "object"`，而且完全内联：`$ref`、`$dynamicRef`、`$recursiveRef` 都会被拒绝，因此校验永远不会解析引用或访问网络。参数名 `runtime` 和 `config` 是保留的。
+- **限制。** 宿主会按 schema 校验每次调用的输入，上限 256 KiB。处理函数必须在 30 秒内返回，JSON 编码后的结果不能超过 64 KiB。
+- **上下文。** 处理函数收到一个 `ToolContext`：`settings`、`thread_id`（不在会话中时为 `None`）和 `principal`。对工具来说，principal **只**带 `user_id`，`is_admin` 恒为 `False`，`roles` 为空。不要让工具的授权依赖它们。
+- **错误。** 任何失败都以通用工具错误的形式交给模型：`Invalid plugin tool input.`、`Plugin result exceeds 64 KiB.`、`Plugin disabled by administrator.` 或 `Plugin tool unavailable or input rejected.`。Gateway 日志会记录插件、工具和异常类型。
+- **组装与策略。** 插件工具加入常规的工具组装流程。通过 `tool_groups` 限制过的 Agent，只有在列表包含该工具的 `group`（默认为 `extensions`）时才会拿到它。宿主之后的授权和技能工具策略与其他工具一样适用。
+
+工具描述就是提示词。写清楚工具返回什么、返回的是数据而不是指令，以及它是否只读。
+
+## 浏览器代码
+
+插件用两种传输方式之一交付浏览器代码。两者产出的东西相同：一个默认导出符合[浏览器 API](#浏览器-api) 的 ES 模块。`GET /api/plugins` 会标出每个插件的传输方式，浏览器据此决定如何加载。
+
+| 传输方式    | 声明             | 引入版本 | 适用场景                                                                     |
+| ----------- | ---------------- | -------- | ---------------------------------------------------------------------------- |
+| `inline-v1` | `BrowserModule`  | 0.2.2    | 单个不超过 512 KiB 的自包含文件：没有相对导入、CSS 文件、图片或 WASM          |
+| `assets-v1` | `BrowserAssets`  | 0.2.3    | 清单中列出的一个目录的文件：拆分的模块、样式表、图片、字体、WASM、source map |
+
+两种方式中，`module` 都是匹配 `[a-z][a-z0-9.-]{0,95}` 的标识，例如 `bookmarks.v1`，绝不是 URL，并且必须与默认导出里的 `module` 相同。使用 `BrowserAssets` 的插件需要 `deerflow-extension-api>=0.2.3`，宿主的前端和后端都必须是对应版本。旧版前端无法加载 `assets-v1` 插件，但失败只影响这一个插件。
+
+### 内联模块
+
+```python
+BrowserModule(module: str, code: str, public_fields: tuple[str, ...] = ())
+```
+
+`code` 是一个自包含 ES 模块的完整文本。宿主带着会话获取它，再从临时 Blob URL 导入，所以不能有相对导入，也不能有相对于 `import.meta.url` 解析的资源。把它打进 wheel，在 `install()` 里读取：
+
+```python
+BrowserModule("notes.v1", Path(__file__).with_name("client.mjs").read_text(encoding="utf-8"))
+```
+
+配置了内容安全策略（CSP）的部署必须在 `script-src` 中允许 `blob:`。
+
+### 静态资源
+
+```python
+BrowserAssets(module: str, root: str | Path, manifest: str = "ui_manifest.json", public_fields: tuple[str, ...] = ())
+```
+
+`root` 是已安装包内的一个目录，通常是 `Path(__file__).parent`。清单文件相对于 `root`，列出浏览器可以加载的每一个文件：
+
+```json filename="ui_manifest.json"
+{
+  "schema_version": 1,
+  "entry": "static/dist/index.mjs",
+  "files": [
+    "static/dist/index.mjs",
+    "static/dist/chunks/page.mjs",
+    "static/dist/notes.css"
+  ]
+}
+```
+
+入口模块可以用相对路径导入同级模块，并用 `new URL(..., import.meta.url)` 定位资源：
+
+```js filename="static/dist/index.mjs"
+import { mountNotes } from "./chunks/page.mjs";
+
+export default {
+  apiVersion: 1,
+  module: "notes.v1",
+  surfaces: [
+    {
+      id: "notes",
+      slot: "page",
+      title: "Notes",
+      navigation: { label: "My notes", labelZh: "我的笔记" },
+      mount: mountNotes,
+    },
+  ],
+};
+```
+
+```js filename="static/dist/chunks/page.mjs"
+export function mountNotes(root, context) {
+  const style = document.createElement("link");
+  style.rel = "stylesheet";
+  style.crossOrigin = "use-credentials";
+  style.href = new URL("../notes.css", import.meta.url).href;
+  const list = document.createElement("ul");
+  root.append(style, list);
+  context
+    .callBackend("list", {})
+    .then(({ notes }) => {
+      for (const note of notes) {
+        const item = document.createElement("li");
+        item.textContent = note;
+        list.append(item);
+      }
+    })
+    .catch(() => {});
+  return { dispose: () => root.replaceChildren() };
+}
+```
+
+```python
+frontend=BrowserAssets("notes.v1", Path(__file__).parent),
+```
+
+把清单和列出的每个文件都打进 wheel。用 hatchling 打包 Python 包目录时，不需要额外配置就会包含它们。第三方依赖要打包进来：宿主不解析裸 npm 导入，也不提供共享的 React 实例。让打包工具输出相对 URL，而不是 `/assets/...` 这样的绝对路径。
+
+#### 清单规则
+
+注册表在 `install()` 期间读取、校验每个列出的文件，并把它们快照到内存。任何违规都会让扩展加载失败：
+
+| 规则                                                                                        | 错误信息                                                        |
+| ------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| 清单是只含 `schema_version`（整数 `1`）、`entry` 和 `files` 三个键的 JSON 对象                | `Unsupported browser asset manifest; expected schema_version 1` |
+| 没有重复的键                                                                                | `Duplicate browser manifest key`                                |
+| `files` 列出 1 到 256 个互不重复的合法路径                                                   | `Browser manifest must list unique asset paths`                 |
+| `entry` 是 `files` 之一，并以 `.js` 或 `.mjs` 结尾                                           | `Browser manifest entry must be a listed JavaScript module`     |
+| 每个文件的类型都受支持（见下）                                                               | `Unsupported browser asset file type`                           |
+| `root` 不是符号链接，列出路径的任何一级都不是符号链接                                        | `Browser asset root must not be a symlink`、`Browser assets must not contain symlinks` |
+| 每个列出的文件都是 `root` 内的普通文件                                                       | `Browser asset must be a regular file inside its package`（文件不存在时抛出 `FileNotFoundError`） |
+| 清单不超过 64 KiB，单个文件不超过 4 MiB，所有文件合计不超过 16 MiB                           | `Browser asset size limit exceeded`                             |
+
+合法路径最长 512 个字符，由 `/` 分隔的段组成；每段只能用 ASCII 字母、数字、`_`、`-` 和 `.`，并以字母、数字、`_` 或 `-` 开头。因此点文件、`.` 和 `..` 段、空段、反斜杠、百分号编码和查询字符串都不被允许。
+
+支持的类型（括号内为返回的 MIME 类型）：`.js` 和 `.mjs`（`text/javascript`）、`.css`、`.json` 和 `.map`（`application/json`）、`.wasm`、`.png`、`.jpg`/`.jpeg`、`.gif`、`.webp`、`.svg`、`.ico`、`.woff`、`.woff2`、`.ttf` 和 `.otf`。HTML 和服务端文件永远不会被提供。
+
+#### 修订版本与缓存
+
+宿主对清单和每个文件的内容哈希计算一个 SHA-256 **修订版本**，每个 URL 都包含它：`/api/plugins/{namespace}/assets/{revision}/{path}`。任何一个文件变了，所有文件的修订版本都会变。请求由启动时的快照响应，从不读取文件系统，所以修改已安装的文件在重启前不会生效。
+
+资源响应带有 `Cache-Control: private, max-age=31536000, immutable` 和 `Vary: Cookie, Authorization`。未知的路径或修订版本返回 `404`，带 `private, no-store`。宿主不保留历史快照，也没有公开 CDN 的约定。升级之后，仍持有旧修订版本的页面对未缓存的内容会得到 `404`，必须刷新。反过来，插件被移除后，浏览器仍可以继续使用已缓存的代码，所以移除并不等于立即撤销缓存。
+
+#### 浏览器如何加载资源
+
+宿主插入一个指向入口 URL、带 `crossorigin="use-credentials"` 的原生模块脚本，再从文档的模块映射里读取导出。因此相对的静态和动态导入都会在同一个修订版本内解析，并带上会话 cookie。URL 遵循 `NEXT_PUBLIC_BACKEND_BASE_URL`，包括路径前缀。
+
+- **超时。** 宿主等待 30 秒后停止等待，并把该插件标为不可用。这是等待的期限，不是取消：模块之后仍可能完成求值。顶层代码不要有副作用，UI 工作放到 `mount` 里开始。
+- **模块状态是共享的。** 一个模块实例由整个文档共享。按查看者区分的数据放在每次挂载的状态里，并在 `dispose()` 中清除。不要在模块级别跨账号切换缓存 principal 或私有结果。
+- **其他资源由你负责。** 你创建的样式表和图片要设置 `crossOrigin = "use-credentials"`，就像 `page.mjs` 那样；JSON、WASM 或二进制数据用 `fetch(url, { credentials: "include" })`。CSS 里的字体和背景 URL 并不总会带上跨域 cookie。对这些资源，优先使用同源部署，或者带凭据获取后构造 `FontFace` 或 Blob URL，并在 dispose 时释放。
+- **CSP 与 CORS。** 后端来源必须在相应的 `script-src`、`style-src`、`img-src`、`font-src` 和 `connect-src` 指令中被允许。前后端分离部署需要精确来源的带凭据 CORS，以及可用的会话 cookie。
+
+### 浏览器 API
+
+模块的默认导出必须符合宿主的浏览器 API v1：
+
+```js
+export default {
+  apiVersion: 1,          // 必填
+  module: "notes.v1",     // 必填，与声明里的 module 相同
+  icon: "file-text",      // 可选
+  surfaces: [/* 页面 surface，最多 16 个 */],
+  conversationActions(t, locale) {/* 返回一个动作组 */},
+};
+```
+
+如果 `apiVersion` 或 `module` 不匹配，或者任何 surface、导航项格式不对，宿主会拒绝这个模块，并在它的卡片上显示"当前页面加载失败"。
+
+### 页面 surface
+
+| 字段         | 规则                                                                |
+| ------------ | ------------------------------------------------------------------- |
+| `id`         | `[a-z][a-z0-9-]{0,63}`，模块内唯一                                   |
+| `slot`       | `"page"`（目前唯一的 slot）                                          |
+| `title`      | 非空字符串                                                          |
+| `navigation` | 可选的 `{ label, labelZh?, icon? }`，添加侧边栏入口。标签最多 120 个字符 |
+| `mount`      | `(root, context) => { dispose }`，同步调用                           |
+
+宿主把页面挂载到一个 Shadow DOM 根节点，并传入上下文：
+
+| 上下文成员                     | 含义                                                                        |
+| ------------------------------ | --------------------------------------------------------------------------- |
+| `namespace`、`locale`          | 插件命名空间和界面语言，例如 `en-US` 或 `zh-CN`                               |
+| `settings`                     | `enabled` 加上 `public_fields`                                              |
+| `signal`                       | 卸载或切换账号时中止。传给事件监听和请求                                     |
+| `callBackend(action, payload)` | 向本插件声明过的某个动作发 POST，解析为 JSON 响应。非 2xx 响应和未声明的动作会被拒绝 |
+| `openConversation(threadId)`   | 可选。先通过认证 API 解析会话再跳转；会话不存在或无权访问时拒绝，不会跳转     |
+
+`mount` 必须返回一个带同步 `dispose()` 的对象。卸载时宿主先中止 `signal` 再调用它，并拦截之后才到达的 `callBackend` 结果。
+
+### 会话动作
+
+`conversationActions(t, locale)` 必须是同步的，返回 `{ label, icon, actions }`。每个动作有 `id`、`label`、`icon`，一个返回布尔值的同步 `available(settings)`，以及 `execute(context, services)`：
+
+- `context.thread` 是当前会话；宿主手上已有消息时，`context.messages` 就是这些消息。
+- `services.callBackend` 与上面相同。`services.latestVisibleAnswer(context)` 返回最后一条可见的助手消息 `{ id, text }` 或 `null`。`services.conversationText(context)` 返回可见的对话文本。两者都复用宿主的导出清洗逻辑，会排除隐藏消息、工具输出和推理内容。`services.showMessage(text)` 弹出一条提示。
+
+每个插件的动作都在各自的错误边界里求值。格式错误或抛出异常的动作组会被省略并记录到浏览器控制台，其他插件的动作和会话页面都不受影响。
+
+### 图标
+
+宿主把图标名映射到一个固定集合：`bell`、`bookmark`、`download`、`file-json` 和 `file-text`。其他名字都会显示为通用的拼图图标。
+
+## HTTP 端点
+
+宿主通过四个需要认证的 Gateway 路由提供插件，它们遵循常规的会话和 CSRF 策略；没有已认证的调用方时都返回 `401`：
+
+| 路由                                                    | 用途                                                                                        |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `GET /api/plugins`                                      | 所有已加载插件：`namespace`、`title`、`description`、`viewer_id`、`module`、`entry`、`transport`（`inline-v1`、`assets-v1` 或 `null`）、公开的 `settings`，以及 `backend_actions` 名称 |
+| `GET /api/plugins/modules/{module}/{sha256}.mjs`        | 按内容哈希寻址的内联模块。`text/javascript`、`nosniff`、`private, no-store`                   |
+| `GET /api/plugins/{namespace}/assets/{revision}/{path}` | 清单列出的一个文件。声明的 MIME 类型、`nosniff`、`Content-Security-Policy: sandbox`，以及[修订版本与缓存](#修订版本与缓存)中描述的不可变私有缓存 |
+| `POST /api/plugins/{namespace}/actions/{name}`          | 调用一个后端动作（见[后端动作](#后端动作)）                                                   |
+
+内联哈希或资源修订版本过期时返回 `404`，需要刷新页面。两个下载路由在插件停用时仍然会提供它的代码。
+
+浏览器会带上 `X-Deerflow-Plugin-Viewer` 请求头，值为它发现插件时得到的 `viewer_id`，所以在另一个账号下打开的视图发起的动作会以 `409` 被拒绝。
+
+## 安全模型
+
+<Callout type="error">
+  浏览器模块和 Python 处理函数都是运维人员安装的受信任代码。浏览器代码运行在**主页面里**，
+  拥有当前登录用户的同源能力；Shadow DOM 隔离的是 CSS，不是权限。Python 处理函数在
+  Gateway 进程中以 Gateway 权限运行。
+</Callout>
+
+宿主确实保证的：
+
+- 它从不从浏览器提供的路径、导入字符串或远程 URL 加载代码，只提供已安装、经内容哈希校验的内联模块，或清单列出、从启动快照读取的文件。它从不提供目录列表或未列出的文件。
+- 资源响应带有 `Content-Security-Policy: sandbox`，所以直接打开一个资源（比如内含脚本的 SVG）不能以 Gateway 的来源运行脚本。这限制的是被当作文档打开的资源，并不会把宿主加载进页面的插件 JavaScript 放进沙箱。
+- 每个端点都要求已认证的调用方，而调用方身份来自会话，不来自请求体。
+- `callBackend` 绑定在插件自己的命名空间和它声明过的动作名上。
+- 只有 `enabled` 和显式公开的字段会到达浏览器。
+
+任何已认证用户都可以下载清单列出的全部资源，包括 source map，即使插件已停用。不要在清单里列出机密或私有源码。
+
+仍然是插件自己的职责：按 `principal.user_id` 对自己的数据做授权，校验每个 payload，渲染用户和模型文本时做转义（用 `textContent`，绝不用 `innerHTML`），并把工具结果当作不可信数据。
+
+## 逐步讲解：书签示例
+
+[`examples/deerflow-extension-bookmarks`](https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-bookmarks)（0.2.0 版，需要 `deerflow-extension-api>=0.2.3`）是一个完整的插件：用户在会话菜单里收藏最后一条可见回答，然后在 **我的书签** 页面搜索、重命名、打开或删除书签，Agent 也可以搜索这些书签。它用到了本章的每一部分：
+
+1. **配置和状态。** `install()` 要求 `config.enabled`（布尔值）和一个绝对路径 `config.storage_path`，并在那里打开 SQLite 存储。容器部署时要为它挂载持久目录。
+2. **贡献声明。** 命名空间 `community.bookmarks`，`enabled=config["enabled"]`，`BrowserAssets("bookmarks.v1", Path(__file__).parent)`，五个 `BackendAction`（`save`、`search`、`get`、`rename`、`delete`），以及一个只读的 `ModelTool`：`search_bookmarks`，模型看到的名字是 `ext_community_bookmarks_search_bookmarks_<hash>`。
+3. **检查返回值。** 如果 `registry.plugin(...)` 不是 `True`，它会抛出 `RuntimeError`。
+4. **数据归属。** 每条 SQL 语句都带有 `owner = context.principal.user_id`，每个动作只接受一组确定的 payload 键。模型工具从不接受用户 ID，所以用户永远只能搜索自己的书签。
+5. **资源。** `ui_manifest.json` 列出 `static/dist/` 下的四个文件：入口 `index.mjs`、页面模块 `chunks/bookmarks.mjs`、`styles.css` 和 `bookmark.svg`。它们随 Python 包一起发布，不需要 JavaScript 构建步骤。
+6. **入口模块。** `index.mjs` 从 `./chunks/bookmarks.mjs` 导入 `mountBookmarks`，导出一个 `page` surface `library`，带 `navigation: { label: "My bookmarks", labelZh: "我的书签", icon: "bookmark" }`，地址为 `/workspace/extensions/community.bookmarks/library`；还导出一个"书签 → 收藏最后一条回答"会话动作，先调用 `services.latestVisibleAnswer`，再调用 `callBackend("save", ...)`。
+7. **页面模块。** `chunks/bookmarks.mjs` 相对于 `import.meta.url` 解析 `../styles.css` 和 `../bookmark.svg`，并用 `crossorigin="use-credentials"` 加载它们，因此在前后端分离部署下也能工作。它监听 `context.signal`，用 `textContent` 渲染文本，并在 `dispose()` 中清空自己的 DOM。
+
+部署记录如下：
+
+```yaml
+plugins:
+  - name: bookmarks
+    use: deerflow_extension_bookmarks:install
+    enabled: true
+    config:
+      enabled: true
+      storage_path: /var/lib/deerflow/bookmarks.sqlite
+```
+
+重启并刷新浏览器后，扩展标签页里会出现它的卡片，侧边栏多出 **我的书签**，会话菜单多出 **书签**。这个示例使用单机 SQLite 存储，不是多节点存储的范式。
+
+## 最小插件
+
+最小的实用形态是一个页面、两个动作和一个只读工具。这个例子使用内联传输方式，所以只有一个 `client.mjs`；要拆成多个文件，请改用[静态资源](#静态资源)，就像那一节里的 `acme.notes` 那样。下面每一部分都已经在宿主的注册表和路由上实际跑过：
+
+```python
+"""A per-user scratchpad: a page, one backend action, one read-only model tool."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+from deerflow_extension_api import (
+    ActionContext,
+    BackendAction,
+    BrowserModule,
+    ModelTool,
+    PluginContribution,
+    SettingsField,
+    ToolContext,
+    extension,
+)
+
+NOTES: dict[str, list[str]] = {}  # demo only: in-memory, single process
+
+
+async def add_note(payload: Mapping[str, Any], context: ActionContext) -> dict[str, Any]:
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("text is required")  # becomes HTTP 422
+    notes = NOTES.setdefault(context.principal.user_id, [])
+    if len(notes) >= context.settings["max_notes"]:
+        raise ValueError("note limit reached")
+    notes.append(text.strip())
+    return {"count": len(notes)}
+
+
+async def list_notes(payload: Mapping[str, Any], context: ActionContext) -> dict[str, Any]:
+    return {"notes": NOTES.get(context.principal.user_id, [])}
+
+
+async def count_notes(payload: Mapping[str, Any], context: ToolContext) -> dict[str, Any]:
+    return {"count": len(NOTES.get(context.principal.user_id, []))}
+
+
+@extension(api="0.2.2", name="notes")
+def install(registry, config: Mapping[str, Any]) -> None:
+    accepted = registry.plugin(
+        PluginContribution(
+            namespace="acme.notes",
+            title="Notes",
+            description="A private scratchpad for each user.",
+            enabled=config.get("enabled", False) is True,
+            fields=(SettingsField("max_notes", "Maximum notes", "integer", 50, minimum=1, maximum=500),),
+            frontend=BrowserModule(
+                "notes.v1",
+                Path(__file__).with_name("client.mjs").read_text(encoding="utf-8"),
+                public_fields=("max_notes",),
+            ),
+            backend=(BackendAction("add", add_note), BackendAction("list", list_notes)),
+            tools=(
+                ModelTool(
+                    "count_notes",
+                    "Count the current user's saved notes. Read-only.",
+                    {"type": "object", "properties": {}, "additionalProperties": False},
+                    count_notes,
+                ),
+            ),
+        )
+    )
+    if accepted is not True:
+        raise RuntimeError("acme-notes requires a host with full-stack plugin support")
+```
+
+它的 `client.mjs` 放在 `__init__.py` 旁边，并打进 wheel：
+
+```js
+function mountNotes(root, context) {
+  const list = document.createElement("ul");
+  const input = document.createElement("input");
+  const add = document.createElement("button");
+  add.textContent = context.locale.startsWith("zh") ? "添加" : "Add";
+  root.append(input, add, list);
+
+  const render = async () => {
+    const { notes } = await context.callBackend("list", {});
+    list.replaceChildren(
+      ...notes.map((note) => {
+        const item = document.createElement("li");
+        item.textContent = note; // textContent, never innerHTML
+        return item;
+      }),
+    );
+  };
+  add.addEventListener(
+    "click",
+    async () => {
+      await context.callBackend("add", { text: input.value });
+      input.value = "";
+      await render();
+    },
+    { signal: context.signal },
+  );
+  render().catch(() => {});
+  return { dispose: () => root.replaceChildren() };
+}
+
+export default {
+  apiVersion: 1,
+  module: "notes.v1",
+  surfaces: [
+    {
+      id: "notes",
+      slot: "page",
+      title: "Notes",
+      navigation: { label: "My notes", labelZh: "我的笔记" },
+      mount: mountNotes,
+    },
+  ],
+  conversationActions(_t, locale = "en") {
+    const zh = locale.startsWith("zh");
+    return {
+      label: zh ? "笔记" : "Notes",
+      icon: "file-text",
+      actions: [
+        {
+          id: "save-answer",
+          label: zh ? "把最后一条回答存为笔记" : "Save last answer as a note",
+          icon: "file-text",
+          available: (settings) => settings.enabled === true,
+          async execute(context, services) {
+            const answer = await services.latestVisibleAnswer?.(context);
+            if (!answer) return services.showMessage(zh ? "没有可保存的回答" : "No answer to save");
+            await services.callBackend("add", { text: answer.text.slice(0, 2000) });
+            services.showMessage(zh ? "已保存" : "Saved");
+          },
+        },
+      ],
+    };
+  },
+};
+```
+
+内存字典只用于示例。真实插件需要能在重启后保留、并在多个 Gateway worker 之间共享的存储。
+
+## 生命周期
+
+- 安装、升级、启用、停用和任何 `config` 改动都需要重启 Gateway，然后刷新浏览器。没有热加载，也没有热卸载。
+- 重启之后，已打开的页面可能指向已不存在的模块哈希、资源修订版本或动作。这些请求会明确失败（`404`），直到用户刷新页面。
+- 已停用或已移除的插件在刷新后没有侧边栏入口。直接访问它的页面 URL 会显示"扩展页面不可用"，不会挂载任何内容。
+
+运维命令见[运维](/docs/harness/extensions/operations)。

@@ -11,6 +11,7 @@ from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.extensions import LoadedExtensions, get_loaded_extensions
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.subagents.batch_acceptance import check_batch_acceptance
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
 from deerflow.subagents.capacity import SubagentExecutionCapacity
@@ -195,7 +196,12 @@ class SubagentBatchService:
             batch = item["batch"]
             self._item_batches[item_id] = batch["id"]
             spec = batch["execution_spec"]
-            config = SubagentConfig(**spec["subagent_config"])
+            config_data = spec["subagent_config"]
+            if "prompt_overlay" in config_data:
+                from deerflow.config.prompt_overlay import PromptOverlay
+
+                config_data = {**config_data, "prompt_overlay": PromptOverlay.model_validate(config_data["prompt_overlay"])}
+            config = SubagentConfig(**config_data)
             app_config = self._app_config or get_app_config()
             from deerflow.tools import get_available_tools
 
@@ -233,6 +239,9 @@ class SubagentBatchService:
                     item_id,
                 )
                 return
+            executor_kwargs = {}
+            if THREAD_INCARNATION_CONTEXT_KEY in spec:
+                executor_kwargs[THREAD_INCARNATION_CONTEXT_KEY] = spec[THREAD_INCARNATION_CONTEXT_KEY]
             executor = SubagentExecutor(
                 config=config,
                 tools=tools,
@@ -251,6 +260,7 @@ class SubagentBatchService:
                 execution_capacity=self._execution_capacity,
                 extensions=self._extensions,
                 acceptance_criteria=item.get("acceptance_criteria"),
+                **executor_kwargs,
             )
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"
             execution_id = executor.execute_async(prompt, task_id=item_id)

@@ -1,0 +1,76 @@
+---
+title: 沙箱与隔离
+description: Lead Agent 与并发的子 Agent 如何共享同一个线程沙箱而互不干扰，子 Agent 的中间件链与执行环境哪些地方是隔离的，以及运维需要匹配的会话上限。
+---
+
+import { Callout } from "nextra/components";
+
+# 沙箱与隔离
+
+## 共享线程沙箱
+
+Lead Agent 和它派出的所有子 Agent 使用**同一个线程沙箱**：同一个文件系统、同样的 `/mnt/user-data/workspace` 与 `/mnt/user-data/outputs`。子 Agent 写的文件 Lead Agent 立刻能读，反之亦然。
+
+共享带来两个问题，运行时用两种机制解决：
+
+### 执行租约
+
+每个 run（Lead Agent 或子 Agent）在使用沙箱时持有一份进程内的执行租约，子 Agent 的租约所有者 id 形如 `subagent:<task_id>`。沙箱 provider 的 `release()` 只在**最后一份租约**释放时才真正执行；一个子 Agent 先结束不会把兄弟子 Agent 正在用的沙箱停掉。租约释放在取消时也会被屏蔽并排干，避免半途中断。
+
+### 独立 shell 会话
+
+在 AIO 沙箱里，每个租约所有者有自己的一条**持久 shell 会话**（按 scope id 惰性创建，UUID 命名）。并发的子 Agent 不再共用镜像的隐式会话，互相的 `cd`、环境变量和后台进程不会串。带显式环境变量的命令走一次性的 `bash.exec`，不经过持久会话。
+
+会话出问题时的恢复策略：
+
+- 服务端返回 `session not found`（404）：重建一次会话并重试。
+- 返回 `ErrorObservation`：轮换到新会话重试，旧会话不再使用。
+- 租约释放时清理对应的 scope 与会话。
+
+## 匹配 AIO 的会话上限
+
+AIO 镜像默认最多 10 个 shell 会话（`MAX_SHELL_SESSIONS`），超出时会驱逐最旧的空闲会话；被驱逐的子 Agent 下一条命令会收到 `404 Session not found`。DeerFlow 需要的会话数是 `subagent_runtime.max_running + 1`，多出的 1 留给 Lead Agent 自己的 shell。
+
+- 没有显式设置 `sandbox.environment.MAX_SHELL_SESSIONS` 时，只要需要的数量超过 10，本地容器启动时会自动注入该值。
+- 显式设置了但小于需要的数量，Gateway 启动时直接报错：`sandbox.environment.MAX_SHELL_SESSIONS must be at least subagent_runtime.max_running + 1`。
+- Provisioner 模式下，Gateway 会把 `max_shell_sessions` 转发给沙箱 Pod。旧版本的 Provisioner 不会回报这个字段，此时 Gateway 会报版本不一致的错误，需要一并升级 Provisioner。
+
+## bash 子 Agent 的可用条件
+
+`bash` 子 Agent 只在 `is_host_bash_allowed()` 为真时进入目录：
+
+| 沙箱配置                   | 结果                                          |
+| -------------------------- | --------------------------------------------- |
+| 没有 `sandbox` 段          | 不可用                                        |
+| 容器或远端 provider        | 可用                                          |
+| `LocalSandboxProvider`     | 取决于 `sandbox.allow_host_bash`，默认 `false` |
+
+在本地沙箱下委派 `bash` 会得到一条明确的失败结果，说明该子 Agent 被禁用、只应在完全可信的本地环境里开启 `allow_host_bash`。
+
+## 身份传播到命令
+
+通过 IM 渠道触发的对话会把发送者身份放进运行时上下文的 `channel_user_id`。`task` 工具把它转发给子 Agent，子 Agent 的每条 bash 命令前会加上 `export DEERFLOW_CHANNEL_USER_ID=<值>;`（IM 身份存在但为空或无效时是 `unset DEERFLOW_CHANNEL_USER_ID;`；没有 IM 身份的运行不加前缀），值最长 256 个字符并经过 shell 转义。因此委派出去的脚本仍然知道是谁在操作。
+
+## 子 Agent 的中间件链
+
+子 Agent 的链由 `build_subagent_runtime_middlewares` 装配，与 Lead Agent 共享同一个基础部分，再追加子 Agent 专属的中间件。大致顺序（外到内）：
+
+1. 基础部分：输入净化、知识范围、工具输出预算、远端内容净化、可选的 PII 脱敏、线程数据、沙箱（不拥有技能投影）、悬空工具调用修补、LLM 错误处理、工具回执（子 Agent 链始终渲染账本）、可选的授权 / 护栏、沙箱审计、先读后写、工具进度、工具错误处理。
+2. 技能激活（每次装配一个独立的斜杠命令来源令牌）、延迟工具提升审计、技能工具策略、可选的看图工具、MCP 路由、延迟工具过滤。
+3. 循环检测、token 预算、扩展贡献的中间件、安全结束原因处理。
+4. `DurableContextMiddleware`、摘要压缩、`SubagentDateContextMiddleware`。
+5. 最内层是系统消息合并。
+
+Lead Agent 独有、**不在**子 Agent 链上的中间件：动态上下文（用户记忆、每日更新）、记忆、待办、token 用量、标题生成、委派上限、终端响应、模型长度结束处理、澄清、上传。子 Agent 只收到 `SubagentDateContextMiddleware` 注入的一条 `current_date` 提醒，它不依赖任何配置也不读用户记忆。
+
+## 执行隔离
+
+- **无 checkpoint**：子图以 `checkpointer=False` 编译，运行时也不向子图传入 `thread_id` 等 checkpoint 坐标，而是让 LangGraph 自然继承父运行的命名空间。这样子 Agent 的消息不会混进父线程的流，也不会被父 run 的同步 checkpointer 绊倒。
+- **独立事件循环**：所有子 Agent 共享一个进程级事件循环，运行在一条名为 `subagent-persistent-loop` 的守护线程上，与 Gateway 的请求循环分开。跨越这条边界时，运行时会剥离父 run 中绑定到原事件循环的回调（例如账单日志），改用专门的代理把 token 用量与审计事件送回父 run。
+- **系统提示常驻**：子 Agent 的系统提示作为状态里的第一条系统消息存在。摘要压缩按索引裁剪时会显式保留系统消息和最新的用户消息，所以角色提示、报告契约、验收说明和技能索引不会在压缩后丢失。
+- **技能投影**：子 Agent 不会重新投影 `/mnt/skills`，投影由 Lead Agent 的运行拥有。子 Agent 的技能允许列表是发现与激活范围，不是文件系统隔离。
+
+<Callout type="info">
+  子 Agent 与父线程共享 `thread_id`。所有按线程隔离的资源（沙箱、上传目录、技能投影）对二者一致；所有按
+  run 隔离的资源（run 日志、checkpoint、账本条目的 run id）在子 Agent 里对应的是父 run。
+</Callout>

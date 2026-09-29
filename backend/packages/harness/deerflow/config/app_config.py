@@ -14,6 +14,7 @@ from deerflow.config.agent_storage_config import AgentStorageConfig
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
 from deerflow.config.auth_config import AuthAppConfig
 from deerflow.config.authorization_config import AuthorizationConfig, load_authorization_config_from_dict
+from deerflow.config.blob_storage_config import BlobStorageConfig, load_blob_storage_config_from_dict
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
@@ -21,6 +22,7 @@ from deerflow.config.dedupe_storage_config import DedupeStorageConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
+from deerflow.config.file_signature import read_config_with_signature as _read_config_with_signature
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.input_polish_config import InputPolishConfig
 from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
@@ -30,6 +32,7 @@ from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.config.projects_config import ProjectsConfig
+from deerflow.config.prompt_overlay import PromptOverlay
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.config.reload_boundary import format_field_description
 from deerflow.config.run_events_config import RunEventsConfig
@@ -51,10 +54,12 @@ from deerflow.config.task_continuity_config import TaskContinuityConfig
 from deerflow.config.title_config import TitleConfig, load_title_config_from_dict
 from deerflow.config.token_budget_config import TokenBudgetConfig
 from deerflow.config.token_usage_config import TokenUsageConfig
+from deerflow.config.tool_artifact_config import ToolArtifactConfig
 from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
+from deerflow.config.typesafe_config import TypeSafeConfig, load_typesafe_config_from_dict
 from deerflow.config.verification_config import VerificationConfig
 from deerflow.extensions.loader import ExtensionSpec
 
@@ -189,6 +194,8 @@ def apply_logging_level(name: str | None) -> None:
 class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
 
+    lead_prompt_overlay: PromptOverlay = Field(default_factory=PromptOverlay, description="Operator-owned literal prepend/append around the assembled lead-agent system prompt")
+
     log_level: str = Field(
         default="info",
         description=format_field_description(
@@ -242,11 +249,13 @@ class AppConfig(BaseModel):
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig, description="Agent-managed skill evolution configuration")
     extensions: ExtensionsConfig = Field(default_factory=ExtensionsConfig, description="Extensions configuration (MCP servers and skills state)")
     tool_output: ToolOutputConfig = Field(default_factory=ToolOutputConfig, description="Tool output budget protection configuration")
+    tool_artifacts: ToolArtifactConfig = Field(default_factory=ToolArtifactConfig, description="Tool-artifact handle registry configuration (issue #4676)")
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
     title: TitleConfig = Field(default_factory=TitleConfig, description="Automatic title generation configuration")
     summarization: SummarizationConfig = Field(default_factory=SummarizationConfig, description="Conversation summarization configuration")
     task_continuity: TaskContinuityConfig = Field(default_factory=TaskContinuityConfig, description="Thread-local notes and compacted-source recall")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
+    blob_storage: BlobStorageConfig = Field(default_factory=BlobStorageConfig, description="Content-addressed blob store configuration")
     knowledge_base: KnowledgeBaseConfig = Field(
         default_factory=KnowledgeBaseConfig,
         description="Provider-agnostic knowledge capability and custom-agent scope-selection configuration",
@@ -255,6 +264,10 @@ class AppConfig(BaseModel):
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig, description="Guardrail middleware configuration")
+    typesafe: TypeSafeConfig = Field(
+        default_factory=TypeSafeConfig,
+        description="Defaults shared by every TypeSafe (Jev) consumer: connection, model and timeouts. Each consumer overrides what it needs in its own config.",
+    )
     authorization: AuthorizationConfig = Field(default_factory=AuthorizationConfig, description="Fine-grained resource authorization configuration (RBAC and beyond)")
     input_polish: InputPolishConfig = Field(default_factory=InputPolishConfig, description="Pre-send input polishing configuration.")
     suggestions: SuggestionsConfig = Field(default_factory=SuggestionsConfig, description="Follow-up suggestions configuration.")
@@ -432,7 +445,17 @@ class AppConfig(BaseModel):
         """
         resolved_path = cls.resolve_config_path(config_path)
         with open(resolved_path, encoding="utf-8") as f:
-            config_data = yaml.safe_load(f) or {}
+            return cls._from_yaml_text(f.read(), resolved_path)
+
+    @classmethod
+    def _from_yaml_text(cls, text: str, resolved_path: Path) -> Self:
+        """Build the config from already-read YAML *text* of *resolved_path*.
+
+        Split out of :meth:`from_file` so the process-wide cache can parse the
+        exact bytes it signed (see ``_load_and_cache_app_config``) instead of
+        reading the file a second time.
+        """
+        config_data = yaml.safe_load(text) or {}
 
         # Check config version before processing
         cls._check_config_version(config_data, resolved_path)
@@ -484,10 +507,12 @@ class AppConfig(BaseModel):
         load_title_config_from_dict(config.title.model_dump())
         load_summarization_config_from_dict(config.summarization.model_dump())
         load_memory_config_from_dict(config.memory.model_dump())
+        load_blob_storage_config_from_dict(config.blob_storage.model_dump())
         load_agents_api_config_from_dict(config.agents_api.model_dump())
         load_subagents_config_from_dict(config.subagents.model_dump())
         load_tool_search_config_from_dict(config.tool_search.model_dump())
         load_guardrails_config_from_dict(config.guardrails.model_dump())
+        load_typesafe_config_from_dict(config.typesafe.model_dump())
         load_authorization_config_from_dict(config.authorization.model_dump())
         load_checkpointer_config_from_dict(config.checkpointer.model_dump() if config.checkpointer is not None else None)
         load_stream_bridge_config_from_dict(config.stream_bridge.model_dump() if config.stream_bridge is not None else None)
@@ -674,14 +699,25 @@ def _get_config_mtime(config_path: Path) -> float | None:
 
 
 def _load_and_cache_app_config(config_path: str | None = None) -> AppConfig:
-    """Load config from disk and refresh cache metadata."""
+    """Load config from disk and refresh cache metadata.
+
+    The file is read exactly once and the recorded signature is computed from
+    those bytes. Parsing the file and then hashing it again would open a window
+    in which a concurrent write leaves the cache holding the older content under
+    the newer content's signature — a state ``get_app_config`` can never detect,
+    because the on-disk signature already matches, so the edit would only be
+    picked up by the *next* edit. Signing the parsed bytes makes any write that
+    races the load show up as a signature mismatch on the next call instead.
+    """
     global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_is_custom
 
     resolved_path = AppConfig.resolve_config_path(config_path)
-    _app_config = AppConfig.from_file(str(resolved_path))
+    raw, signature = _read_config_with_signature(resolved_path)
+    config = AppConfig._from_yaml_text(raw.decode("utf-8"), resolved_path)
+    _app_config = config
     _app_config_path = resolved_path
-    _app_config_mtime = _get_config_mtime(resolved_path)
-    _app_config_signature = _get_config_signature(resolved_path)
+    _app_config_mtime = signature[0]
+    _app_config_signature = signature
     _app_config_is_custom = False
     return _app_config
 
@@ -775,6 +811,23 @@ def set_app_config(config: AppConfig) -> None:
 def peek_current_app_config() -> AppConfig | None:
     """Return the runtime-scoped AppConfig override, if one is active."""
     return _current_app_config.get()
+
+
+def peek_loaded_app_config() -> AppConfig | None:
+    """Return the configuration this process has loaded, without touching the filesystem.
+
+    The runtime-scoped override wins when one is active; otherwise this is the
+    cached singleton ``get_app_config()`` last loaded (or ``set_app_config()``
+    installed). ``None`` means no configuration has ever been loaded in this
+    process, which is what a host without a ``config.yaml`` looks like — as
+    opposed to a host that *is* running on a config and can no longer read the
+    file, where callers need the loaded value to tell "unavailable" from
+    "never configured".
+    """
+    override = _current_app_config.get()
+    if override is not None:
+        return override
+    return _app_config
 
 
 def push_current_app_config(config: AppConfig) -> None:
