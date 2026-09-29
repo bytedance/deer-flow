@@ -73,6 +73,11 @@ def _has_rich_constructs(text: str) -> bool:
     return _TELEGRAM_RICH_CONSTRUCT_RE.search(text) is not None
 
 
+def _utf16_length(text: str) -> int:
+    """Length of *text* in UTF-16 code units, the unit Telegram measures message limits in."""
+    return sum(2 if ord(char) > 0xFFFF else 1 for char in text)
+
+
 def _load_telegram_input_file(path, filename: str):
     from telegram import InputFile
 
@@ -266,8 +271,9 @@ class TelegramChannel(Channel):
             return
 
         display = text
-        if len(display) > TELEGRAM_MAX_MESSAGE_LENGTH:
-            display = display[: TELEGRAM_MAX_MESSAGE_LENGTH - 1] + "…"
+        if _utf16_length(display) > TELEGRAM_MAX_MESSAGE_LENGTH:
+            # Leave room for the ellipsis in the same unit the limit is measured in.
+            display = self._split_message(display, limit=TELEGRAM_MAX_MESSAGE_LENGTH - 1)[0] + "…"
 
         bot = self._application.bot
         state = self._stream_messages.get(key)
@@ -811,8 +817,24 @@ class TelegramChannel(Channel):
         return "message is not modified" in str(exc).lower()
 
     @staticmethod
-    def _split_message(text: str) -> list[str]:
-        return [text[i : i + TELEGRAM_MAX_MESSAGE_LENGTH] for i in range(0, len(text), TELEGRAM_MAX_MESSAGE_LENGTH)] or [text]
+    def _split_message(text: str, *, limit: int = TELEGRAM_MAX_MESSAGE_LENGTH) -> list[str]:
+        # Telegram counts the limit in UTF-16 code units and a non-BMP character
+        # (most emoji, CJK extension B) costs 2, so slicing by code points can
+        # hand sendMessage a chunk of up to twice the limit -> 400 "Message is
+        # too long" -> the retry policy repeats it and the reply is dropped.
+        chunks: list[str] = []
+        current: list[str] = []
+        units = 0
+        for char in text:
+            width = 2 if ord(char) > 0xFFFF else 1
+            if units + width > limit:
+                chunks.append("".join(current))
+                current = []
+                units = 0
+            current.append(char)
+            units += width
+        chunks.append("".join(current))
+        return chunks
 
     async def _send_running_reply(self, chat_id: str, reply_to_message_id: int) -> None:
         """Send a 'Working on it...' reply and register it as the stream target."""
