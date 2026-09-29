@@ -598,6 +598,7 @@ export default function ChatPage() {
                       )}
                       isWelcomeMode={isWelcomeMode}
                       threadId={threadId}
+                      projectId={projectParam ?? affiliatedProjectId}
                       draftThreadId={isNewThread ? "new" : threadId}
                       knowledgeScopeControl={
                         selectorVisible && knowledgeScope ? (
@@ -636,6 +637,16 @@ export default function ChatPage() {
                       }}
                       onGoalChange={setLocalGoal}
                       onPrepareThread={ensureProjectThread}
+                      onReferenceFileAttached={() => {
+                        if (!isNewThread) return;
+                        history.replaceState(
+                          null,
+                          "",
+                          `/workspace/chats/${threadId}`,
+                        );
+                        setThreadId(threadId);
+                        setIsNewThread(false);
+                      }}
                       onSubmit={handleSubmit}
                       onStop={handleStop}
                       canStopStreaming={canStopStreaming}

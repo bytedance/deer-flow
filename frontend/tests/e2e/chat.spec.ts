@@ -321,7 +321,7 @@ test.describe("Chat workspace", () => {
     await textarea.fill("/dat");
     await textarea.press("Enter");
 
-    await expect(page.getByText("/data-analysis")).toBeVisible();
+    await expect(page.getByText("@data-analysis")).toBeVisible();
     const skillInput = page.getByRole("textbox", {
       name: /how can i assist you/i,
     });
@@ -334,7 +334,7 @@ test.describe("Chat workspace", () => {
 
     await page.reload();
 
-    await expect(page.getByText("/data-analysis")).toBeVisible();
+    await expect(page.getByText("@data-analysis")).toBeVisible();
     await expect(
       page.getByRole("textbox", {
         name: /how can i assist you/i,
@@ -650,7 +650,7 @@ test.describe("Chat workspace", () => {
 
     await textarea.press("Enter");
 
-    await expect(page.getByText("/data-analysis")).toBeVisible();
+    await expect(page.getByText("@data-analysis")).toBeVisible();
     const skillInput = page.getByRole("textbox", {
       name: /how can i assist you/i,
     });
@@ -688,7 +688,7 @@ test.describe("Chat workspace", () => {
       page.getByRole("option", { name: /data-analysis/i }),
     ).toBeVisible();
     await textarea.press("Enter");
-    await expect(page.getByText("/data-analysis")).toBeVisible();
+    await expect(page.getByText("@data-analysis")).toBeVisible();
 
     const skillInput = page.getByRole("textbox", {
       name: /how can i assist you/i,
@@ -712,8 +712,8 @@ test.describe("Chat workspace", () => {
 
     await skillInput.press("Enter");
 
-    await expect(page.getByText("/frontend-design")).toBeVisible();
-    await expect(page.getByText("/data-analysis")).toBeHidden();
+    await expect(page.getByText("@frontend-design")).toBeVisible();
+    await expect(page.getByText("@data-analysis")).toBeHidden();
 
     await skillInput.pressSequentially("polish the composer");
     await skillInput.press("Enter");
@@ -778,7 +778,7 @@ test.describe("Chat workspace", () => {
       page.getByRole("option", { name: /data-analysis/i }),
     ).toBeVisible();
     await textarea.press("Enter");
-    await expect(page.getByText("/data-analysis")).toBeVisible();
+    await expect(page.getByText("@data-analysis")).toBeVisible();
 
     const skillInput = page.getByRole("textbox", {
       name: /how can i assist you/i,
@@ -934,7 +934,7 @@ test.describe("Chat workspace", () => {
     await textarea.press("ArrowDown");
     await textarea.press("Enter");
 
-    await expect(page.getByText("/frontend-design")).toBeVisible();
+    await expect(page.getByText("@frontend-design")).toBeVisible();
     await expect(
       page.getByRole("textbox", { name: /how can i assist you/i }),
     ).toBeVisible();

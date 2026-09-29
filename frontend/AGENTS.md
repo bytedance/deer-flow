@@ -300,3 +300,19 @@ Plugin page `openConversation(threadId)` resolves authenticated thread metadata
 with `pathOfThread`; do not let plugins hardcode default-agent routes. The page's
 abort signal fences late navigation after unmount/account changes. Synchronous
 conversation-action callbacks reject Promise returns while consuming rejections.
+
+### Composer references
+
+`components/workspace/mentions/` owns cursor-local `@` detection and the grouped
+skill, project-document, and conversation picker. `InputBox` keeps selected
+objects separate from draft text and reuses the existing submission channels:
+one leading `/skill-name`, confirmed `additional_kwargs.files`, and explicit
+`conversationReferences` run context. Display metadata grants no read authority.
+The `@` and attachment buttons open the same picker. Email/URL text must not
+trigger it; only the active query range is removed on selection. Keep IME,
+caret restoration, attachment failures, and stale asynchronous selections covered.
+Project attachment selects prepare a project-scoped new thread before calling
+attach-to-thread; thread/account changes fence late results. The draft persists
+conversation reference IDs and titles along with its single selected skill.
+`SlashSkillChip` displays `@` for both composers and transcript, while the existing
+slash activation wire grammar and legacy input remain compatible.

@@ -330,6 +330,25 @@ export const zhCN: Translations = {
 
   // Input Box
   inputBox: {
+    mentionPicker: "添加引用",
+    mentionSearch: "搜索技能、项目文件和对话",
+    mentionSkills: "技能",
+    mentionFiles: "项目文件",
+    mentionConversations: "对话",
+    mentionUpload: "上传文件",
+    mentionEmpty: "已加载的内容中没有匹配的引用",
+    mentionLoadMore: "加载更多",
+    mentionLoading: "正在加载引用…",
+    mentionFailed: "引用加载失败，请重试。",
+    mentionRetry: "重试",
+    mentionAttaching: "正在添加文件…",
+    mentionAttachFailed: "文件添加失败，请重试。",
+    mentionSingleSkill: "每条消息使用一个技能，选择其他技能会替换当前技能。",
+    mentionNoProject: "在项目对话中可引用该项目的文档。",
+    mentionRemoveSkill: "移除技能",
+    mentionUnavailable: "文件不可用",
+    mentionClose: "关闭引用面板",
+
     placeholder: "今天我能为你做些什么？",
     disclaimer: "内容由AI生成，重要信息请务必核查",
     createSkillPrompt:
