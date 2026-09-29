@@ -873,11 +873,20 @@ class DiscordChannel(Channel):
         chunks: list[str] = []
         remaining = text
         while len(remaining) > _DISCORD_MAX_MESSAGE_LEN:
-            split_at = remaining.rfind("\n", 0, _DISCORD_MAX_MESSAGE_LEN)
-            if split_at <= 0:
+            # Prefer breaking right after a newline inside the window so the
+            # next bubble does not start mid-sentence. The delimiter newline
+            # stays in the current chunk (and a leading run of blank lines in
+            # the remainder is never dropped), so the split is
+            # content-preserving: "".join(chunks) == text. When no newline is
+            # found (or the only one is at index 0, which would create a
+            # newline-only bubble) fall back to a hard cut at the limit.
+            split_at = remaining.rfind("\n", 1, _DISCORD_MAX_MESSAGE_LEN)
+            if split_at == -1:
                 split_at = _DISCORD_MAX_MESSAGE_LEN
+            else:
+                split_at += 1  # keep the delimiter newline in this chunk
             chunks.append(remaining[:split_at])
-            remaining = remaining[split_at:].lstrip("\n")
+            remaining = remaining[split_at:]
 
         if remaining:
             chunks.append(remaining)

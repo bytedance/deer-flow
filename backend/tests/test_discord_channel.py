@@ -650,3 +650,77 @@ async def test_send_control_calls_keep_the_default_outbound_bound() -> None:
     assert len(run_mock.await_args_list) == 2  # stop_typing + one text chunk
     for call in run_mock.await_args_list:
         assert "timeout" not in call.kwargs
+
+
+# ---------------------------------------------------------------------------
+# _split_text: content-preserving message splitting
+# ---------------------------------------------------------------------------
+
+
+def _assert_content_preserving(text: str) -> list[str]:
+    from app.channels.discord import _DISCORD_MAX_MESSAGE_LEN
+
+    chunks = DiscordChannel._split_text(text)
+    assert "".join(chunks) == text, "split must not lose or reorder content"
+    assert all(len(chunk) <= _DISCORD_MAX_MESSAGE_LEN for chunk in chunks), (
+        "every chunk must fit Discord's message length limit"
+    )
+    return chunks
+
+
+def test_split_text_short_text_is_single_chunk() -> None:
+    assert DiscordChannel._split_text("hello") == ["hello"]
+
+
+def test_split_text_empty_text_returns_single_empty_chunk() -> None:
+    assert DiscordChannel._split_text("") == [""]
+
+
+def test_split_text_exact_limit_is_single_chunk() -> None:
+    text = "x" * 2000
+    assert DiscordChannel._split_text(text) == [text]
+
+
+def test_split_text_keeps_boundary_newline() -> None:
+    # A newline exactly at the split boundary used to be dropped by lstrip.
+    text = "x" * 1990 + "\n\n" + "y" * 30
+    chunks = _assert_content_preserving(text)
+    assert chunks[0] == "x" * 1990 + "\n"
+    assert chunks[1] == "\n" + "y" * 30
+
+
+def test_split_text_hard_cut_keeps_blank_line_run() -> None:
+    # No newline inside the window: the hard cut must not swallow the
+    # blank-line run that follows it.
+    text = "x" * 2000 + "\n\n\n" + "y" * 30
+    chunks = _assert_content_preserving(text)
+    assert chunks[0] == "x" * 2000
+    assert chunks[1] == "\n\n\n" + "y" * 30
+
+
+def test_split_text_multibubble_cjk() -> None:
+    text = ("第一段\n\n" + "句" * 1990 + "\n\n最后一段") * 3
+    chunks = _assert_content_preserving(text)
+    assert len(chunks) == 4
+
+
+def test_split_text_newline_at_zero_hard_cuts_instead_of_empty_bubble() -> None:
+    # The only newline is at index 0; splitting there would create a
+    # newline-only bubble, so the splitter hard-cuts at the limit instead.
+    text = "\n" + "x" * 2100
+    chunks = _assert_content_preserving(text)
+    assert len(chunks) >= 2
+    assert chunks[0] == "\n" + "x" * 1999
+
+
+def test_split_text_breaks_after_newline_not_before() -> None:
+    text = "x" * 1500 + "\n" + "y" * 1500
+    chunks = _assert_content_preserving(text)
+    assert chunks[0] == "x" * 1500 + "\n"
+    assert chunks[1] == "y" * 1500
+
+
+def test_split_text_never_grows_content() -> None:
+    runs = ["\n\n\n", "a", "\n" * 10, "b" * 5000, "\n\n", "c" * 1999, "\n", "d" * 2001]
+    text = "".join(runs)
+    _assert_content_preserving(text)
