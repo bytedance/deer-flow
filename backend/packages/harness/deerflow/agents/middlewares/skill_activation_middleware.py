@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import html
+import json
 import logging
 import posixpath
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, override
 
@@ -18,7 +19,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
-from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, build_skill_usage, record_skill_usage
+from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY, build_skill_usage, record_skill_usage
 from deerflow.runtime.events.catalog import (
     MIDDLEWARE_SKILL_ACTIVATION_TAG,
     MIDDLEWARE_SKILL_SECRETS_TAG,
@@ -28,8 +29,8 @@ from deerflow.runtime.secret_context import (
     _SLASH_SKILL_ACTIVATION_RUN_KEY,
     ACTIVE_SECRETS_CONTEXT_KEY,
     extract_request_secrets,
-    read_slash_skill_source_path,
-    write_slash_skill_source_path,
+    read_slash_skill_source_paths,
+    write_slash_skill_source_paths,
 )
 from deerflow.skills.slash import parse_slash_skill_reference, resolve_slash_skill
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
@@ -73,6 +74,7 @@ class _Activation:
     remaining_text: str
     editable: bool
     required_secrets: tuple[SecretRequirement, ...] = ()
+    additional_activations: tuple[_Activation, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +116,7 @@ class SkillActivationMiddleware(AgentMiddleware):
             # None means "any enabled, runtime-allowed skill may be activated";
             # a concrete list narrows that to a fixed set.
             "available_skills": sorted(self._available_skills) if self._available_skills is not None else None,
+            "max_explicit_skill_references": 16,
         }
 
     def _storage(self) -> SkillStorage:
@@ -245,6 +248,9 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         if target.id:
             return target.id
         content = get_original_user_content_text(target.content, target.additional_kwargs)
+        references = target.additional_kwargs.get("skill_references")
+        if references is not None:
+            content += "\n" + json.dumps(references, sort_keys=True, default=str)
         return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
 
     @staticmethod
@@ -293,7 +299,29 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             return None
 
         content = get_original_user_content_text(target.content, target.additional_kwargs)
-        resolution = self._resolve_activation(content)
+        names = target.additional_kwargs.get("skill_references")
+        if names is not None:
+            if not isinstance(names, list) or not 1 <= len(names) <= 16:
+                resolution = _ActivationResolution(failure_message="Select between 1 and 16 skills.")
+            else:
+                activations: list[_Activation] = []
+                resolution = None
+                for name in names:
+                    reference = parse_slash_skill_reference(f"/{name}") if isinstance(name, str) else None
+                    if reference is None or reference.name != name:
+                        resolution = _ActivationResolution(failure_message="Invalid skill reference.")
+                        break
+                    if any(item.skill_name == name for item in activations):
+                        continue
+                    resolved = self._resolve_activation(f"/{name} {content}")
+                    if resolved is None or resolved.failure_message or resolved.activation is None:
+                        resolution = resolved or _ActivationResolution(failure_message="Invalid skill reference.")
+                        break
+                    activations.append(resolved.activation)
+                if resolution is None and activations:
+                    resolution = _ActivationResolution(activation=replace(activations[0], additional_activations=tuple(activations[1:])))
+        else:
+            resolution = self._resolve_activation(content)
         if resolution is None:
             return None
         return target_index, target, resolution, run_key
@@ -342,7 +370,8 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             activation.container_file_path,
             activation.content_hash,
         )
-        self._record_activation(request, activation, hook=hook)
+        for item in (activation, *activation.additional_activations):
+            self._record_activation(request, item, hook=hook)
         # Mark this slash message as activated for the run so the tool loop's later
         # model calls skip the redundant re-activation (#3861: one activation call,
         # many follow-up model calls). A new user slash message keys differently and
@@ -354,7 +383,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         # (computed once there, threaded through here) rather than recomputed.
         if run_context is not None:
             run_context[_SLASH_SKILL_ACTIVATION_RUN_KEY] = run_key
-        activation_msg = self._make_activation_message(target, self._build_activation_reminder(activation))
+        activation_msg = self._make_activation_message(target, "\n\n".join(self._build_activation_reminder(item) for item in (activation, *activation.additional_activations)))
         messages = list(request.messages)
         messages.insert(target_index, activation_msg)
         return request.override(messages=messages), activation
@@ -366,7 +395,8 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         effective = prepared if prepared is not None else request
         self._resolve_secret_bindings(effective, activation, hook=hook)
         if activation is not None:
-            record_skill_usage(getattr(request, "runtime", None), self._usage_snapshot(activation))
+            for item in (activation, *activation.additional_activations):
+                record_skill_usage(getattr(request, "runtime", None), self._usage_snapshot(item))
         return effective, activation
 
     @staticmethod
@@ -391,7 +421,11 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             messages = [response] if isinstance(response, AIMessage) else getattr(response, "result", [])
             for message in messages:
                 if isinstance(message, AIMessage):
-                    message.additional_kwargs = {**message.additional_kwargs, SKILL_USAGE_KEY: usage}
+                    if activation.additional_activations:
+                        usages = [snapshot for item in (activation, *activation.additional_activations) if (snapshot := SkillActivationMiddleware._usage_snapshot(item)) is not None]
+                        message.additional_kwargs = {**message.additional_kwargs, SKILL_USAGES_KEY: usages}
+                    else:
+                        message.additional_kwargs = {**message.additional_kwargs, SKILL_USAGE_KEY: usage}
                     break
         return response
 
@@ -431,9 +465,9 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         # consumers authenticate the source and resolve the live registry skill
         # by path, so caller-mergeable context cannot forge an activation.
         if activation is not None:
-            write_slash_skill_source_path(
+            write_slash_skill_source_paths(
                 context,
-                activation.container_file_path,
+                tuple(item.container_file_path for item in (activation, *activation.additional_activations)),
                 owner_token=self._slash_source_owner_token,
             )
 
@@ -444,10 +478,10 @@ Follow this skill before choosing a general workflow. Load supporting resources 
             if registry is not None:
                 # Slash source: exempt from the ``secrets-autonomous`` opt-out
                 # (explicit ceremony), but still enabled + allowlist checked.
-                slash_path = read_slash_skill_source_path(context, owner_token=self._slash_source_owner_token)
-                slash_skill = self._resolve_registry_skill(registry, slash_path, require_autonomous=False)
-                if slash_skill is not None:
-                    sources.append((slash_skill.name, tuple(slash_skill.required_secrets)))
+                for slash_path in read_slash_skill_source_paths(context, owner_token=self._slash_source_owner_token):
+                    slash_skill = self._resolve_registry_skill(registry, slash_path, require_autonomous=False)
+                    if slash_skill is not None:
+                        sources.append((slash_skill.name, tuple(slash_skill.required_secrets)))
                 sources.extend(self._in_context_secret_sources(request, registry))
 
         injected: dict[str, str] = {}

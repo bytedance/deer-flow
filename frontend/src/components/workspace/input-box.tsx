@@ -145,7 +145,6 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
-import { ConversationReferenceChip } from "./conversation-references/conversation-reference-chip";
 import {
   abortGoalRequest,
   beginGoalRequest,
@@ -167,17 +166,20 @@ import {
   type SlashSuggestion,
 } from "./input-box-helpers";
 import {
+  inlineReferences,
+  referenceToken,
+  readableReferences,
+  readReferenceEditor,
+  referenceCaret,
+  focusReferenceAt,
+  renderReferenceEditor,
+} from "./mentions/inline-references";
+import {
   MentionPicker,
   type MentionPickerHandle,
   type MentionSelection,
 } from "./mentions/mention-picker";
-import {
-  editableCaret,
-  focusEditableAt,
-  getMentionQuery,
-  removeMentionQuery,
-  type MentionQuery,
-} from "./mentions/query";
+import { getMentionQuery, type MentionQuery } from "./mentions/query";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
 import {
@@ -462,6 +464,29 @@ export function InputBox({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const inlineSkillTextRef = useRef<HTMLSpanElement | null>(null);
   const inlineSkillComposingRef = useRef(false);
+  const composerCaretRef = useRef(0);
+  const inlineRefs = useMemo(
+    () => inlineReferences(textInput.value),
+    [textInput.value],
+  );
+  const hasInlineReferences = inlineRefs.length > 0;
+  const [inlineEditorActive, setInlineEditorActive] = useState(false);
+  const projectReferenceCache = useRef(
+    new Map<string, (typeof projectAttachments)[number]>(),
+  );
+  useLayoutEffect(() => {
+    projectReferenceCache.current.clear();
+    setInlineEditorActive(false);
+  }, [threadId, user?.id]);
+  useLayoutEffect(() => {
+    for (const attachment of projectAttachments) {
+      if (attachment.source_document_id)
+        projectReferenceCache.current.set(
+          attachment.source_document_id,
+          attachment,
+        );
+    }
+  }, [projectAttachments]);
   const inlineCompositionEndedAt = useRef(-Infinity);
   const goalRequestStateRef = useRef(createGoalRequestState());
   const compactRequestStateRef = useRef(createGoalRequestState());
@@ -816,12 +841,11 @@ export function InputBox({
       if (
         !draft.text &&
         !draft.skillName &&
-        !conversationReferences.length &&
         pendingDraftSubmissionKeyRef.current === key
       ) {
         return null;
       }
-      if (draft.text || draft.skillName || conversationReferences.length) {
+      if (draft.text || draft.skillName) {
         pendingDraftSubmissionKeyRef.current = null;
       }
 
@@ -937,7 +961,21 @@ export function InputBox({
 
     const resolvedDraft = resolveComposerDraft(savedDraft, enabledSkillNames);
     setConversationReferences(savedDraft.conversationReferences ?? []);
-    setTextInput(resolvedDraft.text);
+    const existingReferences = inlineReferences(resolvedDraft.text);
+    const legacyReferences = (savedDraft.conversationReferences ?? []).filter(
+      (ref) =>
+        !existingReferences.some(
+          (item) => item.kind === "conversation" && item.id === ref.threadId,
+        ),
+    );
+    setTextInput(
+      legacyReferences
+        .map(
+          (ref) =>
+            referenceToken("conversation", ref.threadId, ref.title) + " ",
+        )
+        .join("") + resolvedDraft.text,
+    );
     const restoredSkill = resolvedDraft.skillName
       ? agentScopedSkills.find(
           (skill) => skill.enabled && skill.name === resolvedDraft.skillName,
@@ -1288,25 +1326,55 @@ export function InputBox({
       const quoteIds = quotes.map((quote) => quote.id);
       const quoteContexts = quotes.map((quote) => quote.context);
       pendingDraftSubmissionKeyRef.current = draftKey;
-      const referenceIds = conversationReferences.map(
+      const currentReferences = inlineReferences(textInput.value);
+      const activeConversations = conversationReferences.filter((reference) =>
+        currentReferences.some(
+          (item) =>
+            item.kind === "conversation" && item.id === reference.threadId,
+        ),
+      );
+      const referenceIds = activeConversations.map(
         (reference) => reference.threadId,
       );
       // Project-shelf attachments are already ingested thread-side (§9):
       // they join ``additional_kwargs.files`` as completed uploads without a
       // re-upload, and merge with any files uploaded in this send
       // (buildThreadSubmitMessages concatenates the two lists).
-      const stagedFiles: FileInMessage[] = projectAttachments.map(
-        (attachment) => ({
+      const stagedFiles: FileInMessage[] = projectAttachments
+        .filter(
+          (file) =>
+            !file.source_document_id ||
+            currentReferences.some(
+              (ref) =>
+                ref.kind === "file" && ref.id === file.source_document_id,
+            ),
+        )
+        .map((attachment) => ({
           filename: attachment.filename,
           size: attachment.size_bytes,
           path: attachment.virtual_path,
           status: "uploaded" as const,
-        }),
-      );
+        }));
+      const skillReferences = [
+        ...new Set(
+          inlineReferences(textInput.value)
+            .filter((ref) => ref.kind === "skill")
+            .map((ref) => ref.id),
+        ),
+      ];
+      if (
+        skillReferences.length &&
+        selectedSlashSkill?.kind === "skill" &&
+        !skillReferences.includes(selectedSlashSkill.name)
+      )
+        skillReferences.unshift(selectedSlashSkill.name);
       const additionalKwargs = {
+        ...(skillReferences.length
+          ? { skill_references: skillReferences }
+          : {}),
         ...(quotes.length ? buildReferenceMessageMetadata(quoteContexts) : {}),
         ...(referenceIds.length
-          ? buildConversationReferenceMetadata(conversationReferences)
+          ? buildConversationReferenceMetadata(activeConversations)
           : {}),
         ...(stagedFiles.length > 0 ? { files: stagedFiles } : {}),
       };
@@ -1364,6 +1432,8 @@ export function InputBox({
     },
     [
       context,
+      textInput.value,
+      selectedSlashSkill,
       conversationReferences,
       draftKey,
       invalidateDraftSaveTimer,
@@ -1407,6 +1477,7 @@ export function InputBox({
         return Promise.reject(new Error("streaming"));
       }
       abortVoiceInput();
+      message = { ...message, text: readableReferences(message.text) };
       const messageWithSlashSkill = selectedSlashSkill
         ? {
             ...message,
@@ -1423,7 +1494,8 @@ export function InputBox({
         fileCount:
           messageWithSlashSkill.files.length +
           projectAttachments.length +
-          conversationReferences.length,
+          conversationReferences.length +
+          inlineRefs.length,
         status,
       });
       // Check run-starting actions before goal preparation or persistence:
@@ -1515,6 +1587,7 @@ export function InputBox({
       onPrepareThread,
       projectAttachments.length,
       conversationReferences.length,
+      inlineRefs.length,
       selectedSlashSkill,
       status,
       submitThreadMessage,
@@ -1598,12 +1671,13 @@ export function InputBox({
     // rather than withholding them from the helper, which needs the list to
     // reserve their names — a skill named after a builtin is unusable for the
     // mirrored reason, its submitted text runs the command, not the skill.
-    return selectedSlashSkill
+    return selectedSlashSkill || hasInlineReferences
       ? matches.filter(({ kind }) => kind === "skill")
       : matches;
   }, [
     agentScopedSkills,
     builtinSlashCommands,
+    hasInlineReferences,
     selectedSlashSkill,
     slashSkillQuery,
   ]);
@@ -1652,12 +1726,17 @@ export function InputBox({
   }, [textInput.value, mentionQuery]);
   const openMentions = useCallback(() => {
     dismissedMention.current = null;
+    const caret = inlineSkillTextRef.current
+      ? referenceCaret(inlineSkillTextRef.current)
+      : textareaRef.current?.selectionStart;
+    if (caret != null) composerCaretRef.current = caret;
     setMentionQuery(null);
     setMentionButtonOpen(true);
     setMentionError(null);
   }, []);
   const updateMentionQuery = useCallback(
     (value: string, caret: number | null) => {
+      if (caret !== null) composerCaretRef.current = caret;
       if (dismissedMention.current === `${value}:${caret}`) return;
       dismissedMention.current = null;
       setMentionButtonOpen(false);
@@ -1673,7 +1752,7 @@ export function InputBox({
         textarea.focus();
         textarea.setSelectionRange(offset, offset);
       } else if (inlineSkillTextRef.current)
-        focusEditableAt(inlineSkillTextRef.current, offset);
+        focusReferenceAt(inlineSkillTextRef.current, offset);
     });
   }, []);
   const selectMention = useCallback(
@@ -1681,10 +1760,33 @@ export function InputBox({
       if (mentionInFlight.current || disabled || polishingInput) return;
       const epoch = mentionEpoch.current;
       const originalText = textInput.value;
-      const nextText = mentionQuery
-        ? removeMentionQuery(originalText, mentionQuery)
-        : originalText;
-      const caret = mentionQuery?.start ?? originalText.length;
+      const caret =
+        mentionQuery?.start ??
+        Math.min(composerCaretRef.current, originalText.length);
+      let token = "";
+      if (selection.kind === "skill")
+        token = referenceToken(
+          "skill",
+          selection.skill.name,
+          selection.skill.name,
+        );
+      if (selection.kind === "conversation")
+        token = referenceToken(
+          "conversation",
+          selection.reference.threadId,
+          selection.reference.title,
+        );
+      if (selection.kind === "file")
+        token = referenceToken(
+          "file",
+          selection.document.id,
+          selection.document.name,
+        );
+      const inserted = token ? token + " " : "";
+      const nextText =
+        originalText.slice(0, caret) +
+        inserted +
+        originalText.slice(mentionQuery?.end ?? caret);
       if (selection.kind === "file") {
         if (!projectId) return;
         const duplicate = projectAttachments.some(
@@ -1747,12 +1849,6 @@ export function InputBox({
             }
           }
         }
-      } else if (selection.kind === "skill") {
-        setSelectedSlashSkill({
-          kind: "skill",
-          name: selection.skill.name,
-          description: selection.skill.description,
-        });
       } else if (selection.kind === "conversation") {
         setConversationReferences((previous) =>
           previous.some(
@@ -1761,7 +1857,7 @@ export function InputBox({
             ? previous
             : [...previous, selection.reference],
         );
-      } else {
+      } else if (selection.kind === "upload") {
         // Keep the native file dialog in the user gesture for browser permission.
         attachments.openFileDialog();
       }
@@ -1795,7 +1891,7 @@ export function InputBox({
       setMentionQuery(null);
       setMentionButtonOpen(false);
       setMentionError(null);
-      focusComposerAt(caret);
+      focusComposerAt(caret + inserted.length);
       if (selection.kind === "file") onReferenceFileAttached?.();
     },
     [
@@ -1956,7 +2052,7 @@ export function InputBox({
         recognition.start();
         if (options.focusAfterStart) {
           requestAnimationFrame(() => {
-            if (selectedSlashSkill) {
+            if (inlineSkillTextRef.current) {
               focusContentEditableEnd(inlineSkillTextRef.current);
             } else {
               textareaRef.current?.focus();
@@ -1975,7 +2071,6 @@ export function InputBox({
       composerLocked,
       getVoiceInputErrorMessage,
       locale,
-      selectedSlashSkill,
       speechRecognitionConstructor,
       t.inputBox.voiceInputFailed,
       textInput,
@@ -2126,12 +2221,13 @@ export function InputBox({
     (value: string) => {
       textInput.setInput(value);
       requestAnimationFrame(() => {
-        const textarea = textareaRef.current;
-        if (!textarea) {
-          return;
+        if (inlineSkillTextRef.current)
+          focusReferenceAt(inlineSkillTextRef.current, value.length);
+        else {
+          const textarea = textareaRef.current;
+          textarea?.focus();
+          textarea?.setSelectionRange(value.length, value.length);
         }
-        textarea.focus();
-        textarea.setSelectionRange(value.length, value.length);
       });
     },
     [textInput],
@@ -2155,7 +2251,7 @@ export function InputBox({
     try {
       const result = await polishInputDraft(
         {
-          text: originalText,
+          text: readableReferences(originalText),
           locale,
           thread_id: threadId,
         },
@@ -2170,7 +2266,14 @@ export function InputBox({
         return;
       }
 
-      const rewrittenText = result.rewritten_text.trim();
+      let rewrittenText = result.rewritten_text.trim();
+      for (const ref of inlineReferences(originalText)) {
+        const token = referenceToken(ref.kind, ref.id, ref.label);
+        const label = `@${ref.label}`;
+        rewrittenText = rewrittenText.includes(label)
+          ? rewrittenText.replace(label, () => token)
+          : `${token} ${rewrittenText}`;
+      }
       if (!rewrittenText || !result.changed) {
         toast.info(t.inputBox.inputPolishNoChanges);
         return;
@@ -2365,9 +2468,40 @@ export function InputBox({
       }
       promptHistoryIndexRef.current = null;
       promptHistoryDraftRef.current = "";
-      const nextText = element.textContent ?? "";
+      const nextText = readReferenceEditor(element);
+      const refs = inlineReferences(nextText);
+      setConversationReferences((previous) => {
+        const unique = new Map(
+          refs
+            .filter((ref) => ref.kind === "conversation")
+            .map((ref) => [ref.id, ref]),
+        );
+        return [...unique.values()].slice(0, 3).map(
+          (ref) =>
+            previous.find((item) => item.threadId === ref.id) ?? {
+              threadId: ref.id,
+              title: ref.label,
+            },
+        );
+      });
+      setProjectAttachments((previous) => {
+        const ids = new Set(
+          refs.filter((ref) => ref.kind === "file").map((ref) => ref.id),
+        );
+        return [
+          ...previous.filter((file) => !file.source_document_id),
+          ...[...ids].flatMap((id) => {
+            const file = projectReferenceCache.current.get(id);
+            return file ? [file] : [];
+          }),
+        ];
+      });
+      abortInputPolishRequest();
+      setInputPolishUndo(null);
+      const caret = referenceCaret(element);
       textInput.setInput(nextText);
-      updateMentionQuery(nextText, editableCaret(element));
+      updateMentionQuery(nextText, caret);
+      if (!refs.length && caret !== null) focusComposerAt(caret);
       scheduleDraftSave({
         text: nextText,
         skillName:
@@ -2376,6 +2510,9 @@ export function InputBox({
     },
     [
       abortVoiceInput,
+      abortInputPolishRequest,
+      setProjectAttachments,
+      focusComposerAt,
       scheduleDraftSave,
       selectedSlashSkill,
       textInput,
@@ -2384,16 +2521,12 @@ export function InputBox({
     ],
   );
 
-  useEffect(() => {
-    if (!selectedSlashSkill) {
-      return;
-    }
-
+  useLayoutEffect(() => {
+    if (hasInlineReferences) setInlineEditorActive(true);
     const element = inlineSkillTextRef.current;
-    if (element && element.textContent !== textInput.value) {
-      element.textContent = textInput.value;
-    }
-  }, [selectedSlashSkill, textInput.value]);
+    if (element && !inlineSkillComposingRef.current)
+      renderReferenceEditor(element, textInput.value);
+  }, [hasInlineReferences, selectedSlashSkill, textInput.value]);
 
   const handleInlineSkillInput = useCallback(
     (event: FormEvent<HTMLSpanElement>) => {
@@ -2459,9 +2592,8 @@ export function InputBox({
         return;
       }
 
-      if (event.key !== "Enter") {
-        return;
-      }
+      handlePromptHistoryKeyDown(event);
+      if (event.defaultPrevented || event.key !== "Enter") return;
 
       if (isIMEComposing(event, inlineSkillComposingRef.current)) {
         return;
@@ -2480,6 +2612,7 @@ export function InputBox({
     },
     [
       showMentions,
+      handlePromptHistoryKeyDown,
       handleSelectedSlashSkillKeyDown,
       handleSkillSuggestionKeyDown,
       updateInlineSkillTextInput,
@@ -2688,7 +2821,12 @@ export function InputBox({
                 builtinSlashCommands,
               ).some((item) => item.kind === "skill"),
             )}
-            selectedSkill={selectedSlashSkill?.name}
+            selectedSkills={[
+              ...inlineRefs
+                .filter((ref) => ref.kind === "skill")
+                .map((ref) => ref.id),
+              ...(selectedSlashSkill ? [selectedSlashSkill.name] : []),
+            ]}
             references={conversationReferences}
             threadId={threadId}
             projectId={projectId}
@@ -2775,14 +2913,6 @@ export function InputBox({
           </div>
         )}
         <PromptInputHeader className="flex-wrap px-3 pt-3 pb-0 empty:hidden">
-          {selectedSlashSkill && (
-            <SlashSkillChip
-              name={selectedSlashSkill.name}
-              className="max-w-60"
-              onRemove={clearSelectedSlashSkill}
-              removeLabel={t.inputBox.mentionRemoveSkill}
-            />
-          )}
           <PromptInputAttachments className="contents p-0">
             {(attachment) => (
               <div className="max-w-60">
@@ -2790,47 +2920,33 @@ export function InputBox({
               </div>
             )}
           </PromptInputAttachments>
-          {projectAttachments.map((attachment) => (
-            <div
-              key={attachment.virtual_path}
-              className="bg-muted text-muted-foreground flex h-7 items-center gap-1.5 rounded-full border py-0 pr-1 pl-2.5 text-xs font-medium"
-              data-testid="project-attachment-chip"
-            >
-              <PaperclipIcon className="size-3" />
-              <span className="max-w-40 truncate">{attachment.filename}</span>
-              <button
-                aria-label={t.inputBox.removeProjectAttachment}
-                className="hover:bg-primary/20 focus-visible:ring-primary/40 -mr-0.5 ml-0.5 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-full transition-colors focus-visible:ring-2 focus-visible:outline-none"
-                type="button"
-                onClick={() =>
-                  setProjectAttachments((previous) =>
-                    previous.filter(
-                      (candidate) =>
-                        candidate.virtual_path !== attachment.virtual_path,
-                    ),
-                  )
-                }
+          {projectAttachments
+            .filter((attachment) => !attachment.source_document_id)
+            .map((attachment) => (
+              <div
+                key={attachment.virtual_path}
+                className="bg-muted text-muted-foreground flex h-7 items-center gap-1.5 rounded-full border py-0 pr-1 pl-2.5 text-xs font-medium"
+                data-testid="project-attachment-chip"
               >
-                <XIcon className="size-3" />
-              </button>
-            </div>
-          ))}
-          {conversationReferences.map((reference) => (
-            <ConversationReferenceChip
-              key={reference.threadId}
-              onRemove={() =>
-                setConversationReferences((current) =>
-                  current.filter(
-                    (item) => item.threadId !== reference.threadId,
-                  ),
-                )
-              }
-              removeLabel={t.inputBox.referenceConversationsRemove(
-                reference.title,
-              )}
-              title={reference.title}
-            />
-          ))}
+                <PaperclipIcon className="size-3" />
+                <span className="max-w-40 truncate">{attachment.filename}</span>
+                <button
+                  aria-label={t.inputBox.removeProjectAttachment}
+                  className="hover:bg-primary/20 focus-visible:ring-primary/40 -mr-0.5 ml-0.5 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-full transition-colors focus-visible:ring-2 focus-visible:outline-none"
+                  type="button"
+                  onClick={() =>
+                    setProjectAttachments((previous) =>
+                      previous.filter(
+                        (candidate) =>
+                          candidate.virtual_path !== attachment.virtual_path,
+                      ),
+                    )
+                  }
+                >
+                  <XIcon className="size-3" />
+                </button>
+              </div>
+            ))}
           {polishingInput && (
             <div
               aria-live="polite"
@@ -2859,15 +2975,23 @@ export function InputBox({
           )}
         </PromptInputHeader>
         <div className="min-h-16 w-full min-w-0 px-3 py-3">
-          {selectedSlashSkill ? (
+          {hasInlineReferences || inlineEditorActive || selectedSlashSkill ? (
             <div
-              className="max-h-48 min-h-6 w-full min-w-0 cursor-text overflow-y-auto text-base leading-6 break-all whitespace-pre-wrap md:text-sm"
+              className="max-h-48 min-h-6 w-full min-w-0 cursor-text overflow-y-auto text-base leading-7 break-words whitespace-pre-wrap md:text-sm"
               onClick={(event) => {
                 if (event.target === event.currentTarget) {
                   focusContentEditableEnd(inlineSkillTextRef.current);
                 }
               }}
             >
+              {selectedSlashSkill && (
+                <SlashSkillChip
+                  name={selectedSlashSkill.name}
+                  className="mr-2 border-0 bg-transparent px-0 align-baseline font-sans text-base text-blue-600 shadow-none"
+                  onRemove={clearSelectedSlashSkill}
+                  removeLabel={t.inputBox.mentionRemoveSkill}
+                />
+              )}
               <span
                 aria-label={t.inputBox.placeholder}
                 aria-multiline="true"
@@ -2887,8 +3011,8 @@ export function InputBox({
                 aria-controls={showMentions ? mentionListId : undefined}
                 onClick={(event) =>
                   updateMentionQuery(
-                    event.currentTarget.textContent ?? "",
-                    editableCaret(event.currentTarget),
+                    readReferenceEditor(event.currentTarget),
+                    referenceCaret(event.currentTarget),
                   )
                 }
                 onKeyUp={(event) => {
@@ -2898,8 +3022,8 @@ export function InputBox({
                     )
                   )
                     updateMentionQuery(
-                      event.currentTarget.textContent ?? "",
-                      editableCaret(event.currentTarget),
+                      readReferenceEditor(event.currentTarget),
+                      referenceCaret(event.currentTarget),
                     );
                 }}
                 onInput={handleInlineSkillInput}
@@ -2910,7 +3034,9 @@ export function InputBox({
                 role="textbox"
                 suppressContentEditableWarning
                 className={cn(
-                  "outline-none",
+                  selectedSlashSkill
+                    ? "inline min-h-6 outline-none"
+                    : "block min-h-6 outline-none",
                   "before:text-muted-foreground before:pointer-events-none",
                   "data-[empty=true]:before:content-[attr(data-placeholder)]",
                   composerLocked && "cursor-not-allowed opacity-50",

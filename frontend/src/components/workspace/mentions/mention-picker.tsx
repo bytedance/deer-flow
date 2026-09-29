@@ -51,7 +51,7 @@ export function MentionPicker({
   query,
   searchInput = false,
   skills,
-  selectedSkill,
+  selectedSkills,
   references,
   threadId,
   projectId,
@@ -65,7 +65,7 @@ export function MentionPicker({
   query: string;
   searchInput?: boolean;
   skills: Skill[];
-  selectedSkill?: string;
+  selectedSkills?: string[];
   references: ConversationReference[];
   threadId: string;
   projectId?: string | null;
@@ -97,7 +97,10 @@ export function MentionPicker({
         label: skill.name,
         description: skill.description,
         selection: { kind: "skill", skill },
-        selected: skill.name === selectedSkill,
+        selected: selectedSkills?.includes(skill.name),
+        disabled:
+          !selectedSkills?.includes(skill.name) &&
+          new Set(selectedSkills).size >= 16,
       }));
     for (const document of documents.data?.pages.flatMap(
       (page) => page.documents,
@@ -150,7 +153,7 @@ export function MentionPicker({
     return filtered;
   }, [
     skills,
-    selectedSkill,
+    selectedSkills,
     documents.data,
     conversations.data,
     capability.enabled,

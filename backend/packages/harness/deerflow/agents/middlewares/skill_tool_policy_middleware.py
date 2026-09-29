@@ -17,7 +17,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from deerflow.runtime.secret_context import SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY, read_slash_skill_source_path
+from deerflow.runtime.secret_context import SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY, read_slash_skill_source_paths
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.tool_policy import ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES, allowed_tool_names_for_skills
 from deerflow.skills.types import Skill
@@ -75,9 +75,9 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
 
     def _active_policy(self, request: ModelRequest | ToolCallRequest) -> _PolicySignature:
         context = getattr(getattr(request, "runtime", None), "context", None)
-        slash_path = read_slash_skill_source_path(context, owner_token=self._slash_source_owner_token)
-        if slash_path is not None:
-            return _POLICY_SOURCE_SLASH, (slash_path,)
+        slash_paths = read_slash_skill_source_paths(context, owner_token=self._slash_source_owner_token)
+        if slash_paths:
+            return _POLICY_SOURCE_SLASH, slash_paths
 
         paths: list[str] = []
         state = getattr(request, "state", None)

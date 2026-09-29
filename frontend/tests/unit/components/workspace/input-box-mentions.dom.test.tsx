@@ -163,7 +163,21 @@ function enterMention(
   text: string,
   caret = text.length,
 ) {
-  const input = container.querySelector("textarea")!;
+  const input = container.querySelector("textarea");
+  if (!input) {
+    const editor = container.querySelector<HTMLElement>(
+      '[contenteditable="true"]',
+    )!;
+    const node = document.createTextNode(" " + text);
+    editor.append(node);
+    const range = document.createRange();
+    range.setStart(node, 1 + caret);
+    range.collapse(true);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    fireEvent.input(editor);
+    return editor as HTMLTextAreaElement;
+  }
   fireEvent.focus(input);
   fireEvent.change(input, {
     target: { value: text, selectionStart: caret, selectionEnd: caret },
@@ -172,19 +186,24 @@ function enterMention(
 }
 
 describe("unified composer mentions", () => {
-  it("selects a skill in the middle of the draft and submits using the existing activation contract", async () => {
+  it("keeps a skill inline in the middle and sends its explicit activation metadata", async () => {
     const submit = rs.fn();
     const { container } = renderComposer("skill-mention", submit);
     const input = enterMention(container, "Use @res carefully", 8);
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Remove skill" })).toBeTruthy(),
+      expect(screen.getByTestId("inline-skill-reference")).toBeTruthy(),
     );
     const editor = container.querySelector('[contenteditable="true"]')!;
-    await waitFor(() => expect(editor.textContent).toBe("Use  carefully"));
+    await waitFor(() =>
+      expect(editor.textContent).toBe("Use ✦research  carefully"),
+    );
     fireEvent.keyDown(editor, { key: "Enter" });
     await waitFor(() => expect(submit).toHaveBeenCalled());
-    expect(submit.mock.calls[0]![0].text).toBe("/research Use  carefully");
+    expect(submit.mock.calls[0]![0].text).toBe("Use @research  carefully");
+    expect(submit.mock.calls[0]![1].additionalKwargs.skill_references).toEqual([
+      "research",
+    ]);
   });
   it("leaves emails and cancelled or composing queries as text", () => {
     const { container } = renderComposer();
@@ -318,7 +337,8 @@ describe("unified composer mentions", () => {
     enterMention(container, "Review @Brief");
     const fourth = screen.getByRole("option", { name: "Brief 4" });
     expect(fourth.hasAttribute("disabled")).toBe(true);
-    fireEvent.click(screen.getAllByTestId("conversation-reference-chip")[0]!);
+    screen.getAllByTestId("conversation-reference-chip")[0]!.remove();
+    fireEvent.input(container.querySelector('[contenteditable="true"]')!);
     expect(
       screen.getByRole("option", { name: "Brief 4" }).hasAttribute("disabled"),
     ).toBe(false);

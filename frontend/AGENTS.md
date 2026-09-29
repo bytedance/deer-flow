@@ -303,16 +303,15 @@ conversation-action callbacks reject Promise returns while consuming rejections.
 
 ### Composer references
 
-`components/workspace/mentions/` owns cursor-local `@` detection and the grouped
-skill, project-document, and conversation picker. `InputBox` keeps selected
-objects separate from draft text and reuses the existing submission channels:
-one leading `/skill-name`, confirmed `additional_kwargs.files`, and explicit
-`conversationReferences` run context. Display metadata grants no read authority.
-The `@` and attachment buttons open the same picker. Email/URL text must not
-trigger it; only the active query range is removed on selection. Keep IME,
-caret restoration, attachment failures, and stale asynchronous selections covered.
-Project attachment selects prepare a project-scoped new thread before calling
-attach-to-thread; thread/account changes fence late results. The draft persists
-conversation reference IDs and titles along with its single selected skill.
-`SlashSkillChip` displays `@` for both composers and transcript, while the existing
-slash activation wire grammar and legacy input remain compatible.
+`components/workspace/mentions/` owns cursor-local `@` detection, the grouped
+picker, and atomic inline references. The editor renders DOM text safely (never
+HTML from labels); canonical reference tokens preserve positions in draft text.
+Submission expands tokens to readable `@label` text and sends skill IDs in
+`additional_kwargs.skill_references` (up to 16 unique skills). Backend activation
+resolves every ID against the current user registry and agent allowlist before
+loading anything. Legacy leading slash commands remain supported.
+Project documents still use confirmed `additional_kwargs.files`; conversations
+use explicit run context. Deleting an inline object removes that context, and
+undo restores references already attached to this draft. Display labels grant no
+read authority. IME, selection/caret, thread changes and async attachment fences
+apply to the editor and picker. The `@` and attachment buttons share the picker.

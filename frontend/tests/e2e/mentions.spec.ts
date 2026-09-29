@@ -51,33 +51,35 @@ test("mid-draft skill selection preserves both text and caret and submits the ac
     page.getByRole("option", { name: "research Research a topic" }),
   ).toBeVisible();
   await input.press("Enter");
-  await expect(
-    page.getByRole("button", { name: "Remove skill" }),
-  ).toBeVisible();
-  await expect(input).toHaveText("Use  carefully");
+  await expect(page.getByTestId("inline-skill-reference")).toBeVisible();
+  await expect(input).toHaveText("Use ✦research  carefully");
   await input.pressSequentially("it");
-  await expect(input).toHaveText("Use it carefully");
+  await expect(input).toHaveText("Use ✦research it carefully");
   const request = nextRun(page);
   await input.press("Enter");
   expect(
     JSON.stringify((await request).postDataJSON().input.messages),
-  ).toContain("/research Use it carefully");
-  await expect(page.getByText("@research", { exact: true })).toBeVisible();
+  ).toContain("Use @research it carefully");
 });
-test("@ reopens after a skill, replaces it and restores the draft on reload", async ({
+test("keeps multiple inline skills and restores their positions on reload", async ({
   page,
 }) => {
   await page.goto("/workspace/chats/new");
   const input = composer(page);
   await input.fill("@res");
   await page.getByRole("option", { name: "research Research a topic" }).click();
-  await input.fill("Keep this @wri");
+  await input.pressSequentially("Keep this @wri");
   await page.getByRole("option", { name: "writing Write a report" }).click();
-  await expect(input).toHaveText("Keep this ");
-  await expect(page.getByText("@writing", { exact: true })).toBeVisible();
+  await expect(input).toHaveText("✦research Keep this ✦writing ");
   await page.reload();
-  await expect(input).toHaveText("Keep this ");
-  await expect(page.getByText("@writing", { exact: true })).toBeVisible();
+  await expect(input).toHaveText("✦research Keep this ✦writing ");
+  const request = nextRun(page);
+  await input.press("Enter");
+  const message = (await request).postDataJSON().input.messages.at(-1);
+  expect(message.additional_kwargs.skill_references).toEqual([
+    "research",
+    "writing",
+  ]);
 });
 test("emails and dismissed queries stay literal", async ({ page }) => {
   await page.goto("/workspace/chats/new");
@@ -100,13 +102,13 @@ test("attaches a document to a new project thread and submits its confirmed file
   await expect(page.getByTestId("project-attachment-chip")).toContainText(
     "report.pdf",
   );
-  await expect(input).toHaveValue("Read ");
+  await expect(input).toHaveText("Read ▤report.pdf ");
   await expect(page).not.toHaveURL(/\/new/);
   await page.reload();
   await expect(page.getByTestId("project-attachment-chip")).toContainText(
     "report.pdf",
   );
-  await expect(input).toHaveValue("Read ");
+  await expect(input).toHaveText("Read ▤report.pdf ");
   const request = nextRun(page);
   await input.press("Enter");
   expect(
