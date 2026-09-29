@@ -163,8 +163,13 @@ def _readability_available() -> bool:
     """
     try:
         return bool(have_node())
-    except OSError:
-        # The availability probe must never break fetching.
+    except (OSError, subprocess.SubprocessError, ValueError):
+        # The probe must never break fetching, and unavailability must be
+        # cached: readabilipy's have_node() runs a network-bound `npm
+        # install` with check=True, so a failing install raises
+        # CalledProcessError (a SubprocessError, not an OSError) and a
+        # non-numeric `node -v` output raises ValueError — either escaping
+        # here would re-attempt the install on every fetch or fail it.
         return False
 
 
@@ -175,11 +180,13 @@ def _fallback_article_title(soup: BeautifulSoup, root=None) -> str:
     """Ranked headline extraction for the link-preserving fallback.
 
     ``og:title`` is the site-published headline and comes first. ``<h1>``
-    candidates are restricted to the selected content container and skip
-    site-header logo headings: many article pages keep a site or logo
-    ``<h1>`` inside ``<header>`` while the real headline lives in
-    ``<title>`` (the story body using ``<h2>``), so such headings must not
-    outrank the document title. A bare ``<title>`` is the last resort.
+    candidates are restricted to the selected content container; a ``<h1>``
+    inside a ``<header>`` is skipped only when that header is site-level
+    chrome (no ``<article>``/``<main>`` ancestor) — a header owned by the
+    article itself, such as ``<article><header class="entry-header"><h1>``,
+    carries the real headline and must be kept. Headline text is joined
+    with spaces so inline children do not glue words together. A bare
+    ``<title>`` is the last resort.
     """
     og_title = soup.find("meta", attrs={"property": "og:title", "content": True})
     if og_title is not None:
@@ -188,13 +195,14 @@ def _fallback_article_title(soup: BeautifulSoup, root=None) -> str:
             return candidate
     container = root if root is not None else soup
     for h1 in container.find_all("h1"):
-        if h1.find_parent("header") is not None:
-            continue  # A site/logo heading, not the article headline.
-        candidate = h1.get_text(strip=True)
+        header = h1.find_parent("header")
+        if header is not None and header.find_parent(["article", "main"]) is None:
+            continue  # A site-level chrome heading, not an article headline.
+        candidate = " ".join(h1.get_text(" ", strip=True).split())
         if candidate:
             return candidate
     if soup.title is not None:
-        return soup.title.get_text(strip=True)
+        return " ".join(soup.title.get_text(" ", strip=True).split())
     return ""
 
 

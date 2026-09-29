@@ -162,6 +162,47 @@ def test_python_fallback_title_uses_container_h1_over_site_header():
     assert _python_fallback_article_json(html)["title"] == "Real Story"
 
 
+def test_python_fallback_title_keeps_article_header_headline():
+    """A header owned by the article carries the real headline, not site chrome."""
+    from deerflow.utils.readability import _python_fallback_article_json
+
+    body_prose = "<p>Story prose. </p>" * 20
+    html = f'<html><head><title>Site Name</title></head><body><main><article><header class="entry-header"><h1 class="entry-title">Real Story</h1></header>{body_prose}</article></main></body></html>'
+
+    assert _python_fallback_article_json(html)["title"] == "Real Story"
+
+
+def test_python_fallback_title_keeps_words_across_inline_elements():
+    """Inline children must not glue headline words together."""
+    from deerflow.utils.readability import _python_fallback_article_json
+
+    html = f"<html><head><title>Generic</title></head><body><h1>Real <em>Story</em> Today</h1><p>{'Body prose. ' * 20}</p></body></html>"
+
+    assert _python_fallback_article_json(html)["title"] == "Real Story Today"
+
+
+def test_probe_caches_unavailability_when_npm_install_fails(monkeypatch):
+    """A failing npm install must be cached as unavailability, not retried per fetch."""
+    from deerflow.utils.readability import _readability_available
+
+    _readability_available.cache_clear()
+    try:
+        calls: list[int] = []
+
+        def failing_have_node():
+            calls.append(1)
+            raise subprocess.CalledProcessError(1, ["npm", "install"], stderr="boom")
+
+        monkeypatch.setattr("deerflow.utils.readability.have_node", failing_have_node)
+
+        assert _readability_available() is False
+        assert _readability_available() is False
+        assert len(calls) == 1
+    finally:
+        # Restore the process-wide cache state for the other tests.
+        _readability_available.cache_clear()
+
+
 def test_article_to_message_with_images():
     """Article.to_message should handle articles containing images without AttributeError."""
     # Absolute image URL without source url
