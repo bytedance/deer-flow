@@ -3,6 +3,12 @@
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 
+def _reject_boolean_threshold(value: object, info: ValidationInfo) -> object:
+    if isinstance(value, bool):
+        raise ValueError(f"{info.field_name} must be an integer, not a boolean")
+    return value
+
+
 class ToolFreqOverride(BaseModel):
     """Per-tool frequency threshold override.
 
@@ -17,9 +23,7 @@ class ToolFreqOverride(BaseModel):
     @field_validator("warn", "hard_limit", mode="before")
     @classmethod
     def reject_boolean_thresholds(cls, value: object, info: ValidationInfo) -> object:
-        if isinstance(value, bool):
-            raise ValueError(f"{info.field_name} must be an integer, not a boolean")
-        return value
+        return _reject_boolean_threshold(value, info)
 
     @model_validator(mode="after")
     def _validate(self) -> "ToolFreqOverride":
@@ -81,9 +85,7 @@ class LoopDetectionConfig(BaseModel):
     )
     @classmethod
     def reject_boolean_thresholds(cls, value: object, info: ValidationInfo) -> object:
-        if isinstance(value, bool):
-            raise ValueError(f"{info.field_name} must be an integer, not a boolean")
-        return value
+        return _reject_boolean_threshold(value, info)
 
     @model_validator(mode="after")
     def validate_thresholds(self) -> "LoopDetectionConfig":
