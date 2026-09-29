@@ -22,6 +22,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result
+from deerflow.agents.task_continuity.state import RESOLVED_TOOL_CALL_ARGS_KEY
 from deerflow.config.tool_artifact_config import ToolArtifactConfig
 
 _HANDLE_PATTERN = r"(?:`(art_[0-9a-f]{8})`|(?<!\w)(art_[0-9a-f]{8})(?!\w))"
@@ -86,13 +87,13 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
             )
             return normalize_tool_result(message, tool_call_id=message.tool_call_id)
 
-        # 容量预留读取同批调用；只给本次工具运行时提供解析视图，保留原始历史。
+        # Share resolved batch arguments for note admission only in this runtime; preserve message history.
         if request.tool_call.get("name") == "task_note" and request.runtime is not None:
             runtime = request.runtime
             message = next((message for message in reversed(runtime.state.get("messages", [])) if isinstance(message, AIMessage)), None)
             if message is not None:
                 resolved_calls = {call["id"]: self._resolve_value(call["args"], handle_map) for call in message.tool_calls if call["name"] == "task_note"}
-                request = replace(request, runtime=replace(runtime, state={**runtime.state, "__resolved_tool_call_args": resolved_calls}))
+                request = replace(request, runtime=replace(runtime, state={**runtime.state, RESOLVED_TOOL_CALL_ARGS_KEY: resolved_calls}))
 
         resolved_args = self._resolve_value(args, handle_map)
         if resolved_args == args:

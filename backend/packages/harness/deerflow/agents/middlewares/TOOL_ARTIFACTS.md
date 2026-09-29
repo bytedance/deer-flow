@@ -4,8 +4,10 @@
 
 *(optional, if `tool_artifacts.enabled && tool_artifacts.resolve_handles_in_args`, default on)* Resolves `art_xxxxxxxx` artifact handles found in tool-call arguments to their real references (`ThreadState.tool_artifacts[].real_ref`) before the tool executes (issue #4676). Runs after the outer receipt layer and before authorization/guardrail, sandbox-audit, read-before-write and progress policies; the same resolved arguments reach policy and execution. Declarative constraints enforce this order even after extension insertion. It mutates only the request args, never the message history. Handles may appear bare, inside backticks, or nested in dict/list args; unknown or expired handles return an error ToolMessage naming the missing handles and up to ten current handles, without executing the tool. This applies even to an empty registry; ordinary concrete arguments and disabled-feature behavior remain unchanged. Both config flags must be on — disabling `tool_artifacts.enabled` stops resolution for threads that still carry registry state.
 
-任务笔记的同批容量预留通过调用局部 `ToolRuntime.state.__resolved_tool_call_args`
-读取同一解析器生成的参数视图；别名按实际 key 共用名额，原始消息与检查点不变。
+Task-note batch reservations read the same resolver's argument view from the
+call-local `ToolRuntime.state`, using `RESOLVED_TOOL_CALL_ARGS_KEY` from
+`deerflow.agents.task_continuity.state`. Aliases share a slot by resolved key;
+message history and checkpoints remain unchanged.
 
 ## Capture
 

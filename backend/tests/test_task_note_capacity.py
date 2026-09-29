@@ -1,4 +1,4 @@
-"""通过真实工具图验证任务笔记的批次容量与回执。"""
+"""Verify task-note batch capacity and receipts through real tool graphs."""
 
 import asyncio
 import json
@@ -13,6 +13,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+from deerflow.agents.task_continuity.state import RESOLVED_TOOL_CALL_ARGS_KEY
 from deerflow.agents.task_continuity.tools import task_note
 from deerflow.agents.thread_state import ThreadState, get_thread_state_schema
 from deerflow.config.tool_artifact_config import ToolArtifactConfig
@@ -82,7 +83,7 @@ async def test_batch_admission_matches_checkpointed_notebook(async_mode, mode, c
 
 
 class ReverseCompletion(AgentMiddleware):
-    """用真实中间件使后一个调用先完成，验证接纳不取决于调度时机。"""
+    """Complete the later call first through middleware to verify admission is scheduling-independent."""
 
     def __init__(self):
         self.sync_done = threading.Event()
@@ -177,7 +178,7 @@ async def test_failed_sibling_does_not_promise_its_reserved_slot(async_mode, fir
     assert set(state["task_notes"]) == set(notebook(7))
     assert replies(state)["invalid"]["error"] == error
     assert replies(state)["new_a"]["error"] == "note_capacity"
-    # 新模型批次重新计算容量，失败预留不能泄漏到后续执行。
+    # A new model batch recalculates capacity; failed reservations must not leak into later execution.
     retry = create_agent(NoteModel(calls=[note_call("new_a")]), tools=[task_note], state_schema=ThreadState)
     state["messages"].append(HumanMessage(content="retry"))
     state = await retry.ainvoke(state) if async_mode else retry.invoke(state)
@@ -253,7 +254,7 @@ async def test_resolved_batch_reserves_distinct_execution_keys(async_mode, mode,
         assert replies(state)[call_id]["error"] == "note_capacity"
     assert state["task_notes"][target]["content"] == ("replacement" if any(call["args"]["content"] == "replacement" for call in calls) else "new note")
     assert next(message for message in snapshot.values["messages"] if isinstance(message, AIMessage)).tool_calls == [{**call, "type": "tool_call"} for call in calls]
-    assert "__resolved_tool_call_args" not in snapshot.values
+    assert RESOLVED_TOOL_CALL_ARGS_KEY not in snapshot.values
 
 
 @pytest.mark.asyncio

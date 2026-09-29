@@ -82,6 +82,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Sub-Agents](#sub-agents)
     - [Sandbox \& File System](#sandbox--file-system)
     - [Context Engineering](#context-engineering)
+    - [Current Task Notes](#current-task-notes)
     - [Long-Term Memory](#long-term-memory)
   - [Recommended Models](#recommended-models)
   - [Embedded Python Client](#embedded-python-client)
@@ -1923,12 +1924,14 @@ in the composer and in the transcript. There is no automatic history search. See
 [configuration](backend/docs/CONFIGURATION.md#reading-referenced-conversations)
 and the [request contract](backend/docs/API.md#referencing-a-previous-conversation).
 
-### 当前任务笔记
+### Current Task Notes
 
-当前任务可通过 `task_continuity.enabled: true` 开启[任务笔记与历史回查](docs/task-continuity.md)。
-任务笔记最多八条；并行新增超出剩余名额时返回 `note_capacity`，保留原有笔记。
-启用资源句柄解析时按解析后的实际 key 计数，指向同一笔记的别名共用名额。
-已有 key 仍可替换或删除；同批删除及失败调用释放的名额在下一批可用，可届时重试。
+Enable [task notes and history recall](docs/task-continuity.md) with `task_continuity.enabled: true`.
+A task can retain up to eight notes. Parallel additions beyond the remaining slots return
+`note_capacity`, preserving existing notes. When artifact-handle resolution is enabled,
+capacity counts resolved keys; aliases for the same note share one slot.
+Existing keys can still be replaced or deleted. Slots freed by sibling deletions or failed
+calls become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
 

@@ -8,7 +8,7 @@ from langchain_core.tools import StructuredTool
 from langgraph.types import Command
 
 from deerflow.agents.task_continuity.archive import lookup
-from deerflow.agents.task_continuity.state import MAX_NOTE_CHARS, MAX_NOTE_SOURCES, MAX_NOTES, NOTE_KEY_PATTERN, SOURCE_ID_PATTERN, normalize_task_notes
+from deerflow.agents.task_continuity.state import MAX_NOTE_CHARS, MAX_NOTE_SOURCES, MAX_NOTES, NOTE_KEY_PATTERN, RESOLVED_TOOL_CALL_ARGS_KEY, SOURCE_ID_PATTERN, normalize_task_notes
 from deerflow.tools.types import Runtime
 from deerflow.utils.file_io import run_file_io
 
@@ -57,7 +57,7 @@ def _history_read(runtime: Runtime, source_id: str, offset: int = 0) -> str:
 
 
 def _has_note_capacity(runtime: Runtime, notes: dict, key: str) -> bool:
-    """按共同的批次快照预留新 key，避免并行 Command 提交时挤掉旧笔记。"""
+    """Reserve new keys from the shared batch snapshot so parallel Commands preserve existing notes."""
     if key in notes:
         return True
     available = MAX_NOTES - len(notes)
@@ -65,21 +65,21 @@ def _has_note_capacity(runtime: Runtime, notes: dict, key: str) -> bool:
         return False
     message = next((message for message in reversed(runtime.state.get("messages", [])) if isinstance(message, AIMessage)), None)
     if message is None or not any(call["id"] == runtime.tool_call_id for call in message.tool_calls):
-        # 直接调用工具时可能没有模型批次，保留单次调用的容量检查。
+        # Direct tool calls may have no model batch; retain the single-call capacity check.
         return True
     reserved: set[str] = set()
     for call in message.tool_calls:
         if call["name"] != "task_note":
             continue
-        # 启用句柄解析时，中间件提供与实际执行一致的批次参数；否则使用原始参数。
-        args = runtime.state.get("__resolved_tool_call_args", {}).get(call["id"], call["args"])
+        # Use middleware-resolved batch arguments when available, matching execution; otherwise use raw arguments.
+        args = runtime.state.get(RESOLVED_TOOL_CALL_ARGS_KEY, {}).get(call["id"], call["args"])
         candidate = args.get("key")
         content = args.get("content")
         if not isinstance(candidate, str) or not NOTE_KEY_PATTERN.fullmatch(candidate) or not isinstance(content, str) or not content:
             continue
         if candidate not in notes and len(reserved) < available:
             reserved.add(candidate)
-    # 不借用同批删除或失败调用的名额：它们尚未提交，甚至可能被中间件拒绝。
+    # Do not borrow slots from sibling deletions or failures: they have not committed and may be denied.
     return key in reserved
 
 
@@ -88,8 +88,8 @@ def _task_note(runtime: Runtime, key: str, content: str, source_ids: list[str] |
 
     Keep constraints, decisions, failed attempts, verified facts and next steps
     before compaction. Maximum 8 keys, 750 characters each and 4 source IDs.
-    并行新增按工具调用顺序预留名额；同批删除或失败调用释放的名额在下一批可用。
-    收到 note_capacity 时，可替换已有 key，或等当前批次完成后重试。
+    Parallel additions reserve slots in tool-call order; slots freed by sibling deletions or failures are available in the next batch.
+    On note_capacity, replace an existing key or retry after the current batch completes.
     Notes are model reports, not verified truth or long-term user memory. Cite
     history_search IDs when possible; uncited notes are explicitly self-reported.
     """
