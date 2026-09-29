@@ -183,8 +183,24 @@ def _save(body: SaveImageProfileRequest) -> dict:
         except (ImageConfigurationError, ValueError):
             legacy = None
             server_model = None
-        if legacy is not None and legacy.model == body.config.model and not any(item.name == body.config.name for item in store.list()):
-            raise HTTPException(409, "This image model ID is already configured by the server")
+        same_server_settings = (
+            legacy is not None
+            and legacy.usable()
+            and (
+                legacy.provider,
+                legacy.model,
+                legacy.base_url,
+                legacy.size,
+            )
+            == (
+                body.config.provider,
+                body.config.model,
+                body.config.base_url,
+                body.config.size,
+            )
+        )
+        if same_server_settings and not any(item.name == body.config.name for item in store.list()):
+            raise HTTPException(409, "This image provider, model, endpoint, and size are already configured by the server")
         profile = body.config.model_copy(update={"server_model_at_enable": server_model})
         return store.save(profile, expected_revision=body.expected_revision).public()
     except FileNotFoundError:
