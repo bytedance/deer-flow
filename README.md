@@ -1202,9 +1202,12 @@ under `web_fetch` or use `TAVILY_API_KEY` for both.
 For news-focused research, select **Webz.io News Search** in `make setup`, or
 replace the `web_search` tool's `use` with
 `deerflow.community.webz.tools:web_search_tool` and set `WEBZ_API_KEY`.
-An explicit tool `api_key` takes precedence over the environment variable;
-`max_results` defaults to 5 (clamped to 1–100). Results include the matching
-passage, title, URL, publication date, and source metadata. The tool accepts
+An explicit tool `api_key` takes precedence over the environment variable.
+An explicit call's `max_results` overrides the configured default; omission
+uses configuration or 5 (clamped to 1–100). Invalid configured counts, including
+booleans and fractional numbers, fall back to 5. Results include the matching
+passage, title, URL, publication date, and source metadata. `returned_results`
+counts the returned page, not all matching news articles. The tool accepts
 language, country, source-domain, sentiment, category, and publication-date
 filters. Its `time_range` maps to a UTC lower date bound of 1, 7, 30, or 365
 days; an explicit `published_from` overrides that bound. Webz searches recent

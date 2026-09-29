@@ -5,6 +5,9 @@ The setup wizard offers Webz.io as a news-only `web_search` provider using
 entry aligned with the credential check in `doctor.py` and the example config.
 The adapter uses async HTTPS requests, offloads lazy config loading, and maps
 `source` to provider `domain`; explicit `published_from` overrides recency.
+Explicit `max_results` overrides the wizard's configured default; omission or
+null uses configuration or 5. Reject boolean/fractional configured counts before
+clamping to 1–100. `returned_results` is the normalized page size, not a match total.
 Contract tests live in `backend/tests/test_webz_tools.py`.
 
 Optional browser dependency detection reads the top-level `tools:` sequence

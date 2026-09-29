@@ -68,7 +68,7 @@ async def test_request_filters_and_normalized_results(webz, monkeypatch):
     }
     assert result == {
         "query": "renewable energy",
-        "total_results": 1,
+        "returned_results": 1,
         "results": [{"title": "News", "url": "https://example.com/news", "content": "Matching passage", "published_at": "2026-09-20T12:00:00Z", "source": {"domain": "example.com", "language": "english", "country": "US"}}],
     }
 
@@ -95,7 +95,7 @@ async def test_environment_key_configured_count_and_no_implicit_filters(webz, mo
     module, options, requests, _, _ = webz
     options.update(api_key=" ", max_results="1000")
     monkeypatch.setenv("WEBZ_API_KEY", " env-key ")
-    assert json.loads(await module.web_search_tool.ainvoke({"query": " news "})) == {"query": "news", "total_results": 0, "results": []}
+    assert json.loads(await module.web_search_tool.ainvoke({"query": " news "})) == {"query": "news", "returned_results": 0, "results": []}
     assert requests[0].headers["authorization"] == "Bearer env-key"
     assert json.loads(requests[0].content) == {"query": "news", "k": 100}
 
@@ -177,18 +177,36 @@ async def test_transport_failures_are_sanitized(webz, monkeypatch, exception):
 async def test_summary_fallback_and_output_limit(webz):
     module, _, _, response, _ = webz
     response["results"] = [{"article": {"title": "News", "url": "https://example.com", "summary": "Summary"}}] * 3
+    response["total_results"] = 3
     result = json.loads(await module.web_search_tool.ainvoke({"query": "news", "max_results": 1}))
-    assert result["total_results"] == len(result["results"]) == 1
+    assert result["returned_results"] == len(result["results"]) == 1
+    assert "total_results" not in result
     assert result["results"][0]["content"] == "Summary"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value, expected", [(None, 5), (True, 5), ("invalid", 5), (-1, 1), ("12", 12), (200, 100)])
+@pytest.mark.parametrize("value, expected", [(None, 5), (True, 5), (False, 5), ("invalid", 5), (3.5, 5), (-3.5, 5), (float("inf"), 5), (float("nan"), 5), (3.0, 3), (-1, 1), ("12", 12), (200, 100)])
 async def test_configured_result_count(webz, value, expected):
     module, options, requests, _, _ = webz
     options["max_results"] = value
     await module.web_search_tool.ainvoke({"query": "news"})
     assert json.loads(requests[0].content)["k"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured, arguments, expected", [(5, {"max_results": 20}, 20), (20, {"max_results": 5}, 5), ("invalid", {"max_results": 3}, 3), (20, {}, 20), (20, {"max_results": None}, 20)])
+async def test_call_count_overrides_configuration_unless_omitted(webz, configured, arguments, expected):
+    module, options, requests, _, _ = webz
+    options["max_results"] = configured
+    await module.web_search_tool.ainvoke({"query": "news", **arguments})
+    assert json.loads(requests[0].content)["k"] == expected
+
+
+@pytest.mark.asyncio
+async def test_missing_configured_count_defaults_to_five(webz):
+    module, _, requests, _, _ = webz
+    await module.web_search_tool.ainvoke({"query": "news"})
+    assert json.loads(requests[0].content)["k"] == 5
 
 
 def test_doctor_recognizes_webz_credentials(tmp_path, monkeypatch):

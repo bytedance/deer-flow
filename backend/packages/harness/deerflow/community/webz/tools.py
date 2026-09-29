@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
@@ -12,6 +13,8 @@ from langchain.tools import tool
 from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.config import get_app_config
 
+logger = logging.getLogger(__name__)
+
 
 def _options() -> dict:
     config = get_app_config().get_tool_config("web_search")
@@ -20,8 +23,11 @@ def _options() -> dict:
 
 def _count(value: object) -> int:
     try:
-        return max(1, min(100, int(value))) if not isinstance(value, bool) else 5
+        if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+            raise ValueError("Expected an integer")
+        return max(1, min(100, int(value)))
     except (TypeError, ValueError, OverflowError):
+        logger.warning("Invalid Webz max_results; using default 5")
         return 5
 
 
@@ -51,7 +57,7 @@ def _normalize(payload: object, count: int) -> list[dict]:
 @tool("web_search", parse_docstring=True)
 async def web_search_tool(
     query: str,
-    max_results: int = 5,
+    max_results: int | None = None,
     time_range: SearchTimeRange | None = None,
     published_from: str | None = None,
     published_to: str | None = None,
@@ -68,7 +74,7 @@ async def web_search_tool(
 
     Args:
         query: News search query, at most 750 characters and 100 words.
-        max_results: Maximum results, clamped to 1-100; configuration can override it.
+        max_results: Maximum results, clamped to 1-100; uses configuration or 5 when omitted.
         time_range: Optional recency window: day, week, month, or year (UTC).
         published_from: Inclusive lower publication date in YYYY-MM-DD; overrides time_range.
         published_to: Inclusive upper publication date in YYYY-MM-DD.
@@ -79,7 +85,7 @@ async def web_search_tool(
         category: Optional news categories.
 
     Returns:
-        JSON containing query, total_results and results, or an error.
+        JSON containing query, returned_results (the returned page size) and results, or an error.
     """
     query = query.strip()
     if not query or len(query) > 750 or len(query.split()) > 100:
@@ -103,7 +109,7 @@ async def web_search_tool(
     key = key or os.getenv("WEBZ_API_KEY", "").strip()
     if not key:
         return json.dumps({"error": "Webz API key is missing; configure api_key or WEBZ_API_KEY"})
-    count = _count(options.get("max_results", max_results))
+    count = _count(max_results if max_results is not None else options.get("max_results", 5))
     body = {"query": query, "k": count}
     filters = {
         name: value
@@ -137,4 +143,4 @@ async def web_search_tool(
         return json.dumps({"error": "Webz request failed"})
     except ValueError:
         return json.dumps({"error": "Webz returned an unexpected response"})
-    return json.dumps({"query": query, "total_results": len(results), "results": results}, ensure_ascii=False)
+    return json.dumps({"query": query, "returned_results": len(results), "results": results}, ensure_ascii=False)
