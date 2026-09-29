@@ -6,6 +6,7 @@ import asyncio
 import builtins
 import gc
 import json
+import sys
 import threading
 import weakref
 from types import SimpleNamespace
@@ -32,6 +33,22 @@ def test_discord_channel_init() -> None:
     channel = DiscordChannel(bus=bus, config={"bot_token": "token"})
 
     assert channel.name == "discord"
+
+
+@pytest.mark.asyncio
+async def test_start_without_discord_module_points_at_the_extra(caplog) -> None:
+    """discord.py ships in the optional ``discord`` extra, so the missing-dependency
+    hint must send the operator to ``uv sync --extra discord`` — the same command
+    ``scripts/detect_uv_extras.py`` and the Docker builds already use — rather than
+    ``uv add``, which would rewrite pyproject.toml and diverge from ``uv sync --locked``."""
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+
+    with caplog.at_level("ERROR", logger="app.channels.discord"), patch.dict(sys.modules, {"discord": None}):
+        await channel.start()
+
+    assert any("uv sync --extra discord" in record.message for record in caplog.records)
+    assert not any("uv add" in record.message for record in caplog.records)
+    assert channel._running is False
 
 
 # ---------------------------------------------------------------------------
