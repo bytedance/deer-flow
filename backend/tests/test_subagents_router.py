@@ -31,6 +31,39 @@ def _environment(tmp_path, monkeypatch):
     reset_app_config()
 
 
+async def test_create_managed_subagent_routes_write_through_mutation_drain(monkeypatch):
+    created: list[object] = []
+
+    class Store:
+        def create(self, definition):
+            created.append(definition)
+
+    store = Store()
+    calls: list[tuple] = []
+
+    async def drained(func, /, *args):
+        calls.append((func, args))
+        return func(*args)
+
+    monkeypatch.setattr(router, "get_managed_subagent_store", lambda *_: store)
+    monkeypatch.setattr(router, "_run_store_mutation", drained)
+
+    response = await router.create_managed_subagent(
+        _request("admin"),
+        router.ManagedSubagentCreateRequest(
+            name="planner",
+            description="Plans work",
+            system_prompt="Plan the work.",
+        ),
+    )
+
+    assert response.name == "planner"
+    assert len(calls) == 1
+    assert calls[0][0] == store.create
+    assert calls[0][1][0].name == "planner"
+    assert created[0].name == "planner"
+
+
 async def test_admin_can_create_update_and_delete_managed_subagent():
     created = await router.create_managed_subagent(
         _request("admin"),
