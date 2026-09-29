@@ -15,6 +15,11 @@ from deerflow.agents.middlewares import dynamic_context_middleware as context_mo
 from deerflow.utils import context_io
 
 
+class _AsyncioProxy(SimpleNamespace):
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+
 @pytest.fixture
 def context_pool(monkeypatch):
     pool = context_io._ContextInjectionPool(max_workers=2)
@@ -25,8 +30,9 @@ def context_pool(monkeypatch):
         pool.shutdown(wait=True)
 
 
-def test_timed_out_injections_do_not_starve_default_executor(monkeypatch, context_pool):
+def test_timed_out_injections_do_not_starve_default_executor(monkeypatch, context_pool, caplog):
     """Abandoned injection workers must not queue unrelated handler work."""
+    monkeypatch.setattr(context_module, "_INJECT_TIMEOUT_SECONDS", 7.5)
 
     async def scenario():
         loop = asyncio.get_running_loop()
@@ -37,6 +43,7 @@ def test_timed_out_injections_do_not_starve_default_executor(monkeypatch, contex
         calls = []
 
         async def timeout_after_workers_start(awaitable, *, timeout):
+            assert timeout == 7.5
             # Exercise real wait_for cancellation, but only after both workers
             # have started. No scheduler-speed assumption or slow network call.
             task = asyncio.ensure_future(awaitable)
@@ -52,8 +59,10 @@ def test_timed_out_injections_do_not_starve_default_executor(monkeypatch, contex
         monkeypatch.setattr(
             context_module,
             "asyncio",
-            SimpleNamespace(to_thread=asyncio.to_thread, wait_for=timeout_after_workers_start),
+            _AsyncioProxy(wait_for=timeout_after_workers_start),
         )
+        assert context_module.asyncio.gather is asyncio.gather
+        assert context_module.asyncio.sleep is asyncio.sleep
 
         def make_injection(index):
             def inject(*_args):
@@ -74,6 +83,7 @@ def test_timed_out_injections_do_not_starve_default_executor(monkeypatch, contex
                 calls.append(asyncio.create_task(middleware.abefore_agent({}, SimpleNamespace(context={}))))
 
             assert await asyncio.wait_for(asyncio.gather(*calls), 5) == [None, None]
+            assert caplog.text.count("injection timed out after 7.5s") == 2
             assert not any(event.is_set() for event in finished)
             # Equivalent to an unrelated handler's synchronous offload. It must
             # complete while both abandoned injection workers are still blocked.
@@ -92,7 +102,7 @@ def test_timed_out_injections_do_not_starve_default_executor(monkeypatch, contex
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fatal", [False, True, None], ids=["fail_open", "fail_closed", "unknown"])
-async def test_saturated_injection_rejects_bursts_without_submitting_more_work(monkeypatch, context_pool, fatal):
+async def test_saturated_injection_rejects_bursts_without_submitting_more_work(monkeypatch, context_pool, fatal, caplog):
     loop = asyncio.get_running_loop()
     started = [asyncio.Event(), asyncio.Event()]
     release = threading.Event()
@@ -117,6 +127,9 @@ async def test_saturated_injection_rejects_bursts_without_submitting_more_work(m
                     await asyncio.wait_for(call, 1)
                 assert isinstance(error.value.__cause__, context_io.ContextInjectionBusyError)
         inject.assert_not_called()
+        if fatal is False:
+            assert caplog.text.count("injection unavailable (context injection pool saturated)") == 20
+            assert "timed out" not in caplog.text
     finally:
         release.set()
         await asyncio.gather(*tasks)

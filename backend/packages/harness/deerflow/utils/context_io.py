@@ -39,6 +39,7 @@ class _ContextInjectionPool:
         self._slots = threading.BoundedSemaphore(max_workers)
 
     async def run[**P, T](self, func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+        loop = asyncio.get_running_loop()
         # Never wait for admission on a worker or accumulate an unbounded queue.
         # A threading primitive also shares the limit with subagent/embedded loops.
         if not self._slots.acquire(blocking=False):
@@ -54,7 +55,7 @@ class _ContextInjectionPool:
         # a running submission does not stop its thread. This callback also runs
         # when queued work is cancelled, or the submitting event loop has closed.
         future.add_done_callback(lambda _future: self._slots.release())
-        return await asyncio.wrap_future(future)
+        return await asyncio.wrap_future(future, loop=loop)
 
     def shutdown(self, *, wait: bool = False) -> None:
         # Running synchronous calls still require their own downstream deadlines.

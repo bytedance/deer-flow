@@ -652,7 +652,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         except (TimeoutError, ContextInjectionBusyError) as exc:
             from deerflow.agents.memory import MemoryReadError
 
-            reason = "unavailable (context injection pool saturated)" if isinstance(exc, ContextInjectionBusyError) else "timed out"
+            reason = "unavailable (context injection pool saturated)" if isinstance(exc, ContextInjectionBusyError) else f"timed out after {_INJECT_TIMEOUT_SECONDS:.1f}s"
             # A worker that never started (or is still resolving policy) leaves
             # the policy unknown. Fail closed without waiting for that worker.
             if read_failures_are_fatal is not False:
