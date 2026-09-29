@@ -619,3 +619,138 @@ def test_absent_history_remains_uninitialized(scoped, empty):
     rendered = _render_durable_context_data(None, [], [], {}, empty)
     assert '"history_status": "no_compaction_yet"' in rendered
     assert archive.lookup({"task_history": empty}, scoped, query="missing") == {"results": [], "status": "available"}
+
+
+@pytest.mark.parametrize("location", ["active", "archive", "mixed"])
+def test_role_search_recovers_user_correction_beyond_active_result_limit(scoped, location):
+    import json
+
+    from deerflow.tools.types import Runtime
+
+    scoped = Runtime(state={}, context=scoped.context, config={}, stream_writer=lambda _: None, tool_call_id="search", store=None)
+
+    noise = [AIMessage(content="replicas 3", id=f"assistant-{i}") for i in range(9)]
+    correction = HumanMessage(content="replicas: change the count from 3 to 4", id="correction")
+    scoped.state = {"messages": [*noise, correction]}
+    if location != "active":
+        scoped.state = {"task_history": archive.capture({}, scoped, [*noise, correction], TaskContinuityConfig(enabled=True)), "messages": []}
+    if location == "mixed":
+        scoped.state["messages"] = [ToolMessage(content="replicas 3", tool_call_id="noise"), HumanMessage(content="replicas: keep backups", id="active-user")]
+    unfiltered = json.loads(history_search.invoke({"runtime": scoped, "query": "replicas"}))
+    assert len(unfiltered["results"]) == 8
+    assert all(row["message_id"] != "correction" for row in unfiltered["results"])
+
+    filtered = json.loads(history_search.invoke({"runtime": scoped, "query": "replicas", "role": "user"}))
+    assert filtered["status"] == "available"
+    assert [row["message_id"] for row in filtered["results"]] == (["correction", "active-user"] if location == "mixed" else ["correction"])
+    source = json.loads(history_read.invoke({"runtime": scoped, "source_id": filtered["results"][0]["id"]}))
+    assert source["text"] == "replicas: change the count from 3 to 4"
+
+
+@pytest.fixture
+def role_runtime(scoped):
+    from deerflow.tools.types import Runtime
+
+    return Runtime(state={}, context=scoped.context, config={}, stream_writer=lambda _: None, tool_call_id="search", store=None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+@pytest.mark.parametrize("archived", [False, True])
+@pytest.mark.parametrize("role,stored_role", [("user", "human"), ("assistant", "ai"), ("tool", "tool")])
+async def test_role_search_mapping_and_default_compatibility(role_runtime, async_mode, archived, role, stored_role):
+    import json
+
+    messages = [HumanMessage(content="Citrine user", id="human"), AIMessage(content="Citrine assistant", id="ai"), ToolMessage(content="Citrine tool", id="tool", tool_call_id="call")]
+    role_runtime.state = {"messages": messages}
+    if archived:
+        role_runtime.state = {"task_history": archive.capture({}, role_runtime, messages, TaskContinuityConfig(enabled=True))}
+
+    async def search(**kwargs):
+        arguments = {"runtime": role_runtime, "query": "Citrine", **kwargs}
+        return json.loads(await history_search.ainvoke(arguments) if async_mode else history_search.invoke(arguments))
+
+    original = await search()
+    assert original == await search(role=None)
+    assert [row["role"] for row in original["results"]] == ["human", "ai", "tool"]
+    filtered = await search(role=role)
+    assert filtered == {"results": [row for row in original["results"] if row["role"] == stored_role], "status": "available"}
+    arguments = {"runtime": role_runtime, "source_id": filtered["results"][0]["id"]}
+    source = json.loads(await history_read.ainvoke(arguments) if async_mode else history_read.invoke(arguments))
+    assert source["message_id"] == stored_role
+    assert source["text"] == {"user": "Citrine user", "assistant": "Citrine assistant", "tool": "Citrine tool"}[role]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["human", "ai", "system", "", "USER", 1, ["user"]])
+async def test_role_search_rejects_invalid_tool_arguments(role_runtime, role):
+    from pydantic import ValidationError
+
+    arguments = {"runtime": role_runtime, "query": "Citrine", "role": role}
+    with pytest.raises(ValidationError, match="role"):
+        history_search.invoke(arguments)
+    with pytest.raises(ValidationError, match="role"):
+        await history_search.ainvoke(arguments)
+
+
+def test_role_search_schema_is_optional_and_model_visible():
+    schema = history_search.tool_call_schema.model_json_schema()
+    assert "role" not in schema.get("required", [])
+    assert "runtime" not in schema["properties"]
+    assert schema["properties"]["role"]["default"] is None
+    assert schema["properties"]["role"]["anyOf"] == [{"enum": ["user", "assistant", "tool"], "type": "string"}, {"type": "null"}]
+
+
+@pytest.mark.parametrize("context", [{"thread_id": "thread-b", "user_id": "alice"}, {"thread_id": "thread-a", "user_id": "bob"}])
+def test_role_search_preserves_checkpoint_scope(role_runtime, context):
+    import json
+
+    role_runtime.state = {"task_history": archive.capture({}, role_runtime, conversation(), TaskContinuityConfig(enabled=True))}
+    role_runtime.context = context
+    assert json.loads(history_search.invoke({"runtime": role_runtime, "query": "Citrine", "role": "user"})) == {"results": [], "status": "scope_unavailable"}
+
+
+def test_role_search_preserves_visibility_reachability_and_status(role_runtime):
+    import json
+
+    config = TaskContinuityConfig(enabled=True, max_batches=1)
+    messages = [HumanMessage(content="Citrine visible", id="visible"), HumanMessage(content="Citrine hidden", additional_kwargs={"hide_from_ui": True})]
+    role_runtime.state = {"messages": messages}
+    arguments = {"runtime": role_runtime, "query": "Citrine", "role": "user"}
+    active = json.loads(history_search.invoke(arguments))
+    assert [row["message_id"] for row in active["results"]] == ["visible"]
+    role_runtime.state = {"task_history": archive.capture({}, role_runtime, messages, config)}
+    assert json.loads(history_search.invoke(arguments)) == active
+    archive.capture(role_runtime.state, role_runtime, [HumanMessage(content="Citrine future", id="future")], config)
+    assert json.loads(history_search.invoke(arguments)) == {"results": [], "status": "partially_expired"}
+    role_runtime.state["task_history"]["status"] = "unavailable"
+    assert json.loads(history_search.invoke(arguments)) == {"results": [], "status": "unavailable"}
+    assert json.loads(history_search.invoke({**arguments, "query": "!!!"})) == {"results": [], "status": "empty_query"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_graph_executes_role_search_and_reads_original_source(scoped, async_mode):
+    import json
+
+    class RoleRecallModel(StaticModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            last = messages[-1]
+            if isinstance(last, ToolMessage) and last.name == "history_search":
+                rows = json.loads(last.content)["results"]
+                assert [row["message_id"] for row in rows] == ["correction"]
+                call = {"name": "history_read", "args": {"source_id": rows[0]["id"]}, "id": "read"}
+            elif isinstance(last, ToolMessage) and last.name == "history_read":
+                assert json.loads(last.content)["text"] == "replicas: change the count from 3 to 4"
+                return ChatResult(generations=[ChatGeneration(message=AIMessage(content="source verified"))])
+            else:
+                call = {"name": "history_search", "args": {"query": "replicas", "role": "user"}, "id": "search"}
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", tool_calls=[call]))])
+
+    messages = [ToolMessage(content="replicas 3", tool_call_id=f"noise-{i}", id=f"noise-{i}") for i in range(9)]
+    messages.append(HumanMessage(content="replicas: change the count from 3 to 4", id="correction"))
+    history = archive.capture({}, scoped, messages, TaskContinuityConfig(enabled=True))
+    graph = create_agent(RoleRecallModel(), tools=[history_search, history_read], state_schema=ThreadState)
+    initial = {"messages": [HumanMessage(content="Resume")], "task_history": history}
+    result = await graph.ainvoke(initial, context=scoped.context) if async_mode else graph.invoke(initial, context=scoped.context)
+    assert result["messages"][-1].content == "source verified"

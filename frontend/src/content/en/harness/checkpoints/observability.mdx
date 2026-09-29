@@ -1,0 +1,117 @@
+---
+title: Observability
+description: Nothing reports the checkpoint mode. This chapter covers what a client can and cannot see, the log lines and SSE frames a mismatch produces, what a browser user actually sees, the cache counters an operator can read, and how to determine a running process's or a thread's mode.
+---
+
+import { Callout } from "nextra/components";
+
+# Observability
+
+## Nothing exposes the mode
+
+The checkpoint mode is server-side state. Neither the mode nor the snapshot cadence appears in any health, readiness, features, capabilities, or console field, and none of them appears in a response model, a response header, or an event field.
+
+- The health and readiness probes only test backend reachability. No route reads `checkpoint_channel_mode` except the threads router's error mapping.
+- The only custom SSE headers are `Cache-Control`, `Connection`, `X-Accel-Buffering`, and `Content-Location`.
+- The Gateway consumes the mode server-side only, into `app.state.checkpoint_channel_mode` / `app.state.checkpoint_snapshot_frequency` and the run context. Nothing serializes it outward.
+
+There is no field to poll for "is this deployment in delta mode?". You infer it from a thread's metadata, from a `409` on a gated route, or from inside the process.
+
+## What a client can and cannot see
+
+Two mode keys exist, and only one of them can reach a client.
+
+| Key | Where it is written | On the wire |
+| --- | --- | --- |
+| `INTERNAL_CHECKPOINT_MODE_KEY` = `"__deerflow_checkpoint_channel_mode"` | `config["configurable"]`, always, both modes | Never. Server-side only. |
+| `CHECKPOINT_MODE_METADATA_KEY` = `"deerflow_checkpoint_channel_mode"` | `config["metadata"]`, **only** in delta mode; removed in full mode | Can pass through inside response `metadata` objects |
+
+Because the marker is only written in delta mode, a stored delta checkpoint carries it and a stored full checkpoint does not; absence means full.
+
+Two read endpoints build their response `metadata` from the stored snapshot's metadata minus a strip list, and that list does not contain the mode marker or LangGraph's own `counters_since_delta_snapshot`, so both can reach a client:
+
+| Endpoint | Response `metadata` source |
+| --- | --- |
+| `GET /api/threads/{thread_id}` | `snapshot.metadata` minus `created_at`, `updated_at`, `step`, `source`, `writes`, `parents` — but only when no `threads_meta` row exists; otherwise the store row supplies `metadata` |
+| `POST /api/threads/{thread_id}/history` | each entry's `snapshot.metadata` minus the same list plus `run_durations` and the run-message-ids key, then `step` is re-added |
+
+This passthrough follows from the strip lists in the handlers; no test asserts the marker on the wire, so treat it as an implementation detail rather than a contract.
+
+Stream frames carry no mode. The SSE `metadata` event payload is only `{"run_id", "thread_id"}`, and the SSE `error` event payload is `{"message", "name"}`, where `name` is the exception class name.
+
+## Log and stream surface
+
+A mode problem produces different evidence depending on which path hit it.
+
+| Situation | Surface | Verbatim text |
+| --- | --- | --- |
+| A run hits a mismatch | run worker log (`exc_info=True`) | `Run %s failed: %s` with the mismatch text as `%s` |
+| A run hits a mismatch | run record / `/wait` body / SSE `error` frame | `Thread requires delta mode; materialize and convert its checkpoints before using full mode.` |
+| A run hits a restart-required violation | run worker log (`exc_info=True`), run record, SSE `error` frame | `Run %s failed: %s` with `checkpoint_channel_mode is restart-required and cannot change in a running process` (or the `checkpoint_delta.snapshot_frequency` twin) as `%s` |
+| Context usage hits a mismatch | log | `Failed to load checkpoint for context usage on thread %s` |
+| Regenerate cannot read the latest checkpoint | log, then HTTP 500 `detail` | `Failed to read latest checkpoint for regenerate thread %s` → `Failed to read latest checkpoint` |
+| Regenerate cannot list checkpoint history | log, then HTTP 500 `detail` | `Failed to list checkpoints for regenerate thread %s` → `Failed to inspect checkpoint history` |
+
+The failure payloads differ by route. Run creation does **not** pre-gate on the threads router: `POST /api/threads/{thread_id}/runs` returns a `200` run record that later turns `status: error` with the mismatch text, `POST /runs/stream` returns `200 text/event-stream` and then an `event: error` frame with `{"message": ..., "name": "CheckpointModeMismatchError"}`, and `POST /runs/wait` returns `200` JSON with `{"status": "error", "error": "<mismatch text>"}`. The exception is a thread whose run-event feed is empty but whose checkpoint head exists: `ensure_checkpoint_history_seeded` materializes that head inside `start_run`, where the mode errors are not mapped, so the same mismatch returns a plain `500` before the run is admitted. The stateless `/api/runs/*` routes share that path.
+
+<Callout type="warning">
+  The mode gate itself logs nothing. `checkpoint_mode.py` has no logger,
+  and the threads router converts mode errors into `HTTPException`s without
+  logging, so a `409` leaves no log line of its own. The evidence lives on
+  the caller: the run worker's `Run %s failed: %s`, the run record, or the
+  client-side toast.
+</Callout>
+
+## What a browser user sees
+
+The UI has no mode surface at all: no badge, setting, column, or error copy, and no i18n string for a mismatch. But the chat page does hit the gated routes, so the failure is visible without naming the mode.
+
+- The chat page loads durable history by default (`fetchStateHistory: { limit: 1 }`), which calls `POST /api/threads/{thread_id}/history`. On a delta thread read by a full-mode process, that is the `409` route.
+- The SDK turns the response into an `HTTPError` whose message is `HTTP 409: <raw response body text>`; `409` is in the SDK's no-retry set, so the error is thrown immediately without retries.
+- That error reaches the stream `onError`, which shows a toast of the error message. The user therefore sees the raw server text, approximately:
+
+  ```
+  HTTP 409: {"detail":"Thread <thread_id>: Thread requires delta mode; materialize and convert its checkpoints before using full mode."}
+  ```
+
+  Both halves are individually verified (`HTTP 409: ` from the SDK, the `detail` body from the router); the concatenated string itself was not observed at runtime.
+- Sidebar **Export** calls `getState()` → `GET /api/threads/{thread_id}/state` → `409`, but a bare `catch {}` discards the detail and shows only the generic `exportFailed` toast.
+- **Rename** calls `updateState()` → `POST /api/threads/{thread_id}/state` → `409` → `toast.error(error.message ?? renameFailed)`, so on this path the raw HTTPError string can surface.
+- Stream-gap recovery wraps a failing `getState` into `StreamReplayGapError`; the other internal `getState` (the reconnect input snapshot) swallows every non-abort error and returns `undefined`.
+- The only checkpoint-ish toast text in the UI, `Failed to load thread history.`, belongs to the messages-page route, not to a mode-gated one.
+
+## Cache counters
+
+The delta history cache wraps the saver only in delta mode on the Gateway (async) path. `CachedHistorySaver.stats()` merges the backend counters with two wrapper counters. No HTTP route exposes them; read them in-process.
+
+| Counter | Meaning | Reported by |
+| --- | --- | --- |
+| `hits` | per-channel history lookups served from the cache | memory, redis |
+| `misses` | lookups that had to be composed or walked | memory, redis |
+| `evictions` | entries dropped by the LRU bound | memory only |
+| `entries` | current number of cached entries | memory only |
+| `compose_hits` | ancestor levels resolved by composing from a warm ancestor (cached entry or snapshot-bearing parent) | wrapper |
+| `full_walks` | fallbacks to the raw inner saver's own walk (cold chain at the depth budget, disabled cache, or no target found) | wrapper |
+
+The redis backend reports only `hits` and `misses`; its `evictions` and `entries` stay at `0`. `max_entries: 0` disables the cache uniformly, and a disabled cache passes straight through to the raw saver without composing at all. Changing any `database.checkpoint_cache.*` field takes a restart before a running Gateway reports different counters, because the cache is built with the checkpointer at startup; see [History Cache](/docs/harness/checkpoints/history-cache).
+
+## Determining the mode
+
+### A running process
+
+The mode is a module-global frozen the first time a process builds an agent. `frozen_checkpoint_channel_mode()` returns the frozen value or `None`; `frozen_checkpoint_snapshot_frequency()` does the same for the cadence. The Gateway additionally stores the startup snapshot at `app.state.checkpoint_channel_mode` and `app.state.checkpoint_snapshot_frequency`.
+
+Nothing prints either value at startup. In practice:
+
+1. Read `database.checkpoint_channel_mode` (and `database.checkpoint_delta.snapshot_frequency`) from `config.yaml`.
+2. Confirm the process started after the last edit — an edit without a restart has no effect and fails loudly once a new graph is built (see [Troubleshooting](/docs/harness/checkpoints/troubleshooting)).
+3. Remember that every process sharing the checkpoint database must use the same value, and that a client-supplied `configurable.__deerflow_checkpoint_channel_mode` cannot change a process's mode.
+
+### A thread
+
+A thread's mode is recorded in its stored checkpoints:
+
+- A delta checkpoint carries `deerflow_checkpoint_channel_mode: "delta"` in its metadata; a full checkpoint does not.
+- LangGraph's own `counters_since_delta_snapshot` metadata is a second delta signal.
+- Through HTTP, the marker can be read from the `metadata` objects of `GET /api/threads/{thread_id}` (when no `threads_meta` row exists) and of each entry in `POST /api/threads/{thread_id}/history`.
+- Or open the thread in a process you believe is `full`: a delta thread answers with `409`.

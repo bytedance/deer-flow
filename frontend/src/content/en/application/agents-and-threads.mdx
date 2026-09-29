@@ -118,6 +118,11 @@ database:
   <code>database</code> for new deployments.
 </Callout>
 
+How thread state is represented in that backend — full-value checkpoints or
+LangGraph's `DeltaChannel` — is a separate switch,
+`database.checkpoint_channel_mode`. See
+[Checkpoints and Delta Channels](/docs/harness/checkpoints).
+
 ### Thread data storage
 
 Working files produced during a thread (uploads, intermediate files, output artifacts) are stored under:

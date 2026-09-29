@@ -176,7 +176,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
    如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
 
-   Setup Wizard 已内置 Z.AI GLM-5.3-Flash 配置。由于该模型强制开启 thinking，且只接受自身限定的 effort 档位，当前兼容配置会在前台和后台调用中始终保持 thinking 开启，并暂时屏蔽 DeerFlow 的通用 effort 选择器。等价的手动配置见 `config.example.yaml`。
+   如果某个模型的 provider 约定与 DeerFlow 通用的 thinking/effort 假设不同，可以为该模型声明 `reasoning:` 块（thinking 为 `unsupported`/`optional`/`required`、允许的 effort 取值及别名和默认值、payload 方言、推理历史要求）。Setup Wizard 内置的 Z.AI GLM-5.3-Flash 配置就使用了它：前台和后台调用都会保持 thinking 开启，effort 选择器只提供该模型自己的 `low`/`high`/`max` 档位。未声明该块的配置行为保持不变。具体格式与等价的手动配置见 `config.example.yaml`。
 
    对于 vLLM 0.19.0，请使用 `deerflow.models.vllm_provider:VllmChatModel`。对于 Qwen 风格的推理模型，DeerFlow 通过 `extra_body.chat_template_kwargs.enable_thinking` 开关推理，并在多轮 tool-call 对话中保留 vLLM 非标准的 `reasoning` 字段。旧版 `thinking` 配置会自动规范化以保持向后兼容。推理模型可能还需要在启动 vLLM 服务时加上 `--reasoning-parser ...` 参数。如果你的本地 vLLM 部署接受任意非空 API key，可以把 `VLLM_API_KEY` 设为一个占位值。
 
@@ -733,6 +733,11 @@ Web UI 输入框支持浏览器侧语音听写。浏览器提供 Web Speech API 
 Web UI 会在输入框上方展示当前激活的 goal。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
 
 ### 手动上下文压缩
+
+启用 `task_continuity.enabled` 后，可用 `history_search` 检索当前任务的活跃消息和
+已压缩历史。可选参数 `role` 接受 `user`、`assistant`、`tool`，在最多八条结果的
+截断前过滤；省略或 `null` 保持原有全角色搜索。使用 `history_read` 核对来源原文，
+历史用户消息不代表当前授权。详见[任务连续性说明（英文）](docs/task-continuity.md)。
 
 在 Web UI 输入框中使用 `/compact`，可以把当前 thread 的早期上下文压缩成摘要。完整聊天记录仍会保留在界面上，但后续模型调用会基于压缩摘要和最近消息继续。当前历史不足时不会压缩；thread 正在运行任务时会阻止压缩。
 

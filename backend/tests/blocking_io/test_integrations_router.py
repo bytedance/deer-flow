@@ -38,6 +38,26 @@ def _build_lark_archive(archive: Path) -> None:
 
 def _write_stub_lark_cli(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        path.write_text(
+            """@echo off
+if "%~1" == "--version" (
+  echo v1.0.65
+  exit /b 0
+)
+
+if "%~1" == "auth" if "%~2" == "status" (
+  echo {"identities":{"user":{"userName":"Alice"}}}
+  exit /b 0
+)
+
+echo {}
+exit /b 0
+""",
+            encoding="utf-8",
+        )
+        return
+
     path.write_text(
         """#!/bin/sh
 if [ "$1" = "--version" ]; then
@@ -119,11 +139,22 @@ async def test_lark_install_route_does_not_block_event_loop(tmp_path: Path, monk
 async def test_lark_auth_complete_route_does_not_block_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _reset_paths(tmp_path, monkeypatch)
     config = await _config(tmp_path)
-    cli_path = tmp_path / "bin" / "lark-cli"
+    cli_name = "lark-cli.cmd" if os.name == "nt" else "lark-cli"
+    cli_path = tmp_path / "cli bin" / cli_name
     await asyncio.to_thread(_write_stub_lark_cli, cli_path)
 
     monkeypatch.setenv("PATH", f"{cli_path.parent}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setattr(integrations, "get_effective_user_id", lambda: "loop-user")
+    resolved_cli_path = await asyncio.to_thread(lark_cli._resolve_lark_cli_path)
+    assert resolved_cli_path is not None
+    assert Path(resolved_cli_path) == cli_path
+    await asyncio.to_thread(lark_cli.ensure_lark_cli_credential_tree, "loop-user")
+    config_dir = await asyncio.to_thread(lark_cli.lark_cli_config_dir, "loop-user")
+    await asyncio.to_thread(
+        (config_dir / "config.json").write_text,
+        '{"apps":[{"appId":"test-app","appSecret":"test-secret"}]}',
+        encoding="utf-8",
+    )
     generation = await asyncio.to_thread(_advance_lark_flow, "loop-user")
 
     response = await integrations.complete_lark_browser_auth(
@@ -134,3 +165,6 @@ async def test_lark_auth_complete_route_does_not_block_event_loop(tmp_path: Path
 
     assert response.status.cli.available is True
     assert response.status.cli.version == "v1.0.65"
+    assert response.success is True
+    assert response.status.auth.status == "authenticated"
+    assert response.status.auth.user == "Alice"

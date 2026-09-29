@@ -386,6 +386,27 @@ def test_null_sandbox_timeout_uses_default(monkeypatch: pytest.MonkeyPatch) -> N
     provider.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("config_key", "value", "message"),
+    [
+        ("request_timeout", float("nan"), "sandbox.request_timeout must be positive"),
+        ("request_timeout", float("inf"), "sandbox.request_timeout must be positive"),
+        ("ready_timeout", float("nan"), "sandbox.ready_timeout must be positive"),
+        ("ready_timeout", float("inf"), "sandbox.ready_timeout must be positive"),
+        ("sandbox_timeout", float("nan"), "sandbox.sandbox_timeout must be non-negative"),
+        ("sandbox_timeout", float("inf"), "sandbox.sandbox_timeout must be non-negative"),
+    ],
+)
+def test_provider_rejects_non_finite_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+    config_key: str,
+    value: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _install(monkeypatch, config={config_key: value})
+
+
 @pytest.mark.parametrize("exit_code", [17, None])
 def test_bootstrap_failure_destroys_created_remote(monkeypatch: pytest.MonkeyPatch, exit_code: int | None) -> None:
     sdk = _FakeSandboxClass(lambda index: _FakeRemote(f"remote-{index}", bootstrap_exit_code=exit_code))
@@ -599,6 +620,11 @@ def test_text_binary_append_and_line_ranges() -> None:
     assert box.read_file(path, 2, 3) == "two\nthree"
     box.write_file(path, "\nfour", append=True)
     assert box.read_file(path) == "one\ntwo\nthree\nfour"
+    # A start past EOF comes back empty rather than raising, and a negative
+    # start reads from the first line instead of wrapping around.
+    assert box.read_file(path, 99) == ""
+    assert box.read_file(path, -1) == "one\ntwo\nthree\nfour"
+    assert box.read_file(path, end_line=-1) == ""
     binary_path = "/mnt/user-data/outputs/blob.bin"
     box.update_file(binary_path, b"\x00\xffpayload")
     assert box.download_file(binary_path) == b"\x00\xffpayload"

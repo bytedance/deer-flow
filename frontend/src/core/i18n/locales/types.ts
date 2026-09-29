@@ -348,6 +348,10 @@ export interface Translations {
     reasoningEffortMediumDescription: string;
     reasoningEffortHigh: string;
     reasoningEffortHighDescription: string;
+    reasoningEffortXhigh: string;
+    reasoningEffortXhighDescription: string;
+    reasoningEffortMax: string;
+    reasoningEffortMaxDescription: string;
     surpriseMe: string;
     surpriseMePrompt: string;
     followupLoading: string;
