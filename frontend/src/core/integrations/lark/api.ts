@@ -36,6 +36,18 @@ async function readErrorDetail(response: Response): Promise<string> {
   return data.detail ?? `HTTP ${response.status}: ${response.statusText}`;
 }
 
+function normalizeLarkIntegrationStatus(
+  status: LarkIntegrationStatus,
+): LarkIntegrationStatus {
+  // Backends predating the flag omit it entirely; an absent flag means the
+  // runtime readiness was not reported as evaluated, so default to false and
+  // let the mutation cache preserve the last authoritative runtime fields.
+  return {
+    ...status,
+    sandbox_runtime_probed: status.sandbox_runtime_probed ?? false,
+  };
+}
+
 export async function loadLarkIntegrationStatus(
   signal?: AbortSignal,
 ): Promise<LarkIntegrationStatus> {
@@ -49,7 +61,7 @@ export async function loadLarkIntegrationStatus(
       await readErrorDetail(response),
     );
   }
-  return response.json();
+  return normalizeLarkIntegrationStatus(await response.json());
 }
 
 export async function installLarkIntegration(): Promise<LarkInstallResponse> {
@@ -65,7 +77,8 @@ export async function installLarkIntegration(): Promise<LarkInstallResponse> {
       await readErrorDetail(response),
     );
   }
-  return response.json();
+  const data = (await response.json()) as LarkInstallResponse;
+  return { ...data, status: normalizeLarkIntegrationStatus(data.status) };
 }
 
 export async function startLarkAuthorization(
@@ -131,7 +144,8 @@ export async function completeLarkConfiguration(
       await readErrorDetail(response),
     );
   }
-  return response.json();
+  const data = (await response.json()) as LarkConfigCompleteResponse;
+  return { ...data, status: normalizeLarkIntegrationStatus(data.status) };
 }
 
 export async function setLarkAppCredentials(
@@ -153,7 +167,8 @@ export async function setLarkAppCredentials(
       await readErrorDetail(response),
     );
   }
-  return response.json();
+  const data = (await response.json()) as LarkConfigCompleteResponse;
+  return { ...data, status: normalizeLarkIntegrationStatus(data.status) };
 }
 
 export async function completeLarkAuthorization(
@@ -175,5 +190,6 @@ export async function completeLarkAuthorization(
       await readErrorDetail(response),
     );
   }
-  return response.json();
+  const data = (await response.json()) as LarkAuthCompleteResponse;
+  return { ...data, status: normalizeLarkIntegrationStatus(data.status) };
 }

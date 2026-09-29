@@ -312,11 +312,23 @@ class ScheduledTaskRunRepository:
     ) -> dict[str, Any] | None:
         """Atomically move one waiting row into the lease-fenced launch phase."""
         async with self._sf() as session:
-            if session.get_bind().dialect.name == "postgresql":
+            dialect = session.get_bind().dialect.name
+            if dialect == "postgresql":
                 await session.execute(
                     text("SELECT pg_advisory_xact_lock(:lock_key)"),
                     {"lock_key": _SCHEDULER_BUDGET_LOCK_KEY},
                 )
+            elif dialect == "sqlite":
+                # The budget count below is only meaningful if no peer can
+                # claim between it and the UPDATE. A deferred SQLite
+                # transaction does not reserve the writer until that UPDATE,
+                # which is too late: every claimer would read the same stale
+                # count and pass. BEGIN IMMEDIATE takes the writer first, the
+                # same reservation _lock_task makes for a parent row, and it
+                # serializes claimers in other processes sharing the file too.
+                # The claim targets one row, but the budget is global, so this
+                # has to be the database-wide writer rather than a row lock.
+                await session.execute(text("BEGIN IMMEDIATE"))
             executing = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES)))
             if int(executing or 0) >= global_max_concurrent_runs:
                 await session.rollback()
@@ -624,6 +636,18 @@ class ScheduledTaskRunRepository:
     ) -> bool:
         async with self._sf() as session:
             row = await session.get(ScheduledTaskRunRow, run_record_id)
+            if row is None:
+                return False
+            # The lease-owner / terminal guards are only as fresh as the row
+            # they read: on SQLite a plain SELECT sees a snapshot that a
+            # concurrent requeue + re-claim can invalidate before this session
+            # commits (the same staleness #5777 fixed for the parent task's
+            # lease release). Take the parent's writer first — the same
+            # task -> run lock order every other mutating path uses — and
+            # re-read the row under it (populate_existing: the identity map
+            # would otherwise serve the pre-lock row back untouched).
+            await self._lock_task(session, row.task_id)
+            row = await session.get(ScheduledTaskRunRow, run_record_id, with_for_update=True, populate_existing=True)
             if row is None:
                 return False
             if protect_terminal and row.status in TERMINAL_RUN_STATUSES:

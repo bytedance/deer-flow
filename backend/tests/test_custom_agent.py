@@ -68,7 +68,8 @@ class TestPaths:
 
     def test_user_md_file(self, tmp_path):
         paths = _make_paths(tmp_path)
-        assert paths.user_md_file == tmp_path / "USER.md"
+        assert paths.user_md_file("alice") == tmp_path / "users" / "alice" / "USER.md"
+        assert paths.user_md_file("bob") != paths.user_md_file("alice")
 
     def test_paths_are_different_from_global(self, tmp_path):
         paths = _make_paths(tmp_path)
@@ -529,12 +530,17 @@ def _stub_app_config():
 
 
 def _make_test_app(tmp_path: Path):
-    """Create a FastAPI app with the agents router, patching paths to tmp_path."""
-    from fastapi import FastAPI
+    """Create a FastAPI app with the agents router, patching paths to tmp_path.
+
+    Uses the stub-auth helper so the ``@require_permission`` decorators on the
+    agents routes see an authenticated user with all permissions (mirroring
+    what ``AuthMiddleware`` does in the real gateway).
+    """
+    from _router_auth_helpers import make_authed_test_app
 
     from app.gateway.routers.agents import router
 
-    app = FastAPI()
+    app = make_authed_test_app()
     app.include_router(router)
     return app
 
@@ -703,8 +709,8 @@ class TestAgentsAPI:
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
 
-    def test_update_agent_preserves_hand_authored_github_block(self, agent_client):
-        """A hand-authored ``github:`` block on disk must survive PATCH.
+    def test_update_agent_preserves_hand_authored_non_managed_fields(self, agent_client):
+        """Hand-authored ``github:`` and ``memory_enabled`` fields must survive PATCH.
 
         The HTTP route does not expose ``github`` as an editable field
         (and rightly so — the GitHub App credentials and binding triggers
@@ -736,6 +742,7 @@ class TestAgentsAPI:
                 }
             ],
         }
+        config_data["memory_enabled"] = False
         config_file.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
 
         # PATCH only the description.
@@ -745,6 +752,7 @@ class TestAgentsAPI:
         # github: block must survive verbatim.
         reloaded = yaml.safe_load(config_file.read_text())
         assert reloaded["description"] == "new desc"
+        assert reloaded["memory_enabled"] is False
         assert reloaded["github"] == {
             "installation_id": 99999,
             "bot_login": "github-agent-bot",
@@ -879,10 +887,28 @@ class TestUserProfileAPI:
         assert response.status_code == 200
         assert response.json()["content"] == content
 
-        # File should be written to disk
-        user_md = tmp_path / "USER.md"
+        # File should be written to the caller's per-user bucket. The autouse
+        # _auto_user_context fixture in conftest.py sets user
+        # "test-user-autouse", so that is the effective id here.
+        user_md = tmp_path / "users" / "test-user-autouse" / "USER.md"
         assert user_md.exists()
         assert user_md.read_text(encoding="utf-8") == content
+
+    def test_user_profile_is_isolated_per_user(self, agent_client, tmp_path):
+        """A legacy global USER.md must never leak into a user's profile read.
+
+        Pre-fix behavior: GET/PUT /api/user-profile read and wrote the shared
+        ``{base_dir}/USER.md`` singleton, so any authenticated user could
+        overwrite the prompt context injected for every other user.
+        """
+        legacy_global = tmp_path / "USER.md"
+        legacy_global.write_text("# injected by another user", encoding="utf-8")
+
+        got = agent_client.get("/api/user-profile")
+        assert got.status_code == 200
+        # Per-user file does not exist yet and the legacy global file is not
+        # consulted as a fallback.
+        assert got.json()["content"] is None
 
     def test_get_user_profile_after_put(self, agent_client):
         content = "# Profile\n\nI work on data science."

@@ -1,0 +1,111 @@
+---
+title: 快照节奏
+description: database.checkpoint_delta.snapshot_frequency 如何在检查点体积与物化成本之间取舍、它与 LangGraph 全局 superstep 上界的关系、为什么它与模式一同冻结且从不写入检查点元数据，以及默认值 1000 改为 10 带来的历史变更与三条旧键迁移告警。
+---
+
+import { Callout } from "nextra/components";
+
+# 快照节奏
+
+`delta` 模式下检查点存的是写入，消息列表在读取时重建。为了让重建不必无限回溯祖先链，系统会定期落下一份完整的消息快照。`database.checkpoint_delta.snapshot_frequency` 决定这个间隔。
+
+<Callout type="info">
+  这个旋钮只在 `delta` 模式下有效。`checkpoint_channel_mode` 为 `full` 时，`checkpoint_delta` 整个小节都会被忽略；见[通道模式](/docs/harness/checkpoints/modes)。
+</Callout>
+
+## 配置键
+
+| 配置键                                          | 类型  | 默认值 | 范围                          | 是否重启 |
+| ----------------------------------------------- | ----- | ------ | ----------------------------- | -------- |
+| `database.checkpoint_delta.snapshot_frequency`  | `int` | `10`   | `ge=1`（大于等于 1，无上界）  | 是       |
+
+语义是：每 N 次逐步写入落一份完整的消息快照（值越大检查点越小、物化越慢）。该值会进入编译后的通道表：messages 字段被构造成 `DeltaChannel(merge_message_writes, snapshot_frequency=…)`，因此节奏是"编译出的图"的属性，而不是某个检查点自身的属性。
+
+```yaml
+database:
+  checkpoint_channel_mode: delta   # 只有在这个模式下 snapshot_frequency 才有意义
+  checkpoint_delta:
+    snapshot_frequency: 10         # 每 10 次逐步写入落一份 _DeltaSnapshot
+```
+
+## 权衡
+
+| 节奏             | 检查点体积                                          | 物化                                      | 物化结果 |
+| ---------------- | --------------------------------------------------- | ----------------------------------------- | -------- |
+| 小 N（例如 1）   | 每一步都带快照；存储优势退化到接近 `full` 模式        | 祖先链最短，读取最快                      | 完全相同 |
+| 默认 `10`        | 每 10 次逐步写入一份快照                             | 中等长度的回溯                            | 完全相同 |
+| 大 N             | 快照最少，存储最小                                   | 回溯最长，读取最慢                        | 完全相同 |
+
+这个旋钮买的是「存储」与「读取成本」之间的取舍，从不改变答案。低节奏会比默认值频繁得多地为消息列表落快照，而物化结果保持一致；两条测试分别钉住这两半：配置值必须真正到达编译后的通道表，且任何节奏下物化都必须产出相同的值。
+
+它同时是一阶的容量旋钮，因为占住保留总量的正是这些快照：设 K 为 `snapshot_frequency`，N 轮保留的是 O(N²/K + N) 而不是 O(N²)，而逐步写入的负载与 K 无关。只按单步成本估算容量会低估占用；推导见[检查点与增量通道](/docs/harness/checkpoints)。
+
+## 与 LangGraph superstep 上界的关系
+
+是否落快照由两个计数器共同决定，谁先到达就由谁触发：
+
+| 计数器                       | 作用域       | 默认值                    | 由谁设置                     |
+| ---------------------------- | ------------ | ------------------------- | ---------------------------- |
+| 本通道的更新次数             | 当前通道     | `snapshot_frequency`（`10`） | `database.checkpoint_delta.snapshot_frequency` |
+| 距上次快照的 superstep 数    | 进程全局     | `5000`                    | LangGraph 的 `DELTA_MAX_SUPERSTEPS_SINCE_SNAPSHOT`（环境变量 `LANGGRAPH_DELTA_MAX_SUPERSTEPS_SINCE_SNAPSHOT`） |
+
+第二个计数器为「不再收到写入」的通道也兜住回溯深度。因此把 `snapshot_frequency` 调得再大，回溯深度也不会无界：一个持续运行却不再触碰 messages 的线程，最迟会在 5000 个 superstep 的界内落快照。这个界属于 LangGraph，不属于 `database:` 小节，且对整个进程内的所有 delta 通道生效。
+
+## 与模式一同冻结，且不写入检查点
+
+快照节奏被编译进每个图的通道表，而不是存进检查点。由此带来几条直接的运维后果：
+
+| 事实 | 后果 |
+| --- | --- |
+| 解析顺序是：显式参数 → 进程内已冻结值 → 配置默认值 `10` | 显式值主要供测试与临时图使用；装配路径始终传入进程值，因此运行中的部署总是按冻结节奏编译 |
+| 与模式一样，在第一次建图时冻结 | 共享同一个检查点数据库的所有进程必须使用同一个值；检查点里没有可供比对的节奏信息 |
+| 运行中改为不同值会抛 `CheckpointModeReconfigurationError("checkpoint_delta.snapshot_frequency is restart-required and cannot change in a running process")` | 改 `config.yaml` 不重启不生效，且失败是响亮的，不会静默降级 |
+| 非正值会抛 `ValueError("snapshot frequency must be positive")` | 冻结入口与配置校验（`ge=1`）口径一致 |
+| 该值只从应用配置读取，不接受逐请求的 configurable 键 | 伪造或客户端传入的值无法重编译通道表 |
+
+节奏被**刻意**不写入检查点元数据：模式标记契约（缺失即 `full`）以及 full → delta 的迁移语义都不随频率值改变。正因为它不在任何检查点里，运行着不同节奏的进程会静默地把自己的节奏套用到同一批线程上——所以这是一个写进配置字段说明的运维责任，运行时无法检测。
+
+对比一下**会**写入的模式标记：delta 检查点的元数据里带有 `deerflow_checkpoint_channel_mode: "delta"`，缺失即表示 `full`。节奏没有对应的标记。
+
+## 存储形态契约
+
+| 检查点类型     | `channel_values.messages`            | 该步的负载存在哪里                        |
+| -------------- | ------------------------------------ | ----------------------------------------- |
+| 非快照步       | 不存在——`channel_values` 里没有 `messages` 这个键 | 在该检查点的逐步写入中                    |
+| 快照步         | 一份 `_DeltaSnapshot`，内含完整消息列表 | 就在检查点本身；祖先回溯到此终止          |
+| `full` 模式    | 每个检查点都带完整消息列表           | 无需重放                                  |
+
+这条契约有两处钉死：第一，非快照检查点不得在 `channel_values` 中携带 `messages`，而每 `snapshot_frequency` 次更新必须改为携带一份 `_DeltaSnapshot`，且两种形态下物化都必须正确；第二，存储层面的守卫在相同轮数下比较两种模式：delta 至多只有周期性快照 blob，而 `full` 模式每个写了消息的检查点都会有一个。所以在 delta 模式下，快照不是"多存的一份拷贝"——它是唯一存在的完整消息负载。
+
+## 默认值变更：1000 改为 10
+
+节奏原本位于扁平键 `database.checkpoint_delta_snapshot_frequency`，默认值 `1000`。现在它迁到嵌套键 `database.checkpoint_delta.snapshot_frequency`，默认值 `10`——同一个字段，但默认情况下线程落快照的频率提高了 **100 倍**。上游 `DeltaChannel` 的参数默认值仍是 1000；DeerFlow 始终显式传值，因此由 DeerFlow 构建的线程不会使用上游默认值。想恢复旧节奏，显式写出该值即可：
+
+```yaml
+database:
+  checkpoint_delta:
+    snapshot_frequency: 1000   # 重命名前的默认节奏
+```
+
+在旧扁平键仍存在期间，可能出现三条迁移告警。三条都只记日志、不报错，且嵌套键始终优先：
+
+| 触发条件 | 告警原文 |
+| --- | --- |
+| 两个键同时存在 | `Both database.checkpoint_delta_snapshot_frequency (deprecated) and database.checkpoint_delta.snapshot_frequency are set; the nested key wins.` |
+| `checkpoint_delta` 已经是配置对象 | `Ignoring deprecated database.checkpoint_delta_snapshot_frequency because database.checkpoint_delta is already set.` |
+| 旧值被继承 | `database.checkpoint_delta_snapshot_frequency is deprecated; use database.checkpoint_delta.snapshot_frequency instead. Carried the legacy value (%r) forward.` |
+
+`DatabaseConfig` 会忽略未知键，所以没有这层兼容代码时，仍写扁平旧键的 `config.yaml` 会静默回落到 `10`，而不是运维选定的值。嵌套键写好后删掉扁平键，这三条告警就都消失了。
+
+## 如何选值
+
+默认值不是拍脑袋定的：生产基准会输出 `snapshot_write_spike`（delta 检查点写入的 p99 与 p50 之比）与 `cache_effect_ms`（状态冷读减去温读的 p50），二者正是生产环境「快照频率」与「accessor 缓存」默认值的决策输入。通道基准报告与后端无关的行数/字节数以及温读、冷读耗时，比值一律是 `delta/full`；耗时阈值不构成 CI 门禁。运行方式见[运维检查点](/docs/harness/checkpoints/operations)。
+
+由于该值会被冻结、且跨进程必须一致，变更要刻意为之：先选定节奏，重启所有共享该数据库的进程，再用存储形态检查确认，而不是盯着单个请求。
+
+## 相关章节
+
+- [通道模式](/docs/harness/checkpoints/modes)——两种存储形态对读写意味着什么。
+- [历史缓存](/docs/harness/checkpoints/history-cache)——本节奏所服务的读取路径。
+- [运维检查点](/docs/harness/checkpoints/operations)——保留、基准测试与后端选择。
+- [参考附录](/docs/harness/checkpoints/reference)——完整的配置键与错误对照表。

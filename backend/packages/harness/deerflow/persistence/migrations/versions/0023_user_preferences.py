@@ -4,7 +4,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0023_user_preferences"
-down_revision = "0022_scheduled_occurrence_seq"
+down_revision = "0023_run_change_seq"
 branch_labels = None
 depends_on = None
 

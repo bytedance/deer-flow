@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import stat
 import threading
 import time
 from pathlib import Path
@@ -21,7 +22,13 @@ from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-from deerflow.uploads.manager import UnsafeUploadPathError, claim_unique_filename, normalize_filename, write_upload_file_no_symlink
+from deerflow.uploads.manager import (
+    UnsafeUploadPathError,
+    apply_upload_sandbox_permits,
+    claim_unique_filename,
+    normalize_filename,
+    write_upload_file_no_symlink,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -629,6 +636,14 @@ class DingTalkChannel(Channel):
         """
         content = await self._download_by_code(download_code)
         if not content:
+            # Neutral on purpose: None covers several reasons (non-200
+            # download exchange, missing downloadUrl, oversize abort,
+            # transport failure), each already logged with its accurate
+            # reason inside _download_by_code — the empty-bytes case lands
+            # here too. Logging here keeps the skip observable at the
+            # receive level instead of vanishing silently (the wechat
+            # channel's callers and the manager reader use the same shape).
+            logger.warning("[DingTalk] inbound file download returned no content, skipping: file=%s", filename or "(unnamed)")
             return ""
 
         paths = get_paths()
@@ -670,6 +685,10 @@ class DingTalkChannel(Channel):
 
         try:
             resolved_target = await asyncio.to_thread(_persist)
+            # Root-written uploads are 0o600, which the non-root sandbox cannot
+            # read on a bind-mounted thread dir; grant group/other read like the
+            # channel manager's inbound-file path and the HTTP upload route.
+            await asyncio.to_thread(apply_upload_sandbox_permits, resolved_target, stat.S_IRGRP | stat.S_IROTH)
         except (OSError, UnsafeUploadPathError):
             logger.exception("[DingTalk] failed to persist downloaded file: %s", safe_filename)
             return ""

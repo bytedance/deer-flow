@@ -458,6 +458,31 @@ class TestDelete:
         assert messages[0]["run_id"] == "r1"
 
     @pytest.mark.anyio
+    async def test_delete_by_thread_accepts_owner_scope(self, store):
+        """Every backend accepts the owner scope the Gateway passes (#2803 wiring).
+
+        User-scoped backends apply the filter; the in-memory store is not
+        user-scoped and accepts it for interface parity.
+        """
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+
+        count = await store.delete_by_thread("t1", user_id="alice")
+
+        assert count == 1
+        assert await store.count_messages("t1") == 0
+
+    @pytest.mark.anyio
+    async def test_delete_by_run_accepts_owner_scope(self, store):
+        await store.put(thread_id="t1", run_id="r1", event_type="human_message", category="message")
+        await store.put(thread_id="t1", run_id="r2", event_type="human_message", category="message")
+
+        count = await store.delete_by_run("t1", "r1", user_id="alice")
+
+        assert count == 1
+        messages = await store.list_messages("t1")
+        assert [message["run_id"] for message in messages] == ["r2"]
+
+    @pytest.mark.anyio
     async def test_delete_nonexistent_thread_returns_zero(self, store):
         assert await store.delete_by_thread("nope") == 0
 
@@ -526,6 +551,90 @@ class TestDbRunEventStore:
         assert "pg_advisory_xact_lock" in str(session.execute_calls[0][0])
         compiled = str(session.scalar_stmt.compile(dialect=postgresql.dialect()))
         assert "FOR UPDATE" not in compiled
+
+    @pytest.mark.anyio
+    async def test_delete_by_thread_takes_postgres_advisory_lock(self):
+        """Deletion must enter the same cross-process fence as writers (#5530)."""
+        from sqlalchemy.dialects import postgresql
+
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        class FakeSession:
+            def __init__(self):
+                self.dialect = postgresql.dialect()
+                self.execute_calls = []
+
+            def get_bind(self):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def begin(self):
+                return self
+
+            async def execute(self, stmt, params=None):
+                self.execute_calls.append((stmt, params))
+
+            async def scalar(self, _stmt):
+                return 3
+
+            async def commit(self) -> None:
+                return None
+
+        session = FakeSession()
+
+        count = await DbRunEventStore(lambda: session).delete_by_thread("thread-1", user_id=None)
+
+        assert count == 3
+        assert session.execute_calls
+        assert "pg_advisory_xact_lock" in str(session.execute_calls[0][0])
+        assert session.execute_calls[0][1] == {"thread_id": "thread-1"}
+
+    @pytest.mark.anyio
+    async def test_delete_by_run_takes_postgres_advisory_lock(self):
+        """delete_by_run shares the cross-process fence as well (#5530)."""
+        from sqlalchemy.dialects import postgresql
+
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        class FakeSession:
+            def __init__(self):
+                self.dialect = postgresql.dialect()
+                self.execute_calls = []
+
+            def get_bind(self):
+                return self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def begin(self):
+                return self
+
+            async def execute(self, stmt, params=None):
+                self.execute_calls.append((stmt, params))
+
+            async def scalar(self, _stmt):
+                return 2
+
+            async def commit(self) -> None:
+                return None
+
+        session = FakeSession()
+
+        count = await DbRunEventStore(lambda: session).delete_by_run("thread-1", "run-1", user_id=None)
+
+        assert count == 2
+        assert session.execute_calls
+        assert "pg_advisory_xact_lock" in str(session.execute_calls[0][0])
+        assert session.execute_calls[0][1] == {"thread_id": "thread-1"}
 
     @pytest.mark.anyio
     async def test_basic_crud(self, tmp_path):
@@ -952,6 +1061,8 @@ class TestDbRunEventStoreWriteLock:
 
     @pytest.mark.anyio
     async def test_delete_by_thread_keeps_lock_held_by_inflight_writer(self, tmp_path):
+        import asyncio
+
         from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
         from deerflow.runtime.events.store.db import DbRunEventStore
 
@@ -959,16 +1070,27 @@ class TestDbRunEventStoreWriteLock:
         await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
         s = DbRunEventStore(get_session_factory())
 
-        # Simulate a writer mid-flight by holding the lock; the eviction must
-        # not drop a lock another coroutine is actively using.
+        # Simulate a writer mid-flight by holding the lock. Deletion now shares
+        # the fence, so it must queue behind the in-flight writer instead of
+        # running concurrently with it. The strict ordering guarantee is pinned
+        # without wall-clock timing by the Event-driven tests in
+        # tests/test_db_event_store_lock_lifecycle.py; this test covers the real
+        # SQLite deletion path and the registry state it leaves behind.
         lock = s._get_write_lock("t1")
         await lock.acquire()
-        try:
-            await s.delete_by_thread("t1")
-            assert "t1" in s._write_locks
-            assert s._write_locks["t1"] is lock
-        finally:
-            lock.release()
+
+        delete_task = asyncio.create_task(s.delete_by_thread("t1"))
+        await asyncio.sleep(0)
+        assert not delete_task.done()
+
+        lock.release()
+
+        await delete_task
+
+        # The eviction must not drop a lock another coroutine still holds: the
+        # generation this test references stays resolvable for later writers.
+        assert "t1" in s._write_locks
+        assert s._write_locks["t1"] is lock
 
         await close_engine()
 

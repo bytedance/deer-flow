@@ -4,7 +4,10 @@ rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
 rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
 
 import { fetch } from "@/core/api/fetcher";
-import { fetchSubagentBatchesCapability } from "@/core/features/api";
+import {
+  fetchConversationReferencesCapability,
+  fetchSubagentBatchesCapability,
+} from "@/core/features/api";
 
 const mockedFetch = rs.mocked(fetch);
 
@@ -52,6 +55,47 @@ describe("subagent batch feature capability", () => {
       repositoryAvailable: true,
       workerRunning: true,
       maxRunning: 4,
+    });
+  });
+});
+
+describe("conversation references feature capability", () => {
+  it("reports the flag and the per-run cap", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        agents_api: { enabled: true },
+        conversation_references: { enabled: true, max_references: 3 },
+      }),
+    );
+
+    await expect(fetchConversationReferencesCapability()).resolves.toEqual({
+      enabled: true,
+      maxReferences: 3,
+    });
+  });
+
+  it("treats a backend without the field as disabled", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({ agents_api: { enabled: true } }),
+    );
+
+    await expect(fetchConversationReferencesCapability()).resolves.toEqual({
+      enabled: false,
+      maxReferences: 0,
+    });
+  });
+
+  it("never reports a cap below zero or a non-numeric one", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        agents_api: { enabled: true },
+        conversation_references: { enabled: true, max_references: "3" },
+      }),
+    );
+
+    await expect(fetchConversationReferencesCapability()).resolves.toEqual({
+      enabled: true,
+      maxReferences: 0,
     });
   });
 });

@@ -273,6 +273,14 @@ test("stripLeakedSystemTags strips tags with attributes", () => {
   expect(stripLeakedSystemTags('<memory class="x">text</memory>')).toBe("text");
 });
 
+test("stripLeakedSystemTags strips project context tags with attributes", () => {
+  expect(
+    stripLeakedSystemTags(
+      '<project name="Roadmap">instructions</project><documents count="1" shown="1">- id=abc | a.pdf</documents>',
+    ),
+  ).toBe("instructions- id=abc | a.pdf");
+});
+
 test("stripLeakedSystemTags handles multiple occurrences", () => {
   expect(
     stripLeakedSystemTags(
@@ -453,4 +461,13 @@ test("stripLeakedSystemTags strips tags after real closing fence", () => {
     "\n",
   );
   expect(stripLeakedSystemTags(input)).toBe(expected);
+});
+
+test("stripLeakedSystemTags keeps a fence open across a line with an info string", () => {
+  // A closing fence cannot carry an info string, so "```python" is content of
+  // the outer fence and the marker inside it must not become visible text.
+  const input = ["```", "```python", "<memory>inside</memory>", "```"].join(
+    "\n",
+  );
+  expect(stripLeakedSystemTags(input)).toBe(input);
 });

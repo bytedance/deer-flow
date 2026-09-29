@@ -353,3 +353,133 @@ def test_project_threads_excludes_archived_members(tmp_path):
         # The archived row still exists in the store (unfiltered search).
         stored = _search_threads(app, user_id="user-a", project_id=pid)
         assert {t["thread_id"] for t in stored} == {"active-1", "archived-1"}
+
+
+# ---------------------------------------------------------------------------
+# instructions byte cap (Projects Phase 2, spec §6.5): 422, never truncated
+# ---------------------------------------------------------------------------
+
+
+def _cap_config(monkeypatch, max_bytes: int):
+    """Pin a small instructions cap so boundary tests stay compact."""
+    from deerflow.config.projects_config import ProjectsConfig
+
+    monkeypatch.setattr(
+        projects,
+        "get_app_config",
+        lambda: SimpleNamespace(projects=ProjectsConfig(instructions_max_bytes=max_bytes)),
+    )
+
+
+def test_instructions_at_exact_byte_cap_accepted_on_create_and_patch(tmp_path, monkeypatch):
+    _cap_config(monkeypatch, 256)
+    app = _build_projects_app(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/projects", json={"name": "p", "instructions": "x" * 256})
+        assert created.status_code == 201
+        assert created.json()["instructions"] == "x" * 256
+
+        patched = client.patch(f"/api/projects/{created.json()['id']}", json={"instructions": "y" * 256})
+        assert patched.status_code == 200
+        assert patched.json()["instructions"] == "y" * 256
+
+
+def test_instructions_one_byte_over_cap_rejected_on_create_and_patch(tmp_path, monkeypatch):
+    _cap_config(monkeypatch, 256)
+    app = _build_projects_app(tmp_path)
+    with TestClient(app) as client:
+        over = client.post("/api/projects", json={"name": "p", "instructions": "x" * 257})
+        assert over.status_code == 422
+
+        created = client.post("/api/projects", json={"name": "p", "instructions": "ok"})
+        assert created.status_code == 201
+        patched = client.patch(f"/api/projects/{created.json()['id']}", json={"instructions": "y" * 257})
+        assert patched.status_code == 422
+        # The stored value is untouched — rejection, never truncation.
+        assert client.get(f"/api/projects/{created.json()['id']}").json()["instructions"] == "ok"
+
+
+def test_instructions_cap_counts_utf8_bytes_not_characters(tmp_path, monkeypatch):
+    """CJK characters cost their UTF-8 length (3 bytes each), so a string well
+    under the cap in characters can still exceed it in bytes."""
+    _cap_config(monkeypatch, 256)  # 85 CJK characters fit; 86 do not
+    app = _build_projects_app(tmp_path)
+    with TestClient(app) as client:
+        accepted = client.post("/api/projects", json={"name": "p", "instructions": "汉" * 85})
+        assert accepted.status_code == 201
+
+        rejected = client.post("/api/projects", json={"name": "p", "instructions": "汉" * 86})
+        assert rejected.status_code == 422
+
+        patched = client.patch(f"/api/projects/{accepted.json()['id']}", json={"instructions": "汉" * 86})
+        assert patched.status_code == 422
+
+
+def test_instructions_cap_uses_default_when_app_config_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(projects, "get_app_config", lambda: (_ for _ in ()).throw(FileNotFoundError("no config.yaml")))
+    app = _build_projects_app(tmp_path)
+    with TestClient(app) as client:
+        accepted = client.post("/api/projects", json={"name": "p", "instructions": "x" * 8192})
+        assert accepted.status_code == 201
+        rejected = client.post("/api/projects", json={"name": "p", "instructions": "x" * 8193})
+        assert rejected.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# GET /api/projects/config (Projects Phase 2): UI-facing projects knobs
+# ---------------------------------------------------------------------------
+
+
+def _config_override(app: FastAPI, projects_config: Any) -> None:
+    from app.gateway.deps import get_config
+
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace(projects=projects_config)
+
+
+def test_projects_config_returns_configured_values(tmp_path):
+    from deerflow.config.projects_config import ProjectsConfig
+
+    app = _build_projects_app(tmp_path)
+    _config_override(app, ProjectsConfig(instructions_max_bytes=1024, trash_retention_days=7))
+    with TestClient(app) as client:
+        response = client.get("/api/projects/config", headers=_as_user("user-a"))
+        assert response.status_code == 200
+        assert response.json() == {"instructions_max_bytes": 1024, "trash_retention_days": 7}
+
+
+def test_projects_config_returns_defaults_when_block_absent(tmp_path):
+    from deerflow.config.projects_config import ProjectsConfig
+
+    app = _build_projects_app(tmp_path)
+    _config_override(app, ProjectsConfig())
+    with TestClient(app) as client:
+        response = client.get("/api/projects/config", headers=_as_user("user-a"))
+        assert response.status_code == 200
+        assert response.json() == {"instructions_max_bytes": 8192, "trash_retention_days": 30}
+
+
+def test_projects_config_route_is_not_swallowed_by_the_project_id_route(tmp_path):
+    """``/config`` is declared before ``/{project_id}``: it answers the config
+    payload, never a project-lookup 404 for a project named "config"."""
+    from deerflow.config.projects_config import ProjectsConfig
+
+    app = _build_projects_app(tmp_path)
+    _config_override(app, ProjectsConfig())
+    with TestClient(app) as client:
+        response = client.get("/api/projects/config", headers=_as_user("user-a"))
+        assert response.status_code == 200
+        assert "instructions_max_bytes" in response.json()
+
+
+def test_projects_config_requires_projects_read(tmp_path):
+    from deerflow.config.projects_config import ProjectsConfig
+
+    app = _build_projects_app(tmp_path)
+    _config_override(app, ProjectsConfig())
+    with TestClient(app) as client:
+        without_read = {
+            **_as_user("user-a"),
+            _PERMISSIONS_HEADER: ",".join(p for p in _STUB_PERMISSIONS if p != Permissions.PROJECTS_READ),
+        }
+        assert client.get("/api/projects/config", headers=without_read).status_code == 403
+        assert client.get("/api/projects/config", headers=_as_user("user-a")).status_code == 200

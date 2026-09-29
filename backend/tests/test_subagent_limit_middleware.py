@@ -172,6 +172,35 @@ class TestTruncateTaskCalls:
         assert [tc["id"] for tc in updated_msg.additional_kwargs["tool_calls"]] == ["t1", "t2"]
         assert updated_msg.response_metadata["finish_reason"] == "tool_calls"
 
+    def test_truncation_syncs_provider_tool_use_content_blocks(self):
+        # The tools node answers only the kept calls, so a dropped call's
+        # Anthropic tool_use block would reach the next model request unpaired.
+        mw = SubagentLimitMiddleware(max_concurrent=2)
+        msg = AIMessage(
+            content=[{"type": "tool_use", "id": call_id, "name": "task", "input": {"prompt": "p"}} for call_id in ("t1", "t2", "t3")],
+            tool_calls=[_task_call("t1"), _task_call("t2"), _task_call("t3")],
+        )
+
+        result = mw.after_model({"messages": [msg]}, _make_runtime())
+
+        updated_msg = result["messages"][0]
+        assert [block["id"] for block in updated_msg.content] == ["t1", "t2"]
+
+    def test_total_limit_reached_drops_provider_tool_use_content_blocks(self):
+        mw = SubagentLimitMiddleware(max_concurrent=3, max_total=1)
+        msg = AIMessage(
+            content=[{"type": "tool_use", "id": "t2", "name": "task", "input": {"prompt": "p"}}],
+            tool_calls=[_task_call("t2")],
+        )
+        state = {"messages": [msg], "delegations": [_delegation("t1", run_id="run-1")]}
+
+        result = mw.after_model(state, _make_runtime())
+
+        updated_msg = result["messages"][0]
+        assert updated_msg.tool_calls == []
+        assert [block["type"] for block in updated_msg.content] == ["text"]
+        assert "subagent delegation limit" in updated_msg.content[0]["text"]
+
     def test_total_limit_counts_prior_delegations(self):
         mw = SubagentLimitMiddleware(max_concurrent=3, max_total=4)
         msg = AIMessage(

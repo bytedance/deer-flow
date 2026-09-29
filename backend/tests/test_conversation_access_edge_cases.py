@@ -228,7 +228,8 @@ def test_escaped_text_that_alone_exceeds_the_budget_is_cut_to_fit():
     [message] = page["messages"]
     assert 0 < len(message["text"]) < 4000 and set(message["text"]) == {"<"}
     assert message["truncated"] is True and page["truncated"] is True
-    assert "ask the user for the missing material" in page["notice"]
+    assert message["continuation"] == {"message_seq": message["seq"], "offset": len(message["text"])}
+    assert "call read_conversation with its message_seq and offset" in page["notice"]
 
 
 def test_single_long_message_is_an_explicitly_truncated_excerpt():
@@ -244,7 +245,9 @@ def test_single_long_message_is_an_explicitly_truncated_excerpt():
     assert page["messages"][0]["text"] == "x" * 4000
     assert page["messages"][0]["truncated"] is True
     assert page["truncated"] is True
-    # The v1 cursor pages between messages; it does not promise suffix recovery.
+    # The page cursor still moves between messages; the suffix is read through
+    # the message's own continuation instead.
+    assert page["messages"][0]["continuation"] == {"message_seq": page["messages"][0]["seq"], "offset": 4000}
     assert page["has_more"] is False
     assert page["next_cursor"] is None
 
@@ -267,7 +270,7 @@ def test_truncation_notice_requests_missing_material_before_claiming_complete_re
     assert page["truncated"] is truncated
     assert page["has_more"] is has_more
     if truncated:
-        assert "Pagination cannot recover" in page["notice"]
+        assert "call read_conversation with its message_seq and offset" in page["notice"]
         assert "ask the user for the missing material" in page["notice"]
         assert "before claiming to have incorporated all requirements" in page["notice"]
     else:

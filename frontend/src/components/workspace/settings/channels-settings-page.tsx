@@ -117,6 +117,11 @@ function ChannelProviderItem({
   const configureMutation = useConfigureChannelProvider();
   const disconnectProviderMutation = useDisconnectChannelProvider();
   const [setupOpen, setSetupOpen] = useState(false);
+  const [setupStep, setSetupStep] = useState<"setup" | "binding">("setup");
+  const openSetup = () => {
+    setSetupStep("setup");
+    setSetupOpen(true);
+  };
   const runtimeAvailable = provider.configured && !provider.unavailable_reason;
   const isConnected =
     runtimeAvailable &&
@@ -142,6 +147,12 @@ function ChannelProviderItem({
     connectProvider: ChannelProvider,
     preparedWindow?: Window | null,
   ) => {
+    if (connectProvider.provider === "wechat") {
+      closeConnectWindow(preparedWindow ?? null);
+      setSetupStep(connectProvider.configured ? "binding" : "setup");
+      setSetupOpen(true);
+      return;
+    }
     const connectWindow =
       preparedWindow !== undefined
         ? preparedWindow
@@ -205,7 +216,7 @@ function ChannelProviderItem({
                   variant="outline"
                   size="sm"
                   disabled={isConnecting || isDisconnecting}
-                  onClick={() => setSetupOpen(true)}
+                  onClick={openSetup}
                 >
                   {isConnecting ? (
                     <LoaderCircleIcon className="animate-spin" />
@@ -251,7 +262,7 @@ function ChannelProviderItem({
                   variant="outline"
                   size="sm"
                   disabled={isConnecting || isDisconnecting}
-                  onClick={() => setSetupOpen(true)}
+                  onClick={openSetup}
                 >
                   {t.channels.modify}
                 </Button>
@@ -263,7 +274,7 @@ function ChannelProviderItem({
                 title={unavailableReason}
                 onClick={() => {
                   if (providerNeedsRuntimeConfig(provider)) {
-                    setSetupOpen(true);
+                    openSetup();
                     return;
                   }
 
@@ -289,7 +300,11 @@ function ChannelProviderItem({
         </ItemActions>
       </Item>
       <ChannelRuntimeConfigDialog
+        onConfigured={() => {
+          setSetupOpen(false);
+        }}
         provider={provider}
+        initialStep={setupStep}
         open={setupOpen}
         submitting={configureMutation.isPending}
         onOpenChange={setSetupOpen}
@@ -298,9 +313,10 @@ function ChannelProviderItem({
             submitProvider.auth_mode === "deep_link"
               ? prepareConnectWindow()
               : null;
-          void configureMutation
+          return configureMutation
             .mutateAsync({ provider: submitProvider.provider, values })
             .then((updated) => {
+              if (updated.provider === "wechat") return updated;
               setSetupOpen(false);
               if (providerCanConnect(updated)) {
                 startConnect(updated, connectWindow);

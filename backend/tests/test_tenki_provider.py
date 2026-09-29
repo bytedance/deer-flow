@@ -25,6 +25,7 @@ import pytest
 
 from deerflow.community.tenki.provider import _BOOTSTRAP_TIMEOUT, TenkiSandboxProvider, _import_client
 from deerflow.community.tenki.sandbox import TenkiSandbox
+from deerflow.config.app_config import AppConfig
 
 # ── Fake Tenki SDK ────────────────────────────────────────────────────
 
@@ -173,7 +174,8 @@ class _FakeSandbox:
             listing = ("\n".join(hits) + "\n") if hits else ""
             if "__DF_FIND_STATUS__:" in script:
                 status = 0 if hits else 1
-                return _FakeResult(stdout=f"{listing}\n__DF_FIND_STATUS__:{status}\n".encode(), exit_code=status)
+                marker = "0" if hits else "missing"
+                return _FakeResult(stdout=f"{listing}\n__DF_FIND_STATUS__:{marker}\n".encode(), exit_code=status)
             return _FakeResult(stdout=listing.encode())
         if script.startswith("grep "):
             # grep <flags> -e <pattern> <root> 2>/dev/null | head -N
@@ -513,6 +515,23 @@ def test_read_missing_file_returns_error() -> None:
     assert box.read_file("/mnt/user-data/workspace/nope.txt").startswith("Error:")
 
 
+def test_read_file_supports_bounded_ranges() -> None:
+    """The tools layer passes ``start_line``/``end_line`` on every ranged read."""
+    box = TenkiSandbox("sb", _FakeSandbox())
+    box.write_file("/mnt/user-data/workspace/range.txt", "line 1\nline 2\nline 3\nline 4\nline 5")
+    assert box.read_file("/mnt/user-data/workspace/range.txt") == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+    # A start past EOF comes back empty rather than raising: the tool layer's
+    # "(start_line exceeds file length)" message and the truncated-read
+    # continuation path both depend on that contract.
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=99) == ""
+    # Negative bounds clamp like LocalSandbox instead of wrapping around.
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=-1) == ("line 1\nline 2\nline 3\nline 4\nline 5")
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=-1) == ""
+
+
 def test_download_missing_file_raises_oserror() -> None:
     box = TenkiSandbox("sb", _FakeSandbox())
     with pytest.raises(OSError):
@@ -735,6 +754,42 @@ def test_create_waits_client_side_and_configures_lifetime(monkeypatch):
     assert kwargs["max_duration"] == 7200
     assert kwargs["sticky"] is False
     provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("false", False), ("0", False), ("off", False), ("no", False), ("FALSE", False), ("true", True), ("1", True), ("on", True), ("yes", True)],
+)
+def test_create_sticky_from_environment(monkeypatch, tmp_path, value, expected):
+    monkeypatch.setenv("TEST_TENKI_STICKY", value)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: []\nsandbox:\n  use: deerflow.community.tenki:TenkiSandboxProvider\n  sticky: $TEST_TENKI_STICKY\n  idle_timeout: 0\n", encoding="utf-8")
+    config = AppConfig.from_file(config_path)
+    client = _FakeClient()
+    monkeypatch.setattr("deerflow.community.tenki.provider.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.community.tenki.provider._import_client", lambda: lambda **kw: client)
+    provider = TenkiSandboxProvider()
+    try:
+        provider.acquire("thread-1", user_id="u1")
+        assert client.create_kwargs[0]["sticky"] is expected
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("value", [False, True, None])
+def test_create_sticky_native_value(monkeypatch, value):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client, config_attrs={"sticky": value, "idle_timeout": 0})
+    try:
+        provider.acquire("thread-1", user_id="u1")
+        assert client.create_kwargs[0]["sticky"] is bool(value)
+    finally:
+        provider.shutdown()
+
+
+def test_sticky_rejects_invalid_boolean(monkeypatch):
+    with pytest.raises(ValueError, match="valid boolean"):
+        _install(monkeypatch, config_attrs={"sticky": "not-a-boolean"})
 
 
 def test_create_default_lifetime_is_explicit(monkeypatch):
@@ -1158,3 +1213,24 @@ def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tm
         result = box.glob(str(tmp_path), "src/*.js", max_results=1)
 
     assert result == ([], truncated)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 1, False), ("grep", 2, True), ("glob", 1, False), ("glob", 2, True)])
+def test_remote_search_exactly_full_is_not_truncated(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 over a tree holding one in-scope match is a complete result:
+    # the Python-side loop used to return on the max-th match without looking for
+    # one more, so an exhausted search over a one-match tree read as cut off. A
+    # second match keeps that report honest.
+    (tmp_path / "src").mkdir()
+    for index in range(entries):
+        (tmp_path / "src" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        matches, reported = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        matches, reported = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert len(matches) == 1
+    assert reported is truncated

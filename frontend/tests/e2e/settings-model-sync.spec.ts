@@ -220,7 +220,9 @@ test("custom agent automatic default does not become an account preference", asy
   expect(patches).toEqual([]);
   // Explicit model selections on this same page must still be synchronized.
   await page.getByRole("button", { name: "Agent Model", exact: true }).click();
-  await page.getByRole("option").filter({ hasText: "First Model" }).click();
+  await page
+    .getByRole("button", { name: "First Model (first-model)", exact: true })
+    .click();
   await expect.poll(() => patches).toEqual([{ model_name: "first-model" }]);
 });
 

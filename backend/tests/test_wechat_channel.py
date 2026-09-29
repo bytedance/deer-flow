@@ -169,7 +169,7 @@ def test_handle_update_downloads_inbound_image(monkeypatch, tmp_path: Path):
         channel = WechatChannel(bus=bus, config={"bot_token": "test-token", "state_dir": str(tmp_path)})
         encrypted = channel.__class__.__dict__["_extract_image_file"].__globals__["_encrypt_aes_128_ecb"](plaintext, aes_key)
 
-        async def _fake_download(_url: str, *, timeout: float | None = None):
+        async def _fake_download(_url: str, *, timeout: float | None = None, max_bytes: int | None = None):
             return encrypted
 
         channel._download_cdn_bytes = _fake_download  # type: ignore[method-assign]
@@ -185,7 +185,7 @@ def test_handle_update_downloads_inbound_image(monkeypatch, tmp_path: Path):
                         "type": 2,
                         "image_item": {
                             "aeskey": aes_key.hex(),
-                            "media": {"full_url": "https://cdn.example/image.bin"},
+                            "media": {"full_url": "https://cdn.weixin.qq.com/image.bin"},
                         },
                     }
                 ],
@@ -224,7 +224,7 @@ def test_handle_update_downloads_inbound_png_with_png_extension(monkeypatch, tmp
         channel = WechatChannel(bus=bus, config={"bot_token": "test-token", "state_dir": str(tmp_path)})
         encrypted = channel.__class__.__dict__["_extract_image_file"].__globals__["_encrypt_aes_128_ecb"](plaintext, aes_key)
 
-        async def _fake_download(_url: str, *, timeout: float | None = None):
+        async def _fake_download(_url: str, *, timeout: float | None = None, max_bytes: int | None = None):
             return encrypted
 
         channel._download_cdn_bytes = _fake_download  # type: ignore[method-assign]
@@ -240,7 +240,7 @@ def test_handle_update_downloads_inbound_png_with_png_extension(monkeypatch, tmp
                         "type": 2,
                         "image_item": {
                             "aeskey": aes_key.hex(),
-                            "media": {"full_url": "https://cdn.example/image.bin"},
+                            "media": {"full_url": "https://cdn.weixin.qq.com/image.bin"},
                         },
                     }
                 ],
@@ -272,7 +272,7 @@ def test_handle_update_preserves_text_and_ref_msg_with_image(monkeypatch, tmp_pa
         channel = WechatChannel(bus=bus, config={"bot_token": "test-token", "state_dir": str(tmp_path)})
         encrypted = channel.__class__.__dict__["_extract_image_file"].__globals__["_encrypt_aes_128_ecb"](plaintext, aes_key)
 
-        async def _fake_download(_url: str, *, timeout: float | None = None):
+        async def _fake_download(_url: str, *, timeout: float | None = None, max_bytes: int | None = None):
             return encrypted
 
         channel._download_cdn_bytes = _fake_download  # type: ignore[method-assign]
@@ -290,7 +290,7 @@ def test_handle_update_preserves_text_and_ref_msg_with_image(monkeypatch, tmp_pa
                         "ref_msg": {"title": "quoted", "message_item": {"type": 1}},
                         "image_item": {
                             "aeskey": aes_key.hex(),
-                            "media": {"full_url": "https://cdn.example/image2.bin"},
+                            "media": {"full_url": "https://cdn.weixin.qq.com/image2.bin"},
                         },
                     },
                 ],
@@ -985,7 +985,7 @@ def test_handle_update_downloads_inbound_file(monkeypatch, tmp_path: Path):
         channel = WechatChannel(bus=bus, config={"bot_token": "test-token", "state_dir": str(tmp_path)})
         encrypted = channel.__class__.__dict__["_extract_file_item"].__globals__["_encrypt_aes_128_ecb"](plaintext, aes_key)
 
-        async def _fake_download(_url: str, *, timeout: float | None = None):
+        async def _fake_download(_url: str, *, timeout: float | None = None, max_bytes: int | None = None):
             return encrypted
 
         channel._download_cdn_bytes = _fake_download  # type: ignore[method-assign]
@@ -1002,7 +1002,7 @@ def test_handle_update_downloads_inbound_file(monkeypatch, tmp_path: Path):
                         "file_item": {
                             "file_name": "report.pdf",
                             "aeskey": aes_key.hex(),
-                            "media": {"full_url": "https://cdn.example/report.bin"},
+                            "media": {"full_url": "https://cdn.weixin.qq.com/report.bin"},
                         },
                     }
                 ],
@@ -1040,7 +1040,7 @@ def test_handle_update_downloads_inbound_file_with_media_aeskey_hex(monkeypatch,
         channel = WechatChannel(bus=bus, config={"bot_token": "test-token", "state_dir": str(tmp_path)})
         encrypted = channel.__class__.__dict__["_extract_file_item"].__globals__["_encrypt_aes_128_ecb"](plaintext, aes_key)
 
-        async def _fake_download(_url: str, *, timeout: float | None = None):
+        async def _fake_download(_url: str, *, timeout: float | None = None, max_bytes: int | None = None):
             return encrypted
 
         channel._download_cdn_bytes = _fake_download  # type: ignore[method-assign]
@@ -1057,7 +1057,7 @@ def test_handle_update_downloads_inbound_file_with_media_aeskey_hex(monkeypatch,
                         "file_item": {
                             "file_name": "report.pdf",
                             "media": {
-                                "full_url": "https://cdn.example/report.bin",
+                                "full_url": "https://cdn.weixin.qq.com/report.bin",
                                 "aeskey": aes_key.hex(),
                             },
                         },
@@ -1091,7 +1091,7 @@ def test_handle_update_downloads_inbound_file_with_unpadded_item_aes_key(monkeyp
         channel = WechatChannel(bus=bus, config={"bot_token": "test-token", "state_dir": str(tmp_path)})
         encrypted = channel.__class__.__dict__["_extract_file_item"].__globals__["_encrypt_aes_128_ecb"](plaintext, aes_key)
 
-        async def _fake_download(_url: str, *, timeout: float | None = None):
+        async def _fake_download(_url: str, *, timeout: float | None = None, max_bytes: int | None = None):
             return encrypted
 
         channel._download_cdn_bytes = _fake_download  # type: ignore[method-assign]
@@ -1108,7 +1108,7 @@ def test_handle_update_downloads_inbound_file_with_unpadded_item_aes_key(monkeyp
                         "aesKey": encoded_key,
                         "file_item": {
                             "file_name": "report.pdf",
-                            "media": {"full_url": "https://cdn.example/report.bin"},
+                            "media": {"full_url": "https://cdn.weixin.qq.com/report.bin"},
                         },
                     }
                 ],
@@ -1140,7 +1140,7 @@ def test_handle_update_downloads_inbound_file_with_media_aes_key_base64_of_hex(m
         channel = WechatChannel(bus=bus, config={"bot_token": "test-token", "state_dir": str(tmp_path)})
         encrypted = channel.__class__.__dict__["_extract_file_item"].__globals__["_encrypt_aes_128_ecb"](plaintext, aes_key)
 
-        async def _fake_download(_url: str, *, timeout: float | None = None):
+        async def _fake_download(_url: str, *, timeout: float | None = None, max_bytes: int | None = None):
             return encrypted
 
         channel._download_cdn_bytes = _fake_download  # type: ignore[method-assign]
@@ -1157,7 +1157,7 @@ def test_handle_update_downloads_inbound_file_with_media_aes_key_base64_of_hex(m
                         "file_item": {
                             "file_name": "report.pdf",
                             "media": {
-                                "full_url": "https://cdn.example/report.bin",
+                                "full_url": "https://cdn.weixin.qq.com/report.bin",
                                 "aes_key": encoded_hex_key,
                             },
                         },
@@ -1190,7 +1190,7 @@ def test_handle_update_skips_disallowed_inbound_file(monkeypatch, tmp_path: Path
         channel = WechatChannel(bus=bus, config={"bot_token": "test-token", "state_dir": str(tmp_path)})
         encrypted = channel.__class__.__dict__["_extract_file_item"].__globals__["_encrypt_aes_128_ecb"](plaintext, aes_key)
 
-        async def _fake_download(_url: str, *, timeout: float | None = None):
+        async def _fake_download(_url: str, *, timeout: float | None = None, max_bytes: int | None = None):
             return encrypted
 
         channel._download_cdn_bytes = _fake_download  # type: ignore[method-assign]
@@ -1207,7 +1207,7 @@ def test_handle_update_skips_disallowed_inbound_file(monkeypatch, tmp_path: Path
                         "file_item": {
                             "file_name": "malware.exe",
                             "aeskey": aes_key.hex(),
-                            "media": {"full_url": "https://cdn.example/bad.bin"},
+                            "media": {"full_url": "https://cdn.weixin.qq.com/bad.bin"},
                         },
                     }
                 ],
@@ -1322,7 +1322,7 @@ def test_poll_loop_one_bad_message_does_not_permanently_lose_its_siblings(monkey
                     "type": 2,
                     "image_item": {
                         "aeskey": aes_key.hex(),
-                        "media": {"full_url": "https://cdn.example/corrupt-attachment.bin"},
+                        "media": {"full_url": "https://cdn.weixin.qq.com/corrupt-attachment.bin"},
                     },
                 }
             ],
@@ -1356,7 +1356,7 @@ def test_poll_loop_one_bad_message_does_not_permanently_lose_its_siblings(monkey
             config={"bot_token": "test-token", "state_dir": str(state_dir), "polling_retry_delay": 0.001},
         )
 
-        async def _fake_download(_url: str, *, timeout: float | None = None) -> bytes:
+        async def _fake_download(_url: str, *, timeout: float | None = None, max_bytes: int | None = None) -> bytes:
             return non_block_aligned_ciphertext
 
         channel._download_cdn_bytes = _fake_download  # type: ignore[method-assign]
@@ -1553,3 +1553,324 @@ def test_save_auth_state_chmod_failure_is_logged_not_warned(tmp_path: Path, capl
     messages = [record.getMessage() for record in caplog.records]
     assert any("unable to chmod auth state" in message for message in messages)
     assert not any("failed to persist auth state" in message for message in messages)
+
+
+# ---------------------------------------------------------------------------
+# Inbound media download cap + destination allowlist
+# ---------------------------------------------------------------------------
+
+
+def test_is_allowed_media_url_suffix_boundaries():
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(MessageBus(), config={"bot_token": "test-token"})
+
+    # Platform CDN defaults (plus the configured cdn_base_url host) are allowed.
+    assert channel._is_allowed_media_url("https://novac2c.cdn.weixin.qq.com/c2c/x?token=1")
+    assert channel._is_allowed_media_url("https://cdn.weixin.qq.com/image.bin")
+    # Dot-boundary suffix matching: lookalike hosts never match.
+    assert not channel._is_allowed_media_url("https://notqq.com/image.bin")
+    assert not channel._is_allowed_media_url("https://qq.com.evil.io/image.bin")
+    assert not channel._is_allowed_media_url("https://cdn.example/image.bin")
+    # Loopback/private targets and non-HTTP schemes are rejected outright.
+    assert not channel._is_allowed_media_url("http://127.0.0.1:8001/api/user")
+    assert not channel._is_allowed_media_url("http://169.254.169.254/latest/meta-data")
+    assert not channel._is_allowed_media_url("file:///etc/passwd")
+
+    # Operator suffixes extend the allowlist; the configured cdn_base_url host
+    # is admitted automatically so a custom CDN endpoint keeps working. A
+    # leading ``*.`` (DNS habit) normalizes to the bare suffix.
+    custom = WechatChannel(
+        MessageBus(),
+        config={
+            "bot_token": "test-token",
+            "cdn_base_url": "https://media.internal.example/c2c",
+            "allowed_media_hosts": ["cdn.example", "*.wild.example"],
+        },
+    )
+    assert custom._is_allowed_media_url("https://media.internal.example/c2c/x")
+    assert custom._is_allowed_media_url("https://a.cdn.example/image.bin")
+    assert custom._is_allowed_media_url("https://cdn.weixin.qq.com/image.bin")
+    assert custom._is_allowed_media_url("https://b.wild.example/image.bin")
+
+
+def test_handle_update_skips_media_from_disallowed_host(tmp_path: Path):
+    from app.channels.wechat import WechatChannel
+
+    async def go():
+        bus = MessageBus()
+        published = []
+
+        async def capture(msg):
+            published.append(msg)
+
+        bus.publish_inbound = capture  # type: ignore[method-assign]
+
+        channel = WechatChannel(bus, config={"bot_token": "test-token", "state_dir": str(tmp_path)})
+
+        async def _forbidden_download(_url: str, *, timeout: float | None = None, max_bytes: int | None = None) -> bytes:
+            raise AssertionError("download must not be attempted for a disallowed media host")
+
+        channel._download_cdn_bytes = _forbidden_download  # type: ignore[method-assign]
+
+        await channel._handle_update(
+            {
+                "message_type": 1,
+                "message_id": 201,
+                "from_user_id": "wx-user-1",
+                "context_token": "ctx-evil-1",
+                "item_list": [
+                    {
+                        "type": 2,
+                        "image_item": {
+                            "aeskey": b"1234567890abcdef".hex(),
+                            "media": {"full_url": "https://evil.example/image.bin"},
+                        },
+                    }
+                ],
+            }
+        )
+
+        # The image is dropped and, with no text either, nothing is published.
+        assert published == []
+        downloads_dir = tmp_path / "downloads"
+        assert not downloads_dir.exists() or not list(downloads_dir.iterdir())
+
+    _run(go())
+
+
+def test_handle_update_http_download_failure_is_sanitized_not_raised(tmp_path: Path, caplog):
+    """An HTTP failure during the media download drops that attachment with a
+    sanitized log instead of escaping to the polling loop's logger.exception.
+
+    httpx.HTTPStatusError formats the signed URL (path + query credentials)
+    into its message, so letting it propagate would render the URL in the
+    per-message traceback. Reproduced with a real 403 mock transport.
+    """
+    import httpx
+
+    from app.channels.wechat import WechatChannel
+
+    async def go():
+        bus = MessageBus()
+        published = []
+
+        async def capture(msg):
+            published.append(msg)
+
+        bus.publish_inbound = capture  # type: ignore[method-assign]
+
+        channel = WechatChannel(bus, config={"bot_token": "test-token", "state_dir": str(tmp_path)})
+        channel._client = httpx.AsyncClient(  # type: ignore[assignment]
+            transport=httpx.MockTransport(lambda _request: httpx.Response(403))
+        )
+        try:
+            await channel._handle_update(
+                {
+                    "message_type": 1,
+                    "message_id": 202,
+                    "from_user_id": "wx-user-1",
+                    "context_token": "ctx-403-1",
+                    "item_list": [
+                        {
+                            "type": 2,
+                            "image_item": {
+                                "aeskey": b"1234567890abcdef".hex(),
+                                "media": {"full_url": "https://cdn.weixin.qq.com/private/BearerSecret?token=QuerySecret"},
+                            },
+                        }
+                    ],
+                }
+            )
+        finally:
+            await channel._client.aclose()
+
+        # The image is dropped and, with no text either, nothing is published.
+        assert published == []
+
+    with caplog.at_level(logging.WARNING, logger="app.channels.wechat"):
+        _run(go())
+
+    assert "BearerSecret" not in caplog.text
+    assert "QuerySecret" not in caplog.text
+    assert "/private/" not in caplog.text
+    # The operator still sees what failed and for which host.
+    assert "HTTPStatusError (403)" in caplog.text
+    assert "cdn.weixin.qq.com" in caplog.text
+
+
+class _FakeStreamResponse:
+    def __init__(self, chunks: list[bytes]):
+        self._chunks = chunks
+        self.headers: dict[str, str] = {}
+
+    def raise_for_status(self) -> None:
+        return None
+
+    # Deliberately no aiter_bytes: the reader must consume undecoded bytes, so
+    # an accidental switch back to the decoding iterator fails loudly here.
+    async def aiter_raw(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class _FakeStreamContext:
+    def __init__(self, response: _FakeStreamResponse):
+        self._response = response
+
+    async def __aenter__(self) -> _FakeStreamResponse:
+        return self._response
+
+    async def __aexit__(self, *exc_info) -> bool:
+        return False
+
+
+class _FakeStreamingClient:
+    def __init__(self, chunks: list[bytes]):
+        self._chunks = chunks
+
+    def stream(self, _method: str, _url: str, timeout: float | None = None, **_kwargs) -> _FakeStreamContext:
+        return _FakeStreamContext(_FakeStreamResponse(self._chunks))
+
+
+def test_download_cdn_bytes_aborts_when_stream_exceeds_cap():
+    from app.channels.wechat import WechatChannel
+
+    async def go():
+        channel = WechatChannel(MessageBus(), config={"bot_token": "test-token"})
+        channel._client = _FakeStreamingClient([b"abc", b"def"])  # type: ignore[assignment]
+
+        # 6 bytes total vs a 5-byte cap: aborted mid-stream before full read.
+        assert await channel._download_cdn_bytes("https://cdn.weixin.qq.com/x", max_bytes=5) is None
+        # At/under the cap and with the cap disabled the chunks are joined as before.
+        assert await channel._download_cdn_bytes("https://cdn.weixin.qq.com/x", max_bytes=6) == b"abcdef"
+        assert await channel._download_cdn_bytes("https://cdn.weixin.qq.com/x", max_bytes=None) == b"abcdef"
+        assert await channel._download_cdn_bytes("https://cdn.weixin.qq.com/x", max_bytes=0) == b"abcdef"
+
+    _run(go())
+
+
+def test_download_cdn_bytes_rejects_compressed_response_before_decode(caplog):
+    """aiter_bytes() would transparently decode Content-Encoding, allocating the
+    whole decompressed body before the cap sees a byte — an ~8 KB gzip wire
+    chunk decoding to 8 MiB (reproduced here) bypasses max_bytes entirely. The
+    download must request identity and refuse a residual encoding before
+    reading, even with the cap disabled."""
+    import gzip
+
+    import httpx
+
+    from app.channels.wechat import WechatChannel
+
+    class _AsyncChunks(httpx.AsyncByteStream):
+        def __init__(self, chunks: list[bytes]):
+            self._chunks = chunks
+
+        async def __aiter__(self):
+            for chunk in self._chunks:
+                yield chunk
+
+    seen_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"Content-Encoding": "gzip"},
+            stream=_AsyncChunks([gzip.compress(b"\x00" * (8 * 1024 * 1024))]),
+        )
+
+    async def go():
+        channel = WechatChannel(MessageBus(), config={"bot_token": "test-token"})
+        channel._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))  # type: ignore[assignment]
+        try:
+            # Cap disabled: the old aiter_bytes() code path would happily
+            # return the 8 MiB decompressed payload here.
+            assert await channel._download_cdn_bytes("https://cdn.weixin.qq.com/x", max_bytes=None) is None
+            # With a cap in place the rejection still happens for the encoding,
+            # before any decode/size accounting.
+            assert await channel._download_cdn_bytes("https://cdn.weixin.qq.com/x", max_bytes=1024 * 1024) is None
+        finally:
+            await channel._client.aclose()
+
+    with caplog.at_level(logging.WARNING, logger="app.channels.wechat"):
+        _run(go())
+
+    assert "Content-Encoding" in caplog.text
+    assert "exceeds" not in caplog.text  # rejected for the encoding, not the size
+    assert seen_requests[0].headers.get("accept-encoding") == "identity"
+
+
+def test_download_cdn_bytes_streams_identity_response():
+    """An unencoded response still round-trips through a real httpx transport."""
+    import httpx
+
+    from app.channels.wechat import WechatChannel
+
+    class _AsyncChunks(httpx.AsyncByteStream):
+        def __init__(self, chunks: list[bytes]):
+            self._chunks = chunks
+
+        async def __aiter__(self):
+            for chunk in self._chunks:
+                yield chunk
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_AsyncChunks([b"abcdef"]))
+
+    async def go():
+        channel = WechatChannel(MessageBus(), config={"bot_token": "test-token"})
+        channel._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))  # type: ignore[assignment]
+        try:
+            assert await channel._download_cdn_bytes("https://cdn.weixin.qq.com/x") == b"abcdef"
+        finally:
+            await channel._client.aclose()
+
+    _run(go())
+
+
+def test_boundary_sized_inbound_image_survives_pkcs7_padding(tmp_path: Path):
+    """A valid attachment whose plaintext is exactly the configured limit must load.
+
+    The limit bounds plaintext, but the stream measures ciphertext — AES-128-ECB
+    with PKCS#7 pads 32 plaintext bytes to 48 — so the stream cap must be the
+    padded size of exactly-limit plaintext, not the plaintext limit itself.
+    Exercises the real streaming download (no _download_cdn_bytes stub).
+    """
+    from app.channels.wechat import WechatChannel, _encrypt_aes_128_ecb
+
+    async def go():
+        channel = WechatChannel(
+            MessageBus(),
+            config={"bot_token": "test-token", "state_dir": str(tmp_path), "max_inbound_image_bytes": 32},
+        )
+        aes_key = b"1234567890abcdef"
+        plaintext = b"\x89PNG\r\n\x1a\n" + b"x" * 24  # exactly 32 bytes, valid PNG magic
+        encrypted = _encrypt_aes_128_ecb(plaintext, aes_key)  # 48 bytes > 32-byte limit
+        assert len(encrypted) == 48
+        channel._client = _FakeStreamingClient([encrypted])  # type: ignore[assignment]
+
+        assert channel._stream_cap_for(32) == 48
+        assert channel._stream_cap_for(0) is None
+
+        files = await channel._extract_inbound_files(
+            {
+                "message_id": 301,
+                "item_list": [
+                    {
+                        "type": 2,
+                        "image_item": {
+                            "aeskey": aes_key.hex(),
+                            "media": {"full_url": "https://cdn.weixin.qq.com/image.bin"},
+                        },
+                    }
+                ],
+            }
+        )
+
+        assert len(files) == 1
+        assert files[0]["type"] == "image"
+        assert files[0]["size"] == 32
+        assert Path(files[0]["path"]).read_bytes() == plaintext
+
+    _run(go())

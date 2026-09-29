@@ -313,6 +313,83 @@ require_compose_version
     assert "too old" in result.stdout
 
 
+@pytest.mark.parametrize("args", ["logs --prod", "logs --prod --gateway"])
+def test_logs_prod_targets_production_stack(args):
+    """`logs --prod` must tail the stack deploy.sh started, not the dev project.
+
+    `make up` runs scripts/deploy.sh (project `deer-flow`, docker-compose.yaml)
+    while the dev default is project `deer-flow-dev`, so `make docker-logs`
+    after `make up` printed nothing (#5529). The production entry point must
+    target the same project and interpolate the same .env.
+
+    Compose detection is NOT stubbed here: it rebuilds COMPOSE_CMD, and the
+    appended `--env-file` must survive that rebuild (#5538 review).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        (tmp_root / "docker-compose.yaml").write_text("services: {}\n", encoding="utf-8")
+        (tmp_root / ".env").write_text("KEEP=me\n", encoding="utf-8")
+        marker = tmp_root / "prod_invoke.txt"
+
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
+docker() {{
+  if [ "$1" = compose ] && [ "$2" = version ]; then
+    echo '2.41.0'
+    return 0
+  fi
+  if [ "$1" = compose ]; then
+    printf '%s\\n' "$*" "DEER_FLOW_HOME=${{DEER_FLOW_HOME:-unset}}" > '{marker}'
+    return 0
+  fi
+  command docker "$@"
+}}
+unset DEER_FLOW_ROOT DEER_FLOW_HOME DEER_FLOW_CONFIG_PATH
+unset DEER_FLOW_EXTENSIONS_CONFIG_PATH DEER_FLOW_REPO_ROOT
+unset BETTER_AUTH_SECRET DEER_FLOW_INTERNAL_AUTH_TOKEN
+{args}
+"""
+        subprocess.check_call([BASH_EXECUTABLE, "-lc", command])
+
+        recorded = marker.read_text(encoding="utf-8")
+        assert "-p deer-flow " in recorded, recorded
+        assert "-f docker-compose.yaml" in recorded, recorded
+        assert "--env-file ../.env" in recorded, recorded
+        assert "logs" in recorded, recorded
+        # deploy.sh exports interpolation defaults before every compose call;
+        # `logs --prod` must too, or the volume specs fail to parse.
+        assert "DEER_FLOW_HOME=" in recorded, recorded
+        assert "DEER_FLOW_HOME=unset" not in recorded, recorded
+
+
+def test_logs_without_dev_containers_hints_at_prod_logs():
+    """Silent empty output is the #5529 report: point at the production entry point."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+
+        command = f"""
+source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
+require_compose_version() {{ :; }}
+COMPOSE_CMD=true
+unset DEER_FLOW_ROOT
+logs
+"""
+        result = subprocess.run(
+            [BASH_EXECUTABLE, "-lc", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "make prod-logs" in result.stdout
+
+
 def test_aio_dood_socket_preflight_allows_windows_when_docker_reachable():
     """Windows Git Bash without /var/run/docker.sock proceeds when Docker daemon is reachable."""
     with tempfile.TemporaryDirectory() as tmpdir:

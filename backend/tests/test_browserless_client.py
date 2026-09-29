@@ -310,6 +310,15 @@ class TestBrowserlessClient:
 class TestBrowserlessTools:
     """Tests for the Browserless tool functions."""
 
+    @pytest.fixture(autouse=True)
+    def _resolve_example_com(self):
+        """Keep tool tests offline while preserving URL-safety validation."""
+        with patch(
+            "deerflow.community.browserless.tools._resolve_host_addresses",
+            return_value=[ipaddress.ip_address("93.184.216.34")],
+        ):
+            yield
+
     async def test_get_browserless_client_uses_env_token_fallback(self):
         """Browserless tools use BROWSERLESS_TOKEN when config omits token."""
         with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
@@ -367,6 +376,74 @@ class TestBrowserlessTools:
 
         assert "Error:" not in result
         assert "warning:" not in result
+
+    async def _fetch_kwargs_with_config(self, cfg: dict) -> dict:
+        """Invoke web_fetch_tool against ``cfg`` and return the kwargs it sent."""
+        with (
+            patch("deerflow.community.browserless.tools._get_browserless_client") as mock_get_client,
+            patch("deerflow.community.browserless.tools._get_tool_config", return_value=cfg),
+        ):
+            mock_client = MagicMock()
+            mock_client.fetch_html_with_status = AsyncMock(
+                return_value=BrowserlessFetchResult(
+                    html="<html><body><p>ok</p></body></html>",
+                    target_status_code="200",
+                    target_status="OK",
+                )
+            )
+            mock_get_client.return_value = mock_client
+            await tools.web_fetch_tool.ainvoke("https://example.com")
+            return mock_client.fetch_html_with_status.call_args.kwargs
+
+    async def test_web_fetch_tool_reads_reject_lists_from_config(self):
+        """`reject_resource_types` / `reject_request_pattern` reach the client.
+
+        web_fetch_tool declared both and passed them to the client, but only ever
+        assigned ``None``: the client supports them (and is tested for it) while
+        nothing in the tool ever read them from config, so the provider's
+        resource blocking was unreachable.
+        """
+        kwargs = await self._fetch_kwargs_with_config(
+            {
+                "reject_resource_types": ["image", "media"],
+                "reject_request_pattern": [r"\.css$"],
+            }
+        )
+
+        assert kwargs["reject_resource_types"] == ["image", "media"]
+        assert kwargs["reject_request_pattern"] == [r"\.css$"]
+
+    async def test_web_fetch_tool_accepts_comma_separated_reject_lists(self):
+        """A comma-separated string is accepted too, since YAML makes it natural."""
+        kwargs = await self._fetch_kwargs_with_config({"reject_resource_types": "image, media"})
+
+        assert kwargs["reject_resource_types"] == ["image", "media"]
+
+    async def test_web_fetch_tool_omits_reject_params_when_unset(self):
+        """An unset key stays ``None`` so the parameter is left out of the payload."""
+        kwargs = await self._fetch_kwargs_with_config({})
+
+        assert kwargs["reject_resource_types"] is None
+        assert kwargs["reject_request_pattern"] is None
+
+    async def test_web_fetch_tool_ignores_unusable_reject_values(self):
+        """A scalar or empty value yields ``None`` instead of an unusable payload."""
+        kwargs = await self._fetch_kwargs_with_config({"reject_resource_types": 5, "reject_request_pattern": []})
+
+        assert kwargs["reject_resource_types"] is None
+        assert kwargs["reject_request_pattern"] is None
+
+    async def test_web_fetch_tool_ignores_non_string_reject_list_items(self):
+        """Non-string list items stay out of the Browserless payload."""
+        kwargs = await self._fetch_kwargs_with_config(
+            {
+                "reject_resource_types": ["image", 5, "", " media "],
+                "reject_request_pattern": [False],
+            }
+        )
+
+        assert kwargs["reject_resource_types"] == ["image", "media"]
+        assert kwargs["reject_request_pattern"] is None
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
     async def test_web_fetch_tool_error(self, mock_get_client):
@@ -481,6 +558,70 @@ class TestBrowserlessTools:
 
         assert "Error:" not in result
         assert "warning:" not in result
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_tool_reads_wait_timeouts_like_web_capture(self, mock_get_client):
+        """web_fetch_tool resolves both wait timeouts with the tolerant int coercion.
+
+        web_capture_tool reads ``wait_for_timeout_ms`` and
+        ``wait_for_selector_timeout_ms`` through ``_as_int``, so a loosely typed
+        value falls back to the default instead of raising. web_fetch_tool used a
+        bare ``int()`` for the first key and never read the second, so a typo'd
+        value made every fetch return "invalid literal for int()" and a slow
+        selector could not be given more than the hardcoded 5000 ms.
+        """
+        mock_client = MagicMock()
+        mock_client.fetch_html_with_status = AsyncMock(
+            return_value=BrowserlessFetchResult(
+                html="<html><body><article><h1>Title</h1></article></body></html>",
+                target_status_code="200",
+                target_status="OK",
+            )
+        )
+        mock_get_client.return_value = mock_client
+
+        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
+            mock_cfg.return_value = {
+                "wait_for_timeout_ms": "2500",  # quoted number: parsed, not rejected
+                "wait_for_selector": "article",
+                "wait_for_selector_timeout_ms": 9000,
+            }
+            with patch(
+                "deerflow.community.browserless.tools._resolve_host_addresses",
+                return_value=[ipaddress.ip_address("93.184.216.34")],
+            ):
+                result = await tools.web_fetch_tool.ainvoke("https://example.com/article")
+
+        assert "Error:" not in result
+        kwargs = mock_client.fetch_html_with_status.call_args.kwargs
+        assert kwargs["wait_for_timeout_ms"] == 2500
+        assert kwargs["wait_for_selector_timeout_ms"] == 9000
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_fetch_tool_bad_wait_timeout_falls_back_to_default(self, mock_get_client):
+        """A non-numeric wait timeout must not fail the whole fetch."""
+        mock_client = MagicMock()
+        mock_client.fetch_html_with_status = AsyncMock(
+            return_value=BrowserlessFetchResult(
+                html="<html><body><article><h1>Title</h1></article></body></html>",
+                target_status_code="200",
+                target_status="OK",
+            )
+        )
+        mock_get_client.return_value = mock_client
+
+        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
+            mock_cfg.return_value = {"wait_for_timeout_ms": "2s"}
+            with patch(
+                "deerflow.community.browserless.tools._resolve_host_addresses",
+                return_value=[ipaddress.ip_address("93.184.216.34")],
+            ):
+                result = await tools.web_fetch_tool.ainvoke("https://example.com/article")
+
+        assert "Error:" not in result
+        kwargs = mock_client.fetch_html_with_status.call_args.kwargs
+        assert kwargs["wait_for_timeout_ms"] == 0
+        assert kwargs["wait_for_selector_timeout_ms"] == 5000
 
     async def test_web_fetch_and_web_capture_tools_agree_on_target_error_warning(self, tmp_path):
         """web_fetch_tool and web_capture_tool surface the identical warning for identical target-error headers.

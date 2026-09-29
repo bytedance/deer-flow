@@ -51,3 +51,24 @@ export interface ChannelConnectResponse {
   instruction: string;
   expires_in: number;
 }
+
+export type WechatQRLoginSession = {
+  id: string;
+  status:
+    | "pending"
+    | "scanned"
+    | "verification_required"
+    | "confirmed"
+    | "expired"
+    | "failed";
+  error?:
+    | "network"
+    | "invalid_response"
+    | "verification_rejected"
+    | "verification_blocked"
+    | "already_bound"
+    | null;
+  qrcode_content: string;
+  expires_in: number;
+  provider: ChannelProvider | null;
+};

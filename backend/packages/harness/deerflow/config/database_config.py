@@ -184,6 +184,7 @@ class DatabaseConfig(BaseModel):
     )
     pool_size: int = Field(
         default=5,
+        gt=0,
         description="Connection pool size for the app ORM engine (postgres only).",
     )
     pool_recycle: int = Field(
@@ -194,6 +195,7 @@ class DatabaseConfig(BaseModel):
     command_timeout: float | None = Field(
         default=30,
         gt=0,
+        allow_inf_nan=False,
         description="Timeout in seconds for app ORM PostgreSQL commands. Set to null to disable the command timeout.",
     )
     postgres_schema: str = Field(
@@ -212,6 +214,20 @@ class DatabaseConfig(BaseModel):
     @classmethod
     def _validate_postgres_schema(cls, value: str) -> str:
         return validate_postgres_schema(value)
+
+    @field_validator("pool_size", "pool_recycle", mode="before")
+    @classmethod
+    def _reject_boolean_pool_settings(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be an integer, not a boolean")
+        return value
+
+    @field_validator("command_timeout", mode="before")
+    @classmethod
+    def _reject_boolean_command_timeout(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("command_timeout must be a number of seconds or null, not a boolean")
+        return value
 
     # -- Legacy key migration (not user-configured) --
 
@@ -309,6 +325,14 @@ class DatabaseConfig(BaseModel):
             return f"sqlite:///{self.sqlite_path}"
         if self.backend == "postgres":
             url = self.postgres_url
+            if self.postgres_schema:
+                # The synchronous agent stores use psycopg via SQLAlchemy,
+                # so they need the same search_path as the async ORM engine
+                # and LangGraph stores.  Keep the option merge in the shared
+                # PostgreSQL helper so existing libpq options are preserved.
+                from deerflow.persistence.postgres_schema import dsn_with_search_path
+
+                url = dsn_with_search_path(url, self.postgres_schema)
             if url.startswith("postgresql+asyncpg://"):
                 url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
             elif url.startswith("postgresql://"):

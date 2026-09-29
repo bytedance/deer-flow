@@ -203,8 +203,14 @@ class Sandbox(ABC):
         """Find paths that match a glob pattern under a root directory.
 
         Returns the matches and ``truncated``, which is true whenever the
-        matches may be incomplete: ``max_results`` was reached, or the search
-        stopped at an output cap before filtering.
+        matches may be incomplete: the search stopped at an output cap before
+        filtering, or an eligible match beyond ``max_results`` was dropped.
+
+        Providers differ in how precisely they can decide the second case. One
+        that holds the whole listing can tell an exactly-full result from a
+        cut-off one and reports the former as complete; one reading a capped
+        stream cannot, and reports it as truncated. Treat the flag as "may be
+        incomplete", never as a count.
         """
         pass
 

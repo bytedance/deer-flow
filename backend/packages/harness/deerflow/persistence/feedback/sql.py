@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.feedback.model import FeedbackRow
@@ -187,17 +187,50 @@ class FeedbackRepository:
             await session.commit()
             return True
 
+    async def delete_by_thread(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> int:
+        """Delete the owner's feedback for every run of a thread.
+
+        ``user_id`` keeps the repository's three-state convention: ``AUTO``
+        resolves the request context, an explicit id scopes the delete to that
+        owner, and ``None`` removes every owner's rows (migration/CLI callers).
+        """
+        resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.delete_by_thread")
+
+        conditions = [FeedbackRow.thread_id == thread_id]
+        if resolved_user_id is not None:
+            conditions.append(FeedbackRow.user_id == resolved_user_id)
+
+        async with self._sf() as session:
+            count = await session.scalar(select(func.count()).select_from(FeedbackRow).where(*conditions)) or 0
+            if count:
+                await session.execute(delete(FeedbackRow).where(*conditions))
+            await session.commit()
+            return count
+
     async def list_by_thread_grouped(
         self,
         thread_id: str,
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> dict[str, dict]:
-        """Return feedback grouped by run_id for a thread: {run_id: feedback_dict}."""
+        """Return feedback grouped by run_id for a thread: {run_id: feedback_dict}.
+
+        With an explicit ``None`` user id (unfiltered reads) several users may
+        hold feedback on the same run, so order deterministically — the
+        per-run collapse below keeps the last row per ``run_id``, i.e. the
+        most recently written feedback (``created_at`` is refreshed on
+        update), with ``feedback_id`` breaking ties.
+        """
         resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.list_by_thread_grouped")
         stmt = select(FeedbackRow).where(FeedbackRow.thread_id == thread_id)
         if resolved_user_id is not None:
             stmt = stmt.where(FeedbackRow.user_id == resolved_user_id)
+        stmt = stmt.order_by(FeedbackRow.created_at.asc(), FeedbackRow.feedback_id.asc())
         async with self._sf() as session:
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
@@ -209,7 +242,13 @@ class FeedbackRepository:
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> dict[str, dict]:
-        """Return feedback for only the selected runs in one thread."""
+        """Return feedback for only the selected runs in one thread.
+
+        Same deterministic ordering as :meth:`list_by_thread_grouped`: with an
+        explicit ``None`` user id the per-run collapse keeps the most recently
+        written feedback (``created_at`` is refreshed on update), ties broken
+        by ``feedback_id``.
+        """
         if not run_ids:
             return {}
         resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.list_by_run_ids")
@@ -219,6 +258,7 @@ class FeedbackRepository:
         )
         if resolved_user_id is not None:
             stmt = stmt.where(FeedbackRow.user_id == resolved_user_id)
+        stmt = stmt.order_by(FeedbackRow.created_at.asc(), FeedbackRow.feedback_id.asc())
         async with self._sf() as session:
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}

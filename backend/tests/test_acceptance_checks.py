@@ -625,22 +625,24 @@ class TestProbeInnerScriptRealLayouts:
         command = f"/usr/bin/env -i /bin/sh -c {shlex.quote(_SIZE_PROBE_INNER_SCRIPT)} probe {shlex.quote(path)} {shlex.quote(root)}"
         return subprocess.run(command, shell=True, capture_output=True, text=True, check=True).stdout.strip()
 
-    def test_real_directory_mount_root(self, tmp_path):
+    @pytest.mark.parametrize("content", ("", "hello"), ids=("empty", "nonempty"))
+    def test_real_directory_mount_root(self, tmp_path, content):
         """AIO/BoxLite/OpenSandbox layout: a genuine mount directory."""
         outputs = tmp_path / "mnt" / "user-data" / "outputs"
         outputs.mkdir(parents=True)
-        (outputs / "report.md").write_text("hello", encoding="utf-8")
-        assert self._run_probe(str(outputs / "report.md"), str(outputs)) == "5"
+        (outputs / "report.md").write_text(content, encoding="utf-8")
+        assert self._run_probe(str(outputs / "report.md"), str(outputs)) == str(len(content))
 
-    def test_symlinked_mount_prefix(self, tmp_path):
+    @pytest.mark.parametrize("content", ("", "hello"), ids=("empty", "nonempty"))
+    def test_symlinked_mount_prefix(self, tmp_path, content):
         """e2b/Tenki default layout: ``/mnt/user-data`` is a symlink to the
         home dir — the canonical root still contains the canonical file."""
         home_outputs = tmp_path / "home" / "user" / "outputs"
         home_outputs.mkdir(parents=True)
-        (home_outputs / "report.md").write_text("hello", encoding="utf-8")
+        (home_outputs / "report.md").write_text(content, encoding="utf-8")
         (tmp_path / "mnt").mkdir()
         (tmp_path / "mnt" / "user-data").symlink_to(tmp_path / "home" / "user")
-        assert self._run_probe(str(tmp_path / "mnt" / "user-data" / "outputs" / "report.md"), str(tmp_path / "mnt" / "user-data" / "outputs")) == "5"
+        assert self._run_probe(str(tmp_path / "mnt" / "user-data" / "outputs" / "report.md"), str(tmp_path / "mnt" / "user-data" / "outputs")) == str(len(content))
 
     def test_final_component_symlink_is_nonregular(self, tmp_path):
         outputs = tmp_path / "outputs"
@@ -656,11 +658,50 @@ class TestProbeInnerScriptRealLayouts:
         command = f"/usr/bin/env -i /bin/sh -c {shlex.quote(_READ_PROBE_INNER_SCRIPT)} probe {shlex.quote(path)} {shlex.quote(root)}"
         return subprocess.run(command, shell=True, capture_output=True, text=True, check=True).stdout.strip()
 
-    def test_read_probe_regular_file_is_readable(self, tmp_path):
+    @pytest.mark.parametrize("content", ("", "hello"), ids=("empty", "nonempty"))
+    def test_read_probe_regular_file_is_readable(self, tmp_path, content):
         outputs = tmp_path / "outputs"
         outputs.mkdir()
-        (outputs / "report.md").write_text("hello", encoding="utf-8")
+        (outputs / "report.md").write_text(content, encoding="utf-8")
         assert self._run_read_probe(str(outputs / "report.md"), str(outputs)) == "READABLE"
+
+    @pytest.mark.parametrize(
+        ("criterion", "holds", "detail"),
+        (
+            ("file:../outputs/empty.md exists", True, "exists, 0 bytes"),
+            ("file:../outputs/empty.md non-empty", False, "file is empty"),
+            ("file_written:../outputs/empty.md", True, "read-back ok, 0 bytes"),
+        ),
+    )
+    def test_empty_remote_file_acceptance(self, tmp_path, monkeypatch, criterion, holds, detail):
+        """Exercise the real size probe through the public checklist API."""
+        outputs = tmp_path / "outputs"
+        outputs.mkdir()
+        (outputs / "empty.md").touch()
+        mapping = {
+            "/mnt/user-data/outputs/empty.md": str(outputs / "empty.md"),
+            "/mnt/user-data/outputs": str(outputs),
+        }
+
+        class _RealShellSandbox:
+            def execute_command(self, command, **kwargs):
+                assert kwargs.get("env") == {"_DEERFLOW_SIZE_PROBE": "1"}
+                for virtual, host in sorted(mapping.items(), key=lambda kv: -len(kv[0])):
+                    command = command.replace(virtual, shlex.quote(host))
+                return subprocess.run(command, shell=True, capture_output=True, text=True, check=True, timeout=5).stdout
+
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime=None: _RealShellSandbox())
+        verdict = check_acceptance_criteria(
+            [criterion],
+            runtime=SimpleNamespace(state=None),
+            thread_data=THREAD_DATA,
+            content_reader=_reader({"/mnt/user-data/outputs/empty.md": ""}),
+        )
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is True
+        assert leaf["holds"] is holds
+        assert leaf["detail"] == detail
+        assert verdict["unchecked"] == []
 
     @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="mode-000 readability needs POSIX permissions and a non-root euid")
     def test_read_probe_mode_000_is_unreadable(self, tmp_path):

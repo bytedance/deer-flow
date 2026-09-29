@@ -57,6 +57,13 @@ import {
   type HumanInputResponse,
 } from "@/core/messages/human-input";
 import { useModels } from "@/core/models/hooks";
+import {
+  getResolvedMode,
+  isThinkingRequired,
+  reasoningEffortForMode,
+  resolveReasoningEffort,
+  supportsThinking as modelSupportsThinking,
+} from "@/core/models/reasoning";
 import type { Model } from "@/core/models/types";
 import { useLocalSettings } from "@/core/settings";
 import {
@@ -80,18 +87,14 @@ import {
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorInput,
-  ModelSelectorItem,
-  ModelSelectorList,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from "../../ai-elements/model-selector";
 import { MessageList, MESSAGE_LIST_DEFAULT_PADDING_BOTTOM } from "../messages";
 import { useThread as useParentThread } from "../messages/context";
 import { ModeHoverGuide } from "../mode-hover-guide";
+import {
+  ModelPicker,
+  ModelPickerContent,
+  ModelPickerTrigger,
+} from "../model-picker-content";
 import { Tooltip } from "../tooltip";
 
 import { type SidecarReference, useSidecar } from "./context";
@@ -116,29 +119,6 @@ function buildHiddenSidecarContextMessage({
 }
 
 type SidecarInputMode = NonNullable<ThreadStreamOptions["context"]["mode"]>;
-
-function getResolvedMode(
-  mode: ThreadStreamOptions["context"]["mode"],
-  supportsThinking: boolean,
-): SidecarInputMode {
-  if (!supportsThinking && mode !== "flash") {
-    return "flash";
-  }
-  if (mode) {
-    return mode;
-  }
-  return supportsThinking ? "pro" : "flash";
-}
-
-function reasoningEffortForMode(mode: SidecarInputMode) {
-  return mode === "ultra"
-    ? "high"
-    : mode === "pro"
-      ? "medium"
-      : mode === "thinking"
-        ? "low"
-        : "minimal";
-}
 
 function promptMessageFiles(message: PromptInputMessage) {
   return message.files.flatMap((file) =>
@@ -176,8 +156,6 @@ export function SidecarPanel({ className }: { className?: string }) {
       models[0]
     );
   }, [models, sidecar.context.model_name]);
-
-  const supportThinking = selectedModel?.supports_thinking ?? false;
 
   const {
     thread,
@@ -234,13 +212,17 @@ export function SidecarPanel({ className }: { className?: string }) {
     );
     const fallbackModel = currentModel ?? models[0]!;
     const nextModelName = fallbackModel.name;
-    const nextMode = getResolvedMode(
-      sidecar.context.mode,
-      fallbackModel.supports_thinking ?? false,
-    );
+    const nextMode = getResolvedMode(sidecar.context.mode, fallbackModel);
     const modeChanged = sidecar.context.mode !== nextMode;
+    const nextEffort = modeChanged
+      ? reasoningEffortForMode(nextMode, fallbackModel)
+      : resolveReasoningEffort(fallbackModel, sidecar.context.reasoning_effort);
 
-    if (sidecar.context.model_name === nextModelName && !modeChanged) {
+    if (
+      sidecar.context.model_name === nextModelName &&
+      !modeChanged &&
+      nextEffort === sidecar.context.reasoning_effort
+    ) {
       return;
     }
 
@@ -248,9 +230,7 @@ export function SidecarPanel({ className }: { className?: string }) {
       ...sidecar.context,
       model_name: nextModelName,
       mode: nextMode,
-      reasoning_effort: modeChanged
-        ? reasoningEffortForMode(nextMode)
-        : sidecar.context.reasoning_effort,
+      reasoning_effort: nextEffort,
     });
   }, [models, sidecar]);
 
@@ -287,18 +267,15 @@ export function SidecarPanel({ className }: { className?: string }) {
       if (!model) {
         return;
       }
-      const nextMode = getResolvedMode(
-        sidecar.context.mode,
-        model.supports_thinking ?? false,
-      );
+      const nextMode = getResolvedMode(sidecar.context.mode, model);
       const modeChanged = sidecar.context.mode !== nextMode;
       sidecar.setContext({
         ...sidecar.context,
         model_name: modelName,
         mode: nextMode,
         reasoning_effort: modeChanged
-          ? reasoningEffortForMode(nextMode)
-          : sidecar.context.reasoning_effort,
+          ? reasoningEffortForMode(nextMode, model)
+          : resolveReasoningEffort(model, sidecar.context.reasoning_effort),
       });
       setModelDialogOpen(false);
     },
@@ -307,14 +284,14 @@ export function SidecarPanel({ className }: { className?: string }) {
 
   const handleModeSelect = useCallback(
     (mode: SidecarInputMode) => {
-      const nextMode = getResolvedMode(mode, supportThinking);
+      const nextMode = getResolvedMode(mode, selectedModel);
       sidecar.setContext({
         ...sidecar.context,
         mode: nextMode,
-        reasoning_effort: reasoningEffortForMode(nextMode),
+        reasoning_effort: reasoningEffortForMode(nextMode, selectedModel),
       });
     },
-    [sidecar, supportThinking],
+    [sidecar, selectedModel],
   );
 
   const ensureSidecarThread = useCallback(
@@ -639,14 +616,13 @@ export function SidecarPanel({ className }: { className?: string }) {
                 <SidecarAddAttachmentsButton uploadLimits={uploadLimits} />
                 <SidecarModeMenu
                   context={sidecar.context}
-                  supportThinking={supportThinking}
+                  model={selectedModel}
                   onModeSelect={handleModeSelect}
                 />
               </PromptInputTools>
               <PromptInputTools className="min-w-0 justify-end">
                 <SidecarModelSelector
                   className="max-w-40 min-w-0 sm:max-w-56 @max-[240px]:hidden"
-                  context={sidecar.context}
                   models={models}
                   open={modelDialogOpen}
                   selectedModel={selectedModel}
@@ -754,15 +730,17 @@ function SidecarAddAttachmentsButton({
 
 function SidecarModeMenu({
   context,
-  supportThinking,
+  model,
   onModeSelect,
 }: {
   context: ThreadStreamOptions["context"];
-  supportThinking: boolean;
+  model: Model | undefined;
   onModeSelect: (mode: SidecarInputMode) => void;
 }) {
   const { t } = useI18n();
-  const mode = getResolvedMode(context.mode, supportThinking);
+  const supportThinking = modelSupportsThinking(model);
+  const thinkingRequired = isThinkingRequired(model);
+  const mode = getResolvedMode(context.mode, model);
 
   return (
     <PromptInputActionMenu>
@@ -794,34 +772,36 @@ function SidecarModeMenu({
           <DropdownMenuLabel className="text-muted-foreground text-xs">
             {t.inputBox.mode}
           </DropdownMenuLabel>
-          <PromptInputActionMenuItem
-            className={cn(
-              mode === "flash"
-                ? "text-accent-foreground"
-                : "text-muted-foreground/65",
-            )}
-            onSelect={() => onModeSelect("flash")}
-          >
-            <div className="flex flex-col gap-2">
-              <div className="flex items-center gap-1 font-bold">
-                <ZapIcon
-                  className={cn(
-                    "mr-2 size-4",
-                    mode === "flash" && "text-accent-foreground",
-                  )}
-                />
-                {t.inputBox.flashMode}
+          {!thinkingRequired && (
+            <PromptInputActionMenuItem
+              className={cn(
+                mode === "flash"
+                  ? "text-accent-foreground"
+                  : "text-muted-foreground/65",
+              )}
+              onSelect={() => onModeSelect("flash")}
+            >
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-1 font-bold">
+                  <ZapIcon
+                    className={cn(
+                      "mr-2 size-4",
+                      mode === "flash" && "text-accent-foreground",
+                    )}
+                  />
+                  {t.inputBox.flashMode}
+                </div>
+                <div className="pl-7 text-xs">
+                  {t.inputBox.flashModeDescription}
+                </div>
               </div>
-              <div className="pl-7 text-xs">
-                {t.inputBox.flashModeDescription}
-              </div>
-            </div>
-            {mode === "flash" ? (
-              <CheckIcon className="ml-auto size-4" />
-            ) : (
-              <div className="ml-auto size-4" />
-            )}
-          </PromptInputActionMenuItem>
+              {mode === "flash" ? (
+                <CheckIcon className="ml-auto size-4" />
+              ) : (
+                <div className="ml-auto size-4" />
+              )}
+            </PromptInputActionMenuItem>
+          )}
           {supportThinking && (
             <PromptInputActionMenuItem
               className={cn(
@@ -918,7 +898,6 @@ function SidecarModeMenu({
 
 function SidecarModelSelector({
   className,
-  context,
   models,
   open,
   selectedModel,
@@ -926,54 +905,33 @@ function SidecarModelSelector({
   onOpenChange,
 }: {
   className?: string;
-  context: ThreadStreamOptions["context"];
   models: Model[];
   open: boolean;
   selectedModel?: Model;
   onModelSelect: (modelName: string) => void;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { t } = useI18n();
-
   if (!selectedModel) {
     return null;
   }
 
   return (
-    <ModelSelector open={open} onOpenChange={onOpenChange}>
-      <ModelSelectorTrigger asChild>
+    <ModelPicker open={open} onOpenChange={onOpenChange}>
+      <ModelPickerTrigger asChild>
         <PromptInputButton className={cn("min-w-0 px-2!", className)}>
           <div className="flex min-w-0 flex-col text-left">
-            <ModelSelectorName className="truncate text-xs font-normal">
+            <span className="flex-1 truncate text-left text-xs font-normal">
               {selectedModel.display_name}
-            </ModelSelectorName>
+            </span>
           </div>
         </PromptInputButton>
-      </ModelSelectorTrigger>
-      <ModelSelectorContent>
-        <ModelSelectorInput placeholder={t.inputBox.searchModels} />
-        <ModelSelectorList>
-          {models.map((model) => (
-            <ModelSelectorItem
-              key={model.name}
-              value={model.name}
-              onSelect={() => onModelSelect(model.name)}
-            >
-              <div className="flex min-w-0 flex-1 flex-col">
-                <ModelSelectorName>{model.display_name}</ModelSelectorName>
-                <span className="text-muted-foreground truncate text-[10px]">
-                  {model.model}
-                </span>
-              </div>
-              {model.name === context.model_name ? (
-                <CheckIcon className="ml-auto size-4" />
-              ) : (
-                <div className="ml-auto size-4" />
-              )}
-            </ModelSelectorItem>
-          ))}
-        </ModelSelectorList>
-      </ModelSelectorContent>
-    </ModelSelector>
+      </ModelPickerTrigger>
+      <ModelPickerContent
+        open={open}
+        models={models}
+        selectedModelName={selectedModel.name}
+        onModelSelect={onModelSelect}
+      />
+    </ModelPicker>
   );
 }
