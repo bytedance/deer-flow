@@ -33,6 +33,7 @@ from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -498,7 +499,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         app.state.run_events_config = run_events_config
         app.state.run_event_store = make_run_event_store(run_events_config)
 
-        from deerflow.extensions.run_evidence import StoreRunEvidenceReader
+        from deerflow.extensions.run_evidence import StoreRunEvidenceReader, StoreRunEvidenceReaderFactory
 
         # Gateway-lifetime services are trusted operator extensions without a
         # request principal. None deliberately binds this app-scoped reader to
@@ -507,6 +508,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.run_store,
             app.state.run_event_store,
             user_id=None,
+        )
+        app.state.run_evidence_reader_factory = StoreRunEvidenceReaderFactory(
+            app.state.run_store,
+            app.state.run_event_store,
         )
 
         # Services are app-scoped. Capture this app's immutable extension set
@@ -520,9 +525,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         async def stop_extension_services() -> None:
             record_runtime_diagnostics(
-                await stop_services(
-                    extensions,
-                    service_entries=attempted_services,
+                await await_drained(
+                    stop_services(
+                        extensions,
+                        service_entries=attempted_services,
+                    )
                 )
             )
 

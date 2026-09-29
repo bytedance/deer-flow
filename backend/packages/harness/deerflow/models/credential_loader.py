@@ -156,14 +156,30 @@ def _extract_claude_code_credential(data: dict[str, Any], source: str) -> Claude
         logger.debug("Claude Code credentials source %s has a non-object claudeAiOauth container; skipping", source)
         return None
     access_token = oauth.get("accessToken", "")
+    if isinstance(access_token, str):
+        # The env and descriptor handoffs strip before they test the token, so a blank or
+        # padded value must not become a credential here either.
+        access_token = access_token.strip()
+    else:
+        access_token = ""
     if not access_token:
-        logger.debug("Claude Code credentials container exists but no accessToken found")
+        logger.debug("Claude Code credentials container exists but no string accessToken found")
         return None
+
+    expires_at = oauth.get("expiresAt", 0)
+    if not isinstance(expires_at, (int, float)):
+        logger.debug("Claude Code credentials source %s has a non-numeric expiresAt; skipping", source)
+        return None
+
+    refresh_token = oauth.get("refreshToken", "")
+    if not isinstance(refresh_token, str):
+        logger.debug("Claude Code credentials source %s has a non-string refreshToken; using no refresh token", source)
+        refresh_token = ""
 
     cred = ClaudeCodeCredential(
         access_token=access_token,
-        refresh_token=oauth.get("refreshToken", ""),
-        expires_at=oauth.get("expiresAt", 0),
+        refresh_token=refresh_token,
+        expires_at=expires_at,
         source=source,
     )
 
@@ -227,7 +243,8 @@ def load_codex_cli_credential() -> CodexCliCredential | None:
     """Load credential from Codex CLI (~/.codex/auth.json)."""
     cred_path = _resolve_credential_path("CODEX_AUTH_PATH", ".codex/auth.json")
     data = _load_json_file(cred_path, "Codex CLI credentials")
-    if data is None:
+    if not isinstance(data, dict):
+        logger.debug("Codex CLI credentials file is not a JSON object; skipping")
         return None
     tokens = data.get("tokens", {})
     if not isinstance(tokens, dict):
@@ -235,8 +252,13 @@ def load_codex_cli_credential() -> CodexCliCredential | None:
 
     access_token = data.get("access_token") or data.get("token") or tokens.get("access_token", "")
     account_id = data.get("account_id") or tokens.get("account_id", "")
-    if not access_token:
-        logger.debug("Codex CLI credentials file exists but no token found")
+    if isinstance(access_token, str):
+        access_token = access_token.strip()
+    if not isinstance(account_id, str):
+        logger.debug("Codex CLI credentials file has a non-string account_id; using no account")
+        account_id = ""
+    if not isinstance(access_token, str) or not access_token:
+        logger.debug("Codex CLI credentials file exists but no string token found")
         return None
 
     logger.info("Loaded Codex CLI credential")

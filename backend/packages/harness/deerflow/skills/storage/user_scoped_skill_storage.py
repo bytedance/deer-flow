@@ -41,7 +41,7 @@ from pathlib import Path
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
-from deerflow.skills.storage.skill_storage import SKILL_MD_FILE
+from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, walk_skill_directories
 from deerflow.skills.types import SkillCategory
 
 logger = logging.getLogger(__name__)
@@ -274,7 +274,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         # 1. Public skills: always from global root
         public_path = self._host_root / SkillCategory.PUBLIC.value
         if public_path.exists() and public_path.is_dir():
-            for current_root, dir_names, file_names in os.walk(public_path, followlinks=True):
+            for current_root, dir_names, file_names in walk_skill_directories(public_path):
                 dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
                 if SKILL_MD_FILE not in file_names:
                     continue
@@ -285,17 +285,18 @@ class UserScopedSkillStorage(LocalSkillStorage):
         # enabled state is still merged from this user's _skill_states.json.
         integration_path = self._integrations_root
         if integration_path.exists() and integration_path.is_dir():
-            for current_root, dir_names, file_names in os.walk(integration_path, followlinks=True):
+            for current_root, dir_names, file_names in walk_skill_directories(integration_path):
                 dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
                 if SKILL_MD_FILE not in file_names:
                     continue
+                dir_names.clear()
                 yield SkillCategory.INTEGRATION, integration_path, Path(current_root) / SKILL_MD_FILE
 
         # 3. Custom skills: prefer user-level directory
         user_custom_exists = False
         user_custom_path = self._user_custom_root
         if user_custom_path.exists() and user_custom_path.is_dir():
-            for current_root, dir_names, file_names in os.walk(user_custom_path, followlinks=True):
+            for current_root, dir_names, file_names in walk_skill_directories(user_custom_path):
                 dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and name != ".history")
                 if SKILL_MD_FILE not in file_names:
                     continue
@@ -311,7 +312,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         if not user_custom_exists:
             global_custom_path = self._global_custom_root
             if global_custom_path.exists() and global_custom_path.is_dir():
-                for current_root, dir_names, file_names in os.walk(global_custom_path, followlinks=True):
+                for current_root, dir_names, file_names in walk_skill_directories(global_custom_path):
                     dir_names[:] = sorted(name for name in dir_names if not name.startswith(".") and name != ".history")
                     if SKILL_MD_FILE not in file_names:
                         continue
@@ -329,8 +330,10 @@ class UserScopedSkillStorage(LocalSkillStorage):
         path = Path(archive_path)
         custom_dir = self._user_custom_root
 
-        # Ensure user custom directory exists
-        custom_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure user custom directory exists. This is filesystem work too, so
+        # it goes through the same worker-thread discipline as the phases below
+        # — the install route awaits this coroutine on the Gateway event loop.
+        await asyncio.to_thread(custom_dir.mkdir, parents=True, exist_ok=True)
 
         # The per-file security scan is an async LLM call and must stay on the
         # event loop; every filesystem phase around it runs in a worker thread.
@@ -338,7 +341,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         try:
             skill_dir, skill_name, target = await asyncio.to_thread(self._prepare_skill_archive, path, Path(tmp), custom_dir, archive_path)
 
-            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name)
+            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name, app_config=self._app_config)
 
             await asyncio.to_thread(self._commit_skill_install, skill_dir, skill_name, custom_dir, target)
             logger.info("Skill %r installed to %s for user %s", skill_name, target, self._user_id)

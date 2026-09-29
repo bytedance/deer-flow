@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -170,6 +170,30 @@ def test_lifespan_sweeps_upload_staging_files_on_startup():
     cleanup_upload_staging_files.assert_called_once_with()
     close_oidc_service.assert_awaited_once()
     stop_channel_service.assert_awaited_once()
+
+
+def test_personal_mcp_authority_spans_runtime_startup_and_shutdown():
+    from deerflow.mcp import personal_access
+
+    events = []
+    previous = personal_access._admin_checker
+
+    @asynccontextmanager
+    async def checked_runtime(_app, _config):
+        checker = personal_access._admin_checker
+        assert checker is not None and checker is not previous
+        events.append("start")
+        try:
+            yield
+        finally:
+            assert personal_access._admin_checker is checker
+            events.append("stop")
+
+    with patch(f"{__name__}._noop_langgraph_runtime", checked_runtime):
+        asyncio.run(_run_lifespan_with_upload_staging_cleanup())
+
+    assert events == ["start", "stop"]
+    assert personal_access._admin_checker is previous
 
 
 async def _run_lifespan_with_mcp_task_config_snapshot() -> None:
@@ -525,3 +549,205 @@ def test_lifespan_preserves_flush_budget_when_retrieval_warm_is_still_running() 
     assert shutdown_elapsed < 1.0
     manager.shutdown_flush.assert_called_once_with(5.0)
     manager.close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_pins_batch_service_to_app_extensions(monkeypatch):
+    import deerflow.extensions as extensions
+    from app.gateway.app import lifespan
+    from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+    from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    app = FastAPI()
+    snapshot = ExtensionRegistry().build()
+    app.state.extensions = snapshot
+    monkeypatch.setattr(extensions, "_loaded", ExtensionRegistry().build())
+    startup_config = MagicMock()
+    startup_config.log_level = "INFO"
+    startup_config.memory.enabled = False
+    startup_config.scheduler.enabled = False
+    startup_config.mcp_tasks.enabled = False
+    startup_config.subagent_batches = SubagentBatchesConfig(enabled=True)
+    startup_config.subagent_runtime = SubagentRuntimeConfig()
+    channel_service = MagicMock()
+    channel_service.get_status.return_value = {}
+
+    @asynccontextmanager
+    async def runtime(app, _config):
+        app.state.subagent_batch_repo = object()
+        yield
+
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", runtime),
+        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+        patch("app.channels.service.start_channel_service", AsyncMock(return_value=channel_service)),
+        patch("app.channels.service.stop_channel_service", AsyncMock()),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
+        patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+        patch("deerflow.subagents.batch_service.SubagentBatchService.start", AsyncMock()),
+        patch("deerflow.subagents.batch_service.SubagentBatchService.stop", AsyncMock()),
+    ):
+        async with lifespan(app):
+            assert app.state.subagent_batch_service._extensions is snapshot
+
+
+def _gateway_lifespan_patches(startup_config, *, pool=None, browser_manager=None):
+    """Common patch set for driving the Gateway lifespan in a unit test."""
+    channel_service = MagicMock()
+    channel_service.get_status.return_value = {}
+    patches = [
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+        patch("app.channels.service.start_channel_service", AsyncMock(return_value=channel_service)),
+        patch("app.channels.service.stop_channel_service", AsyncMock()),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
+        patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+    ]
+    if pool is not None:
+        patches.append(patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool))
+    if browser_manager is not None:
+        patches.append(
+            patch(
+                "deerflow.community.browser_automation.get_browser_session_manager",
+                return_value=browser_manager,
+            )
+        )
+    return patches
+
+
+def test_lifespan_closes_pooled_mcp_sessions_on_shutdown():
+    """Pooled MCP sessions must be closed while the worker is still shutting down.
+
+    Each pooled session owns a live transport (a stdio subprocess, or an
+    SSE/HTTP connection) held by a dedicated owner task. Nothing else can reach
+    that task once the event loop stops, so lifespan shutdown is the only place
+    its ``__aexit__`` can run. The browser session manager is closed here for
+    the same reason; the MCP pool used to be skipped.
+    """
+    from app.gateway.app import lifespan
+
+    async def scenario():
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        pool = MagicMock()
+        pool.close_all = AsyncMock()
+
+        with ExitStack() as stack:
+            for patcher in _gateway_lifespan_patches(startup_config, pool=pool):
+                stack.enter_context(patcher)
+            async with lifespan(app):
+                pass
+
+        pool.close_all.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
+def test_lifespan_continues_when_mcp_close_fails():
+    """A failing MCP close must not abort the remaining shutdown hooks.
+
+    Shutdown is best-effort by design: every hook is isolated so one broken
+    teardown cannot strand the others.
+    """
+    from app.gateway.app import lifespan
+
+    async def scenario():
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        pool = MagicMock()
+        pool.close_all = AsyncMock(side_effect=RuntimeError("close failed"))
+        browser_manager = MagicMock()
+        browser_manager.close_all_sessions = AsyncMock(return_value=0)
+
+        with ExitStack() as stack:
+            for patcher in _gateway_lifespan_patches(startup_config, pool=pool, browser_manager=browser_manager):
+                stack.enter_context(patcher)
+            async with lifespan(app):
+                pass
+
+        pool.close_all.assert_awaited_once()
+        browser_manager.close_all_sessions.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
+def test_lifespan_closes_mcp_sessions_created_during_run_drain():
+    """An active run can acquire a session after other shutdown hooks begin."""
+    from app.gateway.app import lifespan
+    from deerflow.mcp.session_pool import MCPSessionPool
+    from deerflow.runtime import RunManager, RunStatus
+
+    async def scenario():
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        pool = MCPSessionPool()
+        run_manager = RunManager()
+        record = await run_manager.create("mcp-shutdown-race")
+        await run_manager.set_status(record.run_id, RunStatus.running)
+        resume = asyncio.Event()
+        session_created = asyncio.Event()
+        transport_closed = asyncio.Event()
+
+        class SessionContext:
+            async def __aenter__(self):
+                self.owner = asyncio.current_task()
+                return SimpleNamespace(initialize=AsyncMock())
+
+            async def __aexit__(self, *_args):
+                assert asyncio.current_task() is self.owner
+                transport_closed.set()
+
+        async def active_run():
+            await resume.wait()
+            await pool.get_session("server", "thread", {"transport": "stdio", "command": "unused"})
+            session_created.set()
+            await asyncio.Event().wait()
+
+        @asynccontextmanager
+        async def runtime(_app, _config):
+            record.task = asyncio.create_task(active_run())
+            try:
+                yield
+            finally:
+                await run_manager.shutdown(timeout=1.0)
+
+        async def shutdown_memory_backend(**_kwargs):
+            # This hook runs before langgraph_runtime drains the active run.
+            resume.set()
+            await asyncio.wait_for(session_created.wait(), timeout=5)
+
+        try:
+            with ExitStack() as stack:
+                for patcher in _gateway_lifespan_patches(startup_config, pool=pool):
+                    stack.enter_context(patcher)
+                stack.enter_context(patch("app.gateway.app.langgraph_runtime", runtime))
+                stack.enter_context(patch("app.gateway.app._shutdown_memory_backend", shutdown_memory_backend))
+                stack.enter_context(patch("langchain_mcp_adapters.sessions.create_session", side_effect=lambda _connection: SessionContext()))
+                async with lifespan(app):
+                    pass
+
+            assert record.task is not None and record.task.done()
+            assert transport_closed.is_set()
+            assert not pool._entries
+        finally:
+            resume.set()
+            if record.task is not None and not record.task.done():
+                record.task.cancel()
+                await asyncio.gather(record.task, return_exceptions=True)
+            await pool.close_all()
+
+    asyncio.run(scenario())

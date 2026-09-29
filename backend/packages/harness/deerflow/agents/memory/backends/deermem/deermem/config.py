@@ -46,6 +46,9 @@ class DeerMemModelConfig(BaseModel):
 class DeerMemConfig(BaseModel):
     """DeerMem-private configuration (self-contained, host-agnostic)."""
 
+    prompt_prepend: str = Field(default="", strict=True, description="Literal operator instructions prepended to the memory-update system message")
+    prompt_append: str = Field(default="", strict=True, description="Literal operator instructions appended to the memory-update system message")
+
     # ── Storage ──────────────────────────────────────────────────────────
     storage_path: str = Field(
         default="",
@@ -53,7 +56,12 @@ class DeerMemConfig(BaseModel):
     )
     storage_class: str = Field(
         default="",
-        description="Dotted class path for an alternative storage provider; empty (default) = FileMemoryStorage (no importlib, portable).",
+        description=(
+            "Dotted class path for an alternative storage provider, or a built-in alias: "
+            "``file`` = FileMemoryStorage (default) or ``markdown`` = MarkdownMemoryStorage "
+            "(tolerant load path, same JSON on disk); empty (default) = FileMemoryStorage "
+            "(no importlib, portable)."
+        ),
     )
     strict_user_scope: bool = Field(
         default=False,
@@ -283,6 +291,17 @@ class DeerMemConfig(BaseModel):
             "filter, rejection rate, prompt version). The host injects a "
             "Langfuse-based callback to emit an extraction span; None = no "
             "post-invoke observability. Set programmatically (not from YAML)."
+        ),
+    )
+    # ── Memory judge (pre-screen + signal classification) ────────────────
+    judge: Any = Field(
+        default=None,
+        description=(
+            "Optional host-injected memory judge ``judge(context) -> MemoryBatchVerdict``: "
+            "decides whether this batch is worth an extraction call (pre-screening) and "
+            "supplies model hint labels (signal classification). None (default) = no judging, "
+            "leaving the extraction path byte-identical to a deployment without this feature. "
+            "Set programmatically by the host factory (not from YAML)."
         ),
     )
     # ── Watermark cache (in-memory, bounded LRU) ─────────────────────────

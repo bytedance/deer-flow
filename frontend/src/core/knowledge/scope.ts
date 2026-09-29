@@ -314,3 +314,36 @@ export function readKnowledgeScopeSnapshot(
   }
   return snapshot;
 }
+
+/** Restore the complete execution selection; omitted display names fall back to IDs. */
+export function knowledgeScopeToSelection(
+  snapshot: KnowledgeScopeSnapshot | null | undefined,
+): KnowledgeScopeSelection {
+  if (snapshot?.mode !== "selected") {
+    return { mode: snapshot?.mode ?? "all" };
+  }
+  return {
+    mode: "selected",
+    datasets: (snapshot.dataset_ids ?? []).map((id) => {
+      const display = snapshot.display?.datasets.find((item) => item.id === id);
+      const filter = snapshot.document_filters?.find(
+        (item) => item.dataset_id === id,
+      );
+      return {
+        id,
+        name: display?.name ?? id,
+        documents: filter
+          ? {
+              mode: "selected",
+              items: filter.document_ids.map((documentId) => ({
+                id: documentId,
+                name:
+                  display?.documents?.find((item) => item.id === documentId)
+                    ?.name ?? documentId,
+              })),
+            }
+          : { mode: "all" },
+      };
+    }),
+  };
+}

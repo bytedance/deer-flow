@@ -6,10 +6,14 @@ this tool lets the agent discover files uploaded in previous turns on demand.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
+import re
 from collections import Counter
 from pathlib import Path
+from stat import S_ISREG
 from typing import Annotated, Any
 
 from langchain.tools import tool
@@ -26,6 +30,23 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_RESULTS = 20
 _MAX_MAX_RESULTS = 100
+_CURSOR_PATTERN = re.compile(r"v1\.([1-9][0-9]{0,19})\.([0-9a-f]{64})", re.ASCII)
+
+
+def _cursor_error(code: str) -> dict:
+    """用固定消息返回续页失败，避免回显游标或主机路径。"""
+    return {
+        "files": [],
+        "error": code,
+        "restart_required": True,
+        "message": "Upload listing continuation is invalid or has changed. Restart without cursor using the desired filters; discard earlier pages before combining results.",
+    }
+
+
+def _make_cursor(offset: int, revision: str) -> str:
+    """把页位置绑定到清单及调用上下文；此校验值不承担授权职责。"""
+    digest = hashlib.sha256(f"{offset}:{revision}".encode("ascii")).hexdigest()
+    return f"v1.{offset}.{digest}"
 
 
 def _extension_label(file_path: Path) -> str:
@@ -114,9 +135,16 @@ def _list_uploaded_files_impl(
     *,
     query: str | None = None,
     extensions: list[str] | None = None,
+    cursor: str | None = None,
     _paths: Any | None = None,
 ) -> dict:
     """Core implementation — testable without the @tool wrapper."""
+    offset = 0
+    if cursor is not None:
+        if not isinstance(cursor, str) or len(cursor) > 88 or (match := _CURSOR_PATTERN.fullmatch(cursor)) is None:
+            return _cursor_error("invalid_cursor")
+        offset = int(match[1])
+
     if runtime is None:
         return {"files": [], "message": "No runtime context available."}
 
@@ -129,6 +157,8 @@ def _list_uploaded_files_impl(
     uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=user_id)
 
     if not uploads_dir.exists():
+        if cursor is not None:
+            return _cursor_error("stale_cursor")
         return {"files": [], "message": "No uploads directory for this thread."}
 
     # Resolve the set of filenames uploaded in the current run so we can exclude them.
@@ -138,9 +168,12 @@ def _list_uploaded_files_impl(
         uploaded = state.get("uploaded_files") if isinstance(state, dict) else getattr(state, "uploaded_files", None)
         if isinstance(uploaded, list):
             for entry in uploaded:
-                if isinstance(entry, dict) and entry.get("filename"):
-                    current_run_filenames.add(entry["filename"])
+                filename = entry.get("filename") if isinstance(entry, dict) else None
+                if isinstance(filename, str) and filename:
+                    current_run_filenames.add(filename)
     except Exception:
+        if cursor is not None:
+            return _cursor_error("stale_cursor")
         logger.warning(
             "Failed to read uploaded_files from runtime.state; current-run files may appear in list_uploaded_files results",
             exc_info=True,
@@ -159,13 +192,19 @@ def _list_uploaded_files_impl(
 
     # Collect historical files (sorted by mtime descending).
     # Skip .md files that are conversion artifacts (have a same-stem non-.md sibling).
-    candidates: list[tuple[float, Path, int]] = []
+    candidates: list[tuple[int, Path, int]] = []
+    listing_metadata: list[tuple[str, int, int, int]] = []
     try:
         # Collect file entries once to build the name set and iterate.
-        entries = [e for e in os.scandir(uploads_dir) if e.is_file() and not e.is_symlink() and not is_upload_staging_file(e.name)]
+        with os.scandir(uploads_dir) as scan:
+            entries = [e for e in scan if e.is_file(follow_symlinks=False) and not is_upload_staging_file(e.name)]
         all_names: set[str] = {e.name for e in entries}
 
         for entry in entries:
+            stat = entry.stat(follow_symlinks=False)
+            if not S_ISREG(stat.st_mode):
+                continue
+            listing_metadata.append((entry.name, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size))
             if entry.name in current_run_filenames:
                 continue
             # Skip .md files that are conversion artifacts of another file.
@@ -178,32 +217,51 @@ def _list_uploaded_files_impl(
                 non_md_siblings = {n for n in all_names if n != entry.name and Path(n).stem == stem}
                 if non_md_siblings:
                     continue
-            stat = entry.stat()
-            candidates.append((stat.st_mtime, Path(entry.path), stat.st_size))
+            candidates.append((stat.st_mtime_ns, Path(entry.path), stat.st_size))
     except OSError:
-        return {"files": [], "message": f"Failed to read uploads directory: {uploads_dir}"}
-
-    if not candidates:
-        return {"files": [], "message": "No historical uploaded files in this thread."}
+        if cursor is not None:
+            return _cursor_error("stale_cursor")
+        return {"files": [], "message": "Failed to read uploads directory."}
 
     query_filter = _normalize_query(query)
     extension_filter = _normalize_extensions(extensions)
+    # 绑定原始文件名和元数据，不把标识或路径编码到模型可见的游标中。
+    revision = hashlib.sha256(
+        json.dumps(
+            [str(uploads_dir), user_id, thread_id, query_filter.casefold() if query_filter else None, sorted(extension_filter or ()), sorted(current_run_filenames), sorted(listing_metadata)],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+    ).hexdigest()
+    if cursor is not None and cursor != _make_cursor(offset, revision):
+        return _cursor_error("stale_cursor")
+
+    if not candidates:
+        if cursor is not None:
+            return _cursor_error("stale_cursor")
+        return {"files": [], "message": "No historical uploaded files in this thread."}
+
     if query_filter is not None or extension_filter is not None:
         candidates = [item for item in candidates if _matches_filters(item[1].name, item[1].suffix, query_filter, extension_filter)]
         if not candidates:
+            if cursor is not None:
+                return _cursor_error("stale_cursor")
             return {
                 "files": [],
                 "total_count": 0,
                 "message": "No uploaded files matched the given filters.",
             }
 
-    # Sort by mtime descending (most recent first)
-    candidates.sort(key=lambda item: item[0], reverse=True)
+    # 同一时间戳按原始文件名排序，避免依赖 scandir 的不稳定顺序。
+    candidates.sort(key=lambda item: (-item[0], item[1].name))
 
     total_count = len(candidates)
-    truncated = total_count > max_results
-    visible = candidates[:max_results]
-    omitted_paths = [p.name for _, p, _ in candidates[max_results:]]
+    if cursor is not None and offset >= total_count:
+        return _cursor_error("stale_cursor")
+    page_end = offset + max_results
+    truncated = total_count > page_end
+    visible = candidates[offset:page_end]
+    omitted_paths = [p.name for _, p, _ in candidates[page_end:]]
 
     files: list[dict] = []
     for _, file_path, st_size in visible:
@@ -233,6 +291,7 @@ def _list_uploaded_files_impl(
     if truncated:
         result["truncated"] = True
         result["omitted_summary"] = _format_omitted_summary(omitted_paths)
+        result["next_cursor"] = _make_cursor(page_end, revision)
 
     if files:
         result["message"] = f"Found {total_count} historical file(s)."
@@ -264,6 +323,10 @@ def list_uploaded_files(
         list[str] | None,
         'Optional file extensions to keep, e.g. ["pdf", ".PNG"]. With or without a leading dot; matching is case-insensitive. Combined with query using AND. Omit to skip type filtering.',
     ] = None,
+    cursor: Annotated[
+        str | None,
+        "The next_cursor returned by the previous page; keep the same query/extensions when continuing. Omit for the first page. On restart_required, discard previously collected pages and restart from the first page.",
+    ] = None,
 ) -> dict:
     """Discover historical uploaded files available in this thread.
 
@@ -281,6 +344,11 @@ def list_uploaded_files(
 
     Optional filters (`query`, `extensions`) run before the max_results cap, so
     older matching files are not displaced by newer unrelated uploads.
+
+    Continue with next_cursor when present; the last page has no next_cursor.
+    Changes to directory metadata, user, thread, filters, or current-run upload
+    exclusions invalidate the cursor. Each page contains at most 100 files;
+    this enumerates a listing, not a snapshot of file contents.
     """
     return _list_uploaded_files_impl(
         include_outline=include_outline,
@@ -288,4 +356,5 @@ def list_uploaded_files(
         runtime=runtime,
         query=query,
         extensions=extensions,
+        cursor=cursor,
     )

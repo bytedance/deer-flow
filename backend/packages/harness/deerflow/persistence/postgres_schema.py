@@ -7,9 +7,9 @@ uses expect different mechanisms:
 - **asyncpg** (app ORM engine): only honours ``server_settings`` passed
   via SQLAlchemy ``connect_args``. It does not understand libpq's
   ``options=-c ...`` syntax.
-- **psycopg** (LangGraph checkpointer/store): uses the libpq
-  ``options=-c search_path=...`` connection parameter, either as a pool
-  kwarg or encoded into the DSN query string.
+- **psycopg** (LangGraph checkpointer/store and synchronous agent stores): uses
+  the libpq ``options=-c search_path=...`` connection parameter, either as a
+  pool kwarg or encoded into the DSN query string.
 
 Schema names are validated upstream by
 :class:`deerflow.config.database_config.DatabaseConfig` to be plain
@@ -20,7 +20,9 @@ defense-in-depth; connection-argument helpers only assemble driver payloads.
 from __future__ import annotations
 
 import re
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
+
+from deerflow.utils.file_io import await_drained
 
 
 def build_asyncpg_connect_args(schema: str) -> dict:
@@ -198,18 +200,26 @@ def dsn_with_search_path(dsn: str, schema: str) -> str:
     if scheme_base not in {"postgres", "postgresql"}:
         raise ValueError(f"Unsupported PostgreSQL DSN scheme for schema injection: {parts.scheme!r}")
 
+    # Rebuild the query by hand rather than with parse_qsl/urlencode: parse_qsl
+    # decodes '+' as a space (an HTML-form rule libpq does not apply), so
+    # round-tripping an existing parameter would rewrite a literal plus as '%20'
+    # and change the value the server sees. Everything but ``options`` is carried
+    # over exactly as written.
     options_values: list[str] = []
-    query_pairs = []
-    for key, value in parse_qsl(parts.query, keep_blank_values=True):
-        if key == "options":
-            options_values.append(value)
+    preserved: list[str] = []
+    for pair in parts.query.split("&"):
+        if not pair:
+            continue
+        raw_key, _, raw_value = pair.partition("=")
+        if unquote(raw_key) == "options":
+            options_values.append(unquote(raw_value))
         else:
-            query_pairs.append((key, value))
+            preserved.append(pair)
 
     options = _merge_search_path_option(" ".join(options_values), schema)
-    query_pairs.append(("options", options))
-    # quote_via=quote encodes space as %20 (libpq-safe), not + (form-style).
-    query = urlencode(query_pairs, quote_via=quote)
+    # quote() encodes space as %20 (libpq-safe) and a literal '+' as %2B, so the
+    # merged value keeps both distinctions.
+    query = "&".join([*preserved, f"options={quote(options, safe='')}"])
     return urlunsplit((scheme_base, parts.netloc, parts.path, query, parts.fragment))
 
 
@@ -254,4 +264,4 @@ async def ensure_postgres_schema_async(conn_string: str, schema: str, *, install
     try:
         await conn.execute(statement)
     finally:
-        await conn.close()
+        await await_drained(conn.close())

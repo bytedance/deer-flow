@@ -32,7 +32,6 @@ import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
-import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 import { uuid } from "../utils/uuid";
 
@@ -172,6 +171,29 @@ export function hasToolResult(messages: Message[], toolName: string): boolean {
   );
 }
 
+/**
+ * `additional_kwargs` of this turn's visible human message. The optimistic
+ * display copy (before and after the upload) and the submitted message all
+ * build it here, so caller metadata such as quotes and conversation
+ * references stays on the bubble through the upload. Files staged out-of-band
+ * (e.g. a project document attached to this thread and carried in
+ * ``additionalKwargs.files``) ride alongside ``files`` instead of being
+ * overwritten by them.
+ */
+export function buildHumanMessageAdditionalKwargs(
+  additionalKwargs: Record<string, unknown> | undefined,
+  files: FileInMessage[],
+): Record<string, unknown> {
+  const stagedFiles = Array.isArray(additionalKwargs?.files)
+    ? (additionalKwargs.files as FileInMessage[])
+    : [];
+  const allFiles = [...stagedFiles, ...files];
+  return {
+    ...additionalKwargs,
+    ...(allFiles.length > 0 ? { files: allFiles } : {}),
+  };
+}
+
 export function buildThreadSubmitMessages({
   text,
   additionalKwargs,
@@ -190,13 +212,6 @@ export function buildThreadSubmitMessages({
    */
   humanMessageId?: string;
 }): Message[] {
-  // Files staged out-of-band (e.g. a project document attached to this
-  // thread and carried in ``additionalKwargs.files``) ride alongside the
-  // freshly uploaded files instead of being overwritten by them.
-  const stagedFiles = Array.isArray(additionalKwargs?.files)
-    ? (additionalKwargs.files as FileInMessage[])
-    : [];
-  const allFiles = [...stagedFiles, ...filesForSubmit];
   return [
     ...additionalInputMessages,
     {
@@ -208,10 +223,10 @@ export function buildThreadSubmitMessages({
           text,
         },
       ],
-      additional_kwargs: {
-        ...additionalKwargs,
-        ...(allFiles.length > 0 ? { files: allFiles } : {}),
-      },
+      additional_kwargs: buildHumanMessageAdditionalKwargs(
+        additionalKwargs,
+        filesForSubmit,
+      ),
     } as Message,
   ];
 }
@@ -268,6 +283,61 @@ const EMPTY_MESSAGES: Message[] = [];
 const EMPTY_RUN_MESSAGES: RunMessage[] = [];
 const EMPTY_MESSAGE_IDENTITIES: readonly string[] = [];
 const EMPTY_MESSAGE_IDENTITIES_SET: ReadonlySet<string> = new Set<string>();
+const ACTIVE_RUN_STATUSES = new Set(["pending", "running"]);
+const ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS = [1_000, 2_000] as const;
+const MAX_ACTIVE_RUN_REJOIN_ATTEMPTS =
+  ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS.length + 1;
+
+type ActiveRunRejoinState = {
+  attempts: number;
+  inFlight: boolean;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+  runId: string | null;
+  settled: boolean;
+  threadId: string | null;
+};
+
+function createActiveRunRejoinState(
+  threadId: string | null = null,
+  runId: string | null = null,
+): ActiveRunRejoinState {
+  return {
+    attempts: 0,
+    inFlight: false,
+    retryTimer: null,
+    runId,
+    settled: false,
+    threadId,
+  };
+}
+
+function readReconnectRun(threadId: string): string | null {
+  try {
+    return window.sessionStorage.getItem(`lg:stream:${threadId}`);
+  } catch {
+    return null;
+  }
+}
+
+function rememberReconnectRun(threadId: string, runId: string): void {
+  try {
+    window.sessionStorage.setItem(`lg:stream:${threadId}`, runId);
+  } catch {
+    // The stream can still be joined, but SDK stop cannot cancel it without
+    // the tab-local run pointer.
+  }
+}
+
+function clearReconnectRun(threadId: string, runId: string): void {
+  try {
+    const key = `lg:stream:${threadId}`;
+    if (window.sessionStorage.getItem(key) === runId) {
+      window.sessionStorage.removeItem(key);
+    }
+  } catch {
+    // Storage access is best-effort and must never block stream cleanup.
+  }
+}
 /**
  * The turn this client submitted, recorded at dispatch time. The visible human
  * input gets one client-generated identity shared by the optimistic display
@@ -1784,6 +1854,23 @@ export function useThreadStream({
     enabled: !isMock,
     pendingSupersededRunIds,
   });
+  const runsQuery = useThreadRuns(onStreamThreadId ?? undefined, {
+    enabled: !isMock,
+  });
+  const activeRunId = useMemo(
+    () =>
+      runsQuery.data?.find((run) => ACTIVE_RUN_STATUSES.has(String(run.status)))
+        ?.run_id,
+    [runsQuery.data],
+  );
+  const activeRunRejoinRef = useRef<ActiveRunRejoinState>(
+    createActiveRunRejoinState(),
+  );
+  const [activeRunRejoinRetry, setActiveRunRejoinRetry] = useState(0);
+  // Runs reads can lag behind SDK completion, including the initial read.
+  // Keep completed IDs across recovery-state resets so stale "running" data
+  // cannot restart a submitted or natively reconnected stream.
+  const completedRunIdsRef = useRef(new Set<string>());
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
@@ -1836,6 +1923,38 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
+
+  const scheduleActiveRunRejoinRetry = useCallback(() => {
+    const rejoin = activeRunRejoinRef.current;
+    if (!rejoin.inFlight || !rejoin.threadId || !rejoin.runId) {
+      return;
+    }
+
+    rejoin.inFlight = false;
+    clearReconnectRun(rejoin.threadId, rejoin.runId);
+    const retryDelay = ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS[rejoin.attempts - 1];
+    if (retryDelay === undefined) {
+      return;
+    }
+
+    rejoin.retryTimer = setTimeout(() => {
+      rejoin.retryTimer = null;
+      setActiveRunRejoinRetry((current) => current + 1);
+    }, retryDelay);
+  }, []);
+
+  const settleActiveRunRejoin = useCallback(() => {
+    const rejoin = activeRunRejoinRef.current;
+    if (!rejoin.inFlight) {
+      return;
+    }
+    rejoin.inFlight = false;
+    rejoin.settled = true;
+    if (rejoin.retryTimer !== null) {
+      clearTimeout(rejoin.retryTimer);
+      rejoin.retryTimer = null;
+    }
+  }, []);
 
   const clearPreparedReplayMasks = useCallback(
     (replay: PendingPreparedReplayMask | null) => {
@@ -2012,6 +2131,7 @@ export function useThreadStream({
       }
     },
     onError(error) {
+      scheduleActiveRunRejoinRetry();
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);
@@ -2033,7 +2153,11 @@ export function useThreadStream({
         });
       }
     },
-    onFinish(state) {
+    onFinish(state, run) {
+      if (run) {
+        completedRunIdsRef.current.add(run.run_id);
+      }
+      settleActiveRunRejoin();
       listeners.current.onFinish?.(state.values);
       pendingPreparedReplayRef.current = null;
       pendingUsageBaselineMessageIdsRef.current = new Set(
@@ -2044,6 +2168,77 @@ export function useThreadStream({
       invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
     },
   });
+  const { isLoading: isThreadLoading, joinStream } = thread;
+
+  // reconnectOnMount only knows the run id stored in this tab's
+  // sessionStorage. A reopened browser or a new tab has no pointer, so recover
+  // the newest active run from the server and join its resumable SSE stream.
+  useEffect(() => {
+    const resolvedThreadId = onStreamThreadId ?? null;
+    const resolvedRunId = activeRunId ?? null;
+    let rejoin = activeRunRejoinRef.current;
+
+    if (
+      rejoin.threadId !== resolvedThreadId ||
+      rejoin.runId !== resolvedRunId
+    ) {
+      if (rejoin.retryTimer !== null) {
+        clearTimeout(rejoin.retryTimer);
+      }
+      if (rejoin.attempts > 0 && rejoin.threadId && rejoin.runId) {
+        clearReconnectRun(rejoin.threadId, rejoin.runId);
+      }
+      rejoin = createActiveRunRejoinState(resolvedThreadId, resolvedRunId);
+      activeRunRejoinRef.current = rejoin;
+    }
+
+    if (
+      !resolvedThreadId ||
+      !resolvedRunId ||
+      completedRunIdsRef.current.has(resolvedRunId) ||
+      rejoin.inFlight ||
+      rejoin.retryTimer !== null ||
+      rejoin.settled ||
+      rejoin.attempts >= MAX_ACTIVE_RUN_REJOIN_ATTEMPTS ||
+      isThreadLoading
+    ) {
+      return;
+    }
+
+    // A matching pointer means the SDK's native same-tab reconnect owns this
+    // run. Do not create a second SSE consumer.
+    if (readReconnectRun(resolvedThreadId) === resolvedRunId) {
+      return;
+    }
+
+    rejoin.attempts += 1;
+    rejoin.inFlight = true;
+    rememberReconnectRun(resolvedThreadId, resolvedRunId);
+    void joinStream(resolvedRunId);
+  }, [
+    activeRunId,
+    activeRunRejoinRetry,
+    isThreadLoading,
+    joinStream,
+    onStreamThreadId,
+  ]);
+
+  useEffect(
+    () => () => {
+      const rejoin = activeRunRejoinRef.current;
+      if (rejoin.threadId !== (onStreamThreadId ?? null)) {
+        return;
+      }
+      if (rejoin.retryTimer !== null) {
+        clearTimeout(rejoin.retryTimer);
+      }
+      if (rejoin.attempts > 0 && rejoin.threadId && rejoin.runId) {
+        clearReconnectRun(rejoin.threadId, rejoin.runId);
+      }
+      activeRunRejoinRef.current = createActiveRunRejoinState();
+    },
+    [onStreamThreadId],
+  );
 
   const stopThread = useCallback(async () => {
     const stoppedThreadId =
@@ -2298,18 +2493,16 @@ export function useThreadStream({
         }),
       );
 
-      const optimisticAdditionalKwargs = {
-        ...options?.additionalKwargs,
-        ...(optimisticFiles.length > 0 ? { files: optimisticFiles } : {}),
-      };
-
       const newOptimistic: Message[] = [];
       if (!hideFromUI) {
         newOptimistic.push({
           type: "human",
           id: humanMessageId,
           content: text ? [{ type: "text", text }] : "",
-          additional_kwargs: optimisticAdditionalKwargs,
+          additional_kwargs: buildHumanMessageAdditionalKwargs(
+            options?.additionalKwargs,
+            optimisticFiles,
+          ),
         });
       }
 
@@ -2328,7 +2521,9 @@ export function useThreadStream({
 
       listeners.current.onSend?.(threadId);
 
-      let uploadedFileInfo: UploadedFileInfo[] = [];
+      // Shared by the optimistic bubble and the submit, so the files the
+      // user sees are exactly the files that are sent.
+      let uploadedFiles: FileInMessage[] = [];
 
       try {
         // Upload files first if any
@@ -2357,24 +2552,24 @@ export function useThreadStream({
 
             if (files.length > 0) {
               const uploadResponse = await uploadFiles(threadId, files);
-              uploadedFileInfo = uploadResponse.files;
+              uploadedFiles = uploadResponse.files.map((info) => ({
+                filename: info.filename,
+                size: info.size,
+                path: info.virtual_path,
+                status: "uploaded" as const,
+              }));
 
               // Update optimistic human message with uploaded status + paths
-              const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
-                (info) => ({
-                  filename: info.filename,
-                  size: info.size,
-                  path: info.virtual_path,
-                  status: "uploaded" as const,
-                }),
-              );
               setOptimisticMessages((messages) => {
                 if (messages.length > 1 && messages[0]) {
                   const humanMessage: Message = messages[0];
                   return [
                     {
                       ...humanMessage,
-                      additional_kwargs: { files: uploadedFiles },
+                      additional_kwargs: buildHumanMessageAdditionalKwargs(
+                        options?.additionalKwargs,
+                        uploadedFiles,
+                      ),
                     },
                     ...messages.slice(1),
                   ];
@@ -2397,23 +2592,13 @@ export function useThreadStream({
           }
         }
 
-        // Build files metadata for submission (included in additional_kwargs)
-        const filesForSubmit: FileInMessage[] = uploadedFileInfo.map(
-          (info) => ({
-            filename: info.filename,
-            size: info.size,
-            path: info.virtual_path,
-            status: "uploaded" as const,
-          }),
-        );
-
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
               text,
               additionalKwargs: options?.additionalKwargs,
               additionalInputMessages: options?.additionalInputMessages,
-              filesForSubmit,
+              filesForSubmit: uploadedFiles,
               humanMessageId,
             }),
           },
@@ -3287,6 +3472,7 @@ export function useThreadRuns(
     },
     enabled: enabled && Boolean(threadId),
     refetchOnWindowFocus: false,
+    retry: false,
   });
 }
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -89,6 +90,10 @@ def test_command_records_find_status_after_head() -> None:
     assert command.index("find -H ") < command.index("head -n")
     assert command.index("head -n") < command.rindex("__DF_FIND_STATUS__:")
     assert 'exit "${st:-126}"' in command
+    # Mirror pin (review on PR #5546): the exit must stay subshell-wrapped — a
+    # bare top-level exit wedges the implicit persistent session. A silent
+    # revert of the subshell wrap must fail this test.
+    assert command.endswith('exit "${st:-126}" )')
 
 
 def _run_list_dir_script(command: str, *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -206,8 +211,10 @@ def test_list_dir_command_head_truncation_is_not_an_error(tmp_path) -> None:
     )
     entries = parse_remote_list_dir_output(proc.stdout, "/dir", pipeline_exit_code=proc.returncode)
     assert len(entries) == 500
-    assert entries[0] == "/dir/f1"
-    assert entries[-1] == "/dir/f500"
+    # The explicitly emitted root shares the same 500-entry output budget.
+    assert entries[0] == str(tmp_path)
+    assert entries[1] == "/dir/f1"
+    assert entries[-1] == "/dir/f499"
 
 
 @_POSIX_SH
@@ -219,3 +226,168 @@ def test_list_dir_existing_root_with_no_output_is_incomplete_failure(tmp_path) -
     assert proc.returncode == 1
     with pytest.raises(OSError, match="results would be incomplete"):
         parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+
+
+def test_parse_drops_entries_under_ignored_directories() -> None:
+    """A remote listing must skip the same directories remote glob/grep already skip."""
+    stdout = "/root\n/root/.git\n/root/.git/config\n/root/node_modules/pkg/index.js\n/root/src\n/root/src/app.py\n\n__DF_FIND_STATUS__:0\n"
+    assert parse_remote_list_dir_output(stdout, "/root", pipeline_exit_code=0) == [
+        "/root",
+        "/root/src",
+        "/root/src/app.py",
+    ]
+
+
+def test_parse_keeps_names_that_only_resemble_ignore_patterns() -> None:
+    stdout = "/root/node_modules_backup/keep.txt\n/root/builds/keep.txt\n/root/src/environment.py\n\n__DF_FIND_STATUS__:0\n"
+    assert parse_remote_list_dir_output(stdout, "/root", pipeline_exit_code=0) == [
+        "/root/node_modules_backup/keep.txt",
+        "/root/builds/keep.txt",
+        "/root/src/environment.py",
+    ]
+
+
+def test_parse_all_entries_ignored_returns_empty_list_not_missing_path() -> None:
+    """An existing directory whose entries are all ignored is empty, not missing."""
+    stdout = "/data/node_modules\n/data/node_modules/pkg/index.js\n\n__DF_FIND_STATUS__:0\n"
+    assert parse_remote_list_dir_output(stdout, "/data", pipeline_exit_code=0) == []
+
+
+def test_parse_keeps_contents_of_an_explicitly_requested_ignored_root() -> None:
+    """Explicitly listing a directory whose own name is ignored must not come back empty."""
+    stdout = "/data/node_modules\n/data/node_modules/pkg\n/data/node_modules/pkg/index.js\n\n__DF_FIND_STATUS__:0\n"
+    assert parse_remote_list_dir_output(stdout, "/data/node_modules", pipeline_exit_code=0) == [
+        "/data/node_modules",
+        "/data/node_modules/pkg",
+        "/data/node_modules/pkg/index.js",
+    ]
+
+
+def test_parse_ignores_only_descendants_of_the_listing_root() -> None:
+    """An ignored name *outside* the root hides nothing; an ignored name inside it still does."""
+    stdout = "/tmp/build/workspace\n/tmp/build/workspace/report.txt\n/tmp/build/workspace/nested/node_modules/dep.js\n\n__DF_FIND_STATUS__:0\n"
+    assert parse_remote_list_dir_output(stdout, "/tmp/build/workspace", pipeline_exit_code=0) == [
+        "/tmp/build/workspace",
+        "/tmp/build/workspace/report.txt",
+    ]
+    stdout_env = "/srv/env/project\n/srv/env/project/src/main.py\n\n__DF_FIND_STATUS__:0\n"
+    assert parse_remote_list_dir_output(stdout_env, "/srv/env/project", pipeline_exit_code=0) == [
+        "/srv/env/project",
+        "/srv/env/project/src/main.py",
+    ]
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_list_dir_command_drops_ignored_directories(tmp_path) -> None:
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "app.py").write_text("print('x')", encoding="utf-8")
+    (root / "node_modules" / "pkg").mkdir(parents=True)
+    (root / "node_modules" / "pkg" / "index.js").write_text("module.exports = {}", encoding="utf-8")
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("[core]", encoding="utf-8")
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 2))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert str(root / "src" / "app.py") in entries
+    assert not any("node_modules" in entry for entry in entries)
+    assert not any(entry.endswith("/.git") or "/.git/" in entry for entry in entries)
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_list_dir_command_lists_inside_an_ignored_ancestor(tmp_path) -> None:
+    """Real find: an ignored-looking ancestor of the root hides nothing."""
+    root = tmp_path / "build" / "workspace"
+    root.mkdir(parents=True)
+    (root / "report.txt").write_text("x", encoding="utf-8")
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 2))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert str(root / "report.txt") in entries
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_list_dir_command_lists_an_explicitly_requested_ignored_directory(tmp_path) -> None:
+    """Real find: `ls logs` returns the directory and its files, not emptiness."""
+    root = tmp_path / "logs"
+    root.mkdir()
+    (root / "notes.txt").write_text("x", encoding="utf-8")
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 2))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert str(root) in entries
+    assert str(root / "notes.txt") in entries
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None or shutil.which("sort") is None, reason="system find and sort required")
+@pytest.mark.parametrize("root_name", ["workspace", "build", "project [one]'s"])
+@pytest.mark.parametrize("ignored_kind", ["directory", "files"])
+def test_ignored_entries_do_not_consume_listing_budget(tmp_path, root_name, ignored_kind) -> None:
+    """A deterministic real-find order puts ignored entries before the useful file."""
+    root = tmp_path / root_name
+    root.mkdir()
+    if ignored_kind == "directory":
+        ignored = root / "node_modules"
+        ignored.mkdir()
+        for index in range(600):
+            (ignored / f"dependency_{index:04}.js").touch()
+    else:
+        for index in range(600):
+            (root / f"ignored_{index:04}.log").touch()
+    visible = root / "zz_report.txt"
+    visible.write_text("report", encoding="utf-8")
+    # Only enumeration order is normalized. The real find still evaluates the
+    # production arguments and traversal/pruning expression against real files.
+    find = shlex.quote(shutil.which("find"))
+    sort = shlex.quote(shutil.which("sort"))
+    fake_bin = _write_fake_find(tmp_path, f'#!/bin/sh\n{find} "$@" | LC_ALL=C {sort}\n')
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 2), env=_env_with_bin(str(fake_bin)))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert entries == [str(root), str(visible)]
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_visible_listing_still_obeys_depth_and_output_limit(tmp_path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    for index in range(8):
+        (root / f"visible_{index}.txt").touch()
+    (root / "nested" / "too-deep").mkdir(parents=True)
+    (root / "nested" / "too-deep" / "report.txt").touch()
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 1, limit=4))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert len(entries) == 4
+    assert entries[0] == str(root)
+    assert all("too-deep" not in entry for entry in entries)
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_pruning_preserves_an_ignored_symlinked_root(tmp_path) -> None:
+    target = tmp_path / "actual"
+    target.mkdir()
+    (target / "report.txt").touch()
+    (target / "node_modules").mkdir()
+    (target / "node_modules" / "dependency.js").touch()
+    root = tmp_path / "build"
+    root.symlink_to(target, target_is_directory=True)
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 2))
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert entries == [str(root), str(root / "report.txt")]
+
+
+@_POSIX_SH
+@pytest.mark.skipif(shutil.which("find") is None, reason="system find required")
+def test_pruning_uses_the_parsers_case_policy(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "workspace"
+    (root / "BUILD").mkdir(parents=True)
+    (root / "BUILD" / "ignored.txt").touch()
+    (root / "report.txt").touch()
+    # Exercise the policy a Windows Gateway applies to a POSIX remote sandbox.
+    monkeypatch.setattr(os.path, "normcase", lambda value: value.lower())
+    proc = _run_list_dir_script(remote_list_dir_command(str(root), 2))
+    assert "BUILD" not in proc.stdout
+    entries = parse_remote_list_dir_output(proc.stdout, str(root), pipeline_exit_code=proc.returncode)
+    assert entries == [str(root), str(root / "report.txt")]

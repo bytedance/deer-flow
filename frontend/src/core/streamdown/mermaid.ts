@@ -1,3 +1,5 @@
+import { isClosingFence } from "@/core/streamdown/fences";
+
 const MERMAID_OPENING_FENCE_RE =
   /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*mermaid(?:[ \t].*)?$/i;
 
@@ -22,22 +24,6 @@ function normalizeMermaidCode(code: string): string {
       ),
     )
     .join("\n");
-}
-
-function isClosingFence(line: string, fence: string): boolean {
-  const trimmedLine = line.trimEnd();
-  const indentationLength = trimmedLine.length - trimmedLine.trimStart().length;
-  const fenceMarker = trimmedLine.slice(indentationLength);
-  const fenceChar = fence.charAt(0);
-
-  if (indentationLength > 3 || !fenceMarker.startsWith(fenceChar)) {
-    return false;
-  }
-
-  return (
-    fenceMarker.length >= fence.length &&
-    [...fenceMarker].every((char) => char === fenceChar)
-  );
 }
 
 export function normalizeMermaidMarkdown(markdown: string): string {

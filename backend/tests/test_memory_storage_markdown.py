@@ -1187,3 +1187,44 @@ def test_windows_lock_file_does_not_grow_per_acquisition(storage: FileMemoryStor
         assert storage.save(create_empty_memory(), user_id="alice")
     lock_path = storage._get_memory_file_path(user_id="alice").parent / ".memory.lock"
     assert lock_path.stat().st_size == 1
+
+
+@pytest.mark.parametrize("global_version", ["1.0", "2.0"])
+def test_load_migrates_identical_pre_cognitive_summaries(storage, global_version):
+    memory_path = storage._get_memory_file_path("__default__", user_id="alice")
+    legacy_path = memory_path.parent / "agents" / "__default__" / "memory.json"
+    legacy_path.parent.mkdir(parents=True)
+    summaries = {
+        "user": {"workContext": {"summary": "historical profile", "updatedAt": "then", "confidence": 0.8}, "providerState": {"key": "kept"}},
+        "history": {"recentMonths": {"summary": "historical context", "updatedAt": "then"}, "timeline": ["kept"]},
+    }
+    global_data = {"version": global_version, "revision": 0, "lastUpdated": "", **copy.deepcopy(summaries)}
+    if global_version == "1.0":
+        global_data["facts"] = []
+    memory_path.write_text(json.dumps(global_data), encoding="utf-8")
+    fact = _memory_with_fact()["facts"][0]
+    legacy_path.write_text(json.dumps({"version": "1.0", **summaries, "facts": [fact]}), encoding="utf-8")
+
+    loaded = storage.load("__default__", user_id="alice")
+
+    assert [item["id"] for item in loaded["facts"]] == [fact["id"]]
+    assert loaded["user"]["workContext"] == summaries["user"]["workContext"]
+    assert loaded["user"]["providerState"] == summaries["user"]["providerState"]
+    assert loaded["history"]["timeline"] == ["kept"]
+    assert loaded["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+    assert not legacy_path.exists()
+
+
+@pytest.mark.parametrize("facts,error_type", [([None], MemoryStorageCorruption), ([{"id": "invalid", "content": "   "}], ValueError)])
+def test_summary_normalization_does_not_relax_legacy_fact_migration(storage, facts, error_type):
+    memory_path = storage._get_memory_file_path("__default__", user_id="alice")
+    legacy_path = memory_path.parent / "agents" / "__default__" / "memory.json"
+    legacy_path.parent.mkdir(parents=True)
+    original = json.dumps({"version": "1.0", "user": {}, "history": {}, "facts": facts})
+    legacy_path.write_text(original, encoding="utf-8")
+
+    with pytest.raises(error_type):
+        storage.load("__default__", user_id="alice")
+
+    assert legacy_path.read_text(encoding="utf-8") == original
+    assert not memory_path.exists()

@@ -148,3 +148,17 @@ def test_check_status_labels_corepack_fallback(monkeypatch, capsys):
 
     assert check_script.main() == 0
     assert "OK pnpm 10.26.2 (via Corepack)" in capsys.readouterr().out
+
+
+def test_old_node_check_suggests_a_version_manager_command(monkeypatch, capsys):
+    check_script = _load_script(CHECK_SCRIPT_PATH, "deerflow_check_script_old_node")
+    monkeypatch.setattr(check_script.shutil, "which", lambda name: f"/fake/{name}")
+    monkeypatch.setattr(
+        check_script,
+        "run_command",
+        lambda command: {"node": "v20.19.5", "uv": "uv 0.9.0", "nginx": "nginx/1.31.3"}[command[0]],
+    )
+    monkeypatch.setattr(check_script, "run_pnpm_version", lambda: ("10.26.2", True, None))
+
+    assert check_script.main() == 1
+    assert "nvm install 22 && nvm use 22" in capsys.readouterr().out

@@ -63,6 +63,7 @@ def admit_message_knowledge_scope(
 ) -> dict[str, Any] | None:
     """Canonicalize the sole eligible HumanMessage and return execution scope.
 
+    New turns without an explicit scope inherit the custom agent default.
     During regenerate/resume recovery, the server-resolved source snapshot is
     authoritative and replaces any client-supplied value.
     """
@@ -102,7 +103,11 @@ def admit_message_knowledge_scope(
         target_index = scoped_indexes[0]
         raw_scope = messages[target_index].additional_kwargs[KNOWLEDGE_SCOPE_KEY]
     else:
-        return None
+        # Resolve only new turns here. Recovery (including a legacy None
+        # snapshot) must never pick up a subsequently edited agent default.
+        raw_scope = getattr(agent_config, "knowledge_scope", None)
+        if raw_scope is None:
+            return None
 
     canonical: dict[str, Any] | None = None
     if raw_scope is not None:

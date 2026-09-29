@@ -3,7 +3,7 @@
 import { BlocksIcon, SearchIcon, SparklesIcon } from "lucide-react";
 import dynamic from "next/dynamic";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 
 import { Input } from "@/components/ui/input";
 import { SidebarTrigger } from "@/components/ui/sidebar";
@@ -13,16 +13,36 @@ import { useI18n } from "@/core/i18n/hooks";
 const PluginGallery = dynamic(() =>
   import("./plugin-gallery").then((module) => module.PluginGallery),
 );
+const ExtensionGallery = dynamic(() =>
+  import("./extension-gallery").then((module) => module.ExtensionGallery),
+);
 const SkillGallery = dynamic(() =>
   import("./skill-gallery").then((module) => module.SkillGallery),
 );
 
+// Do not accept search input before React can update the directory. A replayed
+// change on blur can move the install button between pointerdown and click.
+const subscribeHydration = () => () => undefined;
+const clientHydrated = () => true;
+const serverHydrated = () => false;
+
 export function CapabilityCenter() {
+  const hydrated = useSyncExternalStore(
+    subscribeHydration,
+    clientHydrated,
+    serverHydrated,
+  );
   const { t } = useI18n();
   const params = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
-  const tab = params.get("tab") === "skills" ? "skills" : "plugins";
+  const requestedTab = params.get("tab");
+  const tab =
+    requestedTab === "skills"
+      ? "skills"
+      : requestedTab === "extensions"
+        ? "extensions"
+        : "plugins";
   const [query, setQuery] = useState("");
   function changeTab(value: string) {
     setQuery("");
@@ -50,16 +70,21 @@ export function CapabilityCenter() {
             <div className="relative w-full md:w-72">
               <SearchIcon className="text-muted-foreground pointer-events-none absolute top-3 left-3 size-4" />
               <Input
+                disabled={!hydrated}
                 className="bg-muted/30 h-10 rounded-xl pl-9 shadow-none"
                 aria-label={
-                  tab === "plugins"
-                    ? t.capabilities.searchPlugins
-                    : t.capabilities.searchSkills
+                  tab === "extensions"
+                    ? t.extensions.search
+                    : tab === "skills"
+                      ? t.capabilities.searchSkills
+                      : t.capabilities.searchPlugins
                 }
                 placeholder={
-                  tab === "plugins"
-                    ? t.capabilities.searchPlugins
-                    : t.capabilities.searchSkills
+                  tab === "extensions"
+                    ? t.extensions.search
+                    : tab === "skills"
+                      ? t.capabilities.searchSkills
+                      : t.capabilities.searchPlugins
                 }
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
@@ -70,15 +95,23 @@ export function CapabilityCenter() {
             <TabsList variant="line" className="h-12 gap-7">
               <TabsTrigger value="plugins" className="gap-2 px-1 pb-4 text-sm">
                 <BlocksIcon className="size-4" />
-                {t.capabilities.plugins}
+                {t.capabilities.toolsAndIntegrations}
               </TabsTrigger>
               <TabsTrigger value="skills" className="gap-2 px-1 pb-4 text-sm">
                 <SparklesIcon className="size-4" />
                 {t.capabilities.skills}
               </TabsTrigger>
+              <TabsTrigger
+                value="extensions"
+                className="gap-2 px-1 pb-4 text-sm"
+              >
+                {t.extensions.title}
+              </TabsTrigger>
             </TabsList>
           </Tabs>
-          {tab === "plugins" ? (
+          {tab === "extensions" ? (
+            <ExtensionGallery query={query} />
+          ) : tab !== "skills" ? (
             <PluginGallery query={query} />
           ) : (
             <SkillGallery query={query} />

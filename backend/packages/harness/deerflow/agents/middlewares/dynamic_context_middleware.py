@@ -542,12 +542,12 @@ class DynamicContextMiddleware(AgentMiddleware):
                 )
             )
 
+        # model_copy preserves response_metadata and any other message fields
+        # that a hand-built HumanMessage call would silently drop, while the
+        # explicit id keeps the {id}__user swap described in the docstring.
         messages.append(
-            HumanMessage(
-                content=original.content,
-                id=f"{stable_id}{INJECTED_USER_MESSAGE_ID_SUFFIX}",
-                name=original.name,
-                additional_kwargs=original.additional_kwargs,
+            original.model_copy(
+                update={"id": f"{stable_id}{INJECTED_USER_MESSAGE_ID_SUFFIX}"},
             )
         )
         return messages

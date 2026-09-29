@@ -210,7 +210,7 @@ Results include the content of each page, not only a snippet. Requires a [Sofya]
 
 ### Web fetch (page content extraction)
 
-<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya"]}>
+<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "Unbrowse"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -266,6 +266,15 @@ tools:
     api_key: $SOFYA_API_KEY
 ```
 Returns the page as markdown. Requires a [Sofya](https://sofya.co) API key.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.unbrowse.tools:web_fetch_tool
+    api_key: $UNBROWSE_API_KEY
+    # render: auto # auto | never (plain HTTP only) | always (cloud browser)
+```
+Returns the page as markdown, fetching over plain HTTP when that is enough and rendering JavaScript-heavy pages in a hosted browser. Requires an [Unbrowse](https://unbrowse.ai) API key.
   </Tabs.Tab>
 </Tabs>
 

@@ -1,4 +1,4 @@
-import type { AgentThreadState, GoalState } from "./types";
+import type { AgentThreadState, ArtifactEntry, GoalState } from "./types";
 
 type ThreadStatePatch = Partial<AgentThreadState>;
 
@@ -16,7 +16,13 @@ function isGoalState(value: unknown): value is GoalState {
   );
 }
 
-const RENDERED_THREAD_STATE_KEYS = ["title", "artifacts", "todos", "goal"];
+const RENDERED_THREAD_STATE_KEYS = [
+  "title",
+  "artifacts",
+  "tool_artifacts",
+  "todos",
+  "goal",
+];
 
 export function hasRenderedThreadStateUpdate(data: unknown): boolean {
   if (!isRecord(data)) return false;
@@ -41,6 +47,49 @@ function mergeArtifacts(
   return [...new Set([...(existing ?? []), ...incoming])];
 }
 
+function isArtifactEntry(value: unknown): value is ArtifactEntry {
+  return (
+    isRecord(value) &&
+    [
+      "handle",
+      "tool_name",
+      "tool_call_id",
+      "artifact_type",
+      "display_name",
+      "real_ref",
+    ].every((key) => typeof value[key] === "string") &&
+    Number.isInteger(value.call_index)
+  );
+}
+
+function mergeToolArtifacts(
+  existing: ArtifactEntry[] | undefined,
+  incoming: unknown,
+): ArtifactEntry[] | undefined {
+  if (!Array.isArray(incoming)) return undefined;
+  // Same-handle updates replace metadata without moving first-seen order.
+  // Capture can append a retention directive after its entries.
+  const byHandle = new Map<string, ArtifactEntry>();
+  for (const item of [...(existing ?? []), ...incoming]) {
+    if (isArtifactEntry(item)) byHandle.set(item.handle, item);
+  }
+  let keep = 1000;
+  for (let index = incoming.length - 1; index >= 0; index--) {
+    const item: unknown = incoming[index];
+    if (isRecord(item) && item.op === "trim_to") {
+      if (
+        typeof item.keep === "number" &&
+        Number.isInteger(item.keep) &&
+        item.keep > 0
+      ) {
+        keep = Math.min(item.keep, keep);
+      }
+      break;
+    }
+  }
+  return [...byHandle.values()].slice(-keep);
+}
+
 /**
  * Fold a LangGraph `updates` frame into the state fields rendered by the chat
  * UI. Updates are grouped by node name and carry reducer inputs, not complete
@@ -61,6 +110,7 @@ export function reduceThreadStateUpdates(
 
   const patch: ThreadStatePatch = {};
   let artifacts = previous.artifacts;
+  let toolArtifacts = previous.tool_artifacts;
   let hasPatch = false;
 
   for (const update of Object.values(data)) {
@@ -78,6 +128,15 @@ export function reduceThreadStateUpdates(
       if (mergedArtifacts !== undefined) {
         artifacts = mergedArtifacts;
         patch.artifacts = mergedArtifacts;
+        hasPatch = true;
+      }
+    }
+
+    if (Object.hasOwn(update, "tool_artifacts")) {
+      const merged = mergeToolArtifacts(toolArtifacts, update.tool_artifacts);
+      if (merged !== undefined) {
+        toolArtifacts = merged;
+        patch.tool_artifacts = merged;
         hasPatch = true;
       }
     }

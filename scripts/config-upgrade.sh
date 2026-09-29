@@ -11,16 +11,34 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.yaml"
 
-# Resolve config.yaml location: env var > backend/ > repo root
-if [ -n "$DEER_FLOW_CONFIG_PATH" ] && [ -f "$DEER_FLOW_CONFIG_PATH" ]; then
-    CONFIG="$DEER_FLOW_CONFIG_PATH"
-elif [ -f "$REPO_ROOT/backend/config.yaml" ]; then
-    CONFIG="$REPO_ROOT/backend/config.yaml"
-elif [ -f "$REPO_ROOT/config.yaml" ]; then
-    CONFIG="$REPO_ROOT/config.yaml"
+if command -v cygpath >/dev/null 2>&1; then
+    REPO_ROOT_WIN="$(cygpath -w "$REPO_ROOT")"
 else
-    CONFIG=""
+    REPO_ROOT_WIN="$REPO_ROOT"
 fi
+
+# Upgrade the config.yaml the Gateway loads. Ask the harness resolver rather
+# than copying its order: with both <checkout>/config.yaml and
+# backend/config.yaml present, `make dev` reads the checkout copy. The import
+# loads .env as the Gateway does; DEER_FLOW_PROJECT_ROOT then defaults to the
+# checkout, as in serve.sh. Prints nothing when no config exists yet.
+CONFIG="$(cd "$REPO_ROOT/backend" && REPO_ROOT_WIN_PATH="$REPO_ROOT_WIN" uv run python -c "
+import os
+import sys
+
+from deerflow.config.app_config import AppConfig
+
+os.environ.setdefault('DEER_FLOW_PROJECT_ROOT', os.environ['REPO_ROOT_WIN_PATH'])
+try:
+    sys.stdout.write(str(AppConfig.resolve_config_path()))
+except FileNotFoundError as exc:
+    # An explicit DEER_FLOW_CONFIG_PATH that does not exist stops the Gateway
+    # too; never upgrade a fallback file in its place.
+    if os.environ.get('DEER_FLOW_CONFIG_PATH'):
+        sys.exit(f'ERROR {exc}')
+except ValueError as exc:
+    sys.exit(f'ERROR {exc}')
+")"
 
 if [ ! -f "$EXAMPLE" ]; then
     echo "✗ config.example.yaml not found at $EXAMPLE"
@@ -45,7 +63,7 @@ fi
 
 cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run python -c "
 import os
-import sys, shutil, copy, re
+import sys, shutil, copy, re, secrets
 from pathlib import Path
 
 import yaml
@@ -154,6 +172,30 @@ MIGRATIONS = {
         'description': 'Preserve configured knowledge providers and move RAGFlow settings to the knowledge_search tool',
         'data_transform': migrate_knowledge_provider_settings,
     },
+}
+
+
+def migrate_pii_token_secret(data):
+    # token_secret became mandatory whenever pii_redaction is enabled (v47).
+    # A v46 deployment that enabled redaction without a secret would fail
+    # startup after the upgrade, so generate a random deployment-scoped
+    # secret and persist it here; the .bak backup taken below covers the
+    # original file.
+    pii = data.get('pii_redaction')
+    changes = []
+    if not isinstance(pii, dict) or not pii.get('enabled'):
+        return changes
+    secret = pii.get('token_secret')
+    if isinstance(secret, str) and secret.strip():
+        return changes
+    pii['token_secret'] = secrets.token_urlsafe(32)
+    changes.append('pii_redaction.token_secret generated (required for enabled redaction; a random value was persisted to config.yaml)')
+    return changes
+
+
+MIGRATIONS[47] = {
+    'description': 'Generate a token_secret for deployments with pii_redaction enabled (now mandatory)',
+    'data_transform': migrate_pii_token_secret,
 }
 
 # Apply migrations in order for versions (user_version, example_version]

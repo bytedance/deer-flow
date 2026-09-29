@@ -57,6 +57,17 @@ class TestExtractSkills:
         }
         assert "ALWAYS_USE_PANDAS_SENTINEL" not in repr(entry)
 
+    def test_build_skill_entry_metadata_from_read_captures_description_behind_a_bom(self):
+        entry = build_skill_entry_metadata_from_read(
+            "/mnt/skills/public/data-analysis/SKILL.md",
+            f"\ufeff{_SKILL_BODY}",
+            skills_root=_ROOT,
+        )
+        assert entry == {
+            "path": "/mnt/skills/public/data-analysis/SKILL.md",
+            "description": "Analyze data with pandas and charts.",
+        }
+
     def test_captures_skill_reference_with_description(self):
         msgs = [
             HumanMessage(content="use the analysis skill"),

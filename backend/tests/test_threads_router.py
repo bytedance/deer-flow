@@ -16,6 +16,7 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.types import Overwrite
 
 from app.gateway import services as gateway_services
+from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs, threads
 from deerflow.config.paths import Paths
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
@@ -178,6 +179,30 @@ def test_update_state_rejects_run_owned_by_another_worker(monkeypatch) -> None:
     assert response.status_code == 409
     assert response.json()["detail"] == "Thread has a run in flight. Update state after the run finishes."
     accessor.aupdate.assert_not_awaited()
+
+
+def test_update_state_rejects_external_system_without_writing(monkeypatch) -> None:
+    app, _store, checkpointer = _build_thread_app()
+    accessor = SimpleNamespace(graph=None, aupdate=AsyncMock(), aget=AsyncMock())
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", AsyncMock(return_value=(accessor, {"configurable": {"thread_id": "system-role-test"}})))
+
+    with TestClient(app) as client:
+        assert client.post("/api/threads", json={"thread_id": "system-role-test"}).status_code == 200
+        before = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "system-role-test"}}))
+        response = client.post(
+            "/api/threads/system-role-test/state",
+            json={
+                "values": {
+                    "messages": [{"role": "system", "content": "synthetic marker"}],
+                    "title": "must not be written",
+                }
+            },
+        )
+
+    assert response.status_code == 400
+    assert "synthetic marker" not in response.text
+    accessor.aupdate.assert_not_awaited()
+    assert asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "system-role-test"}})) == before
 
 
 class _RawStateAccessor:
@@ -389,15 +414,14 @@ def test_delete_thread_data_rejects_invalid_thread_id(tmp_path):
 
 
 def test_delete_thread_route_cleans_thread_directory(tmp_path):
-    from deerflow.runtime.user_context import get_effective_user_id
-
     paths = Paths(tmp_path)
-    user_id = get_effective_user_id()
+    owner = User(email="thread-owner@example.com", password_hash="x")
+    user_id = str(owner.id)
     thread_dir = paths.thread_dir("thread-route", user_id=user_id)
     paths.sandbox_work_dir("thread-route", user_id=user_id).mkdir(parents=True, exist_ok=True)
     (paths.sandbox_work_dir("thread-route", user_id=user_id) / "notes.txt").write_text("hello", encoding="utf-8")
 
-    app = make_authed_test_app()
+    app = make_authed_test_app(user_factory=lambda: owner, bind_current_user=True)
     app.state.run_manager = _ThreadTestRunManager()
     app.include_router(threads.router)
 
@@ -432,6 +456,59 @@ def test_delete_thread_route_closes_browser_session(tmp_path):
 
     assert response.status_code == 200
     manager.close_session.assert_awaited_once_with("thread-browser")
+
+
+def test_delete_thread_route_closes_mcp_sessions(tmp_path):
+    """Deleting a thread tears down its persistent MCP sessions so a later
+    caller who reuses the id gets fresh MCP server state instead of a retained
+    session (and its leaked owner task plus subprocess) — the same invariant the
+    browser-session cleanup above guards (#5188)."""
+    paths = Paths(tmp_path)
+    owner = User(email="mcp-owner@example.com", password_hash="x")
+
+    app = make_authed_test_app(user_factory=lambda: owner, bind_current_user=True)
+    app.state.run_manager = _ThreadTestRunManager()
+    app.include_router(threads.router)
+
+    pool = SimpleNamespace(close_thread_scope=AsyncMock(return_value=None))
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-mcp")
+
+    assert response.status_code == 200
+    pool.close_thread_scope.assert_awaited_once_with(
+        user_id=str(owner.id),
+        thread_id="thread-mcp",
+    )
+
+
+def test_delete_thread_route_isolates_failing_mcp_cleanup(tmp_path):
+    """A failing MCP teardown must stay best-effort like every other cleanup step.
+
+    The delete has already removed the thread's filesystem data, checkpoints and
+    metadata by the time MCP sessions are closed, so an exception here must not
+    turn a successful deletion into a 500.
+    """
+    paths = Paths(tmp_path)
+
+    app = make_authed_test_app()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.include_router(threads.router)
+
+    pool = SimpleNamespace(close_thread_scope=AsyncMock(side_effect=RuntimeError("simulated MCP teardown failure")))
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-mcp-fail")
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "message": "Deleted local thread data for thread-mcp-fail"}
+    pool.close_thread_scope.assert_awaited_once()
 
 
 def _persistence_cleanup_app(tmp_path, *, run_store, event_store, feedback_repo):
@@ -922,7 +999,14 @@ def test_insert_race_recovery_claims_unscoped_row_for_trusted_owner() -> None:
     thread_store = _RacingOwnerStore(store)
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+        # Realistic internal-auth fields: the create_thread permission wrapper
+        # authenticates these direct calls, and get_current_user_from_request
+        # honors state.user only when auth_source marks a trusted origin.
+        cookies={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
         app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
     )
 
@@ -1180,7 +1264,14 @@ def test_internal_owner_header_assigns_thread_to_owner() -> None:
     thread_store = MemoryThreadMetaStore(store)
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+        # Realistic internal-auth fields: the create_thread permission wrapper
+        # authenticates these direct calls, and get_current_user_from_request
+        # honors state.user only when auth_source marks a trusted origin.
+        cookies={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
         app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
     )
 
@@ -1212,7 +1303,14 @@ def test_goal_thread_creation_uses_internal_owner_header() -> None:
     thread_store = MemoryThreadMetaStore(store)
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+        # Realistic internal-auth fields: the create_thread permission wrapper
+        # authenticates these direct calls, and get_current_user_from_request
+        # honors state.user only when auth_source marks a trusted origin.
+        cookies={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
         app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
     )
 
@@ -4028,7 +4126,7 @@ def test_update_thread_state_overwrites_reducer_fields_and_writes_last_values_di
     assert read_config["configurable"]["thread_id"] == "state-overwrite"
     assert read_config["metadata"] == {CHECKPOINT_AGENT_NAME_METADATA_KEY: "stateless-worker"}
     assert isinstance(updates["messages"], Overwrite)
-    assert updates["messages"].value[0]["id"] == "h1"
+    assert updates["messages"].value[0].id == "h1"
     assert isinstance(updates["artifacts"], Overwrite)
     assert updates["artifacts"].value == ["artifact-1"]
     assert updates["title"] == "Renamed"

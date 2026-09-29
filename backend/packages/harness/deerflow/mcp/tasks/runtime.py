@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths, normalize_mcp_server_config
 from deerflow.mcp.tasks.models import TaskSubmitRequest
 
 
@@ -26,6 +27,7 @@ class McpTaskSubmitter(Protocol):
         *,
         thread_id: str,
         user_id: str,
+        thread_incarnation: str | None,
         limit: int = 50,
         active_only: bool = False,
     ) -> list[dict[str, Any]]: ...
@@ -35,6 +37,7 @@ class McpTaskSubmitter(Protocol):
         *,
         thread_id: str,
         user_id: str,
+        thread_incarnation: str | None,
         task: str | None = None,
     ) -> dict[str, Any]: ...
 
@@ -49,11 +52,9 @@ def _task_server_configs(extensions_config: ExtensionsConfig) -> _TaskServerConf
     for server_name, server in extensions_config.get_enabled_mcp_servers().items():
         if not server.task_toolsets:
             continue
-        runtime_config = server.model_dump(mode="json")
-        for presentation_field in ("description", "routing", "tools", "tool_name_prefix"):
-            runtime_config.pop(presentation_field, None)
-        servers[server_name] = runtime_config
-    interceptors = (extensions_config.model_extra or {}).get("mcpInterceptors") if servers else None
+        servers[server_name] = normalize_mcp_server_config(server, task_runtime=True)
+    raw_interceptors = (extensions_config.model_extra or {}).get("mcpInterceptors")
+    interceptors = normalize_mcp_interceptor_paths(raw_interceptors) if servers else None
     return servers, interceptors
 
 

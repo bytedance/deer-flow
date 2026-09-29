@@ -15,6 +15,7 @@ from app.channels.manager import DEFAULT_CHANNEL_MAX_CONCURRENCY, DEFAULT_CHANNE
 from app.channels.message_bus import DEFAULT_INBOUND_QUEUE_MAXSIZE, MessageBus
 from app.channels.runtime_config_store import merge_runtime_channel_configs
 from app.channels.store import ChannelStore
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -468,7 +469,13 @@ class ChannelService:
                 # (tests, tooling) stay free of filesystem side effects.
                 from deerflow.config.paths import get_paths
 
-                config["seen_event_store_path"] = str(Path(get_paths().base_dir) / "channels" / "buzz_seen_events.json")
+                def _default_seen_store_path() -> str:
+                    # Worker thread: ``base_dir`` resolves through realpath, and a
+                    # channel start runs on the Gateway event loop — including the
+                    # per-request ``POST /api/channels/{name}/restart`` path.
+                    return str(Path(get_paths().base_dir) / "channels" / "buzz_seen_events.json")
+
+                config["seen_event_store_path"] = await asyncio.to_thread(_default_seen_store_path)
             if self._connection_repo is not None:
                 config["connection_repo"] = self._connection_repo
             channel = channel_cls(bus=self.bus, config=config)
@@ -573,9 +580,30 @@ async def start_channel_service(
     # from_app_config reads the JSON channel store and runtime config files;
     # keep that disk IO off the event loop. asyncio.to_thread forwards both
     # args and kwargs to the target callable.
-    _channel_service = await asyncio.to_thread(ChannelService.from_app_config, app_config, get_stream_bridge=get_stream_bridge)
-    await _channel_service.start()
-    return _channel_service
+    service = await asyncio.to_thread(ChannelService.from_app_config, app_config, get_stream_bridge=get_stream_bridge)
+    _channel_service = service
+
+    async def rollback_failed_start() -> None:
+        global _channel_service
+        await service.stop()
+        if _channel_service is service:
+            _channel_service = None
+
+    try:
+        await service.start()
+    except BaseException:
+        try:
+            await await_drained(rollback_failed_start())
+        except asyncio.CancelledError:
+            # A repeated caller cancellation arrives only after the owned
+            # rollback has drained; preserve cancellation semantics.
+            raise
+        except Exception:
+            # Retain the singleton when cleanup itself fails so shutdown can
+            # retry it instead of orphaning partially-started resources.
+            logger.exception("Failed to stop ChannelService after startup failure; retaining singleton")
+        raise
+    return service
 
 
 async def stop_channel_service() -> None:

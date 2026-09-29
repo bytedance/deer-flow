@@ -29,6 +29,31 @@ rs.mock("@/core/i18n/hooks", () => ({
   useI18n: () => ({
     t: {
       capabilities: {
+        icon: {
+          title: "Plugin icon",
+          upload: "Upload plugin icon",
+          change: "Choose image",
+          reset: "Restore default",
+          hint: "PNG, JPG or WebP",
+          singleServer: "One plugin at a time",
+          errors: {
+            type: "Invalid type",
+            size: "Too large",
+            invalid: "Invalid image",
+          },
+        },
+        noResults: "No matches found",
+        directory: {
+          categories: {
+            office: "Office",
+            knowledge: "Knowledge",
+            research: "Research",
+            business: "Business",
+            development: "Development",
+            custom: "Custom",
+          },
+          hints: {},
+        },
         enabled: "Enabled",
         disabled: "Disabled",
         details: "View details",
@@ -144,9 +169,18 @@ describe("MCPPluginManager MCP switches", () => {
       mcpMockState.error =
         state === "error" ? new Error("request failed") : null;
       render(
-        <MCPPluginManager toolbar={<button>All plugins</button>}>
-          <button>Configure Lark</button>
-        </MCPPluginManager>,
+        <MCPPluginManager
+          toolbar={<button>All plugins</button>}
+          catalog={[
+            {
+              id: "lark",
+              category: "office",
+              search: "Lark",
+              installed: false,
+              node: <button>Configure Lark</button>,
+            },
+          ]}
+        />,
       );
       expect(
         screen.getByRole("button", { name: "Configure Lark" }),
@@ -257,7 +291,7 @@ describe("MCPPluginManager add server", () => {
 
     render(<MCPPluginManager />);
 
-    expect(screen.getByText("No tools")).toBeDefined();
+    expect(screen.getByText("No matches found")).toBeDefined();
     expect(
       screen
         .getByRole("button", { name: "Add server" })

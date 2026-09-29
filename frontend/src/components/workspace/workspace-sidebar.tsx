@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/sidebar";
 
 import { WorkspaceChannelsList } from "./channels/workspace-channels-list";
+import { PluginNavigation } from "./plugin-navigation";
 import { ProjectsSection } from "./projects-section";
 import { RecentChatList } from "./recent-chat-list";
 import { ThreadDeleteDialogProvider } from "./thread-delete-dialog";
@@ -29,6 +30,7 @@ export function WorkspaceSidebar({
         </SidebarHeader>
         <SidebarContent>
           <WorkspaceNavChatList />
+          <PluginNavigation />
           <WorkspaceChannelsList />
           {isSidebarOpen && (
             <>

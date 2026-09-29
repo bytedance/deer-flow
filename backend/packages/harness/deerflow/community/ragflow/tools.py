@@ -21,13 +21,14 @@ from deerflow.knowledge_scope import (
 from deerflow.tools.types import Runtime
 
 from .client import RAGFlowAPIError, RAGFlowClient, RAGFlowConnectionError, RAGFlowProtocolError
-from .formatting import format_retrieval_result
+from .formatting import format_retrieval_result, format_retrieval_sources
 
 logger = logging.getLogger(__name__)
 
 _warned: set[str] = set()
 _RAGFLOW_UUID_PATTERN = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{32}|[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})(?![0-9A-Fa-f])")
 _MAX_PARALLEL_RAGFLOW_REQUESTS = 4
+_MAX_DOCUMENT_IDS_PER_REQUEST = 100
 _NO_RELEVANT_CONTENT = "No relevant content found."
 
 
@@ -363,7 +364,11 @@ async def _validate_document_filters(
         by_id = {str(document.get("id")): document for document in documents if isinstance(document, Mapping) and document.get("id") is not None}
         return item, by_id
 
-    document_results = await _bounded_gather(document_filters, list_documents)
+    # 所有知识库的批次共用并发预算，避免放大提供商请求量。
+    batches = [
+        {"dataset_id": item["dataset_id"], "document_ids": item["document_ids"][offset : offset + _MAX_DOCUMENT_IDS_PER_REQUEST]} for item in document_filters for offset in range(0, len(item["document_ids"]), _MAX_DOCUMENT_IDS_PER_REQUEST)
+    ]
+    document_results = await _bounded_gather(batches, list_documents)
     validated: dict[str, list[str]] = {}
     for item, by_id in document_results:
         dataset_id = item["dataset_id"]
@@ -382,7 +387,7 @@ async def _validate_document_filters(
                     None,
                     "Error: The selected knowledge scope is no longer available; choose the knowledge bases or files again.",
                 )
-        validated[dataset_id] = document_ids
+        validated.setdefault(dataset_id, []).extend(document_ids)
     return validated, None
 
 
@@ -516,6 +521,7 @@ async def knowledge_search(
     *,
     knowledge_scope: object | None = None,
     runtime: Runtime | None = None,
+    _source_artifact: dict[str, Any] | None = None,
 ) -> str:
     """Search the configured RAGFlow scope, defaulting to every accessible dataset."""
     query = query.strip()
@@ -564,6 +570,17 @@ async def knowledge_search(
 
         result = await _retrieve_dataset_groups(client, settings, query, groups)
         names_by_id = {dataset.dataset_id: dataset.name for dataset in datasets}
+        if _source_artifact is not None:
+            content, artifact = format_retrieval_sources(
+                result,
+                dataset_names_by_id=names_by_id,
+                max_chars_per_chunk=settings.max_chars_per_chunk,
+                max_total_chars=settings.max_total_chars,
+                redact=lambda value: _redact_api_key(value, _api_key(settings)),
+            )
+            if artifact is not None:
+                _source_artifact.update(artifact)
+            return content
         formatted = format_retrieval_result(
             result,
             dataset_names_by_id=names_by_id,
@@ -600,21 +617,28 @@ async def list_knowledge_bases() -> str:
 
 def _tool_description() -> str:
     base = "Search the operator-approved RAGFlow datasets and return compact, citation-numbered source chunks."
-    return f"{base} If knowledge_search.datasets is omitted, all datasets accessible to the configured RAGFlow API key are searched. Dataset IDs are never shown to the model."
+    return (
+        f"{base} If knowledge_search.datasets is omitted, all datasets accessible to the configured RAGFlow API key are searched. "
+        "Dataset IDs are never shown to the model. When citing results, copy the supplied [citation:N](#knowledge-...) links exactly; "
+        "do not invent or renumber source links."
+    )
 
 
-async def _knowledge_search_entrypoint(query: str, runtime: Runtime) -> str:
+async def _knowledge_search_entrypoint(query: str, runtime: Runtime) -> tuple[str, dict[str, Any] | None]:
     """Search the configured RAGFlow datasets, or every accessible dataset by default.
 
     Args:
         query: Specific question or search terms to retrieve from the configured private documents.
     """
-    return await knowledge_search(query, runtime=runtime)
+    artifact: dict[str, Any] = {}
+    content = await knowledge_search(query, runtime=runtime, _source_artifact=artifact)
+    return content, artifact or None
 
 
 knowledge_search_tool = StructuredTool.from_function(
     coroutine=_knowledge_search_entrypoint,
     name="knowledge_search",
+    response_format="content_and_artifact",
     description=_tool_description(),
     parse_docstring=True,
 )

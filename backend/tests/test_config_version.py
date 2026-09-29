@@ -11,7 +11,7 @@ import pytest
 import yaml
 from support.shell import find_script_bash
 
-from deerflow.config.app_config import AppConfig
+from deerflow.config.app_config import AppConfig, _legacy_config_candidates
 from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
 from deerflow.tools.tools import get_available_tools
 
@@ -200,6 +200,7 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     assert upgraded["verification"]["judge_model_name"] is None
 
 
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
     """The v46 migration keeps provider settings on the RAGFlow tool entry."""
     import subprocess
@@ -234,7 +235,7 @@ def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
 
     env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
     result = subprocess.run(
-        ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        [SCRIPT_BASH, str(repo_root / "scripts" / "config-upgrade.sh")],
         env=env,
         capture_output=True,
         text=True,
@@ -254,6 +255,7 @@ def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
     assert tool["api_key"] == "$CURRENT_RAGFLOW_API_KEY"
 
 
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_path):
     """Tools-only legacy configs must not be disabled by the new capability gate."""
     import subprocess
@@ -282,7 +284,7 @@ def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_p
 
     env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
     result = subprocess.run(
-        ["bash", str(repo_root / "scripts" / "config-upgrade.sh")],
+        [SCRIPT_BASH, str(repo_root / "scripts" / "config-upgrade.sh")],
         env=env,
         capture_output=True,
         text=True,
@@ -517,3 +519,260 @@ def test_config_upgrade_adds_security_fail_closed_preserving_user_values():
     assert user["skill_evolution"]["enabled"] is True
     assert user["skill_evolution"]["moderation_model_name"] == "custom-moderation-model"
     assert user["config_version"] == example["config_version"]
+
+
+def test_version_46_pii_enabled_config_reported_outdated_against_example(caplog):
+    """token_secret became mandatory for enabled redaction in v47; a v46
+    deployment with redaction on must be flagged outdated so the upgrade
+    warning fires instead of a raw startup validation error with no guidance."""
+    example = _load_repo_example()
+    example_version = example["config_version"]
+    assert example_version >= 47, "config.example.yaml must be bumped past 46 for the mandatory token_secret"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config_path = _make_config_files(
+            Path(tmpdir),
+            user_config={"config_version": 46, "pii_redaction": {"enabled": True}},
+            example_config=example,
+        )
+        with caplog.at_level(logging.WARNING, logger="deerflow.config.app_config"):
+            AppConfig._check_config_version({"config_version": 46}, config_path)
+        assert "outdated" in caplog.text
+        assert "(version 46)" in caplog.text
+        assert f"version is {example_version}" in caplog.text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_version_46_pii_enabled_config_upgrade_generates_token_secret(tmp_path):
+    """Upgrading a v46 config with redaction enabled persists a generated
+    token_secret, leaving the deployment startable under the v47 mandatory
+    validation instead of failing startup after the version bump."""
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example_src = repo_root / "config.example.yaml"
+    expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
+    assert expected_version >= 47
+
+    config_path = tmp_path / "config.yaml"
+    (tmp_path / "config.example.yaml").write_text(example_src.read_text(encoding="utf-8"), encoding="utf-8")
+    config_path.write_text(
+        yaml.dump(
+            {
+                "config_version": 46,
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "pii_redaction": {"enabled": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
+    result = subprocess.run(
+        [SCRIPT_BASH, str(repo_root / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "token_secret generated" in result.stdout
+
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version
+    assert upgraded["pii_redaction"]["enabled"] is True
+    secret = upgraded["pii_redaction"]["token_secret"]
+    assert isinstance(secret, str) and len(secret) >= 16
+
+    # The upgraded deployment passes the now-mandatory validation.
+    app_config = AppConfig.model_validate(upgraded)
+    assert app_config.pii_redaction.token_secret == secret
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_version_46_pii_disabled_config_upgrade_skips_token_secret(tmp_path):
+    """The migration must not invent a secret when redaction is off."""
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example_src = repo_root / "config.example.yaml"
+    expected_version = yaml.safe_load(example_src.read_text(encoding="utf-8"))["config_version"]
+    assert expected_version >= 47
+
+    config_path = tmp_path / "config.yaml"
+    (tmp_path / "config.example.yaml").write_text(example_src.read_text(encoding="utf-8"), encoding="utf-8")
+    config_path.write_text(
+        yaml.dump(
+            {
+                "config_version": 46,
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "pii_redaction": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env = {**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)}
+    result = subprocess.run(
+        [SCRIPT_BASH, str(repo_root / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version
+    assert "token_secret" not in upgraded["pii_redaction"]
+    AppConfig.model_validate(upgraded)
+
+
+def _run_config_upgrade_in_checkout(checkout: Path, **env_overrides: str):
+    """Run a copy of scripts/config-upgrade.sh from a throwaway checkout.
+
+    The script resolves the checkout from its own location, so the copy sees
+    ``checkout`` as the repository root while ``UV_PROJECT`` keeps its
+    ``uv run`` on the real backend environment. Resolution overrides are
+    cleared so the developer's shell cannot pick the file under test.
+
+    The harness's legacy fallback is anchored to its install location, which
+    here is the real repository, so a run may only reach it when no legacy
+    candidate exists: otherwise the script would upgrade the developer's own
+    ``config.yaml``.
+    """
+    import shutil
+    import subprocess
+
+    project_root = Path(env_overrides.get("DEER_FLOW_PROJECT_ROOT", checkout))
+    if "DEER_FLOW_CONFIG_PATH" not in env_overrides and project_root.is_dir() and not (project_root / "config.yaml").is_file():
+        assert not any(path.exists() for path in _legacy_config_candidates()), "would fall back to the real repository's config.yaml"
+
+    repo_root = Path(__file__).resolve().parents[2]
+    (checkout / "scripts").mkdir(parents=True, exist_ok=True)
+    (checkout / "backend").mkdir(exist_ok=True)
+    shutil.copy2(repo_root / "scripts" / "config-upgrade.sh", checkout / "scripts" / "config-upgrade.sh")
+    shutil.copy2(repo_root / "config.example.yaml", checkout / "config.example.yaml")
+
+    env = {key: value for key, value in os.environ.items() if key not in {"DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT"}}
+    env["UV_PROJECT"] = str(repo_root / "backend")
+    env.update(env_overrides)
+    return subprocess.run(
+        [SCRIPT_BASH, str(checkout / "scripts" / "config-upgrade.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+def _write_outdated_config(path: Path) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = yaml.dump({"config_version": 1, "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+    path.write_text(text, encoding="utf-8")
+    return text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_targets_checkout_config_over_legacy_backend_copy(tmp_path):
+    """With both copies present, upgrade the checkout config.yaml that `make dev` loads."""
+    checkout = tmp_path / "checkout"
+    _write_outdated_config(checkout / "config.yaml")
+    legacy_text = _write_outdated_config(checkout / "backend" / "config.yaml")
+
+    result = _run_config_upgrade_in_checkout(checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    expected_version = yaml.safe_load((checkout / "config.example.yaml").read_text(encoding="utf-8"))["config_version"]
+    upgraded = yaml.safe_load((checkout / "config.yaml").read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version
+    assert (checkout / "backend" / "config.yaml").read_text(encoding="utf-8") == legacy_text
+    assert not (checkout / "backend" / "config.yaml.bak").exists()
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_honors_deer_flow_project_root(tmp_path):
+    """An exported DEER_FLOW_PROJECT_ROOT decides the file, as it does for the Gateway."""
+    checkout = tmp_path / "checkout"
+    project_root = tmp_path / "project"
+    checkout_text = _write_outdated_config(checkout / "config.yaml")
+    _write_outdated_config(project_root / "config.yaml")
+
+    result = _run_config_upgrade_in_checkout(checkout, DEER_FLOW_PROJECT_ROOT=str(project_root))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    upgraded = yaml.safe_load((project_root / "config.yaml").read_text(encoding="utf-8"))
+    assert upgraded["config_version"] > 1
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == checkout_text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_fails_on_missing_deer_flow_config_path(tmp_path):
+    """A missing explicit config stops the Gateway, so no fallback file is upgraded instead."""
+    checkout = tmp_path / "checkout"
+    checkout_text = _write_outdated_config(checkout / "config.yaml")
+    legacy_text = _write_outdated_config(checkout / "backend" / "config.yaml")
+    missing = tmp_path / "missing" / "config.yaml"
+
+    result = _run_config_upgrade_in_checkout(checkout, DEER_FLOW_CONFIG_PATH=str(missing))
+    assert result.returncode != 0
+    assert "DEER_FLOW_CONFIG_PATH" in result.stderr
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == checkout_text
+    assert (checkout / "backend" / "config.yaml").read_text(encoding="utf-8") == legacy_text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_reports_invalid_deer_flow_project_root(tmp_path):
+    """A project root the Gateway rejects fails with its message, not a traceback."""
+    checkout = tmp_path / "checkout"
+    checkout_text = _write_outdated_config(checkout / "config.yaml")
+
+    result = _run_config_upgrade_in_checkout(checkout, DEER_FLOW_PROJECT_ROOT=str(tmp_path / "missing"))
+    assert result.returncode != 0
+    assert "DEER_FLOW_PROJECT_ROOT is set to" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == checkout_text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_honors_deer_flow_config_path_from_dotenv(tmp_path):
+    """`make config-upgrade` does not source .env, but the Gateway loads it; follow the Gateway."""
+    checkout = tmp_path / "checkout"
+    live = tmp_path / "live" / "config.yaml"
+    checkout_text = _write_outdated_config(checkout / "config.yaml")
+    _write_outdated_config(live)
+    (checkout / ".env").write_text(f"DEER_FLOW_CONFIG_PATH={live}\n", encoding="utf-8")
+
+    result = _run_config_upgrade_in_checkout(checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert yaml.safe_load(live.read_text(encoding="utf-8"))["config_version"] > 1
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == checkout_text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_resolves_relative_deer_flow_config_path_from_backend(tmp_path):
+    """The Gateway runs from backend/, so a relative DEER_FLOW_CONFIG_PATH is relative to it."""
+    checkout = tmp_path / "checkout"
+    checkout_text = _write_outdated_config(checkout / "config.yaml")
+    _write_outdated_config(checkout / "backend" / "custom.yaml")
+
+    result = _run_config_upgrade_in_checkout(checkout, DEER_FLOW_CONFIG_PATH="custom.yaml")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    upgraded = yaml.safe_load((checkout / "backend" / "custom.yaml").read_text(encoding="utf-8"))
+    assert upgraded["config_version"] > 1
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == checkout_text
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_creates_checkout_config_when_none_exists(tmp_path):
+    """With no config anywhere, the resolver miss is not an error: the example seeds <checkout>/config.yaml."""
+    if any(path.exists() for path in _legacy_config_candidates()):
+        pytest.skip("the resolver's legacy fallback would find this repository's own config.yaml")
+    checkout = tmp_path / "checkout"
+
+    result = _run_config_upgrade_in_checkout(checkout)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    assert "creating from example" in result.stdout
+    assert (checkout / "config.yaml").read_bytes() == (checkout / "config.example.yaml").read_bytes()

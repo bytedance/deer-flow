@@ -200,6 +200,151 @@ def test_async_model_call_marks_transient_retry_exhaustion_as_error_fallback(
     assert result.additional_kwargs["error_detail"] == "Connection error."
 
 
+@pytest.mark.parametrize("stale_outcome", ["success", "failure", "non_retriable", "graph_bubble_up"])
+def test_async_stale_completion_cannot_settle_an_owned_half_open_probe(stale_outcome: str) -> None:
+    async def run() -> None:
+        middleware = _build_middleware(retry_max_attempts=1)
+        middleware.circuit_failure_threshold = 1
+        middleware.circuit_recovery_timeout_sec = 0
+        old_entered = asyncio.Event()
+        release_old = asyncio.Event()
+        probe_entered = asyncio.Event()
+        release_probe = asyncio.Event()
+        provider_calls: list[str] = []
+
+        async def handler(request) -> AIMessage:
+            name = request.name
+            provider_calls.append(name)
+            if name == "old":
+                old_entered.set()
+                await release_old.wait()
+                if stale_outcome == "failure":
+                    raise FakeError("old request failed", status_code=503)
+                if stale_outcome == "non_retriable":
+                    raise FakeError("insufficient_quota", status_code=429, code="insufficient_quota")
+                if stale_outcome == "graph_bubble_up":
+                    raise GraphBubbleUp()
+            elif name == "open":
+                raise FakeError("provider unavailable", status_code=503)
+            elif name == "probe":
+                probe_entered.set()
+                await release_probe.wait()
+            return AIMessage(content=f"{name} success")
+
+        old_task = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(name="old"), handler))
+        probe_task: asyncio.Task | None = None
+        try:
+            await asyncio.wait_for(old_entered.wait(), timeout=1)
+            await middleware.awrap_model_call(SimpleNamespace(name="open"), handler)
+            assert middleware._circuit_state == "open"
+
+            probe_task = asyncio.create_task(middleware.awrap_model_call(SimpleNamespace(name="probe"), handler))
+            await asyncio.wait_for(probe_entered.wait(), timeout=1)
+            assert middleware._circuit_state == "half_open"
+            assert middleware._circuit_probe_in_flight is True
+
+            release_old.set()
+            if stale_outcome == "graph_bubble_up":
+                with pytest.raises(GraphBubbleUp):
+                    await asyncio.wait_for(old_task, timeout=1)
+            else:
+                await asyncio.wait_for(old_task, timeout=1)
+
+            assert middleware._circuit_state == "half_open"
+            assert middleware._circuit_probe_in_flight is True
+            calls_before_extra = list(provider_calls)
+            extra = await middleware.awrap_model_call(SimpleNamespace(name="extra"), handler)
+            assert provider_calls == calls_before_extra
+            assert extra.additional_kwargs["error_type"] == "CircuitBreakerOpen"
+        finally:
+            release_old.set()
+            release_probe.set()
+            if not old_task.done():
+                await old_task
+            if probe_task is not None:
+                await probe_task
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("stale_outcome", ["success", "failure", "non_retriable", "graph_bubble_up"])
+def test_sync_stale_completion_cannot_settle_an_owned_half_open_probe(stale_outcome: str) -> None:
+    middleware = _build_middleware(retry_max_attempts=1)
+    middleware.circuit_failure_threshold = 1
+    middleware.circuit_recovery_timeout_sec = 0
+    old_entered = threading.Event()
+    release_old = threading.Event()
+    probe_entered = threading.Event()
+    release_probe = threading.Event()
+    provider_calls: list[str] = []
+    provider_lock = threading.Lock()
+    failures: list[BaseException] = []
+
+    def handler(request) -> AIMessage:
+        name = request.name
+        with provider_lock:
+            provider_calls.append(name)
+        if name == "old":
+            old_entered.set()
+            assert release_old.wait(1)
+            if stale_outcome == "failure":
+                raise FakeError("old request failed", status_code=503)
+            if stale_outcome == "non_retriable":
+                raise FakeError("insufficient_quota", status_code=429, code="insufficient_quota")
+            if stale_outcome == "graph_bubble_up":
+                raise GraphBubbleUp()
+        elif name == "open":
+            raise FakeError("provider unavailable", status_code=503)
+        elif name == "probe":
+            probe_entered.set()
+            assert release_probe.wait(1)
+        return AIMessage(content=f"{name} success")
+
+    def call(name: str) -> None:
+        try:
+            middleware.wrap_model_call(SimpleNamespace(name=name), handler)
+        except BaseException as exc:
+            failures.append(exc)
+
+    old_thread = threading.Thread(target=call, args=("old",), daemon=True)
+    probe_thread = threading.Thread(target=call, args=("probe",), daemon=True)
+    try:
+        old_thread.start()
+        assert old_entered.wait(1)
+        middleware.wrap_model_call(SimpleNamespace(name="open"), handler)
+        assert middleware._circuit_state == "open"
+
+        probe_thread.start()
+        assert probe_entered.wait(1)
+        assert middleware._circuit_state == "half_open"
+        assert middleware._circuit_probe_in_flight is True
+
+        release_old.set()
+        old_thread.join(1)
+        assert not old_thread.is_alive()
+        if stale_outcome == "graph_bubble_up":
+            assert len(failures) == 1
+            assert isinstance(failures[0], GraphBubbleUp)
+        else:
+            assert not failures
+
+        assert middleware._circuit_state == "half_open"
+        assert middleware._circuit_probe_in_flight is True
+        with provider_lock:
+            calls_before_extra = list(provider_calls)
+        extra = middleware.wrap_model_call(SimpleNamespace(name="extra"), handler)
+        with provider_lock:
+            assert provider_calls == calls_before_extra
+        assert extra.additional_kwargs["error_type"] == "CircuitBreakerOpen"
+    finally:
+        release_old.set()
+        release_probe.set()
+        old_thread.join(1)
+        probe_thread.join(1)
+    if stale_outcome != "graph_bubble_up":
+        assert not failures
+
+
 def test_sync_model_call_uses_retry_after_header(monkeypatch: pytest.MonkeyPatch) -> None:
     middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=10, retry_cap_delay_ms=10)
     waits: list[float] = []
@@ -519,10 +664,7 @@ def test_empty_response_exhaustion_does_not_trip_circuit_breaker(monkeypatch: py
 def test_empty_response_exhaustion_releases_half_open_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=1, retry_cap_delay_ms=1)
     middleware._circuit_state = "half_open"
-    assert middleware._check_circuit() is False
-    assert middleware._circuit_probe_in_flight is True
     monkeypatch.setattr("time.sleep", lambda _delay: None)
-    monkeypatch.setattr(middleware, "_check_circuit", lambda: False)
 
     def empty_handler(_request) -> AIMessage:
         return AIMessage(content="", response_metadata={"finish_reason": "stop"})
@@ -693,6 +835,45 @@ def test_async_model_call_propagates_graph_bubble_up() -> None:
         asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
 
 
+def test_sync_retry_event_graph_bubble_up_releases_half_open_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=2)
+    middleware._circuit_state = "half_open"
+
+    def unavailable(_request) -> AIMessage:
+        raise FakeError("Service unavailable", status_code=503)
+
+    def interrupt_retry_event(*_args, **_kwargs) -> None:
+        raise GraphBubbleUp()
+
+    monkeypatch.setattr(middleware, "_emit_retry_event", interrupt_retry_event)
+
+    with pytest.raises(GraphBubbleUp):
+        middleware.wrap_model_call(SimpleNamespace(), unavailable)
+
+    assert middleware._circuit_state == "half_open"
+    assert middleware._circuit_probe_in_flight is False
+
+
+@pytest.mark.anyio
+async def test_async_retry_event_graph_bubble_up_releases_half_open_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=2)
+    middleware._circuit_state = "half_open"
+
+    async def unavailable(_request) -> AIMessage:
+        raise FakeError("Service unavailable", status_code=503)
+
+    async def interrupt_retry_event(*_args, **_kwargs) -> None:
+        raise GraphBubbleUp()
+
+    monkeypatch.setattr(middleware, "_aemit_retry_event", interrupt_retry_event)
+
+    with pytest.raises(GraphBubbleUp):
+        await middleware.awrap_model_call(SimpleNamespace(), unavailable)
+
+    assert middleware._circuit_state == "half_open"
+    assert middleware._circuit_probe_in_flight is False
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("cancel_during", ["provider", "backoff", "queue"])
 async def test_cancelled_recovery_probe_allows_next_model_call(cancel_during: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -811,25 +992,15 @@ def test_circuit_half_open_graph_bubble_up_resets_probe() -> None:
     """Verify that GraphBubbleUp in half_open state resets probe_in_flight."""
     middleware = _build_middleware()
 
-    # Step 1: Manually set state to half_open and check_circuit() to set probe_in_flight=True
     middleware._circuit_state = "half_open"
     middleware._circuit_probe_in_flight = False
-    # Call _check_circuit() once to simulate the probe being allowed through
-    assert middleware._check_circuit() is False
-    assert middleware._circuit_probe_in_flight is True
 
-    # Step 2: Now trigger handler that raises GraphBubbleUp
     def handler(_request) -> AIMessage:
         raise GraphBubbleUp()
 
-    # Mock _check_circuit() to return False (since we already did the probe check)
-    import unittest.mock
+    with pytest.raises(GraphBubbleUp):
+        middleware.wrap_model_call(SimpleNamespace(), handler)
 
-    with unittest.mock.patch.object(middleware, "_check_circuit", return_value=False):
-        with pytest.raises(GraphBubbleUp):
-            middleware.wrap_model_call(SimpleNamespace(), handler)
-
-    # Verify probe_in_flight was reset, state should remain half_open
     assert middleware._circuit_probe_in_flight is False
     assert middleware._circuit_state == "half_open"
 
@@ -839,25 +1010,15 @@ async def test_async_circuit_half_open_graph_bubble_up_resets_probe() -> None:
     """Verify that GraphBubbleUp in half_open state resets probe_in_flight (async version)."""
     middleware = _build_middleware()
 
-    # Step 1: Manually set state to half_open and check_circuit() to set probe_in_flight=True
     middleware._circuit_state = "half_open"
     middleware._circuit_probe_in_flight = False
-    # Call _check_circuit() once to simulate the probe being allowed through
-    assert middleware._check_circuit() is False
-    assert middleware._circuit_probe_in_flight is True
 
-    # Step 2: Now trigger handler that raises GraphBubbleUp
     async def handler(_request) -> AIMessage:
         raise GraphBubbleUp()
 
-    # Mock _check_circuit() to return False (since we already did the probe check)
-    import unittest.mock
+    with pytest.raises(GraphBubbleUp):
+        await middleware.awrap_model_call(SimpleNamespace(), handler)
 
-    with unittest.mock.patch.object(middleware, "_check_circuit", return_value=False):
-        with pytest.raises(GraphBubbleUp):
-            await middleware.awrap_model_call(SimpleNamespace(), handler)
-
-    # Verify probe_in_flight was reset, state should remain half_open
     assert middleware._circuit_probe_in_flight is False
     assert middleware._circuit_state == "half_open"
 
@@ -872,25 +1033,15 @@ def test_circuit_half_open_non_retriable_error_resets_probe() -> None:
     fast-failed forever because no later call could ever run the handler to
     reach ``_record_success`` / ``_record_failure``.
     """
-    import unittest.mock
-
     middleware = _build_middleware()
 
-    # Enter half_open and let one probe through (probe_in_flight -> True).
     middleware._circuit_state = "half_open"
     middleware._circuit_probe_in_flight = False
-    assert middleware._check_circuit() is False
-    assert middleware._circuit_probe_in_flight is True
 
     def handler(_request) -> AIMessage:
         raise FakeError("insufficient_quota", status_code=429, code="insufficient_quota")
 
-    # _check_circuit already admitted the probe above; keep it False here so the
-    # top-of-call gate does not fast-fail before the handler runs. Force the
-    # error to classify as non-retriable regardless of heuristics.
-    with unittest.mock.patch.object(middleware, "_check_circuit", return_value=False):
-        with unittest.mock.patch.object(middleware, "_classify_error", return_value=(False, "quota")):
-            result = middleware.wrap_model_call(SimpleNamespace(), handler)
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
 
     # Non-retriable errors still surface a graceful fallback (not a raise) and
     # must NOT trip the breaker.
@@ -906,21 +1057,15 @@ def test_circuit_half_open_non_retriable_error_resets_probe() -> None:
 @pytest.mark.anyio
 async def test_async_circuit_half_open_non_retriable_error_resets_probe() -> None:
     """Async mirror: a non-retriable error during a half-open probe releases it."""
-    import unittest.mock
-
     middleware = _build_middleware()
 
     middleware._circuit_state = "half_open"
     middleware._circuit_probe_in_flight = False
-    assert middleware._check_circuit() is False
-    assert middleware._circuit_probe_in_flight is True
 
     async def handler(_request) -> AIMessage:
         raise FakeError("insufficient_quota", status_code=429, code="insufficient_quota")
 
-    with unittest.mock.patch.object(middleware, "_check_circuit", return_value=False):
-        with unittest.mock.patch.object(middleware, "_classify_error", return_value=(False, "quota")):
-            result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+    result = await middleware.awrap_model_call(SimpleNamespace(), handler)
 
     assert isinstance(result, AIMessage)
     assert middleware._circuit_state == "half_open"
