@@ -1,5 +1,12 @@
 ### Data Flow
 
+Scope local-turn ordering to `displayThreadId ?? threadId`, the displayed
+conversation identity. Confirming a new chat changes the SDK `threadId` from
+undefined to its existing display ID; preserve the human anchor across that
+transition and clear it only on a displayed-conversation switch or the existing
+failure/replay-gap paths. Draft and confirmation regressions live in
+`tests/unit/core/threads/local-turn-order.dom.test.tsx`.
+
 Answer details use `workspace/message-details` descriptors; skill run scoping
 is documented in `docs/skill-usage-ui.md`.
 
