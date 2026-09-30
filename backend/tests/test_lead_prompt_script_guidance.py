@@ -16,6 +16,8 @@ from deerflow.config.subagents_config import SubagentsAppConfig
 
 SCRIPT_GUIDANCE = "When writing scripts or commands that create/read files from the workspace"
 NO_BASH_GUIDANCE = "No `bash` tool is bound: work out results directly and write them with `write_file` instead of saving helper scripts"
+ROUTINE_SHELL_EXAMPLE = "- Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit."
+NO_BASH_ROUTINE_EXAMPLE = "- Do a routine file read, search, or edit directly. No `bash` tool is bound, and a subagent has none either."
 
 
 def _app_config(*, allow_host_bash=False, acp_agents=None):
@@ -67,18 +69,50 @@ def test_prompt_defaults_to_the_script_guidance(render):
     assert render() == render(bash_available=True)
 
 
-def test_subagent_section_agrees_with_the_lead_about_bash(render):
+@pytest.mark.parametrize("max_concurrent", [1, 3])
+def test_subagent_section_agrees_with_the_lead_about_bash(render, max_concurrent):
     # Host bash allowed, so the registry offers the bash subagent, but the lead's own tools lack bash
     # (for example a custom agent's tool_groups); the bash subagent inherits those groups.
     config = _app_config(allow_host_bash=True)
 
-    with_bash = render(config, subagent_enabled=True, bash_available=True)
-    without_bash = render(config, subagent_enabled=True, bash_available=False)
+    with_bash = render(config, subagent_enabled=True, max_concurrent_subagents=max_concurrent, bash_available=True)
+    without_bash = render(config, subagent_enabled=True, max_concurrent_subagents=max_concurrent, bash_available=False)
 
     assert 'bash("npm test")' in with_bash
+    assert ROUTINE_SHELL_EXAMPLE in with_bash
+    assert NO_BASH_ROUTINE_EXAMPLE not in with_bash
+    assert "- **bash**: For bounded shell workflows" in with_bash
+
     assert 'bash("npm test")' not in without_bash
     assert "(bash, ls, read_file, web_search, etc.)" not in without_bash
-    assert "- **bash**: Not available in the current sandbox configuration." in without_bash
+    assert "Run a routine test, build, or git command" not in without_bash
+    assert "Bash subagent" not in without_bash
+    assert NO_BASH_ROUTINE_EXAMPLE in without_bash
+    # The sandbox provider is not the cause here, so the hint must not send the operator to another one.
+    assert "- **bash**: Not available in this run: no `bash` tool is bound for this agent, and a bash subagent is limited to the same tools. Use the direct file/web tools." in without_bash
+    assert "AioSandboxProvider" not in without_bash
+
+
+@pytest.mark.parametrize("max_concurrent", [1, 3])
+def test_subagent_examples_drop_shell_work_when_host_bash_is_off(render, max_concurrent):
+    # The default local sandbox: the registry drops the bash subagent and the lead binds no bash.
+    prompt = render(_app_config(allow_host_bash=False), subagent_enabled=True, max_concurrent_subagents=max_concurrent, bash_available=False)
+
+    assert "- **bash**:" not in prompt
+    assert "Run a routine test, build, or git command" not in prompt
+    assert "Bash subagent" not in prompt
+    assert NO_BASH_ROUTINE_EXAMPLE in prompt
+
+
+@pytest.mark.parametrize("max_concurrent", [1, 3])
+def test_subagent_examples_do_not_name_a_bash_subagent_that_is_not_offered(render, max_concurrent):
+    # A custom agent may bind bash itself while its allowed_subagents leave the bash subagent out.
+    prompt = render(_app_config(allow_host_bash=True), subagent_enabled=True, max_concurrent_subagents=max_concurrent, allowed_subagents=["general-purpose"], bash_available=True)
+
+    assert "- **bash**:" not in prompt
+    assert "- Run a routine test, build, or git command directly.\n" in prompt
+    assert "Bash subagent" not in prompt
+    assert NO_BASH_ROUTINE_EXAMPLE not in prompt
 
 
 def test_acp_section_only_suggests_bash_cp_with_bash(render):

@@ -314,7 +314,7 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
         "bash": (
             "For bounded shell workflows with clear context-isolation or independent-parallel benefit. Routine git, build, test, or deploy operations are not sufficient reason to delegate."
             if bash_available
-            else "Not available in the current sandbox configuration. Use direct file/web tools or switch to AioSandboxProvider for isolated shell access."
+            else "Not available in this run: no `bash` tool is bound for this agent, and a bash subagent is limited to the same tools. Use the direct file/web tools."
         ),
     }
 
@@ -402,6 +402,13 @@ def _build_subagent_section(
         if bash_available
         else '# User asks: "Read the README"\n# Thinking: Single straightforward file read\n# → Execute directly\n\nread_file("/mnt/user-data/workspace/README.md")  # Direct execution, not task()'
     )
+    # The first sentence follows the lead's own bash tool; the second needs a bash subagent in the list above.
+    if bash_available:
+        routine_work_example = "- Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit."
+    elif lead_bash_available:
+        routine_work_example = "- Run a routine test, build, or git command directly."
+    else:
+        routine_work_example = "- Do a routine file read, search, or edit directly. No `bash` tool is bound, and a subagent has none either."
     if n == 1:
         expected_benefit = "specialist capability + context isolation"
         parallel_dispatch_guidance = ""
@@ -417,10 +424,10 @@ With a per-response limit of 1, delegate only for material specialist or context
 4. If delegation wins clearly, give the single subagent a bounded scope, relevant known context and paths, an expected output, and explicit side-effect ownership. Attach acceptance_criteria for objectively checkable outcomes.
 5. Launch at most 1 call and stay within the remaining run allowance.
 {single_verify_step}"""
-        examples = """- Refactor authentication implementation and its tests directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
+        examples = f"""- Refactor authentication implementation and its tests directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
 - Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
 - Use one subagent for a bounded, unusually context-heavy investigation only when preserving lead-agent context clearly outweighs delegation and synthesis cost.
-- Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit."""
+{routine_work_example}"""
         multi_batch_example = ""
     else:
         expected_benefit = "parallel wall-clock savings + specialist capability + context isolation"
@@ -447,10 +454,10 @@ A single subagent is justified only by material specialist or context-isolation 
 5. Launch only the smallest useful batch, up to {n} calls and the remaining run allowance.
 {parallel_verify_step}
 7. Synthesize. Resolve contradictions against primary evidence instead of forwarding incompatible conclusions."""
-        examples = """- Refactor authentication implementation and its tests: execute directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
+        examples = f"""- Refactor authentication implementation and its tests: execute directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
 - Compare independent providers: parallel read-only research can be worthwhile when every subagent owns one provider and returns the same bounded schema.
 - Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
-- Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit."""
+{routine_work_example}"""
         multi_batch_example = f"""**Multi-batch example (limit {n}):** For independent scopes that exceed the per-response limit:
 - **Batch 1: launch up to {n} independent scopes.**
 - Wait for the batch, then re-evaluate the remaining work and net benefit.
