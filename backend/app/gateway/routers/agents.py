@@ -36,9 +36,9 @@ router = APIRouter(prefix="/api", tags=["agents"])
 async def _drained_write[**P, T](
     action: str,
     func: Callable[P, T],
+    expected_errors: tuple[type[Exception], ...] = (),
     /,
     *args: P.args,
-    expected_errors: tuple[type[Exception], ...] = (),
     **kwargs: P.kwargs,
 ) -> T:
     """Run a persistent write off the event loop and drain it across cancellation.
@@ -58,6 +58,7 @@ async def _drained_write[**P, T](
         except expected_errors:
             raise
         except Exception as exc:
+            # Non-cancelled failures are logged again by the outer route handler.
             logger.error("%s failed (%s)", action, type(exc).__name__)
             raise
 
@@ -410,7 +411,7 @@ async def create_agent_endpoint(body: AgentCreateRequest, request: Request) -> A
         return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
 
     try:
-        return await _drained_write("Create agent", _create_agent, expected_errors=(AgentExistsError,))
+        return await _drained_write("Create agent", _create_agent, (AgentExistsError,))
     except AgentExistsError:
         raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
     except Exception as e:
@@ -667,7 +668,7 @@ async def delete_agent(name: str, request: Request) -> None:
     try:
         # Off the event loop: resolve store + cancel → delete → cancel-on-success
         # (get_agent_store / memory manager do blocking config and FS I/O).
-        outcome = await _drained_write("Delete agent", _delete_agent_with_memory_cancel, name, user_id)
+        outcome = await _drained_write("Delete agent", _delete_agent_with_memory_cancel, (), name, user_id)
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")

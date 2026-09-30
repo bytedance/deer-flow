@@ -14,7 +14,6 @@ import concurrent.futures
 import logging
 import threading
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -53,17 +52,14 @@ def _agent_env(tmp_path: Path, monkeypatch):
         reset_app_config()
 
 
-def _request_stub() -> SimpleNamespace:
-    return SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
-
-
 async def test_agent_persistent_writes_route_through_write_drain(_agent_env, monkeypatch):
     from app.gateway.routers import agents as router
 
     calls: list[str] = []
 
-    async def drained(action, func, /, *args, expected_errors=(), **kwargs):
+    async def drained(action, func, expected_errors=(), /, *args, **kwargs):
         calls.append(action)
+        assert isinstance(expected_errors, tuple)
         return func(*args, **kwargs)
 
     monkeypatch.setattr(router, "_drained_write", drained)
