@@ -620,6 +620,34 @@ def test_resolve_and_validate_user_data_path_allows_workspace_symlink(tmp_path: 
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink semantics differ on Windows")
+def test_workspace_symlink_blocks_nested_symlink_escape(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    uploads = tmp_path / "uploads"
+    outputs = tmp_path / "outputs"
+    external_repo = tmp_path / "repos" / "demo"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    uploads.mkdir()
+    outputs.mkdir()
+    external_repo.mkdir(parents=True)
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    (external_repo / "secrets").symlink_to(outside, target_is_directory=True)
+    (workspace / "repo").symlink_to(external_repo, target_is_directory=True)
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(uploads),
+        "outputs_path": str(outputs),
+    }
+
+    with pytest.raises(PermissionError, match="path traversal"):
+        _resolve_and_validate_user_data_path(
+            "/mnt/user-data/workspace/repo/secrets/secret.txt",
+            thread_data,
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink semantics differ on Windows")
 def test_workspace_symlink_does_not_allow_dotdot_escape(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     uploads = tmp_path / "uploads"
@@ -1637,6 +1665,98 @@ def test_str_replace_parallel_updates_should_preserve_both_edits(monkeypatch) ->
     assert failures == []
     assert "ALPHA" in sandbox.content
     assert "BETA" in sandbox.content
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink semantics differ on Windows")
+def test_str_replace_parallel_workspace_aliases_share_canonical_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class AliasRaceSandbox:
+        id = "local:test"
+
+        def __init__(self) -> None:
+            self._active_reads = 0
+            self._state_lock = threading.Lock()
+            self.overlap_detected = threading.Event()
+
+        def read_file(
+            self,
+            path: str,
+            start_line: int | None = None,
+            end_line: int | None = None,
+        ) -> str:
+            with self._state_lock:
+                self._active_reads += 1
+                snapshot = Path(path).read_text(encoding="utf-8")
+                if self._active_reads == 2:
+                    self.overlap_detected.set()
+
+            self.overlap_detected.wait(0.05)
+
+            with self._state_lock:
+                self._active_reads -= 1
+            return snapshot
+
+        def write_file(self, path: str, content: str, append: bool = False) -> None:
+            Path(path).write_text(content, encoding="utf-8")
+
+    workspace = tmp_path / "workspace"
+    uploads = tmp_path / "uploads"
+    outputs = tmp_path / "outputs"
+    repo = workspace / "repo"
+    workspace.mkdir()
+    uploads.mkdir()
+    outputs.mkdir()
+    repo.mkdir()
+    shared_file = repo / "shared.txt"
+    shared_file.write_text("alpha\nbeta\n", encoding="utf-8")
+    (workspace / "alias").symlink_to(repo, target_is_directory=True)
+    thread_data = {
+        "workspace_path": str(workspace),
+        "uploads_path": str(uploads),
+        "outputs_path": str(outputs),
+    }
+    sandbox = AliasRaceSandbox()
+    runtimes = [
+        SimpleNamespace(state={"thread_data": thread_data}, context={"thread_id": "thread-1"}, config={}),
+        SimpleNamespace(state={"thread_data": thread_data}, context={"thread_id": "thread-1"}, config={}),
+    ]
+    failures: list[BaseException] = []
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+    monkeypatch.setattr("deerflow.sandbox.tools.is_local_sandbox", lambda runtime: True)
+
+    def worker(runtime: SimpleNamespace, path: str, old_str: str, new_str: str) -> None:
+        try:
+            result = str_replace_tool.func(
+                runtime=runtime,
+                description="concurrent edit through workspace aliases",
+                path=path,
+                old_str=old_str,
+                new_str=new_str,
+            )
+            assert result == "OK"
+        except BaseException as exc:  # pragma: no cover - failure is asserted below
+            failures.append(exc)
+
+    threads = [
+        threading.Thread(
+            target=worker,
+            args=(runtimes[0], "/mnt/user-data/workspace/alias/shared.txt", "alpha", "ALPHA"),
+        ),
+        threading.Thread(
+            target=worker,
+            args=(runtimes[1], "/mnt/user-data/workspace/repo/shared.txt", "beta", "BETA"),
+        ),
+    ]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+    assert shared_file.read_text(encoding="utf-8") == "ALPHA\nBETA\n"
+    assert not sandbox.overlap_detected.is_set()
 
 
 def test_str_replace_parallel_updates_in_isolated_sandboxes_should_not_share_path_lock(monkeypatch) -> None:

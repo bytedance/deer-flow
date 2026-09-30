@@ -983,15 +983,33 @@ def _validate_resolved_user_data_path(
 ) -> Path:
     """Return the validated lexical or resolved host path.
 
-    Workspace paths may be checked lexically when they are reached through the
-    virtual workspace root, because sandbox workspaces may contain symlinks to
-    checked-out repositories or mounted task data. Uploads and outputs continue
-    to resolve symlinks before validation so uploaded-file escape checks remain
-    effective.
+    Workspace paths may enter a symlinked checkout or mount through their first
+    component. Any later symlink must still resolve beneath that entry target.
+    Uploads and outputs continue to resolve symlinks before validation so
+    uploaded-file escape checks remain effective.
     """
     # abspath normalizes '..' without following symlinks for workspace checks.
     lexical_path = Path(os.path.abspath(str(resolved)))
     resolved_path = lexical_path.resolve()
+
+    if allow_workspace_symlinks:
+        raw_workspace_root = thread_data.get("workspace_path")
+        if raw_workspace_root is None:
+            raise SandboxRuntimeError("No allowed local sandbox workspace configured")
+        workspace_root = Path(os.path.abspath(str(raw_workspace_root)))
+        try:
+            relative = lexical_path.relative_to(workspace_root)
+        except ValueError as exc:
+            raise PermissionError("Access denied: path traversal detected") from exc
+        if not relative.parts:
+            return lexical_path
+        entry_target = (workspace_root / relative.parts[0]).resolve()
+        try:
+            resolved_path.relative_to(entry_target)
+        except ValueError as exc:
+            raise PermissionError("Access denied: path traversal detected") from exc
+        return lexical_path
+
     allowed_roots = [
         (key, value)
         for key, value in (
@@ -1005,13 +1023,9 @@ def _validate_resolved_user_data_path(
     if not allowed_roots:
         raise SandboxRuntimeError("No allowed local sandbox directories configured")
 
-    for key, raw_root in allowed_roots:
-        if allow_workspace_symlinks and key == "workspace_path":
-            normalized = lexical_path
-            root = Path(os.path.abspath(str(raw_root)))
-        else:
-            normalized = resolved_path
-            root = Path(os.path.abspath(str(raw_root))).resolve()
+    for _key, raw_root in allowed_roots:
+        normalized = resolved_path
+        root = Path(os.path.abspath(str(raw_root))).resolve()
         try:
             normalized.relative_to(root)
             return normalized
@@ -2769,13 +2783,15 @@ def write_file_tool(
         requested_path = path
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
+        lock_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
             if not _is_custom_mount_path(path):
                 path = _resolve_and_validate_user_data_path(path, thread_data)
+                lock_path = os.path.realpath(path)
             # Custom mount paths are resolved by LocalSandbox._resolve_path()
-        with get_file_operation_lock(sandbox, path):
+        with get_file_operation_lock(sandbox, lock_path):
             sandbox.write_file(path, content, append)
         return "OK"
     except SandboxError as e:
@@ -2835,13 +2851,15 @@ def str_replace_tool(
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
+        lock_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
             if not _is_custom_mount_path(path):
                 path = _resolve_and_validate_user_data_path(path, thread_data)
+                lock_path = os.path.realpath(path)
             # Custom mount paths are resolved by LocalSandbox._resolve_path()
-        with get_file_operation_lock(sandbox, path):
+        with get_file_operation_lock(sandbox, lock_path):
             content = sandbox.read_file(path)
             if not old_str:
                 # A no-op edit. str.replace("", new_str) would insert new_str at
