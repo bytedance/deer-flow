@@ -557,3 +557,56 @@ def test_vllm_provider_falls_back_to_reasoning_content_in_streaming_chunks():
     assert chunk.message.additional_kwargs["reasoning"] == "First, call the weather tool."
     assert chunk.message.additional_kwargs["reasoning_content"] == "First, call the weather tool."
     assert chunk.message.content == "Calling tool..."
+
+
+def test_vllm_provider_prefers_reasoning_over_reasoning_content_in_chat_result():
+    """A payload carrying both fields keeps `reasoning` (#6047)."""
+    model = _make_model()
+    result = model._create_chat_result(
+        {
+            "model": "Qwen/QwQ-32B",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "42",
+                        "reasoning": "new",
+                        "reasoning_content": "legacy",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
+
+    message = result.generations[0].message
+    assert message.additional_kwargs["reasoning"] == "new"
+    assert message.additional_kwargs["reasoning_content"] == "new"
+
+
+def test_vllm_provider_prefers_reasoning_over_reasoning_content_in_streaming_chunks():
+    """Streaming deltas resolve both fields the same way (#6047)."""
+    model = _make_model()
+    chunk = model._convert_chunk_to_generation_chunk(
+        {
+            "model": "Qwen/QwQ-32B",
+            "choices": [
+                {
+                    "delta": {
+                        "role": "assistant",
+                        "reasoning": "new",
+                        "reasoning_content": "legacy",
+                        "content": "Calling tool...",
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        AIMessageChunk,
+        {},
+    )
+
+    assert chunk is not None
+    assert chunk.message.additional_kwargs["reasoning"] == "new"
+    assert chunk.message.additional_kwargs["reasoning_content"] == "new"

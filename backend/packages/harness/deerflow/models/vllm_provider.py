@@ -10,6 +10,11 @@ This provider preserves ``reasoning`` on:
 - non-streaming responses
 - streaming deltas
 - multi-turn request payloads
+
+Deployments that still emit the older ``reasoning_content`` wire field are
+covered too: when ``reasoning`` is absent or null the provider falls back to
+``reasoning_content``, so either spelling is echoed back under the single
+``reasoning`` key. A payload carrying both keeps ``reasoning``.
 """
 
 from __future__ import annotations
@@ -255,9 +260,10 @@ class VllmChatModel(ChatOpenAI):
             message = generation.message
             if not isinstance(message, AIMessage):
                 continue
-            reasoning = choice.get("message", {}).get("reasoning")
+            message_fields = choice.get("message") or {}
+            reasoning = message_fields.get("reasoning")
             if reasoning is None:
-                reasoning = choice.get("message", {}).get("reasoning_content")
+                reasoning = message_fields.get("reasoning_content")
             if reasoning is None:
                 continue
             message.additional_kwargs["reasoning"] = reasoning
