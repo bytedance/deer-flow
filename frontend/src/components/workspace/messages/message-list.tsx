@@ -165,6 +165,26 @@ function useStableMessageGroups(
 
 export const MESSAGE_LIST_DEFAULT_PADDING_BOTTOM = 24;
 
+function getRenderedReasoningMessages(group: ThreadMessageGroup): Message[] {
+  if (group.type === "assistant") {
+    return group.messages.filter((message) =>
+      extractReasoningContentFromMessage(message),
+    );
+  }
+  if (group.type === "assistant:subagent") {
+    return group.messages.filter(
+      (message) =>
+        hasReasoning(message) &&
+        getMessageGroupReasoningMessage([message]) === message,
+    );
+  }
+  if (group.type === "assistant:processing") {
+    const message = getMessageGroupReasoningMessage(group.messages);
+    return message ? [message] : [];
+  }
+  return [];
+}
+
 const LOAD_MORE_HISTORY_THROTTLE_MS = 1200;
 
 const SELECTION_TOOLBAR_MARGIN = 8;
@@ -350,6 +370,11 @@ export function MessageList({
     useState<SelectionToolbarState | null>(null);
   const messages = thread.messages;
   const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
+  // Stable historical groups survive streaming updates. Weak keys also release
+  // cached targets when pagination or a thread change removes those groups.
+  const reasoningTargetsCache = useRef(
+    new WeakMap<ThreadMessageGroup, Message[]>(),
+  );
   const chapters = useMemo(
     () =>
       buildConversationChapters(
@@ -1148,27 +1173,17 @@ export function MessageList({
               const groupIsLoading =
                 thread.isLoading && groupIndex === lastGroupIndex;
 
-              // Bind only to reasoning disclosures this renderer actually shows.
-              const reasoningTargets =
-                group.type === "assistant"
-                  ? group.messages.filter((message) =>
-                      extractReasoningContentFromMessage(message),
-                    )
-                  : group.type === "assistant:subagent"
-                    ? group.messages.filter(
-                        (message) =>
-                          hasReasoning(message) &&
-                          getMessageGroupReasoningMessage([message]) ===
-                            message,
-                      )
-                    : group.type === "assistant:processing"
-                      ? [
-                          getMessageGroupReasoningMessage(group.messages),
-                        ].filter((message): message is Message => !!message)
-                      : [];
               const reasoningDurations = new Map<Message, RunDurationDisplay>();
-              if (!groupIsLoading) {
-                for (const display of getGroupRunDurations(group, groupIndex)) {
+              const displays = groupIsLoading
+                ? []
+                : getGroupRunDurations(group, groupIndex);
+              if (displays.length > 0) {
+                let reasoningTargets = reasoningTargetsCache.current.get(group);
+                if (!reasoningTargets) {
+                  reasoningTargets = getRenderedReasoningMessages(group);
+                  reasoningTargetsCache.current.set(group, reasoningTargets);
+                }
+                for (const display of displays) {
                   const target = reasoningTargets.find(
                     (message) =>
                       getMessageRunId(message) === display.runId ||

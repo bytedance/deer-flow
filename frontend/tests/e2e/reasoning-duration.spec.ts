@@ -1,14 +1,22 @@
-import { expect, test } from "@playwright/test";
+import type { AddressInfo } from "node:net";
+
+import { expect, test, type Page } from "@playwright/test";
 
 import { mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
 
 const answer = "你好！有什么可以帮你的吗？";
 const reasoning = "先理解用户的需求，再给出简洁的回答。";
 
+async function freezeHistoryClock(page: Page) {
+  await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
+  await page.clock.pauseAt(new Date("2026-01-01T00:00:01Z"));
+}
+
 for (const encoding of ["provider", "inline", "none"] as const) {
   test(`shows one compact Chinese duration header: ${encoding}`, async ({
     page,
   }, testInfo) => {
+    await freezeHistoryClock(page);
     await page
       .context()
       .addCookies([
@@ -54,7 +62,8 @@ for (const encoding of ["provider", "inline", "none"] as const) {
       exact: true,
     });
     if (encoding !== "none") {
-      await expect(trigger).toHaveAttribute("aria-expanded", "false");
+      // Timers are paused: retries cannot hide an initially expanded panel.
+      expect(await trigger.getAttribute("aria-expanded")).toBe("false");
       await trigger.click();
       await expect(page.getByText(reasoning, { exact: true })).toBeVisible();
       await trigger.press("Enter");
@@ -74,7 +83,7 @@ for (const encoding of ["provider", "inline", "none"] as const) {
     await expect(label).toHaveCount(1);
     await expect(label).toHaveText("用时 31 秒");
     if (encoding !== "none") {
-      await expect(trigger).toHaveAttribute("aria-expanded", "false");
+      expect(await trigger.getAttribute("aria-expanded")).toBe("false");
     }
     await page.mouse.move(0, 0);
     if (encoding !== "none") {
@@ -101,6 +110,7 @@ for (const kind of ["processing", "subagent"] as const) {
   test(`binds completed ${kind} duration to its reasoning disclosure`, async ({
     page,
   }) => {
+    await freezeHistoryClock(page);
     mockLangGraphAPI(page, {
       threads: [
         {
@@ -145,7 +155,8 @@ for (const kind of ["processing", "subagent"] as const) {
       exact: true,
     });
     await expect(page.getByTestId("run-duration")).toHaveCount(1);
-    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await expect(trigger).toBeVisible();
+    expect(await trigger.getAttribute("aria-expanded")).toBe("false");
     await trigger.click();
     await expect(page.getByText(reasoning, { exact: true })).toBeVisible();
     await trigger.press("Enter");
@@ -154,10 +165,110 @@ for (const kind of ["processing", "subagent"] as const) {
       page.getByRole("button", { name: "Thinking", exact: true }),
     ).toHaveCount(0);
     await page.reload();
-    await expect(trigger).toHaveAttribute("aria-expanded", "false");
     await expect(page.getByTestId("run-duration")).toHaveCount(1);
+    expect(await trigger.getAttribute("aria-expanded")).toBe("false");
   });
 }
+
+test("keeps completed reasoning collapsed when virtualized history remounts", async ({
+  page,
+}) => {
+  const messages = Array.from({ length: 40 }, (_, index) => [
+    { type: "human", id: `human-${index}`, content: `Question ${index}` },
+    {
+      type: "ai",
+      id: `ai-${index}`,
+      content: `Answer ${index}`,
+      additional_kwargs: {
+        reasoning_content: `Reasoning ${index}`,
+        turn_duration: 31 + index,
+      },
+    },
+  ]).flat();
+  await page.addInitScript(() => {
+    const states: { label: string; expanded: string | null }[] = [];
+    Object.assign(window, { initialReasoningStates: states });
+    const seen = new WeakSet<Element>();
+    new MutationObserver(() => {
+      for (const trigger of document.querySelectorAll(
+        "button[aria-expanded]",
+      )) {
+        const label = trigger.querySelector('[data-testid="run-duration"]');
+        if (!label || seen.has(trigger)) continue;
+        seen.add(trigger);
+        states.push({
+          label: label.textContent ?? "",
+          expanded: trigger.getAttribute("aria-expanded"),
+        });
+      }
+    }).observe(document, { childList: true, subtree: true });
+  });
+  mockLangGraphAPI(page, {
+    threads: [
+      {
+        thread_id: MOCK_THREAD_ID,
+        messages,
+      },
+    ],
+  });
+  // Supply all 80 groups so pagination cannot keep the list below its 60-group
+  // virtualization threshold.
+  await page.route(/\/api\/threads\/[^/]+\/messages\/page/, (route) =>
+    route.fulfill({
+      json: {
+        data: messages.map((content, index) => ({
+          content,
+          run_id: `duration-run-${Math.floor(index / 2)}`,
+          seq: index + 1,
+          metadata: { caller: "lead_agent" },
+        })),
+        has_more: false,
+        next_before_seq: null,
+      },
+    }),
+  );
+  await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+  const lastTrigger = page.getByRole("button", {
+    name: "Took 1m 10s Reasoning",
+    exact: true,
+  });
+  await expect(lastTrigger).toBeVisible();
+  const initialStates = () =>
+    page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            initialReasoningStates: {
+              label: string;
+              expanded: string | null;
+            }[];
+          }
+        ).initialReasoningStates,
+    );
+  const lastMountsBefore = (await initialStates()).filter(
+    (state) => state.label === "Took 1m 10s",
+  ).length;
+  const scroller = page.getByRole("log").locator(":scope > div").first();
+  await scroller.dispatchEvent("wheel", { deltaY: -1000 });
+  await scroller.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await expect(
+    page.getByRole("button", { name: "Took 31s Reasoning", exact: true }),
+  ).toBeVisible();
+  await expect(lastTrigger).toHaveCount(0);
+  await scroller.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await expect(lastTrigger).toBeVisible();
+  const states = await initialStates();
+  expect(
+    states.filter((state) => state.label === "Took 1m 10s").length,
+  ).toBeGreaterThan(lastMountsBefore);
+  expect(states.every((state) => state.expanded === "false")).toBe(true);
+});
 
 // Keep the history response pending until the client fallback has painted, then
 // release the persisted duration without remounting the chat.
@@ -204,7 +315,7 @@ for (const content of [answer, ""]) {
     await new Promise<void>((resolve) =>
       server.listen(0, "127.0.0.1", resolve),
     );
-    const { port } = server.address() as import("node:net").AddressInfo;
+    const { port } = server.address() as AddressInfo;
     mockLangGraphAPI(page, {
       threads: [{ thread_id: MOCK_THREAD_ID, messages: [] }],
     });

@@ -660,7 +660,6 @@ function ToolCall({
   result,
   isLast = false,
   isLoading = false,
-  durationSeconds,
   deferBrowserPreview = false,
   tokenDebugStep,
   showDetails = false,
@@ -676,7 +675,6 @@ function ToolCall({
   result?: string | Record<string, unknown>;
   isLast?: boolean;
   isLoading?: boolean;
-  durationSeconds?: number;
   deferBrowserPreview?: boolean;
   tokenDebugStep?: TokenDebugStep;
   showDetails?: boolean;
