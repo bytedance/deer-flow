@@ -82,6 +82,7 @@ class LarkIntegrationStatusResponse(BaseModel):
     cli: LarkCliProbeResponse
     auth: LarkAuthProbeResponse
     sandbox_runtime_mode: str = Field("none", description="How lark-cli is provisioned into the sandbox: none, gateway-download, init-container, or broker")
+    sandbox_runtime_probed: bool = Field(False, description="Whether sandbox runtime readiness was evaluated rather than conservatively defaulted")
     sandbox_runtime_ready: bool = Field(False, description="Whether the sandbox lark-cli runtime is provisioned and usable at chat time")
     sandbox_runtime_detail: str | None = Field(None, description="Human-readable reason when the sandbox runtime is not ready")
 
@@ -202,6 +203,7 @@ def _status_to_response(status: LarkIntegrationStatus, *, include_host_paths: bo
         cli=cli,
         auth=_auth_probe_to_response(status.auth),
         sandbox_runtime_mode=status.sandbox_runtime_mode,
+        sandbox_runtime_probed=status.sandbox_runtime_probed,
         sandbox_runtime_ready=status.sandbox_runtime_ready,
         sandbox_runtime_detail=status.sandbox_runtime_detail,
     )

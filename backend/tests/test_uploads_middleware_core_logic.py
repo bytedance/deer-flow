@@ -460,6 +460,35 @@ class TestBeforeAgent:
         assert original.content == "check image"
         assert ORIGINAL_USER_CONTENT_KEY not in original.additional_kwargs
 
+    def test_preserves_message_fields_and_subclass_without_mutating_original(self, tmp_path):
+        class CustomHumanMessage(HumanMessage):
+            custom_field: str = "preserved"
+
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "img.png").write_bytes(b"png")
+        files_meta = [{"filename": "img.png", "size": 3, "path": "/mnt/user-data/uploads/img.png", "status": "uploaded"}]
+        msg = CustomHumanMessage(
+            content="check image",
+            id="msg-1",
+            name="uploader",
+            additional_kwargs={"files": files_meta},
+            response_metadata={"source": "gateway"},
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        updated_msg = result["messages"][-1]
+        assert isinstance(updated_msg, CustomHumanMessage)
+        assert updated_msg.id == "msg-1"
+        assert updated_msg.name == "uploader"
+        assert updated_msg.response_metadata == {"source": "gateway"}
+        assert updated_msg.custom_field == "preserved"
+        assert updated_msg is not msg
+        assert updated_msg.additional_kwargs is not msg.additional_kwargs
+        assert msg.content == "check image"
+        assert ORIGINAL_USER_CONTENT_KEY not in msg.additional_kwargs
+
     def test_preserves_original_user_content_before_upload_context(self, tmp_path):
         mw = _middleware(tmp_path)
         uploads_dir = _uploads_dir(tmp_path)

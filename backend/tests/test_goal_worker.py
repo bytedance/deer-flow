@@ -758,6 +758,154 @@ async def test_goal_worker_stands_down_without_durable_assistant_receipt():
     assert latest_goal["last_evaluation"]["stand_down_reason"] == "no_durable_end_of_turn"
 
 
+class _FailingEvaluatorModel:
+    """Evaluator chat model whose provider call raises, or whose answer is not valid JSON."""
+
+    def __init__(self, outcome: Exception | str, before=None) -> None:
+        self._outcome = outcome
+        self._before = before
+        self.calls = 0
+
+    async def ainvoke(self, _messages, config=None):
+        self.calls += 1
+        if self._before is not None:
+            await self._before()
+        if isinstance(self._outcome, Exception):
+            raise self._outcome
+        return AIMessage(content=self._outcome)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_earlier_evaluation", [False, True])
+@pytest.mark.parametrize(
+    ("outcome", "error_type"),
+    [
+        (ConnectionError("Connection error: request-detail-7f3a"), "ConnectionError"),
+        ('{"satisfied": false "blocker": "request-detail-7f3a"}', "ValueError"),
+    ],
+    ids=["provider-error", "malformed-json"],
+)
+async def test_goal_worker_records_a_failed_evaluator_call(outcome, error_type, after_earlier_evaluation):
+    checkpointer = InMemorySaver()
+    thread_id = "evaluator-failed-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    if after_earlier_evaluation:
+        goal = await read_thread_goal(checkpointer, thread_id)
+        unmet = GoalEvaluation(satisfied=False, blocker="goal_not_met_yet", reason="More work remains.", evidence_summary="")
+        await write_thread_goal(checkpointer, thread_id, attach_goal_evaluation(goal, unmet, run_id="run-earlier", continuation_count=1))
+    bridge = _CollectingBridge()
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=bridge,
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-8",
+        model_name="test-model",
+        app_config=None,
+        evaluator_model_factory=lambda: _FailingEvaluatorModel(outcome),
+    )
+
+    assert continuation is None
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal is not None
+    assert latest_goal["continuation_count"] == (1 if after_earlier_evaluation else 0)
+    evaluation = latest_goal["last_evaluation"]
+    assert evaluation["run_id"] == "run-8"
+    assert evaluation["blocker"] == "run_failed"
+    assert evaluation["stand_down_reason"] == "evaluator_failed"
+    assert evaluation["reason"] == f"The goal evaluator did not return a verdict ({error_type})."
+    assert evaluation["evidence_summary"] == ""
+    # Only the exception type: neither a provider's error message nor the model's answer
+    # is stored or streamed, since they can carry request details.
+    assert "request-detail-7f3a" not in repr(latest_goal)
+    assert [event for event, _ in bridge.events] == ["values"]
+    assert "request-detail-7f3a" not in repr(bridge.events)
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_does_not_record_a_failed_evaluator_call_after_abort():
+    checkpointer = InMemorySaver()
+    thread_id = "evaluator-failed-abort-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    abort_event = asyncio.Event()
+
+    async def abort():
+        abort_event.set()
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=_CollectingBridge(),
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-abort-failed",
+        model_name="test-model",
+        app_config=None,
+        evaluator_model_factory=lambda: _FailingEvaluatorModel(ConnectionError("Connection error."), before=abort),
+        abort_event=abort_event,
+    )
+
+    assert continuation is None
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal is not None
+    assert "last_evaluation" not in latest_goal
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_does_not_resurrect_a_goal_cleared_during_a_failed_evaluator_call():
+    checkpointer = InMemorySaver()
+    thread_id = "evaluator-failed-clear-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+
+    async def clear_goal():
+        await write_thread_goal(checkpointer, thread_id, None, as_node="test")
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=_CollectingBridge(),
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-clear-failed",
+        model_name="test-model",
+        app_config=None,
+        evaluator_model_factory=lambda: _FailingEvaluatorModel(ConnectionError("Connection error."), before=clear_goal),
+    )
+
+    assert continuation is None
+    assert await read_thread_goal(checkpointer, thread_id) is None
+
+
+@pytest.mark.asyncio
+async def test_goal_worker_records_nothing_when_the_conversation_cannot_be_read(monkeypatch):
+    checkpointer = InMemorySaver()
+    thread_id = "prepare-failed-thread"
+    await _seed_goal_thread(checkpointer, thread_id=thread_id, goal_text="Finish all tests")
+    model = _FailingEvaluatorModel("unused")
+
+    async def unreadable_messages(_accessor, _thread_id):
+        raise RuntimeError("checkpoint store unavailable")
+
+    monkeypatch.setattr(worker, "_materialized_checkpoint_messages", unreadable_messages)
+
+    continuation = await worker._prepare_goal_continuation_input(
+        accessor=_full_accessor(checkpointer),
+        bridge=_CollectingBridge(),
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        run_id="run-unreadable",
+        model_name="test-model",
+        app_config=None,
+        evaluator_model_factory=lambda: model,
+    )
+
+    # A failure before the evaluator is asked is not an evaluator failure: nothing is recorded.
+    assert continuation is None
+    latest_goal = await read_thread_goal(checkpointer, thread_id)
+    assert latest_goal is not None
+    assert "last_evaluation" not in latest_goal
+    assert model.calls == 0
+
+
 def test_stand_down_reason_uses_documented_default_caps_when_missing():
     """_stand_down_reason must fall back to the same default caps as
     should_continue_goal (8 / 2). A bare goal dict missing the cap fields must

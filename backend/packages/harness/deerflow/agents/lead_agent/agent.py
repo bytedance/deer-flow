@@ -60,8 +60,8 @@ from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.memory_config import should_use_memory_tools
 from deerflow.config.subagents_config import (
-    DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     effective_subagent_concurrency,
+    effective_total_subagents_per_run,
 )
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
@@ -118,11 +118,6 @@ def unwrap_agent_graph(agent_result: Any) -> Any:
     unchanged.
     """
     return agent_result.graph if isinstance(agent_result, LeadAgentAssembly) else agent_result
-
-
-def _default_max_total_subagents(app_config: object) -> int:
-    subagents_config = getattr(app_config, "subagents", None)
-    return getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
 
 
 def _subagent_release_policy(
@@ -708,7 +703,7 @@ def build_middlewares(
             resolved_app_config,
             execution_capacity=subagent_execution_capacity,
         )
-        max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
+        max_total_subagents = effective_total_subagents_per_run(cfg.get("max_total_subagents"), resolved_app_config)
         effective_max_subagents_per_run = max_total_subagents
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents, max_total=max_total_subagents))
 
@@ -959,7 +954,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         resolved_app_config,
         execution_capacity=subagent_execution_capacity,
     )
-    max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
+    max_total_subagents = effective_total_subagents_per_run(cfg.get("max_total_subagents"), resolved_app_config)
     is_bootstrap = cfg.get("is_bootstrap", False)
     interaction_policy = resolve_run_interaction_policy(config)
     non_interactive = not interaction_policy.allows_clarification
