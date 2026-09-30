@@ -60,6 +60,15 @@ class ScheduledTaskService:
         self._stop = asyncio.Event()
         self._skip_next_lease_reconciliation = False
 
+    def attach_notification_outbox(self, *, connection_repo, notification_repo) -> None:
+        """Enable the completion hook's notification enqueue (issue #4254).
+
+        The Gateway calls this after the channel service and the delivery worker
+        are running; both start after this service does.
+        """
+        self._connection_repo = connection_repo
+        self._notification_repo = notification_repo
+
     async def run_once(self, *, now: datetime) -> None:
         if self._multi_instance:
             if self._skip_next_lease_reconciliation:

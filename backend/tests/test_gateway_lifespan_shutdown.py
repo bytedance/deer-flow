@@ -782,7 +782,7 @@ def _notification_startup_config(*, channel_connections_enabled: bool = True):
     )
 
 
-async def _run_lifespan_with_notification_worker(*, channel_service_available: bool):
+async def _run_lifespan_with_notification_worker(*, channel_service_available: bool, visible_only_after_start: bool = False):
     from app.gateway.app import lifespan
 
     app = FastAPI()
@@ -802,7 +802,17 @@ async def _run_lifespan_with_notification_worker(*, channel_service_available: b
     session_factory = MagicMock()
     shutdown_events: list[str] = []
 
+    channel_service_started = False
+
     async def fake_start(_startup_config, **_kwargs):
+        nonlocal channel_service_started
+        channel_service_started = True
+        return fake_service
+
+    def fake_get_channel_service():
+        # The real accessor returns None until start_channel_service() has run.
+        if not channel_service_available or (visible_only_after_start and not channel_service_started):
+            return None
         return fake_service
 
     async def record_worker_stop():
@@ -822,7 +832,7 @@ async def _run_lifespan_with_notification_worker(*, channel_service_available: b
         patch("deerflow.skills.projection.ensure_public_skill_projection"),
         patch("app.gateway.app.auth.close_oidc_service", close_oidc_service),
         patch("app.channels.service.start_channel_service", side_effect=fake_start),
-        patch("app.channels.service.get_channel_service", return_value=fake_service if channel_service_available else None),
+        patch("app.channels.service.get_channel_service", side_effect=fake_get_channel_service),
         patch("app.channels.service.stop_channel_service", stop_channel_service),
         patch("deerflow.persistence.engine.get_session_factory", return_value=session_factory),
         patch("app.scheduler.ScheduledTaskService", return_value=scheduled_service),
@@ -852,3 +862,13 @@ def test_lifespan_starts_notification_worker_when_enqueue_and_channel_are_wired(
     worker_stop.assert_awaited_once()
     stop_channel_service.assert_awaited_once()
     assert shutdown_events.index("worker") < shutdown_events.index("channels")
+
+
+def test_lifespan_wires_notifications_after_the_channel_service_starts() -> None:
+    # The lifespan starts the scheduler before the channel service (#5035), so the
+    # outbox has to look the channel service up after that start.
+    worker_start, worker_stop, _stop_channel_service, worker_on_app, _shutdown_events = asyncio.run(_run_lifespan_with_notification_worker(channel_service_available=True, visible_only_after_start=True))
+
+    worker_start.assert_awaited_once()
+    assert worker_on_app is not None
+    worker_stop.assert_awaited_once()

@@ -1418,6 +1418,25 @@ def _notifying_service_with_wecom(task_repo, notification_repo):
 
 
 @pytest.mark.asyncio
+async def test_outbox_attached_after_construction_enables_the_enqueue():
+    # The Gateway builds the scheduler before the channel service, so the outbox arrives later.
+    task_repo = DummyTaskRepo([_once_task_row()])
+    notification_repo = DummyNotificationRepo()
+    service = _make_notifying_service(task_repo, DummyRunRepo(), connection_repo=None, notification_repo=None)
+
+    await service.handle_run_completion(_completion_record(RunStatus.success))
+    assert notification_repo.enqueued == []
+
+    service.attach_notification_outbox(
+        connection_repo=DummyConnectionRepo([{"provider": "wecom", "external_account_id": "GaoZhiChao", "status": "connected"}]),
+        notification_repo=notification_repo,
+    )
+    await service.handle_run_completion(_completion_record(RunStatus.success))
+
+    assert [row["event"] for row in notification_repo.enqueued] == ["run_completed"]
+
+
+@pytest.mark.asyncio
 async def test_completion_that_was_not_recorded_does_not_notify():
     # complete_run returns False for a missing occurrence, another run's occurrence or another owner.
     class RejectingTaskRepo(DummyTaskRepo):
