@@ -332,6 +332,11 @@
 
 ### 修复
 
+- **中间件：** `_externalize_to_sandbox` 现在校验外部化工具输出的完整字节大小，
+  而不再仅使用 `test -s` 检查文件是否非空。此前当远程沙箱写入中途被截断时（如磁盘满
+  或管道故障），残缺的文件也会通过校验并把错误路径交付给模型；现在会严格核对字节数与负载一致，
+  发生截断时返回 `None` 并回退到内联截断。([#6110])
+
 - **智能体：** 上下文压缩的 fraction 触发器与 fraction 保留量现在使用当前运行
   模型的上下文 profile；单独配置的 `summarization.model_name` 只负责生成摘要。
   这避免运行模型与摘要模型的窗口不一致时压缩过晚或过早。中间件发布身份现在
@@ -5337,3 +5342,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6069]: https://github.com/bytedance/deer-flow/pull/6069
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
 [#6088]: https://github.com/bytedance/deer-flow/pull/6088
+[#6110]: https://github.com/bytedance/deer-flow/issues/6110

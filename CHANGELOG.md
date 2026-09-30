@@ -327,6 +327,14 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **middleware:** `_externalize_to_sandbox` now validates the full byte count
+  of externalized tool outputs instead of only testing non-emptiness with
+  `test -s`. When a remote sandbox write truncated the file part-way (e.g. disk
+  full or pipe failure), the partial file previously passed validation, handing
+  the model a truncated file path. It now verifies the file size exactly matches
+  the payload, returning `None` and falling back to inline truncation if a write
+  was truncated. ([#6110])
+
 - **agents:** Context-compaction fraction triggers and fraction-based retention
   now use the active run model's context profile; a separate
   `summarization.model_name` remains generation-only. This prevents mismatched
@@ -6294,4 +6302,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6069]: https://github.com/bytedance/deer-flow/pull/6069
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
 [#6088]: https://github.com/bytedance/deer-flow/pull/6088
+[#6110]: https://github.com/bytedance/deer-flow/issues/6110
 

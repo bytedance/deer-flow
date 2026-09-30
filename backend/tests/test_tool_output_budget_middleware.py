@@ -1284,7 +1284,7 @@ class _FakeSandbox:
     ) -> str:
         del env, timeout
         self.commands.append(command)
-        if command.startswith("test -s"):
+        if "wc -c" in command:
             return self._check_result
         return ""
 
@@ -1323,7 +1323,8 @@ class TestExternalizeToSandbox:
         assert result.startswith("/mnt/user-data/outputs/.tool-results/bash-")
         assert result.endswith(".log")
         assert any(c.startswith("mkdir -p ") for c in sb.commands)
-        assert any(c.startswith("test -s ") for c in sb.commands)
+        assert any("wc -c" in c for c in sb.commands)
+        assert any("-eq 100" in c for c in sb.commands)
         assert sb.writes and sb.writes[0][0] == result
         assert sb.writes[0][1] == "x" * 100
 
@@ -1354,6 +1355,24 @@ class TestExternalizeToSandbox:
             sandbox=_FakeSandbox(check_result="MISSING"),
         )
         assert result is None
+
+    def test_returns_none_when_byte_size_is_mismatched(self):
+        """A truncated write (fewer bytes than expected) fails validation and returns None."""
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        # check_result returns MISSING when byte count comparison fails
+        sb = _FakeSandbox(check_result="MISSING")
+        result = _externalize_to_sandbox(
+            "x" * 100,
+            tool_name="bash",
+            tool_call_id="tc-3-truncated",
+            storage_subdir=".tool-results",
+            sandbox=sb,
+        )
+        assert result is None
+        assert any("-eq 100" in c for c in sb.commands)
 
     def test_rejects_unsafe_storage_subdir(self):
         from deerflow.agents.middlewares.tool_output_budget_middleware import (
