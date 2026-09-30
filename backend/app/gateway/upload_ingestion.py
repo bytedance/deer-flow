@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 
 from deerflow.config.app_config import AppConfig
+from deerflow.uploads.companions import register_companion, unregister_companion
 from deerflow.utils.file_io import await_drained, run_file_io
 
 if TYPE_CHECKING:
@@ -154,6 +155,7 @@ class ThreadUploadIngestionService:
         self._auto_convert = False
         self._seen_filenames: set[str] = set()
         self._written_paths: list[Path] = []
+        self._companion_sources: list[Path] = []
         self._sync_targets: list[tuple[Path, str]] = []
         self._total_size = 0
 
@@ -378,6 +380,8 @@ class ThreadUploadIngestionService:
                 if self._sync_to_sandbox:
                     self._sync_targets.append((md_path, md_virtual_path))
                 file_info["markdown_file"] = md_path.name
+                await run_file_io(register_companion, file_path, md_path)
+                self._companion_sources.append(file_path)
                 file_info["markdown_path"] = str(self._uploads_dir / md_path.name)
                 file_info["markdown_virtual_path"] = md_virtual_path
                 file_info["markdown_artifact_url"] = uploads.upload_artifact_url(self._thread_id, md_path.name)
@@ -410,6 +414,9 @@ class ThreadUploadIngestionService:
             return
         uploads = _uploads()
         await run_file_io(uploads._cleanup_uploaded_paths, self._written_paths)
+        for original in self._companion_sources:
+            await run_file_io(unregister_companion, original)
+        self._companion_sources = []
         self._written_paths = []
 
     async def aclose(self) -> None:
