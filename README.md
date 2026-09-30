@@ -646,7 +646,7 @@ Signed-in users' notification toggle, default model, conversation mode, and reas
 Capability Center groups plugins by office collaboration, documents and knowledge, search and research, business and data, and development and operations. The directory includes setup references alongside existing MCP configurations and Lark. Recommended integrations and built-in support do not imply an installed or verified connection; the Installed filter shows configured MCP entries and installed Lark only.
 
 Personal MCP connections configured in the web interface are persisted per user.
-Deployment tools remain shared. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
+Deployment tools remain shared. Administrators can add, edit, enable, disable and delete shared MCP servers under **Platform provided**; ordinary users see their status without controls. Personal plugin switches affect only the signed-in user's connections. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
 
 For plugin manifests, adapter registration, and Agent capability selection, see
 [Capability Center integration contract](docs/capability-center.md).
@@ -1168,9 +1168,11 @@ For remote/Kubernetes deployments (the provisioner backend), the sandbox
 copies the binaries into a shared `emptyDir` — no install-time GitHub download and
 no hostPath/PVC runtime mount. Publish the image under
 [`docker/lark-cli-init`](docker/lark-cli-init/README.md) and set
-`LARK_CLI_INIT_IMAGE` on the provisioner; it stays off (legacy behavior) when
-unset. The Lark integration status (`GET /api/integrations/lark/status`) reports
-`sandbox_runtime_mode`, `sandbox_runtime_probed`, and `sandbox_runtime_ready`.
+`LARK_CLI_INIT_IMAGE` on the provisioner (with the Helm chart,
+`provisioner.larkCliInitImage` / `provisioner.larkCliBrokerImage`); it stays off
+(legacy behavior) when unset. The Lark integration status
+(`GET /api/integrations/lark/status`) reports `sandbox_runtime_mode`,
+`sandbox_runtime_probed`, and `sandbox_runtime_ready`.
 `sandbox_runtime_probed` marks whether runtime readiness was actually
 evaluated; responses from older backends may omit the flag, in which case the
 Settings mutation cache keeps the last probed runtime fields instead of

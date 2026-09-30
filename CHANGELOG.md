@@ -333,6 +333,32 @@ This release closes that milestone with **181 merged pull requests**.
   run and summary windows from compacting too late or too early. The middleware
   release identity now records `profile_model` separately from `summary_model`,
   intentionally refreshing the identity when either owner changes. ([#5566])
+- **events:** Run-scoped reads no longer return 500 on the JSONL backend for a
+  run ID it cannot use as a filename. `GET
+  /api/threads/{thread_id}/runs/{run_id}/events`, `.../messages`, and
+  `.../workspace-changes` pass the URL's run ID to the event store unchecked;
+  with `run_events.backend: jsonl` an ID such as `run.1` raised `ValueError`,
+  while the memory and database stores return an empty result. JSONL reads and
+  deletes now treat such an ID as an unknown run; writes still reject it.
+  ([#6070])
+- **scheduler:** Fixed-hour cron tasks no longer fire twice on the daylight-saving
+  fall-back day. `croniter` returns both occurrences of an ambiguous wall-clock
+  hour (the first with `fold=0`, the second with `fold=1`). For tasks where
+  neither minute nor hour contains a wildcard, the second occurrence is skipped
+  to preserve once-per-day semantics (Vixie cron contract), while wildcard
+  schedules (such as `0 * * * *`) still run in both occurrences of the repeated
+  hour. (issue #6052, [#6066])
+- **persistence:** A SQLite `checkpointer.connection_string` written as a
+  `file:` URI now fails at startup instead of silently writing somewhere else.
+  LangGraph's SQLite checkpointer and Store open connection strings without
+  `uri=True`, so SQLite treated the URI as a literal filename:
+  `file:checkpoints.db?mode=rwc` created a file with that exact name in the
+  working directory, `file::memory:?cache=shared` persisted to disk, and a
+  `file:///...` URI failed to open. The readiness probe did parse URIs, so it
+  checked a different file than the runtime used and reported in-memory URIs as
+  `not_configured`. All four SQLite checkpointer/Store factories now reject
+  `file:` URIs with an error that names the setting, and `/health/ready` reports
+  them unreachable. Use a filesystem path or `:memory:` instead. ([#6069])
 
 - **config:** `make config-upgrade` (also run by `make dev` / `make start`)
   upgrades the `config.yaml` the Gateway loads. With both
@@ -6255,3 +6281,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5987]: https://github.com/bytedance/deer-flow/pull/5987
 [#5991]: https://github.com/bytedance/deer-flow/pull/5991
 [#6015]: https://github.com/bytedance/deer-flow/pull/6015
+[#6066]: https://github.com/bytedance/deer-flow/pull/6066
+[#6069]: https://github.com/bytedance/deer-flow/pull/6069
+[#6070]: https://github.com/bytedance/deer-flow/pull/6070
+
