@@ -6,9 +6,13 @@
 #   - a child that exits before listening -> exit 2 immediately (well under
 #     the timeout), instead of burning the whole timeout budget on a dead
 #     launcher;
-#   - a live child that takes several polls to open the port -> exit 0, and
-#     the per-second "Waiting for ..." progress output is preserved while
-#     the port is still closed;
+#   - a live child that opens its port only after the wait has been observed
+#     emitting progress -> exit 0, with the "Waiting for ..." progress output
+#     asserted deterministically: the listener is released by handshake once
+#     a progress line shows up, so a slow first probe (cold powershell.exe +
+#     Get-NetTCPConnection on windows-latest can take many seconds) can no
+#     longer outlast the launcher delay, open the listener mid-probe, and
+#     finish without ever printing a progress line;
 #   - the timeout path keeps working with and without a child_pid (exit 1
 #     plus the "failed to start on port" message), so the new optional
 #     argument stays backward compatible for other callers.
@@ -31,9 +35,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # skip the temporary-directory cleanup.
 dead_pid=""
 slow_pid=""
+wf_pid=""
 TMP="$(mktemp -d)"
 # kill: on Windows, rm would block on files a still-running child keeps open
-trap 'kill ${dead_pid:+"$dead_pid"} ${slow_pid:+"$slow_pid"} 2>/dev/null; rm -rf "$TMP"' EXIT
+trap 'kill ${dead_pid:+"$dead_pid"} ${slow_pid:+"$slow_pid"} ${wf_pid:+"$wf_pid"} 2>/dev/null; rm -rf "$TMP"' EXIT
 
 fail() {
     echo "::error::$1" >&2
@@ -84,19 +89,31 @@ duration=$((SECONDS - start))
 # noise only.
 [ "$duration" -le 10 ] || fail "case 1: fail-fast took ${duration}s; it should not approach the 15s timeout"
 
-# ── Case 2: live child, port opens after several polls -> exit 0 + progress ──
+# ── Case 2: live child, port opens after observed progress -> exit 0 + progress ──
+#
+# Handshake: the launcher prints its port, then waits for a go-file before it
+# starts listening. The wait runs in the background with output redirected to
+# a file, and the test releases the listener only after a "Waiting for" line
+# is observed. The 6s fixed delay this replaces could lose the race against a
+# cold first probe on windows-latest: if that probe outlasts the delay, the
+# listener opens mid-probe and wait-for-port.sh exits successfully without
+# ever printing a progress line.
 
 "$PY" -c '
-import socket, time
+import os, socket, sys, time
 s = socket.socket(); s.bind(("127.0.0.1", 0)); port = s.getsockname()[1]; s.close()
 print(port, flush=True)
-time.sleep(6)  # stay alive but not yet listening: forces multiple polls
+go, deadline = sys.argv[1], time.time() + 120
+while not os.path.exists(go):
+    if time.time() > deadline:
+        sys.exit(3)
+    time.sleep(0.1)
 srv = socket.socket()
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 srv.bind(("127.0.0.1", port))
 srv.listen()
-time.sleep(15)
-' >"$TMP/slow.port" 2>"$TMP/slow.err" &
+time.sleep(30)
+' "$TMP/go" >"$TMP/slow.port" 2>"$TMP/slow.err" &
 slow_pid=$!
 
 for _ in $(seq 1 50); do
@@ -106,14 +123,28 @@ done
 [ -s "$TMP/slow.port" ] || fail "case 2: slow launcher did not report its port"
 open_port="$(tr -d '\r\n ' <"$TMP/slow.port")"
 
-out="$(bash "$ROOT/scripts/wait-for-port.sh" "$open_port" 20 SlowService "$slow_pid")"
+wf_out="$TMP/wf.out"
+bash "$ROOT/scripts/wait-for-port.sh" "$open_port" 60 SlowService "$slow_pid" >"$wf_out" 2>&1 &
+wf_pid=$!
+
+observed=""
+for _ in $(seq 1 450); do
+    kill -0 "$wf_pid" 2>/dev/null || break
+    if grep -q "Waiting for" "$wf_out" 2>/dev/null; then
+        observed=1
+        break
+    fi
+    sleep 0.2
+done
+[ -n "$observed" ] || fail "case 2: no progress line within the observation window; wait output: $(head -c 300 "$wf_out" 2>/dev/null), launcher stderr: $(head -c 300 "$TMP/slow.err" 2>/dev/null)"
+
+: > "$TMP/go"   # observed progress -> release the listener
+
+wait "$wf_pid"   # bounded by wait-for-port's own timeout
 status=$?
 
-# One progress emission is guaranteed (the 6s delay spans at least one poll
-# cycle); more depend on how long each probe takes, e.g. a powershell.exe
-# cold start on Windows turns the 1s poll interval into several seconds.
-[ "$status" -eq 0 ] || fail "case 2: expected exit 0 once the live child opened the port, got $status"
-[ "$(progress_count "$out")" -ge 1 ] || fail "case 2: expected progress output while waiting, got: $out"
+[ "$status" -eq 0 ] || fail "case 2: expected exit 0 once the live child opened the port, got $status (wait output: $(head -c 300 "$wf_out" 2>/dev/null))"
+[ "$(progress_count "$(cat "$wf_out")")" -ge 1 ] || fail "case 2: expected progress output while waiting, got: $(cat "$wf_out")"
 
 # ── Case 3: no child_pid, unreachable port -> exit 1 with the timeout message ──
 
