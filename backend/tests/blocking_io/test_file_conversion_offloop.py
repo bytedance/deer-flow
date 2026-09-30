@@ -1,13 +1,12 @@
 """Regression anchor: ``convert_file_to_markdown`` must not block the event loop.
 
 The converter itself is offloaded to a thread for files above 1 MB
-(``_ASYNC_THRESHOLD_BYTES``), but the converted markdown was written back with
-a synchronous ``Path.write_text`` on the event loop — a multi-megabyte blocking
-write in the upload ingestion path (``app/gateway/upload_ingestion.py`` calls
-this per uploaded document). This anchor drives the real
-``convert_file_to_markdown`` under the strict Blockbuster gate with the
-converter patched to return a large payload, so only the write-back is
-exercised.
+(``_ASYNC_THRESHOLD_BYTES``), and the converted markdown is written back
+through ``run_file_io`` — a multi-megabyte blocking write in the upload
+ingestion path (``app/gateway/upload_ingestion.py`` calls this per uploaded
+document). This anchor drives the real ``convert_file_to_markdown`` under the
+strict Blockbuster gate with the converter patched to return a large payload,
+so only the write-back is exercised.
 
 If the write regresses back onto the event loop, Blockbuster raises
 ``BlockingError`` — which the function's broad ``except`` turns into a ``None``
@@ -72,7 +71,7 @@ async def test_cancelled_conversion_cleanup_failure_preserves_cancellation(
     finish = threading.Event()
 
     async def gated_run_file_io(fn, *args, **kwargs):
-        if getattr(fn, "__name__", "") == "write_text":
+        if getattr(fn, "__name__", "") == "_write_text_atomic":
             # Hold the write-back worker start until the test has cancelled
             # the task, so the cancellation arrives while the write is in
             # flight (deterministic ordering, no sleeps).

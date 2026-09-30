@@ -32,7 +32,11 @@ import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
-import { promptInputFilePartToFile, uploadFiles } from "../uploads";
+import {
+  promptInputFilePartToFile,
+  toSubmittedMessageFiles,
+  uploadFiles,
+} from "../uploads";
 import { uuid } from "../utils/uuid";
 
 import {
@@ -2557,12 +2561,7 @@ export function useThreadStream({
 
             if (files.length > 0) {
               const uploadResponse = await uploadFiles(threadId, files);
-              uploadedFiles = uploadResponse.files.map((info) => ({
-                filename: info.filename,
-                size: info.size,
-                path: info.virtual_path,
-                status: "uploaded" as const,
-              }));
+              uploadedFiles = toSubmittedMessageFiles(uploadResponse.files);
 
               // Update optimistic human message with uploaded status + paths
               setOptimisticMessages((messages) => {
