@@ -332,6 +332,10 @@
 
 ### 修复
 
+- **前端：** `extractTitleFromMarkdown` 现在遵循 CommonMark 规范（§4.2）剔除末尾的
+  闭合 ATX 标题井号（如 `# Title ###` -> `Title`），避免 Markdown 语法泄露到消息组中的
+  `web_fetch` 标题展示中，同时保留字面量井号（如 `C#`）。([#6090])
+
 - **智能体：** 上下文压缩的 fraction 触发器与 fraction 保留量现在使用当前运行
   模型的上下文 profile；单独配置的 `summarization.model_name` 只负责生成摘要。
   这避免运行模型与摘要模型的窗口不一致时压缩过晚或过早。中间件发布身份现在
@@ -5329,3 +5333,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6066]: https://github.com/bytedance/deer-flow/pull/6066
 [#6069]: https://github.com/bytedance/deer-flow/pull/6069
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
+[#6090]: https://github.com/bytedance/deer-flow/issues/6090

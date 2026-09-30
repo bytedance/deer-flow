@@ -9,5 +9,9 @@ export function extractTitleFromMarkdown(markdown: string) {
   if (!headingPrefix) {
     return undefined;
   }
-  return firstLine.slice(headingPrefix[0].length).trim() || undefined;
+  // CommonMark §4.2: ATX headings allow an optional closing sequence of '#' characters
+  // preceded by whitespace (spaces or tabs) and followed only by spaces or tabs.
+  const rawTitle = firstLine.slice(headingPrefix[0].length);
+  const strippedTitle = rawTitle.replace(/[ \t]+#+[ \t]*$/, "");
+  return strippedTitle.trim() || undefined;
 }

@@ -327,6 +327,11 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **frontend:** `extractTitleFromMarkdown` now strips closing ATX heading hashes
+  (e.g. `# Title ###` -> `Title`) per CommonMark specification (§4.2), preventing
+  Markdown syntax from leaking into `web_fetch` title displays in message groups
+  while preserving literal hashes (such as `C#`). ([#6090])
+
 - **agents:** Context-compaction fraction triggers and fraction-based retention
   now use the active run model's context profile; a separate
   `summarization.model_name` remains generation-only. This prevents mismatched
@@ -6284,4 +6289,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6066]: https://github.com/bytedance/deer-flow/pull/6066
 [#6069]: https://github.com/bytedance/deer-flow/pull/6069
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
+[#6090]: https://github.com/bytedance/deer-flow/issues/6090
 
