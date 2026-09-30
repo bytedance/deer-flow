@@ -29,7 +29,6 @@ import logging
 import os
 import posixpath
 import shlex
-import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any, override
@@ -151,6 +150,15 @@ def _sanitize_tool_name(name: str) -> str:
     return safe or "unknown"
 
 
+def _sanitize_tool_call_id(tool_call_id: str) -> str:
+    """Make a tool call id safe to use inside a filename.
+
+    The id reaches us from the model/provider, so it gets the same treatment as
+    a tool name: no separators and no traversal components.
+    """
+    return _sanitize_tool_name(tool_call_id)
+
+
 def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
     """Build the on-disk filename for an externalized tool output.
 
@@ -159,8 +167,11 @@ def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
     """
     safe_name = _sanitize_tool_name(tool_name)
     ext = _EXT_MAP.get(tool_name, "txt")
-    short_id = uuid.uuid4().hex[:12]
-    return f"{safe_name}-{short_id}.{ext}"
+    # Derived from the call id so the host-disk and sandbox paths agree on one
+    # name for a given call, and so externalizing the same output twice is
+    # idempotent instead of leaving two files behind.
+    safe_id = _sanitize_tool_call_id(tool_call_id)
+    return f"{safe_name}-{safe_id}.{ext}"
 
 
 def _externalize(
