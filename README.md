@@ -1168,9 +1168,11 @@ For remote/Kubernetes deployments (the provisioner backend), the sandbox
 copies the binaries into a shared `emptyDir` — no install-time GitHub download and
 no hostPath/PVC runtime mount. Publish the image under
 [`docker/lark-cli-init`](docker/lark-cli-init/README.md) and set
-`LARK_CLI_INIT_IMAGE` on the provisioner; it stays off (legacy behavior) when
-unset. The Lark integration status (`GET /api/integrations/lark/status`) reports
-`sandbox_runtime_mode`, `sandbox_runtime_probed`, and `sandbox_runtime_ready`.
+`LARK_CLI_INIT_IMAGE` on the provisioner (with the Helm chart,
+`provisioner.larkCliInitImage` / `provisioner.larkCliBrokerImage`); it stays off
+(legacy behavior) when unset. The Lark integration status
+(`GET /api/integrations/lark/status`) reports `sandbox_runtime_mode`,
+`sandbox_runtime_probed`, and `sandbox_runtime_ready`.
 `sandbox_runtime_probed` marks whether runtime readiness was actually
 evaluated; responses from older backends may omit the flag, in which case the
 Settings mutation cache keeps the last probed runtime fields instead of
