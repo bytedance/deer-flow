@@ -121,6 +121,7 @@ export type MockAPIOptions = {
   trashDocuments?: MockTrashDocument[];
   threadFileGroups?: MockThreadFileGroup[];
   createdThreadMessages?: unknown[];
+  honorRequestedThreadId?: boolean;
   agents?: MockAgent[];
   skills?: MockSkill[];
   scheduledTasks?: Array<{
@@ -818,8 +819,13 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   // Thread create — called when user sends first message in a new chat
   void page.route("**/api/langgraph/threads", (route) => {
     if (route.request().method() === "POST") {
+      const threadId =
+        (options?.honorRequestedThreadId
+          ? (route.request().postDataJSON() as { thread_id?: string } | null)
+              ?.thread_id
+          : undefined) ?? MOCK_THREAD_ID;
       upsertThread({
-        thread_id: MOCK_THREAD_ID,
+        thread_id: threadId,
         title: "New Chat",
         updated_at: new Date().toISOString(),
         messages: options?.createdThreadMessages ?? mockStreamMessages(),
@@ -828,7 +834,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          thread_id: MOCK_THREAD_ID,
+          thread_id: threadId,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           metadata: {},
@@ -1860,6 +1866,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     }
     return route.fallback();
   });
+
+  void page.route("**/api/mcp/config", (route) =>
+    route.fulfill({ json: { mcp_servers: {} } }),
+  );
 
   void page.route("**/api/mcp/personal/config", (route) =>
     route.fulfill({ json: { mcp_servers: {} } }),

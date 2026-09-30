@@ -90,6 +90,8 @@ run reads, and sequence recovery split on physical newlines. Do not use
 part of the record. Preserve existing UTF-8 files and the writer format.
 `tests/test_jsonl_event_store_unicode.py` covers Unicode values, reopening,
 idempotent writes, LF/CRLF, blank lines, and malformed records.
+Reads and deletes treat a run ID writes reject as an unknown run (routes pass
+URL IDs through); writes still raise.
 
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
