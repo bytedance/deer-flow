@@ -2,7 +2,7 @@
 
 import logging
 import secrets
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING, override
 
 from langchain.agents import AgentState
@@ -204,7 +204,7 @@ def _build_runtime_middlewares(
     lazy_init: bool = True,
     receipts_render_mode: str = "delegation_only",
     authorization_provider=None,
-    authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
+    authorization_infrastructure_tools: Iterable[object] = (),
     available_skills: set[str] | None = None,
     owns_agent_skill_projection: bool = True,
 ) -> list[AgentMiddleware]:
@@ -307,7 +307,7 @@ def _build_runtime_middlewares(
                     GuardrailAuthorizationAdapter(
                         authorization_provider,
                         default_role=authorization_config.default_role,
-                        infrastructure_tool_names=authorization_infrastructure_tool_names,
+                        infrastructure_tools=authorization_infrastructure_tools,
                     ),
                     fail_closed=authorization_config.fail_closed,
                 )
@@ -406,7 +406,7 @@ def build_lead_runtime_middlewares(
         authorization_provider=authorization_provider,
         available_skills=available_skills,
         owns_agent_skill_projection=owns_agent_skill_projection,
-        authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
+        authorization_infrastructure_tools=((deferred_setup.tool_search_tool,) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else ()),
     )
 
 
@@ -442,7 +442,7 @@ def build_subagent_runtime_middlewares(
         # the subagent context — no ledger, no citations, Layer 1 goes inert.
         receipts_render_mode="always",
         authorization_provider=authorization_provider,
-        authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
+        authorization_infrastructure_tools=((deferred_setup.tool_search_tool,) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else ()),
         owns_agent_skill_projection=False,
     )
 

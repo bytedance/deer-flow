@@ -48,6 +48,7 @@ from deerflow.agents.middlewares.terminal_response_middleware import TerminalRes
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
+from deerflow.agents.middlewares.tool_declarations import layer_one_outcome, narrow_declared_tools, verify_declared_tool_view
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.task_continuity.tools import append_task_continuity_tools
@@ -1103,6 +1104,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             context=cfg,
             app_config=resolved_app_config,
         )
+        layer_one = layer_one_outcome(authorization_candidates, authorized_tools)
         configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
         late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
         final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
@@ -1126,6 +1128,13 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             authorization_provider=_authz_provider,
             subagent_execution_capacity=subagent_execution_capacity,
         )
+        middlewares, declared_authorized = narrow_declared_tools(
+            middlewares,
+            outcome=layer_one,
+            context=cfg,
+            app_config=resolved_app_config,
+            authorization_provider=_authz_provider,
+        )
         system_prompt = apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
@@ -1140,10 +1149,12 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             interaction_policy=interaction_policy,
             memory_enabled=memory_enabled,
         )
+        bound_middlewares = normalize_middleware_state_schemas(middlewares, mode)
+        verify_declared_tool_view(bound_middlewares, authorized_names=declared_authorized)
         graph = create_agent(
             model=chat_model,
             tools=final_tools,
-            middleware=normalize_middleware_state_schemas(middlewares, mode),
+            middleware=bound_middlewares,
             system_prompt=system_prompt,
             state_schema=get_thread_state_schema(mode),
             context_schema=dict,
@@ -1234,6 +1245,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         context=cfg,
         app_config=resolved_app_config,
     )
+    layer_one = layer_one_outcome(authorization_candidates, authorized_tools)
     configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
     late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
     final_tools, setup = assemble_deferred_tools(configured_tools, enabled=resolved_app_config.tool_search.enabled)
@@ -1257,6 +1269,13 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         authorization_provider=_authz_provider,
         subagent_execution_capacity=subagent_execution_capacity,
     )
+    middlewares, declared_authorized = narrow_declared_tools(
+        middlewares,
+        outcome=layer_one,
+        context=cfg,
+        app_config=resolved_app_config,
+        authorization_provider=_authz_provider,
+    )
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent_subagents,
@@ -1273,10 +1292,12 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         interaction_policy=interaction_policy,
         memory_enabled=memory_enabled,
     )
+    bound_middlewares = normalize_middleware_state_schemas(middlewares, mode)
+    verify_declared_tool_view(bound_middlewares, authorized_names=declared_authorized)
     graph = create_agent(
         model=chat_model,
         tools=final_tools,
-        middleware=normalize_middleware_state_schemas(middlewares, mode),
+        middleware=bound_middlewares,
         system_prompt=system_prompt,
         state_schema=get_thread_state_schema(mode),
         context_schema=dict,

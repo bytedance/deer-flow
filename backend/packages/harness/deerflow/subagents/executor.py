@@ -963,7 +963,7 @@ class SubagentExecutor:
             self._resolved_app_config = get_app_config()
         return self._resolved_app_config
 
-    def _create_agent(
+    async def _create_agent(
         self,
         tools: list[BaseTool] | None = None,
         *,
@@ -975,6 +975,12 @@ class SubagentExecutor:
         ``deferred_setup`` (assembled in ``_build_initial_state``) carries the
         deferred MCP tool names + catalog hash so the subagent gets the same
         DeferredToolFilterMiddleware the lead agent has. ``None`` is a no-op.
+
+        Async because the middleware-declared-tool decision below calls the
+        authorization provider's ``filter_resources`` — potentially external
+        policy-service I/O — and this method runs on the shared event loop
+        (``_aexecute`` awaits it), so the decision is offloaded to a worker
+        thread with the same provider instance and context.
         """
         app_config = self._get_resolved_app_config()
         if self.model_name is None:
@@ -1011,6 +1017,38 @@ class SubagentExecutor:
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
+        # Authorization Layer 1 for middleware-declared tools (e.g. extension
+        # contributions): collect from the built stack, decide with the same
+        # provider/principal as the ordinary pass (offloaded off the event
+        # loop — a custom provider's filter_resources may do policy-service
+        # I/O), then narrow the view build-locally. The verification before
+        # create_agent is the backstop for third-party __copy__ behavior.
+        declared_authorized = None
+        layer_one = getattr(self, "_layer_one_outcome", None)
+        authz_context = getattr(self, "_authz_context", None)
+        # Production sets provider, context, and outcome together in
+        # ``_build_initial_state``; a missing piece means no ordinary pass ran
+        # on this executor (direct ``_create_agent`` calls in tests), so there
+        # is no verdict set to seed the decision with and the pass is skipped.
+        if authz_provider is not None and layer_one is not None and authz_context is not None:
+            from deerflow.agents.middlewares.tool_declarations import (
+                apply_declared_tool_view,
+                collect_declared_tools,
+                decide_declared_tools,
+                verify_declared_tool_view,
+            )
+
+            declared = collect_declared_tools(middlewares)
+            declared_authorized = await asyncio.to_thread(
+                decide_declared_tools,
+                declared,
+                outcome=layer_one,
+                context=authz_context,
+                app_config=app_config,
+                authorization_provider=authz_provider,
+            )
+            middlewares = apply_declared_tool_view(middlewares, authorized_names=declared_authorized)
+            verify_declared_tool_view(middlewares, authorized_names=declared_authorized)
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware) so _aexecute can read
         # each after the run and surface whichever cap fired. Duck-typed
@@ -1245,6 +1283,7 @@ class SubagentExecutor:
 
         # Apply authorization Layer 1: filter tools before deferred assembly
         # so denied tools can never enter the DeferredToolCatalog.
+        from deerflow.agents.middlewares.tool_declarations import layer_one_outcome
         from deerflow.authz.tool_filter import apply_tool_authorization
 
         authz_context = {
@@ -1265,6 +1304,10 @@ class SubagentExecutor:
             context=authz_context,
             app_config=resolved_app_config,
         )
+        # The declaration pass in ``_create_agent`` reuses this run's provider,
+        # context, and verdicts — one principal and one verdict set per run.
+        self._authz_context = authz_context
+        self._layer_one_outcome = layer_one_outcome(authorization_candidates, authorized_tools)
         configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
         late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
 
@@ -1505,7 +1548,7 @@ class SubagentExecutor:
                 return result
 
             state, final_tools, deferred_setup = await self._build_initial_state(task)
-            agent = self._create_agent(
+            agent = await self._create_agent(
                 final_tools,
                 deferred_setup=deferred_setup,
                 extensions=loaded_extensions,
