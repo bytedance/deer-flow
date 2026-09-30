@@ -3683,7 +3683,59 @@ def test_launch_mcp_task_notification_run_hides_internal_prompt(_stub_app_config
     assert result == {"run_id": "run-notification", "thread_id": "thread-notification"}
 
 
+def test_start_run_marks_run_manager_conflict_as_busy(_stub_app_config):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.services import BusyThreadConflict, start_run
+    from deerflow.runtime.runs.manager import ConflictError
+
+    async def _scenario():
+        request, _run_store, _thread_store = _make_start_run_persistence_context()
+        request.app.state.run_manager.create_or_reject = AsyncMock(side_effect=ConflictError("Thread already has an active run"))
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.ensure_checkpoint_history_seeded", new_callable=AsyncMock),
+            pytest.raises(BusyThreadConflict) as exc_info,
+        ):
+            await start_run(_run_create_request(), "thread-busy", request)
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == "Thread already has an active run"
+
+    asyncio.run(_scenario())
+
+
 def test_launch_mcp_task_notification_run_restores_busy_thread_conflict(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import BusyThreadConflict, launch_mcp_task_notification_run
+    from deerflow.runtime.runs.manager import ConflictError
+
+    async def _scenario():
+        with (
+            patch(
+                "app.gateway.services.start_run",
+                side_effect=BusyThreadConflict("Thread already has an active run"),
+            ),
+            pytest.raises(ConflictError, match="Thread already has an active run"),
+        ):
+            await launch_mcp_task_notification_run(
+                app=SimpleNamespace(state=SimpleNamespace()),
+                thread_id="thread-notification",
+                assistant_id="lead_agent",
+                owner_user_id="user-1",
+                task_id="task-1",
+                dispatch_version=2,
+                dispatch_attempt=3,
+                event={"status": "completed", "result": "done"},
+            )
+
+    asyncio.run(_scenario())
+
+
+def test_launch_mcp_task_notification_run_dead_letters_idempotency_conflict(_stub_app_config):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -3691,15 +3743,18 @@ def test_launch_mcp_task_notification_run_restores_busy_thread_conflict(_stub_ap
     from fastapi import HTTPException
 
     from app.gateway.services import launch_mcp_task_notification_run
-    from deerflow.runtime.runs.manager import ConflictError
+    from app.mcp_tasks.errors import PermanentNotificationError
 
     async def _scenario():
         with (
             patch(
                 "app.gateway.services.start_run",
-                side_effect=HTTPException(status_code=409, detail="Thread already has an active run"),
+                side_effect=HTTPException(
+                    status_code=409,
+                    detail="Idempotency-Key already used with a different request",
+                ),
             ),
-            pytest.raises(ConflictError, match="Thread already has an active run"),
+            pytest.raises(PermanentNotificationError, match="Idempotency-Key"),
         ):
             await launch_mcp_task_notification_run(
                 app=SimpleNamespace(state=SimpleNamespace()),
@@ -3743,6 +3798,72 @@ def test_launch_mcp_task_notification_run_dead_letters_missing_thread(_stub_app_
                 dispatch_attempt=3,
                 event={"status": "completed", "result": "done"},
             )
+
+    asyncio.run(_scenario())
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 403, 422, 501])
+def test_launch_mcp_task_notification_run_dead_letters_deterministic_rejection(_stub_app_config, status_code):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import launch_mcp_task_notification_run
+    from app.mcp_tasks.errors import PermanentNotificationError
+
+    async def _scenario():
+        with (
+            patch(
+                "app.gateway.services.start_run",
+                side_effect=HTTPException(status_code=status_code, detail="request rejected"),
+            ),
+            pytest.raises(PermanentNotificationError, match="request rejected"),
+        ):
+            await launch_mcp_task_notification_run(
+                app=SimpleNamespace(state=SimpleNamespace()),
+                thread_id="thread-notification",
+                assistant_id="lead_agent",
+                owner_user_id="user-1",
+                task_id="task-1",
+                dispatch_version=2,
+                dispatch_attempt=3,
+                event={"status": "completed", "result": "done"},
+            )
+
+    asyncio.run(_scenario())
+
+
+@pytest.mark.parametrize("status_code", [408, 429, 500])
+def test_launch_mcp_task_notification_run_preserves_ambiguous_http_failure(_stub_app_config, status_code):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import launch_mcp_task_notification_run
+
+    async def _scenario():
+        with (
+            patch(
+                "app.gateway.services.start_run",
+                side_effect=HTTPException(status_code=status_code, detail="launch outcome unknown"),
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await launch_mcp_task_notification_run(
+                app=SimpleNamespace(state=SimpleNamespace()),
+                thread_id="thread-notification",
+                assistant_id="lead_agent",
+                owner_user_id="user-1",
+                task_id="task-1",
+                dispatch_version=2,
+                dispatch_attempt=3,
+                event={"status": "completed", "result": "done"},
+            )
+        assert exc_info.value.status_code == status_code
 
     asyncio.run(_scenario())
 

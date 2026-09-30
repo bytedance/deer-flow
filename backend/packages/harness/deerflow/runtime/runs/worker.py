@@ -2027,7 +2027,8 @@ def _ends_on_human_input_request(messages: list[Any]) -> bool:
 
     ``ask_clarification`` and the sandbox network prompt put the request in a
     ToolMessage artifact and end the graph there, so it sits in the trailing run of
-    tool results. The goal evaluator only reads human and AI text and never sees it.
+    tool results. Continuing would tell the agent to keep going while the question is
+    still open, so the evaluator is not asked.
     """
     for message in reversed(messages):
         if _message_type(message) != "tool":

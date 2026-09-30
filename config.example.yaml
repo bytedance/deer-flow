@@ -2471,6 +2471,7 @@ skill_evolution:
 #
 # checkpointer:
 #   type: sqlite
+#   # A filesystem path or ':memory:'; SQLite `file:` URIs are rejected.
 #   connection_string: checkpoints.db
 #
 # checkpointer:

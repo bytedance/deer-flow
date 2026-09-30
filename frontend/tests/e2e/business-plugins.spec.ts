@@ -178,7 +178,7 @@ test("ordinary users see shared connections read-only and configure their own cr
     personal.locator("article").filter({ hasText: "Team CRM" }),
   ).toHaveCount(0);
   await expect(
-    personal.getByRole("button", { name: "Add MCP plugin" }),
+    personal.getByRole("button", { name: "Add MCP plugin (My plugins)" }),
   ).toBeVisible();
   await expect(
     personal.locator("article").filter({ hasText: "HubSpot" }),
@@ -190,7 +190,7 @@ test("ordinary users see shared connections read-only and configure their own cr
     page.locator("article").filter({ hasText: "Team CRM" }).getByRole("switch"),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("button", { name: "Add MCP plugin" }),
+    page.getByRole("button", { name: "Add MCP plugin (My plugins)" }),
   ).toHaveCount(1);
   await page
     .getByRole("button", {

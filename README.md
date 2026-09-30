@@ -646,7 +646,7 @@ Signed-in users' notification toggle, default model, conversation mode, and reas
 Capability Center groups plugins by office collaboration, documents and knowledge, search and research, business and data, and development and operations. The directory includes setup references alongside existing MCP configurations and Lark. Recommended integrations and built-in support do not imply an installed or verified connection; the Installed filter shows configured MCP entries and installed Lark only.
 
 Personal MCP connections configured in the web interface are persisted per user.
-Deployment tools remain shared. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
+Deployment tools remain shared. Administrators can add, edit, enable, disable and delete shared MCP servers under **Platform provided**; ordinary users see their status without controls. Personal plugin switches affect only the signed-in user's connections. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
 
 For plugin manifests, adapter registration, and Agent capability selection, see
 [Capability Center integration contract](docs/capability-center.md).
@@ -1168,9 +1168,15 @@ For remote/Kubernetes deployments (the provisioner backend), the sandbox
 copies the binaries into a shared `emptyDir` — no install-time GitHub download and
 no hostPath/PVC runtime mount. Publish the image under
 [`docker/lark-cli-init`](docker/lark-cli-init/README.md) and set
-`LARK_CLI_INIT_IMAGE` on the provisioner; it stays off (legacy behavior) when
-unset. The Lark integration status (`GET /api/integrations/lark/status`) reports
-`sandbox_runtime_mode` and `sandbox_runtime_ready` so the Settings UI shows
+`LARK_CLI_INIT_IMAGE` on the provisioner (with the Helm chart,
+`provisioner.larkCliInitImage` / `provisioner.larkCliBrokerImage`); it stays off
+(legacy behavior) when unset. The Lark integration status
+(`GET /api/integrations/lark/status`) reports `sandbox_runtime_mode`,
+`sandbox_runtime_probed`, and `sandbox_runtime_ready`.
+`sandbox_runtime_probed` marks whether runtime readiness was actually
+evaluated; responses from older backends may omit the flag, in which case the
+Settings mutation cache keeps the last probed runtime fields instead of
+overwriting them with an unevaluated fallback — so the Settings UI shows
 whether `lark-cli` will actually be present in the sandbox at chat time, rather
 than a green status hiding a later `command not found`.
 
@@ -1589,7 +1595,7 @@ Supported commands:
 /goal clear        # clear it
 ```
 
-After each Gateway-backed run, DeerFlow evaluates the visible conversation against the active goal with a non-thinking evaluator model. The evaluator must return a typed blocker (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait`, or `goal_not_met_yet`) plus visible evidence. DeerFlow only injects a hidden continuation when the latest assistant turn is durably checkpointed, the blocker is `goal_not_met_yet`, the thread did not change during evaluation, and the no-progress breaker has not fired. The safety cap defaults to 8 hidden continuations, and repeated identical non-progress evaluations stop after 2 attempts. `/goal clear` and any user-authored new input win over queued continuations. When the evaluator considers the goal satisfied, DeerFlow clears it after the run successfully finalizes and publishes the updated thread state. If required artifact delivery or its receipt persistence fails, the run reports an error and the goal remains active for a later retry; this does not start another hidden continuation.
+After each Gateway-backed run, DeerFlow evaluates the visible conversation, including the assistant's tool calls and shortened tool results, against the active goal with a non-thinking evaluator model. A successful tool result alone does not satisfy a goal, and when the assistant had to guess missing or ambiguous information the evaluator reports `needs_user_input`. The evaluator must return a typed blocker (`missing_evidence`, `needs_user_input`, `run_failed`, `external_wait`, or `goal_not_met_yet`) plus visible evidence. DeerFlow only injects a hidden continuation when the latest assistant turn is durably checkpointed, the blocker is `goal_not_met_yet`, the thread did not change during evaluation, and the no-progress breaker has not fired. The safety cap defaults to 8 hidden continuations, and repeated identical non-progress evaluations stop after 2 attempts. `/goal clear` and any user-authored new input win over queued continuations. When the evaluator considers the goal satisfied, DeerFlow clears it after the run successfully finalizes and publishes the updated thread state. If required artifact delivery or its receipt persistence fails, the run reports an error and the goal remains active for a later retry; this does not start another hidden continuation.
 
 The Web UI shows the active goal above the composer. The same command is available from the TUI and supported IM channels. In the Web UI and supported IM channels, setting `/goal <completion condition>` also starts a run with the condition as the task; status and clear commands only manage goal state. Setting or clearing a goal is rejected while that thread has a run in flight, including a run owned by another Gateway worker, so the goal checkpoint cannot branch away from an active run's checkpoint lineage.
 

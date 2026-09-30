@@ -31,7 +31,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
-import urllib.parse
 import weakref
 from typing import TYPE_CHECKING
 
@@ -130,39 +129,17 @@ def resolve_checkpointer_config(startup_config: AppConfig) -> CheckpointerConfig
         return None
 
 
-def _sqlite_is_in_memory(conn_str: str) -> bool:
-    """Return True when *conn_str* refers to a purely in-memory SQLite database."""
-    if conn_str == ":memory:":
-        return True
-    if not conn_str.startswith("file:"):
-        return False
-    parts = urllib.parse.urlsplit(conn_str)
-    if parts.path in (":memory:", ""):
-        return True
-    return any(key == "mode" and value == "memory" for key, value in urllib.parse.parse_qsl(parts.query))
-
-
 def _sqlite_disk_uri(conn_str: str) -> str:
     """Return a non-creating (``mode=rw``) SQLite URI for a disk-backed database.
 
     Opening with ``mode=rw`` refuses to create a missing database file, so a
     readiness probe can never resurrect a checkpointer/Store file that was
-    deleted or lost after startup - absence must surface as unreachable. Plain
-    filesystem paths (already absolute after
-    ``deerflow.runtime.store._sqlite_utils.resolve_sqlite_conn_str``) are
-    converted with ``Path.as_uri`` for correct percent-encoding; existing
-    ``file:`` URIs keep their path bytes and get ``mode=rw`` merged into the
-    query, replacing any pinned mode.
+    deleted or lost after startup - absence must surface as unreachable. The
+    path is already absolute after
+    ``deerflow.runtime.store._sqlite_utils.resolve_sqlite_conn_str`` and is
+    converted with ``Path.as_uri`` for correct percent-encoding.
     """
-    if not conn_str.startswith("file:"):
-        return f"{pathlib.Path(conn_str).as_uri()}?mode=rw"
-    parts = urllib.parse.urlsplit(conn_str)
-    query_pairs = urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
-    if not any(key == "mode" for key, _ in query_pairs):
-        separator = "&" if parts.query else "?"
-        return f"{conn_str}{separator}mode=rw"
-    replaced = urllib.parse.urlencode([(key, "rw") if key == "mode" else (key, value) for key, value in query_pairs])
-    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, replaced, parts.fragment))
+    return f"{pathlib.Path(conn_str).as_uri()}?mode=rw"
 
 
 async def _probe_sqlite_backend(conn_string: str | None) -> str:
@@ -170,9 +147,10 @@ async def _probe_sqlite_backend(conn_string: str | None) -> str:
 
     Disk-backed databases are opened non-creating (``mode=rw``): a missing
     file stays missing and fails the probe instead of being recreated empty.
-    In-memory forms (``:memory:`` and ``file:`` URIs with ``mode=memory``)
-    only exist inside the running process, so there is nothing external to
-    probe and they report ``not_configured`` like the memory backend.
+    ``:memory:`` only exists inside the running process, so there is nothing
+    external to probe and it reports ``not_configured`` like the memory
+    backend. A connection string the runtime refuses (a SQLite ``file:`` URI)
+    is unreachable.
     """
     try:
         import aiosqlite
@@ -181,8 +159,12 @@ async def _probe_sqlite_backend(conn_string: str | None) -> str:
         return DATABASE_UNREACHABLE
     from deerflow.runtime.store._sqlite_utils import resolve_sqlite_conn_str
 
-    conn_str = resolve_sqlite_conn_str(conn_string or "store.db")
-    if _sqlite_is_in_memory(conn_str):
+    try:
+        conn_str = resolve_sqlite_conn_str(conn_string or "store.db")
+    except ValueError as exc:
+        logger.error("Readiness probe: %s", exc)
+        return DATABASE_UNREACHABLE
+    if conn_str == ":memory:":
         return DATABASE_NOT_CONFIGURED
     try:
         async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):

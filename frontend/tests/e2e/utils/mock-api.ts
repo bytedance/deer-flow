@@ -381,7 +381,9 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     sandbox_runtime_mode: "init-container" as
       | "none"
       | "gateway-download"
-      | "init-container",
+      | "init-container"
+      | "broker",
+    sandbox_runtime_probed: true,
     sandbox_runtime_ready: false,
     sandbox_runtime_detail:
       "The provisioner has no lark-cli init image configured (LARK_CLI_INIT_IMAGE)." as
@@ -1859,6 +1861,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  void page.route("**/api/mcp/config", (route) =>
+    route.fulfill({ json: { mcp_servers: {} } }),
+  );
+
   void page.route("**/api/mcp/personal/config", (route) =>
     route.fulfill({ json: { mcp_servers: {} } }),
   );
@@ -1969,6 +1975,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           verified: false,
         },
         sandbox_runtime_mode: "init-container",
+        sandbox_runtime_probed: true,
         sandbox_runtime_ready: true,
         sandbox_runtime_detail: null,
       };
