@@ -327,6 +327,14 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **events:** Run-scoped reads no longer return 500 on the JSONL backend for a
+  run ID it cannot use as a filename. `GET
+  /api/threads/{thread_id}/runs/{run_id}/events`, `.../messages`, and
+  `.../workspace-changes` pass the URL's run ID to the event store unchecked;
+  with `run_events.backend: jsonl` an ID such as `run.1` raised `ValueError`,
+  while the memory and database stores return an empty result. JSONL reads and
+  deletes now treat such an ID as an unknown run; writes still reject it.
+
 - **config:** `make config-upgrade` (also run by `make dev` / `make start`)
   upgrades the `config.yaml` the Gateway loads. With both
   `<checkout>/config.yaml` and `backend/config.yaml` present, the script

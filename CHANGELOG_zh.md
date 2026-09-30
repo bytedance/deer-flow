@@ -332,6 +332,13 @@
 
 ### 修复
 
+- **事件：** 在 JSONL 后端上，按 run 读取时，若 run ID 无法用作文件名，不再返回
+  500。`GET /api/threads/{thread_id}/runs/{run_id}/events`、`.../messages` 与
+  `.../workspace-changes` 会把 URL 中的 run ID 原样传给事件存储；在
+  `run_events.backend: jsonl` 下，`run.1` 这类 ID 会抛出 `ValueError`，而内存与
+  数据库存储返回空结果。现在 JSONL 的读取与删除把这类 ID 视为不存在的 run，写入
+  仍会拒绝它。
+
 - **配置：** `make config-upgrade`（`make dev` / `make start` 也会执行）现在升级的是
   Gateway 实际加载的 `config.yaml`。当 `<checkout>/config.yaml` 与
   `backend/config.yaml` 同时存在时，脚本升级的是 `backend/` 下的副本，而 Gateway
