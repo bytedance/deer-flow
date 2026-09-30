@@ -22,6 +22,7 @@ from langgraph.checkpoint.base import empty_checkpoint, uuid6
 
 import deerflow.utils.llm_text as llm_text
 from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalState
+from deerflow.agents.human_input import read_human_input_response
 from deerflow.models import create_chat_model
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.tracing import inject_langfuse_metadata
@@ -41,6 +42,8 @@ MAX_GOAL_CONVERSATION_MESSAGES = 30
 MAX_GOAL_TOOL_VALUE_CHARS = 200
 MAX_GOAL_TOOL_STEP_CHARS = 600
 MAX_GOAL_REQUEST_CHARS = 2000
+# Evidence line for a user's answer to a Human Input Card; unlike "User: " lines it is not a request.
+GOAL_CARD_ANSWER_PREFIX = "User (Human Input Card answer): "
 
 GOAL_BLOCKERS: set[GoalBlocker] = {
     "none",
@@ -275,9 +278,10 @@ def _cap_evidence(lines: list[str]) -> str:
 
     Over the cap, whole lines are kept from the end, where the latest work is. The latest
     user message among the lines left out is kept at the top, because it states the request
-    that work answers; it is shortened only when it and the lines after it do not fit whole.
-    If the next assistant message back does not fit whole, its end fills the room left. A
-    marker says how many lines were left out, so no line starts midway without a label.
+    that work answers, and so is the latest Human Input Card answer left out. Each is shortened
+    only when it and the lines after it do not fit whole. If the next assistant message back
+    does not fit whole, its end fills the room left. A marker says how many lines were left
+    out. No line starts midway without a label.
     """
     conversation = "\n\n".join(lines)
     if len(conversation) <= MAX_GOAL_CONVERSATION_CHARS:
@@ -291,22 +295,25 @@ def _cap_evidence(lines: list[str]) -> str:
             used += len(lines[index]) + 2
         return index
 
-    # Reserve room for the request first, then give what it does not use back to the tail.
-    start = tail_start(MAX_GOAL_CONVERSATION_CHARS - MAX_GOAL_REQUEST_CHARS - 128, 0)
-    request = next((index for index in range(start - 1, -1, -1) if lines[index].startswith("User: ")), None)
+    prefixes = ["User: "]
+    if any(line.startswith(GOAL_CARD_ANSWER_PREFIX) for line in lines):
+        prefixes.append(GOAL_CARD_ANSWER_PREFIX)
+    # Reserve room for the lines kept at the top first, then give what they do not use back to the tail.
+    start = tail_start(MAX_GOAL_CONVERSATION_CHARS - (MAX_GOAL_REQUEST_CHARS + 64) * len(prefixes) - 64, 0)
+    latest = (next((index for index in range(start - 1, -1, -1) if lines[index].startswith(prefix)), None) for prefix in prefixes)
+    picks = sorted(index for index in latest if index is not None)
     head: list[str] = []
     room = 0
-    if request is not None and tail_start(MAX_GOAL_CONVERSATION_CHARS - 64, request) == request:
-        start = request
+    if picks and tail_start(MAX_GOAL_CONVERSATION_CHARS - 64, picks[0]) == picks[0]:
+        start = picks[0]
     else:
-        if request is not None:
-            head = [_truncate(lines[request], MAX_GOAL_REQUEST_CHARS)]
-        room = MAX_GOAL_CONVERSATION_CHARS - sum(len(line) for line in head) - 64
-        start = tail_start(room, request + 1 if request is not None else 0)
+        head = [_truncate(lines[index], MAX_GOAL_REQUEST_CHARS) for index in picks]
+        room = MAX_GOAL_CONVERSATION_CHARS - sum(len(line) for line in head) - 2 * max(len(head) - 1, 0) - 64
+        start = tail_start(room, picks[-1] + 1 if picks else 0)
         room -= sum(len(line) + 2 for line in lines[start:])
     kept = lines[start:]
     boundary = start - 1
-    if boundary > (request if request is not None else -1) and lines[boundary].startswith("Assistant: ") and room >= 500:
+    if boundary > (picks[-1] if picks else -1) and lines[boundary].startswith("Assistant: ") and room >= 500:
         text = lines[boundary].removeprefix("Assistant: ")
         keep = room - 64
         kept = [f"Assistant: [{len(text) - keep} earlier chars omitted] {text[-keep:]}", *kept]
@@ -324,7 +331,8 @@ def format_visible_conversation(messages: list[Any]) -> str:
     the web UI shows them too, and they are the only evidence of file, command and delivery work.
     Without them the evaluator stood down with ``missing_evidence`` on most completed file tasks.
     As in the web UI, the calls of a hidden assistant message and their results are left out,
-    except a clarification prompt, which the UI shows as its own card.
+    except a clarification prompt, which the UI shows as its own card. The user's answer to such a
+    card is a hidden message too, but the card shows it, so its value is included on its own line.
     """
     visible_positions = [index for index, message in enumerate(messages) if _is_visible_message(message)]
     if not visible_positions:
@@ -342,6 +350,10 @@ def format_visible_conversation(messages: list[Any]) -> str:
                 if call.get("id"):
                     calls[str(call["id"])] = (call.get("name"), hidden)
         if hidden:
+            answer = read_human_input_response(_additional_kwargs(message)) if message_type == "human" else None
+            if answer is not None:
+                # The card shows the answer in the web UI; its question is on the card's own line.
+                lines.append(GOAL_CARD_ANSWER_PREFIX + _truncate(" ".join(answer["value"].split()), MAX_GOAL_REQUEST_CHARS))
             continue
         if message_type in {"human", "ai"}:
             text = message_to_text(message).strip()

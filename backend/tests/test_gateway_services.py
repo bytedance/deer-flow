@@ -2071,6 +2071,28 @@ def test_merge_run_context_overrides_forwards_subagent_total_limit():
     assert config["context"]["max_total_subagents"] == 8
 
 
+def test_null_subagent_total_limit_from_api_context_builds_with_configured_cap():
+    # The Gateway forwards an explicit ``null`` verbatim; the lead agent must
+    # read it as "unset" rather than fail the run while building its stack.
+    from app.gateway.services import build_run_config, merge_run_context_overrides
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.config.subagents_config import SubagentsAppConfig
+
+    app_config = AppConfig(
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        subagents=SubagentsAppConfig(max_total_per_run=7),
+    )
+    config = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(config, {"subagent_enabled": True, "max_total_subagents": None})
+
+    middlewares = build_middlewares(config, model_name=None, app_config=app_config)
+
+    limit = next(m for m in middlewares if isinstance(m, SubagentLimitMiddleware))
+    assert limit.max_total == 7
+
+
 def test_merge_run_context_overrides_noop_for_empty_context():
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
