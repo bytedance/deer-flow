@@ -328,11 +328,41 @@ describe("extractCitationSources", () => {
     ]);
   });
 
+  it("counts a tab after a list marker as columns when it sizes the item", () => {
+    // `-<TAB>` advances to the next four-column stop, so this item's content
+    // starts at column four and the citation two spaces in has left the fence
+    // rather than sitting inside it.
+    const markdown = [
+      "-\t```md",
+      "  [citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
   it("ends a fence when a line drops out of the inner blockquote", () => {
     const markdown = [
       ">> ```md",
       ">> [citation:Fake](https://example.com/fake)",
       "> Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("gives a quoted closer its full three-column budget", () => {
+    // The one optional space after `>` belongs to the block quote marker, not to
+    // the fence, so `>` plus four spaces indents the closer by three columns and
+    // it closes the block.
+    const markdown = [
+      "> ```md",
+      "> [citation:Fake](https://example.com/fake)",
+      ">    ```",
+      "> [citation:Real](https://example.com/real)",
     ].join("\n");
 
     expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
@@ -349,6 +379,23 @@ describe("extractCitationSources", () => {
       "[citation:Fake](https://example.com/fake)",
       "```",
       "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("does not close a fence from list-looking content inside it", () => {
+    // Inside a fenced block `- ``` ` is literal content: a closing fence may
+    // carry indentation and a marker, nothing else. Reading it as a closer leaks
+    // Fake, and the real closer then masks away Real.
+    const markdown = [
+      "```md",
+      "- ```",
+      "[citation:Fake](https://example.com/fake)",
+      "```",
+      "[citation:Real](https://example.com/real)",
     ].join("\n");
 
     expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([

@@ -114,6 +114,10 @@ const FENCE_LINE_RE =
   /^((?:(?:[ \t]*>)|(?:[-+*]|\d{1,9}[.)])[ \t]|[ \t])*)(`{3,}|~{3,})/;
 const BLOCKQUOTE_PREFIX_RE = /^(?:[ \t]*>)+/;
 const LIST_ITEM_RE = /^(?:[-+*]|\d{1,9}[.)])[ \t]+/;
+// A closing fence is indentation and a marker and nothing else, so it cannot
+// reuse FENCE_LINE_RE: that pattern also accepts list markers, which are plain
+// content once a fence is open.
+const FENCE_CLOSER_RE = /^([ \t]*)(`{3,}|~{3,})/;
 
 // Inline spans end at a block boundary, not just at a blank line: see
 // `inlineSpanStarts` for the shapes and the matching scanner in
@@ -126,6 +130,17 @@ const INTERRUPTING_LIST_RE = /^(?:[ \t]*>)*[ \t]{0,3}(?:[-+*]|1[.)])[ \t]+\S/;
 
 const INLINE_CODE_SPAN_RE = /(`+)[\s\S]*?\1/g;
 
+// Column reached by advancing from `column` through `text`, expanding a tab to
+// the next four-column stop the way CommonMark does. Character counts would make
+// `-\t` two columns wide when it really reaches column four.
+function advanceColumns(column: number, text: string): number {
+  let reached = column;
+  for (const char of text) {
+    reached += char === "\t" ? 4 - (reached % 4) : 1;
+  }
+  return reached;
+}
+
 function indentationColumns(text: string): number {
   let column = 0;
   for (const char of text) {
@@ -137,6 +152,22 @@ function indentationColumns(text: string): number {
   return column;
 }
 
+// A line split into the block quotes it sits in and the text inside the
+// innermost one. One optional space or tab after the last `>` is the quote
+// marker's own padding, not indentation, so it is stripped before anything is
+// measured: counting it left a closer at the three-column limit reading as four
+// columns and rejected.
+function quoteContext(line: string): { quoteDepth: number; rest: string } {
+  const quoted = BLOCKQUOTE_PREFIX_RE.exec(line)?.[0];
+  if (!quoted) {
+    return { quoteDepth: 0, rest: line };
+  }
+  return {
+    quoteDepth: quoted.split(">").length - 1,
+    rest: line.slice(quoted.length).replace(/^[ \t]?/, ""),
+  };
+}
+
 // Where a line sits once its blockquote markers are stripped: how deep in the
 // quotes it is, the column its content starts at inside them, and the text after
 // that indentation. A line that loses a `>` has left the blockquote that held
@@ -146,11 +177,10 @@ function linePosition(line: string): {
   indent: number;
   body: string;
 } {
-  const quoted = BLOCKQUOTE_PREFIX_RE.exec(line)?.[0] ?? "";
-  const rest = line.slice(quoted.length);
+  const { quoteDepth, rest } = quoteContext(line);
   const body = rest.replace(/^[ \t]+/, "");
   return {
-    quoteDepth: quoted.split(">").length - 1,
+    quoteDepth,
     indent: indentationColumns(rest.slice(0, rest.length - body.length)),
     body,
   };
@@ -160,9 +190,23 @@ function linePosition(line: string): {
 // blockquote. Container prefixes are part of the offset, so `- ```md` and
 // `  ```md` both read as column two.
 function fenceMarkerColumn(line: string, marker: string): number {
-  const quoted = BLOCKQUOTE_PREFIX_RE.exec(line)?.[0] ?? "";
-  const rest = line.slice(quoted.length);
-  return rest.indexOf(marker);
+  const rest = quoteContext(line).rest;
+  return advanceColumns(0, rest.slice(0, rest.indexOf(marker)));
+}
+
+// The closer a line offers, or null when it is literal content. Only
+// indentation may precede the marker and nothing but whitespace may follow it.
+function closingFence(line: string): { marker: string; column: number } | null {
+  const rest = quoteContext(line).rest;
+  const match = FENCE_CLOSER_RE.exec(rest);
+  if (!match) {
+    return null;
+  }
+  const [, indentation = "", marker = ""] = match;
+  if (marker === "" || rest.slice(match[0].length).trim() !== "") {
+    return null;
+  }
+  return { marker, column: indentationColumns(indentation) };
 }
 
 // What follows a fence marker on its line. Two CommonMark rules live there: a
@@ -205,19 +249,17 @@ function maskFencedCodeBlocks(markdown: string): string {
         fence = null;
       } else {
         lines[i] = maskKeepingNewlines(line);
-        const closer = opener?.[2];
         // A closer is only a closer when nothing but whitespace follows the
         // marker: ` ```text ` inside a ` ``` ` block is literal content, so
         // blanking it as a fence end would let a citation on the following
         // lines surface as a phantom source.
-        const closerTail = opener ? fenceTail(line, opener) : "";
+        const closer = closingFence(line);
         if (
           closer &&
-          closerTail.trim() === "" &&
           position.quoteDepth === fence!.quoteDepth &&
-          fenceMarkerColumn(line, closer) - fence!.column <= 3 &&
-          closer.startsWith(openMarker.charAt(0)) &&
-          closer.length >= openMarker.length
+          closer.column - fence!.column <= 3 &&
+          closer.marker.startsWith(openMarker.charAt(0)) &&
+          closer.marker.length >= openMarker.length
         ) {
           openMarker = null;
           fence = null;
@@ -240,7 +282,10 @@ function maskFencedCodeBlocks(markdown: string): string {
     }
     const item = LIST_ITEM_RE.exec(position.body);
     if (item && position.indent - (items[items.length - 1] ?? 0) <= 3) {
-      items.push(position.indent + item[0].length);
+      // The item's content column is where its marker text ends in columns, not
+      // in characters: `-\t` reaches column four, and reading it as two would
+      // keep a citation two spaces in inside a fence the reader already left.
+      items.push(advanceColumns(position.indent, item[0]));
     }
     // The opener gets the same three-column budget as the closer: four columns
     // past the container's content column is an indented code block, so a marker
