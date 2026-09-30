@@ -78,6 +78,20 @@ class TestNormalizeFilename:
         with pytest.raises(ValueError, match="NUL"):
             normalize_filename("report\x00.pdf")
 
+    @pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-.part", "folder/.upload-notes.part"])
+    def test_rejects_reserved_staging_names(self, filename):
+        with pytest.raises(ValueError, match="reserved upload staging"):
+            normalize_filename(filename)
+
+    @pytest.mark.parametrize("filename", [".upload-notes.txt", "notes.part", ".env"])
+    def test_keeps_non_staging_names(self, filename):
+        assert normalize_filename(filename) == filename
+
+    def test_reserved_name_rejected_before_writing_upload(self, tmp_path):
+        with pytest.raises(ValueError, match="reserved upload staging"):
+            write_upload_file_no_symlink(tmp_path, ".upload-notes.part", b"user document")
+        assert list(tmp_path.iterdir()) == []
+
 
 # ---------------------------------------------------------------------------
 # claim_unique_filename

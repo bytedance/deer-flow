@@ -1870,6 +1870,14 @@ also fails, for example because of a Windows sharing violation.
 Once the file is published, a temporary-file cleanup failure is logged without
 failing the upload; hidden staging files are left for the startup sweep.
 
+Uploaded filenames matching `.upload-*.part` are rejected because that pattern is
+reserved for temporary staging files. Rename such a file before uploading it.
+The SDK validates filenames for the whole batch before copying any files. Project document
+names follow the same restriction; an older shelf document with a reserved name
+remains downloadable but cannot be attached directly. Download it, rename it,
+and upload it to the thread. This change does not recover or migrate older
+thread uploads that already match the staging pattern.
+
 This is the difference between a chatbot with tool access and an agent with an actual execution environment.
 
 ```

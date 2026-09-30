@@ -79,6 +79,7 @@ from deerflow.uploads.manager import (
     ensure_uploads_dir,
     get_uploads_dir,
     list_files_in_dir,
+    normalize_filename,
     upload_artifact_url,
     upload_virtual_path,
 )
@@ -1717,7 +1718,8 @@ class DeerFlowClient:
 
         Raises:
             FileNotFoundError: If any file does not exist.
-            ValueError: If any supplied path exists but is not a regular file.
+            ValueError: If any supplied path exists but is not a regular file,
+                or its filename is unsafe or reserved for upload staging.
         """
         validate_thread_id(thread_id)
         from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
@@ -1732,7 +1734,7 @@ class DeerFlowClient:
                 raise FileNotFoundError(f"File not found: {f}")
             if not p.is_file():
                 raise ValueError(f"Path is not a file: {f}")
-            dest_name = claim_unique_filename(p.name, seen_names)
+            dest_name = claim_unique_filename(normalize_filename(p.name), seen_names)
             resolved_files.append((p, dest_name))
             if not has_convertible_file and p.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                 has_convertible_file = True
