@@ -2196,6 +2196,11 @@ async def _prepare_goal_continuation_input(
 
         if abort_event is not None and abort_event.is_set():
             return None
+    except Exception:
+        logger.warning("Could not prepare goal evaluation for thread %s after run %s", thread_id, run_id, exc_info=True)
+        return None
+
+    try:
         evaluator_model = evaluator_model_factory() if evaluator_model_factory is not None else None
         evaluation = await evaluate_goal_completion(
             goal,
@@ -2209,10 +2214,23 @@ async def _prepare_goal_continuation_input(
             task_store=task_store,
             extensions=extensions,
         )
+    except Exception as exc:
+        logger.warning("Goal evaluator failed for thread %s after run %s", thread_id, run_id, exc_info=True)
         if abort_event is not None and abort_event.is_set():
             return None
-    except Exception:
-        logger.warning("Goal evaluator failed for thread %s after run %s", thread_id, run_id, exc_info=True)
+        # Record the failure like the other stand-downs; otherwise the goal keeps the
+        # previous run's verdict, or none. Only the exception type is stored: a provider's
+        # error message can carry request details, and the traceback is logged above.
+        evaluation = GoalEvaluation(
+            satisfied=False,
+            blocker="run_failed",
+            reason=f"The goal evaluator did not return a verdict ({type(exc).__name__}).",
+            evidence_summary="",
+        )
+        no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+        await _persist(goal, evaluation, no_progress_count, stand_down_reason="evaluator_failed")
+        return None
+    if abort_event is not None and abort_event.is_set():
         return None
 
     no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
