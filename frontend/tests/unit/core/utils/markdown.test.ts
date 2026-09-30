@@ -95,3 +95,26 @@ test("does not report a heading that is only a closing sequence as a title", () 
 test("ignores closing hashes on lines that are not level-one headings", () => {
   expect(extractTitleFromMarkdown("Real Title ###\n\nbody")).toBeUndefined();
 });
+
+test("strips only the terminal closing sequence when several hash runs exist", () => {
+  expect(extractTitleFromMarkdown("# Real ### Title ###")).toBe(
+    "Real ### Title",
+  );
+});
+
+test("keeps a hash run that is followed by text", () => {
+  expect(extractTitleFromMarkdown("# Real Title ###suffix")).toBe(
+    "Real Title ###suffix",
+  );
+});
+
+test("strips the closing sequence with trailing spaces before the CRLF tail", () => {
+  expect(extractTitleFromMarkdown("# Real Title ###  \r\nbody")).toBe(
+    "Real Title",
+  );
+});
+
+test("keeps a long whitespace run followed by text without going quadratic", () => {
+  const title = `Real Title${" ".repeat(100_000)}suffix`;
+  expect(extractTitleFromMarkdown(`# ${title}`)).toBe(title);
+});
