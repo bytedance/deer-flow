@@ -595,7 +595,8 @@ models:
   #   supports_vision: true
   #   supports_thinking: true
   #   # PatchedChatMiniMax is the MiniMax adapter: it enables reasoning_split and
-  #   # maps MiniMax's structured reasoning into reasoning_content (the field
+  #   # maps MiniMax's structured reasoning and reasoning_content into the
+  #   # DeerFlow reasoning_content field (the field
   #   # DeerFlow understands), and it strips the per-message `name` field that
   #   # DeerFlow middlewares attach — MiniMax rejects requests whose user-message
   #   # names differ with "user name must be consistent (2013)". Declare the
@@ -659,7 +660,8 @@ models:
   #   supports_vision: true
   #   supports_thinking: true
   #   # PatchedChatMiniMax is the MiniMax adapter: it enables reasoning_split and
-  #   # maps MiniMax's structured reasoning into reasoning_content (the field
+  #   # maps MiniMax's structured reasoning and reasoning_content into the
+  #   # DeerFlow reasoning_content field (the field
   #   # DeerFlow understands), and it strips the per-message `name` field that
   #   # DeerFlow middlewares attach — MiniMax rejects requests whose user-message
   #   # names differ with "user name must be consistent (2013)". Declare the

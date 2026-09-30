@@ -77,6 +77,30 @@ def test_create_chat_result_maps_reasoning_details_to_reasoning_content():
     assert result.generations[0].text == "最终答案"
 
 
+def test_create_chat_result_maps_reasoning_content_to_reasoning_content():
+    model = _make_model()
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "最终答案",
+                    "reasoning_content": "先分析问题，再给出答案。",
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "model": "MiniMax-M3",
+    }
+
+    result = model._create_chat_result(response)
+    message = result.generations[0].message
+
+    assert message.content == "最终答案"
+    assert message.additional_kwargs["reasoning_content"] == "先分析问题，再给出答案。"
+    assert result.generations[0].text == "最终答案"
+
+
 def test_create_chat_result_strips_inline_think_tags():
     model = _make_model()
     response = {
@@ -140,6 +164,62 @@ def test_convert_chunk_to_generation_chunk_preserves_reasoning_deltas():
                                 "text": " asks.",
                             }
                         ],
+                    }
+                }
+            ]
+        },
+        AIMessageChunk,
+        {},
+    )
+    answer = model._convert_chunk_to_generation_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "content": "最终答案",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "model": "MiniMax-M3",
+        },
+        AIMessageChunk,
+        {},
+    )
+
+    assert first is not None
+    assert second is not None
+    assert answer is not None
+
+    combined = first.message + second.message + answer.message
+
+    assert combined.additional_kwargs["reasoning_content"] == "The user asks."
+    assert combined.content == "最终答案"
+
+
+def test_convert_chunk_to_generation_chunk_preserves_reasoning_content_deltas():
+    model = _make_model()
+    first = model._convert_chunk_to_generation_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "The user",
+                    }
+                }
+            ]
+        },
+        AIMessageChunk,
+        {},
+    )
+    second = model._convert_chunk_to_generation_chunk(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning_content": " asks.",
                     }
                 }
             ]
