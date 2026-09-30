@@ -542,7 +542,7 @@ This release closes that milestone with **301 merged pull requests**.
   `None`, and OpenViking stored sessions under a `None/` directory. A
   value-less `owner_user_id:` is now rejected as empty rather than accepted as
   a user named `None`. Numeric knobs already treated `null` as unset
-  ([#5555]). ([#PRNUM])
+  ([#5555]). ([#6123])
 - **scheduler:** Fixed-hour cron tasks no longer fire twice on the daylight-saving
   fall-back day. `croniter` returns both occurrences of an ambiguous wall-clock
   hour (the first with `fold=0`, the second with `fold=1`). For tasks where
@@ -7561,7 +7561,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
 [#6101]: https://github.com/bytedance/deer-flow/pull/6101
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
-[#PRNUM]: https://github.com/bytedance/deer-flow/pull/PRNUM
+[#6123]: https://github.com/bytedance/deer-flow/pull/6123
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135

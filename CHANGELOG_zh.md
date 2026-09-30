@@ -477,7 +477,7 @@
   Honcho 的工作区前缀会从 `deerflow-u-` 变成 `None`，assistant peer 也叫 `None`，
   mem0 会去读名为 `None` 的环境变量，OpenViking 会把会话存到 `None/` 目录下。
   不带值的 `owner_user_id:` 现在会按空值报错，而不是被当作名为 `None` 的用户。
-  数值配置项此前已把 `null` 视为未设置（[#5555]）。([#PRNUM])
+  数值配置项此前已把 `null` 视为未设置（[#5555]）。([#6123])
 - **调度器：** 固定小时的 cron 任务在夏令时回退（DST fall-back）当天不再重复运行两次。
   `croniter` 会返回模糊本地时间的两个实例（首个为 `fold=0`，第二个为 `fold=1`）。
   对于分和时字段不包含通配符的固定任务，现在会跳过第二个重复实例（`fold=1`），保持每天只运行一次
@@ -6328,7 +6328,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
 [#6101]: https://github.com/bytedance/deer-flow/pull/6101
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
-[#PRNUM]: https://github.com/bytedance/deer-flow/pull/PRNUM
+[#6123]: https://github.com/bytedance/deer-flow/pull/6123
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135
