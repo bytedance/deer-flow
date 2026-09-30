@@ -13,6 +13,8 @@ is documented in `docs/skill-usage-ui.md`.
 Artifact URLs encode raw filesystem paths, preserving literal percent sequences.
 Only Markdown destinations decode once; relative images match decoded names
 against raw artifact paths before encoding.
+File-type detection uses the basename so extensionless `Dockerfile` and
+`Makefile` artifacts remain recognizable under nested or dotted directories.
 
 1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission, and `core/voice-input` can transcribe browser microphone input into that same local draft; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming
 2. Stream events update thread state (messages, artifacts, todos, goal). The main thread stream uses the LangGraph SDK's `throttle: true` mode so updates received in the same macrotask coalesce before React is notified; do not replace it with a numeric delay without validating the SDK's trailing-debounce behavior on a continuous stream.

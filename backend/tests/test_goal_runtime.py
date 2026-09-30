@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.runtime import goal
@@ -221,10 +222,93 @@ def test_format_visible_conversation_keeps_a_clarification_prompt_of_a_hidden_ca
     assert "Assistant tool call: ask_clarification" not in formatted
 
 
+def _card_answer(value: str = "inches", *, list_content: bool = False, **overrides) -> HumanMessage:
+    # The shape chat-page.tsx handleSubmitHumanInput sends for a Human Input Card answer.
+    response = {"version": 1, "kind": "human_input_response", "source": "ask_clarification", "request_id": "req-1", "response_kind": "text", "value": value, **overrides}
+    text = f'For your clarification "Which unit?", my answer is: {response["value"]}'
+    content = [{"type": "text", "text": text}] if list_content else text
+    return HumanMessage(content=content, additional_kwargs={"hide_from_ui": True, "human_input_response": response})
+
+
+def _answered_card_run(answer: HumanMessage) -> list:
+    return [
+        HumanMessage(content="Convert the lengths to metres."),
+        AIMessage(content="", tool_calls=[{"name": "ask_clarification", "args": {"question": "Which unit?"}, "id": "call-ask"}]),
+        ToolMessage(content="Which unit?", tool_call_id="call-ask", name="ask_clarification"),
+        answer,
+        AIMessage(content="", tool_calls=[{"name": "write_file", "args": {"path": "/mnt/user-data/outputs/lengths_m.csv", "content": "part,length_m"}, "id": "call-write"}]),
+        ToolMessage(content="OK", tool_call_id="call-write", name="write_file"),
+        AIMessage(content="Converted from inches."),
+    ]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [_card_answer(), _card_answer(response_kind="option", option_id="in"), _card_answer(list_content=True)],
+    ids=["text", "option", "list-content"],
+)
+def test_format_visible_conversation_includes_the_answer_to_a_human_input_card(answer):
+    formatted = goal.format_visible_conversation(_answered_card_run(answer))
+
+    # The card shows the user's answer in the web UI, so the evaluator sees it once, right after the
+    # question; without it, following the answer read as the assistant guessing.
+    assert formatted.split("\n\n") == [
+        "User: Convert the lengths to metres.",
+        'Assistant tool call: ask_clarification {"question": "Which unit?"}',
+        'Tool result (ask_clarification): "Which unit?"',
+        "User (Human Input Card answer): inches",
+        'Assistant tool call: write_file {"path": "/mnt/user-data/outputs/lengths_m.csv", "content": "part,length_m"}',
+        'Tool result (write_file): "OK"',
+        "Assistant: Converted from inches.",
+    ]
+
+
+@pytest.mark.parametrize(
+    "hidden_message",
+    [
+        _card_answer(kind="something_else"),
+        _card_answer(version=2),
+        _card_answer(source=""),
+        _card_answer(" "),
+        _card_answer(request_id=" "),
+        _card_answer(response_kind="option"),
+        _card_answer(response_kind="choice"),
+        HumanMessage(content="<goal_continuation>keep going</goal_continuation>", additional_kwargs={"hide_from_ui": True}),
+    ],
+    ids=["wrong-kind", "version-2", "no-source", "blank-value", "blank-request-id", "option-without-id", "unknown-response-kind", "goal-continuation"],
+)
+def test_format_visible_conversation_keeps_other_hidden_user_messages_out(hidden_message):
+    formatted = goal.format_visible_conversation(_answered_card_run(hidden_message))
+
+    assert "Human Input Card answer" not in formatted
+    assert "my answer is" not in formatted
+    assert "goal_continuation" not in formatted
+
+
+def test_format_visible_conversation_keeps_the_card_answer_and_the_request_over_the_cap():
+    messages = [
+        HumanMessage(content="Convert the lengths to metres and write a summary chart."),
+        AIMessage(content="", tool_calls=[{"name": "ask_clarification", "args": {"question": "Which unit?"}, "id": "call-ask"}]),
+        ToolMessage(content="Which unit?", tool_call_id="call-ask", name="ask_clarification"),
+        _card_answer(),
+    ]
+    for index in range(20):
+        messages.append(AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"path": f"/mnt/user-data/workspace/part-{index:02d}.csv"}, "id": f"call-{index}"}]))
+        messages.append(ToolMessage(content="z" * 2000, tool_call_id=f"call-{index}", name="read_file"))
+    messages.append(AIMessage(content="Done."))
+
+    lines = _evidence_lines(goal.format_visible_conversation(messages))
+
+    # The answer line is not taken for the request: both are kept at the top, in order.
+    assert lines[:2] == ["User: Convert the lengths to metres and write a summary chart.", "User (Human Input Card answer): inches"]
+    assert lines[2].endswith(" earlier evidence lines omitted]")
+    assert lines[-1] == "Assistant: Done."
+
+
 def _evidence_lines(formatted):
     lines = formatted.split("\n\n")
     assert len(formatted) <= goal.MAX_GOAL_CONVERSATION_CHARS
-    assert all(line.startswith(("User: ", "Assistant: ", "Assistant tool call: ", "Tool result (", "[")) for line in lines)
+    assert all(line.startswith(("User: ", "User (Human Input Card answer): ", "Assistant: ", "Assistant tool call: ", "Tool result (", "[")) for line in lines)
     return lines
 
 
