@@ -328,12 +328,14 @@ This release closes that milestone with **181 merged pull requests**.
 ### Fixed
 
 - **gateway:** A non-ASCII CSRF token, GitHub webhook signature, internal auth
-  token, or OIDC `state` is now rejected with the usual 403/401 instead of a
-  500. `hmac.compare_digest` raises `TypeError` for `str` operands with
-  non-ASCII characters, and Starlette decodes header bytes as latin-1, so a
-  single `0xE9` byte crashed the comparison. The Gateway now compares the UTF-8
-  bytes through one helper, `app.gateway.utils.constant_time_equals`. No bypass
-  was possible; the request was already failing, just with the wrong status.
+  token, OIDC `state`, or provisioner `X-API-Key` is now rejected with the
+  usual 403/401 instead of a 500. `hmac.compare_digest` raises `TypeError` for
+  `str` operands with non-ASCII characters, and Starlette decodes header bytes
+  as latin-1, so a single `0xE9` byte crashed the comparison. The Gateway now
+  compares the UTF-8 bytes through one helper,
+  `app.gateway.utils.constant_time_equals`, and the standalone provisioner
+  encodes inline. No bypass was possible; the request was already failing, just
+  with the wrong status.
 - **agents:** Context-compaction fraction triggers and fraction-based retention
   now use the active run model's context profile; a separate
   `summarization.model_name` remains generation-only. This prevents mismatched
