@@ -31,7 +31,9 @@ from app.gateway.checkpoint_lineage import (
     CheckpointParentMissingError,
     find_checkpoint_before_message,
     find_checkpoint_before_message_chronologically,
+    history_parent_index,
     is_duration_only_checkpoint,
+    parent_from_history_index,
 )
 from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager, get_run_store
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
@@ -223,8 +225,10 @@ async def _find_branch_checkpoint(
     target_message_ids: set[str],
 ) -> Any:
     try:
-        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT):
-            if is_duration_only_checkpoint(snapshot):
+        history = await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT)
+        history_index = history_parent_index(history)
+        for snapshot in history:
+            if is_duration_only_checkpoint(snapshot, parent=parent_from_history_index(snapshot, history_index)):
                 continue
             if _matches_branch_target(_checkpoint_messages(snapshot), target_message_ids):
                 return snapshot
@@ -244,8 +248,10 @@ async def _branch_targets_latest_turn(
 ) -> bool:
     """Return whether the target turn is the final visible turn."""
     try:
-        for snapshot in await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT):
-            if is_duration_only_checkpoint(snapshot):
+        history = await accessor.ahistory(config, limit=_BRANCH_HISTORY_RAW_SCAN_LIMIT)
+        history_index = history_parent_index(history)
+        for snapshot in history:
+            if is_duration_only_checkpoint(snapshot, parent=parent_from_history_index(snapshot, history_index)):
                 continue
             messages = _checkpoint_messages(snapshot)
             if not messages:

@@ -40,7 +40,7 @@ def checkpoint_metadata(checkpoint_tuple: Any) -> dict[str, Any]:
     return dict(metadata) if isinstance(metadata, dict) else {}
 
 
-def is_duration_only_checkpoint(checkpoint_tuple: Any, *, stamp_fallback: bool = True) -> bool:
+def is_duration_only_checkpoint(checkpoint_tuple: Any, *, parent: Any | None = None, stamp_fallback: bool = True) -> bool:
     """Return whether the tuple is a metadata-only run-duration checkpoint.
 
     ``persist_run_history_metadata`` (``deerflow.runtime.runs.worker``) is the
@@ -48,8 +48,9 @@ def is_duration_only_checkpoint(checkpoint_tuple: Any, *, stamp_fallback: bool =
     ``metadata["writes"]["runtime_run_duration"]``, and the memory and SQLite
     savers round-trip that marker unchanged — so whenever ``writes`` is
     present it is authoritative: its per-writer key classifies the leaf
-    exactly (a title leaf carries ``runtime_interrupt_title``, a graph step
-    carries its channel writes, and neither is a duration checkpoint).
+    exactly (a title or goal leaf carries ``runtime_interrupt_title`` /
+    ``goal``, a graph step carries its channel writes, and none of them is a
+    duration checkpoint).
 
     The Postgres savers instead funnel metadata through langgraph's
     ``get_serializable_checkpoint_metadata``, which pops ``writes`` before
@@ -58,28 +59,103 @@ def is_duration_only_checkpoint(checkpoint_tuple: Any, *, stamp_fallback: bool =
     checkpoint would look like an addressable state to the replay and history
     paths. The writer's index keys (``run_durations`` and
     ``run_message_ids``) and ``source == "update"`` do survive that round
-    trip, and the fallback trusts them only while ``writes`` is absent.
+    trip, but they are not proof on their own: ``_ensure_interrupted_title``
+    and ``write_thread_goal`` copy the head's metadata and thereby inherit
+    the stamps while changing a real channel. The fallback therefore also
+    requires the duration writer's shape — it clones the parent's
+    ``channel_versions`` verbatim (``id``/``ts`` only), while a state-changing
+    leaf bumps at least one version — which is what passing ``parent``
+    enables. Without a resolvable parent the stamps are refused: the cost of
+    scanning one metadata-only copy is a state-equivalent base, the cost of
+    skipping a goal leaf is the goal itself.
 
-    Stamps alone are not exact: ``_ensure_interrupted_title`` and
-    ``_rollback_to_pre_run_checkpoint`` copy the head's metadata, so a title
-    or rollback leaf stacked on a stamped head inherits them. The read paths
-    tolerate that because every stamp-bearing leaf either copies its parent's
-    messages verbatim or restores an ancestor's exact message state, so a
-    skipped leaf only ever advances a message-presence scan onto a
-    state-equivalent checkpoint. Destructive callers must not rely on the
-    fallback — pass ``stamp_fallback=False`` and confirm by shape instead,
-    as ``checkpoint_retention._mark_duration_leaves_without_the_marker`` does.
+    Langgraph's ``update_state`` paths (rollback restore, compaction, manual
+    updates) cannot inherit the stamps at all: they persist metadata built
+    from scratch (``{"source": "update", "step", "parents", ...}``), and
+    ``get_checkpoint_metadata`` merges only scalar values from config
+    metadata, so dict-valued stamps never leak in either.
+
+    Destructive callers must not rely on the fallback — pass
+    ``stamp_fallback=False`` and confirm by shape instead, as
+    ``checkpoint_retention._mark_duration_leaves_without_the_marker`` does.
     """
 
     metadata = checkpoint_metadata(checkpoint_tuple)
     writes = metadata.get("writes")
     if isinstance(writes, dict):
         return "runtime_run_duration" in writes
-    if not stamp_fallback:
+    if not stamp_fallback or parent is None:
+        return False
+    if metadata.get("source") != "update":
+        return False
+    if not ("run_durations" in metadata or "run_message_ids" in metadata):
+        return False
+    return _copies_parent_verbatim(checkpoint_tuple, parent)
+
+
+def has_duration_stamps_without_marker(checkpoint_tuple: Any) -> bool:
+    """Whether the tuple reaches the Postgres stamp-fallback tier.
+
+    Reaching the tier makes the tuple a duration-copy *candidate*, not a
+    verdict: title and goal leaves inherit the same stamps. Callers that can
+    resolve the parent tuple pass it to :func:`is_duration_only_checkpoint`
+    for the shape check; this predicate exists so the lineage walk only pays
+    the extra grandparent read when the marker tier could not decide.
+    """
+
+    metadata = checkpoint_metadata(checkpoint_tuple)
+    if isinstance(metadata.get("writes"), dict):
         return False
     if metadata.get("source") != "update":
         return False
     return "run_durations" in metadata or "run_message_ids" in metadata
+
+
+def _copies_parent_verbatim(checkpoint_tuple: Any, parent: Any) -> bool:
+    """Whether the leaf cloned its parent's ``channel_versions`` unchanged.
+
+    Same rule as ``checkpoint_retention``'s shape check: the duration writer
+    replaces only ``id``/``ts``, while any state-changing writer bumps at
+    least one channel version.
+    """
+
+    checkpoint = getattr(checkpoint_tuple, "checkpoint", None) or {}
+    parent_checkpoint = getattr(parent, "checkpoint", None) or {}
+    versions = checkpoint.get("channel_versions") if isinstance(checkpoint, dict) else None
+    parent_versions = parent_checkpoint.get("channel_versions") if isinstance(parent_checkpoint, dict) else None
+    if not isinstance(versions, dict) or not isinstance(parent_versions, dict) or not versions:
+        return False
+    return frozenset(versions.values()) == frozenset(parent_versions.values())
+
+
+def history_parent_index(checkpoints: Sequence[Any]) -> dict[tuple[str, str], Any]:
+    """Index a checkpoint window by ``(namespace, id)`` for parent lookups."""
+
+    index: dict[tuple[str, str], Any] = {}
+    for checkpoint_tuple in checkpoints:
+        configurable = checkpoint_configurable(checkpoint_tuple)
+        checkpoint_id = configurable.get("checkpoint_id")
+        if isinstance(checkpoint_id, str) and checkpoint_id:
+            index[(str(configurable.get("checkpoint_ns") or ""), checkpoint_id)] = checkpoint_tuple
+    return index
+
+
+def parent_from_history_index(checkpoint_tuple: Any, index: dict[tuple[str, str], Any]) -> Any | None:
+    """Resolve the tuple's parent inside an indexed window, or ``None``.
+
+    ``None`` means the parent is outside the window (or the tuple predates
+    parent links); the stamp fallback then refuses to classify, which keeps a
+    goal leaf at the window boundary addressable.
+    """
+
+    parent_config = getattr(checkpoint_tuple, "parent_config", None)
+    if not isinstance(parent_config, dict):
+        return None
+    configurable = parent_config.get("configurable") or {}
+    checkpoint_id = configurable.get("checkpoint_id")
+    if not isinstance(checkpoint_id, str) or not checkpoint_id:
+        return None
+    return index.get((str(configurable.get("checkpoint_ns") or ""), checkpoint_id))
 
 
 def has_pending_tasks(checkpoint_tuple: Any) -> bool:
@@ -163,10 +239,11 @@ async def find_checkpoint_before_message(
     if current_identity is not None:
         visited.add(current_identity)
 
-    # Each step performs one ancestor read, but normal branch/regenerate
-    # histories cross the target boundary within 1–3 reads. Keep max_depth as
-    # a conservative safety cap for valid histories with many intermediate or
-    # duration-only checkpoints.
+    # Each step performs one ancestor read (two for a Postgres stamp
+    # candidate, which needs its grandparent for the shape check), but normal
+    # branch/regenerate histories cross the target boundary within 1–3 reads.
+    # Keep max_depth as a conservative safety cap for valid histories with
+    # many intermediate or duration-only checkpoints.
     for _ in range(max_depth):
         parent_config = getattr(current, "parent_config", None)
         if not isinstance(parent_config, dict):
@@ -182,7 +259,19 @@ async def find_checkpoint_before_message(
                 raise CheckpointLineageIntegrityError("Checkpoint lineage contains a cycle")
             visited.add(parent_identity)
 
-        if is_duration_only_checkpoint(parent):
+        grandparent = None
+        if has_duration_stamps_without_marker(parent):
+            # Postgres popped the marker; the stamps also sit on title and
+            # goal leaves, so confirm the verbatim-copy shape against the
+            # grandparent before skipping. An unresolvable grandparent leaves
+            # the parent addressable, which only ever costs one extra scanned
+            # state-equivalent copy.
+            gp_config = getattr(parent, "parent_config", None)
+            if isinstance(gp_config, dict):
+                candidate = await accessor.aget(gp_config)
+                if _checkpoint_exists(candidate):
+                    grandparent = candidate
+        if is_duration_only_checkpoint(parent, parent=grandparent):
             current = parent
             continue
 
@@ -209,8 +298,9 @@ def find_checkpoint_before_message_chronologically(
     """
 
     previous_checkpoint = None
+    history_index = history_parent_index(checkpoints)
     for checkpoint_tuple in reversed(checkpoints):
-        if is_duration_only_checkpoint(checkpoint_tuple):
+        if is_duration_only_checkpoint(checkpoint_tuple, parent=parent_from_history_index(checkpoint_tuple, history_index)):
             continue
         message_ids = {_message_id(message) for message in checkpoint_messages(checkpoint_tuple)}
         if message_id in message_ids:
