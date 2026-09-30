@@ -10,6 +10,10 @@ view supplied by `ArtifactResolutionMiddleware`. Both modules import
 `ToolRuntime.state`, outside messages and checkpoints. Disabled resolution and
 direct tool graphs retain raw arguments. Skip non-dict sibling arguments before
 reading note fields so malformed calls cannot break valid sibling receipts.
+Reservation and execution share `_note_shape_error` for key, content and source
+structure checks. Skip structurally invalid calls without source lookups during
+reservation; source availability and policy denial remain runtime outcomes whose
+unused slots are recalculated in the next batch.
 
 `history_search` accepts optional `role=user|assistant|tool`, mapped at the tool
 boundary to stored roles `human|ai|tool`; omission/null keeps all roles. Filter

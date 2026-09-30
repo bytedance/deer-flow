@@ -23,7 +23,9 @@ The standard lead-agent builders (including custom-agent bootstrap) and
   750 characters and four source IDs per note. Parallel additions reserve the
   remaining slots for distinct new keys in model tool-call order; repeated keys
   share a slot. Non-dict sibling arguments are ignored during reservation, so
-  malformed calls neither consume slots nor break valid sibling receipts.
+  malformed calls neither consume slots nor break valid sibling receipts. Invalid
+  keys, oversized content, excess source IDs and malformed source IDs also reserve
+  no slot; these structural checks use the same resolved arguments as execution.
   When artifact-handle resolution is enabled, reservations use
   resolved keys, so handles and concrete keys referring to one note share a slot.
   Excess additions return `note_capacity` without evicting existing notes or
@@ -31,7 +33,7 @@ The standard lead-agent builders (including custom-agent bootstrap) and
   be replaced at capacity; empty content deletes a note. Valid writes to the same
   key, including explicit deletions, retain call-order, last-write-wins merging.
   Reservations use the pre-batch notebook snapshot. Slots freed by sibling
-  deletions or left unused by invalid or policy-denied calls are recalculated in
+  deletions or left unused by unavailable-source or policy-denied calls are recalculated in
   the next batch. On a capacity error, replace an existing key or retry after the
   current batch completes. This avoids predicting sibling success or serializing
   other tools. Source IDs establish readability, not semantic support; all notes

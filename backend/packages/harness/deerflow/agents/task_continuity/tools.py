@@ -56,6 +56,15 @@ def _history_read(runtime: Runtime, source_id: str, offset: int = 0) -> str:
     return json.dumps({**row, "text": text[offset : offset + 4000], "next_offset": offset + 4000 if offset + 4000 < len(text) else None, "status": result["status"]}, ensure_ascii=False)
 
 
+def _note_shape_error(key: str, content: str, sources: list[str]) -> str | None:
+    """Share deterministic validation between batch reservation and execution."""
+    if not NOTE_KEY_PATTERN.fullmatch(key) or len(content) > MAX_NOTE_CHARS or len(sources) > MAX_NOTE_SOURCES:
+        return "invalid_note"
+    if any(not isinstance(source_id, str) or not SOURCE_ID_PATTERN.fullmatch(source_id) for source_id in sources):
+        return "invalid_source_id"
+    return None
+
+
 def _has_note_capacity(runtime: Runtime, notes: dict, key: str) -> bool:
     """Reserve new keys from the shared batch snapshot so parallel Commands preserve existing notes."""
     if key in notes:
@@ -77,11 +86,16 @@ def _has_note_capacity(runtime: Runtime, notes: dict, key: str) -> bool:
             continue
         candidate = args.get("key")
         content = args.get("content")
-        if not isinstance(candidate, str) or not NOTE_KEY_PATTERN.fullmatch(candidate) or not isinstance(content, str) or not content:
+        if not isinstance(candidate, str) or not isinstance(content, str) or not content:
+            continue
+        sources = args.get("source_ids")
+        if sources is None:
+            sources = []
+        if not isinstance(sources, list) or _note_shape_error(candidate, content, sources):
             continue
         if candidate not in notes and len(reserved) < available:
             reserved.add(candidate)
-    # Do not borrow slots from sibling deletions or failures: they have not committed and may be denied.
+    # Do not borrow slots from sibling deletions or runtime failures: they have not committed and may be denied.
     return key in reserved
 
 
@@ -90,20 +104,22 @@ def _task_note(runtime: Runtime, key: str, content: str, source_ids: list[str] |
 
     Keep constraints, decisions, failed attempts, verified facts and next steps
     before compaction. Maximum 8 keys, 750 characters each and 4 source IDs.
-    Parallel additions reserve slots in tool-call order; slots freed by sibling deletions or failures are available in the next batch.
+    Parallel additions reserve slots in tool-call order, skipping structurally invalid notes.
+    Slots freed by sibling deletions or runtime failures are available in the next batch.
     On note_capacity, replace an existing key or retry after the current batch completes.
     Notes are model reports, not verified truth or long-term user memory. Cite
     history_search IDs when possible; uncited notes are explicitly self-reported.
     """
     sources = source_ids or []
     notes = normalize_task_notes(runtime.state.get("task_notes"))
-    if not NOTE_KEY_PATTERN.fullmatch(key) or len(content) > MAX_NOTE_CHARS or len(sources) > MAX_NOTE_SOURCES:
-        return json.dumps({"error": "invalid_note", "limits": "key: 40 ASCII letters/digits/_/-, content: 750 chars, sources: 4"})
+    error = _note_shape_error(key, content, sources)
+    if error == "invalid_note":
+        return json.dumps({"error": error, "limits": "key: 40 ASCII letters/digits/_/-, content: 750 chars, sources: 4"})
+    if error:
+        return json.dumps({"error": error})
     if content and not _has_note_capacity(runtime, notes, key):
         return json.dumps({"error": "note_capacity", "hint": "replace an existing key, or retry after this batch; deletions and unused reservations free capacity for the next batch"})
     for source_id in sources:
-        if not SOURCE_ID_PATTERN.fullmatch(source_id):
-            return json.dumps({"error": "invalid_source_id"})
         try:
             result = lookup(runtime.state, runtime, source_id=source_id)
         except ValueError:

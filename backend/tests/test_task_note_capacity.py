@@ -173,19 +173,17 @@ async def test_full_notebook_allows_replace_delete_and_new_key_in_next_batch(asy
         (note_call("invalid", source_ids=["r" + "0" * 32] * 5), "invalid_note"),
     ],
 )
-async def test_failed_sibling_does_not_promise_its_reserved_slot(async_mode, first_call, error):
-    graph = create_agent(NoteModel(calls=[first_call, note_call("new_a")]), tools=[task_note], state_schema=ThreadState)
+@pytest.mark.parametrize("resolve_handles", [False, True], ids=["raw", "resolved"])
+async def test_structurally_invalid_sibling_does_not_reserve_a_slot(async_mode, first_call, error, resolve_handles):
+    middleware = [ArtifactResolutionMiddleware()] if resolve_handles else []
+    graph = create_agent(NoteModel(calls=[first_call, note_call("new_a"), note_call("overflow")]), tools=[task_note], middleware=middleware, state_schema=ThreadState)
     initial = {"messages": [HumanMessage(content="save notes")], "task_notes": notebook(7)}
     state = await graph.ainvoke(initial) if async_mode else graph.invoke(initial)
-    assert set(state["task_notes"]) == set(notebook(7))
+    assert set(state["task_notes"]) == set(notebook(7)) | {"new_a"}
     assert replies(state)["invalid"]["error"] == error
-    assert replies(state)["new_a"]["error"] == "note_capacity"
-    # A new model batch recalculates capacity; failed reservations must not leak into later execution.
-    retry = create_agent(NoteModel(calls=[note_call("new_a")]), tools=[task_note], state_schema=ThreadState)
-    state["messages"].append(HumanMessage(content="retry"))
-    state = await retry.ainvoke(state) if async_mode else retry.invoke(state)
-    assert len(state["task_notes"]) == 8
+    assert replies(state)["overflow"]["error"] == "note_capacity"
     assert replies(state)["new_a"]["status"] == "saved"
+    assert state["task_notes"]["new_a"]["content"] == "new note"
 
 
 @pytest.mark.asyncio
@@ -318,3 +316,51 @@ async def test_malformed_sibling_arguments_preserve_valid_note_receipts(async_mo
     assert state["task_notes"] == notebook(7)
     assert message.tool_calls[0]["args"] == malformed_args
     assert RESOLVED_TOOL_CALL_ARGS_KEY not in state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("field", ["content", "source_ids"])
+async def test_resolved_invalid_note_shape_does_not_reserve_a_slot(async_mode, field):
+    first = note_call("invalid", "art_ab12cd34") if field == "content" else note_call("invalid", source_ids=["art_ab12cd34"])
+    graph = create_agent(NoteModel(calls=[first, note_call("new_a")]), tools=[task_note], middleware=[ArtifactResolutionMiddleware()], state_schema=ThreadState)
+    initial = {
+        "messages": [HumanMessage(content="save notes")],
+        "task_notes": notebook(7),
+        "tool_artifacts": [{"handle": "art_ab12cd34", "artifact_type": "task", "real_ref": "x" * 751 if field == "content" else "not-a-source"}],
+    }
+    state = await graph.ainvoke(initial) if async_mode else graph.invoke(initial)
+    assert replies(state)["invalid"]["error"] == ("invalid_note" if field == "content" else "invalid_source_id")
+    assert replies(state)["new_a"]["status"] == "saved"
+    assert set(state["task_notes"]) == set(notebook(7)) | {"new_a"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("source_ids", [None, []])
+async def test_maximum_length_note_still_reserves_a_slot(async_mode, source_ids):
+    graph = create_agent(NoteModel(calls=[note_call("new_a", "x" * 750, source_ids=source_ids), note_call("overflow")]), tools=[task_note], state_schema=ThreadState)
+    initial = {"messages": [HumanMessage(content="save notes")], "task_notes": notebook(7)}
+    state = await graph.ainvoke(initial) if async_mode else graph.invoke(initial)
+    assert replies(state)["new_a"]["status"] == "saved"
+    assert state["task_notes"]["new_a"]["content"] == "x" * 750
+    assert replies(state)["overflow"]["error"] == "note_capacity"
+    assert set(state["task_notes"]) == set(notebook(7)) | {"new_a"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+async def test_unavailable_sources_keep_reservation_until_next_batch(async_mode):
+    calls = [note_call("unavailable", source_ids=["r" + "0" * 32] * 4), note_call("new_a")]
+    graph = create_agent(NoteModel(calls=calls), tools=[task_note], state_schema=ThreadState)
+    config = {"configurable": {"thread_id": "unavailable-source"}}
+    initial = {"messages": [HumanMessage(content="save notes")], "task_notes": notebook(7)}
+    state = await graph.ainvoke(initial, config) if async_mode else graph.invoke(initial, config)
+    assert replies(state)["unavailable"]["error"] == "source_unavailable"
+    assert replies(state)["new_a"]["error"] == "note_capacity"
+    assert set(state["task_notes"]) == set(notebook(7))
+    retry = create_agent(NoteModel(calls=[note_call("new_a", call_id="retry")]), tools=[task_note], state_schema=ThreadState)
+    state["messages"].append(HumanMessage(content="retry"))
+    state = await retry.ainvoke(state, config) if async_mode else retry.invoke(state, config)
+    assert replies(state)["retry"]["status"] == "saved"
+    assert set(state["task_notes"]) == set(notebook(7)) | {"new_a"}

@@ -1942,8 +1942,10 @@ A task can retain up to eight notes. Parallel additions beyond the remaining slo
 `note_capacity`, preserving existing notes. When artifact-handle resolution is enabled,
 capacity counts resolved keys; aliases for the same note share one slot.
 Malformed non-dict sibling arguments do not consume slots or disrupt valid note calls.
-Existing keys can still be replaced or deleted. Slots freed by sibling deletions or failed
-calls become available in the next batch, when rejected additions can be retried.
+Notes with invalid keys, content over 750 characters, more than four sources, or malformed
+source IDs also reserve no slot. Existing keys can still be replaced or deleted. Slots freed
+by sibling deletions or runtime failures (such as unavailable sources or policy denial)
+become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
 
