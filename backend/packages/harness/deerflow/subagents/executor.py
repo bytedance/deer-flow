@@ -268,10 +268,11 @@ class SubagentResult:
             return True
 
 
-def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
+def _extract_final_result(final_state: Any, *, trace_id: str, name: str, return_direct_tools: set[str] | None = None) -> str:
     """Extract a human-readable result string from the streamed subagent state.
 
-    Finds the last ``AIMessage`` in the conversation and stringifies its
+    Uses the matched tool results when the last assistant turn consists only
+    of direct-return tools. Otherwise finds the last ``AIMessage`` and stringifies its
     content via the shared :func:`message_content_to_text` helper; falls back
     to the last message of any type when no AIMessage is present. Returns a
     sentinel string (``"No response generated"``) when there is nothing to
@@ -291,9 +292,21 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
     logger.info(f"[trace={trace_id}] Subagent {name} final messages count: {len(messages)}")
 
     last_ai_message = None
-    for msg in reversed(messages):
+    for index in range(len(messages) - 1, -1, -1):
+        msg = messages[index]
         if isinstance(msg, AIMessage):
             last_ai_message = msg
+            calls = msg.tool_calls
+            if calls and return_direct_tools and all(call["name"] in return_direct_tools for call in calls):
+                # LangChain ends after this tool batch without another model
+                # reply. The assistant text is only a preamble, not its result.
+                # Match this turn's call IDs; older/unrelated results cannot
+                # complete an unanswered call. Preserve call order even if
+                # tool results arrive in a different order.
+                results = {message.tool_call_id: message for message in messages[index + 1 :] if isinstance(message, ToolMessage)}
+                if all(call["id"] in results for call in calls):
+                    texts = [message_content_to_text(results[call["id"]].content) for call in calls]
+                    return "\n\n".join(text for text in texts if text) or "No response generated"
             break
 
     if last_ai_message is not None:
@@ -1709,7 +1722,12 @@ class SubagentExecutor:
                     tool_receipts=terminal_receipts(),
                 )
             else:
-                final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
+                final_result = _extract_final_result(
+                    final_state,
+                    trace_id=self.trace_id,
+                    name=self.config.name,
+                    return_direct_tools={tool.name for tool in final_tools if tool.return_direct},
+                )
                 # A guard hard-stop (token budget or loop detection) does not raise
                 # — it strips tool_calls so the run completes with a final answer.
                 # ``consume_stop_reason`` on each guard tells us whether that

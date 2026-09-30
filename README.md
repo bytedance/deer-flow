@@ -1618,6 +1618,8 @@ The chat header also shows a context-window gauge when the selected model has a 
 
 ### Sub-Agents
 
+When a sub-agent ends with `return_direct=True` tools, their outputs are returned to the caller in tool-call order, without requiring another model reply.
+
 Ordinary `task` calls accept `context_mode="isolated"` (default) or
 `context_mode="snapshot"`. Isolated tasks receive their delegated prompt as
 before. Snapshot tasks also receive the parent's retained conversation and
