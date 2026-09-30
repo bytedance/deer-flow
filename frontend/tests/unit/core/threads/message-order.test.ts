@@ -6,6 +6,7 @@ import {
   buildVisibleHistoryMessages,
   mergeRenderedMessageLedger,
   mergeMessages,
+  reconcileThreadHistoryRows,
   resolveThreadTransientHistoryBridge,
   resolveTransientHistoryBridge,
 } from "@/core/threads/hooks";
@@ -543,3 +544,43 @@ test.each(["before", "after"] as const)(
     expect(idsOf(mergeMessages(resolved, [], []))).toEqual(idsOf(previous));
   },
 );
+
+test("reconcile anchors a re-persisted message at its earliest seq", () => {
+  // Same run, same message id, re-persisted under a later journal seq while
+  // the older row only survives in the retained snapshot.
+  const previousRows = [row("r1", 95, msg("m1", "ai", "partial"))];
+  const currentRows = [row("r1", 130, msg("m1", "ai", "final"))];
+
+  const reconciled = reconcileThreadHistoryRows(
+    previousRows,
+    currentRows,
+    false,
+  );
+
+  expect(reconciled).toHaveLength(1);
+  // earliest-seq-wins: the re-persisted update must not push the message
+  // towards the tail of the thread.
+  expect(reconciled[0]!.seq).toBe(95);
+  // content converges to the newest copy.
+  expect(reconciled[0]!.content).toBe(currentRows[0]!.content);
+
+  const visible = buildVisibleHistoryMessages(reconciled, new Set());
+  expect(visible).toHaveLength(1);
+  expect(visible[0]!.additional_kwargs?.[MESSAGE_SEQ_KEY]).toBe(95);
+  expect(visible[0]!.content).toBe("final");
+});
+
+test("reconcile still converges content for same-seq refreshed copies", () => {
+  const previousRows = [row("r1", 95, msg("m1", "ai", "partial"))];
+  const currentRows = [row("r1", 95, msg("m1", "ai", "final"))];
+
+  const reconciled = reconcileThreadHistoryRows(
+    previousRows,
+    currentRows,
+    false,
+  );
+
+  expect(reconciled).toHaveLength(1);
+  expect(reconciled[0]!.seq).toBe(95);
+  expect(reconciled[0]!.content).toBe(currentRows[0]!.content);
+});
