@@ -184,6 +184,8 @@ class ModelConfig(BaseModel):
     )
     stream_chunk_timeout: float | None = Field(
         default=None,
+        gt=0,
+        allow_inf_nan=False,
         description=(
             "Maximum seconds to wait between successive streaming chunks before "
             "langchain-openai raises StreamChunkTimeoutError. None means use the "
@@ -192,6 +194,14 @@ class ModelConfig(BaseModel):
             "interactive endpoints. Has no effect on non-OpenAI-compatible providers."
         ),
     )
+
+    @field_validator("stream_chunk_timeout", "context_window", mode="before")
+    @classmethod
+    def _reject_boolean_numeric_settings(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be a number, not a boolean")
+        return value
+
     thinking: dict | None = Field(
         default_factory=lambda: None,
         description=(

@@ -381,7 +381,7 @@ class DeerFlowClient:
             model_name = self._app_config.models[0].name
         model_name = _authorize_model_name(model_name, context=cfg, app_config=self._app_config)
         subagent_enabled = cfg.get("subagent_enabled", False)
-        from deerflow.config.subagents_config import effective_subagent_concurrency
+        from deerflow.config.subagents_config import effective_subagent_concurrency, effective_total_subagents_per_run
 
         # Lightweight integrations and older tests may construct a client via
         # ``__new__`` and inject only ``_app_config``. Production clients keep
@@ -397,7 +397,7 @@ class DeerFlowClient:
             self._app_config,
             execution_capacity=subagent_execution_capacity,
         )
-        max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
+        max_total_subagents = effective_total_subagents_per_run(cfg.get("max_total_subagents"), self._app_config)
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins)
 

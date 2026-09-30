@@ -1516,6 +1516,21 @@ class TestResolveSandbox:
         req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "sb-1"}}))
         assert mod._resolve_sandbox(req) is sb
 
+    def test_returns_sandbox_from_provider_when_overwrite_wrapped(self, monkeypatch):
+        from langgraph.types import Overwrite
+
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
+        )
+        # Fork-restored state delivers sandbox wrapped in Overwrite
+        req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": Overwrite({"sandbox_id": "sb-fork"})}))
+        assert mod._resolve_sandbox(req) is sb
+
     def test_returns_none_on_provider_exception(self, monkeypatch):
         from deerflow.agents.middlewares import tool_output_budget_middleware as mod
 

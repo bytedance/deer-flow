@@ -2053,6 +2053,17 @@ _CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
 # this is corrupt and must not bloat every sandbox command string.
 _CHANNEL_USER_ID_MAX_LEN = 256
 
+# Fixed env var exposing the authenticated DeerFlow user id to sandbox
+# commands, so skill scripts and the subprocesses they launch can scope their
+# work to the current user instead of guessing or hard-coding (#3919). An
+# identifier, not a secret.
+USER_ID_ENV = "DEERFLOW_USER_ID"
+
+# Same defensive bound as the channel identity: a real user id is short
+# (``make_safe_user_id`` output), so anything past this is corrupt and must not
+# bloat every sandbox command string.
+_USER_ID_MAX_LEN = 256
+
 
 def _is_windows() -> bool:
     return os.name == "nt"
@@ -2087,6 +2098,58 @@ def _channel_identity_prefix(runtime: Runtime) -> str | None:
     if isinstance(channel_user_id, str) and 0 < len(channel_user_id) <= _CHANNEL_USER_ID_MAX_LEN:
         return f"export {CHANNEL_USER_ID_ENV}={shlex.quote(channel_user_id)}; "
     return f"unset {CHANNEL_USER_ID_ENV}; "
+
+
+def _resolved_user_id(runtime: Runtime) -> str | None:
+    """Return the effective user id when it is publishable, else ``None``.
+
+    ``resolve_runtime_user_id`` is the authorization-grade source (see its
+    docstring): server-owned for external callers, channel-authenticated for
+    internal ones. The guards are the same defensive bound the channel identity
+    uses — a real id is short (``make_safe_user_id`` output), so an empty /
+    non-str / over-cap value is corrupt and must not reach a command.
+    """
+    user_id = resolve_runtime_user_id(runtime)
+    if isinstance(user_id, str) and 0 < len(user_id) <= _USER_ID_MAX_LEN:
+        return user_id
+    return None
+
+
+def _user_identity_prefix(runtime: Runtime) -> str:
+    """Build the command prefix that publishes the effective user id to bash.
+
+    Unlike :func:`_channel_identity_prefix`, this always returns a prefix.
+    ``resolve_runtime_user_id`` falls back to ``DEFAULT_USER_ID``, so there is
+    no "not applicable" run: every command is attributable to a user. Stating
+    the value on every command is also what keeps a skill script correct
+    regardless of what an earlier command exported into a reused shell session
+    — the same per-call discipline the channel identity needs.
+
+    - usable id (non-empty str within the length cap) → ``export VAR=<quoted>; ``
+    - unusable id (empty / non-str / over the cap) → ``unset VAR; ``
+
+    The id deliberately rides the command string instead of the
+    ``execute_command(env=...)`` channel: a non-empty ``env`` switches
+    ``AioSandbox`` to the ``bash.exec`` API (fresh session per call, image
+    >= 1.9.3 required), which is reserved for request-scoped secrets. The value
+    is an identifier, not a secret, so keeping it in the audit-visible command
+    string is fine.
+
+    **Informational, not authenticated identity.** The exported shell variable
+    is a convenience for skill scripts — exactly like
+    ``DEERFLOW_CHANNEL_USER_ID`` — not a credential and not proof of who is
+    acting. Any bash command can overwrite its own environment, and anything the
+    command sources or launches (a dependency, a sourced rc file on the
+    host-bash path) can silently re-export a different id before a skill's
+    scoping logic reads it; only the outer prefix on the *next* ``bash_tool``
+    call re-asserts the true value. Skills that need user-scoped *authorization*
+    must resolve the identity server-side via ``resolve_runtime_user_id`` rather
+    than trusting this variable.
+    """
+    user_id = _resolved_user_id(runtime)
+    if user_id is not None:
+        return f"export {USER_ID_ENV}={shlex.quote(user_id)}; "
+    return f"unset {USER_ID_ENV}; "
 
 
 def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
@@ -2194,6 +2257,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         # never placed in the command string.
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         identity_prefix = _channel_identity_prefix(runtime)
+        user_prefix = _user_identity_prefix(runtime)
         github_env = _github_env_from_runtime(runtime)
         lark_cli_env = _lark_cli_env_from_runtime(runtime, command, sandbox_paths=not is_local_sandbox(runtime))
         if github_env:
@@ -2209,9 +2273,20 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via
-            # PowerShell/cmd.exe where `export` is not valid syntax.
-            if identity_prefix and not _is_windows():
-                command = identity_prefix + command
+            # PowerShell/cmd.exe where `export` is not valid syntax, so the id
+            # is published through the subprocess environment instead —
+            # LocalSandbox layers `env` into the per-process environment, and
+            # unlike AioSandbox it has no persistent shell session that could
+            # carry a stale value forward. Deliberately kept out of
+            # `injected_env`, which doubles as the secret-redaction set: an
+            # identifier is not a secret and must stay readable in output.
+            local_env = injected_env
+            if not _is_windows():
+                command = user_prefix + (identity_prefix or "") + command
+            else:
+                windows_user_id = _resolved_user_id(runtime)
+                if windows_user_id is not None:
+                    local_env = {**(injected_env or {}), USER_ID_ENV: windows_user_id}
             try:
                 from deerflow.config.app_config import get_app_config
 
@@ -2225,7 +2300,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
                 sandbox,
                 command,
                 runtime=runtime,
-                env=injected_env,
+                env=local_env,
                 timeout=command_timeout,
             )
             return _truncate_bash_output(
@@ -2234,8 +2309,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             )
         ensure_thread_directories_exist(runtime)
         command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
-        if identity_prefix:
-            command = identity_prefix + command
+        command = user_prefix + (identity_prefix or "") + command
         try:
             from deerflow.config.app_config import get_app_config
 

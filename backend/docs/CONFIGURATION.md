@@ -109,7 +109,7 @@ Run `make config-upgrade` to merge new fields into your config.
 ```
 
 - **Missing `config_version`** in your config is treated as version 0.
-- Run `make config-upgrade` to auto-merge missing fields (your existing values are preserved, a `.bak` backup is created).
+- Run `make config-upgrade` to auto-merge missing fields (your existing values are preserved, a `.bak` backup is created). It upgrades the file the Gateway loads, resolved as in [Configuration Priority](#configuration-priority).
 - When changing the config schema, bump `config_version` in `config.example.yaml`.
 
 ## Configuration Sections

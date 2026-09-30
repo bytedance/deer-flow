@@ -279,7 +279,9 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
                 return thread_id
         state = request.state
         if isinstance(state, dict):
-            sandbox_state = state.get("sandbox")
+            from deerflow.sandbox.overwrite import unwrap_sandbox
+
+            sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
             if isinstance(sandbox_state, dict):
                 sandbox_id = sandbox_state.get("sandbox_id")
                 if isinstance(sandbox_id, str) and sandbox_id:
