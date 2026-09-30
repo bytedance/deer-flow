@@ -44,11 +44,11 @@ cd "$REPO_ROOT"
 
 ENV_FILE="$REPO_ROOT/.env"
 DOCKER_DIR="$REPO_ROOT/docker"
+COMPOSE_ENV_FILE_ARGS=()
 if [ -f "$ENV_FILE" ]; then
-    COMPOSE_CMD=(docker compose --env-file "$ENV_FILE" -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
-else
-    COMPOSE_CMD=(docker compose -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
+    COMPOSE_ENV_FILE_ARGS=(--env-file "$ENV_FILE")
 fi
+COMPOSE_CMD=(docker compose "${COMPOSE_ENV_FILE_ARGS[@]}" -p deer-flow -f "$DOCKER_DIR/docker-compose.yaml")
 
 load_uv_extras_from_dotenv() {
     local line=""
@@ -167,12 +167,50 @@ else
 fi
 
 
+# Compose interpolates ${BETTER_AUTH_SECRET} and ${DEER_FLOW_INTERNAL_AUTH_TOKEN}
+# from the shell environment first and --env-file second. A secret the operator
+# wrote to $ENV_FILE therefore only reaches the stack while this script does not
+# export a competing value: generating or reloading one here would silently
+# replace it. Leave a dotenv-provided secret unexported so compose parses it
+# from $ENV_FILE itself, and only fall back to the persisted/generated one
+# when neither the shell nor $ENV_FILE provides it.
+#
+# "Provided" has to mean what Compose will see, not what a KEY=VALUE grep
+# finds: Compose also accepts `KEY: VALUE` lines and interpolates `${VAR}`
+# inside values, so `TOKEN: abc` is set and `TOKEN=${UNSET}` is empty. Ask
+# Compose itself: render a stub project whose only environment entry is
+# `${KEY}`, with the same --env-file and project directory as the real
+# command, and read the interpolated value back. This works on every Compose
+# v2 (unlike `config --environment`, which needs 2.28), needs no daemon, and
+# cannot fail on the real compose file before the secrets are decided. An
+# empty or unset variable renders as `""`.
+compose_interpolated_value() {
+    local key="$1"
+    local rendered=""
+    if ! rendered="$(printf 'services:\n  probe:\n    image: scratch\n    environment:\n      DEER_FLOW_PROBE_VALUE: ${%s}\n' "$key" \
+        | docker compose "${COMPOSE_ENV_FILE_ARGS[@]}" --project-directory "$DOCKER_DIR" -f - config 2>&1)"; then
+        echo -e "${RED}✗ docker compose could not resolve $key from the environment and $ENV_FILE:${NC}" >&2
+        printf '%s\n' "$rendered" >&2
+        exit 1
+    fi
+    printf '%s\n' "$rendered" | sed -n 's/^[[:space:]]*DEER_FLOW_PROBE_VALUE: //p' | head -n 1
+}
+
+dotenv_provides_secret() {
+    local value=""
+    # The probe runs in a subshell, so its exit 1 must be re-raised here.
+    value="$(compose_interpolated_value "$1")" || exit 1
+    [ -n "$value" ] && [ "$value" != '""' ]
+}
+
 # ── BETTER_AUTH_SECRET ───────────────────────────────────────────────────────
 # Required by Next.js in production. Generated once and persisted so auth
 # sessions survive container restarts.
 
 _secret_file="$DEER_FLOW_HOME/.better-auth-secret"
-if [ -z "$BETTER_AUTH_SECRET" ]; then
+if [ -z "$BETTER_AUTH_SECRET" ] && dotenv_provides_secret BETTER_AUTH_SECRET; then
+    echo -e "${GREEN}✓ BETTER_AUTH_SECRET loaded from $ENV_FILE${NC}"
+elif [ -z "$BETTER_AUTH_SECRET" ]; then
     if [ -f "$_secret_file" ]; then
         export BETTER_AUTH_SECRET
         BETTER_AUTH_SECRET="$(cat "$_secret_file")"
@@ -204,7 +242,9 @@ fi
 # APIs even when the request is handled by a different Uvicorn worker.
 
 _internal_auth_token_file="$DEER_FLOW_HOME/.internal-auth-token"
-if  [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
+if [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ] && dotenv_provides_secret DEER_FLOW_INTERNAL_AUTH_TOKEN; then
+    echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN loaded from $ENV_FILE${NC}"
+elif [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
     if [ -f "$_internal_auth_token_file" ]; then
         export DEER_FLOW_INTERNAL_AUTH_TOKEN
         DEER_FLOW_INTERNAL_AUTH_TOKEN="$(cat "$_internal_auth_token_file")"
@@ -367,17 +407,29 @@ fi
 # appended here, so the default (local) and provisioner modes never expose the
 # host daemon. Mounting the socket = root-equivalent host control; see SECURITY.md.
 
-if [ -z "$DEER_FLOW_DOCKER_SOCKET" ]; then
-    export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
-fi
+docker_socket="$(read_dotenv_value DEER_FLOW_DOCKER_SOCKET)"
+docker_socket="${docker_socket:-/var/run/docker.sock}"
 
 if [ "$sandbox_mode" = "aio" ]; then
-    if [ ! -S "$DEER_FLOW_DOCKER_SOCKET" ]; then
-        echo -e "${RED}⚠ Docker socket not found at $DEER_FLOW_DOCKER_SOCKET${NC}"
-        echo "  AioSandboxProvider (DooD) will not work."
-        exit 1
+    if [ ! -S "$docker_socket" ]; then
+        # On Windows (Git Bash / MSYS), Docker Desktop mounts the default
+        # /var/run/docker.sock into containers even though no host socket file exists.
+        if [ "$docker_socket" = "/var/run/docker.sock" ] && [[ "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]] && docker info >/dev/null 2>&1; then
+            :
+        else
+            echo -e "${RED}⚠ Docker socket not found at $docker_socket${NC}"
+            echo "  AioSandboxProvider (DooD) will not work."
+            exit 1
+        fi
     fi
-    echo -e "${GREEN}✓ Docker socket: $DEER_FLOW_DOCKER_SOCKET${NC}"
+    # On Windows (Git Bash / MSYS), exporting /var/run/docker.sock causes MSYS to
+    # convert it to C:\Program Files\Git\var\run\docker.sock when invoking native
+    # docker compose, triggering mkdir errors. Unsetting the default allows Compose
+    # to evaluate its own default literal fallback (${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}).
+    if [[ "$(uname -s)" =~ ^(MINGW|MSYS|CYGWIN) ]] && [ "$DEER_FLOW_DOCKER_SOCKET" = "/var/run/docker.sock" ]; then
+        unset DEER_FLOW_DOCKER_SOCKET
+    fi
+    echo -e "${GREEN}✓ Docker socket: $docker_socket${NC}"
     echo -e "${YELLOW}  Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
     COMPOSE_CMD+=(-f "$DOCKER_DIR/docker-compose.dood.yaml")
 fi

@@ -6,6 +6,8 @@ import logging
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths
+from deerflow.mcp.context_headers import build_context_headers_interceptor
 from deerflow.mcp.oauth import build_oauth_tool_interceptor
 from deerflow.mcp.user_scoped_auth import build_user_scoped_auth_interceptor
 from deerflow.reflection import resolve_variable
@@ -18,10 +20,11 @@ def build_mcp_tool_interceptors(
     *,
     oauth_builder: Any = build_oauth_tool_interceptor,
     user_auth_builder: Any = build_user_scoped_auth_interceptor,
+    context_headers_builder: Any = build_context_headers_interceptor,
     resolver: Any = resolve_variable,
     target_logger: logging.Logger = logger,
 ) -> list[Any]:
-    """Build OAuth, user-scoped auth, then configured custom MCP interceptors."""
+    """Build OAuth, user-scoped auth, context headers, then custom MCP interceptors."""
     interceptors: list[Any] = []
     oauth_interceptor = oauth_builder(extensions_config)
     if oauth_interceptor is not None:
@@ -34,16 +37,21 @@ def build_mcp_tool_interceptors(
     if user_auth_interceptor is not None:
         interceptors.append(user_auth_interceptor)
 
-    raw_paths = (extensions_config.model_extra or {}).get("mcpInterceptors")
-    if isinstance(raw_paths, str):
-        raw_paths = [raw_paths]
-    elif not isinstance(raw_paths, list):
-        if raw_paths is not None:
-            target_logger.warning(
-                "mcpInterceptors must be a list of strings, got %s; skipping",
-                type(raw_paths).__name__,
-            )
-        raw_paths = []
+    # Last of the built-ins, by the same rule: a credential the caller chose for
+    # this one request is more specific than a configured per-user or per-server
+    # credential, so it must win the final header value for a server declaring
+    # more than one source.
+    context_headers_interceptor = context_headers_builder(extensions_config)
+    if context_headers_interceptor is not None:
+        interceptors.append(context_headers_interceptor)
+
+    raw_value = (extensions_config.model_extra or {}).get("mcpInterceptors")
+    if raw_value is not None and not isinstance(raw_value, (str, list)):
+        target_logger.warning(
+            "mcpInterceptors must be a list of strings, got %s; skipping",
+            type(raw_value).__name__,
+        )
+    raw_paths = normalize_mcp_interceptor_paths(raw_value)
 
     for interceptor_path in raw_paths:
         try:

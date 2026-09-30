@@ -8,10 +8,14 @@ transport, search parsing, path guards, and terminal-session eviction.
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import logging
+import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -135,20 +139,27 @@ class _FakeCommands:
             return _execution(exit_code=9)
         if command == "missing-complete":
             return _execution(stderr=("stream ended",), exit_code=None)
-        if command.startswith("find "):
+        if "__DF_SEARCH_STATUS__:" in command:
+            return self._search(command)
+        if command.startswith("find ") or "find -H " in command:
             return self._find(command)
         if command.startswith(("grep ", "{ grep ")):
             return self._grep(command)
         return _execution()
 
     def _find(self, command: str) -> _Execution:
-        tokens = shlex.split(command)
-        root = tokens[1].rstrip("/") or "/"
-        include_dirs = "d" in tokens
+        match = re.search(r"(?:^|[\s;{])find(?:\s+-[HLP])*\s+(\S+)", command)
+        root = (match.group(1).strip("'\"") if match else "").rstrip("/") or "/"
+        include_dirs = "-type d" in command
         paths = list(self._owner.file_data)
         if include_dirs:
             paths.extend(self._owner.directories)
         matches = sorted(path for path in set(paths) if path == root or path.startswith(f"{root}/"))
+        if "__DF_FIND_STATUS__:" in command:
+            status = 0 if matches else 1
+            marker = "__DF_FIND_STATUS__:0" if matches else "__DF_FIND_STATUS__:missing"
+            stdout = (*matches, "", marker) if matches else ("", marker)
+            return _execution(stdout=stdout, exit_code=status)
         return _execution(stdout=tuple(matches))
 
     def _grep(self, command: str) -> _Execution:
@@ -168,6 +179,20 @@ class _FakeCommands:
         if self._owner.grep_duplicate_rows:
             rows.extend(rows)
         return _execution(stdout=tuple(rows))
+
+    def _search(self, command: str) -> _Execution:
+        # remote_search_command: a root-existence check, then the wrapped search and its status marker.
+        root = shlex.split(re.search(r"\[ ! -e (.+?) \]; then", command).group(1))[0].rstrip("/") or "/"
+        paths = set(self._owner.file_data) | set(self._owner.directories)
+        if not any(path == root or path.startswith(f"{root}/") for path in paths):
+            return _execution(stdout=("__DF_SEARCH_STATUS__:missing",))
+        inner = command[command.index("{ ") + 2 : command.index('; echo $? > "$_st"; }')]
+        if inner.startswith("find "):
+            rows, status = [message.text for message in self._find(inner).logs.stdout], 0
+        else:
+            rows = [message.text for message in self._grep(inner).logs.stdout]
+            status = 0 if rows else 1
+        return _execution(stdout=(*rows, "", f"__DF_SEARCH_STATUS__:{status}"))
 
 
 class _FakeRemote:
@@ -361,6 +386,27 @@ def test_null_sandbox_timeout_uses_default(monkeypatch: pytest.MonkeyPatch) -> N
     provider.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("config_key", "value", "message"),
+    [
+        ("request_timeout", float("nan"), "sandbox.request_timeout must be positive"),
+        ("request_timeout", float("inf"), "sandbox.request_timeout must be positive"),
+        ("ready_timeout", float("nan"), "sandbox.ready_timeout must be positive"),
+        ("ready_timeout", float("inf"), "sandbox.ready_timeout must be positive"),
+        ("sandbox_timeout", float("nan"), "sandbox.sandbox_timeout must be non-negative"),
+        ("sandbox_timeout", float("inf"), "sandbox.sandbox_timeout must be non-negative"),
+    ],
+)
+def test_provider_rejects_non_finite_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+    config_key: str,
+    value: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _install(monkeypatch, config={config_key: value})
+
+
 @pytest.mark.parametrize("exit_code", [17, None])
 def test_bootstrap_failure_destroys_created_remote(monkeypatch: pytest.MonkeyPatch, exit_code: int | None) -> None:
     sdk = _FakeSandboxClass(lambda index: _FakeRemote(f"remote-{index}", bootstrap_exit_code=exit_code))
@@ -463,7 +509,9 @@ def test_shutdown_stops_idle_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_execute_forwards_env_timeout_and_combines_streams() -> None:
     remote = _FakeRemote("remote")
     box = _box(remote, default_env={"BASE": "1"})
-    assert box.execute_command("mixed-output", env={"EXTRA": "2"}, timeout=5) == "out-1\nout-2\nerr-1"
+    # A nonzero exit with non-empty output keeps the authoritative marker
+    # (LocalSandbox parity) instead of losing the failure.
+    assert box.execute_command("mixed-output", env={"EXTRA": "2"}, timeout=5) == "out-1\nout-2\nerr-1\nExit Code: 7"
     _, opts = remote.commands.calls[-1]
     assert opts is not None
     assert opts.envs == {"BASE": "1", "EXTRA": "2"}
@@ -572,6 +620,11 @@ def test_text_binary_append_and_line_ranges() -> None:
     assert box.read_file(path, 2, 3) == "two\nthree"
     box.write_file(path, "\nfour", append=True)
     assert box.read_file(path) == "one\ntwo\nthree\nfour"
+    # A start past EOF comes back empty rather than raising, and a negative
+    # start reads from the first line instead of wrapping around.
+    assert box.read_file(path, 99) == ""
+    assert box.read_file(path, -1) == "one\ntwo\nthree\nfour"
+    assert box.read_file(path, end_line=-1) == ""
     binary_path = "/mnt/user-data/outputs/blob.bin"
     box.update_file(binary_path, b"\x00\xffpayload")
     assert box.download_file(binary_path) == b"\x00\xffpayload"
@@ -612,14 +665,17 @@ def test_list_glob_and_grep_return_virtual_paths() -> None:
     assert truncated is False
     grep_tokens = shlex.split(remote.commands.calls[-1][0])
     assert "--include=*.py" in grep_tokens
-    assert "-m100" in grep_tokens
+    assert "-m101" in grep_tokens
 
     box.grep("/mnt/user-data/workspace", "needle", glob="src/*.py; echo injected", literal=True)
     unsafe_glob_tokens = shlex.split(remote.commands.calls[-1][0])
     assert "--include=*.py; echo injected" in unsafe_glob_tokens
     assert unsafe_glob_tokens.count("grep") == 2
-    assert 'status=$?; [ "$status" -eq 2 ] &&' in remote.commands.calls[-1][0]
-    fallback_tokens = unsafe_glob_tokens[unsafe_glob_tokens.index("grep", 2) :]
+    # The fallback runs only on the primary's status 2, and the primary's
+    # status is kept otherwise so a missing grep (127) is not "no matches".
+    assert 'status=$?; if [ "$status" -eq 2 ]; then' in remote.commands.calls[-1][0]
+    assert '(exit "$status")' in remote.commands.calls[-1][0]
+    fallback_tokens = unsafe_glob_tokens[unsafe_glob_tokens.index("grep", unsafe_glob_tokens.index("grep") + 1) :]
     assert not any(token.startswith("--include=") or token.startswith("-m") for token in fallback_tokens)
 
 
@@ -711,3 +767,198 @@ def test_concurrent_same_scope_acquire_creates_once(monkeypatch: pytest.MonkeyPa
     assert len(results) == 2 and results[0] == results[1]
     assert len(sdk.create_calls) == 1
     provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_acquire_async_serializes_retry_behind_abandoned_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancelled acquire_async abandons the body thread, not the lock.
+
+    Regression test (#4741): the serializer hold must follow the abandoned
+    body to completion, so a retry for the same scope serializes behind it
+    instead of overlapping it and creating a duplicate, untracked remote.
+    """
+    provider, sdk = _install(monkeypatch)
+    started = threading.Event()
+    release = threading.Event()
+    original_create = sdk.create
+
+    def blocking_create(image: str, **kwargs: Any) -> _FakeRemote:
+        started.set()
+        assert release.wait(timeout=10)
+        return original_create(image, **kwargs)
+
+    sdk.create = blocking_create  # type: ignore[method-assign]
+
+    first = asyncio.create_task(provider.acquire_async("thread", user_id="user"))
+    assert await asyncio.to_thread(started.wait, 10)  # body is blocked inside create()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    release.set()  # abandoned body runs to completion and registers
+    second = await provider.acquire_async("thread", user_id="user")
+
+    expected_id = provider._sandbox_id("thread", "user")
+    assert len(sdk.create_calls) == 1  # no duplicate remote sandbox
+    assert second == expected_id
+    assert provider._thread_sandboxes[provider._thread_key("thread", "user")] == expected_id
+    provider.shutdown()
+
+
+def test_sandbox_id_matches_shared_identity():
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert OpenSandboxProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+    assert OpenSandboxProvider._sandbox_id("t-1", "") == derive_sandbox_scope_token(user_id="", thread_id="t-1")
+
+
+def test_list_dir_raises_when_find_returns_no_entries() -> None:
+    remote = _FakeRemote("remote")
+    box = _box(remote)
+
+    with pytest.raises(FileNotFoundError):
+        box.list_dir("/mnt/user-data/missing")
+
+
+def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path() -> None:
+    # find exit 1 is "start point absent"; 127 (no binary) must not look missing.
+    box = _box(_FakeRemote("remote"))
+    box._run = lambda *args, **kwargs: _execution(exit_code=127)
+
+    with pytest.raises(OSError, match="exited with code 127"):
+        box.list_dir("/mnt/user-data/workspace")
+
+
+def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
+    # "notes.txt " (trailing space) is a legal Linux filename; find prints it
+    # verbatim, one entry per line, so a per-line strip() corrupts the name.
+    remote = _FakeRemote("remote")
+    box = _box(remote)
+    box.write_file("/mnt/user-data/workspace/notes.txt ", "payload")
+
+    assert "/mnt/user-data/workspace/notes.txt " in box.list_dir("/mnt/user-data/workspace")
+
+    found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
+    assert found == ["/mnt/user-data/workspace/notes.txt "]
+    assert truncated is False
+
+
+# ── Remote grep/glob failure contract against a real POSIX sh (#5376) ─────────
+
+_RS_POSIX = pytest.mark.skipif(
+    os.name == "nt" or any(shutil.which(tool) is None for tool in ("sh", "head", "grep", "find")),
+    reason="POSIX sh, head, grep and find required",
+)
+
+
+def _rs_env(tmp_path, failing: str | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    if failing is not None:
+        bin_dir = tmp_path / "fake-bin"
+        bin_dir.mkdir()
+        fake = bin_dir / failing
+        fake.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+        fake.chmod(0o755)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _rs_box(tmp_path, monkeypatch, failing: str | None = None) -> OpenSandboxSandbox:
+    box = _box(_FakeRemote("remote"))
+    shell_env = _rs_env(tmp_path, failing)
+
+    def run(command: str, *, env=None, timeout=None) -> _Execution:
+        # ``sh -c`` (not ``-lc``) keeps a login profile from overriding the fake PATH.
+        proc = subprocess.run(["sh", "-c", command], capture_output=True, text=True, env=shell_env, check=False)
+        return _execution(stdout=(proc.stdout,), stderr=(proc.stderr,) if proc.stderr else (), exit_code=proc.returncode)
+
+    monkeypatch.setattr(box, "_run", run)
+    return box
+
+
+def _rs_search(box, op: str, root: str):
+    return box.grep(root, "needle") if op == "grep" else box.glob(root, "**/*.py")
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("op", ["grep", "glob"])
+def test_remote_search_missing_root_raises_file_not_found(tmp_path, monkeypatch, op) -> None:
+    with pytest.raises(FileNotFoundError):
+        _rs_search(_rs_box(tmp_path, monkeypatch), op, str(tmp_path / "missing"))
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "binary"), [("grep", "grep"), ("glob", "find")])
+def test_remote_search_missing_binary_raises_instead_of_no_matches(tmp_path, monkeypatch, op, binary) -> None:
+    with pytest.raises(OSError, match="exited with code 127"):
+        _rs_search(_rs_box(tmp_path, monkeypatch, failing=binary), op, str(tmp_path))
+
+
+@_RS_POSIX
+def test_remote_search_keeps_real_matches_and_genuine_no_match(tmp_path, monkeypatch) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("def needle():\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    matches, _ = box.grep(str(tmp_path), "needle")
+    assert [(os.path.basename(m.path), m.line_number) for m in matches] == [("app.py", 1)]
+    assert box.grep(str(tmp_path), "zzz_nothing") == ([], False)
+    found, _ = box.glob(str(tmp_path), "**/*.py")
+    assert [os.path.basename(path) for path in found] == ["app.py"]
+    assert box.glob(str(tmp_path), "*.md") == ([], False)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 51, False), ("grep", 52, True), ("glob", 51, False), ("glob", 52, True)])
+def test_remote_search_reports_truncation_when_the_cap_hides_filtered_results(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 caps the raw stream at 51 lines, and every line falls outside
+    # the glob, so nothing survives the Python-side filter. Only the cap decides
+    # whether that empty result is complete; reporting it as such reads as "no
+    # matches" while an in-scope file may sit past the cap.
+    (tmp_path / "other").mkdir()
+    for index in range(entries):
+        (tmp_path / "other" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        result = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        result = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert result == ([], truncated)
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("op", "entries", "truncated"), [("grep", 1, False), ("grep", 2, True), ("glob", 1, False), ("glob", 2, True)])
+def test_remote_search_exactly_full_is_not_truncated(tmp_path, monkeypatch, op, entries, truncated) -> None:
+    # max_results=1 over a tree holding one in-scope match is a complete result:
+    # the Python-side loop used to return on the max-th match without looking for
+    # one more, so an exhausted search over a one-match tree read as cut off. A
+    # second match keeps that report honest.
+    (tmp_path / "src").mkdir()
+    for index in range(entries):
+        (tmp_path / "src" / f"f{index}.js").write_text("needle\n", encoding="utf-8")
+    box = _rs_box(tmp_path, monkeypatch)
+
+    if op == "grep":
+        matches, reported = box.grep(str(tmp_path), "needle", glob="src/*.js", max_results=1)
+    else:
+        matches, reported = box.glob(str(tmp_path), "src/*.js", max_results=1)
+
+    assert len(matches) == 1
+    assert reported is truncated
+
+
+@_RS_POSIX
+@pytest.mark.parametrize(("entries", "truncated"), [(50, False), (51, True)])
+def test_remote_grep_reports_single_file_overflow(tmp_path, monkeypatch, entries, truncated) -> None:
+    # The shell command must retain one more match per file than the caller's
+    # cap. Otherwise 51 matches in this single file look complete at a cap of
+    # 50 because the raw-output cap is not reached.
+    source = tmp_path / "src.py"
+    source.write_text("needle\n" * entries, encoding="utf-8")
+
+    matches, reported = _rs_box(tmp_path, monkeypatch).grep(str(tmp_path), "needle", max_results=50)
+
+    assert len(matches) == 50
+    assert reported is truncated

@@ -14,7 +14,14 @@ import pytest
 
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import Paths
-from deerflow.skills.projection import ensure_public_skill_projection, ensure_skill_projections, rebuild_skill_projections, skill_projection_mutation
+from deerflow.sandbox.middleware import SandboxMiddleware
+from deerflow.skills.projection import (
+    ensure_public_skill_projection,
+    ensure_skill_projections,
+    ensure_thread_skill_projection,
+    rebuild_skill_projections,
+    skill_projection_mutation,
+)
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
 
@@ -225,6 +232,242 @@ def test_managed_integration_projection_is_filtered_per_user(projection_env) -> 
     bob_storage = UserScopedSkillStorage("bob", host_path=str(env.skills_root), app_config=env.config)
     bob_projection = rebuild_skill_projections(bob_storage)
     assert (bob_projection.integrations / "lark-cli" / "lark-doc" / "SKILL.md").is_file()
+
+
+def test_thread_projection_enforces_agent_allowlist_across_skill_categories(projection_env) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public", "public-allowed")
+    _write_skill(env.skills_root / "public", "public-denied")
+    env.storage.write_custom_skill("custom-allowed", "SKILL.md", _skill_content("custom-allowed"))
+    env.storage.write_custom_skill("custom-denied", "SKILL.md", _skill_content("custom-denied"))
+    integration_root = env.paths.integration_skills_dir() / "provider"
+    _write_skill(integration_root, "integration-allowed")
+    _write_skill(integration_root, "integration-denied")
+
+    projected = ensure_thread_skill_projection(
+        env.storage,
+        "thread-1",
+        {"public-allowed", "custom-allowed", "integration-allowed"},
+    )
+
+    assert projected is not None
+    assert (projected.public / "public-allowed" / "SKILL.md").is_file()
+    assert not (projected.public / "public-denied").exists()
+    assert (projected.custom / "custom-allowed" / "SKILL.md").is_file()
+    assert not (projected.custom / "custom-denied").exists()
+    assert (projected.integrations / "provider" / "integration-allowed" / "SKILL.md").is_file()
+    assert not (projected.integrations / "provider" / "integration-denied").exists()
+
+
+def test_thread_projection_rejects_symlink_escape_to_omitted_skill(
+    projection_env,
+) -> None:
+    env = projection_env
+    allowed_file = _write_skill(env.skills_root / "public", "public-allowed")
+    _write_skill(env.skills_root / "public", "public-denied", "DENIED_MARKER")
+    leak = allowed_file.parent / "leak.md"
+    try:
+        leak.symlink_to(Path("..") / "public-denied" / "SKILL.md")
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+        raise
+
+    with pytest.raises(ValueError, match="symlink escapes its package"):
+        ensure_thread_skill_projection(
+            env.storage,
+            "thread-symlink-escape",
+            {"public-allowed"},
+        )
+
+    root = env.paths.thread_skills_view_dir(
+        "thread-symlink-escape",
+        user_id="alice",
+    )
+    assert all(list((root / category).iterdir()) == [] for category in ("public", "custom", "legacy", "integrations"))
+    assert not (root / ".projection-manifest.json").exists()
+
+
+def test_thread_projection_exposes_only_effective_same_name_winner(
+    projection_env,
+) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public", "shadowed-skill", "public copy")
+    env.storage.write_custom_skill(
+        "shadowed-skill",
+        "SKILL.md",
+        _skill_content("shadowed-skill", "custom copy"),
+    )
+
+    projected = ensure_thread_skill_projection(
+        env.storage,
+        "thread-shadowing",
+        {"shadowed-skill"},
+    )
+
+    assert projected is not None
+    assert not (projected.public / "shadowed-skill").exists()
+    custom_file = projected.custom / "shadowed-skill" / "SKILL.md"
+    assert custom_file.is_file()
+    assert "custom copy" in custom_file.read_text(encoding="utf-8")
+
+
+def test_thread_projection_enforces_allowlist_for_legacy_skills(
+    projection_env,
+) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "custom", "legacy-allowed")
+    _write_skill(env.skills_root / "custom", "legacy-denied")
+
+    projected = ensure_thread_skill_projection(
+        env.storage,
+        "thread-legacy",
+        {"legacy-allowed"},
+    )
+
+    assert projected is not None
+    assert (projected.legacy / "legacy-allowed" / "SKILL.md").is_file()
+    assert not (projected.legacy / "legacy-denied").exists()
+
+
+def test_thread_projection_intersects_agent_allowlist_with_deployment_state(
+    projection_env,
+) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public", "deployment-disabled")
+    env.extensions.skills["deployment-disabled"] = SkillStateConfig(enabled=False)
+
+    projected = ensure_thread_skill_projection(
+        env.storage,
+        "thread-disabled",
+        {"deployment-disabled"},
+    )
+
+    assert projected is not None
+    assert not (projected.public / "deployment-disabled").exists()
+
+
+def test_empty_agent_allowlist_projects_no_business_skills(projection_env) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public", "public-skill")
+    env.storage.write_custom_skill("custom-skill", "SKILL.md", _skill_content("custom-skill"))
+
+    projected = ensure_thread_skill_projection(env.storage, "thread-empty", set())
+
+    assert projected is not None
+    for category in (projected.public, projected.custom, projected.legacy, projected.integrations):
+        assert list(category.iterdir()) == []
+
+
+def test_unrestricted_thread_without_policy_keeps_shared_projection(
+    projection_env,
+) -> None:
+    env = projection_env
+
+    projected = ensure_thread_skill_projection(
+        env.storage,
+        "thread-unrestricted",
+        None,
+    )
+
+    assert projected is None
+    assert not env.paths.thread_skills_view_dir(
+        "thread-unrestricted",
+        user_id="alice",
+    ).exists()
+
+
+def test_unrestricted_run_reuses_existing_thread_mount_with_full_enabled_view(projection_env) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public", "alpha")
+    _write_skill(env.skills_root / "public", "beta")
+
+    projected = ensure_thread_skill_projection(env.storage, "thread-switch", {"alpha"})
+    assert projected is not None
+    category_inodes = {category: getattr(projected, category).stat().st_ino for category in ("public", "custom", "legacy", "integrations")}
+    assert (projected.public / "alpha" / "SKILL.md").is_file()
+    assert not (projected.public / "beta").exists()
+
+    unrestricted = ensure_thread_skill_projection(env.storage, "thread-switch", None)
+
+    assert unrestricted == projected
+    assert (projected.public / "alpha" / "SKILL.md").is_file()
+    assert (projected.public / "beta" / "SKILL.md").is_file()
+    assert {category: getattr(projected, category).stat().st_ino for category in ("public", "custom", "legacy", "integrations")} == category_inodes
+
+
+def test_subagent_non_owner_preserves_restricted_lead_projection(
+    projection_env,
+    monkeypatch,
+) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public", "allowed")
+    _write_skill(env.skills_root / "public", "omitted")
+    provider = SimpleNamespace(supports_agent_skill_isolation=True)
+    monkeypatch.setattr(
+        "deerflow.sandbox.middleware.get_sandbox_provider",
+        lambda: provider,
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: env.config)
+    monkeypatch.setattr(
+        "deerflow.skills.storage.get_or_new_user_skill_storage",
+        lambda *_args, **_kwargs: env.storage,
+    )
+
+    lead = SandboxMiddleware(available_skills={"allowed"})
+    projected = lead._prepare_agent_skill_projection(
+        "thread-delegation",
+        user_id="alice",
+    )
+    assert projected is not None
+    assert (projected.public / "allowed" / "SKILL.md").is_file()
+    assert not (projected.public / "omitted").exists()
+
+    subagent = SandboxMiddleware(
+        available_skills=None,
+        owns_agent_skill_projection=False,
+    )
+    assert (
+        subagent._prepare_agent_skill_projection(
+            "thread-delegation",
+            user_id="alice",
+        )
+        is None
+    )
+    assert (projected.public / "allowed" / "SKILL.md").is_file()
+    assert not (projected.public / "omitted").exists()
+
+
+def test_thread_projection_revokes_removed_skill_before_repopulation(projection_env, monkeypatch) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public", "alpha")
+    _write_skill(env.skills_root / "public", "beta")
+    projected = ensure_thread_skill_projection(env.storage, "thread-update", {"alpha", "beta"})
+    assert projected is not None
+
+    from deerflow.skills import projection as projection_module
+
+    real_stage_skill = projection_module._stage_skill
+    staging_started = Event()
+    release_staging = Event()
+
+    def _delayed_stage_skill(*args, **kwargs):
+        if not staging_started.is_set():
+            staging_started.set()
+            assert release_staging.wait(timeout=5)
+        return real_stage_skill(*args, **kwargs)
+
+    monkeypatch.setattr(projection_module, "_stage_skill", _delayed_stage_skill)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        rebuild = executor.submit(ensure_thread_skill_projection, env.storage, "thread-update", {"alpha"})
+        assert staging_started.wait(timeout=5)
+        beta_was_revoked = not (projected.public / "beta").exists()
+        release_staging.set()
+        rebuild.result(timeout=5)
+
+    assert beta_was_revoked
+    assert (projected.public / "alpha" / "SKILL.md").is_file()
+    assert not (projected.public / "beta").exists()
 
 
 def test_disabling_custom_skill_hides_only_target_while_rebuilding(projection_env, monkeypatch) -> None:
@@ -505,7 +748,10 @@ def test_rebuild_failure_clears_old_projection(projection_env, monkeypatch) -> N
     replacement = source.with_suffix(".replacement")
     replacement.write_text(_skill_content("demo-skill", "after"), encoding="utf-8")
     replacement.replace(source)
-    monkeypatch.setattr("deerflow.skills.projection._stage_skill", lambda *_args: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(
+        "deerflow.skills.projection._stage_skill",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
 
     with pytest.raises(OSError, match="disk full"):
         ensure_skill_projections(env.storage)

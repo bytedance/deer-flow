@@ -17,10 +17,14 @@ do not impede pluggability.
 from __future__ import annotations
 
 import importlib
+import inspect
+import json
 import logging
 import os
+import sys
 import threading
 from abc import abstractmethod
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 from typing import Any, ClassVar, Literal
@@ -41,6 +45,29 @@ _MANAGER_CLASS_ATTR = "MANAGER_CLASS"
 _memory_manager: MemoryManager | None = None
 _backends_cache: dict[str, type[MemoryManager]] | None = None
 _manager_lock = threading.Lock()
+# Signature of the host judging config the cached manager's judge was built
+# from. ``memory.*`` is documented as hot-reloadable, but the manager singleton
+# (and its injected judge) is constructed once; this lets get_memory_manager()
+# rebuild only the judge when memory.prescreen / memory.signal_classification
+# changes. None = no manager built yet (or reset).
+_memory_judge_signature: str | None = None
+
+
+def context_query_kwargs(get_context: Callable[..., str], query: str | None) -> dict[str, str | None]:
+    """Pass the optional hint only when a backend accepts that keyword.
+
+    Older plugins need no signature change. An uninspectable callable keeps
+    the old call contract; backend TypeErrors must never trigger a retry.
+    """
+    if query is None:
+        return {}
+    try:
+        parameters = inspect.signature(get_context).parameters.values()
+    except (TypeError, ValueError):
+        return {}
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD or (parameter.name == "query" and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)) for parameter in parameters):
+        return {"query": query}
+    return {}
 
 
 class MemoryCallbacks:
@@ -84,6 +111,10 @@ class MemoryCallbacks:
 
 class MemoryManagerError(RuntimeError):
     """Backend-neutral base error exposed at the MemoryManager boundary."""
+
+
+class MemoryReadError(MemoryManagerError):
+    """A required memory read failed, so callers must not continue without it."""
 
 
 class MemoryConflictError(MemoryManagerError):
@@ -161,10 +192,40 @@ class MemoryManager(BaseModel):
     # that fails fast at instantiation rather than silently returning empty
     # results). Default False: a new backend must explicitly opt in to tool mode.
     supports_search: ClassVar[bool] = False
+    # Opt-in capability for Gateway management calls that name an agent scope.
+    # The HTTP layer rejects a scoped read/write unless the backend declares
+    # this flag, because accepting ``agent_name`` in a Python signature does
+    # not prove that an adapter actually binds storage and mutations to it.
+    # Backends that leave it False retain the unscoped management API and get
+    # an explicit 501 for scoped management instead of silently operating on
+    # the user's default/global bucket.
+    supports_agent_scoped_management: ClassVar[bool] = False
     # Backends that rely on conversation-level extraction instead of fact CRUD
     # can retain MemoryMiddleware writes while tool mode supplies query-aware
     # search. Most backends keep tool mode fully model-directed.
     requires_passive_writes_in_tool_mode: ClassVar[bool] = False
+
+    @classmethod
+    def read_failures_are_fatal_for_config(
+        cls,
+        backend_config: dict[str, Any] | None,
+    ) -> bool:
+        """Honor legacy fail_closed using only in-memory config; do not perform I/O."""
+
+        failure_policy = backend_config.get("failure_policy") if isinstance(backend_config, dict) else None
+        return isinstance(failure_policy, dict) and failure_policy.get("read") == "fail_closed"
+
+    @property
+    def read_failures_are_fatal(self) -> bool:
+        """Whether caller-owned timeouts must abort instead of degrading.
+
+        Backends that require memory context override the class-level config
+        resolver so this remains available before or after manager creation.
+        The default honors legacy ``fail_closed``; other settings are permissive
+        unless the backend overrides the config resolver.
+        """
+
+        return type(self).read_failures_are_fatal_for_config(self.backend_config)
 
     @model_validator(mode="after")
     def _check_invariants(self) -> MemoryManager:
@@ -228,13 +289,25 @@ class MemoryManager(BaseModel):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         """Return injection-ready memory text for the given bucket.
+
+        ``query`` is an optional current-turn query hint. Backends that
+        support query-aware ranking (DeerMem with
+        ``retrieval_relevance_enabled``) may rank injected facts against it;
+        other backends ignore it. ``None`` must preserve legacy behavior.
 
         Implementations load their memory and format it however they choose;
         the returned string is injected verbatim by call sites. Format
         parameters are the backend's own private config (received via
         ``backend_config`` at construction), NOT a host config on this method.
+
+        Backends configured to tolerate read failures return an empty string.
+        Backends configured to require memory context raise
+        :class:`MemoryReadError`, which callers must propagate, and expose
+        ``read_failures_are_fatal`` so caller-owned timeouts preserve the same
+        policy before a backend call returns.
         """
 
     # ── Tier 2: management ops with defaults ────────────────────────────
@@ -314,6 +387,36 @@ class MemoryManager(BaseModel):
         """
         raise NotImplementedError(f"clear_memory not supported by {type(self).__name__}")
 
+    def cancel_by_agent(
+        self,
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> int:
+        """Cancel buffered memory-extraction work for a scope.
+
+        Backends without a debounce queue have nothing to cancel and inherit
+        the default ``0``. DeerMem drops matching pending contexts so a deleted
+        or cleared agent cannot be resurrected by a late timer fire.
+
+        Scope (must stay symmetric with ``clear_memory`` / storage buckets):
+
+        - ``user_id`` selects the user bucket. ``user_id=None`` means the
+          **legacy no-user root only**, never "every user in the process".
+        - ``agent_name=None`` cancels every agent bucket inside that user
+          scope (including the default/global bucket).
+        - An explicit ``agent_name`` cancels only that agent's pending
+          contexts inside the same user scope.
+
+        There is no "cancel the whole process-local queue" form of this
+        method; callers that need a broader sweep must iterate known user
+        scopes explicitly.
+
+        Returns:
+            Number of pending contexts cancelled. Default: ``0``.
+        """
+        return 0
+
     def import_memory(
         self,
         memory_data: dict[str, Any],
@@ -322,7 +425,11 @@ class MemoryManager(BaseModel):
         agent_name: str | None = None,
     ) -> dict[str, Any]:
         """Import a memory document into the bucket; return the merged result.
-        Default: unsupported."""
+
+        An explicit ``agent_name`` replaces only that agent's facts. Shared
+        user/history summaries must remain unchanged even when the incoming
+        document contains summary fields. Default: unsupported.
+        """
         raise NotImplementedError(f"import_memory not supported by {type(self).__name__}")
 
     def export_memory(
@@ -445,6 +552,16 @@ class MemoryManager(BaseModel):
         """Turn-start nudge (future background review). Default: no-op."""
         return None
 
+    def refresh_judge(self, judge: Any) -> None:
+        """Replace the injected memory judge after a judging-config hot-reload.
+
+        Called by :func:`get_memory_manager` when ``memory.prescreen`` or
+        ``memory.signal_classification`` changes in ``config.yaml``, so toggling
+        a mode takes effect without restarting the process. Default: no-op (a
+        backend without a judge ignores it).
+        """
+        return None
+
     # ── Async (speculative) ──────────────────────────────────────────────
     # Interface placeholders so a future async LLM client can override without
     # changing the contract. Defaults delegate to the sync methods (no
@@ -467,8 +584,9 @@ class MemoryManager(BaseModel):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
-        return self.get_context(user_id, agent_name=agent_name, thread_id=thread_id)
+        return self.get_context(user_id, agent_name=agent_name, thread_id=thread_id, **context_query_kwargs(self.get_context, query))
 
     async def asearch(
         self,
@@ -560,7 +678,7 @@ def _scan_backends() -> dict[str, type[MemoryManager]]:
     return registry
 
 
-def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
+def _resolve_manager_class(manager_class: str, *, allow_discovery: bool = True) -> type[MemoryManager]:
     """Resolve a ``manager_class`` config value to a concrete class.
 
     Resolution order:
@@ -575,7 +693,9 @@ def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
     is resolved eagerly at startup so it can be warmed) so the operator fixes
     ``memory.manager_class`` instead of discovering the mismatch later.
     """
-    registry = _scan_backends()
+    # Timeout preparation may only inspect already-loaded backends. Do not
+    # turn a cold registry or dotted import into event-loop file/import I/O.
+    registry = _scan_backends() if allow_discovery else (_backends_cache or {})
     if manager_class in registry:
         return registry[manager_class]
 
@@ -587,11 +707,14 @@ def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
         module_path, _, attr = manager_class.rpartition(".")
     if module_path and attr:
         try:
-            module = importlib.import_module(module_path)
+            module = importlib.import_module(module_path) if allow_discovery else sys.modules.get(module_path)
         except ImportError as e:
             dotted_error = f"cannot import module {module_path!r}: {e}"
         else:
-            cls = getattr(module, attr, None)
+            if allow_discovery:
+                cls = getattr(module, attr, None)
+            else:
+                cls = vars(module).get(attr) if module is not None else None
             if cls is None:
                 dotted_error = f"attribute {attr!r} not found in {module_path!r}"
             elif not (isinstance(cls, type) and issubclass(cls, MemoryManager)):
@@ -818,6 +941,34 @@ def _host_default_extraction_callback(payload: Any) -> None:
                 fact_scope_rejected / extracted * 100,
                 thread_id,
             )
+    prescreen = payload.get("prescreen")
+    if isinstance(prescreen, dict):
+        # The pre-screen record is the only trace a *skip* leaves (no LLM call
+        # runs), so it carries the digest and the fallback reason rather than a
+        # probability for every batch.
+        logger.info(
+            "Memory pre-screen: thread=%s mode=%s verdict=%s p=%s cached=%s digest=%s fallback=%s",
+            thread_id,
+            prescreen.get("mode"),
+            prescreen.get("verdict"),
+            prescreen.get("probability"),
+            prescreen.get("cached"),
+            prescreen.get("digest"),
+            prescreen.get("fallback_reason"),
+        )
+    signal_classification = payload.get("signal_classification")
+    if isinstance(signal_classification, dict):
+        logger.info(
+            "Memory signal classification: thread=%s mode=%s labels=%s cached=%s digest=%s fallback=%s",
+            thread_id,
+            signal_classification.get("mode"),
+            signal_classification.get("labels"),
+            signal_classification.get("cached"),
+            signal_classification.get("digest"),
+            signal_classification.get("fallback_reason"),
+        )
+    if payload.get("skip_vetoed_by_model_signal"):
+        logger.info("Memory pre-screen skip vetoed by a model signal (thread=%s)", thread_id)
 
 
 def _collect_host_hooks() -> dict[str, Any]:
@@ -830,16 +981,122 @@ def _collect_host_hooks() -> dict[str, Any]:
     builds the host default model when it actually needs one (i.e. has no model
     of its own) -- building an unused default on every startup would waste
     time. The others are direct values (cheap function refs).
+
+    ``judge`` is built here from the host memory config (pre-screening and signal
+    classification) and is ``None`` when both sides are off, which leaves the
+    extraction path byte-identical to a deployment without the feature. A
+    configured-but-unusable judge fails *here* (agent build time) rather than
+    silently degrading on the first batch: it can decide whether a call happens,
+    so a half-configured one must not run.
     """
-    from deerflow.trace_context import request_trace_context
+    from deerflow.trace_context import ensure_trace_context
 
     return {
         "callbacks": LangfuseMemoryCallbacks(),
         "should_keep_hidden_message": _host_default_should_keep_hidden_message,
-        "trace_context_manager": request_trace_context,
+        "trace_context_manager": ensure_trace_context,
         "host_llm_factory": _host_default_llm,
         "extraction_callback": _host_default_extraction_callback,
+        "judge": _host_default_judge(),
     }
+
+
+def _host_default_judge() -> Any:
+    """Build the memory judge from the host memory config (``None`` when every side is off)."""
+    from deerflow.agents.memory.signals.coordinator import build_memory_judge
+
+    return build_memory_judge()
+
+
+def _judging_config_signature(cfg: Any) -> str:
+    """Stable signature of the host judging config, for change detection.
+
+    Covers both slots in full (mode, ``use``, and provider ``config``), the
+    shared top-level ``typesafe:`` block, and each enabled side's *resolved*
+    connection identity. A side that does not override a connection field
+    (endpoint, model, credential, deadlines) inherits it from that block, so
+    editing the block must invalidate the cached judge; the resolved identity
+    also catches a credential rotated through its environment variable, which
+    the block's own fields do not show.
+    """
+    from deerflow.typesafe.connection import typesafe_defaults
+
+    return json.dumps(
+        {
+            "prescreen": cfg.prescreen.model_dump(mode="json"),
+            "signal_classification": cfg.signal_classification.model_dump(mode="json"),
+            "typesafe": typesafe_defaults(),
+            "effective_connections": _effective_connection_signature(cfg),
+        },
+        sort_keys=True,
+    )
+
+
+def _effective_connection_signature(cfg: Any) -> dict[str, Any]:
+    """Each judging side's resolved connection identity, keyed by slot.
+
+    Uses the same ``resolve_connection_for_mode`` the providers use, so the
+    signature reflects the *effective* settings (slot override > shared block >
+    built-in defaults > environment credential) rather than config text alone.
+    It records the credential's fingerprint, never the key. A side that is off
+    resolves to ``None``; a side whose config cannot resolve is marked
+    ``unresolved`` instead of raising, so this signature can never break
+    ``get_memory_manager()`` — the rebuild that follows surfaces the same error.
+    """
+    from deerflow.agents.memory.prescreen.contract import CONFIGURATION_SOURCE as PRESCREEN_SOURCE
+    from deerflow.agents.memory.signals.contract import CONFIGURATION_SOURCE as SIGNAL_SOURCE
+    from deerflow.typesafe.connection import resolve_connection_for_mode, typesafe_defaults
+
+    defaults = typesafe_defaults()
+    signature: dict[str, Any] = {}
+    for name, slot, source in (
+        ("prescreen", cfg.prescreen, PRESCREEN_SOURCE),
+        ("signal_classification", cfg.signal_classification, SIGNAL_SOURCE),
+    ):
+        try:
+            connection = resolve_connection_for_mode(mode=slot.mode, settings=slot.config, defaults=defaults, configuration_source=source)
+        except Exception:
+            signature[name] = {"unresolved": True}
+            continue
+        signature[name] = None if connection is None else {**connection.public_parameters(), "credential": connection.credential_fingerprint()}
+    return signature
+
+
+def _refresh_judge_for_reloaded_config(manager: MemoryManager) -> None:
+    """Rebuild and re-inject the judge when the host judging config changed.
+
+    The manager singleton (and its judge) is built once, yet ``memory.*`` is
+    documented as hot-reloadable and a mode toggle must take effect:
+    ``enforce`` -> ``off`` must stop skipping extraction and sending the
+    conversation to the provider, and ``off`` -> ``shadow`` must start
+    recording. Rebuild here so storage / queue / LLM dependencies stay intact
+    and only the judging hook is swapped.
+    """
+    global _memory_judge_signature
+    signature = _judging_config_signature(get_memory_config())
+    if signature == _memory_judge_signature:
+        return
+    try:
+        judge = _host_default_judge()
+    except Exception:
+        # A transiently broken judging config must not fail every memory call.
+        # Keep the last-good judge, record the signature so the rebuild is not
+        # retried until the config is edited again, and surface it loudly.
+        logger.error("Failed to rebuild the memory judge from the reloaded config; keeping the previous judge", exc_info=True)
+        with _manager_lock:
+            _memory_judge_signature = signature
+        return
+    # Publish under the manager lock, revalidating the config generation first:
+    # another thread may have rolled the config back (e.g. enforce -> off) while
+    # this judge was being built, and installing it then would resurrect the
+    # superseded mode for already-queued batches. If the generation moved, drop
+    # this build and let the next lookup rebuild for the current config.
+    with _manager_lock:
+        if _judging_config_signature(get_memory_config()) != signature:
+            return
+        manager.refresh_judge(judge)
+        _memory_judge_signature = signature
+    logger.info("Memory judge refreshed after a memory judging-config change")
 
 
 # ── Singleton factory ─────────────────────────────────────────────────────
@@ -851,8 +1108,12 @@ def get_memory_manager() -> MemoryManager:
     :func:`reset_memory_manager` to force re-resolution (tests / runtime
     backend switching).
     """
-    global _memory_manager
+    global _memory_manager, _memory_judge_signature
     if _memory_manager is not None:
+        # The manager is built once; refresh only the judge so a hot-reloaded
+        # memory.prescreen / memory.signal_classification takes effect (a mode
+        # switch must not keep a stale judge deciding or a stale skip persisting).
+        _refresh_judge_for_reloaded_config(_memory_manager)
         return _memory_manager
 
     # deer-flow is multi-threaded: memory injection runs via asyncio.to_thread,
@@ -863,6 +1124,10 @@ def get_memory_manager() -> MemoryManager:
     # connections) constructed here in __init__.
     with _manager_lock:
         if _memory_manager is not None:
+            # Another thread built the singleton while we waited for the lock; it
+            # installed the matching judge signature, and the lock-free fast path
+            # above is what handles later config edits. (Refreshing here would
+            # re-enter _manager_lock.)
             return _memory_manager
 
         cfg = get_memory_config()
@@ -896,8 +1161,36 @@ def get_memory_manager() -> MemoryManager:
         # ``mode`` mirrors host MemoryConfig.mode so the invariant validator
         # (mode=="tool" requires search) can fire on the factory path too.
         _memory_manager = cls.from_config(backend_config, mode=cfg.mode, **host_hooks)
+        _memory_judge_signature = _judging_config_signature(cfg)
         logger.info("Memory manager resolved: %s (manager_class=%r)", cls.__name__, manager_class)
         return _memory_manager
+
+
+def memory_read_failures_are_fatal(
+    manager_class: str,
+    backend_config: dict[str, Any] | None,
+    *,
+    resolved_only: bool = False,
+) -> bool | None:
+    """Resolve strict-read capability without constructing a new manager.
+
+    With ``resolved_only``, never scan/import backends; return ``None`` when
+    the class is not already loaded. The caller can finish discovery inside
+    its bounded worker. Invalid config and full-resolution failures fail closed.
+    """
+
+    try:
+        cls = _resolve_manager_class(manager_class, allow_discovery=not resolved_only)
+    except Exception:
+        if resolved_only:
+            return None
+        logger.exception("Could not resolve memory read failure policy; treating the read timeout as fatal")
+        return True
+    try:
+        return cls.read_failures_are_fatal_for_config(backend_config)
+    except Exception:
+        logger.exception("Could not resolve memory read failure policy; treating the read timeout as fatal")
+        return True
 
 
 def reset_memory_manager() -> None:
@@ -906,7 +1199,8 @@ def reset_memory_manager() -> None:
     The next :func:`get_memory_manager` call re-reads the config and re-scans
     backends. Use this in tests or when switching backends at runtime.
     """
-    global _memory_manager, _backends_cache
+    global _memory_manager, _backends_cache, _memory_judge_signature
     with _manager_lock:
         _memory_manager = None
         _backends_cache = None
+        _memory_judge_signature = None

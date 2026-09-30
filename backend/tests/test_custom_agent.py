@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.gateway.routers.agents import AGENT_NAME_PATTERN as GATEWAY_AGENT_NAME_PATTERN
 from deerflow.agents.memory.backends.deermem.deermem.core.paths import AGENT_NAME_PATTERN as DEERMEM_AGENT_NAME_PATTERN
-from deerflow.agents.memory.backends.deermem.deermem.core.paths import DEFAULT_AGENT_BUCKET, validate_agent_name
+from deerflow.agents.memory.backends.deermem.deermem.core.paths import DEFAULT_AGENT_BUCKET, agent_facts_directory, validate_agent_name
 from deerflow.config.agents_api_config import AgentsApiConfig, get_agents_api_config, set_agents_api_config
 
 # ---------------------------------------------------------------------------
@@ -24,6 +24,24 @@ def test_reserved_memory_bucket_stays_outside_both_public_agent_patterns() -> No
     assert GATEWAY_AGENT_NAME_PATTERN.fullmatch(DEFAULT_AGENT_BUCKET) is None
     assert DEERMEM_AGENT_NAME_PATTERN.fullmatch(DEFAULT_AGENT_BUCKET) is None
     validate_agent_name(DEFAULT_AGENT_BUCKET)  # Internal storage sentinel remains usable.
+
+
+@pytest.mark.parametrize("name", ["reviewer\n", "reviewer \n"])
+def test_agent_name_validation_rejects_trailing_newline(name: str) -> None:
+    """``$`` in ``^[A-Za-z0-9-]+$`` also matches before a final newline.
+
+    Only ``fullmatch`` anchors it, so DeerMem's inlined copy of the host's
+    agent-name grammar accepted ``"reviewer\\n"`` and used it as a directory
+    name — which the host's own strict validator then refuses forever.
+
+    ``"reviewer \\n"`` was already rejected by ``.match`` (the space falls
+    outside the class, so the match never reaches ``$``); it is parametrized
+    here to pin the grammar, not because it regressed.
+    """
+    with pytest.raises(ValueError, match="Invalid agent name"):
+        validate_agent_name(name)
+    with pytest.raises(ValueError, match="Invalid agent name"):
+        agent_facts_directory(Path("memory.json"), name)
 
 
 def _make_paths(base_dir: Path):
@@ -68,7 +86,8 @@ class TestPaths:
 
     def test_user_md_file(self, tmp_path):
         paths = _make_paths(tmp_path)
-        assert paths.user_md_file == tmp_path / "USER.md"
+        assert paths.user_md_file("alice") == tmp_path / "users" / "alice" / "USER.md"
+        assert paths.user_md_file("bob") != paths.user_md_file("alice")
 
     def test_paths_are_different_from_global(self, tmp_path):
         paths = _make_paths(tmp_path)
@@ -529,12 +548,17 @@ def _stub_app_config():
 
 
 def _make_test_app(tmp_path: Path):
-    """Create a FastAPI app with the agents router, patching paths to tmp_path."""
-    from fastapi import FastAPI
+    """Create a FastAPI app with the agents router, patching paths to tmp_path.
+
+    Uses the stub-auth helper so the ``@require_permission`` decorators on the
+    agents routes see an authenticated user with all permissions (mirroring
+    what ``AuthMiddleware`` does in the real gateway).
+    """
+    from _router_auth_helpers import make_authed_test_app
 
     from app.gateway.routers.agents import router
 
-    app = FastAPI()
+    app = make_authed_test_app()
     app.include_router(router)
     return app
 
@@ -581,6 +605,62 @@ def disabled_agent_client(tmp_path):
 
 
 class TestAgentsAPI:
+    @pytest.mark.parametrize("display_name", ["x" * 150, 123, "\u200b" * 3])
+    def test_invalid_stored_display_name_falls_back_in_api(self, agent_client, display_name):
+        from deerflow.persistence.agents.file import FileAgentStore
+
+        FileAgentStore().create("reviewer", {"display_name": display_name, "description": "healthy"}, "Soul")
+        response = agent_client.get("/api/agents/reviewer")
+        assert response.status_code == 200
+        assert response.json()["display_name"] is None
+        assert response.json()["description"] == "healthy"
+        assert agent_client.get("/api/agents").json()["agents"][0]["name"] == "reviewer"
+        response = agent_client.put("/api/agents/reviewer", json={"display_name": "已修复"})
+        assert response.status_code == 200
+        assert response.json()["display_name"] == "已修复"
+
+    @pytest.mark.parametrize("display_name", ["a\u202eb", "line1\nline2", "z\x00ero", "\u200b" * 3, "a\u200fb", "a\u2028b", "\u200c\u200d"])
+    def test_invalid_display_name_cannot_be_persisted(self, agent_client, display_name):
+        assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": display_name}).status_code == 422
+        assert agent_client.get("/api/agents").json()["agents"] == []
+        assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": "🦌" * 100}).status_code == 201
+        assert agent_client.put("/api/agents/reviewer", json={"display_name": display_name}).status_code == 422
+        assert agent_client.get("/api/agents/reviewer").json()["display_name"] == "🦌" * 100
+
+    @pytest.mark.parametrize("name", ["reviewer\n", "reviewer\n\n"])
+    def test_trailing_newline_in_agent_name_is_rejected(self, agent_client, name):
+        """The router's ``AGENT_NAME_PATTERN.match`` accepted ``"reviewer\\n"`` and the store 500'd.
+
+        ``$`` matches before a single trailing newline, so that one param reached
+        the file store, which validates the same grammar with ``fullmatch``.
+        ``"reviewer\\n\\n"`` was already rejected by ``.match`` on main; it is
+        parametrized to pin the grammar, not because it regressed.
+        """
+        assert agent_client.post("/api/agents", json={"name": name}).status_code == 422
+        assert agent_client.get("/api/agents").json()["agents"] == []
+
+    def test_display_name_round_trip_keeps_stable_identity(self, agent_client):
+        response = agent_client.post("/api/agents", json={"name": "code-reviewer", "display_name": "  代码审查助手  "})
+        assert response.status_code == 201
+        assert response.json()["display_name"] == "代码审查助手"
+        assert response.json()["name"] == "code-reviewer"
+        assert agent_client.get("/api/agents").json()["agents"][0]["display_name"] == "代码审查助手"
+        response = agent_client.put("/api/agents/code-reviewer", json={"description": "Updated"})
+        assert response.json()["display_name"] == "代码审查助手"
+        response = agent_client.put("/api/agents/code-reviewer", json={"display_name": "审查员 🦌"})
+        assert response.json()["display_name"] == "审查员 🦌"
+        assert agent_client.get("/api/agents/code-reviewer").json()["display_name"] == "审查员 🦌"
+        response = agent_client.put("/api/agents/code-reviewer", json={"display_name": None})
+        assert response.json()["display_name"] is None
+        assert response.json()["name"] == "code-reviewer"
+
+    def test_display_name_validation_does_not_relax_agent_identifier(self, agent_client):
+        assert agent_client.post("/api/agents", json={"name": "中文"}).status_code == 422
+        assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": "名" * 101}).status_code == 422
+        assert agent_client.post("/api/agents", json={"name": "reviewer", "display_name": "名" * 100}).status_code == 201
+        assert agent_client.put("/api/agents/reviewer", json={"display_name": "名" * 101}).status_code == 422
+        assert agent_client.get("/api/agents/reviewer").json()["display_name"] == "名" * 100
+
     def test_list_agents_empty(self, agent_client):
         response = agent_client.get("/api/agents")
         assert response.status_code == 200
@@ -659,8 +739,8 @@ class TestAgentsAPI:
         assert response.status_code == 200
         assert response.json()["description"] == "new desc"
 
-    def test_update_agent_preserves_hand_authored_github_block(self, agent_client):
-        """A hand-authored ``github:`` block on disk must survive PATCH.
+    def test_update_agent_preserves_hand_authored_non_managed_fields(self, agent_client):
+        """Hand-authored ``github:`` and ``memory_enabled`` fields must survive PATCH.
 
         The HTTP route does not expose ``github`` as an editable field
         (and rightly so — the GitHub App credentials and binding triggers
@@ -692,6 +772,7 @@ class TestAgentsAPI:
                 }
             ],
         }
+        config_data["memory_enabled"] = False
         config_file.write_text(yaml.safe_dump(config_data, sort_keys=False), encoding="utf-8")
 
         # PATCH only the description.
@@ -701,6 +782,7 @@ class TestAgentsAPI:
         # github: block must survive verbatim.
         reloaded = yaml.safe_load(config_file.read_text())
         assert reloaded["description"] == "new desc"
+        assert reloaded["memory_enabled"] is False
         assert reloaded["github"] == {
             "installation_id": 99999,
             "bot_login": "github-agent-bot",
@@ -835,10 +917,28 @@ class TestUserProfileAPI:
         assert response.status_code == 200
         assert response.json()["content"] == content
 
-        # File should be written to disk
-        user_md = tmp_path / "USER.md"
+        # File should be written to the caller's per-user bucket. The autouse
+        # _auto_user_context fixture in conftest.py sets user
+        # "test-user-autouse", so that is the effective id here.
+        user_md = tmp_path / "users" / "test-user-autouse" / "USER.md"
         assert user_md.exists()
         assert user_md.read_text(encoding="utf-8") == content
+
+    def test_user_profile_is_isolated_per_user(self, agent_client, tmp_path):
+        """A legacy global USER.md must never leak into a user's profile read.
+
+        Pre-fix behavior: GET/PUT /api/user-profile read and wrote the shared
+        ``{base_dir}/USER.md`` singleton, so any authenticated user could
+        overwrite the prompt context injected for every other user.
+        """
+        legacy_global = tmp_path / "USER.md"
+        legacy_global.write_text("# injected by another user", encoding="utf-8")
+
+        got = agent_client.get("/api/user-profile")
+        assert got.status_code == 200
+        # Per-user file does not exist yet and the legacy global file is not
+        # consulted as a fallback.
+        assert got.json()["content"] is None
 
     def test_get_user_profile_after_put(self, agent_client):
         content = "# Profile\n\nI work on data science."

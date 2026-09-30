@@ -13,7 +13,6 @@ sandbox:
   api_key: $TENKI_API_KEY   # falls back to TENKI_API_KEY / TENKI_AUTH_TOKEN env var
   base_url: https://tenki.cloud  # optional; SDK default when omitted
   image: my-base-image      # optional; Tenki account default base image when omitted
-  project_id: proj_...       # optional; auto-selected if the account has exactly one
   workspace_id: ws_...       # optional; auto-selected if the account has exactly one
   cpu_cores: 2               # optional per-sandbox vCPUs
   memory_mb: 2048            # optional per-sandbox memory
@@ -26,14 +25,21 @@ sandbox:
     PYTHONUNBUFFERED: "1"
 ```
 
+`sticky` also accepts an environment reference such as `sticky: $TENKI_STICKY`.
+Boolean strings are case-insensitive: `false`, `0`, `off`, and `no` disable host
+pinning; `true`, `1`, `on`, and `yes` enable it. Invalid boolean values are
+rejected when the provider loads its configuration. Omitted or `null` values
+keep pinning disabled.
+
 Install the optional SDK before selecting this provider:
 
 ```bash
 pip install "deerflow-harness[tenki]"
 ```
 
-The `tenki-sandbox` package is an optional DeerFlow harness extra, not part of
-the default install. Get an API key from <https://tenki.cloud/docs/sandbox/sdk>.
+The `tenki` package (which provides the `tenki_sandbox` module) is an optional
+DeerFlow harness extra, not part of the default install. Get an API key from
+<https://tenki.cloud/docs/sandbox/sdk>.
 
 ## Design
 
@@ -92,6 +98,6 @@ sandboxes left by a previous gateway process) and a preview-URL surface.
 Verified end-to-end against live Tenki sandboxes: provider resolution →
 `execute_command` → full file-op surface (`read`/`write`/`update`/`download`,
 `list_dir`/`glob`/`grep`) → warm-pool reclaim → terminate, plus the
-`/mnt/user-data` sudo symlink. Unit tests run in CI without `tenki-sandbox`
+`/mnt/user-data` sudo symlink. Unit tests run in CI without `tenki`
 installed; `test_integration_real_sandbox` exercises a real microVM when
 `TENKI_API_KEY` is set.

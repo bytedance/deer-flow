@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from support.symlinks import symlink_or_skip
 
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.dingtalk import (
@@ -2310,7 +2311,7 @@ class TestReceiveFile:
             uploads = tmp_path / "uploads"
             uploads.mkdir()
             outside = tmp_path / "outside.txt"
-            (uploads / "image.png").symlink_to(outside)
+            symlink_or_skip(uploads / "image.png", outside)
             _patch_uploads(monkeypatch, uploads)
             channel._download_by_code = AsyncMock(return_value=b"PWNED")
 
@@ -2607,3 +2608,33 @@ class TestHandlerStashesRawData:
             assert DingTalkChannel._extract_files(msg) == [{"type": "file", "download_code": "dc_doc", "filename": "a.xlsx"}]
 
         _run(go())
+
+
+class TestDingTalkDownloadGuardLogging:
+    """A None (or empty) download result used to drop the attachment with
+    zero log lines at the receive level — the accurate reason lines inside
+    _download_by_code fired, but nothing tied them to the file being
+    received. The caller now logs a neutral guard line, mirroring the
+    wechat channel's callers and the manager reader."""
+
+    def test_none_download_logs_neutral_guard_line(self, caplog):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._download_by_code = AsyncMock(return_value=None)
+            with caplog.at_level(logging.WARNING, logger="app.channels.dingtalk"):
+                result = await channel._receive_single_file("dc1", "file", "report.pdf", "t1", user_id="default")
+            assert result == ""
+
+        _run(go())
+        assert any("inbound file download returned no content" in r.message and "report.pdf" in r.message for r in caplog.records)
+
+    def test_empty_download_logs_neutral_guard_line(self, caplog):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            channel._download_by_code = AsyncMock(return_value=b"")
+            with caplog.at_level(logging.WARNING, logger="app.channels.dingtalk"):
+                result = await channel._receive_single_file("dc2", "image", "photo.png", "t1", user_id="default")
+            assert result == ""
+
+        _run(go())
+        assert any("inbound file download returned no content" in r.message and "photo.png" in r.message for r in caplog.records)

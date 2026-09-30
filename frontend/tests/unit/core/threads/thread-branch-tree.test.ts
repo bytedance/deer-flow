@@ -1,6 +1,9 @@
 import { describe, expect, it } from "@rstest/core";
 
-import { flattenThreadBranches } from "@/core/threads/thread-branch-tree";
+import {
+  flattenThreadBranches,
+  isBranchThread,
+} from "@/core/threads/thread-branch-tree";
 import type { AgentThread } from "@/core/threads/types";
 
 function thread(
@@ -39,6 +42,24 @@ function summarize(entries: ReturnType<typeof flattenThreadBranches>) {
     parentId: entry.parentThread?.thread_id,
   }));
 }
+
+describe("isBranchThread", () => {
+  it("recognizes a thread with valid branch provenance", () => {
+    expect(
+      isBranchThread(branch("child", "parent", "2026-01-01T00:00:00Z")),
+    ).toBe(true);
+  });
+
+  it("rejects missing or malformed branch provenance", () => {
+    expect(isBranchThread(thread("regular", "2026-01-01T00:00:00Z"))).toBe(
+      false,
+    );
+    expect(
+      isBranchThread(branch("malformed", 42, "2026-01-01T00:00:00Z")),
+    ).toBe(false);
+    expect(isBranchThread(null)).toBe(false);
+  });
+});
 
 describe("flattenThreadBranches", () => {
   it("nests loaded siblings and lifts the group by its freshest descendant", () => {

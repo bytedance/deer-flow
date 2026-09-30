@@ -11,10 +11,20 @@ pod = load("podcast-generation")
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
-    for k in ["VOLCENGINE_TTS_APPID", "VOLCENGINE_TTS_ACCESS_TOKEN", "VOLCENGINE_TTS_CLUSTER",
-              "MINIMAX_API_KEY", "PODCAST_GENERATION_PROVIDER", "MINIMAX_API_HOST",
-              "MINIMAX_TTS_MODEL", "MINIMAX_TTS_VOICE_MALE", "MINIMAX_TTS_VOICE_FEMALE",
-              "MINIMAX_TTS_MAX_RETRIES"]:
+    for k in [
+        "VOLCENGINE_TTS_APPID",
+        "VOLCENGINE_TTS_ACCESS_TOKEN",
+        "VOLCENGINE_TTS_CLUSTER",
+        "VOLCENGINE_TTS_VOICE_TYPE_MALE",
+        "VOLCENGINE_TTS_VOICE_TYPE_FEMALE",
+        "MINIMAX_API_KEY",
+        "PODCAST_GENERATION_PROVIDER",
+        "MINIMAX_API_HOST",
+        "MINIMAX_TTS_MODEL",
+        "MINIMAX_TTS_VOICE_MALE",
+        "MINIMAX_TTS_VOICE_FEMALE",
+        "MINIMAX_TTS_MAX_RETRIES",
+    ]:
         monkeypatch.delenv(k, raising=False)
     # never actually sleep during backoff in tests
     monkeypatch.setattr(pod.time, "sleep", lambda *_: None)
@@ -133,6 +143,50 @@ def test_process_line_minimax_male_and_override(monkeypatch):
     monkeypatch.setenv("MINIMAX_TTS_VOICE_MALE", "custom-male")
     pod._process_line((0, male, 1, "minimax"))
     assert seen[-1] == "custom-male"
+
+
+@pytest.mark.parametrize(
+    ("speaker", "env_name", "default_voice"),
+    [
+        (
+            "male",
+            "VOLCENGINE_TTS_VOICE_TYPE_MALE",
+            "zh_male_yangguangqingnian_moon_bigtts",
+        ),
+        (
+            "female",
+            "VOLCENGINE_TTS_VOICE_TYPE_FEMALE",
+            "zh_female_sajiaonvyou_moon_bigtts",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("configured_voice", "expected_voice"),
+    [
+        pytest.param(None, None, id="unset"),
+        pytest.param("custom-voice", "custom-voice", id="custom"),
+        pytest.param("", None, id="empty"),
+        pytest.param("   ", None, id="whitespace"),
+        pytest.param("  custom-voice  ", "custom-voice", id="padded-custom"),
+    ],
+)
+def test_process_line_volcengine_voice_mapping(
+    monkeypatch, speaker, env_name, default_voice, configured_voice, expected_voice
+):
+    if configured_voice is not None:
+        monkeypatch.setenv(env_name, configured_voice)
+
+    seen = {}
+
+    def fake_tts(text, voice_type):
+        seen["voice_type"] = voice_type
+        return b"x"
+
+    monkeypatch.setattr(pod, "text_to_speech_volcengine", fake_tts)
+    line = pod.ScriptLine(speaker=speaker, paragraph="hi")
+
+    pod._process_line((0, line, 1, "volcengine"))
+    assert seen["voice_type"] == (expected_voice or default_voice)
 
 
 def _seq_post(responses):

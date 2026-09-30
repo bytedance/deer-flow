@@ -23,12 +23,19 @@ from typing import override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages, is_genuine_user_message
-from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, extract_tool_receipts, make_tool_receipt, render_tool_receipts
+from deerflow.agents.middlewares.tool_receipt import (
+    TOOL_RECEIPT_KEY,
+    TOOL_RECEIPT_LEDGER_KEY,
+    ToolReceipt,
+    extract_tool_receipts,
+    make_tool_receipt,
+    render_tool_receipts_with_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,11 +132,7 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                 return True
         return False
 
-    def _inject(self, request: ModelRequest) -> ModelRequest:
-        if not self._should_render(request):
-            return request
-        receipts = extract_tool_receipts(list(request.messages))
-        ledger = render_tool_receipts(receipts)
+    def _inject(self, request: ModelRequest, ledger: str) -> ModelRequest:
         if not ledger:
             return request
         ledger_message = HumanMessage(
@@ -139,13 +142,40 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
         messages = insert_after_leading_system_messages(list(request.messages), [ledger_message])
         return request.override(messages=messages)
 
+    def _prepare_model_call(self, request: ModelRequest) -> tuple[ModelRequest, list[ToolReceipt] | None]:
+        if not self._should_render(request):
+            return request, None
+        receipts = extract_tool_receipts(list(request.messages))
+        ledger, rendered_receipts = render_tool_receipts_with_snapshot(receipts)
+        return self._inject(request, ledger), rendered_receipts
+
+    @staticmethod
+    def _stamp_citing_ledger(result: ModelCallResult, receipts: list[ToolReceipt] | None) -> ModelCallResult:
+        if receipts is None:
+            return result
+        if isinstance(result, AIMessage):
+            messages = [result]
+        else:
+            response = getattr(result, "model_response", result)
+            messages = getattr(response, "result", [])
+        for message in messages:
+            if not isinstance(message, AIMessage):
+                continue
+            kwargs = dict(message.additional_kwargs or {})
+            # Runtime-owned and always overwritten so provider output cannot
+            # forge the ledger against which its citations will be checked.
+            kwargs[TOOL_RECEIPT_LEDGER_KEY] = [dict(receipt) for receipt in receipts]
+            message.additional_kwargs = kwargs
+        return result
+
     @override
     def wrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        return handler(self._inject(request))
+        prepared, receipts = self._prepare_model_call(request)
+        return self._stamp_citing_ledger(handler(prepared), receipts)
 
     @override
     async def awrap_model_call(
@@ -153,4 +183,5 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        return await handler(self._inject(request))
+        prepared, receipts = self._prepare_model_call(request)
+        return self._stamp_citing_ledger(await handler(prepared), receipts)

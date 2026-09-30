@@ -79,6 +79,16 @@ def _strip_leading_slack_bot_mention(text: str, bot_user_id: str | None) -> str:
     return text[end + 1 :].lstrip()
 
 
+def _unescape_slack_text(text: str) -> str:
+    """Decode the three entities Slack escapes in message text.
+
+    Slack sends a user-typed ``&``, ``<`` and ``>`` as ``&amp;``, ``&lt;`` and
+    ``&gt;`` so that raw ``<...>`` always marks a control sequence (mention,
+    link). ``&amp;`` is decoded last so an escaped entity is decoded only once.
+    """
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
 class SlackChannel(Channel):
     """Slack IM channel using Socket Mode (WebSocket, no public IP).
 
@@ -141,9 +151,26 @@ class SlackChannel(Channel):
         self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
 
-        # Start socket mode in background thread
-        asyncio.get_event_loop().run_in_executor(None, self._socket_client.connect)
+        # Start socket mode in background thread. Go through
+        # ``_connect_socket_mode`` so a connect failure gets logged: nothing
+        # awaits the future ``run_in_executor`` returns, so an exception stored
+        # on it would never surface.
+        socket_client = self._socket_client
+        asyncio.get_event_loop().run_in_executor(None, self._connect_socket_mode, socket_client)
         logger.info("Slack channel started")
+
+    def _connect_socket_mode(self, socket_client: Any) -> None:
+        """Connect one start attempt's Socket Mode client if it is still current.
+
+        Mirrors the Telegram and Discord channels, whose background threads log
+        their errors instead of letting them vanish with the thread.
+        """
+        if socket_client is not self._socket_client:
+            return
+        try:
+            socket_client.connect()
+        except Exception:
+            logger.exception("[Slack] Socket Mode connection failed; the channel will not receive events")
 
     async def stop(self) -> None:
         self._running = False
@@ -332,6 +359,9 @@ class SlackChannel(Channel):
         text = event.get("text", "").strip()
         if event.get("type") == "app_mention":
             text = _strip_leading_slack_bot_mention(text, self._bot_user_id)
+        # Decode after mention stripping: a real mention is a raw <@...>, while
+        # a user-typed "<@...>" arrives as &lt;@...&gt; and must stay text.
+        text = _unescape_slack_text(text)
         if not text:
             return
 

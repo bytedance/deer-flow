@@ -71,10 +71,13 @@ def _make_provider_with_active_sandbox(tmp_path: Path, sandbox_id: str):
     from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
     from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
     from deerflow.config.sandbox_config import SandboxOwnershipConfig
+    from deerflow.sandbox.acquire_serialization import AcquireSerializer
 
     provider = AioSandboxProvider.__new__(AioSandboxProvider)
     provider._lock = threading.Lock()
-    provider._sandboxes = {sandbox_id: MagicMock()}
+    sandbox = MagicMock()
+    sandbox.requires_container_recycle = False
+    provider._sandboxes = {sandbox_id: sandbox}
     provider._active_sandbox_identity = {sandbox_id: ("default", "thread-1")}
     provider._sandbox_infos = {
         sandbox_id: SandboxInfo(
@@ -85,7 +88,7 @@ def _make_provider_with_active_sandbox(tmp_path: Path, sandbox_id: str):
         )
     }
     provider._thread_sandboxes = {}
-    provider._thread_locks = {}
+    provider._acquire_serializer = AcquireSerializer(thread_name_prefix="aio-sandbox-lock-wait")
     provider._last_activity = {sandbox_id: 1.0}
     provider._warm_pool = {}
     provider._warm_pool_identity = {}

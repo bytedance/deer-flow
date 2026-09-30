@@ -7,22 +7,44 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.search_time_range import DDGS_TIMELIMIT_BY_TIME_RANGE, SearchTimeRange
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BACKEND = "auto"
+DEFAULT_MAX_RESULTS = 5
 DEFAULT_REGION = "wt-wt"
 DEFAULT_SAFESEARCH = "moderate"
 DEFAULT_WIKIPEDIA_REGION = "us-en"
 
 WIKIPEDIA_BACKENDS = {"auto", "all", "wikipedia"}
+# ddgs 9.14.1: enabled text engines whose implementations honor ``timelimit``.
+# Google and Bing also implement it but are disabled upstream in this release.
+TIME_RANGE_CAPABLE_BACKENDS = ("brave", "duckduckgo", "yahoo")
+DEFAULT_TIME_RANGE_BACKEND = ",".join(TIME_RANGE_CAPABLE_BACKENDS)
 WIKIPEDIA_LANGUAGE_ALIASES = {
     "jp": "ja",
     "kr": "ko",
     "tzh": "zh",
     "wt": "en",
 }
+
+
+def _coerce_max_results(value: object) -> int:
+    """Normalize config/parameter values before passing them to DDGS."""
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        # int() accepts booleans and silently truncates a YAML value such as 3.5.
+        count = 0
+    else:
+        try:
+            count = int(value)  # type: ignore[call-overload]
+        except (TypeError, ValueError, OverflowError):
+            count = 0
+    if count <= 0:
+        logger.warning("Invalid DDG Search max_results=%r; using default %s", value, DEFAULT_MAX_RESULTS)
+        return DEFAULT_MAX_RESULTS
+    return count
 
 
 def _normalize_backend(backend: str | list[str] | tuple[str, ...] | None) -> str:
@@ -35,6 +57,20 @@ def _normalize_backend(backend: str | list[str] | tuple[str, ...] | None) -> str
 
 def _normalize_setting(value: str | None, default: str) -> str:
     return str(value).strip() if value else default
+
+
+def _resolve_time_range_backend(backend: str | list[str] | tuple[str, ...] | None) -> str:
+    """Exclude DDGS text backends that ignore the native time limit."""
+    normalized_backend = _normalize_backend(backend)
+    configured_backends = [part.strip().lower() for part in normalized_backend.split(",") if part.strip()]
+    if any(part in {"auto", "all"} for part in configured_backends):
+        return DEFAULT_TIME_RANGE_BACKEND
+
+    supported_backends = [part for part in configured_backends if part in TIME_RANGE_CAPABLE_BACKENDS]
+    excluded_backends = [part for part in configured_backends if part not in TIME_RANGE_CAPABLE_BACKENDS]
+    if excluded_backends:
+        logger.warning("Ignoring DDGS backends without time-range support: %s", ", ".join(excluded_backends))
+    return ",".join(supported_backends) or DEFAULT_TIME_RANGE_BACKEND
 
 
 def _backend_includes_wikipedia(backend: str | list[str] | tuple[str, ...] | None) -> bool:
@@ -86,10 +122,11 @@ def _resolve_ddgs_region(query: str, region: str | None, backend: str | list[str
 
 def _search_text(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
     region: str | None = DEFAULT_REGION,
     safesearch: str | None = DEFAULT_SAFESEARCH,
     backend: str | list[str] | tuple[str, ...] | None = DEFAULT_BACKEND,
+    time_range: SearchTimeRange | None = None,
 ) -> list[dict]:
     """
     Execute text search using DuckDuckGo.
@@ -100,6 +137,7 @@ def _search_text(
         region: Search region
         safesearch: Safe search level
         backend: DDGS backend(s), e.g. "auto", "duckduckgo", or "duckduckgo,brave"
+        time_range: Optional relative publication/update window
 
     Returns:
         List of search results
@@ -113,16 +151,18 @@ def _search_text(
     ddgs = DDGS(timeout=30)
 
     try:
-        backend = _normalize_backend(backend)
+        backend = _resolve_time_range_backend(backend) if time_range is not None else _normalize_backend(backend)
         safesearch = _normalize_setting(safesearch, DEFAULT_SAFESEARCH)
         effective_region = _resolve_ddgs_region(query, region, backend)
-        results = ddgs.text(
-            query,
-            region=effective_region,
-            safesearch=safesearch,
-            max_results=max_results,
-            backend=backend,
-        )
+        search_kwargs: dict[str, object] = {
+            "region": effective_region,
+            "safesearch": safesearch,
+            "max_results": max_results,
+            "backend": backend,
+        }
+        if time_range is not None:
+            search_kwargs["timelimit"] = DDGS_TIMELIMIT_BY_TIME_RANGE[time_range]
+        results = ddgs.text(query, **search_kwargs)
         return list(results) if results else []
 
     except Exception as e:
@@ -133,13 +173,15 @@ def _search_text(
 @tool("web_search", parse_docstring=True)
 def web_search_tool(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
+    time_range: SearchTimeRange | None = None,
 ) -> str:
     """Search the web for information. Use this tool to find current information, news, articles, and facts from the internet.
 
     Args:
         query: Search keywords describing what you want to find. Be specific for better results.
         max_results: Maximum number of results to return. Default is 5.
+        time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
     config = get_app_config().get_tool_config("web_search")
     region = DEFAULT_REGION
@@ -155,10 +197,11 @@ def web_search_tool(
 
     results = _search_text(
         query=query,
-        max_results=max_results,
+        max_results=_coerce_max_results(max_results),
         region=region,
         safesearch=safesearch,
         backend=backend,
+        time_range=time_range,
     )
 
     if not results:

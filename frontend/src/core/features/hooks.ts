@@ -2,6 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 
 import {
   fetchBrowserControlEnabled,
+  fetchConversationReferencesCapability,
+  fetchKnowledgeBaseFeature,
   fetchMcpTasksEnabled,
   fetchSubagentBatchesCapability,
 } from "./api";
@@ -48,6 +50,35 @@ export function useSubagentBatchesCapability() {
     repositoryAvailable: data?.repositoryAvailable ?? false,
     workerRunning: data?.workerRunning ?? false,
     maxRunning: data?.maxRunning ?? 0,
+    isLoading: isPending,
+  };
+}
+
+export function useConversationReferencesCapability() {
+  const { data, isPending } = useQuery({
+    queryKey: ["features", "conversation_references"],
+    queryFn: () => fetchConversationReferencesCapability(),
+    staleTime: 0,
+    refetchOnMount: true,
+    retry: false,
+  });
+  return {
+    enabled: data?.enabled ?? false,
+    maxReferences: data?.maxReferences ?? 0,
+    isLoading: isPending,
+  };
+}
+
+export function useKnowledgeBaseEnabled() {
+  const { data, isPending } = useQuery({
+    queryKey: ["features", "knowledge_base"],
+    queryFn: fetchKnowledgeBaseFeature,
+    staleTime: 0,
+    refetchOnMount: true,
+    retry: false,
+  });
+  return {
+    scopeSelectionEnabled: data?.scopeSelectionEnabled ?? false,
     isLoading: isPending,
   };
 }

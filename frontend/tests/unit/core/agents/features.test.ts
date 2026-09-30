@@ -12,6 +12,7 @@ import { fetchAgentsApiEnabled } from "@/core/agents/api";
 import { fetch as fetcher } from "@/core/api/fetcher";
 import {
   fetchBrowserControlEnabled,
+  fetchKnowledgeBaseFeature,
   fetchMcpTasksEnabled,
 } from "@/core/features/api";
 
@@ -113,5 +114,30 @@ describe("fetchMcpTasksEnabled", () => {
   test("throws when the features request fails", async () => {
     mockedFetch.mockResolvedValueOnce(jsonResponse(500, {}));
     await expect(fetchMcpTasksEnabled()).rejects.toThrow();
+  });
+});
+
+describe("fetchKnowledgeBaseFeature", () => {
+  test("reads the knowledge-base retrieval-scope flags", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        agents_api: { enabled: true },
+        knowledge_base: {
+          scope_selection_enabled: true,
+        },
+      }),
+    );
+    await expect(fetchKnowledgeBaseFeature()).resolves.toEqual({
+      scopeSelectionEnabled: true,
+    });
+  });
+
+  test("defaults to disabled when omitted", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { agents_api: { enabled: true } }),
+    );
+    await expect(fetchKnowledgeBaseFeature()).resolves.toEqual({
+      scopeSelectionEnabled: false,
+    });
   });
 });

@@ -13,6 +13,7 @@ Implementations:
 from __future__ import annotations
 
 import abc
+from collections.abc import Sequence
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
@@ -193,6 +194,7 @@ class RunEventStore(abc.ABC):
         task_id: str | None = None,
         limit: int = 500,
         after_seq: int | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict]:
         """Return the full event stream for a run, ordered by seq ascending.
 
@@ -200,7 +202,8 @@ class RunEventStore(abc.ABC):
         ``metadata["task_id"]``). ``after_seq`` is a forward cursor returning the
         first ``limit`` records with seq > after_seq, so callers can page through
         a single subagent task's events without the run-wide ``limit`` truncating
-        the tail (#3779).
+        the tail (#3779). ``user_id`` follows the same explicit-caller semantics
+        as :meth:`list_messages`.
         """
 
     @abc.abstractmethod
@@ -240,9 +243,56 @@ class RunEventStore(abc.ABC):
         """Count displayable messages (category=message) in a thread."""
 
     @abc.abstractmethod
-    async def delete_by_thread(self, thread_id: str) -> int:
-        """Delete all events for a thread. Return the number of deleted events."""
+    async def get_message_seqs(
+        self,
+        thread_id: str,
+        identities: Sequence[str],
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> dict[str, int]:
+        """Return ``{identity: seq}`` for messages already persisted in this thread.
+
+        A checkpoint carries no seq of its own and loses messages to
+        summarization, so a client merging a checkpoint frame with this
+        seq-ordered feed cannot place a surviving old message once the feed's
+        loaded page window no longer reaches back to it (#4666). The seq already
+        exists here; this exposes it without paging the whole feed.
+
+        *identities* are the values produced by
+        ``deerflow.runtime.events.message_identity.message_identity`` — the same
+        rule the frontend applies — so both sides agree on what "same message"
+        means. Identities that are not persisted (or not `category="message"`)
+        are simply absent from the result: callers degrade to their own
+        placement rule rather than treating a miss as an error. When one
+        identity resolves to several rows, the earliest seq wins, so a message
+        re-persisted later keeps the position it first occupied.
+        """
 
     @abc.abstractmethod
-    async def delete_by_run(self, thread_id: str, run_id: str) -> int:
-        """Delete all events for a specific run. Return the number of deleted events."""
+    async def delete_by_thread(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> int:
+        """Delete all events for a thread. Return the number of deleted events.
+
+        ``user_id`` follows the same three-state convention as the read methods:
+        ``AUTO`` resolves the caller's context, an explicit id scopes the delete
+        to that owner, and ``None`` removes every owner's rows. Backends whose
+        storage is not user-scoped (memory, JSONL) accept the parameter for
+        interface parity and ignore it, so callers can delete uniformly.
+        """
+
+    @abc.abstractmethod
+    async def delete_by_run(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> int:
+        """Delete all events for a specific run. Return the number of deleted events.
+
+        ``user_id`` follows the same convention as :meth:`delete_by_thread`.
+        """

@@ -1,10 +1,107 @@
 ## Service Startup Contracts
 
+Optional browser dependency detection reads the top-level `tools:` sequence
+without requiring `name` to be its first mapping key. Both indented and
+indentless lists are supported; nested option names and block-scalar text
+must not enable the browser extra. Keep the detector standard-library-only
+because it runs before dependency synchronization. Read UTF-8 config files
+with or without a leading BOM so the first section remains detectable.
+`setup-sandbox.sh` also strips the leading BOM and normalizes CRLF before selecting the image;
+keep its shell filter compatible with GNU and BSD sed.
+An Apple Container pull that succeeds on macOS must not fail the setup step
+just because Docker is absent. Keep the Docker pull when Docker is available,
+including after an Apple Container failure, and retain the final image-config
+note rather than exiting early on Apple Container success.
+
 The root `PORT` value configures Docker's published nginx ingress only; local
 orchestration pins Next.js to `3000`. Runtime commands launch from the already
 synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
+
+`deploy.sh` never sources the repo-root `.env`; Compose reads it via
+`--env-file`, and shell exports outrank that file during interpolation (an
+exported-but-empty variable still wins). So `BETTER_AUTH_SECRET` and
+`DEER_FLOW_INTERNAL_AUTH_TOKEN` resolve shell → `.env` → persisted file under
+`DEER_FLOW_HOME` → freshly generated, and a `.env`-provided value is left
+unexported so Compose parses it itself. Whether `.env` provides one is
+Compose's answer, not a `KEY=VALUE` grep: Compose also accepts `KEY: VALUE`
+lines and interpolates `${VAR}` inside values, so the script renders a stub
+project whose only environment entry is `${KEY}` through
+`docker compose config` (same `--env-file`, stub on stdin, project directory
+`docker/`) and reads the value back; `""` means empty or unset and falls
+through to the persisted/generated secret. This works on every Compose v2
+(the README floor is 2.24; `config --environment` would need 2.28), and a
+failing probe stops the script rather than guessing. `read_dotenv_value`
+stays for the end-of-run summary only. Do not export a value the script read
+from `.env`: that shadows Compose's own dotenv parsing and re-creates the bug
+where `make up` replaced the operator's secret with a generated one.
+`backend/tests/test_deploy_dotenv_secrets.py` pins the order and the probe;
+its real-Compose cases run against the installed `docker` CLI and against any
+standalone binaries listed in `DEER_FLOW_TEST_COMPOSE_BINARIES`.
+
+`doctor.py` checks the config file the Gateway would load, not a fixed
+`<checkout>/config.yaml`. It mirrors how `serve.sh` hands the two
+config-location variables to the Gateway: `.env` values for
+`DEER_FLOW_CONFIG_PATH` / `DEER_FLOW_PROJECT_ROOT` override the shell (other
+keys stay shell-first), an unquoted leading `~` in them expands as `source`
+does (a quoted one stays literal), and an unset or empty
+`DEER_FLOW_PROJECT_ROOT` becomes the checkout. It then asks the harness
+(`AppConfig.resolve_config_path`) instead of re-implementing its order. An
+override the Gateway would reject (`DEER_FLOW_CONFIG_PATH` missing,
+`DEER_FLOW_PROJECT_ROOT` not a directory) fails `config.yaml found` with the
+Gateway's error, and the config-dependent checks skip. Any failure to import
+the harness is reported, never raised: doctor diagnoses broken environments.
+Pinned by `backend/tests/test_doctor.py::TestMainConfigResolution`.
+
+Root `make install` runs pre-commit through uv, so uv's tool bin directory
+need not be on `PATH`.
+
+`config-upgrade.sh` upgrades the file the Gateway loads by asking the harness
+(`AppConfig.resolve_config_path`) rather than copying its lookup order. It
+defaults `DEER_FLOW_PROJECT_ROOT` to the checkout, as `serve.sh` does, so
+`<checkout>/config.yaml` wins over a legacy `backend/config.yaml`. A missing
+`DEER_FLOW_CONFIG_PATH` or invalid project root is an error, never a fallback.
+Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
+`backend/tests/test_config_version.py::test_config_upgrade_*` pins this.
+
+## Shell Script Invocation Contract
+
+Root Makefile recipes must invoke repository `.sh` files through
+`RUN_SHELL_SCRIPT`. On POSIX this expands to `$(BASH)`; on Windows it uses the
+Git Bash wrapper. Shell scripts that invoke sibling repository scripts must
+likewise prefix the target with `bash`. This keeps documented `make` commands
+working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
+does not preserve executable bits.
+
+Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
+Python (`os.name == "nt"`), it checks `pnpm.cmd` before the generic `pnpm`
+lookup, which uses `PATH`/`PATHEXT` and may select an `.exe` or `.bat` in the
+same or an earlier PATH directory. If neither is found, it falls back to
+Corepack, checking `corepack.cmd` before `corepack`. POSIX Python (including
+MSYS/Cygwin Python) keeps the generic name first for each tool; the gate is
+based on Python's `os.name`, not the invoking shell.
+
+## Public Skill Review Waivers
+
+`review_changed_public_skills.py` keeps the analyzer strict and applies narrow
+CI-only exceptions from `.github/skill-review-waivers.v1.json`. The manifest is
+versioned by `contracts/skill_review/waiver_manifest.v1.schema.json`; each entry
+must identify one current error by package, source, rule, path, line, and
+evidence, and pin the complete source file with SHA-256 plus an expiry date.
+An optional, bounded `preapproved_file_sha256s` list authorizes reviewed future
+full-file digests without relaxing the exact finding match. Blockers are never
+waivable, and waived errors are still printed with their original severity and
+justification.
+
+For pull requests, only the base revision's manifest is effective. The head
+manifest is parsed and checked against the current analyzer output, but cannot
+self-authorize a finding in the same pull request. Push comparisons use the
+same before/after trust boundary. A waiver-only change can therefore land
+without weakening its own check, then become effective for later changes after
+it is part of the trusted base. Preapproved digests must be code-reviewed in
+that first change; after the corresponding file revision lands, promote the
+consumed digest to `file_sha256` and remove it from the preapproval list.
 
 ## Backend Static Analysis Commands
 
@@ -220,3 +317,7 @@ bounded, drop-oldest frame queue. WebSocket clients that request
 The legacy no-parameter protocol still base64-encodes frames into JSON at the
 Gateway boundary for backward compatibility. Unknown `frame_format` values
 receive a JSON error and close code 1008.
+
+The support bundle's `extensions_config.json` reader accepts UTF-8 with or
+without a leading BOM, matching the runtime loader. Preserve redaction and
+avoid flagging a valid BOM-prefixed file as a syntax error in triage output.

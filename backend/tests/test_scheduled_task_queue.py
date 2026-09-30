@@ -154,6 +154,94 @@ async def test_queued_run_survives_single_instance_restart_sweep(tmp_path):
         await close_engine()
 
 
+async def test_queued_once_task_survives_startup_and_is_drained_on_next_poll(tmp_path):
+    """A newer queued occurrence survives recovery of an already-stuck parent.
+
+    The old success models a completion that committed before its parent update.
+    A real manual dispatch then leaves newer work queued after a transient
+    same-thread conflict. Startup must not let the old success finalize the
+    parent through the newer active row; the ordinary queue drain owns launch.
+    """
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        await task_repo.create(
+            task_id="task-queued-once",
+            user_id="user-1",
+            thread_id="thread-queued-once",
+            context_mode="reuse_thread",
+            assistant_id="lead_agent",
+            title="Queued once task",
+            prompt="Resume queued work",
+            schedule_type="once",
+            schedule_spec={"run_at": now.isoformat()},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await task_repo.update(
+            "task-queued-once",
+            user_id="user-1",
+            updates={"status": "running"},
+        )
+        await run_repo.create(
+            run_record_id="task-run-old-success",
+            task_id="task-queued-once",
+            thread_id="thread-queued-once",
+            scheduled_for=now - timedelta(minutes=1),
+            trigger="scheduled",
+            status="success",
+        )
+        task = await task_repo.get("task-queued-once", user_id="user-1")
+        assert task is not None
+        launched = []
+
+        async def launch_run(**kwargs):
+            launched.append(kwargs)
+            if len(launched) == 1:
+                raise ConflictError("Thread thread-queued-once already has an active run")
+            return {"run_id": "run-after-restart", "thread_id": kwargs["thread_id"]}
+
+        first_service = _make_service(task_repo, run_repo, launch_run)
+        queued = await first_service.dispatch_task(task, now=now, trigger="manual")
+        assert queued["outcome"] == "queued"
+        rows = await run_repo.list_by_task("task-queued-once")
+        assert [row["status"] for row in rows] == ["queued", "success"]
+
+        service = _make_service(task_repo, run_repo, launch_run)
+
+        async def parked_run_loop():
+            await service._stop.wait()
+
+        service._run_loop = parked_run_loop
+        await service.start()
+        try:
+            task = await task_repo.get_internal("task-queued-once")
+            rows = await run_repo.list_by_task("task-queued-once")
+            assert task is not None
+            assert task["status"] == "running"
+            assert rows[0]["status"] == "queued"
+
+            await service.run_once(now=now + timedelta(seconds=1))
+
+            task = await task_repo.get_internal("task-queued-once")
+            rows = await run_repo.list_by_task("task-queued-once")
+            assert task is not None
+            assert task["status"] == "running"
+            assert task["last_run_id"] == "run-after-restart"
+            assert rows[0]["status"] == "running"
+            assert rows[0]["run_id"] == "run-after-restart"
+            assert rows[1]["status"] == "success"
+            assert len(launched) == 2
+        finally:
+            await service.stop()
+    finally:
+        await close_engine()
+
+
 async def test_only_one_worker_can_claim_a_queued_run(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
@@ -193,6 +281,75 @@ async def test_only_one_worker_can_claim_a_queued_run(tmp_path):
         assert row["status"] == "launching"
         assert row["attempt_count"] == 1
         assert row["lease_owner"] in {"worker-a", "worker-b"}
+    finally:
+        await close_engine()
+
+
+async def test_global_launch_budget_holds_when_distinct_rows_are_claimed_concurrently(tmp_path):
+    """The global launch budget must survive claims racing on *distinct* rows.
+
+    ``claim_queued_run`` counts executing rows and then promotes one row to
+    ``launching``. Postgres serializes that pair with an advisory lock. SQLite
+    needs ``BEGIN IMMEDIATE`` for the same reason ``ThreadMetaRepository``
+    does: a deferred transaction does not reserve the writer until the UPDATE,
+    so every claimer reads the same stale count and overshoots
+    ``max_concurrent_runs``.
+
+    Distinct rows are the load-bearing part. Two claims of the *same* row are
+    already safe via the ``status == "queued"`` CAS, which is what
+    ``test_only_one_worker_can_claim_a_queued_run`` covers.
+    """
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime(2026, 8, 20, 9, 0, tzinfo=UTC)
+        claimants = 8
+        for index in range(claimants):
+            await run_repo.create(
+                run_record_id=f"task-run-budget-{index}",
+                task_id=f"task-budget-{index}",
+                thread_id=f"thread-budget-{index}",
+                scheduled_for=now,
+                trigger="scheduled",
+                status="queued",
+            )
+
+        # Open every connection the claimers need up front. On a cold pool the
+        # per-connection PRAGMA setup staggers them enough to hide the race.
+        await asyncio.gather(*(run_repo.count_active_runs() for _ in range(claimants)))
+
+        # That warm-up is load-bearing, and it only works because the SQLite
+        # engine keeps pooled connections (init_engine_from_config builds it on
+        # SQLAlchemy's default AsyncAdaptedQueuePool, so `pool_size` of them
+        # survive this gather while the overflow is discarded). Under a
+        # non-pooling class such as NullPool every claimer would open its own
+        # connection, the PRAGMA setup would serialize them, and this test
+        # would pass against an unserialized claim instead of failing. Assert
+        # the reuse so that a pool change breaks this test loudly rather than
+        # quietly draining it of guard strength.
+        pool = sf.kw["bind"].sync_engine.pool
+        # A non-pooling class does not implement checkedin() at all, so treat a
+        # missing counter as "nothing was reused" and report it the same way.
+        pooled = pool.checkedin() if hasattr(pool, "checkedin") else 0
+        assert pooled >= 2, f"{type(pool).__name__} left {pooled} connections pooled after the warm-up; the claimers cannot overlap, so this test would pass against an unserialized claim"
+
+        claims = await asyncio.gather(
+            *(
+                run_repo.claim_queued_run(
+                    f"task-run-budget-{index}",
+                    lease_owner=f"worker-{index}",
+                    now=now,
+                    lease_seconds=120,
+                    global_max_concurrent_runs=1,
+                )
+                for index in range(claimants)
+            )
+        )
+
+        assert sum(claim is not None for claim in claims) == 1
+        assert await run_repo.count_active_runs() == 1
     finally:
         await close_engine()
 

@@ -45,6 +45,37 @@ test("extractHumanInputRequest reads a valid tool artifact payload", () => {
   expect(extractHumanInputRequest(message)).toEqual(requestPayload);
 });
 
+test("extractHumanInputRequest accepts sandbox network single-choice approvals", () => {
+  const networkRequest = {
+    ...requestPayload,
+    source: "sandbox_network",
+    request_id: "network-request-1",
+    title: "Sandbox network access",
+    input_mode: "single_choice",
+    options: [
+      { id: "deny", label: "Deny", value: "Deny network access" },
+      {
+        id: "allow_temporary",
+        label: "Allow for 5 minutes",
+        value: "Allow network access for 5 minutes",
+      },
+      {
+        id: "allow_sandbox",
+        label: "Allow for this sandbox",
+        value: "Allow network access for this sandbox",
+      },
+    ],
+  };
+  const message = {
+    type: "tool",
+    name: "bash",
+    content: "network policy denied pypi.org:443",
+    artifact: { human_input: networkRequest },
+  } as unknown as Message;
+
+  expect(extractHumanInputRequest(message)).toEqual(networkRequest);
+});
+
 test("extractHumanInputRequest rejects malformed artifacts", () => {
   const message = {
     type: "tool",

@@ -11,7 +11,10 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.browser_capability import browser_capability
+from app.gateway.conversation_access import conversation_references_enabled
 from app.gateway.deps import get_config
+from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
+from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
 from deerflow.config.app_config import AppConfig
 from deerflow.subagents.capacity import configured_subagent_max_running
 
@@ -45,6 +48,22 @@ class SubagentBatchesFeature(BaseModel):
     max_running: int = Field(..., description="Native subagent execution slots in this Gateway process")
 
 
+class ConversationReferencesFeature(BaseModel):
+    """Availability of explicit conversation references on run requests."""
+
+    enabled: bool = Field(..., description="Whether the opt-in read_conversation tool is configured, so run requests may carry conversation_references")
+    max_references: int = Field(..., description="Maximum conversation references accepted on one run request")
+
+
+class KnowledgeBaseFeature(BaseModel):
+    """Availability of RAGFlow retrieval scope selection in chat."""
+
+    scope_selection_enabled: bool = Field(
+        ...,
+        description="Whether chat may select a per-message RAGFlow retrieval scope",
+    )
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
@@ -52,6 +71,8 @@ class FeaturesResponse(BaseModel):
     browser_control: BrowserControlFeature
     mcp_tasks: McpTasksFeature
     subagent_batches: SubagentBatchesFeature
+    conversation_references: ConversationReferencesFeature
+    knowledge_base: KnowledgeBaseFeature
 
 
 @router.get(
@@ -80,4 +101,23 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             worker_running=subagent_batch_worker_running,
             max_running=configured_subagent_max_running(),
         ),
+        # Same predicate as run admission (``prepare_conversation_reader``), read
+        # through ``get_config`` so enabling the tool in config.yaml shows up
+        # without a restart. A UI with no entry point still needs no change here.
+        conversation_references=ConversationReferencesFeature(
+            enabled=conversation_references_enabled(config),
+            max_references=MAX_CONVERSATION_REFERENCES,
+        ),
+        knowledge_base=KnowledgeBaseFeature(
+            scope_selection_enabled=_knowledge_scope_selection_enabled(config),
+        ),
     )
+
+
+def _knowledge_scope_selection_enabled(config: AppConfig) -> bool:
+    """Fail closed unless the effective knowledge_search entry is RAGFlow."""
+    settings = config.knowledge_base
+    if not settings.enabled or not settings.scope_selection_enabled:
+        return False
+    tool = config.get_tool_config("knowledge_search")
+    return tool is not None and tool.use == RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER

@@ -2,7 +2,12 @@ import { describe, expect, test } from "@rstest/core";
 
 import {
   describeSchedule,
+  hasScheduleSpec,
+  clampIntervalAmount,
+  intervalToSeconds,
+  minIntervalAmount,
   parseCron,
+  secondsToInterval,
   serializeCron,
   utcToZonedLocalInput,
   zonedLocalToUtcIso,
@@ -258,6 +263,108 @@ describe("describeSchedule", () => {
         "en",
       ),
     ).toBe("Custom: */5 * * * * (UTC)");
+  });
+
+  test("interval minutes en/zh omit timezone", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 90,
+          intervalUnit: "minutes",
+          timezone: "Asia/Shanghai",
+        },
+        "en",
+      ),
+    ).toBe("Every 90 minutes");
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 90,
+          intervalUnit: "minutes",
+          timezone: "Asia/Shanghai",
+        },
+        "zh",
+      ),
+    ).toBe("每 90 分钟");
+  });
+
+  test("interval singular hour en", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 1,
+          intervalUnit: "hours",
+          timezone: "UTC",
+        },
+        "en",
+      ),
+    ).toBe("Every hour");
+  });
+
+  test("interval seconds en/zh omit timezone", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 90,
+          intervalUnit: "seconds",
+          timezone: "Asia/Shanghai",
+        },
+        "en",
+      ),
+    ).toBe("Every 90 seconds");
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: 90,
+          intervalUnit: "seconds",
+          timezone: "Asia/Shanghai",
+        },
+        "zh",
+      ),
+    ).toBe("每 90 秒");
+  });
+});
+
+describe("interval conversion", () => {
+  test("minutes and hours convert to seconds", () => {
+    expect(intervalToSeconds(90, "seconds")).toBe(90);
+    expect(intervalToSeconds(90, "minutes")).toBe(5400);
+    expect(intervalToSeconds(2, "hours")).toBe(7200);
+  });
+
+  test("whole hours stay in hours; whole minutes stay in minutes", () => {
+    expect(secondsToInterval(7200)).toEqual({ amount: 2, unit: "hours" });
+    expect(secondsToInterval(5400)).toEqual({ amount: 90, unit: "minutes" });
+    expect(secondsToInterval(120)).toEqual({ amount: 2, unit: "minutes" });
+  });
+
+  test("edit/duplicate round-trip keeps intervals that are not whole minutes", () => {
+    const stored = 90;
+    const displayed = secondsToInterval(stored);
+    expect(displayed).toEqual({ amount: 90, unit: "seconds" });
+    expect(intervalToSeconds(displayed.amount, displayed.unit)).toBe(stored);
+  });
+
+  test("seconds unit clamps below the default 60s server floor", () => {
+    expect(minIntervalAmount("seconds")).toBe(60);
+    expect(minIntervalAmount("minutes")).toBe(1);
+    expect(minIntervalAmount("hours")).toBe(1);
+    expect(clampIntervalAmount(30, "seconds")).toBe(60);
+    expect(clampIntervalAmount(90, "seconds")).toBe(90);
+    expect(clampIntervalAmount(1, "minutes")).toBe(1);
+  });
+
+  test("hasScheduleSpec accepts interval every_seconds", () => {
+    expect(hasScheduleSpec({ every_seconds: 90 })).toBe(true);
+    expect(hasScheduleSpec({ cron: "0 9 * * *" })).toBe(true);
+    expect(hasScheduleSpec({ run_at: "2026-07-02T01:00:00+00:00" })).toBe(true);
+    expect(hasScheduleSpec({})).toBe(false);
+    expect(hasScheduleSpec({ every_seconds: 0 })).toBe(false);
   });
 });
 

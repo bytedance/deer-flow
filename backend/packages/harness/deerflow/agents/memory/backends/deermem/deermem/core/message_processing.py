@@ -13,7 +13,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-_UPLOAD_BLOCK_RE = re.compile(r"<(?P<tag>uploaded_files|current_uploads)>[\s\S]*?</(?P=tag)>\n*", re.IGNORECASE)
+_UPLOAD_BLOCK_RE = re.compile(r"<current_uploads>[\s\S]*?</current_uploads>\n*", re.IGNORECASE)
 
 _PATTERN_CACHE: dict[tuple[str, str | None], list[re.Pattern[str]]] = {}
 
@@ -186,7 +186,7 @@ def filter_messages_for_memory(messages: list[Any], *, should_keep_hidden_messag
                 if not keep:
                     continue
             content_str = extract_message_text(msg)
-            if "<uploaded_files>" in content_str.lower() or "<current_uploads>" in content_str.lower():
+            if "<current_uploads>" in content_str.lower():
                 stripped = _UPLOAD_BLOCK_RE.sub("", content_str).strip()
                 if not stripped:
                     skip_next_ai = True
@@ -262,20 +262,32 @@ SIGNAL_NAMES: tuple[str, ...] = (
     "decision",
 )
 
+#: Trailing messages :func:`detect_signals` scans by default. This is the "recent
+#: turns" window the extraction hints and the reinforcement gate are about; a caller
+#: with a different question -- the pre-screen's L3 veto, which has to answer for a
+#: whole batch -- passes ``window=None``.
+_SIGNAL_WINDOW = 6
+
 
 def detect_signals(
     messages: list[Any],
     *,
     patterns_dir: str | None = None,
+    window: int | None = _SIGNAL_WINDOW,
 ) -> set[str]:
     """Detect signal classes in the recent conversation turns.
 
-    Returns the set of signal names whose patterns match a human message among
-    the last 6 filtered messages. This generalizes :func:`detect_correction` /
-    :func:`detect_reinforcement` (which remain for backward compatibility) to
-    the full signal set. The window stays ``messages[-6:]``.
+    Returns the set of signal names whose patterns match a human message among the
+    last ``window`` messages (the default 6, the "recent turns" window the
+    extraction hints and the reinforcement gate are about). ``window=None`` scans
+    every message instead: the pre-screen's L3 veto needs that, because a skip
+    consumes the whole post-watermark batch, so an explicit signal anywhere in that
+    batch must keep it out of judging -- not only one inside the trailing window.
+    This generalizes :func:`detect_correction` / :func:`detect_reinforcement` (which
+    remain for backward compatibility) to the full signal set.
     """
-    recent_user_msgs = [msg for msg in messages[-6:] if getattr(msg, "type", None) == "human"]
+    candidates = messages if window is None else messages[-window:]
+    recent_user_msgs = [msg for msg in candidates if getattr(msg, "type", None) == "human"]
     if not recent_user_msgs:
         return set()
 

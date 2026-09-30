@@ -37,7 +37,7 @@ from .view_state import (
 )
 from .widgets.composer import ComposerInput
 
-_HELP_KEYS = "Keys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
+_HELP_KEYS = "Keys:  Enter send · PgUp/PgDn scroll transcript · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
 _HELP_TEXT = f"{format_command_help()}\n{_HELP_KEYS}"
 
 
@@ -169,6 +169,8 @@ class DeerFlowTUI(App):
         Binding("tab", "palette_complete", show=False, priority=True),
         Binding("escape", "escape", show=False, priority=True),
         Binding("enter", "palette_accept", show=False, priority=True),
+        Binding("pageup", "transcript_page_up", show=False, priority=True),
+        Binding("pagedown", "transcript_page_down", show=False, priority=True),
     ]
 
     def __init__(self, session, plan) -> None:
@@ -193,6 +195,7 @@ class DeerFlowTUI(App):
         self._palette_index = 0
         self._history = InputHistory()
         self._transcript_dirty = False
+        self._transcript_scroll_pending = False
 
     # ----- composition --------------------------------------------------- #
 
@@ -260,16 +263,31 @@ class DeerFlowTUI(App):
     # ----- slash command palette ----------------------------------------- #
 
     def check_action(self, action: str, parameters):  # noqa: D401 - Textual hook
-        custom = {"nav_up", "nav_down", "palette_complete", "palette_accept", "escape"}
+        custom = {
+            "nav_up",
+            "nav_down",
+            "palette_complete",
+            "palette_accept",
+            "escape",
+            "transcript_page_up",
+            "transcript_page_down",
+        }
         if action in custom:
             # A modal overlay (e.g. the model/thread picker) is on top — never
             # intercept its keys; let the overlay handle them natively.
             if len(self.screen_stack) > 1:
                 return None
-            # nav (history), Tab and Esc are always consumed (Tab can't move focus
-            # off the composer; Esc closes the palette or interrupts a run). Enter
-            # falls through to the Input when the palette is closed so it submits.
-            if action in {"nav_up", "nav_down", "palette_complete", "escape"}:
+            # History navigation, transcript paging, Tab, and Esc are always
+            # consumed. Enter falls through to the Input when the palette is
+            # closed so it submits normally.
+            if action in {
+                "nav_up",
+                "nav_down",
+                "palette_complete",
+                "escape",
+                "transcript_page_up",
+                "transcript_page_down",
+            }:
                 return True
             return True if self._palette_open else None
         return True
@@ -667,6 +685,19 @@ class DeerFlowTUI(App):
     def action_clear_composer(self) -> None:
         self.query_one("#composer", Input).value = ""
 
+    def action_transcript_page_up(self) -> None:
+        scroll = self.query_one("#scroll", VerticalScroll)
+        self._transcript_scroll_pending = True
+        scroll.scroll_page_up(animate=False, on_complete=self._finish_transcript_scroll)
+
+    def action_transcript_page_down(self) -> None:
+        scroll = self.query_one("#scroll", VerticalScroll)
+        self._transcript_scroll_pending = True
+        scroll.scroll_page_down(animate=False, on_complete=self._finish_transcript_scroll)
+
+    def _finish_transcript_scroll(self) -> None:
+        self._transcript_scroll_pending = False
+
     # ----- rendering ----------------------------------------------------- #
 
     def _dispatch(self, action) -> None:
@@ -702,8 +733,20 @@ class DeerFlowTUI(App):
         )
 
     def _refresh_transcript(self) -> None:
+        scroll = self.query_one("#scroll", VerticalScroll)
+        follow_transcript = scroll.is_vertical_scroll_end
+        reading_position = scroll.scroll_y
         self.query_one("#transcript", Static).update(render_transcript(self.state))
-        self.query_one("#scroll", VerticalScroll).scroll_end(animate=False)
+        if self._transcript_scroll_pending:
+            # Let the scheduled page movement win if output arrives between the
+            # key press and Textual's next refresh cycle.
+            return
+        if follow_transcript:
+            scroll.scroll_end(animate=False)
+        else:
+            # Static.update() can change layout before the next refresh. Restore
+            # the absolute reading position after that layout has been applied.
+            scroll.scroll_to(y=reading_position, animate=False)
 
     def _refresh_status(self) -> None:
         spinner = SYMBOLS["spinner"][self._spinner_idx] if self._streaming else ""

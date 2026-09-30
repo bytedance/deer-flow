@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import pytest
+
 from deerflow.skills.parser import parse_skill_file
 
 # ---------------------------------------------------------------------------
@@ -20,12 +22,12 @@ from deerflow.skills.parser import parse_skill_file
 # ---------------------------------------------------------------------------
 
 
-def _write_skill(tmp_path: Path, front_matter: str, body: str = "# My Skill\n") -> Path:
+def _write_skill(tmp_path: Path, front_matter: str, body: str = "# My Skill\n", encoding: str = "utf-8") -> Path:
     """Write a minimal SKILL.md and return the path."""
     skill_dir = tmp_path / "my-skill"
     skill_dir.mkdir()
     skill_file = skill_dir / "SKILL.md"
-    skill_file.write_text(f"---\n{front_matter}\n---\n{body}", encoding="utf-8")
+    skill_file.write_text(f"---\n{front_matter}\n---\n{body}", encoding=encoding)
     return skill_file
 
 
@@ -108,8 +110,113 @@ def test_parse_empty_allowed_tools_list(tmp_path):
     assert skill.allowed_tools == ()
 
 
+def test_parse_allowed_tools_string(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Bash WebFetch Read Write Edit Bash(git:*)",
+    )
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is not None
+    assert skill.allowed_tools == (
+        "bash",
+        "web_fetch",
+        "read_file",
+        "write_file",
+        "str_replace",
+        "Bash(git:*)",
+    )
+
+
+def test_parse_allowed_tools_string_preserves_parenthesized_spaces(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Bash(tvly *) Bash(playwright-cli:*) Bash(npx:*) Bash(npm:*)",
+    )
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.allowed_tools == (
+        "Bash(tvly *)",
+        "Bash(playwright-cli:*)",
+        "Bash(npx:*)",
+        "Bash(npm:*)",
+    )
+
+
+def test_parse_allowed_tools_string_preserves_scalar_custom_tool_names(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: mcp__arxiv__SearchPapers MyCustomTool write",
+    )
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.allowed_tools == ("mcp__arxiv__SearchPapers", "MyCustomTool", "write")
+
+
+def test_parse_allowed_tools_string_normalizes_glob_and_grep_aliases(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Glob Grep",
+    )
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.allowed_tools == ("glob", "grep")
+
+
+@pytest.mark.parametrize(
+    "allowed_tools",
+    [
+        'Bash("echo )")',
+        "Bash('echo )')",
+        r"Bash(echo \) literal)",
+    ],
+)
+def test_parse_allowed_tools_string_preserves_quoted_and_escaped_parentheses(tmp_path, allowed_tools):
+    skill_file = _write_skill(tmp_path, f"name: my-skill\ndescription: Test\nallowed-tools: {allowed_tools}")
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.allowed_tools == (allowed_tools,)
+
+
+def test_parse_allowed_tools_list_preserves_exact_runtime_names(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: [mcp__arxiv__SearchPapers, Read, 'Bash(tvly *)']\n",
+    )
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.allowed_tools == ("mcp__arxiv__SearchPapers", "Read", "Bash(tvly *)")
+
+
+def test_parse_allowed_tools_string_rejects_unbalanced_parentheses(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Bash(tvly *",
+    )
+
+    assert parse_skill_file(skill_file, category="custom") is None
+
+
+def test_parse_allowed_tools_string_rejects_unmatched_closing_parenthesis(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Bash(tvly *) )",
+    )
+
+    assert parse_skill_file(skill_file, category="custom") is None
+
+
 def test_parse_invalid_allowed_tools_returns_none(tmp_path):
-    skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: Test\nallowed-tools: bash")
+    skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: Test\nallowed-tools: {bash: true}")
     skill = parse_skill_file(skill_file, category="custom")
     assert skill is None
 
@@ -310,3 +417,37 @@ def test_parse_unquoted_colon_value_escapes_regex_in_hint(tmp_path, caplog):
     assert skill is None
     combined = "\n".join(rec.getMessage() for rec in caplog.records)
     assert r'description: "match: \\d+ digits"' in combined
+
+
+# ---------------------------------------------------------------------------
+# UTF-8 byte-order mark
+# ---------------------------------------------------------------------------
+
+
+def test_parse_skill_file_saved_with_utf8_bom(tmp_path):
+    """A SKILL.md saved as "UTF-8 with BOM" is a skill, not a broken file.
+
+    Windows Notepad and PowerShell's ``Set-Content -Encoding UTF8`` prepend U+FEFF to
+    every file they save. The front-matter anchor began at ``^---``, so that mark made
+    ``parse_skill_file`` return ``None`` and the catalog builder dropped the skill with
+    no log line and no error - the skill simply never existed as far as DeerFlow was
+    concerned, while the exact same file edited on Linux loaded fine.
+    """
+    skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: A test skill", encoding="utf-8-sig")
+    assert skill_file.read_bytes().startswith(b"\xef\xbb\xbf"), "fixture must carry a real BOM"
+
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is not None
+    assert skill.name == "my-skill"
+    assert skill.description == "A test skill"
+
+
+def test_parse_skill_file_without_bom_is_unaffected(tmp_path):
+    """Control: the same document written as plain UTF-8 parses exactly as before."""
+    skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: A test skill", encoding="utf-8")
+    assert not skill_file.read_bytes().startswith(b"\xef\xbb\xbf")
+
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is not None
+    assert skill.name == "my-skill"
+    assert skill.description == "A test skill"

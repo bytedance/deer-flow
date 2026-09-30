@@ -99,7 +99,7 @@ enum UserScope:
 5. 服务端确认当前没有 admin，创建 `system_role="admin"`、`needs_setup=false` 的用户。
 6. 服务端设置 `access_token` HttpOnly cookie，用户进入 workspace。
 
-`/api/v1/auth/initialize` 只在没有 admin 时可用。并发初始化由数据库唯一约束兜底，失败方返回 409。
+`/api/v1/auth/initialize` 只在没有 admin 时可用。并发初始化由存储层的原子认领兜底：admin 计数与插入在同一个事务内完成，且写入先被串行化（SQLite 使用 `BEGIN IMMEDIATE`，PostgreSQL 使用事务级 advisory lock），因此同时到达的两个首次初始化请求不会都看到空系统，失败方返回 409。邮箱唯一约束只覆盖相同邮箱的重复提交，无法阻止两个不同邮箱同时成为 admin。
 
 ### 普通登录
 
@@ -110,7 +110,7 @@ enum UserScope:
 - 成功后签发 JWT，放入 `access_token` HttpOnly cookie。
 - 响应体只返回 `expires_in` 和 `needs_setup`，不返回 token。
 
-登录失败会按客户端 IP 计数。IP 解析只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，不使用 `X-Forwarded-For`。
+登录失败会按客户端 IP 计数。IP 解析只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，不使用 `X-Forwarded-For`。阈值与锁定时长可通过 `auth.local.max_login_attempts`（默认 5）和 `auth.local.lockout_seconds`（默认 300 秒）配置，按次实时读取，改配置后下一次登录即生效，无需重启 Gateway（`max_login_attempts` 最小为 2：单次失败不得锁定 IP。时长热改按方向生效：下调可提前释放进行中的锁定、收紧阈值会保留已计数的失败；上调只延长仍在锁定期内的锁定，不会复活已服满原时长的锁定）。
 
 ### 注册
 

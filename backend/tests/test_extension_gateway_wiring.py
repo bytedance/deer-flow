@@ -57,12 +57,19 @@ async def test_services_start_in_order_with_narrow_deps_and_fail_open():
         subagents=SimpleNamespace(max_total_per_run=4),
     )
 
-    diagnostics = await start_services(extensions, config, session_factory)
+    run_evidence_reader = object()
+    diagnostics = await start_services(
+        extensions,
+        config,
+        session_factory,
+        run_evidence_reader=run_evidence_reader,
+    )
 
     assert events == ["start:first", "start:second"]
     assert first.deps is second.deps
     assert second.deps.app_store is extensions.app_store
     assert second.deps.session_factory is session_factory
+    assert second.deps.run_evidence_reader is run_evidence_reader
     assert second.deps.policy.token_budget_enabled is False
     assert second.deps.policy.max_total_tokens is None
     assert second.deps.policy.max_subagents_per_run == 4

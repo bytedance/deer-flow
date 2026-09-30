@@ -11,6 +11,18 @@ export interface FeaturesResponse {
     worker_running?: boolean;
     max_running?: number;
   };
+  conversation_references?: {
+    enabled?: boolean;
+    max_references?: number;
+  };
+  knowledge_base?: {
+    scope_selection_enabled?: boolean;
+  };
+}
+
+export interface ConversationReferencesCapability {
+  enabled: boolean;
+  maxReferences: number;
 }
 
 export interface SubagentBatchesCapability {
@@ -46,5 +58,29 @@ export async function fetchSubagentBatchesCapability(): Promise<SubagentBatchesC
     repositoryAvailable: feature?.repository_available ?? legacyEnabled,
     workerRunning: feature?.worker_running ?? legacyEnabled,
     maxRunning: feature?.max_running ?? 0,
+  };
+}
+
+export async function fetchConversationReferencesCapability(): Promise<ConversationReferencesCapability> {
+  const features = await fetchFeatures();
+  const capability = features.conversation_references;
+  const maxReferences = capability?.max_references;
+  return {
+    enabled: capability?.enabled === true,
+    maxReferences:
+      typeof maxReferences === "number" &&
+      Number.isInteger(maxReferences) &&
+      maxReferences > 0
+        ? maxReferences
+        : 0,
+  };
+}
+
+export async function fetchKnowledgeBaseFeature(): Promise<{
+  scopeSelectionEnabled: boolean;
+}> {
+  const feature = (await fetchFeatures()).knowledge_base;
+  return {
+    scopeSelectionEnabled: feature?.scope_selection_enabled ?? false,
   };
 }

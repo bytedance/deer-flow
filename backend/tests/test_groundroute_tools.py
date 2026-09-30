@@ -328,3 +328,10 @@ class TestWebFetchTool:
             patcher.stop()
 
         assert result == "Error: No results found"
+
+
+def test_coerce_max_results_inf_falls_back_to_default():
+    """A YAML `.inf` max_results must fall back to the default, not crash."""
+    import deerflow.community.groundroute.tools as groundroute_mod
+
+    assert groundroute_mod._coerce_max_results(float("inf")) == groundroute_mod._DEFAULT_MAX_RESULTS

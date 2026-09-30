@@ -17,6 +17,17 @@ from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
 
 
+class _ModelRequestFake:
+    """Minimal ModelRequest stand-in for the wrap_model_call hooks."""
+
+    def __init__(self, messages, runtime):
+        self.messages = list(messages)
+        self.runtime = runtime
+
+    def override(self, **kwargs):
+        return _ModelRequestFake(kwargs.get("messages", self.messages), self.runtime)
+
+
 @pytest.mark.anyio
 async def test_list_run_events_forwards_task_id_and_after_seq():
     from app.gateway.routers.thread_runs import list_run_events
@@ -100,25 +111,59 @@ async def test_list_run_events_redacts_historical_run_start_metadata():
     assert events[0] is not stored_row
 
 
+@pytest.mark.parametrize("run_id", ["run.1", "a%20b", "%2e%2e"])
+@pytest.mark.parametrize("route", ["events", "messages", "workspace-changes"])
+def test_run_scoped_reads_of_a_noncanonical_run_id_on_jsonl_match_the_memory_store(tmp_path, route, run_id):
+    """The URL's run_id reaches the event store unvalidated; JSONL must answer it as an unknown run, not a 500."""
+    from _router_auth_helpers import make_authed_test_app
+    from fastapi.testclient import TestClient
+
+    from app.gateway.routers import thread_runs
+    from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+    def get(store):
+        app = make_authed_test_app()
+        app.include_router(thread_runs.router)
+        app.state.run_event_store = store
+        with TestClient(app, raise_server_exceptions=False) as client:
+            return client.get(f"/api/threads/t1/runs/{run_id}/{route}")
+
+    jsonl = get(JsonlRunEventStore(tmp_path))
+    memory = get(MemoryRunEventStore())
+
+    assert (jsonl.status_code, jsonl.json()) == (200, memory.json())
+
+
 @pytest.mark.anyio
 async def test_effective_memory_flows_from_injection_to_the_existing_debug_api():
-    """The production run-events route is the field-level consumer for M1."""
+    """The production run-events route is the field-level consumer for M1.
+
+    The event fires at the first model-request assembly (wrap_model_call),
+    once injection results are known.
+    """
     from app.gateway.routers.thread_runs import list_run_events
 
     store = MemoryRunEventStore()
     journal = RunJournal("r1", "t1", store, flush_threshold=100)
     runtime = SimpleNamespace(context={"__run_journal": journal})
     memory = "<memory>\nUser prefers Python.\n</memory>\n"
+    mw = DynamicContextMiddleware()
 
     with (
         mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=memory),
         mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
     ):
         mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
-        update = DynamicContextMiddleware().before_agent(
+        update = mw.before_agent(
             {"messages": [HumanMessage(content="Hi", id="msg-1")]},
             runtime,
         )
+
+    from langgraph.graph.message import add_messages
+
+    assembled = add_messages([HumanMessage(content="Hi", id="msg-1")], update["messages"])
+
+    mw.wrap_model_call(_ModelRequestFake(assembled, runtime), lambda _request: "response")
     await journal.flush()
 
     class FakeState:
@@ -127,14 +172,14 @@ async def test_effective_memory_flows_from_injection_to_the_existing_debug_api()
     class FakeApp:
         state = FakeState()
 
-    class FakeRequest:
+    class FakeRequest_:
         app = FakeApp()
         _deerflow_test_bypass_auth = True
 
     events = await list_run_events(
         thread_id="t1",
         run_id="r1",
-        request=FakeRequest(),
+        request=FakeRequest_(),
         event_types="context:memory",
         task_id=None,
         limit=500,
@@ -142,4 +187,8 @@ async def test_effective_memory_flows_from_injection_to_the_existing_debug_api()
     )
 
     effective_content = update["messages"][1].content
-    assert events[0]["content"] == {"content_sha256": hashlib.sha256(effective_content.encode("utf-8")).hexdigest()}
+    assert events[0]["content"] == {
+        "content_sha256": hashlib.sha256(effective_content.encode("utf-8")).hexdigest(),
+        "project_context_revision": None,
+        "project_shelf_revision": None,
+    }

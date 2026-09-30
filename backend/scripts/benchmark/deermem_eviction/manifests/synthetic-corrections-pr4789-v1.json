@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "protocol_id": "deermem-hybrid-v1-pr4789-reproduction-v1",
+  "scenario": "correction_reserve",
+  "cases": [
+    {
+      "case_id": "correction_peanut_allergy",
+      "support_fact": "USER CORRECTION: I am allergic to peanuts. The earlier note saying I enjoy peanut snacks was wrong.",
+      "question": "Should you recommend peanut snacks to me? Answer YES or NO.",
+      "answer": "NO",
+      "loss_rank": 6
+    },
+    {
+      "case_id": "correction_language",
+      "support_fact": "USER CORRECTION: My preferred response language is Chinese, not English.",
+      "question": "Should responses default to English? Answer YES or NO.",
+      "answer": "NO",
+      "loss_rank": 8
+    },
+    {
+      "case_id": "correction_timezone",
+      "support_fact": "USER CORRECTION: My current timezone is Asia/Shanghai, not UTC.",
+      "question": "Should reminders use UTC as my timezone? Answer YES or NO.",
+      "answer": "NO",
+      "loss_rank": 8
+    },
+    {
+      "case_id": "correction_review_resolution",
+      "support_fact": "USER CORRECTION: Never resolve a review thread merely because a reply was posted; wait for explicit authorization.",
+      "question": "May a review thread be resolved automatically after posting a reply? Answer YES or NO.",
+      "answer": "NO",
+      "loss_rank": 10
+    },
+    {
+      "case_id": "correction_shipping_address",
+      "support_fact": "USER CORRECTION: My current shipping address is in Shanghai, not Beijing.",
+      "question": "Should a package be shipped to Beijing? Answer YES or NO.",
+      "answer": "NO",
+      "loss_rank": 10
+    }
+  ]
+}

@@ -25,6 +25,8 @@ runtime effect is Postgres's contract, not ours.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from deerflow.persistence import bootstrap as bootstrap_mod
@@ -96,3 +98,63 @@ async def test_postgres_lock_releases_even_if_body_raises() -> None:
 
     sqls = [stmt for stmt, _ in engine.conn.executed]
     assert any("pg_advisory_unlock" in s for s in sqls), f"unlock missing after body error; saw: {sqls}"
+
+
+class _BlockingUnlockConn(_FakeAsyncConn):
+    def __init__(self) -> None:
+        super().__init__()
+        self.unlock_started = asyncio.Event()
+        self.allow_unlock = asyncio.Event()
+        self.unlock_finished = asyncio.Event()
+
+    async def execute(self, stmt, params=None):
+        sql = str(stmt)
+        self.executed.append((sql, params))
+        if "pg_advisory_unlock" in sql:
+            self.unlock_started.set()
+            await self.allow_unlock.wait()
+            self.unlock_finished.set()
+        return None
+
+
+class _BlockingUnlockEngine:
+    def __init__(self) -> None:
+        self.conn = _BlockingUnlockConn()
+
+    def connect(self) -> _BlockingUnlockConn:
+        return self.conn
+
+
+@pytest.mark.asyncio
+async def test_postgres_lock_drains_unlock_across_repeated_cancellation() -> None:
+    engine = _BlockingUnlockEngine()
+    entered = asyncio.Event()
+    hold_body = asyncio.Event()
+
+    async def owner() -> None:
+        async with bootstrap_mod._postgres_lock(engine):  # type: ignore[arg-type]
+            entered.set()
+            await hold_body.wait()
+
+    task = asyncio.create_task(owner())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    task.cancel()
+    await asyncio.wait_for(engine.conn.unlock_started.wait(), timeout=1)
+
+    try:
+        task.cancel()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done(), "bootstrap returned before advisory unlock finished"
+        assert not engine.conn.unlock_finished.is_set()
+
+        engine.conn.allow_unlock.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert engine.conn.unlock_finished.is_set()
+    finally:
+        engine.conn.allow_unlock.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

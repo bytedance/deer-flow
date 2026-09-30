@@ -12,6 +12,13 @@ from deerflow.subagents.capacity import (
 )
 
 
+@pytest.fixture(autouse=True)
+def restore_default_execution_capacity():
+    """Keep capacity scenarios from changing admission for later tests."""
+    yield
+    configure_subagent_execution_capacity(SubagentRuntimeConfig())
+
+
 @pytest.mark.asyncio
 async def test_capacity_queues_without_starting_more_than_configured_slots() -> None:
     configure_subagent_execution_capacity(SubagentRuntimeConfig(max_running=1, max_queued=2, queue_timeout_seconds=5))

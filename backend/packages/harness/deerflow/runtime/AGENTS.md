@@ -1,3 +1,7 @@
+### Stream Bridge Heartbeats
+
+Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.
+
 ### Checkpoint Channel Modes (`full` / `delta`)
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.
@@ -10,7 +14,7 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Compatibility is asymmetric and fail-closed.** Every checkpoint written in delta mode carries metadata marker `deerflow_checkpoint_channel_mode: "delta"` (injected via `inject_checkpoint_mode`; absence of marker = full, so pre-feature checkpoints need no migration). Before any state read/write, `ensure_checkpoint_mode_compatible` rejects a full-mode process opening a delta thread with `CheckpointModeMismatchError` (surfaced as HTTP 409 with the cause and thread id by the threads router; `CheckpointModeReconfigurationError` maps to 503) — a full-mode raw read of a delta blob would silently return empty/partial `messages`. The reverse direction is allowed: delta-mode processes read full checkpoints transparently (old full checkpoints seed the delta channel), so full → delta is the smooth migration path; delta → full requires materializing/converting the data first. Detection also honors upstream's `counters_since_delta_snapshot.messages` metadata, and an explicit config marker takes precedence over any ambient context value.
 
-**Never bypass `CheckpointStateAccessor` (`runtime/checkpoint_state.py`) for thread-state access.** It is the single choke point binding graph + checkpointer + mode: it injects the mode marker into configs, runs the compatibility check before every `get`/`update`/`history`, and returns materialized state (delta checkpoints lack `channel_values.messages` — raw `get_tuple` reads see a sentinel). Gateway `services.py` builds and passes the accessor; thread-owned reads (state/history/regeneration) must use `build_thread_checkpoint_state_accessor` so the recorded assistant's middleware schema materializes every channel. `history(limit)` semantics: `0` means zero items (explicit empty), `None` means unlimited — do not pass `limit=0` through to `graph.get_state_history`. Assistant metadata lookup is fail-closed for mutation accessors so a store outage cannot silently select the default schema and discard extension channels. In `full` mode the read path degrades to a raw checkpointer read (`_RawCheckpointReadAccessor`) when the agent factory cannot build the graph (bad model config, MCP outage) — full checkpoints carry complete `channel_values`, so reads don't need the graph; degraded snapshots take `created_at` from the standard checkpoint `ts` field, falling back to metadata only for compatibility. The delta gate still applies on the degraded path; `next`/`tasks` degrade to empty and thread status falls back to the stored status because task presence is not derivable, while delta mode has no fallback (materialization needs the channel table).
+**Never bypass `CheckpointStateAccessor` (`runtime/checkpoint_state.py`) for thread-state access.** It is the single choke point binding graph + checkpointer + mode: it injects the mode marker into configs, runs the compatibility check before every `get`/`update`/`history`, and returns materialized state (delta checkpoints lack `channel_values.messages` — raw `get_tuple` reads see a sentinel). For metadata-only reads, use `get_metadata` / `aget_metadata` to retain the mode gate without materialization. Thread-owned reads must use `build_thread_checkpoint_state_accessor` so the recorded assistant schema materializes every channel. Sync checkpoint mutations must drain off-thread commits before cancellation propagates; sync `get_tuple` reads remain cancellable. `history(limit)` semantics: `0` means zero items (explicit empty), `None` means unlimited — do not pass `limit=0` through to `graph.get_state_history`. Assistant metadata lookup is fail-closed for mutation accessors so a store outage cannot silently select the default schema and discard extension channels. In `full` mode the read path degrades to a raw checkpointer read (`_RawCheckpointReadAccessor`) when the agent factory cannot build the graph (bad model config, MCP outage) — full checkpoints carry complete `channel_values`, so reads don't need the graph; degraded snapshots take `created_at` from the standard checkpoint `ts` field, falling back to metadata only for compatibility. The delta gate still applies on the degraded path; `next`/`tasks` degrade to empty and thread status falls back to the stored status because task presence is not derivable, while delta mode has no fallback (materialization needs the channel table).
 
 **Replay checkpoint lookup prefers lineage and degrades only for an explicitly missing legacy parent link.** Branch and regenerate paths first walk `parent_config`, which prevents a global chronological scan from selecting a sibling created by regeneration. `CheckpointParentMissingError` alone enables the bounded newest-first history fallback in `app/gateway/checkpoint_lineage.py`; cycles, dangling/non-addressable parents, target mismatches, and depth exhaustion raise `CheckpointLineageIntegrityError` and fail closed instead of selecting a sibling. The compatibility scans request 400 raw checkpoints so up to 200 duration-only entries do not consume the effective branch-history budget; the fallback scans oldest-to-newest internally, skips duration-only checkpoints, and accepts only checkpoints with an addressable id as the replay base. A source history with no discoverable pre-user checkpoint preserves the historical single-checkpoint branch behavior instead of rejecting the branch; regeneration remains unavailable for that inherited response. Existing single-checkpoint branches are not mutated by regenerate preparation, and no raw checkpoint tuple is copied across threads because delta state depends on ancestry and pending writes. Regenerate source-run lookup uses the current thread's exact event, then the server-stamped `run_id` on the copied human message, then verified RunManager content matching; it does not read parent-thread events. When an interrupted response was streamed but never checkpointed, regeneration accepts only the latest visible human message's server-stamped `run_id` after verifying that it belongs to the same thread and still has `interrupted` status. Storage or checkpoint-mode failures are not treated as a missing base and still fail closed.
 
@@ -18,7 +22,76 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Wholesale state replacement uses a state-only mutation graph + `Overwrite`.** `update_state` values pass through channel reducers (`add_messages` merge in full, append in delta), so replacing reducer values requires `Overwrite` rather than an ordinary update. Full-mode rollback and context compaction replace `messages`; delta resume and delta rollback replace every materialized channel and reset current-head-only channels to their schema default (or `None`). These writes go through `build_state_mutation_graph(as_node, mode, state_schema)`, and `state_schema` MUST be the thread's effective schema (`graph_state_schema(assistant_graph)`), because the base-ThreadState fallback silently discards written channels contributed by custom `AgentMiddleware.state_schema`. Channels absent from a full-mode fork write inherit the parent's channel blobs, so middleware channels survive rollback/compaction (locked by `test_rollback_preserves_middleware_contributed_channels` and `test_compact_thread_context_preserves_middleware_contributed_channels`). The compiled mutation graph has one no-op node (entry = finish) whose checkpoint machinery (channels/versions/metadata) is identical to the agent graph's but schedules no pending tasks, so the restored/compacted head stays idle instead of re-triggering the agent. Never hand-write checkpoints via `checkpointer.aput` for this; raw writers elsewhere must preserve checkpoint parentage — severed ancestry breaks delta replay (see `runtime/runs/worker.py` writer parenting and `checkpoint_patches.py`).
 
-**Run rollback flow** (`runtime/runs/worker.py`): `_capture_rollback_point` materializes the complete pre-run state via the accessor and captures raw `pending_writes` via `aget_tuple` into an immutable `RollbackPoint` before the run starts — capture failure disables rollback (fail-closed), never restores partial state. In `full` mode, cancel-with-rollback forks from the pre-run checkpoint via the mutation graph and inherits non-message channels from that parent. In `delta` mode, forking is unsafe once the cancelled path has attached sibling writes to the pre-run checkpoint, so rollback replaces every captured channel on the current head, using `Overwrite` for reducers and schema defaults for current-head-only channels. Both modes reattach only the captured pre-run pending writes to the restored checkpoint. Edit replay runs (`metadata.replay_kind="edit"`) also restore the pre-run checkpoint on failed, timed-out, or interrupted completion and publish the restored `values` snapshot to the stream before `end`, so clients do not remain on a transient edited branch when the replay did not produce a successful replacement.
+**Run rollback flow** (`runtime/runs/worker.py`): `_capture_rollback_point` materializes the complete pre-run state via the accessor and captures raw `pending_writes` via `aget_tuple` into an immutable `RollbackPoint` before the run starts — capture failure disables rollback (fail-closed), never restores partial state. In `full` mode, cancel-with-rollback forks from the pre-run checkpoint via the mutation graph and inherits non-message channels from that parent. In `delta` mode, forking is unsafe once the cancelled path has attached sibling writes to the pre-run checkpoint, so rollback replaces every captured channel on the current head, using `Overwrite` for reducers and schema defaults for current-head-only channels. Resume and rollback state rewrites copy only the selected/captured checkpoint's server-authored agent binding; missing or malformed bindings remain unbound. Both modes reattach only the captured pre-run pending writes to the restored checkpoint. Edit replay runs (`metadata.replay_kind="edit"`) also restore the pre-run checkpoint on failed, timed-out, or interrupted completion and publish the restored `values` snapshot to the stream before `end`, so clients do not remain on a transient edited branch when the replay did not produce a successful replacement.
+
+**Message sequence placement:** Keep backend and frontend message identity rules aligned. Details: `backend/docs/runtime-guidance-details.md`.
+
+**Human-input capture** (`runtime/journal.py`): track capture separately from
+the optional display summary. Image-only input has no text but must still stop
+the batch scan and later model calls from appending another human-input event.
+`tests/test_run_journal.py` covers callback and full/delta graph paths.
+
+**LLM response callback coalescing** (`runtime/journal.py`): a provider may fire
+`on_llm_end` twice for one LangChain run id, first without usage (or with all token
+counts zero) and immediately again with usage populated. The first callback's generation
+set is always canonical: `RunJournal` stages only its response events and immutable
+message-summary fields while retaining the first caller, and applies that callback's
+fallback state and tool-call bookkeeping immediately; those effects remain canonical.
+It must not retain provider-owned message objects because a provider may mutate and
+reuse the same response for the usage replay. Usage metadata is deep-snapshotted,
+including nested token-detail mappings, before it enters a staged or buffered event.
+An adjacent same-id positive-usage replay may enrich only each corresponding staged
+event's metadata/content usage fields. Replay
+generation-count differences never add, remove, or replace canonical messages. The next
+unrelated event, an effective buffer size (committed plus pending events) reaching the
+flush threshold, or an explicit flush commits the staged unit and updates the message
+summary. Once that ordering boundary is crossed, a late usage replay can still update the
+authoritative run token summary, but it cannot mutate the append-only message event,
+caller attribution, fallback state, or tool-call bookkeeping. Closed journals return
+from `on_llm_end` before inspecting the response or touching any run state.
+
+**Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
+answers for paginated history. See `docs/skill-usage-ui.md`.
+
+**Run delivery receipts:** Journal artifact evidence and terminal status must finalize before a satisfied goal is cleared. Goal cleanup uses a durable checkpoint-write reservation; delivery failure retains the goal without another continuation. Details: `backend/docs/runtime-guidance-details.md`.
+
+**Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
+`RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
+`tool_search` Sends read the same pre-step state, so state diffing alone can
+label the same schema as new more than once even though the `promoted` reducer
+unions it once. Producers claim sorted candidate names before appending
+`middleware:tool_promotion`; later overlapping decisions emit only their
+unclaimed remainder. Ordinary task-tool subagents use an equivalent claim on
+their per-execution parent-loop proxy, preserving separate events when two
+different delegated agents promote the same tool. The active catalog is fixed
+for one graph execution, so the claim needs no persisted catalog hash.
+
+**Tool-progress phase events** (`agents/middlewares/tool_progress_middleware.py`):
+effective ACTIVE → WARNED, WARNED/ACTIVE → BLOCKED, WARNED → ACTIVE recovery,
+and later-invocation WARNED/BLOCKED → ACTIVE resets append
+`middleware:tool_progress` through `RunJournal`. Recorder calls happen after
+the middleware releases its state lock, matching LoopDetectionMiddleware, so a
+slow recorder cannot stall tool-state updates. Cross-thread middleware
+producers (currently slash-skill activation via `asyncio.to_thread`) schedule
+journal mutation directly onto its owning event loop; they never mutate or
+flush `RunJournal._buffer` from the worker thread. The task-tool subagent proxy
+rejects a loop that differs from the journal owner, so its close fence always
+drains the only scheduling hop.
+The persisted projection accepts
+only framework-defined error/action values and strict booleans (using null for
+invalid values) from the producer-supplied tool stamp; tool content, args,
+prompts, and derived hashes do not enter the event. Ordinary task-tool subagents use the narrow parent-loop
+recorder proxy, never the journal itself; durable batch runs have no parent
+journal and emit no such event. Recorder failures are fail-open.
+
+**JSONL record boundaries** (`runtime/events/store/jsonl.py`): thread reads,
+run reads, and sequence recovery split on physical newlines. Do not use
+`str.splitlines()`: U+0085/U+2028/U+2029 inside valid JSON strings must remain
+part of the record. Preserve existing UTF-8 files and the writer format.
+`tests/test_jsonl_event_store_unicode.py` covers Unicode values, reopening,
+idempotent writes, LF/CRLF, blank lines, and malformed records.
+Reads and deletes treat a run ID writes reject as an unknown run (routes pass
+URL IDs through); writes still raise.
 
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
@@ -27,118 +100,71 @@ contract. Its default implementation walks `list_messages()` backward in
 `before_seq` cursor, and raises when a full page has no safe progressing `seq`.
 Memory and database stores use that bounded path; the JSONL store overrides it
 with one complete thread-log read because each JSONL page would otherwise
-rescan every run file. The default and JSONL paths share the public
+rescan every run file. That JSONL snapshot task is named `jsonl-snapshot:{thread_id}` for
+asyncio task dumps and retains the per-thread lock until its off-thread full-log
+read settles even through caller cancellation. It deliberately has no drain
+timeout: releasing ownership while the worker can still read files would let a
+writer enter the supposedly stable snapshot. The default and JSONL paths share the public
 `normalize_message_ids()` and `match_ai_message_run_id()` helpers from
 `events/store/base.py`. Database owner filtering is inherited on every page.
+
+**Event-store mutation fence** (`runtime/events/store/`): every thread mutation —
+`put`, `put_batch`, `put_if_absent`, `delete_by_thread`, `delete_by_run` — shares
+one serialization domain: the per-thread `asyncio` lock, plus (on PostgreSQL) the
+transaction-scoped advisory lock keyed by `thread_id` that
+`DbRunEventStore._acquire_thread_mutation_fence()` takes before any read or write.
+Deletion therefore cannot interleave with an admitted writer and re-create rows for
+a deleted thread, and all backends accept the same owner-scoped delete signature
+(`user_id` filters on the DB store; memory/JSONL accept it for parity). This is
+serialization, not an incarnation fence: a mutation already admitted before a
+deletion may still run afterwards, and preventing old-incarnation resurrection
+needs a separate durable generation contract. `JsonlRunEventStore` keeps its own
+equivalent guarantee through `_run_mutation`.
 Callers may use a missing key as proof that no valid AI event exists only after
 an ordinary return, never after an exception. A caller that crosses a run or
 checkpoint-write admission boundary must repeat the complete audit after
 admission; a pre-admission exact hit can be superseded by a later event just as
 a pre-admission miss can become an exact hit.
 
-Gateway `POST /api/threads/{id}/history` uses that lookup to migrate legacy AI
-messages. An exhaustive miss preserves the human-boundary fallback; an
-incomplete lookup removes unproven synthesized IDs. Its metadata-only
-write-on-read cache stores `run_message_ids` for every audited AI ID (including
-exhaustive misses) plus required `run_durations`; duration presence alone does
-not prove attribution. Historical `body.before` reads write the audit to the
-head, and the merge may retain IDs no longer in materialized history, which
-readers ignore. Migration must acquire the durable `checkpoint_write`
-reservation, then repeat the whole message audit and batch-reload required run
-rows before persisting. Post-admission exact hits replace foreground exact or
-boundary mappings, and recomputed final durations replace foreground snapshots.
-Successful workers keep their durable run row active through the final duration
-checkpoint write, so a peer migration cannot enter during terminalization.
-The first `RunManager.list_by_thread()` hydration page uses a 100-row floor or
-the number of required IDs, whichever is larger; missing exact runs use targeted
-`get()` calls.
+**Changed-run discovery:** Use the durable `(change_seq, run_id)` cursor and repeat history audits after admission. Details: `backend/docs/runtime-guidance-details.md`.
+
+**Terminal run cleanup:** Close streams, journals, and graph references even on cancellation. Details: `backend/docs/runtime-guidance-details.md`.
+
+**`RunManager._runs` holds only records this worker admitted.** A cross-worker idempotent reuse returns the `store_only` row from `_record_from_store()` unregistered: the peer never finalizes or `cleanup()`s it, so a registered copy stays `pending`/`running`, 409s later same-thread admissions, hides the owner's orphan from reconciliation, and sends a peer `cancel()` down the local-owner path. Pinned by `test_peer_idempotent_reuse_*` and `test_peer_cancel_of_reused_run_*` (`tests/test_multi_worker_run_ownership.py`) plus `tests/test_gateway_services.py::test_start_run_peer_idempotent_reuse_*`.
+
+**A `RunRecord` owner matches its durable row.** HTTP admissions omit `user_id` and the SQL store stamps the ambient user, so `create()` and `_admit_thread_operation()` resolve an omitted owner from the contextvar, keeping `None` without one — never `get_effective_user_id()`'s `default` bucket. A `None` record made SQL keyed retries on a peer or after `cleanup()` return 500, hid HTTP runs from owner-scoped history, and skipped their MCP `background_tasks` projection. Pinned by `test_run_record_owner_matches_row_stamped_from_context`, `test_keyed_retry_without_explicit_user_*`, the `sql` case of `test_start_run_peer_idempotent_reuse_*`, `test_run_manager_*_admitted_without_explicit_user`, and `test_run_manager_keeps_omitted_owner_unset_without_user_context`.
 
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`
-- `checkpoint_patches.py` (package root) — checkpoint-machinery patches: delta-history folding for `InMemorySaver` (delegating to the base walk), stable message IDs across materialization, upstream first-write drop fix, and `BinaryOperatorAggregate` unwrapping an `Overwrite` first write into an empty (MISSING) channel — Union-typed reducer channels (`sandbox`/`goal`/`todos`/`promoted`) have no constructible default, so a replace-style write into a fresh branch thread or a never-written channel stored the wrapper literally and crashed the next consumer (#4380; probe-guarded, stands down if upstream fixes it)
+- `checkpoint_patches.py` (package root) — the one remaining patch: `BinaryOperatorAggregate` unwrapping an `Overwrite` first write into an empty channel (#4380; probe-guarded). The `InMemorySaver` delta-history patch is gone: `langgraph-checkpoint` 4.2.0 fixed that write loss upstream (#8526) while keeping its override, so the dependency floor plus the full → delta migration contract test are the gate — never re-add a version-guarded saver patch.
 - `agents/thread_state.py` — `ThreadState`/`DeltaThreadState`, `delta_messages_field` / `DELTA_MESSAGES_FIELD` (`DeltaChannel` at the configured `snapshot_frequency`, default 10), schema adaptation helpers
-- `runtime/context_compaction.py` — compaction via accessor + mutation graph (reference consumer)
+- `runtime/context_compaction.py` — compaction via accessor + mutation graph (reference consumer). Runs stamp their effective agent into server-owned checkpoint metadata; manual compaction uses that binding—not request `agent_name`—for memory policy and bucket. Missing/invalid legacy bindings and unreadable agent configs fail closed by skipping the optional flush while compaction may continue with the default model; a missing pre-binding checkpoint emits a warning so the skipped write is observable.
 - `runtime/checkpoint_cache/` + `runtime/checkpointer/cached_saver.py` — delta-mode checkpoint history cache; checkpoint state reads MUST go through `CheckpointStateAccessor`, and the checkpointer may be a `CachedHistorySaver` wrapper — never rely on concrete saver types
 - Tests: `tests/test_checkpoint_mode.py` (freeze/detect/gate), `tests/test_checkpoint_state.py` (accessor/mutation graph), `tests/test_delta_channel_checkpointers.py` (saver parity), `tests/test_threads_checkpoint_mode.py`, `tests/test_gateway_checkpoint_mode.py` (dual-mode e2e parity), `tests/test_context_compaction.py` (mutation-graph write, no scheduling), `tests/test_run_worker_rollback.py`, `tests/test_cached_history_saver.py` + `tests/test_cached_history_saver_integration.py` (history cache)
 
-**Checkpoint channel benchmark**: `scripts/benchmark/checkpoint/bench_channels.py`
-runs paired `full`/`delta` message-only StateGraphs in a fresh child process per
-case, using sync `InMemorySaver` or `SqliteSaver` so reducer, serialization, and
-saver costs stay separate from Gateway/async scheduling. It reports deterministic
-correctness digests, write windows/percentiles, warm and graph-rebuilt cold reads,
-logical checkpoint/write bytes, SQLite DB/WAL/SHM footprint, reducer replay time,
-and peak RSS as versioned JSONL. The controller alternates mode order and rejects
-performance data when paired modes materialize different state. Its default 1 GiB
-estimated cumulative full-payload cap skips both modes of an oversized pair when
-`full` is selected, including every delta cadence in a `--snapshot-frequencies`
-sweep; intentional `--modes delta` diagnostics bypass this full-payload cap, so
-size those runs explicitly. Use `--allow-large-cases` only
-on a provisioned machine. Duplicate CSV matrix values are ignored with a warning;
-use `--repetitions` for repeated samples. Summarize paired successful repetitions
-with `scripts/benchmark/checkpoint/summarize_channels.py` (all ratios are
-`delta/full`). `--profile-dir /tmp/checkpoint-profiles` writes one cProfile
-artifact per case for attribution. Profiled rows carry `profiled: true`, and the
-summarizer automatically excludes them from baseline summaries with a warning.
-Storage-size collection relies on saver-specific diagnostic layouts; if those
-layouts change, the timing/correctness row remains successful while storage
-fields become `null` and `storage_stats_error` records the diagnostic failure.
-Example:
+**Checkpoint benchmarks:** Paired full/delta cases and production-shaped runs are documented in `backend/docs/runtime-guidance-details.md`.
 
-```bash
-cd backend
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
-  --backends sqlite --updates 100,500,999,1000,1001 --payload-bytes 128 \
-  --repetitions 7 --output /tmp/checkpoint-bench.jsonl
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_channels.py \
-  /tmp/checkpoint-bench.jsonl
-```
+# Referenced conversation capability
 
-The production-shaped layer lives in
-`scripts/benchmark/checkpoint/bench_production.py`: per-case child processes
-run graph-level `ainvoke` turns through the real lead-agent graph (scripted
-deterministic model, real `AsyncSqliteSaver`), then measure
-`GET /threads/{id}/state` and `POST /threads/{id}/history` through the real
-Gateway route stack in the same event loop (httpx ASGITransport), split into
-cold/warm accessor-graph-cache samples. It sweeps `snapshot_frequency`
-(config: `checkpoint_delta.snapshot_frequency`, process-frozen like the mode),
-pairs every delta frequency against the same full row, and fails both
-rows of a pair when materialized or wire digests diverge. Each case must have
-more than the two discarded warm-up turns, and SQLite DB/WAL/SHM sizes are
-captured while the saver is still open so they represent the online storage
-footprint. Summarize with
-`scripts/benchmark/checkpoint/summarize_production.py` (ratios are
-`delta/full`; it also emits `snapshot_write_spike` and `cache_effect_ms`,
-the decision inputs for the production snapshot-frequency and accessor-cache
-defaults). Harness tests live in `tests/test_bench_checkpoint_production.py`
-and `tests/test_summarize_checkpoint_production.py`; timing thresholds are
-not CI gates. The matrix test pins that every `(repetition, turns)` group
-contains both modes and that their execution order flips between consecutive
-groups, including across repetition boundaries.
+`RunContext.conversation_reader` is a host-provided per-run callback. The worker
+rejects caller-supplied `__conversation_reader` values in both context carriers,
+installs only the host value, and releases it during terminal cleanup. The
+callback is not checkpoint state and must never be recovered from an earlier
+run or serialized into run kwargs.
 
-Operational limits learned from the first runs (the default matrix is too
-large to run blindly):
+## JSONL mutation cancellation
 
-- The default `--timeout-seconds 900` is insufficient for delta mode at
-  `snapshot_frequency=1000` once turns reach 500 (measured: delta-500 takes
-  ~1100-1200s; delta-2000 takes ~45min). Pass an explicit
-  `--timeout-seconds` for any large matrix, and treat the turns=2000 corner
-  as practical only at small snapshot frequencies.
-- Full-mode 2000-turn runs produce a ~33GB sqlite DB. Point `TMPDIR` at real
-  disk, not tmpfs (the benchmark uses `tempfile.TemporaryDirectory`, which
-  honors `TMPDIR`), or the run dies mid-case.
-- The history route clamps `limit` to 100 (`le=100` on
-  `ThreadHistoryRequest.limit`), so `--history-limits` values above 100 are
-  measured and reported by their effective (clamped) limit.
-
-Example:
-
-```bash
-cd backend
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_production.py \
-  --turns 10,100,500,1000,2000 --payload-bytes 128 \
-  --snapshot-frequencies 10,50,100,500,1000 \
-  --repetitions 7 --output /tmp/production-bench.jsonl
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py \
-  /tmp/production-bench.jsonl
-```
+`JsonlRunEventStore._run_mutation` acquires the per-thread lock before admitting
+an operation, then drains the shielded operation through filesystem I/O, rollback,
+and sequence/lock bookkeeping before releasing the lock or re-raising caller
+cancellation. Repeated cancellation must not detach an active disk worker; a failed
+mutation remains the cause of the propagated cancellation. There is deliberately
+no drain timeout that would release ownership while a worker can still modify files.
+A queued caller can cancel before admission, and unrelated threads remain independent.
+Drain tasks are named `jsonl-mutation:{thread_id}` for asyncio task dumps. Multi-thread
+`put_batch` drains its current group on cancellation and never starts later groups;
+the admitted group keeps its records on success or completes rollback on failure.
+This is a store-local guarantee, not a change to RunJournal cancellation policy or
+JSONL's single-process deployment constraint. Regression coverage is in
+`tests/test_jsonl_event_store_cancellation.py`.

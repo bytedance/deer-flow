@@ -20,6 +20,7 @@ from deerflow.config.reload_boundary import (
     is_startup_only_field,
     iter_startup_only_field_paths,
 )
+from deerflow.config.skills_config import SkillsConfig
 
 
 def test_registry_has_a_reason_for_every_field():
@@ -85,7 +86,7 @@ def test_appconfig_descriptions_retain_original_field_documentation():
     hover documents what the field is *and* why a restart is needed."""
     descriptions = {
         "log_level": "debug/info/warning/error",
-        "logging": "Structured logging and request trace correlation settings.",
+        "logging": "Structured logging settings: whether request trace ids appear in log records, and in which format.",
         "database": "memory, sqlite, or postgres",
         "sandbox": "Sandbox provider",
         "run_events": "memory for dev",
@@ -113,6 +114,15 @@ def test_appconfig_schema_marks_registered_fields_with_prefix():
             continue
         description = schema_fields[field_path].description or ""
         assert description.startswith(STARTUP_ONLY_PREFIX), f"AppConfig.{field_path} should have Field(description=) starting with {STARTUP_ONLY_PREFIX!r}, got {description!r}"
+
+
+def test_skills_container_path_is_registered_as_startup_only():
+    """AIO and E2B snapshot the mount root when their provider starts."""
+    field_path = "skills.container_path"
+    assert field_path in STARTUP_ONLY_FIELDS
+    description = SkillsConfig.model_fields["container_path"].description or ""
+    assert description.startswith(STARTUP_ONLY_PREFIX)
+    assert STARTUP_ONLY_FIELDS[field_path] in description
 
 
 def test_no_appconfig_field_uses_prefix_without_registration():

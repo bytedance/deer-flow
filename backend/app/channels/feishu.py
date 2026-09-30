@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import stat
 import threading
 import time
 from typing import Any, Literal
@@ -23,10 +24,16 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
+from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-from deerflow.uploads.manager import claim_unique_filename, normalize_filename, write_upload_file_no_symlink
+from deerflow.uploads.manager import (
+    apply_upload_sandbox_permits,
+    claim_unique_filename,
+    normalize_filename,
+    write_upload_file_no_symlink,
+)
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
@@ -487,6 +494,10 @@ class FeishuChannel(Channel):
 
         try:
             resolved_target = await asyncio.to_thread(_persist)
+            # Root-written uploads are 0o600, which the non-root sandbox cannot
+            # read on a bind-mounted thread dir; grant group/other read like the
+            # channel manager's inbound-file path and the HTTP upload route.
+            await asyncio.to_thread(apply_upload_sandbox_permits, resolved_target, stat.S_IRGRP | stat.S_IROTH)
         except (OSError, ValueError, RuntimeError):
             logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", safe_filename, type)
             return f"Failed to obtain the [{type}]"
@@ -495,13 +506,18 @@ class FeishuChannel(Channel):
 
         try:
             sandbox_provider = await asyncio.to_thread(get_sandbox_provider)
-            if not getattr(sandbox_provider, "uses_thread_data_mounts", False):
-                sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
-                sandbox = sandbox_provider.get(sandbox_id)
-                if sandbox is None:
-                    logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
-                    return f"Failed to obtain the [{type}]"
-                await asyncio.to_thread(sandbox.update_file, virtual_path, content)
+            synced = await sync_file_to_thread_sandbox(
+                sandbox_provider,
+                thread_id=thread_id,
+                user_id=effective_user_id,
+                virtual_path=virtual_path,
+                content=content,
+                owner_prefix="feishu-upload",
+                release_on_last=True,
+            )
+            if not synced:
+                logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)
+                return f"Failed to obtain the [{type}]"
         except Exception:
             logger.exception("[Feishu] failed to sync resource into non-local sandbox: %s", virtual_path)
             return f"Failed to obtain the [{type}]"

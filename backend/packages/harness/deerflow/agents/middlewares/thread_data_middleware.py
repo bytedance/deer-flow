@@ -103,11 +103,15 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         last_message = messages[-1] if messages else None
 
         if last_message and isinstance(last_message, HumanMessage):
-            messages[-1] = HumanMessage(
-                content=last_message.content,
-                id=last_message.id,
-                name=last_message.name or "user-input",
-                additional_kwargs={**last_message.additional_kwargs, "run_id": context.get("run_id"), "timestamp": datetime.now(UTC).isoformat()},
+            messages[-1] = last_message.model_copy(
+                update={
+                    "name": last_message.name or "user-input",
+                    "additional_kwargs": {
+                        **last_message.additional_kwargs,
+                        "run_id": context.get("run_id"),
+                        "timestamp": datetime.now(UTC).isoformat(),
+                    },
+                },
             )
 
         return {

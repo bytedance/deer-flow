@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
+
 # Reserved sub-key of the run context that holds request-scoped secrets supplied
 # by the caller. Source of truth for what a skill *may* receive.
 SECRETS_CONTEXT_KEY = "secrets"
@@ -101,6 +103,44 @@ def read_slash_skill_source_path(context: Any, *, owner_token: str) -> str | Non
     return path if isinstance(path, str) and path else None
 
 
+# Reserved run-context key holding the per-model-step ``skill:activate``
+# decisions for persisted ``skill_context`` entry paths, keyed by normalized
+# container SKILL.md path. Published by the skill-activation middleware (async
+# hook: reused from the prepass snapshot; sync hook: one scan + sync
+# authorize) and consumed by the durable-context renderer so the model-visible
+# "Active skills" reminder stops advertising skills the provider now denies.
+# Names only — never secret values. Authenticated by the chain-local owner
+# token, same contract as the slash source above.
+_SKILL_ENTRY_DECISIONS_KEY = "__skill_entry_activation_decisions"
+
+
+def write_skill_entry_decisions(context: Any, decisions: dict[str, bool], *, owner_token: str) -> None:
+    """Publish per-step entry activation decisions for downstream renderers."""
+    if isinstance(context, dict) and isinstance(decisions, dict) and isinstance(owner_token, str) and owner_token:
+        context[_SKILL_ENTRY_DECISIONS_KEY] = {"decisions": dict(decisions), "owner_token": owner_token}
+
+
+def read_skill_entry_decisions(context: Any, *, owner_token: str) -> dict[str, bool] | None:
+    """Return the authenticated entry decisions, or ``None`` when unpublished.
+
+    ``None`` means "no decision published this step" (authorization disabled,
+    no entries, or a foreign/malformed carrier) — consumers then render the
+    entries unchanged, matching the absent-is-permissive contract of the
+    other run-context carriers.
+    """
+    if not isinstance(context, dict):
+        return None
+    carrier = context.get(_SKILL_ENTRY_DECISIONS_KEY)
+    if not isinstance(carrier, dict):
+        return None
+    if not isinstance(owner_token, str) or not owner_token or carrier.get("owner_token") != owner_token:
+        return None
+    decisions = carrier.get("decisions")
+    if not isinstance(decisions, dict) or not all(isinstance(k, str) and isinstance(v, bool) for k, v in decisions.items()):
+        return None
+    return decisions
+
+
 # Private run-context keys the skill-activation middleware uses to carry secret
 # bindings across a run. Only ``secrets`` / ``__active_skill_secrets`` hold
 # secret values; the slash source holds a middleware-chain owner token, while
@@ -129,6 +169,7 @@ REDACTED_CONTEXT_KEYS = frozenset(
         _SECRETS_BINDING_AUDIT_KEY,
         _SLASH_SKILL_ACTIVATION_RUN_KEY,
         SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY,
+        _SKILL_ENTRY_DECISIONS_KEY,
     }
 )
 
@@ -155,6 +196,11 @@ def redact_config_secrets(config: Any) -> Any:
     protected config surface is persisted or returned, while the live config
     that drives the run (built separately) keeps them. Ordinary metadata is
     preserved. Non-dict configs pass through unchanged.
+
+    ``deerflow_trace_id`` is dropped from both containers as well: the id is
+    server-issued and ignored as an input, so echoing a caller-supplied one
+    back would only manufacture disagreement with the ``X-Trace-Id`` header,
+    the logs, and the run record's own stamped metadata.
     """
     if not isinstance(config, dict):
         return config
@@ -162,10 +208,14 @@ def redact_config_secrets(config: Any) -> Any:
     redacted = dict(config)
     context = config.get("context")
     if isinstance(context, dict):
-        redacted["context"] = redact_secret_context_keys(context)
+        scrubbed_context = redact_secret_context_keys(context)
+        scrubbed_context.pop(DEERFLOW_TRACE_METADATA_KEY, None)
+        redacted["context"] = scrubbed_context
 
     metadata = config.get("metadata")
     if isinstance(metadata, dict):
-        redacted["metadata"] = redact_metadata_secrets(metadata)
+        scrubbed_metadata = redact_metadata_secrets(metadata)
+        scrubbed_metadata.pop(DEERFLOW_TRACE_METADATA_KEY, None)
+        redacted["metadata"] = scrubbed_metadata
 
     return redacted

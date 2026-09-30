@@ -8,6 +8,12 @@ const SUPPORTED_RUN_STREAM_MODES = new Set([
   "custom",
 ] as const);
 
+export const CHAT_RUN_STREAM_MODES = [
+  "messages-tuple",
+  "updates",
+  "custom",
+] as const;
+
 const warnedUnsupportedStreamModes = new Set<string>();
 let warnedUnsupportedStreamResumable = false;
 
@@ -72,4 +78,35 @@ export function sanitizeRunStreamOptions<T>(options: T): T {
   }
 
   return sanitizedOptions;
+}
+
+/**
+ * Keep chat streams on incremental events only. Without an explicit mode list,
+ * the SDK's lazy message tracking also requests `values`, retransmitting the
+ * full thread state (including message history) after graph steps.
+ */
+export function forceChatRunStreamOptions<T>(options: T): T {
+  const sanitizedOptions = sanitizeRunStreamOptions(options);
+  const preservedOptions =
+    typeof AbortSignal !== "undefined" &&
+    sanitizedOptions instanceof AbortSignal
+      ? { signal: sanitizedOptions }
+      : typeof sanitizedOptions === "object" && sanitizedOptions !== null
+        ? sanitizedOptions
+        : {};
+  const requestedMode = Reflect.get(preservedOptions, "streamMode");
+  const streamModes = new Set<string>([
+    ...CHAT_RUN_STREAM_MODES,
+    ...((Array.isArray(requestedMode)
+      ? requestedMode
+      : requestedMode == null
+        ? []
+        : [requestedMode]) as string[]),
+  ]);
+  streamModes.delete("values");
+
+  return {
+    ...preservedOptions,
+    streamMode: [...streamModes],
+  } as T;
 }

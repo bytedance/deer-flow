@@ -16,7 +16,7 @@
 | 7 | TodoMiddleware | | ✓ | ✓ | | ✓ | | ✓ | ✗ | `plan_mode` 参数 |
 | 8 | TitleMiddleware | | | ✓ | | | | ✓ | ✗ | `auto_title` |
 | 9 | MemoryMiddleware | | | | ✓ | | | ✓ | ✗ | `memory` |
-| 10 | ViewImageMiddleware | | ✓ | | | | | ✓ | ✗ | `vision` |
+| 10 | ViewImageMiddleware | | | | | ✓ | | ✓ | ✗ | `vision` |
 | 11 | SubagentLimitMiddleware | | | ✓ | | | | ✓ | ✗ | `subagent` |
 | 12 | LoopDetectionMiddleware | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✗ | 始终开启 |
 | 13 | ClarificationMiddleware | | | | | | ✓ | ✓ | ✗ | 始终最后 |
@@ -38,18 +38,12 @@ graph TB
         TD["[0] ThreadData<br/>创建线程目录"] --> UL["[1] Uploads<br/>扫描上传文件"] --> SB["[2] Sandbox<br/>获取沙箱"] --> LD_BA["[12] LoopDetection<br/>清理 stale warning"]
     end
 
-    subgraph BM ["<b>before_model</b> 正序 0→N"]
+    subgraph WM ["<b>wrap_model_call</b> 外→内 0→N"]
         direction TB
-        VI["[10] ViewImage<br/>注入图片 base64"]
+        DTC_WM["[3] DanglingToolCall<br/>补悬空 ToolMessage"] --> VI["[10] ViewImage<br/>注入图片 base64（仅请求内）"] --> LD_WM["[12] LoopDetection<br/>注入当前 run warning"]
     end
 
-    subgraph WM ["<b>wrap_model_call</b>"]
-        direction TB
-        DTC_WM["[3] DanglingToolCall<br/>补悬空 ToolMessage"] --> LD_WM["[12] LoopDetection<br/>注入当前 run warning"]
-    end
-
-    LD_BA --> VI
-    VI --> DTC_WM
+    LD_BA --> DTC_WM
     LD_WM --> M["<b>MODEL</b>"]
 
     subgraph AM ["<b>after_model</b> 反序 N→0"]
@@ -74,8 +68,8 @@ graph TB
     classDef afterAgentNode fill:#a0b5a8,stroke:#637a6b,color:#2d3239
     classDef terminalNode fill:#a8b5a0,stroke:#6b7a63,color:#2d3239
 
-    class TD,UL,SB,LD_BA,VI beforeNode
-    class DTC_WM,LD_WM wrapModelNode
+    class TD,UL,SB,LD_BA beforeNode
+    class DTC_WM,VI,LD_WM wrapModelNode
     class M modelNode
     class LD,SL,TI afterModelNode
     class LD_CLEAN,SBR,MEM afterAgentNode
@@ -91,8 +85,8 @@ sequenceDiagram
     participant UL as UploadsMiddleware
     participant SB as SandboxMiddleware
     participant LD as LoopDetectionMiddleware
-    participant VI as ViewImageMiddleware
     participant DTC as DanglingToolCallMiddleware
+    participant VI as ViewImageMiddleware
     participant M as MODEL
     participant SL as SubagentLimitMiddleware
     participant TI as TitleMiddleware
@@ -113,14 +107,14 @@ sequenceDiagram
     SB ->> LD: before_agent
     activate LD
     Note right of LD: before_agent 清理同 thread 旧 run 的 pending warning
-    LD ->> VI: before_model
-    activate VI
-    Note right of VI: before_model 注入图片 base64
-
-    VI ->> DTC: wrap_model_call
+    LD ->> DTC: wrap_model_call
     activate DTC
     Note right of DTC: wrap_model_call 补悬空 ToolMessage
-    DTC ->> LD: wrap_model_call
+
+    DTC ->> VI: wrap_model_call
+    activate VI
+    Note right of VI: wrap_model_call 把图片 base64 追加到请求（不写入 state）
+    VI ->> LD: wrap_model_call
     Note right of LD: wrap_model_call drain 当前 run warning 并追加到末尾
     LD ->> M: messages + tools
     activate M
@@ -138,13 +132,13 @@ sequenceDiagram
 
     activate TI
     Note right of TI: after_model 生成标题
-    TI -->> DTC: done
+    TI -->> VI: done
     deactivate TI
 
-    deactivate DTC
-
-    VI -->> SB: done
     deactivate VI
+
+    DTC -->> SB: done
+    deactivate DTC
 
     Note right of LD: after_agent 清理当前 run 未消费 warning
 
@@ -166,7 +160,8 @@ sequenceDiagram
 列表位置决定在洋葱中的层级 — 位置 0 最外层，位置 N 最内层：
 
 ```
-进入 before_*：   [0] → [1] → [2] → ... → [10] → MODEL
+进入 before_*：   [0] → [1] → [2] → ... → [7] → MODEL
+进入 wrap_model_call： [3] → [10] → [12] → MODEL（外→内，同样正序）
 退出 after_*：    MODEL → [13] → [11] → ... → [6] → [3] → [2] → [0]
                           ↑ 最内层最先执行
 ```
@@ -233,8 +228,8 @@ sequenceDiagram
     participant UL as Uploads
     participant SB as Sandbox
     participant LD as LoopDetection
-    participant VI as ViewImage
     participant DTC as DanglingToolCall
+    participant VI as ViewImage
     participant M as MODEL
     participant SL as SubagentLimit
     participant TI as Title
@@ -250,11 +245,11 @@ sequenceDiagram
     Note right of LD: before_agent 清理 stale pending warning
 
     loop 每轮对话（tool call 循环）
-        SB ->> VI: .
-        Note right of VI: before_model 注入图片
-        VI ->> DTC: .
+        SB ->> DTC: .
         Note right of DTC: wrap_model_call 补悬空工具结果
-        DTC ->> LD: .
+        DTC ->> VI: .
+        Note right of VI: wrap_model_call 把图片追加到请求
+        VI ->> LD: .
         Note right of LD: wrap_model_call 注入当前 run warning
         LD ->> M: messages + tools
         M -->> LD: AI response

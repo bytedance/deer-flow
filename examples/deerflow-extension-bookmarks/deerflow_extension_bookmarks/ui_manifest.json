@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "entry": "static/dist/index.mjs",
+  "files": [
+    "static/dist/index.mjs",
+    "static/dist/chunks/bookmarks.mjs",
+    "static/dist/styles.css",
+    "static/dist/bookmark.svg"
+  ]
+}

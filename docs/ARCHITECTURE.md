@@ -154,7 +154,7 @@ These span both layers and require reading multiple files to understand:
   tasks reuse the *same* Gateway run lifecycle (scheduler decides *when*, not *how*).
 - **Scheduled tasks** — workspace page `/workspace/scheduled-tasks` + a background scheduler
   gated by `config.yaml → scheduler.enabled`; non-interactive runs drop `ask_clarification`
-  and client-supplied `non_interactive`.
+  and client-supplied `non_interactive` (see the run-context trust boundary in §6).
 - **Long-running MCP** — a durable `McpTaskService` (leased rows, DB as source of truth)
   keeps remote task IDs/polling out of the agent loop.
 - **Version sources** — a release version must match in `backend/pyproject.toml`,
@@ -172,6 +172,12 @@ These span both layers and require reading multiple files to understand:
   sandbox is dev-only direct execution.
 - **MCP isolation**: each MCP server runs in its own process with runtime env-var
   resolution; servers toggle independently.
+- **Run-context trust boundary**: run context reaches the agent from two client-writable
+  surfaces — `body.context` and the free-form `body.config` — so every server-produced key
+  is gated on both. `non_interactive`, `disable_clarification`, and `github_token` are
+  honored only for internally-authenticated callers (the scheduler and IM/webhook channel
+  policies) and scrubbed from a non-internal caller's config; identity and sandbox
+  lifecycle fields are cleared unconditionally and restamped from auth state.
 - **Loopback-by-default ingress**: nginx is the only published surface; the Gateway's `8001`
   is container-internal and never published. A bare `"${PORT}:2026"` bind (0.0.0.0) is
   rejected by convention and CI. See the Security Notice in [`README.md`](../README.md) before

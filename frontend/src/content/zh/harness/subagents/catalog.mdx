@@ -1,0 +1,130 @@
+---
+title: 子 Agent 目录
+description: 内置子 Agent 的默认值与可用条件，三种定义来源及其优先级，Custom Agent 的委派范围，以及外部 ACP Agent。
+---
+
+import { Callout } from "nextra/components";
+
+# 子 Agent 目录
+
+`task` 工具能看到的子 Agent 集合叫做**目录**。目录由三种来源合并而成，再按调用方的允许列表过滤。本章说明每种来源怎么定义、冲突时谁生效。
+
+## 内置子 Agent
+
+| 名称              | 工具                                          | 默认最大轮次 | 默认超时      | 适用场景                                             |
+| ----------------- | --------------------------------------------- | ------------ | ------------- | ---------------------------------------------------- |
+| `general-purpose` | 继承 Lead Agent 的全部工具                    | 150          | 1800 秒       | 多步推理、网络搜索、文件操作、产出物生成             |
+| `bash`            | `bash`、`ls`、`read_file`、`write_file`、`str_replace` | 60           | 1800 秒       | 脚本、数据处理、文件转换、环境准备等命令行任务       |
+
+两者的模型都是 `inherit`，即使用 Lead Agent 当前的模型。两者都禁止 `task`、`ask_clarification` 和 `present_files`。
+
+`bash` 只在沙箱允许执行命令时出现在目录里：
+
+- 没有 `sandbox` 配置时不可用。
+- 使用容器沙箱（任何非本地 provider）时可用。
+- 使用本地沙箱时取决于 `sandbox.allow_host_bash`，默认为 `false`。此时委派 `bash` 会得到一条明确的失败结果，提示只在完全可信的本地环境里开启该选项。
+
+`general-purpose` 的系统提示里有一段 `tool_restrictions`，明确告诉它 `task` 不可用、不得再派生子 Agent；需要并行时用 bash 后台进程或顺序执行。
+
+## 三种定义来源与优先级
+
+| 来源               | 定义位置                                | 谁能改                   |
+| ------------------ | --------------------------------------- | ------------------------ |
+| 内置               | 代码                                    | 不可改，只能覆盖参数     |
+| `config.yaml`      | `subagents.custom_agents.<name>`        | 运维，改后重启           |
+| 设置页管理         | **设置 → 子智能体**                     | 管理员，即时生效         |
+
+运行时合并顺序为**内置 → `config.yaml` → 设置页管理**。设置页管理的定义如果与内置或 `config.yaml` 同名，会继续保存并在设置页显示冲突标记，但被排除在运行时目录之外。
+
+在此之上，`subagents.agents.<name>` 可以对任何来源的子 Agent 覆盖 `timeout_seconds`、`max_turns`、`model`、`skills` 和 `token_budget`。设置页目录会标出其中 `timeout_seconds`、`max_turns`、`model`、`skills` 的覆盖。
+
+<Callout type="warning">
+  全局的 `subagents.timeout_seconds` 和 `subagents.max_turns` 只作用于内置子
+  Agent。`config.yaml` 自定义和设置页管理的子 Agent 各自有默认值（900 秒、50
+  轮），要改它们请用 `subagents.agents.<name>` 的按 Agent 覆盖。
+</Callout>
+
+## 在 config.yaml 里定义
+
+```yaml
+subagents:
+  custom_agents:
+    analysis:
+      description: "数据分析专家，负责处理数据集并生成洞察"   # 必填，会出现在 Lead Agent 的目录说明里
+      system_prompt: |                                        # 必填
+        你是数据分析专家……
+      tools: null            # null 表示继承 Lead Agent 的全部工具；也可以给出白名单
+      disallowed_tools:      # 默认值；task 始终不可用，另外两个仅在列于此处时被禁止
+        - task
+        - ask_clarification
+        - present_files
+      skills: null           # null 继承全部已启用技能；[] 表示不暴露任何技能
+      model: inherit         # 或某个已配置的模型名
+      max_turns: 50
+      timeout_seconds: 900
+```
+
+`description` 的第一行会被渲染进 Lead Agent 系统提示的 `subagent_system` 块。它会先经过 HTML 转义，所以描述里的尖括号不会被当成标签。
+
+## 在设置页管理
+
+管理员可以在**设置 → 子智能体**里添加可复用的工作智能体。每条定义包含：
+
+| 字段               | 说明                                                                                     |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| `name`             | 只允许字母、数字和连字符，保存时转为小写，作为 `subagent_type` 使用                                     |
+| `display_name`     | 可选显示名                                                                               |
+| `description`      | 派遣说明，Lead Agent 据此决定何时使用                                                    |
+| `system_prompt`    | 系统提示                                                                                 |
+| `tools` / `disallowed_tools` | 工具白名单与黑名单。`task`、`ask_clarification`、`present_files` 会被强制加入黑名单 |
+| `skills`           | 技能允许列表                                                                             |
+| `model`            | `inherit` 或已配置的模型名，保存时校验                                                   |
+| `max_turns`        | 默认 50                                                                                  |
+| `timeout_seconds`  | 默认 900                                                                                 |
+| `enabled`          | 关闭后不进入运行时目录                                                                   |
+
+内置项和 `config.yaml` 项也会显示在同一个目录里，但只读。
+
+存储后端跟随 Custom Agent 的设置：`agent_storage.backend: file` 在 `DEER_FLOW_HOME/managed-subagents/` 下为每条定义写一个原子 JSON 文件；`agent_storage.backend: db` 写入共享应用数据库，供多实例部署共同读取。这些定义是部署级全局数据，不按用户隔离。对应的 API 在 `/api/subagents`：所有用户都可以读取目录（系统提示仅对管理员可见），创建、更新与删除仅管理员可用；运行时对定义有约 1 秒的缓存。
+
+## Custom Agent 的委派范围
+
+默认 Lead Agent 可以看到全部已启用的运行时子 Agent。每个 Custom Agent 可以用其智能体设置里的**子智能体权限**选项收窄：
+
+| 选项                 | 效果                                                                              |
+| -------------------- | --------------------------------------------------------------------------------- |
+| 全部已启用子智能体   | 不加限制                                                                          |
+| 不允许使用子智能体   | 即使请求开启了 Ultra 模式，委派也保持关闭                                         |
+| 仅允许选中的子智能体 | 提示词只展示所选名称，`task` 与 `batch_task` 也只接受这些名称                     |
+
+允许列表会在 run 开始时作为快照写入 run metadata，`task` 工具再次做服务端校验，因此客户端不能通过直接填写隐藏名称绕过限制。扩展系统看到的装配描述符（`effective_policies.subagents`）同样按允许列表过滤，不会泄漏完整目录。
+
+## 外部 ACP Agent
+
+除内置和自定义子 Agent 外，DeerFlow 还能通过 **Agent Client Protocol (ACP)** 委派给作为独立进程运行的外部 Agent，包括用 ACP 适配器封装的第三方 CLI。
+
+```yaml
+acp_agents:
+  claude_code:
+    command: npx
+    args: ["-y", "@zed-industries/claude-agent-acp"]
+    description: 用于实现、重构和调试的 Claude Code
+    model: null
+    # auto_approve_permissions: false   # false 时拒绝外部 Agent 发起的全部权限请求
+    # timeout_seconds: 1800             # 与 subagents.timeout_seconds 同形
+    # env:
+    #   ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY
+
+  codex:
+    command: npx
+    args: ["-y", "@zed-industries/codex-acp"]
+    description: 用于仓库任务和代码生成的 Codex CLI
+    model: null
+```
+
+Lead Agent 通过 `invoke_acp_agent` 工具调用它们。ACP Agent 不走 `task` 的目录、容量和账本机制，只受自己的 `timeout_seconds` 约束。
+
+<Callout type="tip">
+  原始的 `claude` 或 `codex` 命令默认不兼容 ACP。请使用上面列出的适配器包，或其他兼容的
+  ACP 封装器。
+</Callout>

@@ -14,6 +14,20 @@ The summarization feature uses LangChain's `SummarizationMiddleware` to monitor 
 4. Maintains AI/Tool message pairs together for context continuity
 5. Stores the summary in `ThreadState.summary_text` and projects it ephemerally through durable context data
 
+## Todo reminders
+
+Compaction filters `HumanMessage(name="todo_reminder")` snapshots after the
+trigger check and before selecting the retained tail. They enter neither summary
+generation/pre-compaction hooks nor retained messages, while `state["todos"]`
+remains unchanged. Only a successful compaction commits the removal; no-op and
+failure paths keep the original state. The following `TodoMiddleware.before_model`
+rebuilds one reminder from current todos when no `write_todos` call is still
+visible; empty todos need no reminder. Both automatic and manual compaction use
+this shared preparation path. Coverage: `tests/test_todo_compaction.py`.
+`todo_middleware.py::TODO_REMINDER_MESSAGE_NAME` owns the backend message name;
+the producer, presence check, and compaction filter share it. Its value remains
+`todo_reminder` for compatibility with the frontend's hidden-message filtering.
+
 ## Configuration
 
 Summarization is configured in `config.yaml` under the `summarization` key:
@@ -95,6 +109,18 @@ summarization:
      value: 0.8  # 80% of max input tokens
    ```
 
+   The percentage resolves from the **active run model's** declared
+   `context_window`: the lead model selected for this run, the subagent's own
+   model, or the model resolved for manual `/compact`. A separately configured
+   `summarization.model_name` generates the replacement summary but never sizes
+   the run model's context budget. Declare `context_window` on the run model's
+   entry in `config.yaml`. Third-party OpenAI-compatible models carry no built-in
+   capacity profile, so without a declared `context_window` the fraction clause
+   is dropped with a warning at agent build — any remaining absolute clauses
+   (`tokens` / `messages`) keep working. Fraction-based `keep` uses the same run
+   model profile and falls back to the documented message-count retention when
+   that profile is unavailable.
+
 **Multiple Triggers:**
 ```yaml
 trigger:
@@ -130,7 +156,7 @@ keep:
 #### `trim_tokens_to_summarize`
 - **Type**: Integer or null
 - **Default**: `4000`
-- **Description**: Maximum tokens to include when preparing messages for the summarization call itself. Set to `null` to skip trimming (not recommended for very long conversations).
+- **Description**: Token budget used to trim the raw input sections for the summarization call. Escaping, wrapper tags, and the summary prompt add overhead beyond this budget; it is not a hard limit on the final model request. When preserving the current user request leaves an assistant/tool-only summary window, trimming favors the most recent content in that window. If a mixed window still contains a human message but the human-anchored trim is empty, the existing final-message fallback is preserved. Set to `null` to skip trimming (not recommended for very long conversations).
 
 #### `summary_prompt`
 - **Type**: String or null
@@ -188,6 +214,7 @@ The middleware intelligently preserves message context:
   [Generated summary text]
   </durable_context_data>
   ```
+- **Active goal**: When the thread has an active `/goal`, its objective opens the same data message on every model call, inside an `<active_goal>` element, so compaction cannot take the goal away with the message that stated it. The system contract then ends with a static exception: the agent works toward that element as it would a request in a user message, with no system or developer authority, while every other field value stays data, as does any other text that calls itself a goal. The exception covers only the element at the start of the data message, by position. Within that message every other field value is HTML-escaped, so only the renderer can produce the element; in the lead agent chain the input and tool-result sanitizers also escape `<active_goal>` in user input and remote tool results. Only the objective is rendered, not the evaluator's counters, so the block and the contract change only when the goal is set or cleared.
 
 ## Best Practices
 
@@ -314,7 +341,7 @@ middlewares such as title generation, memory queuing, and clarification:
 - Summarization configuration is loaded from `config.yaml`
 - Generated summaries are stored in `ThreadState.summary_text`, not as regular `messages`
 - The message reducer removes compacted raw messages while the checkpointer persists `summary_text`
-- DurableContextMiddleware projects `summary_text` back into later model calls as hidden durable context data
+- DurableContextMiddleware projects `summary_text` and the active `goal` objective back into later model calls as hidden durable context data
 
 ## Example Configurations
 

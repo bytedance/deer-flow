@@ -20,12 +20,13 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 
 ### How It Works
 
-1. **Backend Request**: When the backend needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id`, `thread_id`, and optional `user_id`.
+1. **Backend Request**: When the backend needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id`, `thread_id`, optional `user_id`, and the configured `skills_container_path` (default: `/mnt/skills`).
 
 2. **Pod Creation**: The provisioner creates a dedicated Pod in the `deer-flow` namespace with:
    - The sandbox container image (all-in-one-sandbox)
    - HostPath volumes mounted for:
-     - `/mnt/skills/{public,custom,legacy}` → Read-only enabled-only skill projections
+     - `{skills_container_path}/{public,custom,legacy}` → Default read-only skill projections
+     - `{skills_container_path}/integrations` → Optional read-only managed-integration projection supplied by the Gateway
      - `/mnt/user-data` → Read-write access to thread-specific data
    - Resource limits (CPU, memory, ephemeral storage)
    - Readiness/liveness probes
@@ -163,6 +164,17 @@ The provisioner is configured via environment variables (set in [docker-compose-
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
 
+For new sandbox requests, the Gateway also sends the effective AIO shell-session
+capacity derived from `subagent_runtime.max_running`. The provisioner writes it
+to the sandbox Pod as `MAX_SHELL_SESSIONS`; requests from older Gateways omit the
+field and retain the image default. Discovery responses report the effective
+capacity. The Gateway replaces a lower-capacity Pod through its ownership-fenced
+replacement path once the previous owner and recovery grace permit it. A create
+request for an existing Pod with insufficient capacity returns HTTP 409; the
+provisioner does not delete an existing Pod to upgrade its capacity, including
+after a transient Gateway discovery failure. If the old Pod has already gone
+but its Service remains, create can safely provision the missing Pod.
+
 ### Custom sandbox image
 
 Provisioner-created sandbox Pods use the provisioner's `SANDBOX_IMAGE` environment variable. This is separate from `sandbox.image` in `config.yaml`, which applies to local Docker or Apple Container mode.
@@ -208,7 +220,7 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 
 This moves legacy `threads/{thread_id}/user-data` data under `users/<target-user-id>/threads/{thread_id}/user-data`, which matches the new provisioner PVC subPath when the gateway base directory is mounted at `deer-flow/` on the PVC. Use `default` as the target user only when the legacy data should remain in the default no-auth user namespace. Run the migration while no gateway or sandbox Pods are writing to those paths.
 
-In hostPath mode, the gateway materializes enabled-only views under `skills_view/public` and `users/{user_id}/skills_view/{custom,legacy}` beneath `DEER_FLOW_HOST_BASE_DIR`; the provisioner mounts those stable directories. When skills are materialized per thread on the same PVC, set `SKILLS_PVC_NAME` to that PVC and configure `SKILLS_PVC_SUBPATH_TEMPLATE=deer-flow/users/{user_id}/threads/{thread_id}/skills`. Leaving the template empty preserves the legacy behavior of mounting the skills PVC root at `/mnt/skills`. The gateway does not yet populate that PVC layout dynamically, so PVC-backed skills do not receive hostPath projection updates.
+In hostPath mode, the gateway materializes enabled-only views under `skills_view/public` and `users/{user_id}/skills_view/{custom,legacy}` beneath `DEER_FLOW_HOST_BASE_DIR`; the provisioner mounts those stable directories. A lead Agent with an explicit skills policy supplies all four category mounts from `users/{user_id}/threads/{thread_id}/skills_view`; those overrides replace the default hostPath or root skills-PVC mount. When `USERDATA_PVC_NAME` is configured, the provisioner mounts these thread categories from that PVC using `deer-flow/users/{user_id}/threads/{thread_id}/skills_view/{category}` subpaths. For unrestricted threads, operators can still set `SKILLS_PVC_NAME` and optionally configure `SKILLS_PVC_SUBPATH_TEMPLATE`; leaving the template empty mounts the skills PVC root unchanged. The gateway does not populate the unrestricted `SKILLS_PVC_SUBPATH_TEMPLATE` layout dynamically.
 
 **hostPath skills volumes require the gateway and the K8s node to see the same `DEER_FLOW_HOST_BASE_DIR`** (single-node deployment, or NFS/shared storage mounted at that path on every node). The gateway writes the projection there before every sandbox acquire, so as long as that path is shared, the directory the provisioner mounts always exists by the time the Pod is scheduled — even a boot-time rebuild failure for one user self-heals on their next acquire, before the provisioner is called. `skills-custom` and `skills-legacy` use hostPath type `Directory` (not `DirectoryOrCreate`): if the shared-storage assumption is violated — the gateway wrote to a different node than the one the Pod lands on — Pod creation now fails visibly instead of silently mounting an empty directory. Use `SKILLS_PVC_NAME` instead of hostPath for genuinely multi-node clusters without shared storage.
 

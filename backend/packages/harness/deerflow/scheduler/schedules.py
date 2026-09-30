@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
+
+MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60
 
 
 def validate_timezone(timezone_name: str) -> str:
@@ -19,6 +21,33 @@ def normalize_cron_expression(expr: str) -> str:
     if len(parts) != 5:
         raise ValueError("Cron expression must contain exactly 5 fields")
     return " ".join(parts)
+
+
+def parse_interval_seconds(schedule_spec: dict[str, object]) -> int:
+    raw = schedule_spec.get("every_seconds")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise ValueError("interval schedule requires every_seconds as a positive integer")
+    return raw
+
+
+def _is_fixed_time_cron(cron_expr: str) -> bool:
+    """Return whether a cron expression specifies a single fixed minute and hour.
+
+    Expressions with wildcards ('*'), steps ('/'), ranges ('-'), or lists (',')
+    in either the minute or hour field (e.g. '0 0-23 * * *' or '*/15 2 * * *')
+    fire multiple times and should preserve all occurrences across repeated hours.
+    """
+    parts = cron_expr.strip().split()
+    if len(parts) >= 2:
+        minute, hour = parts[0], parts[1]
+        special = ("*", "/", "-", ",")
+        return not any(ch in minute or ch in hour for ch in special)
+    return False
+
+
+def _is_ambiguous_datetime(dt: datetime) -> bool:
+    """Return whether a local datetime is ambiguous (e.g. during a DST fall-back)."""
+    return dt.replace(fold=0).utcoffset() != dt.replace(fold=1).utcoffset()
 
 
 def next_run_at(
@@ -51,9 +80,26 @@ def next_run_at(
         cron_expr = normalize_cron_expression(str(schedule_spec.get("cron", "")))
         zone = ZoneInfo(timezone_name)
         local_now = now.astimezone(zone)
-        next_local = croniter(cron_expr, local_now).get_next(datetime)
+        it = croniter(cron_expr, local_now)
+        next_local = it.get_next(datetime)
         if next_local.tzinfo is None:
             next_local = next_local.replace(tzinfo=zone)
+
+        # During a daylight-saving fall-back (e.g. 03:00 -> 02:00), an ambiguous
+        # wall-clock hour repeats twice. croniter returns both occurrences (the
+        # first with fold=0, the second with fold=1). For fixed-time tasks
+        # (where neither minute nor hour contains '*'), running twice on the
+        # same calendar day violates the cron contract (Vixie cron / POSIX
+        # behavior). Skip the second occurrence (fold=1) to preserve once-per-day
+        # semantics while letting wildcard schedules (e.g. '0 * * * *') fire each hour.
+        if next_local.fold == 1 and _is_fixed_time_cron(cron_expr) and _is_ambiguous_datetime(next_local):
+            next_local = it.get_next(datetime)
+            if next_local.tzinfo is None:
+                next_local = next_local.replace(tzinfo=zone)
+
         return next_local.astimezone(UTC)
+    if schedule_type == "interval":
+        every_seconds = parse_interval_seconds(schedule_spec)
+        return now.astimezone(UTC) + timedelta(seconds=every_seconds)
 
     raise ValueError(f"Unsupported schedule_type: {schedule_type}")

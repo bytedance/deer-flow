@@ -1,0 +1,24 @@
+{
+  "isolated_handoff": {
+    "n": 8,
+    "artifact_correct": 8,
+    "clean_success": 7,
+    "observed_total_tokens": 105569,
+    "usage_complete": true,
+    "mean_total_tokens": 13196.125,
+    "mean_seconds": 33.73334966699986,
+    "median_seconds": 25.309243562995107,
+    "requests": 48
+  },
+  "snapshot": {
+    "n": 8,
+    "artifact_correct": 8,
+    "clean_success": 7,
+    "observed_total_tokens": 89214,
+    "usage_complete": true,
+    "mean_total_tokens": 11151.75,
+    "mean_seconds": 20.140418104128912,
+    "median_seconds": 13.929723041510442,
+    "requests": 42
+  }
+}

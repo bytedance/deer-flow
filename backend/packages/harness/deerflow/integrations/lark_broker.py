@@ -430,8 +430,9 @@ def _config_from_env() -> BrokerConfig:
         config_dir=os.environ.get("LARKSUITE_CLI_CONFIG_DIR", "/var/lark/config"),
         data_dir=os.environ.get("LARKSUITE_CLI_DATA_DIR", "/var/lark/data"),
         host=os.environ.get("DEERFLOW_LARK_BROKER_HOST", LARK_BROKER_DEFAULT_HOST),
-        port=int(os.environ.get("DEERFLOW_LARK_BROKER_PORT", str(LARK_BROKER_DEFAULT_PORT))),
-        timeout_seconds=int(os.environ.get("DEERFLOW_LARK_BROKER_TIMEOUT", str(LARK_BROKER_DEFAULT_TIMEOUT_SECONDS))),
+        # A blank value means "unset" (`-e DEERFLOW_LARK_BROKER_PORT=`); int("") would abort startup.
+        port=int(os.environ.get("DEERFLOW_LARK_BROKER_PORT") or LARK_BROKER_DEFAULT_PORT),
+        timeout_seconds=int(os.environ.get("DEERFLOW_LARK_BROKER_TIMEOUT") or LARK_BROKER_DEFAULT_TIMEOUT_SECONDS),
         deny_subcommands=parse_deny_subcommands(os.environ.get(LARK_BROKER_DENY_SUBCOMMANDS_ENV)),
     )
 

@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, NotRequired, Protocol, TypedDict
+
+
+class BatchItemInput(TypedDict):
+    key: str
+    prompt: str
+    acceptance_criteria: NotRequired[list[str] | None]
 
 
 @dataclass(frozen=True)
@@ -16,7 +22,7 @@ class BatchSubmitRequest:
     submission_key: str
     title: str
     subagent_type: str
-    items: list[dict[str, str]]
+    items: list[BatchItemInput]
     max_live_items: int | None
     max_running_items: int | None
     execution_spec: dict[str, Any]

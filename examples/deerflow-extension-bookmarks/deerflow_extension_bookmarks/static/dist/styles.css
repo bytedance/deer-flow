@@ -1,0 +1,108 @@
+:host {
+  display: block;
+  color: inherit;
+  font: inherit;
+}
+* {
+  box-sizing: border-box;
+}
+.intro {
+  padding: 24px;
+  background: linear-gradient(125deg, #edf9f4, #f1f4ff);
+  border-radius: 16px;
+  color: #1b3930;
+  margin-bottom: 22px;
+}
+h3 {
+  font-size: 23px;
+  letter-spacing: -0.5px;
+  margin: 0 0 8px;
+}
+p {
+  font-size: 14px;
+  line-height: 1.7;
+  margin: 0;
+}
+form {
+  display: flex;
+  gap: 10px;
+  margin: 0 0 14px;
+}
+input {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid #8885;
+  border-radius: 9px;
+  padding: 10px 12px;
+  min-width: 0;
+  flex: 1;
+}
+button,
+a {
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid #8885;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: transparent;
+  color: inherit;
+  text-decoration: none;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+button:hover,
+a:hover {
+  background: #8881;
+}
+.search-button {
+  background: #216549;
+  color: white;
+}
+.search-button:hover {
+  background: #194f39;
+}
+article {
+  border: 1px solid #8884;
+  border-radius: 14px;
+  padding: 20px;
+  margin: 14px 0;
+}
+.name {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 15px;
+}
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.8;
+  margin: 0 0 16px;
+  max-height: 320px;
+  overflow: auto;
+}
+.actions {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.meta {
+  font-size: 12px;
+  opacity: 0.6;
+  margin-bottom: 12px;
+}
+[role="status"],
+[role="alert"] {
+  font-size: 13px;
+  margin: 8px 0;
+}
+[role="alert"] {
+  color: #bd4040;
+}
