@@ -1186,6 +1186,14 @@ class TestSqliteUriRejection:
         assert resolve_sqlite_conn_str(":memory:") == ":memory:"
         assert resolve_sqlite_conn_str(str(tmp_path / "cp.db")) == str(tmp_path / "cp.db")
 
+    @pytest.mark.parametrize("conn_string", ["FILE:x.db", "File:x.db"])
+    def test_resolve_treats_non_lowercase_file_prefix_as_path(self, conn_string):
+        """SQLite only recognizes a lowercase ``file:`` prefix as a URI, even with ``uri=True``."""
+        from deerflow.config.paths import resolve_path
+        from deerflow.runtime.store._sqlite_utils import resolve_sqlite_conn_str
+
+        assert resolve_sqlite_conn_str(conn_string) == str(resolve_path(conn_string))
+
     @pytest.mark.parametrize("conn_string", SQLITE_URIS)
     def test_sync_checkpointer_rejects_uri(self, conn_string, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
