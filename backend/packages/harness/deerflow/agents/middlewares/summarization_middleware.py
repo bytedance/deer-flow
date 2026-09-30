@@ -26,6 +26,7 @@ from deerflow.config.summarization_config import DEFAULT_KEEP
 from deerflow.config.task_continuity_config import TaskContinuityConfig
 from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
+from deerflow.models.reasoning import resolve_reasoning_contract
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
@@ -247,7 +248,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         try:
             model = create_chat_model(
                 name=name,
-                thinking_enabled=False,
+                thinking_enabled=_summary_model_thinking_enabled(name, self._app_config),
                 app_config=self._app_config,
                 attach_tracing=False,
             )
@@ -839,6 +840,25 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 logger.exception("before_summarization hook %s failed", hook_name)
 
 
+def _summary_model_thinking_enabled(name: str | None, app_config: Any) -> bool:
+    """Return a construction mode accepted by the model's reasoning contract.
+
+    Summary generation prefers non-thinking mode, but a required-thinking model
+    cannot honor that preference. In particular, a declared
+    ``on_disable_request: reject`` contract would reject construction before its
+    profile could anchor fraction-based compaction. Resolve ``None`` the same way
+    as :func:`create_chat_model` and enable thinking only when the selected model
+    requires it; optional and legacy models keep the existing disabled default.
+    """
+    resolved_app_config = app_config or get_app_config()
+    resolved_name = name
+    if resolved_name is None:
+        models = getattr(resolved_app_config, "models", None)
+        resolved_name = models[0].name if models else None
+    model_config = resolved_app_config.get_model_config(resolved_name) if resolved_name is not None else None
+    return model_config is not None and resolve_reasoning_contract(model_config).thinking_required
+
+
 def _build_summary_model(candidate_names: list[str | None], app_config: Any) -> tuple[Any | None, str | None]:
     """Build the first constructible summarization model candidate (guarded).
 
@@ -855,7 +875,12 @@ def _build_summary_model(candidate_names: list[str | None], app_config: Any) -> 
             continue
         tried.add(name)
         try:
-            model = create_chat_model(name=name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+            model = create_chat_model(
+                name=name,
+                thinking_enabled=_summary_model_thinking_enabled(name, app_config),
+                app_config=app_config,
+                attach_tracing=False,
+            )
         except Exception:
             logger.exception("Failed to build summarization model %r; trying the next candidate", name)
             continue
