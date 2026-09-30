@@ -111,7 +111,7 @@ async def test_fail_open_on_non_2xx(monkeypatch):
     async def resp(body):
         return _FakeResponse(status_code=503, payload={"answers": {"ok": {"noul": 0.9}}})
 
-    await gate.classify_turn("user: hello")
+    _patch_client(monkeypatch, resp)
     assert await gate.query_system_one("user: hello", gate.TURN_QUESTIONS) is None
 
 
@@ -121,6 +121,7 @@ async def test_fail_open_on_malformed_body(monkeypatch):
     async def resp(body):
         return _FakeResponse(status_code=200, json_exc=ValueError("not json"))
 
+    _patch_client(monkeypatch, resp)
     assert await gate.query_system_one("user: hello", gate.TURN_QUESTIONS) is None
 
 
@@ -202,10 +203,13 @@ async def test_payload_is_bounded(monkeypatch):
 
 
 def test_derive_route_decisive_and_unknown():
-    assert gate.derive_route(_answers(needs_tool=0.95)) == "needs_tool"
-    assert gate.derive_route(_answers(needs_tool=0.1, from_context=0.92, intent="code_question")) == "answer_from_context"
-    assert gate.derive_route(_answers(needs_tool=0.05, from_context=0.4, intent="chat", conf=0.95)) == "plain_chat"
-    assert gate.derive_route(_answers(needs_tool=0.5, from_context=0.5, intent="other", conf=0.4)) == "unknown"
+    # derive_route takes the inner answers map, the same shape query_system_one
+    # returns after unwrapping the HTTP envelope. The _answers() fixture returns
+    # the full envelope, so pass its inner map here.
+    assert gate.derive_route(_answers(needs_tool=0.95)["answers"]) == "needs_tool"
+    assert gate.derive_route(_answers(needs_tool=0.1, from_context=0.92, intent="code_question")["answers"]) == "answer_from_context"
+    assert gate.derive_route(_answers(needs_tool=0.05, from_context=0.4, intent="chat", conf=0.95)["answers"]) == "plain_chat"
+    assert gate.derive_route(_answers(needs_tool=0.5, from_context=0.5, intent="other", conf=0.4)["answers"]) == "unknown"
 
 
 def test_derive_route_rejects_mis_scaled_answers():
