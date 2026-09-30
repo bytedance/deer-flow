@@ -340,7 +340,7 @@
   却会解析 URI，因此检查的文件与运行时实际使用的不同，并把内存 URI 报告为
   `not_configured`。现在四个 SQLite checkpointer/Store 工厂都会拒绝 `file:` URI，
   错误信息会指明该配置项，`/health/ready` 也会将其报告为不可达。请改用文件系统
-  路径或 `:memory:`。
+  路径或 `:memory:`。([#6069])
 
 - **配置：** `make config-upgrade`（`make dev` / `make start` 也会执行）现在升级的是
   Gateway 实际加载的 `config.yaml`。当 `<checkout>/config.yaml` 与
@@ -5310,3 +5310,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5987]: https://github.com/bytedance/deer-flow/pull/5987
 [#5991]: https://github.com/bytedance/deer-flow/pull/5991
 [#6015]: https://github.com/bytedance/deer-flow/pull/6015
+[#6069]: https://github.com/bytedance/deer-flow/pull/6069

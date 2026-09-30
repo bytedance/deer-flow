@@ -337,7 +337,7 @@ This release closes that milestone with **181 merged pull requests**.
   checked a different file than the runtime used and reported in-memory URIs as
   `not_configured`. All four SQLite checkpointer/Store factories now reject
   `file:` URIs with an error that names the setting, and `/health/ready` reports
-  them unreachable. Use a filesystem path or `:memory:` instead.
+  them unreachable. Use a filesystem path or `:memory:` instead. ([#6069])
 
 - **config:** `make config-upgrade` (also run by `make dev` / `make start`)
   upgrades the `config.yaml` the Gateway loads. With both
@@ -6259,4 +6259,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5987]: https://github.com/bytedance/deer-flow/pull/5987
 [#5991]: https://github.com/bytedance/deer-flow/pull/5991
 [#6015]: https://github.com/bytedance/deer-flow/pull/6015
+[#6069]: https://github.com/bytedance/deer-flow/pull/6069
 
