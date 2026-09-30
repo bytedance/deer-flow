@@ -66,6 +66,7 @@ async def cancel_background_task(
 
     If several tasks are active, provide the exact task name shown by
     list_background_tasks. Remote MCP task handles are never needed or exposed.
+    Use a local task ID to distinguish tasks with the same name. Exact IDs take precedence over name matches.
     """
     thread_id = _resolve_thread_id(runtime)
     if thread_id is None:

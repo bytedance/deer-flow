@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint, false
+from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, LargeBinary, String, Text, UniqueConstraint, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.constants import (
@@ -27,6 +27,8 @@ class McpTaskRow(Base):
     driver_name: Mapped[str] = mapped_column(String(64))
     remote_task_id: Mapped[str] = mapped_column(String(MCP_TASK_REMOTE_ID_MAX_LENGTH))
     task_name: Mapped[str] = mapped_column(String(MCP_TASK_NAME_MAX_LENGTH))
+    # Use a binary key to preserve Python casefold semantics across database collations.
+    task_name_key: Mapped[bytes] = mapped_column(LargeBinary, default=lambda context: context.get_current_parameters()["task_name"].casefold().encode("utf-8"))
     status: Mapped[str] = mapped_column(String(32), index=True)
     result: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     result_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -77,6 +79,7 @@ class McpTaskRow(Base):
             name="uq_mcp_tasks_user_server_remote",
         ),
         Index("ix_mcp_tasks_thread_created", "thread_id", "created_at"),
+        Index("ix_mcp_tasks_name_scope", "user_id", "thread_id", "task_name_key"),
         Index("ix_mcp_tasks_due", "status", "next_poll_at"),
         Index("ix_mcp_tasks_notification_due", "notification_status", "next_notification_at"),
         Index("ix_mcp_tasks_cancel_due", "cancel_requested_at", "next_cancel_at"),

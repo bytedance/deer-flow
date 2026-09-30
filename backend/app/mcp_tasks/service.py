@@ -736,22 +736,17 @@ class McpTaskService:
         thread_incarnation: str | None,
         task: str | None = None,
     ) -> dict[str, Any]:
-        active = await self.list_tasks(
+        matches = await self._repository.find_active_matches(
             thread_id=thread_id,
             user_id=user_id,
             thread_incarnation=thread_incarnation,
-            active_only=True,
+            task=task,
         )
-        if task:
-            normalized = task.casefold().strip()
-            matches = [item for item in active if item["id"] == task or str(item.get("task_name") or "").casefold() == normalized]
-        else:
-            matches = active
         if not matches:
             raise LookupError("No active background task matches this request")
         if len(matches) > 1:
             names = ", ".join(str(item.get("task_name") or item["id"]) for item in matches[:5])
-            raise ValueError(f"More than one active background task matches; specify one task name: {names}")
+            raise ValueError(f"More than one active background task matches; specify a task ID: {names}")
         result = await self.cancel_task(
             task_id=matches[0]["id"],
             thread_id=thread_id,

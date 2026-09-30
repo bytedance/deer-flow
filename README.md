@@ -683,6 +683,9 @@ The Gateway can adapt an MCP server's ordinary `submit` / `status` / `cancel` to
 Notification launch and failed Agent-run deliveries use capped exponential backoff with a visible attempt count and stop after five failed attempts. When a bounded ordinary release exceeds its drain deadline, the service retains ownership until it settles. A permanently rejected target such as a deleted chat is dead-lettered immediately instead of retried forever or recreated. Cancellation endpoints return after durably recording the request; the background service owns the potentially slow remote MCP call and its retry schedule.
 
 Notification runs keep their trusted delivery instruction separate from the framed, untrusted remote event payload. The process-started task runtime—not a hot config read—controls whether the task-management tools are exposed, so changing `mcp_tasks` requires a Gateway restart. When a skill's `allowed-tools` policy is active, `list_background_tasks` and `cancel_background_task` must be declared explicitly like other business tools.
+
+Background task cancellation resolves an exact local task ID before matching names, independently of the recent-task list limit. Name matching preserves Unicode case folding; use a local task ID to distinguish tasks with the same name. A successful response means the cancellation request is persisted; the background service confirms remote cancellation. Stop all older Gateway writers before upgrading: the startup migration backfills a required name lookup key in batches, and older writers cannot populate it. Before reverting to an older version, reverse this schema change using the database backup and migration procedure.
+
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
 Security: pass per-request MCP credentials only through `config.context.secrets`;

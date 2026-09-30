@@ -25,7 +25,7 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0019_thread_incarnations` → `0022_scheduled_occurrence_seq` →
 `0023_run_change_seq` → `0023_user_preferences` →
 `0024_project_documents` → `0025_repair_run_change_seq` →
-`0026_mcp_task_lease_tokens` (current head). The preference
+`0026_mcp_task_lease_tokens` → `0027_mcp_task_name_key` (current head). The preference
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to
@@ -33,6 +33,8 @@ shelf table, and the MCP lease-token revision adds two nullable token columns to
 The incarnation revision deliberately retains the exact id audited by the
 rollback-floor binary; Alembic orders revisions by `down_revision`, not by the
 numeric prefix.
+
+`0027_mcp_task_name_key` adds a required binary name key and a scoped lookup index for MCP tasks, backfilling Python Unicode casefold results in primary-key batches of 500. Enforcing the non-null constraint on SQLite rebuilds the table. Stop all older Gateway writers before upgrading. Unlike the nullable expansions above, this revision does not support mixed-version writers: older writers cannot insert into the new schema. Reverse this revision before rollback and verify the database backup recovery procedure.
 
 The deployed `0020_threads_meta_project_id` rollback-floor binary knows none of
 `0021_batch_acceptance`, `0019_thread_incarnations`,

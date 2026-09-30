@@ -167,6 +167,7 @@ class McpTaskRepository:
     @staticmethod
     def _row_to_dict(row: McpTaskRow, *, include_internal: bool = False) -> dict[str, Any]:
         data = row.to_dict()
+        data.pop("task_name_key", None)
         thread_incarnation = data.pop("thread_incarnation", None)
         if include_internal:
             data["_thread_incarnation"] = thread_incarnation
@@ -289,6 +290,33 @@ class McpTaskRepository:
         if active_only:
             stmt = stmt.where(McpTaskRow.status.in_(_POLLABLE_STATUS_VALUES))
         stmt = stmt.order_by(McpTaskRow.created_at.desc(), McpTaskRow.id.desc()).limit(limit)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(row) for row in result.scalars()]
+
+    async def find_active_matches(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+        thread_incarnation: str | None,
+        task: str | None,
+    ) -> list[dict[str, Any]]:
+        """Prefer exact IDs; filter names before reading at most two matches to detect ambiguity."""
+        if task:
+            exact = await self.get(task, user_id=user_id, thread_id=thread_id, thread_incarnation=thread_incarnation)
+            if exact is not None:
+                return [exact] if exact["status"] in _POLLABLE_STATUS_VALUES else []
+        stmt = select(McpTaskRow).where(
+            McpTaskRow.user_id == user_id,
+            McpTaskRow.thread_id == thread_id,
+            McpTaskRow.thread_incarnation.is_not_distinct_from(thread_incarnation),
+            _matches_current_thread_incarnation(user_id=user_id, thread_id=thread_id, thread_incarnation=thread_incarnation),
+            McpTaskRow.status.in_(_POLLABLE_STATUS_VALUES),
+        )
+        if task:
+            stmt = stmt.where(McpTaskRow.task_name_key == task.casefold().strip().encode("utf-8"))
+        stmt = stmt.limit(2)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
