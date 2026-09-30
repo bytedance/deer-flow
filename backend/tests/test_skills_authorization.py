@@ -2854,7 +2854,7 @@ def test_lead_chain_wires_durable_render_filter():
     provider = _rbac_provider({"user": {"skills": {"allow": "*"}}})
     resolved = _resolved_skill_authorization(provider, fail_closed=True)
 
-    middlewares = build_middlewares({"configurable": {}}, model_name="gpt-4", skill_authorization=resolved, user_id="user-123")
+    middlewares = build_middlewares({"configurable": {}}, app_config=_make_app_config(), model_name="gpt-4", skill_authorization=resolved, user_id="user-123")
 
     activations = [m for m in middlewares if isinstance(m, SkillActivationMiddleware)]
     durables = [m for m in middlewares if isinstance(m, DurableContextMiddleware)]
