@@ -60,14 +60,14 @@ class ScheduledTaskService:
         self._stop = asyncio.Event()
         self._skip_next_lease_reconciliation = False
 
-    def attach_notification_outbox(self, *, connection_repo, notification_repo) -> None:
-        """Enable the completion hook's notification enqueue (issue #4254).
+    def detach_notification_outbox(self) -> None:
+        """Stop enqueueing run notifications (issue #4254).
 
-        The Gateway calls this after the channel service and the delivery worker
-        are running; both start after this service does.
+        The Gateway calls this when the delivery side cannot start, so the outbox
+        does not fill with rows nothing will send.
         """
-        self._connection_repo = connection_repo
-        self._notification_repo = notification_repo
+        self._connection_repo = None
+        self._notification_repo = None
 
     async def run_once(self, *, now: datetime) -> None:
         if self._multi_instance:
@@ -579,15 +579,18 @@ class ScheduledTaskService:
         if self._notification_repo is None or self._connection_repo is None:
             return
         # complete_run commits the outcome atomically without returning the task,
-        # so the title is read afterwards. A task deleted meanwhile stays silent,
-        # and a failed read must not shadow the outcome already committed.
+        # so the title is read afterwards. A task deleted meanwhile stays silent.
+        # A failed read must not shadow the committed outcome or drop the push:
+        # the title is optional and the message falls back to the task id.
+        task_title = None
         try:
             task = await self._task_repo.get(task_id, user_id=user_id)
         except Exception:
             logger.exception("[Scheduler] failed to load task %s for notifications", task_id)
-            return
-        if task is None:
-            return
+        else:
+            if task is None:
+                return
+            task_title = task.get("title")
 
         await self._enqueue_run_notifications(
             task_id=task_id,
@@ -596,7 +599,7 @@ class ScheduledTaskService:
             user_id=user_id,
             terminal_status=terminal_status,
             error=error,
-            task_title=task.get("title"),
+            task_title=task_title,
         )
 
     async def _enqueue_run_notifications(

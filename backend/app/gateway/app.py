@@ -393,23 +393,36 @@ async def _shutdown_startup_trash_sweep(app: FastAPI) -> None:
         logger.exception("Startup trash sweep failed during shutdown")
 
 
-async def _start_scheduled_task_notifications(app: FastAPI, startup_config: AppConfig) -> None:
-    """Wire the scheduled-run notification outbox and start its delivery worker.
+def _scheduled_task_notification_repos(startup_config: AppConfig):
+    """Return ``(connection_repo, notification_repo)`` for the scheduled-run outbox (issue #4254).
 
-    Only active when channel connections are enabled, so the completion hook can
-    resolve the task owner's bound IM identities. The scheduler only enqueues; the
-    delivery worker sends. Enqueue and delivery activate together: writing outbox
-    rows with no worker or channel service would leave a silent backlog.
+    Both are None unless channel connections are enabled, because the completion
+    hook resolves the task owner's bound IM identities through them.
     """
-    scheduled_task_service = getattr(app.state, "scheduled_task_service", None)
     connection_config = getattr(startup_config, "channel_connections", None)
-    if scheduled_task_service is None or connection_config is None or not getattr(connection_config, "enabled", False):
-        return
+    if connection_config is None or not getattr(connection_config, "enabled", False):
+        return None, None
 
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository
     from deerflow.persistence.engine import get_session_factory
+    from deerflow.persistence.notification_deliveries import NotificationDeliveryRepository
 
     session_factory = get_session_factory()
     if session_factory is None:
+        return None, None
+    return ChannelConnectionRepository(session_factory), NotificationDeliveryRepository(session_factory)
+
+
+async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_config: AppConfig, notification_repo) -> None:
+    """Start the delivery side of the scheduled-run outbox, or switch its enqueue side off.
+
+    The scheduler only enqueues; this worker polls due rows and pushes them through
+    the owning channel's proactive send path. Enqueue and delivery stay active
+    together: writing outbox rows with no worker or channel service would leave a
+    silent backlog, so the enqueue side is detached when delivery cannot start.
+    """
+    scheduled_task_service = getattr(app.state, "scheduled_task_service", None)
+    if scheduled_task_service is None or notification_repo is None:
         return
 
     from app.channels.service import get_channel_service
@@ -417,37 +430,33 @@ async def _start_scheduled_task_notifications(app: FastAPI, startup_config: AppC
     channel_service = get_channel_service()
     if channel_service is None:
         logger.warning("channel_connections.enabled but no channel service is running; disabling scheduled-task IM notification enqueue to avoid a write-only outbox")
+        scheduled_task_service.detach_notification_outbox()
         return
 
-    from app.scheduler.notification_delivery import NotificationDeliveryWorker
-    from deerflow.persistence.channel_connections import ChannelConnectionRepository
-    from deerflow.persistence.notification_deliveries import NotificationDeliveryRepository
-    from deerflow.persistence.run import RunRepository
+    try:
+        from app.scheduler.notification_delivery import NotificationDeliveryWorker
+        from deerflow.persistence.engine import get_session_factory
+        from deerflow.persistence.run import RunRepository
 
-    notification_repo = NotificationDeliveryRepository(session_factory)
-    run_repo = RunRepository(session_factory)
+        run_repo = RunRepository(get_session_factory())
 
-    async def resolve_run_summary(run_id: str, user_id: str | None) -> str | None:
-        # Scoped to the outbox row's owner so a stale row
-        # can never pull another user's run content.
-        row = await run_repo.get(run_id, user_id=user_id)
-        return row.get("last_ai_message") if row else None
+        async def resolve_run_summary(run_id: str, user_id: str | None) -> str | None:
+            # Scoped to the outbox row's owner so a stale row
+            # can never pull another user's run content.
+            row = await run_repo.get(run_id, user_id=user_id)
+            return row.get("last_ai_message") if row else None
 
-    # Delivery side of the outbox: polls due rows and pushes them through the
-    # owning channel's proactive send path.
-    worker = NotificationDeliveryWorker(
-        delivery_repo=notification_repo,
-        resolve_channel=channel_service.get_channel,
-        resolve_run_summary=resolve_run_summary,
-        poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
-    )
-    await worker.start()
+        worker = NotificationDeliveryWorker(
+            delivery_repo=notification_repo,
+            resolve_channel=channel_service.get_channel,
+            resolve_run_summary=resolve_run_summary,
+            poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
+        )
+        await worker.start()
+    except Exception:
+        scheduled_task_service.detach_notification_outbox()
+        raise
     app.state.notification_delivery_worker = worker
-    # Enqueue side, enabled only once the worker is running.
-    scheduled_task_service.attach_notification_outbox(
-        connection_repo=ChannelConnectionRepository(session_factory),
-        notification_repo=notification_repo,
-    )
 
 
 @asynccontextmanager
@@ -603,6 +612,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # already-started file worker drains before the runtime is torn down.
         app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_trash_sweep(app, startup_config))
 
+        # Enqueue side of the scheduled-run notification outbox (issue #4254).
+        # It only needs the durable table, so it is wired with the scheduler;
+        # the delivery worker starts after the channel service, further down.
+        notification_connection_repo = scheduled_notification_repo = None
+        try:
+            notification_connection_repo, scheduled_notification_repo = _scheduled_task_notification_repos(startup_config)
+        except Exception:
+            logger.exception("Failed to prepare the scheduled-task notification outbox")
+
         try:
             from app.gateway.services import launch_scheduled_thread_run
             from app.scheduler import ScheduledTaskService
@@ -618,6 +636,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     queue_timeout_seconds=startup_config.scheduler.queue_timeout_seconds,
                     multi_instance=startup_config.scheduler.multi_instance,
                     run_lease_grace_seconds=startup_config.run_ownership.grace_seconds,
+                    connection_repo=notification_connection_repo,
+                    notification_repo=scheduled_notification_repo,
                 )
                 app.state.scheduled_task_service = scheduled_task_service
                 if startup_config.scheduler.enabled:
@@ -652,13 +672,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("No IM channels configured or channel service failed to start")
 
-        # Scheduled-task IM notifications (issue #4254) are wired here rather
-        # than next to the scheduler: the scheduler starts before the channel
-        # service, and the outbox needs that service to be running.
+        # Delivery side of the scheduled-run notification outbox (issue #4254).
+        # It starts here rather than next to the scheduler: the scheduler starts
+        # before the channel service, and delivery needs that service running.
         try:
-            await _start_scheduled_task_notifications(app, startup_config)
+            await _start_scheduled_task_notification_delivery(app, startup_config, scheduled_notification_repo)
         except Exception:
-            logger.exception("Failed to start scheduled-task IM notifications")
+            logger.exception("Failed to start scheduled-task IM notification delivery")
 
         from app.gateway.services import launch_mcp_task_notification_run
         from app.mcp_tasks import McpTaskService

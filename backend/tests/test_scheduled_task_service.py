@@ -1418,22 +1418,20 @@ def _notifying_service_with_wecom(task_repo, notification_repo):
 
 
 @pytest.mark.asyncio
-async def test_outbox_attached_after_construction_enables_the_enqueue():
-    # The Gateway builds the scheduler before the channel service, so the outbox arrives later.
+async def test_detached_outbox_stops_the_enqueue():
+    # The Gateway detaches the outbox when the delivery side cannot start.
     task_repo = DummyTaskRepo([_once_task_row()])
     notification_repo = DummyNotificationRepo()
-    service = _make_notifying_service(task_repo, DummyRunRepo(), connection_repo=None, notification_repo=None)
+    service = _notifying_service_with_wecom(task_repo, notification_repo)
 
     await service.handle_run_completion(_completion_record(RunStatus.success))
-    assert notification_repo.enqueued == []
-
-    service.attach_notification_outbox(
-        connection_repo=DummyConnectionRepo([{"provider": "wecom", "external_account_id": "GaoZhiChao", "status": "connected"}]),
-        notification_repo=notification_repo,
-    )
-    await service.handle_run_completion(_completion_record(RunStatus.success))
-
     assert [row["event"] for row in notification_repo.enqueued] == ["run_completed"]
+
+    service.detach_notification_outbox()
+    await service.handle_run_completion(_completion_record(RunStatus.success))
+
+    assert len(notification_repo.enqueued) == 1
+    assert len(task_repo.completions) == 2
 
 
 @pytest.mark.asyncio
@@ -1465,7 +1463,7 @@ async def test_completion_for_a_task_deleted_meanwhile_does_not_notify():
 
 
 @pytest.mark.asyncio
-async def test_completion_survives_a_failed_task_read_for_the_notification():
+async def test_completion_still_notifies_when_the_task_read_fails():
     class UnreadableTaskRepo(DummyTaskRepo):
         async def get(self, task_id, *, user_id):
             raise RuntimeError("database unavailable")
@@ -1476,7 +1474,8 @@ async def test_completion_survives_a_failed_task_read_for_the_notification():
     await _notifying_service_with_wecom(task_repo, notification_repo).handle_run_completion(_completion_record(RunStatus.success))
 
     assert task_repo.completions[-1][1]["status"] == "success"
-    assert notification_repo.enqueued == []
+    # The title is optional: the push still goes out and falls back to the task id.
+    assert [row["payload"]["task_title"] for row in notification_repo.enqueued] == [None]
 
 
 @pytest.mark.asyncio
