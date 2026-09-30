@@ -54,6 +54,31 @@ export function readableReferences(text: string) {
   return value;
 }
 
+/** Restore display labels in one pass so replacement tokens cannot match again. */
+export function restoreReferenceLabels(original: string, rewritten: string) {
+  const remaining = inlineReferences(original);
+  if (!remaining.length) return rewritten;
+  const labels = [...new Set(remaining.map((ref) => ref.label))]
+    .sort((a, b) => b.length - a.length)
+    .map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  // Longest labels win; a short label cannot consume a longer word or slug.
+  const pattern = new RegExp(
+    `@(?:${labels.join("|")})(?![\\p{L}\\p{M}\\p{N}_-])`,
+    "gu",
+  );
+  const restored = rewritten.replace(pattern, (label) => {
+    const index = remaining.findIndex((ref) => `@${ref.label}` === label);
+    if (index < 0) return label;
+    const [ref] = remaining.splice(index, 1);
+    return referenceToken(ref!.kind, ref!.id, ref!.label);
+  });
+  // A rewrite may omit a label; retain that explicit selection in draft order.
+  return [
+    ...remaining.map((ref) => referenceToken(ref.kind, ref.id, ref.label)),
+    restored,
+  ].join(" ");
+}
+
 export function readReferenceEditor(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? "";
   if (node instanceof HTMLElement) {
@@ -137,11 +162,24 @@ export function renderReferenceEditor(root: HTMLElement, text: string) {
 export function reconcileConversationReferences(
   text: string,
   known: ConversationReference[],
-  capability: { enabled: boolean; maxReferences: number; isLoading: boolean },
+  capability: {
+    enabled: boolean;
+    maxReferences: number;
+    isLoading: boolean;
+    isSuccess: boolean;
+  },
   threadId: string,
 ): { text: string; references: ConversationReference[] } {
-  // Keep the draft intact while discovery is pending; sending waits for it.
-  if (capability.isLoading) return { text, references: [] };
+  // Only a successful discovery may destructively normalize the draft.
+  // Preserve known metadata while pending/failed, including across editor changes.
+  if (!capability.isSuccess || capability.isLoading) {
+    const ids = new Set(
+      inlineReferences(text)
+        .filter((ref) => ref.kind === "conversation")
+        .map((ref) => ref.id),
+    );
+    return { text, references: known.filter((ref) => ids.has(ref.threadId)) };
+  }
   const references = new Map<string, ConversationReference>();
   const limit = capability.enabled ? capability.maxReferences : 0;
   const tokens = inlineReferences(text).filter(

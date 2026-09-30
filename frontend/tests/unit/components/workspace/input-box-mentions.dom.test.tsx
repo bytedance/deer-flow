@@ -67,6 +67,7 @@ function renderComposer(
   onSubmit = rs.fn(),
   onPrepareThread = rs.fn(),
   props: Partial<ComponentProps<typeof InputBox>> = {},
+  isMock = true,
 ) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -84,7 +85,7 @@ function renderComposer(
           }}
         >
           <ThreadContext.Provider
-            value={{ thread: { messages: [] } as never, isMock: true }}
+            value={{ thread: { messages: [] } as never, isMock }}
           >
             <PromptInputProvider>
               <InputBox
@@ -106,7 +107,18 @@ function renderComposer(
 }
 
 const attach = rs.fn();
-const capability = { enabled: true, maxReferences: 3, isLoading: false };
+const capability = {
+  enabled: true,
+  maxReferences: 3,
+  isLoading: false,
+  isSuccess: true,
+  error: null as Error | null,
+  refetch: rs.fn(),
+};
+const polish = rs.fn();
+rs.mock("@/core/input-polish/api", () => ({
+  polishInputDraft: (...args: unknown[]) => polish(...args),
+}));
 rs.mock("@/core/features/hooks", () => ({
   useConversationReferencesCapability: () => capability,
 }));
@@ -158,6 +170,10 @@ beforeEach(() => {
   capability.enabled = true;
   capability.maxReferences = 3;
   capability.isLoading = false;
+  capability.isSuccess = true;
+  capability.error = null;
+  capability.refetch.mockReset();
+  polish.mockReset();
   skillsQuery.isLoading = false;
   skillsQuery.error = null;
   skillsQuery.refetch.mockReset();
@@ -447,6 +463,7 @@ describe("reference review regressions", () => {
   });
   it("does not send while conversation capability is loading", async () => {
     capability.isLoading = true;
+    capability.isSuccess = false;
     const submit = rs.fn();
     const { container } = renderComposer("cap-loading", submit);
     enterMention(
@@ -600,4 +617,126 @@ it("a capability rerender before send acceptance cannot revive the accepted draf
     "Accepted task",
   );
   release();
+});
+
+describe("reference discovery failures and polish round trips", () => {
+  it("preserves restored references and blocks sending until capability retry succeeds", async () => {
+    capability.enabled = false;
+    capability.maxReferences = 0;
+    capability.isSuccess = false;
+    capability.error = new Error("503 temporary");
+    const token = referenceToken("conversation", "source-1", "Writer brief");
+    const text = token + " summarize";
+    saveDraft("cap-error", text, {
+      conversationReferences: [
+        { threadId: "source-1", title: "Writer brief", agentName: "writer" },
+      ],
+    });
+    const submit = rs.fn();
+    const { container } = renderComposer("cap-error", submit);
+    await waitFor(() =>
+      expect(screen.getByTestId("conversation-reference-chip")).toBeTruthy(),
+    );
+    fireEvent.submit(container.querySelector("form")!);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(submit).not.toHaveBeenCalled();
+    const key = buildComposerDraftKey({
+      userId: "user-1",
+      agentName: null,
+      threadId: "cap-error",
+    });
+    expect(JSON.parse(window.sessionStorage.getItem(key)!).text).toBe(text);
+    expect(
+      JSON.parse(window.sessionStorage.getItem(key)!).conversationReferences,
+    ).toEqual([
+      { threadId: "source-1", title: "Writer brief", agentName: "writer" },
+    ]);
+    capability.refetch.mockImplementation(() => {
+      capability.isSuccess = true;
+      capability.enabled = true;
+      capability.maxReferences = 3;
+      capability.error = null;
+    });
+    fireEvent.click(screen.getByTestId("retry-conversation-capability"));
+    expect(capability.refetch).toHaveBeenCalledTimes(1);
+    // An ordinary editor update observes the recovered mock capability.
+    enterMention(container, " now");
+    fireEvent.submit(container.querySelector("form")!);
+    await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+    expect(submit.mock.calls[0]![1].conversationReferences).toEqual([
+      "source-1",
+    ]);
+    expect(
+      submit.mock.calls[0]![1].additionalKwargs.conversation_references[0]
+        .agent_name,
+    ).toBe("writer");
+  });
+
+  it("offers capability retry from the picker without a selected conversation", async () => {
+    capability.enabled = false;
+    capability.isSuccess = false;
+    capability.error = new Error("503 temporary");
+    renderComposer("picker-cap-error");
+    fireEvent.click(screen.getByTestId("mention-button"));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(capability.refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores reordered overlapping skill labels in the intended positions and supports undo", async () => {
+    const short = referenceToken("skill", "research", "research");
+    const long = referenceToken("skill", "research-tools", "research-tools");
+    const original = `Use ${short} after ${long}`;
+    saveDraft("polish-prefix", original);
+    polish.mockResolvedValue({
+      rewritten_text: "Use @research-tools first, then @research.",
+      changed: true,
+    });
+    const submit = rs.fn();
+    const { container } = renderComposer(
+      "polish-prefix",
+      submit,
+      rs.fn(),
+      {},
+      false,
+    );
+    await waitFor(() =>
+      expect(screen.getAllByTestId("inline-skill-reference")).toHaveLength(2),
+    );
+    fireEvent.click(screen.getByTestId("polish-input-button"));
+    await waitFor(() =>
+      expect(
+        container.querySelector('[contenteditable="true"]')?.textContent,
+      ).toBe("Use ✦research-tools first, then ✦research."),
+    );
+    expect(
+      screen
+        .getAllByTestId("inline-skill-reference")
+        .map((el) => el.dataset.reference),
+    ).toEqual([long, short]);
+    fireEvent.click(screen.getByTestId("polish-input-button"));
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("inline-skill-reference")
+          .map((el) => el.dataset.reference),
+      ).toEqual([short, long]),
+    );
+    fireEvent.click(screen.getByTestId("polish-input-button"));
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByTestId("inline-skill-reference")
+          .map((el) => el.dataset.reference),
+      ).toEqual([long, short]),
+    );
+    fireEvent.submit(container.querySelector("form")!);
+    await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+    expect(submit.mock.calls[0]![0].text).toBe(
+      "Use @research-tools first, then @research.",
+    );
+    expect(submit.mock.calls[0]![1].additionalKwargs.skill_references).toEqual([
+      "research-tools",
+      "research",
+    ]);
+  });
 });

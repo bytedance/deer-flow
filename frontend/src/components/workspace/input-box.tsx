@@ -172,6 +172,7 @@ import {
   MAX_EXPLICIT_SKILLS,
   referenceToken,
   readableReferences,
+  restoreReferenceLabels,
   readReferenceEditor,
   referenceCaret,
   focusReferenceAt,
@@ -483,8 +484,8 @@ export function InputBox({
     [textInput.value],
   );
   const hasInlineReferences = inlineRefs.length > 0;
-  const conversationReferencesLoading =
-    conversationCapability.isLoading &&
+  const conversationReferencesUnavailable =
+    (!conversationCapability.isSuccess || conversationCapability.isLoading) &&
     inlineRefs.some((ref) => ref.kind === "conversation");
   const reconciledConversations = useMemo(
     () =>
@@ -495,6 +496,7 @@ export function InputBox({
           enabled: conversationCapability.enabled,
           maxReferences: conversationCapability.maxReferences,
           isLoading: conversationCapability.isLoading,
+          isSuccess: conversationCapability.isSuccess,
         },
         threadId,
       ),
@@ -504,6 +506,7 @@ export function InputBox({
       conversationCapability.enabled,
       conversationCapability.maxReferences,
       conversationCapability.isLoading,
+      conversationCapability.isSuccess,
       threadId,
     ],
   );
@@ -925,14 +928,7 @@ export function InputBox({
       draft = {
         ...draft,
         text: reconciled.text,
-        conversationReferences: conversationCapability.isLoading
-          ? conversationReferences.filter((item) =>
-              inlineReferences(draft.text).some(
-                (ref) =>
-                  ref.kind === "conversation" && ref.id === item.threadId,
-              ),
-            )
-          : reconciled.references,
+        conversationReferences: reconciled.references,
       };
       latestDraftRef.current = { key, draft };
       cancelDraftSaveTimer();
@@ -1415,11 +1411,14 @@ export function InputBox({
       const quoteContexts = quotes.map((quote) => quote.context);
       const currentReferences = inlineReferences(textInput.value);
       if (
-        conversationCapability.isLoading &&
+        (!conversationCapability.isSuccess ||
+          conversationCapability.isLoading) &&
         currentReferences.some((ref) => ref.kind === "conversation")
       ) {
         return Promise.reject(
-          new Error("Conversation capability is still loading."),
+          new Error(
+            "Conversation capability is not available. Retry discovery before sending.",
+          ),
         );
       }
       const activeConversations = reconcileConversationReferences(
@@ -2419,14 +2418,10 @@ export function InputBox({
         return;
       }
 
-      let rewrittenText = result.rewritten_text.trim();
-      for (const ref of inlineReferences(originalText)) {
-        const token = referenceToken(ref.kind, ref.id, ref.label);
-        const label = `@${ref.label}`;
-        rewrittenText = rewrittenText.includes(label)
-          ? rewrittenText.replace(label, () => token)
-          : `${token} ${rewrittenText}`;
-      }
+      const rewrittenText = restoreReferenceLabels(
+        originalText,
+        result.rewritten_text.trim(),
+      );
       if (!rewrittenText || !result.changed) {
         toast.info(t.inputBox.inputPolishNoChanges);
         return;
@@ -3073,6 +3068,20 @@ export function InputBox({
           </div>
         )}
         <PromptInputHeader className="flex-wrap px-3 pt-3 pb-0 empty:hidden">
+          {!!conversationCapability.error &&
+            inlineRefs.some((ref) => ref.kind === "conversation") && (
+              <div role="alert" className="w-full text-xs">
+                {t.inputBox.mentionFailed}{" "}
+                <button
+                  type="button"
+                  className="underline"
+                  data-testid="retry-conversation-capability"
+                  onClick={() => void conversationCapability.refetch()}
+                >
+                  {t.inputBox.mentionRetry}
+                </button>
+              </div>
+            )}
           <PromptInputAttachments className="contents p-0">
             {(attachment) => (
               <div className="max-w-60">
@@ -3569,7 +3578,7 @@ export function InputBox({
                 composerLocked ||
                 stopDenied ||
                 sendDenied ||
-                (status !== "streaming" && conversationReferencesLoading)
+                (status !== "streaming" && conversationReferencesUnavailable)
               }
               variant="outline"
               status={status}

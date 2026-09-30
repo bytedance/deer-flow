@@ -74,7 +74,13 @@ export function MentionPicker({
   skillsLoading?: boolean;
   skillsError?: unknown;
   onRetrySkills?: () => unknown;
-  capability: { enabled: boolean; maxReferences: number; isLoading: boolean };
+  capability: {
+    enabled: boolean;
+    maxReferences: number;
+    isLoading: boolean;
+    error?: unknown;
+    refetch?: () => unknown;
+  };
   onActiveOptionChange?: (id: string | undefined) => void;
   selectedSkills?: string[];
   references: ConversationReference[];
@@ -229,6 +235,7 @@ export function MentionPicker({
     (!!projectId && documents.isPending) ||
     (capability.enabled && conversations.isPending);
   const failed =
+    !!capability.error ||
     !!skillsError ||
     (!!projectId && documents.isError) ||
     (capability.enabled && conversations.isError);
@@ -357,6 +364,7 @@ export function MentionPicker({
           <button
             type="button"
             onClick={() => {
+              if (capability.error) void capability.refetch?.();
               if (skillsError) void onRetrySkills?.();
               if (projectId && documents.isError) void documents.refetch();
               if (capability.enabled && conversations.isError)

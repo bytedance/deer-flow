@@ -196,3 +196,109 @@ for (const metadataState of ["pending", "failed"] as const) {
     }
   });
 }
+
+for (const enabledAfterRetry of [true, false]) {
+  test(`preserves references across a failed discovery and retries to enabled=${enabledAfterRetry}`, async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+    const input = composer(page);
+    await input.fill("Summarize @Writer");
+    await page.getByRole("option", { name: "Writer brief" }).click();
+    await expect(page.getByTestId("conversation-reference-chip")).toBeVisible();
+    let failed = true;
+    await page.route("**/api/features", (route) =>
+      failed
+        ? route.fulfill({ status: 503, body: "Temporarily unavailable" })
+        : enabledAfterRetry
+          ? route.fallback()
+          : route.fulfill({
+              json: {
+                agents_api: { enabled: true },
+                conversation_references: { enabled: false, max_references: 0 },
+              },
+            }),
+    );
+    await page.reload();
+    const retry = page.getByTestId("retry-conversation-capability");
+    await expect(retry).toBeVisible();
+    await expect(page.getByTestId("conversation-reference-chip")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Submit", exact: true }),
+    ).toBeDisabled();
+    await input.press("End");
+    await input.pressSequentially("after retry");
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          Object.values(sessionStorage).some(
+            (value) =>
+              value.includes("after retry") &&
+              value.includes("ref:conversation:"),
+          ),
+        ),
+      )
+      .toBe(true);
+    await page.reload();
+    await expect(retry).toBeVisible();
+    await expect(page.getByTestId("conversation-reference-chip")).toBeVisible();
+    failed = false;
+    await retry.click();
+    await expect(retry).toBeHidden();
+    await expect(
+      page.getByRole("button", { name: "Submit", exact: true }),
+    ).toBeEnabled();
+    if (enabledAfterRetry)
+      await expect(
+        page.getByTestId("conversation-reference-chip"),
+      ).toBeVisible();
+    else
+      await expect(
+        page.getByTestId("conversation-reference-chip"),
+      ).toBeHidden();
+    const request = nextRun(page);
+    await input.press("Enter");
+    const body = (await request).postDataJSON();
+    expect(body.context.conversation_references ?? []).toEqual(
+      enabledAfterRetry ? [MOCK_THREAD_ID] : [],
+    );
+    expect(JSON.stringify(body.input.messages)).toContain("after retry");
+  });
+}
+
+test("polish preserves reordered overlapping reference labels and their IDs", async ({
+  page,
+}) => {
+  await page.route("**/api/input-polish", (route) =>
+    route.fulfill({
+      json: {
+        rewritten_text: "Use @research-tools first, then @research.",
+        changed: true,
+      },
+    }),
+  );
+  await page.goto("/workspace/chats/new");
+  const input = composer(page);
+  await input.fill(
+    "Use @[research](ref:skill:research) after @[research-tools](ref:skill:research-tools)",
+  );
+  await expect(page.getByTestId("inline-skill-reference")).toHaveCount(2);
+  await page.getByTestId("polish-input-button").click();
+  await expect(input).toHaveText("Use ✦research-tools first, then ✦research.");
+  await expect(
+    page.getByTestId("inline-skill-reference").first(),
+  ).toHaveAttribute(
+    "data-reference",
+    "@[research-tools](ref:skill:research-tools)",
+  );
+  const request = nextRun(page);
+  await input.press("Enter");
+  const message = (await request).postDataJSON().input.messages.at(-1);
+  expect(message.additional_kwargs.skill_references).toEqual([
+    "research-tools",
+    "research",
+  ]);
+  expect(JSON.stringify(message)).toContain(
+    "Use @research-tools first, then @research.",
+  );
+});

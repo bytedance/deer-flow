@@ -303,18 +303,17 @@ conversation-action callbacks reject Promise returns while consuming rejections.
 
 ### Composer references
 
-`components/workspace/mentions/` owns cursor-local `@` detection, the grouped
-picker, and atomic inline references. The editor renders DOM text safely (never
-HTML from labels); canonical reference tokens preserve positions in draft text.
-Submission expands tokens to readable `@label` text and sends skill IDs in
-`additional_kwargs.skill_references` (up to 16 unique skills). Backend activation
-resolves every ID against the current user registry and agent allowlist before
-loading anything. Legacy leading slash commands remain supported.
-Project documents still use confirmed `additional_kwargs.files`; conversations
-use explicit run context reconciled from tokens on every entry/send path against
-the current capability and limit. Over-limit skill sends are rejected locally.
-Confirmed thread creation seeds metadata before draft migration; reference
-mutations stay locked throughout file attachment. Deleting an inline object removes its context, and
-undo restores references already attached to this draft. Display labels grant no
-read authority. IME, selection/caret, thread changes and async attachment fences
-apply to the editor and picker. The `@` and attachment buttons share the picker.
+`components/workspace/mentions/` owns cursor-local `@` detection, the picker,
+and atomic references. Render labels as DOM text, never HTML; canonical tokens
+preserve draft positions. Submission expands tokens to `@label` and sends up to
+16 unique skill IDs in `additional_kwargs.skill_references`; the backend checks
+each against the user registry and agent allowlist. Legacy slash input remains.
+Project files require confirmed `additional_kwargs.files`. Conversation context
+is reconciled from tokens against the current capability and limit. Only successful
+discovery may flatten references; pending/errors preserve IDs and block reference
+sends, with retry on failure. Polish restores whole labels longest-first in one
+pass. Confirmed thread creation seeds metadata before migration; references stay
+locked during attachment. Deleting an object removes its context; undo restores
+references already attached to the draft. Labels grant no read authority. IME,
+caret, thread changes and attachment fences apply to editor and picker. The `@`
+and attachment buttons share the picker.
