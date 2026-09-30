@@ -1,6 +1,8 @@
 """Owner-only MCP configuration. Deployment MCP routes remain admin-only."""
 
 import asyncio
+import logging
+from collections.abc import Callable
 from typing import Literal
 from uuid import uuid4
 
@@ -12,8 +14,37 @@ from app.gateway.routers import mcp
 from deerflow.capabilities.runtime import ambiguous_installation_ids
 from deerflow.config.extensions_config import ExtensionsConfig, atomic_write_extensions_config, extensions_config_file_lock, extensions_config_write_lock
 from deerflow.mcp.user_config import read_user_mcp_config, user_mcp_config_path
+from deerflow.utils.file_io import await_drained
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mcp/personal/config", tags=["mcp"])
+
+
+async def _drained_mutation[**P, T](func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    """Run a personal-config mutation off the event loop and drain it across cancellation.
+
+    A client that disconnects mid-request cancels the handler task: with a bare
+    ``asyncio.to_thread`` a still-queued mutation never runs — the user's change
+    silently vanishes — and a running one's failure is dropped because the
+    handler's ``except`` never runs. ``await_drained`` lets the mutation finish
+    first; its failure is logged with the exception type only — the text can
+    carry configuration details — and 4xx ``HTTPException``s stay unlogged:
+    they are caller-facing contracts the connected client still receives.
+    """
+
+    def _logged() -> T:
+        try:
+            return func(*args, **kwargs)
+        except HTTPException as exc:
+            if exc.status_code >= 500:
+                logger.error("Personal MCP config mutation failed (HTTP %d)", exc.status_code)
+            raise
+        except Exception as exc:
+            logger.error("Personal MCP config mutation failed (%s)", type(exc).__name__)
+            raise
+
+    return await await_drained(asyncio.to_thread(_logged))
 
 
 async def _owner(request: Request) -> str:
@@ -102,7 +133,7 @@ async def get_configuration(request: Request):
 async def _write(request: Request, operation: str, body):
     owner = await _owner(request)
     admin = await is_admin_user(request)
-    raw = await asyncio.to_thread(_mutate, owner, operation, body, admin=admin)
+    raw = await _drained_mutation(_mutate, owner, operation, body, admin=admin)
     return _response(raw)
 
 
