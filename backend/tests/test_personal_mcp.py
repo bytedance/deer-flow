@@ -48,6 +48,47 @@ def create(client, user, *, name="github", token=None, role="admin"):
     )
 
 
+@pytest.mark.asyncio
+async def test_personal_config_write_drains_started_mutation_across_cancellation(monkeypatch):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    monkeypatch.setattr(personal_mcp, "_owner", AsyncMock(return_value="alice"))
+    monkeypatch.setattr(personal_mcp, "is_admin_user", AsyncMock(return_value=True))
+
+    def mutate(*_args, **_kwargs):
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(asyncio.sleep(0))
+        finally:
+            loop.close()
+        started_loop.call_soon_threadsafe(started.set)
+        release_thread.wait(timeout=5)
+        return {"mcpServers": {}}
+
+    import threading
+
+    started_loop = asyncio.get_running_loop()
+    release_thread = threading.Event()
+    monkeypatch.setattr(personal_mcp, "_mutate", mutate)
+
+    task = asyncio.create_task(personal_mcp._write(SimpleNamespace(), "delete", "missing"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release_thread.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release_thread.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
 def test_persistent_same_name_connections_are_owner_only(personal_client):
     client = personal_client
     assert client.get("/api/mcp/personal/config").status_code == 401
