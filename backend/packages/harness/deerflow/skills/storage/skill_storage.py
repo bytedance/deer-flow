@@ -12,6 +12,7 @@ from pathlib import Path
 
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory  # noqa: F401
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +152,10 @@ class SkillStorage(ABC):
             raise ValueError("Supporting file path must be relative.")
         if any(part in {"..", ""} for part in relative.parts):
             raise ValueError("Supporting file path must not contain parent-directory traversal.")
+        for part in relative.parts:
+            reason = windows_incompatible_segment(part)
+            if reason:
+                raise ValueError(f"Supporting file path is not portable to Windows: {relative_path!r} ({reason})")
         top_level = relative.parts[0] if relative.parts else ""
         if top_level not in _ALLOWED_SUPPORT_SUBDIRS:
             raise ValueError(f"Supporting files must live under one of: {', '.join(sorted(_ALLOWED_SUPPORT_SUBDIRS))}.")

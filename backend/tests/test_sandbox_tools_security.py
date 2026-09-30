@@ -427,6 +427,21 @@ def test_reject_path_traversal_allows_normal_paths() -> None:
     _reject_path_traversal("/mnt/user-data/workspace/sub/dir/file.py")
 
 
+def test_reject_path_traversal_blocks_windows_reserved_names() -> None:
+    for path in (
+        "/mnt/user-data/workspace/CON",
+        "/mnt/user-data/workspace/dir/COM1.txt",
+        "/mnt/user-data/workspace/file.txt.",
+        "/mnt/user-data/workspace/file.txt ",
+    ):
+        with pytest.raises(PermissionError, match="Access denied"):
+            _reject_path_traversal(path)
+
+
+def test_reject_path_traversal_allows_names_that_only_look_reserved() -> None:
+    _reject_path_traversal("/mnt/user-data/workspace/contour.txt")
+
+
 # ---------- validate_local_tool_path ----------
 
 

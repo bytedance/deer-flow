@@ -53,6 +53,7 @@ from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provi
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
 
@@ -907,6 +908,9 @@ def _reject_path_traversal(path: str) -> None:
     for segment in normalised.split("/"):
         if segment == "..":
             raise PermissionError("Access denied: path traversal detected")
+        reason = windows_incompatible_segment(segment)
+        if reason:
+            raise PermissionError(f"Access denied: {reason}")
 
 
 def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, read_only: bool = False) -> None:
