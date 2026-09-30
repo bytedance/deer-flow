@@ -1334,7 +1334,7 @@ async def test_completion_does_not_notify_for_manual_triggers():
     await service.handle_run_completion(_completion_record(RunStatus.success, trigger="manual"))
 
     # Execution status is still recorded; only the IM push is suppressed.
-    assert run_repo.updated[-1][1]["status"] == "success"
+    assert task_repo.completions[-1][1]["status"] == "success"
     assert notification_repo.enqueued == []
 
 
@@ -1409,5 +1409,70 @@ async def test_completion_notification_failure_does_not_break_status_writes():
 
     # Execution status is written regardless: delivery is best-effort and must
     # never shadow the run outcome (execution/delivery status separation).
-    assert run_repo.updated[-1][1]["status"] == "success"
-    assert task_repo.rows[0]["status"] == "completed"
+    assert task_repo.completions[-1][1]["status"] == "success"
+
+
+def _notifying_service_with_wecom(task_repo, notification_repo):
+    connection_repo = DummyConnectionRepo([{"provider": "wecom", "external_account_id": "GaoZhiChao", "status": "connected"}])
+    return _make_notifying_service(task_repo, DummyRunRepo(), connection_repo=connection_repo, notification_repo=notification_repo)
+
+
+@pytest.mark.asyncio
+async def test_completion_that_was_not_recorded_does_not_notify():
+    # complete_run returns False for a missing occurrence, another run's occurrence or another owner.
+    class RejectingTaskRepo(DummyTaskRepo):
+        async def complete_run(self, task_id, **kwargs):
+            await super().complete_run(task_id, **kwargs)
+            return False
+
+    task_repo = RejectingTaskRepo([_once_task_row()])
+    notification_repo = DummyNotificationRepo()
+
+    await _notifying_service_with_wecom(task_repo, notification_repo).handle_run_completion(_completion_record(RunStatus.success))
+
+    assert len(task_repo.completions) == 1
+    assert notification_repo.enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_completion_for_a_task_deleted_meanwhile_does_not_notify():
+    task_repo = DummyTaskRepo([])
+    notification_repo = DummyNotificationRepo()
+
+    await _notifying_service_with_wecom(task_repo, notification_repo).handle_run_completion(_completion_record(RunStatus.success))
+
+    assert task_repo.completions[-1][1]["status"] == "success"
+    assert notification_repo.enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_completion_survives_a_failed_task_read_for_the_notification():
+    class UnreadableTaskRepo(DummyTaskRepo):
+        async def get(self, task_id, *, user_id):
+            raise RuntimeError("database unavailable")
+
+    task_repo = UnreadableTaskRepo([_once_task_row()])
+    notification_repo = DummyNotificationRepo()
+
+    await _notifying_service_with_wecom(task_repo, notification_repo).handle_run_completion(_completion_record(RunStatus.success))
+
+    assert task_repo.completions[-1][1]["status"] == "success"
+    assert notification_repo.enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_completion_without_the_outbox_does_not_read_the_task():
+    class CountingTaskRepo(DummyTaskRepo):
+        reads = 0
+
+        async def get(self, task_id, *, user_id):
+            self.reads += 1
+            return await super().get(task_id, user_id=user_id)
+
+    task_repo = CountingTaskRepo([_once_task_row()])
+    service = _make_notifying_service(task_repo, DummyRunRepo(), connection_repo=None, notification_repo=None)
+
+    await service.handle_run_completion(_completion_record(RunStatus.success))
+
+    assert task_repo.completions[-1][1]["status"] == "success"
+    assert task_repo.reads == 0
