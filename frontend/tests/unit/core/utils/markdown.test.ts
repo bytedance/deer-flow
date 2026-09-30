@@ -46,6 +46,33 @@ test("ignores headings that are not level 1", () => {
   expect(extractTitleFromMarkdown("#NoSpace")).toBeUndefined();
 });
 
+test("strips a CommonMark closing sequence from the heading", () => {
+  expect(extractTitleFromMarkdown("# Release Notes ###\n\nbody")).toBe(
+    "Release Notes",
+  );
+  expect(extractTitleFromMarkdown("# Release Notes #")).toBe("Release Notes");
+  expect(extractTitleFromMarkdown("# Release Notes ###   ")).toBe(
+    "Release Notes",
+  );
+  expect(extractTitleFromMarkdown("# Release Notes ###\r\nbody")).toBe(
+    "Release Notes",
+  );
+  expect(extractTitleFromMarkdown("# Release Notes\t##")).toBe("Release Notes");
+  expect(extractTitleFromMarkdown("# #")).toBeUndefined();
+});
+
+test("keeps literal hashes that are not a closing sequence", () => {
+  expect(extractTitleFromMarkdown("# C#")).toBe("C#");
+  expect(extractTitleFromMarkdown("# C# for Beginners")).toBe(
+    "C# for Beginners",
+  );
+  expect(extractTitleFromMarkdown("# Release ### notes")).toBe(
+    "Release ### notes",
+  );
+  expect(extractTitleFromMarkdown("# F# and C#")).toBe("F# and C#");
+  expect(extractTitleFromMarkdown("# trailing #hash")).toBe("trailing #hash");
+});
+
 test("does not report an empty heading as a title", () => {
   expect(extractTitleFromMarkdown("# \n\nbody")).toBeUndefined();
   expect(extractTitleFromMarkdown("#")).toBeUndefined();

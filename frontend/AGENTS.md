@@ -87,8 +87,11 @@ More specific `AGENTS.md` files under `src/` contain the frontend sections split
 
 `core/utils/markdown.ts` reads web-fetch titles from the first nonblank line.
 Match zero to three literal spaces before `# ` without trimming indentation;
-mixed space/tab code blocks must fall back to the URL. Keep this local to title
-extraction rather than changing the shared streamdown fence parser.
+mixed space/tab code blocks must fall back to the URL. A trailing hash run
+preceded by a space or tab is CommonMark's optional closing sequence and is
+stripped; literal hashes (`# C#`, `# Release ### notes`) stay in the title.
+Keep this local to title extraction rather than changing the shared streamdown
+fence parser.
 
 Custom Agent `display_name` is an optional Unicode UI label, edited in
 `AgentSettingsDialog`. Use it with a fallback to `name` for gallery/chat text;

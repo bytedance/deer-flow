@@ -9,5 +9,12 @@ export function extractTitleFromMarkdown(markdown: string) {
   if (!headingPrefix) {
     return undefined;
   }
-  return firstLine.slice(headingPrefix[0].length).trim() || undefined;
+  // A trailing hash run preceded by a space or tab is CommonMark's optional
+  // closing sequence, not title text. Literal hashes (`# C#`) stay.
+  const title = firstLine
+    .slice(headingPrefix[0].length)
+    .trimEnd()
+    .replace(/(^|[ \t])#+$/, "")
+    .trim();
+  return title || undefined;
 }
