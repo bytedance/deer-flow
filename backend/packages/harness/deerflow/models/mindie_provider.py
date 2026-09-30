@@ -10,11 +10,50 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 
+_MAX_TOOL_RESULT_CHARS = 30_000
+_MEDIA_BLOCK_TYPES = frozenset({"file", "image", "image_url", "resource", "blob"})
+_BINARY_CONTENT_KEYS = frozenset({"base64", "blob", "data"})
+
+
+def _compact_media_block(block: dict) -> dict:
+    """Keep media metadata while removing inline binary payloads."""
+    compact: dict = {}
+    omitted = False
+    for key, value in block.items():
+        if key in _BINARY_CONTENT_KEYS:
+            omitted = True
+            continue
+        if key == "image_url":
+            if isinstance(value, dict):
+                image_url = dict(value)
+                url = image_url.get("url")
+                if isinstance(url, str) and url.startswith("data:"):
+                    image_url["url"] = "[inline image data omitted]"
+                    omitted = True
+                compact[key] = image_url
+                continue
+            if isinstance(value, str) and value.startswith("data:"):
+                compact[key] = "[inline image data omitted]"
+                omitted = True
+                continue
+        compact[key] = value
+    if omitted:
+        compact["content_omitted"] = "binary media payload omitted"
+    return compact
+
+
+def _truncate_tool_result(text: str) -> str:
+    """Bound the serialized tool result before it becomes model input."""
+    if len(text) <= _MAX_TOOL_RESULT_CHARS:
+        return text
+    marker = f"\n[... tool response truncated at {_MAX_TOOL_RESULT_CHARS} chars ...]"
+    return text[: _MAX_TOOL_RESULT_CHARS - len(marker)] + marker
+
 
 def _tool_result_to_text(content: object) -> str:
-    """Flatten a tool result without discarding structured content blocks."""
+    """Flatten a tool result without exposing unbounded binary content."""
     if isinstance(content, str):
-        return content
+        return _truncate_tool_result(content)
     if isinstance(content, list):
         parts: list[str] = []
         for block in content:
@@ -24,11 +63,14 @@ def _tool_result_to_text(content: object) -> str:
                 text = block.get("text", "")
                 parts.append(text if isinstance(text, str) else json.dumps(text, ensure_ascii=False, default=str))
             else:
-                parts.append(json.dumps(block, ensure_ascii=False, default=str))
-        return "".join(parts)
+                serializable = block
+                if isinstance(block, dict) and block.get("type") in _MEDIA_BLOCK_TYPES:
+                    serializable = _compact_media_block(block)
+                parts.append(json.dumps(serializable, ensure_ascii=False, default=str))
+        return _truncate_tool_result("".join(parts))
     if content is None:
         return ""
-    return json.dumps(content, ensure_ascii=False, default=str)
+    return _truncate_tool_result(json.dumps(content, ensure_ascii=False, default=str))
 
 
 def _fix_messages(messages: list) -> list:
