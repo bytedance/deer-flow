@@ -57,6 +57,8 @@ Configuration priority:
 3. `config.yaml` under `DEER_FLOW_PROJECT_ROOT`, or the current directory when it is unset
 4. Legacy `backend/config.yaml`, then repository-root `config.yaml` (project root is the **recommended location**)
 
+`scripts/config-upgrade.sh` calls `AppConfig.resolve_config_path` rather than copying this order.
+The legacy locations are anchored to the installed harness source, not to the caller's checkout.
 `scripts/doctor.py` calls `AppConfig.resolve_config_path` rather than copying this order.
 
 Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).

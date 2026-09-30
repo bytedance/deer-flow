@@ -1312,6 +1312,7 @@ class TestBashToolInjectsActiveSecrets:
 
     def test_local_bash_forwards_env_and_timeout(self, monkeypatch):
         from deerflow.sandbox import tools as tools_mod
+        from deerflow.sandbox.tools import USER_ID_ENV
 
         captured = {}
 
@@ -1323,7 +1324,7 @@ class TestBashToolInjectsActiveSecrets:
                 return "done"
 
         runtime = SimpleNamespace(
-            context={"__active_skill_secrets": {"ERP_TOKEN": "tok-456"}},
+            context={"__active_skill_secrets": {"ERP_TOKEN": "tok-456"}, "user_id": "u-local"},
             state={"sandbox": {"sandbox_id": "local:1"}},
         )
         thread_data = {"workspace_path": "/tmp/ws", "cwd": "/mnt/user-data/workspace"}
@@ -1337,14 +1338,57 @@ class TestBashToolInjectsActiveSecrets:
             patch.object(tools_mod, "validate_local_bash_command_paths", return_value=None),
             patch.object(tools_mod, "replace_virtual_paths_in_command", side_effect=lambda command, td: command),
             patch.object(tools_mod, "_apply_cwd_prefix", side_effect=lambda command, td: command),
+            # Pinned so the assertion below does not depend on the host OS:
+            # the Windows local sandbox publishes the id through ``env`` rather
+            # than the command string (#3919).
+            patch.object(tools_mod, "_is_windows", return_value=False),
+            patch("deerflow.config.app_config.get_app_config", return_value=fake_cfg),
+        ):
+            out = tools_mod.bash_tool.func(runtime=runtime, command="echo hi", description="run local skill")
+
+        assert out == "done"
+        assert captured["command"] == f"export {USER_ID_ENV}=u-local; echo hi"
+        assert captured["env"] == {"ERP_TOKEN": "tok-456"}
+        assert captured["timeout"] == 42
+
+    def test_local_bash_windows_publishes_user_id_via_env(self, monkeypatch):
+        """``export`` is invalid under the Windows local sandbox's
+        PowerShell/cmd.exe shells, so the id moves to the ``env`` channel there
+        instead of being dropped — the PR promises it on every bash command."""
+        from deerflow.sandbox import tools as tools_mod
+        from deerflow.sandbox.tools import USER_ID_ENV
+
+        captured = {}
+
+        class FakeSandbox:
+            def execute_command(self, command, env=None, timeout=None):
+                captured["command"] = command
+                captured["env"] = env
+                return "done"
+
+        runtime = SimpleNamespace(
+            context={"__active_skill_secrets": {"ERP_TOKEN": "tok-789"}, "user_id": "u-win"},
+            state={"sandbox": {"sandbox_id": "local:1"}},
+        )
+        thread_data = {"workspace_path": "/tmp/ws", "cwd": "/mnt/user-data/workspace"}
+        fake_cfg = SimpleNamespace(sandbox=SimpleNamespace(bash_output_max_chars=321, bash_command_timeout=42))
+        with (
+            patch.object(tools_mod, "ensure_sandbox_initialized", return_value=FakeSandbox()),
+            patch.object(tools_mod, "is_local_sandbox", return_value=True),
+            patch.object(tools_mod, "is_host_bash_allowed", return_value=True),
+            patch.object(tools_mod, "ensure_thread_directories_exist", return_value=None),
+            patch.object(tools_mod, "get_thread_data", return_value=thread_data),
+            patch.object(tools_mod, "validate_local_bash_command_paths", return_value=None),
+            patch.object(tools_mod, "replace_virtual_paths_in_command", side_effect=lambda command, td: command),
+            patch.object(tools_mod, "_apply_cwd_prefix", side_effect=lambda command, td: command),
+            patch.object(tools_mod, "_is_windows", return_value=True),
             patch("deerflow.config.app_config.get_app_config", return_value=fake_cfg),
         ):
             out = tools_mod.bash_tool.func(runtime=runtime, command="echo hi", description="run local skill")
 
         assert out == "done"
         assert captured["command"] == "echo hi"
-        assert captured["env"] == {"ERP_TOKEN": "tok-456"}
-        assert captured["timeout"] == 42
+        assert captured["env"] == {"ERP_TOKEN": "tok-789", USER_ID_ENV: "u-win"}
 
     def test_remote_bash_does_not_forward_shared_timeout(self):
         from deerflow.sandbox import tools as tools_mod

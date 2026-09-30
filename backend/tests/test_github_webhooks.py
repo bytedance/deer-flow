@@ -315,6 +315,21 @@ def test_signature_mismatch_returns_401(client: TestClient) -> None:
     assert response.status_code == 401
 
 
+def test_non_ascii_signature_returns_401(client: TestClient) -> None:
+    body = b'{"zen": "x"}'
+    response = client.post(
+        "/api/webhooks/github",
+        content=body,
+        headers={
+            "X-GitHub-Event": "ping",
+            "X-GitHub-Delivery": DELIVERY_ID,
+            "X-Hub-Signature-256": ("sha256=" + "\xe9" * 64).encode("latin-1"),
+        },
+    )
+
+    assert response.status_code == 401
+
+
 def test_signature_verified_against_exact_bytes(client: TestClient) -> None:
     """Signature must be computed over the request body bytes, not
     re-serialised JSON. Whitespace and key ordering matter."""
