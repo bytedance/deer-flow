@@ -15,7 +15,10 @@ import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from deerflow.client import StreamEvent
 
 _UNSET = object()
 
@@ -291,28 +294,27 @@ class _RunOutcome:
     """
 
     def __init__(self) -> None:
-        # Per-id delta lists, joined once at the end (same as DeerFlowClient.chat).
-        self._chunks: dict[str, list[str]] = {}
-        self._last_id = ""
+        from deerflow.client import _AIMessageAccumulator
+
+        self._messages = _AIMessageAccumulator()
         self._errors: dict[str, dict] = {}
 
-    def observe(self, event) -> None:
+    def observe(self, event: StreamEvent) -> None:
+        self._messages.observe(event)
         if event.type != "messages-tuple" or event.data.get("type") != "ai":
             return
         msg_id = event.data.get("id") or ""
         additional_kwargs = event.data.get("additional_kwargs") or {}
         if additional_kwargs.get("deerflow_error_fallback"):
             self._errors[msg_id] = additional_kwargs
-        if delta := event.data.get("content", ""):
-            self._chunks.setdefault(msg_id, []).append(delta)
-            self._last_id = msg_id
 
     def answer(self) -> str:
-        return "".join(self._chunks.get(self._last_id, ()))
+        return self._messages.answer()
 
     def error_text(self) -> str | None:
         """One-line description when the final AI message is an error fallback."""
-        error = self._errors.get(self._last_id)
+        # Error fallbacks carry text, or follow up on an id whose text was already sent.
+        error = self._errors.get(self._messages.last_id)
         if error is None:
             return None
         details = ", ".join(f"{key}={error[key]}" for key in ("error_type", "error_reason") if error.get(key))

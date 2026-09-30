@@ -25,7 +25,7 @@ from app.gateway.routers.threads import ThreadGoalResponse
 from app.gateway.routers.uploads import UploadResponse
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import DeltaThreadState, ThreadState
-from deerflow.client import DeerFlowClient
+from deerflow.client import DeerFlowClient, StreamEvent
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
@@ -1250,6 +1250,54 @@ class TestStream:
 
 
 class TestChat:
+    @pytest.mark.parametrize(
+        ("events", "expected"),
+        [
+            pytest.param(
+                [
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "draft", "content": "draft"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "answer", "content": "fi"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "draft", "content": " revised"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "answer", "content": "nal"}),
+                    StreamEvent(type="messages-tuple", data={"type": "tool", "id": "tool", "content": "ignored"}),
+                    StreamEvent(type="values", data={"messages": [{"type": "ai", "content": "ignored"}]}),
+                ],
+                "final",
+                id="interleaved-message-ids",
+            ),
+            pytest.param(
+                [
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "answer", "content": "answer"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "empty", "content": "", "additional_kwargs": {"reasoning_content": "thinking"}}),
+                    StreamEvent(type="end"),
+                ],
+                "answer",
+                id="metadata-only-message",
+            ),
+            pytest.param(
+                [
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "content": "no"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": None, "content": " id"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "", "content": " answer"}),
+                ],
+                "no id answer",
+                id="missing-message-id",
+            ),
+            pytest.param([StreamEvent(type="messages-tuple", data={"type": "ai", "id": "empty", "content": ""})], "", id="no-ai-text"),
+        ],
+    )
+    def test_headless_and_chat_share_final_answer_selection(self, client, events, expected):
+        """The CLI and chat must agree on interleaved deltas and metadata-only events."""
+        from deerflow.tui.cli import _RunOutcome
+
+        with patch.object(client, "stream", return_value=iter(events)):
+            assert client.chat("q", thread_id="t-shared-answer") == expected
+
+        outcome = _RunOutcome()
+        for event in events:
+            outcome.observe(event)
+        assert outcome.answer() == expected
+
     def test_returns_last_message(self, client):
         """chat() returns the last AI message text."""
         ai1 = AIMessage(content="thinking...", id="ai-1")

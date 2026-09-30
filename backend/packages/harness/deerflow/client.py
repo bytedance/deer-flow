@@ -146,6 +146,30 @@ class StreamEvent:
     data: dict[str, Any] = field(default_factory=dict)
 
 
+class _AIMessageAccumulator:
+    """Accumulate text for the last content-bearing AI message id.
+
+    Metadata-only updates do not select a new id. Both ``chat()`` and the
+    headless CLI use this rule to choose the final answer.
+    """
+
+    def __init__(self) -> None:
+        # Join once at the end to avoid quadratic copying of long responses.
+        self._chunks: dict[str, list[str]] = {}
+        self.last_id = ""
+
+    def observe(self, event: StreamEvent) -> None:
+        if event.type != "messages-tuple" or event.data.get("type") != "ai":
+            return
+        if delta := event.data.get("content", ""):
+            msg_id = event.data.get("id") or ""
+            self._chunks.setdefault(msg_id, []).append(delta)
+            self.last_id = msg_id
+
+    def answer(self) -> str:
+        return "".join(self._chunks.get(self.last_id, ()))
+
+
 class DeerFlowClient:
     """Embedded Python client for DeerFlow agent system.
 
@@ -1245,18 +1269,10 @@ class DeerFlowClient:
             The accumulated text of the last AI message, or empty string
             if no AI text was produced.
         """
-        # Per-id delta lists joined once at the end — avoids the O(n²) cost
-        # of repeated ``str + str`` on a growing buffer for long responses.
-        chunks: dict[str, list[str]] = {}
-        last_id: str = ""
+        answer = _AIMessageAccumulator()
         for event in self.stream(message, thread_id=thread_id, **kwargs):
-            if event.type == "messages-tuple" and event.data.get("type") == "ai":
-                msg_id = event.data.get("id") or ""
-                delta = event.data.get("content", "")
-                if delta:
-                    chunks.setdefault(msg_id, []).append(delta)
-                    last_id = msg_id
-        return "".join(chunks.get(last_id, ()))
+            answer.observe(event)
+        return answer.answer()
 
     # ------------------------------------------------------------------
     # Public API — configuration queries
