@@ -46,20 +46,27 @@ async def test_upgrade_exposes_legacy_runs_and_allocates_new_positions(tmp_path)
                 )
 
         await asyncio.to_thread(command.upgrade, cfg, REVISION)
+        # Inspect the historical schema directly: today's ORM also selects
+        # evidence columns introduced after this migration.
+        async with engine.connect() as connection:
+            legacy = (await connection.execute(sa.text("SELECT change_seq, run_id FROM runs ORDER BY run_id"))).all()
+            assert legacy == [(0, "legacy-a"), (0, "legacy-b")]
         factory = async_sessionmaker(engine, expire_on_commit=False)
         repo = RunRepository(factory)
+        # This update only uses columns present at 0023; test sequence allocation
+        # before applying later migrations, then verify current reader behavior.
+        await repo.update_status("legacy-a", "error")
+        async with engine.connect() as connection:
+            assert await connection.scalar(sa.text("SELECT change_seq FROM runs WHERE run_id = 'legacy-a'")) > 0
+        await asyncio.to_thread(command.upgrade, cfg, "head")
         legacy = await repo.list_changed(
             after_change_seq=-1,
             after_run_id="",
             user_id="user-1",
             limit=10,
         )
-        assert [(row["change_seq"], row["run_id"]) for row in legacy] == [
-            (0, "legacy-a"),
-            (0, "legacy-b"),
-        ]
+        assert {row["run_id"] for row in legacy} == {"legacy-a", "legacy-b"}
 
-        await repo.update_status("legacy-a", "error")
         changed = await repo.list_changed(
             after_change_seq=0,
             after_run_id="legacy-b",

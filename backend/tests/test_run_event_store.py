@@ -562,6 +562,7 @@ class TestDbRunEventStore:
         class FakeSession:
             def __init__(self):
                 self.dialect = postgresql.dialect()
+                self.bind = self
                 self.execute_calls = []
 
             def get_bind(self):
@@ -591,8 +592,13 @@ class TestDbRunEventStore:
 
         assert count == 3
         assert session.execute_calls
-        assert "pg_advisory_xact_lock" in str(session.execute_calls[0][0])
-        assert session.execute_calls[0][1] == {"thread_id": "thread-1"}
+        # The shared changed-run clock precedes every run-row mutation.
+        assert "run_change_clock" in str(session.execute_calls[0][0])
+        assert "pg_advisory_xact_lock" in str(session.execute_calls[1][0])
+        assert session.execute_calls[1][1] == {"thread_id": "thread-1"}
+        assert "UPDATE runs" in str(session.execute_calls[2][0])
+        assert "DELETE FROM completed_run_snapshots" in str(session.execute_calls[3][0])
+        assert "DELETE FROM run_events" in str(session.execute_calls[4][0])
 
     @pytest.mark.anyio
     async def test_delete_by_run_takes_postgres_advisory_lock(self):
@@ -604,6 +610,7 @@ class TestDbRunEventStore:
         class FakeSession:
             def __init__(self):
                 self.dialect = postgresql.dialect()
+                self.bind = self
                 self.execute_calls = []
 
             def get_bind(self):
@@ -633,8 +640,12 @@ class TestDbRunEventStore:
 
         assert count == 2
         assert session.execute_calls
-        assert "pg_advisory_xact_lock" in str(session.execute_calls[0][0])
-        assert session.execute_calls[0][1] == {"thread_id": "thread-1"}
+        assert "run_change_clock" in str(session.execute_calls[0][0])
+        assert "pg_advisory_xact_lock" in str(session.execute_calls[1][0])
+        assert session.execute_calls[1][1] == {"thread_id": "thread-1"}
+        assert "UPDATE runs" in str(session.execute_calls[2][0])
+        assert "DELETE FROM completed_run_snapshots" in str(session.execute_calls[3][0])
+        assert "DELETE FROM run_events" in str(session.execute_calls[4][0])
 
     @pytest.mark.anyio
     async def test_basic_crud(self, tmp_path):

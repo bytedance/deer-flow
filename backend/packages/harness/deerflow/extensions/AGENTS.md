@@ -422,3 +422,10 @@ No online settings write API is added. `plugin_tools.py` joins normal tool assem
 the run's extension snapshot; task delegation passes that snapshot explicitly. Browser
 public-field projection is an allowlist. Package code is trusted, not sandboxed. See
 `docs/full-stack-plugins.md` and the independently packaged bookmark example.
+
+Evolution host grants (`host_access.evidence` / `skill_mutations`) compose with
+`host_access.model_invocation` through `HostAccess`. Evolution grants require a
+unique stable name and entry point; model-only grants retain their per-install
+identity and permit repeated entry points. Keep all granted dependencies when
+wrapping services with `ModelInvocationService`. The additive evolution contracts
+ship in extension API 0.2.5, after 0.2.4's model invocation contract.

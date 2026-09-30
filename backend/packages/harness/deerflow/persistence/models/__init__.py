@@ -30,6 +30,7 @@ from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
 from deerflow.persistence.run.model import RunChangeClockRow, RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.skill_mutations.model import SkillAssetRow, SkillOperationRow, SkillOwnerRow, SkillProposalRow
 from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserPreferenceRow, UserRow
@@ -50,6 +51,10 @@ __all__ = [
     "RunEventRow",
     "RunChangeClockRow",
     "RunRow",
+    "SkillAssetRow",
+    "SkillOperationRow",
+    "SkillOwnerRow",
+    "SkillProposalRow",
     "ScheduledTaskRow",
     "ScheduledTaskRunRow",
     "SubagentBatchRow",

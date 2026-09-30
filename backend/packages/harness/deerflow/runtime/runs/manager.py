@@ -229,6 +229,8 @@ class RunRecord:
     # True only on the caller that recovered an existing idempotent admission;
     # that caller must not attach a second worker to the durable run.
     idempotency_reused: bool = False
+    evidence_origin: str = "unknown"
+    evidence_agent_id: str | None = None
 
 
 class RunStartOutcome(StrEnum):
@@ -327,6 +329,10 @@ class RunManager:
             "lease_expires_at": record.lease_expires_at,
             "idempotency_key": record.idempotency_key,
         }
+        if record.evidence_origin != "unknown":
+            payload["evidence_origin"] = record.evidence_origin
+        if record.evidence_agent_id is not None:
+            payload["evidence_agent_id"] = record.evidence_agent_id
         if record.user_id is not None:
             payload["user_id"] = record.user_id
         if record.stop_reason is not None:
@@ -502,6 +508,8 @@ class RunManager:
             last_ai_message=row.get("last_ai_message"),
             first_human_message=row.get("first_human_message"),
             owner_worker_id=row.get("owner_worker_id"),
+            evidence_origin=row.get("evidence_origin") or "unknown",
+            evidence_agent_id=row.get("evidence_agent_id"),
             lease_expires_at=row.get("lease_expires_at"),
             stop_reason=row.get("stop_reason"),
             idempotency_key=row.get("idempotency_key"),
@@ -602,6 +610,34 @@ class RunManager:
             except Exception:
                 logger.warning("Failed to persist finalizing progress for %s", run_id, exc_info=True)
 
+    @staticmethod
+    def _validate_evidence_origin(origin: str) -> None:
+        if origin not in ("interactive", "scheduled", "extension_evaluation", "unknown"):
+            raise ValueError("invalid evidence origin")
+
+    async def seal_completed_evidence(self, run_id: str, receipt) -> bool:
+        """Best-effort evidence metadata is independent of business completion."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or record.ownership_lost:
+                return False
+            owner_worker_id = record.owner_worker_id
+        seal = getattr(self._store, "seal_evidence", None)
+        if seal is None or owner_worker_id is None:
+            return False
+        return await seal(run_id, owner_worker_id=owner_worker_id, receipt=receipt)
+
+    async def mark_evidence_partial(self, run_id: str, *, error: str) -> bool:
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or record.ownership_lost:
+                return False
+            owner_worker_id = record.owner_worker_id
+        mark_partial = getattr(self._store, "mark_evidence_partial", None)
+        if mark_partial is None or owner_worker_id is None:
+            return False
+        return await mark_partial(run_id, owner_worker_id=owner_worker_id, error=error)
+
     async def create(
         self,
         thread_id: str,
@@ -612,6 +648,8 @@ class RunManager:
         kwargs: dict | None = None,
         multitask_strategy: str = "reject",
         user_id: str | None = None,
+        evidence_origin: str = "unknown",
+        evidence_agent_id: str | None = None,
     ) -> RunRecord:
         """Create a new pending run and register it.
 
@@ -622,6 +660,7 @@ class RunManager:
         raw ``IntegrityError`` instead of a ``ConflictError``. Production
         callers should use :meth:`create_or_reject`.
         """
+        self._validate_evidence_origin(evidence_origin)
         run_id = str(uuid.uuid4())
         now = _now_iso()
         user_id = _resolve_record_user_id(user_id)
@@ -640,6 +679,8 @@ class RunManager:
             updated_at=now,
             owner_worker_id=self._worker_id,
             lease_expires_at=lease_expires_at,
+            evidence_origin=evidence_origin,
+            evidence_agent_id=evidence_agent_id,
         )
         async with self._lock:
             self._runs[run_id] = record
@@ -1507,6 +1548,8 @@ class RunManager:
         model_name: str | None = None,
         user_id: str | None = None,
         idempotency_key: str | None = None,
+        evidence_origin: str = "unknown",
+        evidence_agent_id: str | None = None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         return await self._admit_thread_operation(
@@ -1520,6 +1563,8 @@ class RunManager:
             model_name=model_name,
             user_id=user_id,
             idempotency_key=idempotency_key,
+            evidence_origin=evidence_origin,
+            evidence_agent_id=evidence_agent_id,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -1580,6 +1625,8 @@ class RunManager:
         model_name: str | None = None,
         user_id: str | None = None,
         idempotency_key: str | None = None,
+        evidence_origin: str = "unknown",
+        evidence_agent_id: str | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -1595,6 +1642,7 @@ class RunManager:
         partial unique index on ``(thread_id) WHERE status IN
         ('pending','running')``.
         """
+        self._validate_evidence_origin(evidence_origin)
         run_id = str(uuid.uuid4())
         now = _now_iso()
         # Resolve before the idempotency checks below compare it with stored rows.
@@ -1625,6 +1673,8 @@ class RunManager:
             owner_worker_id=self._worker_id,
             lease_expires_at=lease_expires_at,
             idempotency_key=idempotency_key,
+            evidence_origin=evidence_origin,
+            evidence_agent_id=evidence_agent_id,
         )
 
         async with self._lock:
@@ -1690,6 +1740,10 @@ class RunManager:
                     }
                     if idempotency_key is not None:
                         create_kwargs["idempotency_key"] = idempotency_key
+                    if evidence_origin != "unknown":
+                        create_kwargs["evidence_origin"] = evidence_origin
+                    if evidence_agent_id is not None:
+                        create_kwargs["evidence_agent_id"] = evidence_agent_id
                     try:
                         await self._call_store_with_retry(
                             "create_thread_operation_atomic",
@@ -1722,6 +1776,10 @@ class RunManager:
                     }
                     if idempotency_key is not None:
                         create_kwargs["idempotency_key"] = idempotency_key
+                    if evidence_origin != "unknown":
+                        create_kwargs["evidence_origin"] = evidence_origin
+                    if evidence_agent_id is not None:
+                        create_kwargs["evidence_agent_id"] = evidence_agent_id
                     # Interrupt / rollback: store-side claim + insert in one
                     # transaction. Retry on IntegrityError in case another
                     # worker races us between our SELECT FOR UPDATE and INSERT.
@@ -1882,6 +1940,24 @@ class RunManager:
         if self._store is None:
             return []
         grace_seconds = self._run_ownership_config.grace_seconds if self._run_ownership_config else 10
+        recover_evidence = getattr(self._store, "recover_unsealed_evidence", None)
+        if callable(recover_evidence):
+            try:
+                evidence_before = before or _now_iso()
+                while True:
+                    async with self._lock:
+                        local_finalizing = tuple(r.run_id for r in self._runs.values() if not r.ownership_lost and (r.finalizing or (r.task is not None and not r.task.done())))
+                    recovered_count = await self._call_store_with_retry(
+                        "recover_unsealed_evidence",
+                        "*",
+                        lambda: recover_evidence(before=evidence_before, grace_seconds=grace_seconds, exclude_run_ids=local_finalizing),
+                    )
+                    # Drain at startup too: single-worker mode has no heartbeat.
+                    if not recovered_count:
+                        break
+            except Exception:
+                # Evidence availability must not prevent normal run recovery.
+                logger.warning("Failed to recover orphaned completed-run evidence", exc_info=True)
         try:
             rows = await self._call_store_with_retry(
                 "list_inflight_with_expired_lease",

@@ -7,6 +7,7 @@ at ``max_trace_content`` bytes to avoid bloating the database.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -14,10 +15,12 @@ import weakref
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunRow
+from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
@@ -209,6 +212,7 @@ class DbRunEventStore(RunEventStore):
                         event_type=event_type,
                         category=category,
                         content=db_content,
+                        content_sha256=hashlib.sha256(db_content.encode("utf-8")).hexdigest(),
                         event_metadata=metadata,
                         seq=seq,
                         created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
@@ -245,6 +249,7 @@ class DbRunEventStore(RunEventStore):
                             event_type=e["event_type"],
                             category=category,
                             content=db_content,
+                            content_sha256=hashlib.sha256(db_content.encode("utf-8")).hexdigest(),
                             event_metadata=metadata,
                             seq=seq,
                             created_at=datetime.fromisoformat(e["created_at"]) if e.get("created_at") else datetime.now(UTC),
@@ -299,6 +304,7 @@ class DbRunEventStore(RunEventStore):
                         event_type=event_type,
                         category=category,
                         content=db_content,
+                        content_sha256=hashlib.sha256(db_content.encode("utf-8")).hexdigest(),
                         event_metadata=metadata,
                         seq=(max_seq or 0) + 1,
                         created_at=datetime.fromisoformat(created_at) if created_at else datetime.now(UTC),
@@ -337,6 +343,45 @@ class DbRunEventStore(RunEventStore):
                 result = await session.execute(stmt)
                 rows = list(result.scalars())
                 return [self._row_to_dict(r) for r in reversed(rows)]
+
+    async def evidence_receipt(self, thread_id: str, run_id: str):
+        """Capture acknowledged durable bounds after the journal's producer drain."""
+        from deerflow.runtime.events.evidence import JournalSealReceipt
+
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    await self._acquire_thread_mutation_fence(session, thread_id)
+                    run = (await session.execute(select(RunRow.user_id, RunRow.evidence_retention_revision).where(RunRow.run_id == run_id, RunRow.thread_id == thread_id))).one_or_none()
+                    if run is None:
+                        return None
+                    bounds = await session.execute(
+                        select(func.max(RunEventRow.seq), func.count()).where(
+                            RunEventRow.thread_id == thread_id,
+                            RunEventRow.run_id == run_id,
+                            or_(RunEventRow.user_id == run.user_id, RunEventRow.user_id.is_(None)),
+                        )
+                    )
+                    upper, count = bounds.one()
+                    return JournalSealReceipt(run_id, thread_id, upper or 0, count, run.evidence_retention_revision, self._sf)
+
+    @staticmethod
+    async def _invalidate_evidence(session, thread_id: str, user_id: str | None, change_seq: int, run_id: str | None = None) -> None:
+        conditions = [RunRow.thread_id == thread_id]
+        if user_id is not None:
+            conditions.append(RunRow.user_id == user_id)
+        if run_id is not None:
+            conditions.append(RunRow.run_id == run_id)
+        await session.execute(
+            update(RunRow)
+            .where(*conditions)
+            .values(
+                evidence_retention_revision=RunRow.evidence_retention_revision + 1,
+                evidence_seal_state="partial",
+                change_seq=change_seq,
+            )
+        )
+        await session.execute(delete(CompletedRunSnapshotRow).where(CompletedRunSnapshotRow.run_id.in_(select(RunRow.run_id).where(*conditions))))
 
     async def list_events(
         self,
@@ -521,7 +566,9 @@ class DbRunEventStore(RunEventStore):
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
+                    change_seq = await RunRepository._next_change_seq(session)
                     await self._acquire_thread_mutation_fence(session, thread_id)
+                    await self._invalidate_evidence(session, thread_id, resolved_user_id, change_seq)
                     count_conditions = [RunEventRow.thread_id == thread_id]
                     if resolved_user_id is not None:
                         count_conditions.append(RunEventRow.user_id == resolved_user_id)
@@ -555,7 +602,9 @@ class DbRunEventStore(RunEventStore):
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
+                    change_seq = await RunRepository._next_change_seq(session)
                     await self._acquire_thread_mutation_fence(session, thread_id)
+                    await self._invalidate_evidence(session, thread_id, resolved_user_id, change_seq, run_id)
                     count_conditions = [RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id]
                     if resolved_user_id is not None:
                         count_conditions.append(RunEventRow.user_id == resolved_user_id)

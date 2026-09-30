@@ -39,3 +39,16 @@ Lets a caller pass per-request, short-lived end-user credentials (e.g. an ERP to
 - Build archives from captured bytes and require the preview's revision. Preserve file contents, empty directories, and normalized executable flags; import must not restore privileged permission bits.
 - Keep traversal, YAML parsing, and archive construction bounded and cancellable. Reject unsupported filesystem operations rather than following links; report limits instead of truncating results. Preserve YAML preflight before object construction.
 - Export includes raw saved files and is not a secret audit. Return relative paths and generic errors without leaking source content. See the [export API contract](../../../../docs/API.md#export-a-custom-skill) for response fields and limits.
+
+### Evolution host checks and recovery
+
+`mutations/service.py` shares one shielded check per proposal. A cancelled waiter
+does not cancel the shared scan; a cancelled scan or timeout must propagate and
+drain token-fenced lease cleanup, leaving no cached verdict. Keep the scan attempt
+for hourly quota accounting. Cleanup must not erase a replacement worker's lease.
+Single-operation recovery propagates an unresolved owner barrier as `NEEDS_REPAIR`
+(HTTP 409); only the host-wide recovery sweep suppresses it to continue with other
+owners. Publication and derived-view status remain separate.
+`tests/blocking_io/test_skill_mutation_host.py` exercises the real host lifetime,
+evidence pages, scanner, publication, revert and admin routes under Blockbuster;
+only remote moderation is stubbed. Keep new async paths inside that gate.
