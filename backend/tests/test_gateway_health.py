@@ -224,13 +224,19 @@ async def test_probe_checkpointer_sqlite_reachable(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_probe_checkpointer_sqlite_file_uri_reachable(tmp_path):
-    db_path = tmp_path / "checkpoints.db"
-    _create_sqlite_file(db_path)
+@pytest.mark.parametrize(
+    "conn_string",
+    ["file:checkpoints.db", "file::memory:?cache=shared", "file:memdb1?mode=memory&cache=shared"],
+)
+async def test_probe_checkpointer_sqlite_uri_is_unreachable(conn_string, tmp_path, monkeypatch):
+    """The runtime refuses SQLite URIs, so the probe must not report them healthy."""
+    monkeypatch.chdir(tmp_path)
+    _create_sqlite_file(tmp_path / "checkpoints.db")
 
-    result = await _probe_checkpointer_backend(CheckpointerConfig(type="sqlite", connection_string=pathlib.Path(db_path).as_uri()))
+    result = await _probe_checkpointer_backend(CheckpointerConfig(type="sqlite", connection_string=conn_string))
 
-    assert result == DATABASE_OK
+    assert result == DATABASE_UNREACHABLE
+    assert [path.name for path in tmp_path.iterdir()] == ["checkpoints.db"]
 
 
 @pytest.mark.anyio
@@ -254,13 +260,9 @@ async def test_probe_checkpointer_sqlite_unreachable_when_parent_missing(tmp_pat
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "conn_string",
-    [":memory:", "file:memdb1?mode=memory&cache=shared", "file::memory:?cache=shared"],
-)
-async def test_probe_checkpointer_sqlite_in_memory_is_not_configured(conn_string):
+async def test_probe_checkpointer_sqlite_in_memory_is_not_configured():
     """In-memory SQLite has no external state, mirroring the memory backend."""
-    result = await _probe_checkpointer_backend(CheckpointerConfig(type="sqlite", connection_string=conn_string))
+    result = await _probe_checkpointer_backend(CheckpointerConfig(type="sqlite", connection_string=":memory:"))
 
     assert result == DATABASE_NOT_CONFIGURED
 

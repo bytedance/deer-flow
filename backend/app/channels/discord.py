@@ -876,8 +876,12 @@ class DiscordChannel(Channel):
             split_at = remaining.rfind("\n", 0, _DISCORD_MAX_MESSAGE_LEN)
             if split_at <= 0:
                 split_at = _DISCORD_MAX_MESSAGE_LEN
+            else:
+                # Keep the delimiter on this chunk's tail so consecutive
+                # Discord messages reconstruct the original text exactly.
+                split_at += 1
             chunks.append(remaining[:split_at])
-            remaining = remaining[split_at:].lstrip("\n")
+            remaining = remaining[split_at:]
 
         if remaining:
             chunks.append(remaining)
