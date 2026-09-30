@@ -58,3 +58,40 @@ test("returns undefined when the document has no content", () => {
     extractTitleFromMarkdown("Plain text with no heading"),
   ).toBeUndefined();
 });
+
+test("strips a closing hash sequence per CommonMark ATX headings", () => {
+  expect(extractTitleFromMarkdown("# Real Title ###\n\nbody")).toBe(
+    "Real Title",
+  );
+});
+
+test("strips a closing sequence of any length and any trailing spaces", () => {
+  expect(extractTitleFromMarkdown("# Real Title #####  ")).toBe("Real Title");
+});
+
+test("strips the closing sequence when a tab precedes it", () => {
+  expect(extractTitleFromMarkdown("# Real Title\t###")).toBe("Real Title");
+});
+
+test("strips the closing sequence with CRLF line endings", () => {
+  expect(extractTitleFromMarkdown("# Real Title ###\r\nbody")).toBe(
+    "Real Title",
+  );
+});
+
+test("keeps a literal hash glued to the last word", () => {
+  expect(extractTitleFromMarkdown("# C#")).toBe("C#");
+});
+
+test("keeps a hash run that is not at the end of the heading", () => {
+  expect(extractTitleFromMarkdown("# Real ### Title")).toBe("Real ### Title");
+});
+
+test("does not report a heading that is only a closing sequence as a title", () => {
+  expect(extractTitleFromMarkdown("# ###")).toBeUndefined();
+  expect(extractTitleFromMarkdown("# ####")).toBeUndefined();
+});
+
+test("ignores closing hashes on lines that are not level-one headings", () => {
+  expect(extractTitleFromMarkdown("Real Title ###\n\nbody")).toBeUndefined();
+});

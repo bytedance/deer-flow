@@ -5,9 +5,14 @@ export function extractTitleFromMarkdown(markdown: string) {
   if (firstLine === undefined) {
     return undefined;
   }
-  const headingPrefix = /^ {0,3}# /.exec(firstLine);
+  // A closing run of #s is heading syntax when a space or tab precedes it and
+  // only spaces, tabs or the CRLF tail follow it (CommonMark ATX headings).
+  // Stripping it from the raw line also collapses "# ###" - content that is
+  // nothing but the closing sequence - to no title.
+  const withoutClosing = firstLine.replace(/[ \t]+#+[ \t]*\r?$/, "");
+  const headingPrefix = /^ {0,3}# /.exec(withoutClosing);
   if (!headingPrefix) {
     return undefined;
   }
-  return firstLine.slice(headingPrefix[0].length).trim() || undefined;
+  return withoutClosing.slice(headingPrefix[0].length).trim() || undefined;
 }
