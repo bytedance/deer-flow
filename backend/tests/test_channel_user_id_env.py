@@ -315,9 +315,10 @@ class TestBashToolUserIdentityPrefix:
         assert len(sandbox.calls) == 1
         assert sandbox.calls[0]["command"].startswith(_USER_PREFIX)
 
-    def test_windows_local_sandbox_skips_user_prefix(self, monkeypatch):
-        """POSIX ``export`` is invalid under the Windows local sandbox, so the
-        user id is skipped there too rather than breaking every command."""
+    def test_windows_local_sandbox_publishes_user_id_via_env(self, monkeypatch):
+        """POSIX ``export`` is invalid under the Windows local sandbox, so the id
+        moves to the ``env`` channel there rather than being dropped: the
+        contract is that every bash command can see the user id."""
         runtime = SimpleNamespace(
             state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
             context={"thread_id": "t1", "user_id": _USER_ID},
@@ -331,5 +332,46 @@ class TestBashToolUserIdentityPrefix:
         bash_tool.func(runtime=runtime, description="test", command="echo hi")
 
         assert len(sandbox.calls) == 1
-        assert USER_ID_ENV not in sandbox.calls[0]["command"]
-        assert "export" not in sandbox.calls[0]["command"]
+        call = sandbox.calls[0]
+        assert USER_ID_ENV not in call["command"]
+        assert "export" not in call["command"]
+        assert call["env"] == {USER_ID_ENV: _USER_ID}
+
+    def test_windows_env_channel_keeps_secrets_and_user_id_separate(self, monkeypatch):
+        """Secrets stay in ``env`` for redaction; the id rides alongside them
+        without entering the redaction set, so echoing it stays readable."""
+        runtime = SimpleNamespace(
+            state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+            context={
+                "thread_id": "t1",
+                "user_id": _USER_ID,
+                "__active_skill_secrets": {"ERP_TOKEN": "secret-value"},
+            },
+        )
+        sandbox = _CapturingSandbox()
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+        monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+        monkeypatch.setattr("deerflow.sandbox.tools._is_windows", lambda: True)
+
+        bash_tool.func(runtime=runtime, description="test", command="echo hi")
+
+        assert sandbox.calls[0]["env"] == {"ERP_TOKEN": "secret-value", USER_ID_ENV: _USER_ID}
+
+    def test_windows_local_sandbox_omits_unusable_user_id(self, monkeypatch):
+        """A corrupt id is dropped rather than published — there is no portable
+        way to clear a variable across PowerShell/cmd/MSYS, so the env channel
+        carries nothing instead of carrying garbage."""
+        runtime = SimpleNamespace(
+            state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},
+            context={"thread_id": "t1", "user_id": "x" * 5000},
+        )
+        sandbox = _CapturingSandbox()
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: sandbox)
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
+        monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+        monkeypatch.setattr("deerflow.sandbox.tools._is_windows", lambda: True)
+
+        bash_tool.func(runtime=runtime, description="test", command="echo hi")
+
+        assert sandbox.calls[0]["env"] is None

@@ -2100,6 +2100,21 @@ def _channel_identity_prefix(runtime: Runtime) -> str | None:
     return f"unset {CHANNEL_USER_ID_ENV}; "
 
 
+def _resolved_user_id(runtime: Runtime) -> str | None:
+    """Return the effective user id when it is publishable, else ``None``.
+
+    ``resolve_runtime_user_id`` is the authorization-grade source (see its
+    docstring): server-owned for external callers, channel-authenticated for
+    internal ones. The guards are the same defensive bound the channel identity
+    uses — a real id is short (``make_safe_user_id`` output), so an empty /
+    non-str / over-cap value is corrupt and must not reach a command.
+    """
+    user_id = resolve_runtime_user_id(runtime)
+    if isinstance(user_id, str) and 0 < len(user_id) <= _USER_ID_MAX_LEN:
+        return user_id
+    return None
+
+
 def _user_identity_prefix(runtime: Runtime) -> str:
     """Build the command prefix that publishes the effective user id to bash.
 
@@ -2119,9 +2134,20 @@ def _user_identity_prefix(runtime: Runtime) -> str:
     >= 1.9.3 required), which is reserved for request-scoped secrets. The value
     is an identifier, not a secret, so keeping it in the audit-visible command
     string is fine.
+
+    **Informational, not authenticated identity.** The exported shell variable
+    is a convenience for skill scripts — exactly like
+    ``DEERFLOW_CHANNEL_USER_ID`` — not a credential and not proof of who is
+    acting. Any bash command can overwrite its own environment, and anything the
+    command sources or launches (a dependency, a sourced rc file on the
+    host-bash path) can silently re-export a different id before a skill's
+    scoping logic reads it; only the outer prefix on the *next* ``bash_tool``
+    call re-asserts the true value. Skills that need user-scoped *authorization*
+    must resolve the identity server-side via ``resolve_runtime_user_id`` rather
+    than trusting this variable.
     """
-    user_id = resolve_runtime_user_id(runtime)
-    if isinstance(user_id, str) and 0 < len(user_id) <= _USER_ID_MAX_LEN:
+    user_id = _resolved_user_id(runtime)
+    if user_id is not None:
         return f"export {USER_ID_ENV}={shlex.quote(user_id)}; "
     return f"unset {USER_ID_ENV}; "
 
@@ -2247,9 +2273,20 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via
-            # PowerShell/cmd.exe where `export` is not valid syntax.
+            # PowerShell/cmd.exe where `export` is not valid syntax, so the id
+            # is published through the subprocess environment instead —
+            # LocalSandbox layers `env` into the per-process environment, and
+            # unlike AioSandbox it has no persistent shell session that could
+            # carry a stale value forward. Deliberately kept out of
+            # `injected_env`, which doubles as the secret-redaction set: an
+            # identifier is not a secret and must stay readable in output.
+            local_env = injected_env
             if not _is_windows():
                 command = user_prefix + (identity_prefix or "") + command
+            else:
+                windows_user_id = _resolved_user_id(runtime)
+                if windows_user_id is not None:
+                    local_env = {**(injected_env or {}), USER_ID_ENV: windows_user_id}
             try:
                 from deerflow.config.app_config import get_app_config
 
@@ -2263,7 +2300,7 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
                 sandbox,
                 command,
                 runtime=runtime,
-                env=injected_env,
+                env=local_env,
                 timeout=command_timeout,
             )
             return _truncate_bash_output(
