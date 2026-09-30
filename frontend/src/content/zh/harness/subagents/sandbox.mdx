@@ -51,6 +51,12 @@ AIO 镜像默认最多 10 个 shell 会话（`MAX_SHELL_SESSIONS`），超出时
 
 通过 IM 渠道触发的对话会把发送者身份放进运行时上下文的 `channel_user_id`。`task` 工具把它转发给子 Agent，子 Agent 的每条 bash 命令前会加上 `export DEERFLOW_CHANNEL_USER_ID=<值>;`（IM 身份存在但为空或无效时是 `unset DEERFLOW_CHANNEL_USER_ID;`；没有 IM 身份的运行不加前缀），值最长 256 个字符并经过 shell 转义。因此委派出去的脚本仍然知道是谁在操作。
 
+每条 bash 命令还会带上已认证的 DeerFlow 用户 id，环境变量名为 `DEERFLOW_USER_ID`，并且作为**最外层**前缀出现——即 `export DEERFLOW_USER_ID=<值>; `，当解析出的 id 为空、不是字符串或超过 256 个字符时则是 `unset DEERFLOW_USER_ID; `。它排在渠道前缀和 `cd` 进工作目录之前，所以从左往右读就是「这条命令以哪个用户身份运行」、再是「来自哪个 IM 发送者」。与渠道 id 不同，这个前缀对非 IM 运行也不会省略：`resolve_runtime_user_id` 会回退到 `default`，因此每条命令都能归属到用户，而每次调用都重申一次也避免复用中的 AIO shell 会话解析到过期的值。
+
+在 **Windows 本地沙箱**上两个前缀都不会出现——其 PowerShell/cmd.exe 回退路径不支持 `export`/`unset` 语法。用户 id 改为通过子进程环境传递，`LocalSandbox` 会把它分层并入进程环境（它没有需要保持一致的持久会话），而渠道 id 则完全缺失。
+
+两个 shell 变量都应视为**信息性，而非已认证身份**。任何 bash 命令都能覆写自己的环境，因此需要按用户授权的技能必须在服务端解析身份（`resolve_runtime_user_id`），而不能信任 `DEERFLOW_USER_ID`。
+
 ## 子 Agent 的中间件链
 
 子 Agent 的链由 `build_subagent_runtime_middlewares` 装配，与 Lead Agent 共享同一个基础部分，再追加子 Agent 专属的中间件。大致顺序（外到内）：

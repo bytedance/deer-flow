@@ -162,3 +162,73 @@ def test_plural_source_round_trip_and_single_path_compatibility():
 def test_plural_source_malformed_list_fails_closed(paths):
     context = {_SLASH_SECRET_SOURCE_KEY: {"path": "first", "paths": paths, "owner_token": OWNER}}
     assert read_slash_skill_source_paths(context, owner_token=OWNER) == ()
+
+
+@pytest.mark.parametrize("denied", [False, True])
+@pytest.mark.parametrize("fail_closed", [False, True])
+def test_async_inline_batch_authorizes_every_selection_on_the_event_loop(catalog, denied, fail_closed):
+    from deerflow.authz.provider import AuthzDecision
+    from deerflow.authz.skill_filter import ResolvedSkillAuthorization
+
+    middleware, _, _ = catalog
+    provider = SimpleNamespace(authorize=Mock(side_effect=RuntimeError("sync API must not run")))
+    calls = []
+
+    async def authorize(value):
+        calls.append(value.target)
+        return AuthzDecision(allow=not (denied and value.target == "skill-1"))
+
+    provider.aauthorize = authorize
+    middleware._skill_authorization = ResolvedSkillAuthorization(provider=provider, principal=None, fail_closed=fail_closed)
+    context = {"secrets": {"KEY_0": "zero", "KEY_1": "one"}}
+    original = request("compare", {"skill_references": ["skill-0", "skill-1"]}, context)
+    seen = []
+
+    async def handler(value):
+        seen.append(value)
+        return AIMessage(content="done")
+
+    result = asyncio.run(middleware.awrap_model_call(original, handler))
+    assert calls == ["skill-0", "skill-1"]
+    provider.authorize.assert_not_called()
+    if denied:
+        assert not seen
+        assert "not available" in result.content
+        assert _SLASH_SECRET_SOURCE_KEY not in context
+        assert ACTIVE_SECRETS_CONTEXT_KEY not in context
+    else:
+        assert len(seen) == 1
+        assert context[ACTIVE_SECRETS_CONTEXT_KEY] == {"KEY_0": "zero", "KEY_1": "one"}
+        assert [entry["name"] for entry in result.additional_kwargs["skill_usages"]] == ["skill-0", "skill-1"]
+
+
+def test_each_inline_activation_excludes_its_stale_entry_secret_snapshot(catalog):
+    from deerflow.authz.provider import AuthzDecision
+    from deerflow.authz.skill_filter import ResolvedSkillAuthorization
+
+    middleware, skills, factory = catalog
+    old = skills[1]
+    skills[1] = replace(old, required_secrets=(SecretRequirement(name="OLD_KEY"),))
+    calls = []
+
+    async def authorize(value):
+        calls.append(value.target)
+        # The prepass already captured OLD_KEY; activation and binding must use
+        # the new declaration, including for the second explicit selection.
+        skills[1] = old
+        return AuthzDecision(allow=True)
+
+    provider = SimpleNamespace(aauthorize=authorize, authorize=Mock(side_effect=RuntimeError("sync API must not run")))
+    middleware._skill_authorization = ResolvedSkillAuthorization(provider=provider, principal=None, fail_closed=True)
+    context = {"secrets": {"KEY_0": "zero", "KEY_1": "one", "OLD_KEY": "stale"}}
+    original = request("compare", {"skill_references": ["skill-0", "skill-1"]}, context)
+    original.state["skill_context"] = [{"name": old.name, "path": old.get_container_file_path()}]
+
+    async def handler(value):
+        return AIMessage(content="done")
+
+    asyncio.run(middleware.awrap_model_call(original, handler))
+    assert calls == ["skill-0", "skill-1"]
+    provider.authorize.assert_not_called()
+    assert context[ACTIVE_SECRETS_CONTEXT_KEY] == {"KEY_0": "zero", "KEY_1": "one"}
+    assert factory.called
