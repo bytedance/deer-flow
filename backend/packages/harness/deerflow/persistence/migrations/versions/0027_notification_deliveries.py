@@ -1,7 +1,7 @@
 """Scheduled-task notification delivery outbox (issue #4254).
 
-Revision ID: 0017_notification_deliveries
-Revises: 0016_subagent_batches
+Revision ID: 0027_notification_deliveries
+Revises: 0026_mcp_task_lease_tokens
 Create Date: 2026-08-16
 """
 
@@ -12,8 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0017_notification_deliveries"
-down_revision: str | Sequence[str] | None = "0016_subagent_batches"
+revision: str = "0027_notification_deliveries"
+down_revision: str | Sequence[str] | None = "0026_mcp_task_lease_tokens"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
