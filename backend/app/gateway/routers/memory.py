@@ -12,6 +12,7 @@ from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, M
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.file_io import await_drained
 
 router = APIRouter(prefix="/api", tags=["memory"])
 
@@ -172,6 +173,11 @@ async def _get_memory_or_501(manager: MemoryManager, user_id: str, label: str) -
         raise _map_memory_manager_error(exc) from exc
 
 
+async def _run_memory_mutation(func, /, *args, **kwargs):
+    """Run a persistent memory mutation without letting cancellation outlive it."""
+    return await await_drained(asyncio.to_thread(func, *args, **kwargs))
+
+
 class FactCreateRequest(BaseModel):
     """Request model for creating a memory fact."""
 
@@ -299,7 +305,7 @@ async def clear_memory(request: Request) -> MemoryResponse:
     """Clear all persisted memory data."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
-        memory_data = await asyncio.to_thread(manager.clear_memory, user_id=_resolve_memory_user_id(request))
+        memory_data = await _run_memory_mutation(manager.clear_memory, user_id=_resolve_memory_user_id(request))
     except NotImplementedError:
         raise _unsupported_501(manager, "clear memory") from None
     except (MemoryConflictError, MemoryCorruptionError) as exc:
@@ -322,7 +328,7 @@ async def create_memory_fact_endpoint(body: FactCreateRequest, request: Request)
     """Create a single fact manually."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
-        memory_data, fact_id = await asyncio.to_thread(
+        memory_data, fact_id = await _run_memory_mutation(
             manager.create_fact,
             content=body.content,
             category=body.category,
@@ -356,7 +362,7 @@ async def delete_memory_fact_endpoint(fact_id: str, request: Request) -> MemoryR
     """Delete a single fact from memory by fact id."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
-        memory_data = await asyncio.to_thread(manager.delete_fact, fact_id, user_id=_resolve_memory_user_id(request))
+        memory_data = await _run_memory_mutation(manager.delete_fact, fact_id, user_id=_resolve_memory_user_id(request))
     except NotImplementedError:
         raise _unsupported_501(manager, "delete fact") from None
     except KeyError as exc:
@@ -381,7 +387,7 @@ async def update_memory_fact_endpoint(fact_id: str, body: FactPatchRequest, requ
     """Partially update a single fact manually."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
-        memory_data = await asyncio.to_thread(
+        memory_data = await _run_memory_mutation(
             manager.update_fact,
             fact_id=fact_id,
             content=body.content,
@@ -430,7 +436,7 @@ async def import_memory(body: MemoryResponse, request: Request) -> MemoryRespons
     """Import and persist memory data."""
     manager = await asyncio.to_thread(get_memory_manager)
     try:
-        memory_data = await asyncio.to_thread(
+        memory_data = await _run_memory_mutation(
             manager.import_memory,
             body.model_dump(exclude_none=True),
             user_id=_resolve_memory_user_id(request),
