@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -92,7 +92,10 @@ async def test_upload_endpoint_mounted_provider_does_not_block_event_loop(tmp_pa
     assert await asyncio.to_thread(target.read_bytes) == b"hello uploads"
 
 
-async def test_reserved_name_rejects_batch_without_blocking_or_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("filename", [".upload-notes.part", r"folder\.upload-notes.part", r"C:\users\.upload-notes.part"])
+async def test_reserved_name_rejects_batch_without_blocking_or_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filename: str) -> None:
+    # Emulate Linux parsing of the multipart name while keeping disk paths native.
+    monkeypatch.setattr(uploads, "Path", lambda value: PurePosixPath(value) if value == filename else Path(value))
     _reset_paths(tmp_path, monkeypatch)
     uploads_dir = await _thread_uploads_dir("t-reserved")
     existing = uploads_dir / "existing.txt"
@@ -106,7 +109,7 @@ async def test_reserved_name_rejects_batch_without_blocking_or_writing(tmp_path:
             request=None,
             files=[
                 UploadFile(filename="normal.txt", file=BytesIO(b"normal document")),
-                UploadFile(filename=".upload-notes.part", file=BytesIO(b"reserved document")),
+                UploadFile(filename=filename, file=BytesIO(b"reserved document")),
             ],
             config=SimpleNamespace(),
         )

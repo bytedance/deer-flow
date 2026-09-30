@@ -1872,8 +1872,10 @@ failing the upload; hidden staging files are left for the startup sweep.
 
 Uploaded filenames matching `.upload-*.part` are rejected because that pattern is
 reserved for temporary staging files. Rename such a file before uploading it.
-The HTTP endpoint returns `400` with a rename hint before publishing any file in
-a batch containing a reserved name, so the chat reports the upload error instead
+The HTTP check recognizes both `/` and `\` as path separators, including on
+Linux, when extracting the basename. The endpoint returns `400` with a rename
+hint before publishing any file in a batch containing a reserved name, so the
+chat reports the upload error instead
 of continuing without the attachment. The SDK validates filenames for the whole
 batch before copying any files. Project document names follow the same
 restriction; an older shelf document with a reserved name
