@@ -502,6 +502,50 @@ class TestAgentConstruction:
         assert candidates == ["allowed_decl", "denied_decl"]
         assert principal.role == "user"
 
+    def test_create_agent_warns_when_the_declared_tool_pass_is_skipped_with_a_provider(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
+    ):
+        """Fail-open must not be silent: a configured provider without the seeded
+        Layer-1 state skips the declaration pass but logs a warning."""
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        app_config = SimpleNamespace(
+            models=[SimpleNamespace(name="default-model")],
+            authorization=SimpleNamespace(enabled=True, fail_closed=True, default_role="user"),
+        )
+
+        monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: MagicMock())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: MagicMock())
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=lambda **kwargs: [],
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=app_config,
+            parent_model="parent-model",
+        )
+        executor._authz_provider = object()
+        # _layer_one_outcome and _authz_context deliberately unset.
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.subagents.executor"):
+            asyncio.run(executor._create_agent())
+
+        assert "skipping the middleware-declared tool pass" in caplog.text
+        assert "_layer_one_outcome" in caplog.text
+
     def test_create_agent_scales_max_turns_into_a_super_step_budget(
         self,
         classes,

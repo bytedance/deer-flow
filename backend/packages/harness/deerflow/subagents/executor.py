@@ -1049,6 +1049,20 @@ class SubagentExecutor:
             )
             middlewares = apply_declared_tool_view(middlewares, authorized_names=declared_authorized)
             verify_declared_tool_view(middlewares, authorized_names=declared_authorized)
+        elif authz_provider is not None:
+            # Defense in depth: the provider is configured but the seeded
+            # decision state is missing, so the declaration pass is skipped.
+            # Layer 2 still enforces at call time, but middleware-declared
+            # tools bypass Layer 1 in this build — log so a future refactor
+            # that breaks the ``_build_initial_state`` invariant is visible
+            # instead of silently reopening the channel.
+            missing = [name for name, value in (("_layer_one_outcome", layer_one), ("_authz_context", authz_context)) if value is None]
+            logger.warning(
+                "Authorization provider is configured but %s %s not set for subagent %r; skipping the middleware-declared tool pass (Layer 2 still enforces at call time)",
+                " and ".join(missing),
+                "is" if len(missing) == 1 else "are",
+                self.config.name,
+            )
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware) so _aexecute can read
         # each after the run and surface whichever cap fired. Duck-typed

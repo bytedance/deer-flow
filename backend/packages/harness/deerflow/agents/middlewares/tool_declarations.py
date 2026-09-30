@@ -11,9 +11,11 @@ middleware stack exists:
    as two name sets at the existing Layer-1 call site.
 2. **Collect** — :func:`collect_declared_tools` reads ``getattr(m, "tools",
    ())`` off the built stack. Entries that are not ``BaseTool`` instances with
-   a usable name cannot be authorized and are skipped with a warning
-   (LangChain would convert them through ``create_tool`` — that conversion is
-   not a decision this module makes).
+   a usable name cannot be authorized by name; with authorization enabled they
+   are warned about here and removed from the bound stack at view time
+   (LangChain would otherwise convert them through ``create_tool`` and bind
+   them unchecked). A contributor who needs a plain callable must wrap it in
+   a ``StructuredTool``.
 3. **Decide, seeded** — :func:`decide_declared_tools` submits only names the
    ordinary pass never saw, through the *same* provider instance, context, and
    app config. A name the ordinary pass already decided reuses that verdict:
@@ -22,9 +24,10 @@ middleware stack exists:
    from being silently undone by a recovered second call).
 4. **Narrow, build-locally** — :func:`apply_declared_tool_view` returns a new
    stack. Fully-authorized middlewares keep their identity and position; a
-   middleware with a denied declaration is replaced by an independent copy
-   whose ``tools`` is a new tuple of its authorized declarations. The original
-   (possibly caller-owned, possibly shared across builds) is never mutated.
+   middleware with a denied or non-collectable declaration is replaced by an
+   independent copy whose ``tools`` is a new tuple of its authorized
+   declarations. The original (possibly caller-owned, possibly shared across
+   builds) is never mutated.
 5. **Verify after the last copy** — :func:`verify_declared_tool_view`
    re-collects declared names from the exact stack being bound (after the
    final ``normalize_middleware_state_schemas``) and raises
@@ -127,8 +130,10 @@ def collect_declared_tools(middlewares: Sequence[object]) -> list[BaseTool]:
     """Return the collectable ``BaseTool`` declarations in middleware order.
 
     Entries that are not collectable are dropped with a warning: they cannot
-    be authorized by name. The middleware itself is left untouched — dropping
-    here only excludes the entry from the authorization decision.
+    be authorized by name, and :func:`apply_declared_tool_view` removes them
+    from the bound stack when authorization is enabled. The middleware itself
+    is left untouched here — dropping only excludes the entry from the
+    authorization decision.
     """
     declared: list[BaseTool] = []
     for middleware in middlewares:
@@ -137,7 +142,7 @@ def collect_declared_tools(middlewares: Sequence[object]) -> list[BaseTool]:
                 declared.append(tool)
             else:
                 logger.warning(
-                    "Middleware %s declares a tool that is not a BaseTool with a usable name (%r); it cannot be authorized and is excluded from the declaration check",
+                    "Middleware %s declares a tool that is not a BaseTool with a usable name (%r); it cannot be authorized and is removed from the bound stack when authorization is enabled",
                     _middleware_name(middleware),
                     tool,
                 )
@@ -165,7 +170,16 @@ def decide_declared_tools(
     declared name, matching ``filter_tools_by_authorization``'s keep-all
     behavior.
     """
-    new_declarations = [tool for tool in declared if tool.name not in outcome.submitted]
+    # Dedupe by first occurrence of the name: two middlewares declaring the
+    # same never-submitted name must reach the provider as one candidate, so
+    # counting or audit-logging providers see each name once.
+    seen: set[str] = set()
+    new_declarations: list[BaseTool] = []
+    for tool in declared:
+        if tool.name in outcome.submitted or tool.name in seen:
+            continue
+        seen.add(tool.name)
+        new_declarations.append(tool)
     if not new_declarations or authorization_provider is None:
         newly_authorized = {tool.name for tool in new_declarations}
         return frozenset(outcome.allowed | newly_authorized)
@@ -231,18 +245,21 @@ def apply_declared_tool_view(
     """Return a build-local stack with declarations narrowed to *authorized_names*.
 
     A middleware whose declarations are all authorized keeps its identity and
-    position; a middleware with at least one denied declaration is replaced by
-    an independent copy whose ``tools`` is a new tuple of its authorized
-    declarations (non-collectable entries ride along unchanged — they were
-    never part of the decision). Never mutates the caller's instances, never
-    reorders, never appends.
+    position; a middleware with at least one denied or non-collectable
+    declaration is replaced by an independent copy whose ``tools`` is a new
+    tuple of its authorized declarations. Non-collectable entries cannot be
+    authorized by name, so they are removed here too — otherwise LangChain's
+    factory would fold them into ``ToolNode`` verbatim (auto-converting plain
+    callables through ``create_tool``) and they would bind with no provider
+    decision at all. Never mutates the caller's instances, never reorders,
+    never appends.
     """
     view = list(middlewares)
     for index, middleware in enumerate(view):
         tools = _iter_declared(middleware)
         if not tools:
             continue
-        kept = tuple(tool for tool in tools if not (_collectable(tool) and tool.name not in authorized_names))
+        kept = tuple(tool for tool in tools if _collectable(tool) and tool.name in authorized_names)
         if len(kept) == len(tools):
             continue
         clone = _independent_copy(middleware)
@@ -270,7 +287,14 @@ def verify_declared_tool_view(
         return
     for middleware in middlewares:
         for tool in _iter_declared(middleware):
-            if _collectable(tool) and tool.name not in authorized_names:
+            if not _collectable(tool):
+                raise DeclaredToolViewError(
+                    f"Middleware {_middleware_name(middleware)} ({type(middleware).__name__}) still declares "
+                    f"a tool that is not a BaseTool with a usable name ({tool!r}) after middleware normalization. "
+                    "Non-collectable declarations cannot be authorized and must not survive narrowing; "
+                    "its __copy__ must preserve instance state instead of rebuilding from constructor arguments."
+                )
+            if tool.name not in authorized_names:
                 raise DeclaredToolViewError(
                     f"Middleware {_middleware_name(middleware)} ({type(middleware).__name__}) still declares "
                     f"tool {tool.name!r}, which is not authorized for this build, after middleware normalization. "

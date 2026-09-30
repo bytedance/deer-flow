@@ -252,7 +252,11 @@ denied for the build cannot be resurrected by declaring it). A middleware whose
 declaration is denied is replaced in that build's stack by an independent,
 state-preserving copy carrying only the authorized declarations — the contributor's
 own instance is never mutated, so a later build under a more permissive principal
-binds the declaration again. Two author-visible rules follow: declare tools as a
+binds the declaration again. Declarations must be `BaseTool` instances with a
+usable name: anything else (for example a plain callable, which LangChain would
+otherwise auto-convert and bind unchecked) cannot be authorized by name and is
+removed from the bound stack with a warning when authorization is enabled — wrap
+callables in a `StructuredTool`. Two author-visible rules follow: declare tools as a
 plain instance attribute (a `tools` property cannot be narrowed safely and fails
 the build), and if you customize `__copy__`, it must return an independent copy
 that preserves current instance state — returning `self` or rebuilding from

@@ -178,6 +178,24 @@ class TestCollectAndDecide:
         assert second_principal == first_principal  # one principal across both passes
         assert second_principal.role == "reviewer"
 
+    def test_same_named_new_declarations_reach_the_provider_once(self):
+        """Two middlewares declaring the same never-submitted name submit one
+        candidate — counting or audit-logging providers must not see a doubled
+        candidate."""
+        provider = _FilterProvider(["dup"])
+
+        authorized = decide_declared_tools(
+            [_tool("dup"), _tool("dup")],
+            outcome=_outcome([], []),
+            context={},
+            app_config=_app_config(),
+            authorization_provider=provider,
+        )
+
+        assert authorized == frozenset({"dup"})
+        assert len(provider.calls) == 1
+        assert provider.calls[0][2] == ["dup"]
+
 
 class TestNarrowingView:
     def test_denied_declaration_is_removed_on_an_independent_copy(self):
@@ -214,6 +232,41 @@ class TestNarrowingView:
         # bound set is LangChain's middleware_tools + regular_tools merge.
         bound_names = [tool.name for middleware in view for tool in getattr(middleware, "tools", [])]
         assert bound_names == ["decl"]
+
+    def test_non_collectable_declaration_is_removed_from_the_bound_view(self):
+        """A plain callable cannot be authorized by name; with authorization
+        enabled it must not bind (LangChain would auto-convert it into the
+        ToolNode unchecked)."""
+        allowed = _tool("allowed_decl")
+        original = _DeclaringMiddleware([lambda: "not a tool", allowed])
+        provider = _FilterProvider(["allowed_decl"])
+
+        view, names = _narrow([original], provider=provider, outcome=_outcome([], []))
+
+        assert names == frozenset({"allowed_decl"})
+        narrowed = view[0]
+        assert narrowed is not original
+        assert narrowed.tools == (allowed,)
+        assert len(original.tools) == 2  # caller-owned instance untouched
+
+    def test_middleware_with_only_non_collectable_declarations_binds_none(self):
+        original = _DeclaringMiddleware([lambda: "not a tool"])
+
+        view, names = _narrow([original], provider=_FilterProvider([]), outcome=_outcome([], []))
+
+        assert names == frozenset()
+        assert view[0] is not original
+        assert view[0].tools == ()
+        assert len(original.tools) == 1
+
+    def test_verify_fails_loudly_when_a_non_collectable_declaration_survives(self):
+        """Backstop: a hostile __copy__ that rebuilds from constructor arguments
+        would restore non-collectable entries after narrowing — same fail-loud
+        standard as for denied names."""
+        restored = _DeclaringMiddleware([lambda: "not a tool", _tool("kept")])
+
+        with pytest.raises(DeclaredToolViewError, match="not a BaseTool"):
+            verify_declared_tool_view([restored], authorized_names=frozenset({"kept"}))
 
 
 class TestSeed:
