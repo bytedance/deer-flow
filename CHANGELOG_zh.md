@@ -332,6 +332,12 @@
 
 ### 修复
 
+- **Gateway：** 含非 ASCII 字符的 CSRF token、GitHub webhook 签名、内部认证 token
+  或 OIDC `state` 现在按常规返回 403/401，而不是 500。`hmac.compare_digest` 遇到含
+  非 ASCII 字符的 `str` 参数会抛出 `TypeError`，而 Starlette 以 latin-1 解码请求头
+  字节，一个 `0xE9` 字节就能让比较崩溃。Gateway 现在通过统一的
+  `app.gateway.utils.constant_time_equals` 比较 UTF-8 字节。此前不存在绕过，请求本就
+  会失败，只是状态码错误。
 - **智能体：** 上下文压缩的 fraction 触发器与 fraction 保留量现在使用当前运行
   模型的上下文 profile；单独配置的 `summarization.model_name` 只负责生成摘要。
   这避免运行模型与摘要模型的窗口不一致时压缩过晚或过早。中间件发布身份现在

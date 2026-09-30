@@ -405,3 +405,23 @@ def test_oidc_redirect_uri_fallback_plain_host_when_no_proxy_headers():
     result = _resolve_oidc_redirect_uri(req, "keycloak", cfg)
 
     assert result == "http://localhost:8001/api/v1/auth/callback/keycloak"
+
+
+@pytest.mark.asyncio
+async def test_oidc_callback_rejects_non_ascii_state_as_mismatch(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import deerflow.config.app_config as app_config_module
+    from app.gateway.auth.oidc_state import OIDCStatePayload
+    from app.gateway.routers import auth as auth_router
+
+    oidc_config = SimpleNamespace(enabled=True, providers={"keycloak": _provider_config()})
+    monkeypatch.setattr(app_config_module, "get_app_config", lambda: SimpleNamespace(auth=SimpleNamespace(oidc=oidc_config)))
+    monkeypatch.setattr(auth_router, "get_state_cookie", lambda request, provider: OIDCStatePayload(provider=provider, state="expected-state"))
+
+    with pytest.raises(HTTPException) as exc:
+        await auth_router.oauth_callback(request=MagicMock(), provider="keycloak", code="code", state="expected-st\xe4te")
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == "OIDC state mismatch"
