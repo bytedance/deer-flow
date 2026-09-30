@@ -1017,6 +1017,56 @@ def test_upload_files_adjusts_read_permissions_for_mounted_non_local_sandbox(tmp
     assert called_path.name == "notes.txt"
 
 
+@pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-.part", "folder/.upload-notes.part"])
+@pytest.mark.parametrize("batch", ["single", "reserved_first", "reserved_last"])
+def test_upload_files_rejects_reserved_names_before_starting_batch(tmp_path, filename, batch):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    existing = thread_uploads_dir / "existing.txt"
+    existing.write_bytes(b"existing document")
+    app = make_authed_test_app()
+    app.include_router(uploads.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+
+    reserved = ("files", (filename, b"reserved document"))
+    normal = ("files", ("normal.txt", b"normal document"))
+    files = [reserved] if batch == "single" else [reserved, normal] if batch == "reserved_first" else [normal, reserved]
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir) as ensure_dir,
+        patch.object(uploads, "get_sandbox_provider") as get_provider,
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/threads/thread-local/uploads", files=files)
+
+    assert response.status_code == 400
+    assert "reserved upload staging" in response.json()["detail"]
+    assert "Rename" in response.json()["detail"]
+    ensure_dir.assert_not_called()
+    get_provider.assert_not_called()
+    assert [path.name for path in thread_uploads_dir.iterdir()] == ["existing.txt"]
+    assert existing.read_bytes() == b"existing document"
+
+
+@pytest.mark.parametrize("filename", [".upload-notes.txt", "notes.part", ".env"])
+def test_upload_files_accepts_names_near_reserved_pattern(tmp_path, filename):
+    app = make_authed_test_app()
+    app.include_router(uploads.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=tmp_path),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/threads/thread-local/uploads", files={"files": (filename, b"user document")})
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert [entry["filename"] for entry in response.json()["files"]] == [filename]
+    assert (tmp_path / filename).read_bytes() == b"user document"
+
+
 def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)

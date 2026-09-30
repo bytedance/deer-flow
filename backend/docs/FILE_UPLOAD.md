@@ -24,6 +24,10 @@ POST /api/threads/{thread_id}/uploads
 
 网关会在应用层限制上传规模，默认最多 10 个文件、单文件 50 MiB、单次请求总计 100 MiB。可通过 `config.yaml` 的 `uploads.max_files`、`uploads.max_file_size`、`uploads.max_total_size` 调整；前端会读取同一组限制并在选择文件时提示，超过限制时后端返回 `413 Payload Too Large`。
 
+文件名匹配 `.upload-*.part`（例如 `.upload-notes.part`）时，网关会返回 `400 Bad Request`，提示改名后重新上传。这是系统保留的临时文件命名规则；文件名按去掉目录后的 basename 判断。网关会先检查整批文件，再开始写入聊天的上传目录或获取沙箱，因此保留名称排在批次末尾也不会留下部分上传。聊天界面收到该错误后会提示用户，并停止本次消息发送。`.upload-notes.txt`、`notes.part` 和 `.env` 仍可上传。
+
+嵌入式 `DeerFlowClient.upload_files` 同样在复制前检查整批文件名，保留名称会抛出 `ValueError`。项目资料库上传和重命名也遵循这项限制；旧资料库中使用保留名称的文件仍可下载，但直接附加到聊天会返回 `400`。请先下载、改名，再上传到聊天。本修复不会迁移或恢复旧聊天目录中已经匹配该临时文件规则的文件。
+
 **响应：**
 ```json
 {
