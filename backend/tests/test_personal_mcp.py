@@ -56,11 +56,6 @@ async def test_personal_config_write_drains_started_mutation_across_cancellation
     monkeypatch.setattr(personal_mcp, "is_admin_user", AsyncMock(return_value=True))
 
     def mutate(*_args, **_kwargs):
-        loop = asyncio.new_event_loop()
-        try:
-            loop.run_until_complete(asyncio.sleep(0))
-        finally:
-            loop.close()
         started_loop.call_soon_threadsafe(started.set)
         release_thread.wait(timeout=5)
         return {"mcpServers": {}}
