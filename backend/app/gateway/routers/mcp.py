@@ -27,7 +27,7 @@ from deerflow.config.extensions_config import (
 )
 from deerflow.config.runtime_paths import project_root
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
-from deerflow.mcp.cache import reset_mcp_tools_cache
+from deerflow.mcp.cache import publish_mcp_tools_cache_reset, reset_mcp_tools_cache
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
@@ -535,6 +535,7 @@ class McpCacheResetResponse(BaseModel):
     """Response model for resetting the MCP tools cache."""
 
     success: bool = Field(description="Whether the MCP tools cache was reset")
+    scope: Literal["shared_config", "process"] = Field(description="Whether the reset was published through the shared config directory or only this process")
     message: str = Field(description="Human-readable reset status")
 
 
@@ -1447,20 +1448,28 @@ def _apply_mcp_server_delete(server_name: str) -> dict:
     "/mcp/cache/reset",
     response_model=McpCacheResetResponse,
     summary="Reset MCP Tools Cache",
-    description=("Reset cached MCP tools and pooled sessions process-wide so tools are reloaded on next use. This affects all threads and users in the current Gateway process."),
+    description=("Publish an MCP cache generation beside the runtime config and retire cached tools and pooled sessions so workers sharing that directory reload on next use."),
 )
 async def reset_mcp_tools_cache_endpoint(request: Request) -> McpCacheResetResponse:
-    """Reset cached MCP tools and persistent sessions process-wide.
+    """Reset cached MCP tools and persistent sessions across Gateway workers.
 
     The next agent run or tool lookup will reload tools from the configured MCP
-    servers. This affects all threads and users in the current Gateway process,
-    and avoids relying on extensions_config.json mtime changes.
+    servers. A durable marker next to the runtime-editable extensions config
+    carries the invalidation to peer workers even when the config itself did
+    not change (for example, a remote server changed ``tools/list``).
     """
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
-    reset_mcp_tools_cache()
+    generation = await asyncio.to_thread(publish_mcp_tools_cache_reset)
+    if generation is None:
+        return McpCacheResetResponse(
+            success=True,
+            scope="process",
+            message="MCP tools cache reset in the current Gateway process. Tools will reload on next use.",
+        )
     return McpCacheResetResponse(
         success=True,
-        message="MCP tools cache reset. Tools will reload on next use.",
+        scope="shared_config",
+        message="MCP tools cache reset published through the shared config directory. Tools will reload on next use.",
     )
 
 
