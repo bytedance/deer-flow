@@ -338,6 +338,12 @@
   跟踪窗口、工具频率和按工具覆盖项中的布尔值也会把对应限制缩小为
   1。现在所有整数阈值字段都会在配置加载阶段按字段名报错，同时保持
   有效整数和数字字符串的既有行为。
+- **Gateway：** 含非 ASCII 字符的 CSRF token、GitHub webhook 签名、内部认证 token、
+  OIDC `state` 或 provisioner `X-API-Key` 现在按常规返回 403/401，而不是 500。
+  `hmac.compare_digest` 遇到含非 ASCII 字符的 `str` 参数会抛出 `TypeError`，而
+  Starlette 以 latin-1 解码请求头字节，一个 `0xE9` 字节就能让比较崩溃。Gateway 现在通过统一的
+  `app.gateway.utils.constant_time_equals` 比较 UTF-8 字节，独立部署的 provisioner
+  则在原处编码后比较。此前不存在绕过，请求本就会失败，只是状态码错误。([#6076])
 - **智能体：** 上下文压缩的 fraction 触发器与 fraction 保留量现在使用当前运行
   模型的上下文 profile；单独配置的 `summarization.model_name` 只负责生成摘要。
   这避免运行模型与摘要模型的窗口不一致时压缩过晚或过早。中间件发布身份现在
@@ -5342,4 +5348,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6066]: https://github.com/bytedance/deer-flow/pull/6066
 [#6069]: https://github.com/bytedance/deer-flow/pull/6069
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
+[#6076]: https://github.com/bytedance/deer-flow/pull/6076
 [#6088]: https://github.com/bytedance/deer-flow/pull/6088
