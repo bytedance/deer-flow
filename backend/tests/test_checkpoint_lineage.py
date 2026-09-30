@@ -345,6 +345,27 @@ def test_lineage_walk_keeps_goal_leaf_addressable():
     assert base.config["configurable"]["checkpoint_id"] == "ckpt-goal"
 
 
+def test_lineage_walk_keeps_stamp_candidate_addressable_when_grandparent_is_gone():
+    """A stamp candidate whose own parent link was pruned stays addressable.
+
+    Retention may already have removed the grandparent; the walk must then
+    treat the candidate as addressable rather than skipping it on inherited
+    stamps — the returned replay base keeps the candidate's channel values.
+    """
+    human = HumanMessage(id="h1", content="question")
+    ai = AIMessage(id="ai-1", content="answer")
+    human2 = HumanMessage(id="h2", content="follow-up")
+    history = [
+        _snapshot("ckpt-turn2-head", [human, ai, human2], parent_id="ckpt-orphan-duration"),
+        _snapshot("ckpt-orphan-duration", [human, ai], parent_id="ckpt-pruned", metadata=dict(_POSTGRES_INHERITED_STAMPS), channel_versions={"messages": 5}),
+    ]
+    accessor = _Accessor(history)
+
+    base = asyncio.run(find_checkpoint_before_message(accessor, history[0], "h2", max_depth=10))
+
+    assert base.config["configurable"]["checkpoint_id"] == "ckpt-orphan-duration"
+
+
 def test_title_leaf_inheriting_duration_stamps_is_not_duration_only():
     """``_ensure_interrupted_title`` copies the head's metadata, stamps included.
 

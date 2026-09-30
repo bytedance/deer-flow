@@ -40,6 +40,22 @@ def checkpoint_metadata(checkpoint_tuple: Any) -> dict[str, Any]:
     return dict(metadata) if isinstance(metadata, dict) else {}
 
 
+def _has_postgres_stamps(metadata: dict[str, Any]) -> bool:
+    """The stamp-fallback gate shared by the classifier and the walk probe.
+
+    One gate, two consumers: if the classifier's fallback tier is ever
+    widened, this predicate widens with it and the lineage walk keeps
+    fetching the grandparent that the fallback will require. Re-encoding the
+    gate in the probe would silently break that pairing — the walk would stop
+    prefetching, every Postgres duration leaf would fall back to
+    ``parent=None``, and the refusal tier would return the original bug.
+    """
+
+    if metadata.get("source") != "update":
+        return False
+    return "run_durations" in metadata or "run_message_ids" in metadata
+
+
 def is_duration_only_checkpoint(checkpoint_tuple: Any, *, parent: Any | None = None, stamp_fallback: bool = True) -> bool:
     """Return whether the tuple is a metadata-only run-duration checkpoint.
 
@@ -86,9 +102,7 @@ def is_duration_only_checkpoint(checkpoint_tuple: Any, *, parent: Any | None = N
         return "runtime_run_duration" in writes
     if not stamp_fallback or parent is None:
         return False
-    if metadata.get("source") != "update":
-        return False
-    if not ("run_durations" in metadata or "run_message_ids" in metadata):
+    if not _has_postgres_stamps(metadata):
         return False
     return _copies_parent_verbatim(checkpoint_tuple, parent)
 
@@ -106,9 +120,7 @@ def has_duration_stamps_without_marker(checkpoint_tuple: Any) -> bool:
     metadata = checkpoint_metadata(checkpoint_tuple)
     if isinstance(metadata.get("writes"), dict):
         return False
-    if metadata.get("source") != "update":
-        return False
-    return "run_durations" in metadata or "run_message_ids" in metadata
+    return _has_postgres_stamps(metadata)
 
 
 def _copies_parent_verbatim(checkpoint_tuple: Any, parent: Any) -> bool:
@@ -239,17 +251,20 @@ async def find_checkpoint_before_message(
     if current_identity is not None:
         visited.add(current_identity)
 
-    # Each step performs one ancestor read (two for a Postgres stamp
-    # candidate, which needs its grandparent for the shape check), but normal
-    # branch/regenerate histories cross the target boundary within 1–3 reads.
-    # Keep max_depth as a conservative safety cap for valid histories with
-    # many intermediate or duration-only checkpoints.
+    # Each distinct ancestor is read once; a Postgres stamp candidate also
+    # needs its grandparent for the shape check, and that grandparent is the
+    # next iteration's parent, so it is carried over instead of re-read.
+    # Normal branch/regenerate histories cross the target boundary within
+    # 1–3 reads. Keep max_depth as a conservative safety cap for valid
+    # histories with many intermediate or duration-only checkpoints.
+    prefetched_parent = None
     for _ in range(max_depth):
         parent_config = getattr(current, "parent_config", None)
         if not isinstance(parent_config, dict):
             raise CheckpointParentMissingError("Checkpoint lineage ended before the target message")
 
-        parent = await accessor.aget(parent_config)
+        parent = prefetched_parent if prefetched_parent is not None else await accessor.aget(parent_config)
+        prefetched_parent = None
         parent_identity = _checkpoint_identity(parent)
         requested_parent_identity = _config_identity(parent_config)
         if parent_identity is None or not _checkpoint_exists(parent) or (requested_parent_identity is not None and parent_identity != requested_parent_identity):
@@ -272,6 +287,7 @@ async def find_checkpoint_before_message(
                 if _checkpoint_exists(candidate):
                     grandparent = candidate
         if is_duration_only_checkpoint(parent, parent=grandparent):
+            prefetched_parent = grandparent
             current = parent
             continue
 
