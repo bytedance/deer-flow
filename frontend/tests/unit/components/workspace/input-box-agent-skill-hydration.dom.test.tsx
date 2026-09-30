@@ -113,9 +113,7 @@ describe("InputBox agent skill draft hydration", () => {
       agentSkillNames: undefined,
     });
 
-    expect(
-      screen.queryByRole("button", { name: "Remove /research" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove skill" })).toBeNull();
     expect(window.sessionStorage.getItem(draftKey)).toContain(
       '"skillName":"research"',
     );
@@ -160,9 +158,7 @@ describe("InputBox agent skill draft hydration", () => {
     );
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Remove /research" }),
-      ).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Remove skill" })).toBeTruthy();
     });
     expect(screen.getByRole("textbox").textContent).toBe("topic");
   });
@@ -179,9 +175,7 @@ describe("InputBox agent skill draft hydration", () => {
     });
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", { name: "Remove /research" }),
-      ).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Remove skill" })).toBeTruthy();
     });
   });
 });

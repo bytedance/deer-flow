@@ -302,3 +302,20 @@ Plugin page `openConversation(threadId)` resolves authenticated thread metadata
 with `pathOfThread`; do not let plugins hardcode default-agent routes. The page's
 abort signal fences late navigation after unmount/account changes. Synchronous
 conversation-action callbacks reject Promise returns while consuming rejections.
+
+### Composer references
+
+`components/workspace/mentions/` owns cursor-local `@` detection, the picker,
+and atomic references. Render labels as DOM text, never HTML; canonical tokens
+preserve draft positions. Submission expands tokens to `@label` and sends up to
+16 unique skill IDs in `additional_kwargs.skill_references`; the backend checks
+each against the user registry and agent allowlist. Legacy slash input remains.
+Project files require confirmed `additional_kwargs.files`. Conversation context
+is reconciled from tokens against the current capability and limit. Only successful
+discovery may flatten references; pending/errors preserve IDs and block reference
+sends, with retry on failure. Polish restores whole labels longest-first in one
+pass. Confirmed thread creation seeds metadata before migration; references stay
+locked during attachment. Deleting an object removes its context; undo restores
+references already attached to the draft. Labels grant no read authority. IME,
+caret, thread changes and attachment fences apply to editor and picker. The `@`
+and attachment buttons share the picker.
