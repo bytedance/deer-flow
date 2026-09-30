@@ -210,6 +210,7 @@ class McpOAuthConfig(BaseModel):
         if isinstance(value, bool):
             raise ValueError("must be an integer, not a boolean")
         return value
+
     extra_token_params: dict[str, str] = Field(default_factory=dict, description="Additional form params sent to token endpoint")
     model_config = ConfigDict(extra="allow")
 
@@ -265,6 +266,7 @@ class McpServerConfig(BaseModel):
         if isinstance(value, bool):
             raise ValueError("must be a number, not a boolean")
         return value
+
     task_toolsets: list[McpTaskToolsetConfig] = Field(
         default_factory=list,
         description="Ordinary submit/status/cancel tool groups managed by the durable MCP task runtime",

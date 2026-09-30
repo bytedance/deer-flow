@@ -92,6 +92,7 @@ class SummarizationConfig(BaseModel):
         if isinstance(value, bool):
             raise ValueError("must be an integer, not a boolean")
         return value
+
     summary_prompt: str | None = Field(
         default=None,
         description="Custom prompt template for generating summaries. If not provided, uses the default LangChain prompt.",

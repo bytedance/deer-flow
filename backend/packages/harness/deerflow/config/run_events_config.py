@@ -35,6 +35,7 @@ class RunEventsConfig(BaseModel):
         if isinstance(value, bool):
             raise ValueError("must be an integer, not a boolean")
         return value
+
     track_token_usage: bool = Field(
         default=True,
         description="Whether RunJournal should accumulate token counts to RunRow.",

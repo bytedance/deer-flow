@@ -43,6 +43,7 @@ class SandboxNetworkConfig(BaseModel):
         if isinstance(value, bool):
             raise ValueError("must be an integer, not a boolean")
         return value
+
     proxy_image: str = Field(
         default="ghcr.io/bytedance/deer-flow-sandbox-network-proxy:latest",
         min_length=1,
@@ -126,6 +127,7 @@ class SandboxOwnershipConfig(BaseModel):
         if isinstance(value, bool):
             raise ValueError("must be a number, not a boolean")
         return value
+
     key_prefix: str = Field(
         default="deerflow:sandbox:owner",
         description="Redis key prefix for ownership leases. Only applies to the redis ownership type.",
@@ -269,6 +271,7 @@ class SandboxConfig(BaseModel):
         if isinstance(value, bool):
             raise ValueError("must be a number, not a boolean")
         return value
+
     health_check_skip_seconds: float | None = Field(
         default=None,
         ge=0,
