@@ -2352,13 +2352,18 @@ export function useThreadStream({
     };
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
-    localTurnAnchorRef.current = null;
     pendingPreparedReplayRef.current = null;
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
   }, [threadId]);
+
+  // Confirming a new thread only assigns its SDK id; the displayed
+  // conversation and its submitted human anchor have not changed.
+  useEffect(() => {
+    localTurnAnchorRef.current = null;
+  }, [currentViewThreadId]);
 
   // Release entries individually once canonical history confirms their stable
   // identities. Keep unconfirmed entries across failure/refetch within this
@@ -2956,7 +2961,7 @@ export function useThreadStream({
       visibleOptimisticMessages,
     );
     const localTurnAnchor =
-      localTurnAnchorRef.current?.threadId === threadId
+      localTurnAnchorRef.current?.threadId === currentViewThreadId
         ? localTurnAnchorRef.current
         : null;
     const canonicalHistoryIdentities = new Set(
@@ -3008,6 +3013,7 @@ export function useThreadStream({
           canonicalHistoryIdentities,
         );
   }, [
+    currentViewThreadId,
     previouslyRenderedOrder,
     renderMessages,
     threadId,
@@ -3432,6 +3438,7 @@ export function useInfiniteThreads(
     sortOrder: "desc",
     select: ["thread_id", "updated_at", "values", "metadata"],
   },
+  { enabled = true }: { enabled?: boolean } = {},
 ) {
   const apiClient = getAPIClient();
   return useInfiniteQuery<
@@ -3453,6 +3460,7 @@ export function useInfiniteThreads(
     getNextPageParam: (lastPage, allPages) =>
       getInfiniteThreadsNextPageParam(lastPage, allPages),
     refetchOnWindowFocus: false,
+    enabled,
   });
 }
 

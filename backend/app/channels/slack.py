@@ -79,6 +79,16 @@ def _strip_leading_slack_bot_mention(text: str, bot_user_id: str | None) -> str:
     return text[end + 1 :].lstrip()
 
 
+def _unescape_slack_text(text: str) -> str:
+    """Decode the three entities Slack escapes in message text.
+
+    Slack sends a user-typed ``&``, ``<`` and ``>`` as ``&amp;``, ``&lt;`` and
+    ``&gt;`` so that raw ``<...>`` always marks a control sequence (mention,
+    link). ``&amp;`` is decoded last so an escaped entity is decoded only once.
+    """
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
 class SlackChannel(Channel):
     """Slack IM channel using Socket Mode (WebSocket, no public IP).
 
@@ -349,6 +359,9 @@ class SlackChannel(Channel):
         text = event.get("text", "").strip()
         if event.get("type") == "app_mention":
             text = _strip_leading_slack_bot_mention(text, self._bot_user_id)
+        # Decode after mention stripping: a real mention is a raw <@...>, while
+        # a user-typed "<@...>" arrives as &lt;@...&gt; and must stay text.
+        text = _unescape_slack_text(text)
         if not text:
             return
 

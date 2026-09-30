@@ -40,8 +40,30 @@ where `make up` replaced the operator's secret with a generated one.
 its real-Compose cases run against the installed `docker` CLI and against any
 standalone binaries listed in `DEER_FLOW_TEST_COMPOSE_BINARIES`.
 
+`doctor.py` checks the config file the Gateway would load, not a fixed
+`<checkout>/config.yaml`. It mirrors how `serve.sh` hands the two
+config-location variables to the Gateway: `.env` values for
+`DEER_FLOW_CONFIG_PATH` / `DEER_FLOW_PROJECT_ROOT` override the shell (other
+keys stay shell-first), an unquoted leading `~` in them expands as `source`
+does (a quoted one stays literal), and an unset or empty
+`DEER_FLOW_PROJECT_ROOT` becomes the checkout. It then asks the harness
+(`AppConfig.resolve_config_path`) instead of re-implementing its order. An
+override the Gateway would reject (`DEER_FLOW_CONFIG_PATH` missing,
+`DEER_FLOW_PROJECT_ROOT` not a directory) fails `config.yaml found` with the
+Gateway's error, and the config-dependent checks skip. Any failure to import
+the harness is reported, never raised: doctor diagnoses broken environments.
+Pinned by `backend/tests/test_doctor.py::TestMainConfigResolution`.
+
 Root `make install` runs pre-commit through uv, so uv's tool bin directory
 need not be on `PATH`.
+
+`config-upgrade.sh` upgrades the file the Gateway loads by asking the harness
+(`AppConfig.resolve_config_path`) rather than copying its lookup order. It
+defaults `DEER_FLOW_PROJECT_ROOT` to the checkout, as `serve.sh` does, so
+`<checkout>/config.yaml` wins over a legacy `backend/config.yaml`. A missing
+`DEER_FLOW_CONFIG_PATH` or invalid project root is an error, never a fallback.
+Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
+`backend/tests/test_config_version.py::test_config_upgrade_*` pins this.
 
 ## Shell Script Invocation Contract
 

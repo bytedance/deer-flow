@@ -155,6 +155,29 @@ class TestHashToolCalls:
 
         assert _hash_tool_calls([forward_call]) == _hash_tool_calls([reversed_call])
 
+    def test_non_finite_read_file_line_bound_does_not_crash(self):
+        """A model-emitted ``1e999`` parses to ``float('inf')`` via ``json.loads``.
+
+        ``int(float('inf'))`` raises ``OverflowError``, which the line-bound
+        coercion must treat as an unusable value — falling back to the
+        open-ended read key — instead of crashing ``after_model`` and the run.
+        """
+        inf_call = {
+            "name": "read_file",
+            "args": {"path": "/tmp/demo.py", "start_line": float("inf")},
+        }
+        open_ended_call = {"name": "read_file", "args": {"path": "/tmp/demo.py"}}
+
+        assert _hash_tool_calls([inf_call]) == _hash_tool_calls([open_ended_call])
+
+    def test_non_finite_end_line_does_not_crash(self):
+        inf_call = {
+            "name": "read_file",
+            "args": {"path": "/tmp/demo.py", "end_line": float("inf")},
+        }
+
+        assert isinstance(_hash_tool_calls([inf_call]), str)
+
     def test_stringified_non_dict_args_do_not_crash(self):
         non_dict_json_call = {"name": "bash", "args": '"echo hello"'}
         plain_string_call = {"name": "bash", "args": "echo hello"}
@@ -384,6 +407,24 @@ class TestLoopDetection:
         for _ in range(2):
             result = mw._apply(_make_state(tool_calls=call), runtime)
             assert result is None
+
+    def test_non_finite_line_bound_does_not_break_detection(self):
+        """``after_model`` must survive a read_file call whose JSON args carry
+        ``start_line: 1e999`` (parsed to ``float('inf')``): the middleware keeps
+        tracking the call instead of raising ``OverflowError`` out of the hook.
+        """
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=5)
+        runtime = _make_runtime()
+        call = [{"name": "read_file", "id": "call_inf", "args": {"path": "/tmp/demo.py", "start_line": float("inf")}}]
+
+        for _ in range(2):
+            result = mw._apply(_make_state(tool_calls=call), runtime)
+            assert result is None
+
+        result = mw._apply(_make_state(tool_calls=call), runtime)
+        assert result is None
+        assert mw._pending_warnings[_pending_key()]
+        assert "LOOP DETECTED" in mw._pending_warnings[_pending_key()][0]
 
     def test_warn_at_threshold_queues_but_does_not_mutate_state(self):
         """At warn threshold, ``after_model`` enqueues but returns None.

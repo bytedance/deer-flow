@@ -134,6 +134,11 @@ def _executor_with_declaration(monkeypatch, declaring):
         ),
     )
 
+    # Phase 3's skill-authorization resolution requires a real
+    # AuthorizationConfig; the SimpleNamespace app_config above is scoped to
+    # the declaration pass, which uses the explicitly-set provider.
+    monkeypatch.setattr(SubagentExecutor, "_resolve_skill_authorization", lambda self: None)
+
     executor = SubagentExecutor(
         config=SubagentConfig(name="researcher", description="d", system_prompt="p"),
         tools=[],

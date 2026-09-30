@@ -18,6 +18,7 @@ from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent
 from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool, reset_session_pool
 from deerflow.mcp_scope import (
     THREAD_INCARNATION_METADATA_GUARD_KEY,
+    mcp_scope_belongs_to_thread,
     mcp_session_scope_key,
     runtime_thread_incarnation,
 )
@@ -368,6 +369,131 @@ async def test_close_scope():
 
     # t2 session still exists.
     assert ("s", "t2") in {k[:2] for k in pool._entries}
+
+
+@pytest.mark.asyncio
+async def test_close_thread_scope_closes_every_incarnation_of_one_thread():
+    """Thread deletion must invalidate all of the thread's scopes, and only its own.
+
+    A thread can hold both the legacy ``user:thread`` scope and a versioned
+    ``v2:[user, thread, incarnation]`` scope, so a teardown that closed a single
+    exact key would leave the other alive. Sessions of another thread or another
+    user must survive (#5188).
+    """
+    pool = MCPSessionPool()
+
+    class CmFactory:
+        def __init__(self):
+            self.closed = False
+
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            self.closed = True
+            return False
+
+    cms: list[CmFactory] = []
+
+    def make_cm(*a, **kw):
+        cm = CmFactory()
+        cms.append(cm)
+        return cm
+
+    legacy = mcp_session_scope_key(user_id="u1", thread_id="t1", thread_incarnation=None)
+    versioned = mcp_session_scope_key(user_id="u1", thread_id="t1", thread_incarnation="inc-2")
+    other_thread = mcp_session_scope_key(user_id="u1", thread_id="t2", thread_incarnation="inc-1")
+    other_user = mcp_session_scope_key(user_id="u2", thread_id="t1", thread_incarnation="inc-1")
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        for scope in (legacy, versioned, other_thread, other_user):
+            await pool.get_session("s", scope, {"transport": "stdio", "command": "x", "args": []})
+
+    await pool.close_thread_scope(user_id="u1", thread_id="t1")
+
+    assert cms[0].closed is True, "legacy scope must be closed"
+    assert cms[1].closed is True, "versioned scope must be closed"
+    assert cms[2].closed is False, "another thread of the same user must survive"
+    assert cms[3].closed is False, "the same thread id under another user must survive"
+
+    remaining = {k[:2] for k in pool._entries}
+    assert ("s", other_thread) in remaining
+    assert ("s", other_user) in remaining
+    assert not any(mcp_scope_belongs_to_thread(k[1], user_id="u1", thread_id="t1") for k in pool._entries)
+
+
+@pytest.mark.asyncio
+async def test_close_thread_scope_tears_down_inflight_creation_for_same_thread():
+    """A session being created when the thread is deleted must not be admitted.
+
+    The pool registers a session only after ``initialize()`` succeeds, so an
+    in-flight creation for the deleted thread has to be cancelled out of
+    ``_inflight``; otherwise it commits afterwards and recreates the very state
+    the deletion removed (#5188).
+    """
+    pool = MCPSessionPool()
+    gate = asyncio.Event()
+
+    class CmFactory:
+        def __init__(self):
+            self.closed = False
+
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            self.closed = True
+            return False
+
+    established_cms: list[CmFactory] = []
+
+    def make_established(*a, **kw):
+        cm = CmFactory()
+        established_cms.append(cm)
+        return cm
+
+    blocked = _BlockingInitCm(gate)
+
+    def make_blocked(*a, **kw):
+        return blocked
+
+    target_scope = mcp_session_scope_key(user_id="u1", thread_id="t1", thread_incarnation="inc-1")
+    other_scope = mcp_session_scope_key(user_id="u1", thread_id="t2", thread_incarnation="inc-1")
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_established):
+        await pool.get_session("s", other_scope, {"transport": "stdio", "command": "x", "args": []})
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_blocked):
+        conn = {"transport": "stdio", "command": "x", "args": []}
+        creator = asyncio.create_task(pool.get_session("s", target_scope, conn))
+        for _ in range(200):
+            if target_scope in {k[1] for k in pool._inflight}:
+                break
+            await asyncio.sleep(0.005)
+        assert target_scope in {k[1] for k in pool._inflight}, "creation must be in flight"
+
+        await pool.close_thread_scope(user_id="u1", thread_id="t1")
+
+        assert target_scope not in {k[1] for k in pool._inflight}, "in-flight creation must be removed"
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await creator
+
+    assert blocked.closed is True, "the cancelled creation must still run its __aexit__"
+    assert established_cms[0].closed is False, "another thread's session must survive"
+
+    # The surviving session's owner task is legitimately parked on its close
+    # event, so retire it before checking that the cancelled creation left no
+    # owner task behind.
+    await pool.close_scope(other_scope)
+    leaked: list[asyncio.Task] = []
+    for _ in range(200):
+        current = asyncio.current_task()
+        leaked = [t for t in asyncio.all_tasks() if t is not current and not t.done() and "_run_session" in str(t.get_coro())]
+        if not leaked:
+            break
+        await asyncio.sleep(0.005)
+    assert not leaked, "owner task must not be left pending after the thread teardown"
 
 
 @pytest.mark.asyncio

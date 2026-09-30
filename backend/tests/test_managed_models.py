@@ -1,5 +1,8 @@
 """Managed models: persistence, snapshot resolution and administrator boundaries."""
 
+import asyncio
+import logging
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -61,6 +64,83 @@ def test_missing_encryption_key_never_replaced(store):
 def test_endpoint_validation(url):
     with pytest.raises(ValidationError):
         ManagedModel(name="test", model="test", base_url=url)
+
+
+@pytest.mark.asyncio
+async def test_save_model_drains_started_persistence_across_cancellation(monkeypatch):
+    from app.gateway.routers import managed_models as router
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def save(_body):
+        started.set()
+        assert release.wait(timeout=2)
+        return {"name": "managed-test", "has_api_key": True}
+
+    monkeypatch.setattr(router, "_save", save)
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    body = router.SaveModelRequest(config=profile())
+
+    task = asyncio.create_task(router.save_model(request, body))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [OSError, RuntimeError])
+async def test_save_model_logs_failed_drained_persistence_after_cancellation(store, monkeypatch, caplog, failure):
+    from app.gateway.routers import managed_models as router
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def fail_save(self, *_args, **_kwargs):
+        started.set()
+        assert release.wait(timeout=5)
+        raise failure("test-secret must not appear in logs")
+
+    monkeypatch.setattr(router, "get_app_config", lambda: AppConfig.model_validate({"sandbox": {"use": "test"}}))
+    monkeypatch.setattr(ManagedModelStore, "save", fail_save)
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    body = router.SaveModelRequest(config=profile())
+
+    with caplog.at_level(logging.ERROR, logger=router.__name__):
+        task = asyncio.create_task(router.save_model(request, body))
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    save_errors = [record for record in caplog.records if record.name == router.__name__ and "Managed model save failed" in record.message]
+    assert len(save_errors) == 1
+    expected_detail = "503" if failure is OSError else "RuntimeError"
+    assert expected_detail in save_errors[0].message
+    assert "test-secret" not in caplog.text
 
 
 @pytest.mark.asyncio

@@ -787,6 +787,10 @@ class TestClientWiring:
             patch.object(client, "_get_tools", return_value=[safe_tool]),
             patch("deerflow.authz.tool_filter.resolve_authorization_provider", return_value=provider),
             patch("deerflow.agents.lead_agent.agent.resolve_authorization_provider", return_value=provider),
+            # Phase 3 resolves a skill-authorization provider through
+            # skill_filter's own import; a separate double keeps the tool-path
+            # call assertions below exact.
+            patch("deerflow.authz.skill_filter.resolve_authorization_provider", return_value=_FilterProvider([])),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
         ):
             client._ensure_agent(client._get_runnable_config("t1"), context={"user_role": "user"})

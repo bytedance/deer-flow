@@ -34,7 +34,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Sys
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import _authorize_model_name, build_middlewares
-from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
+from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config, has_bash_tool
 from deerflow.agents.middlewares.tool_declarations import layer_one_outcome, narrow_declared_tools, verify_declared_tool_view
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
@@ -147,6 +147,30 @@ class StreamEvent:
     data: dict[str, Any] = field(default_factory=dict)
 
 
+class _AIMessageAccumulator:
+    """Accumulate text for the last content-bearing AI message id.
+
+    Metadata-only updates do not select a new id. Both ``chat()`` and the
+    headless CLI use this rule to choose the final answer.
+    """
+
+    def __init__(self) -> None:
+        # Join once at the end to avoid quadratic copying of long responses.
+        self._chunks: dict[str, list[str]] = {}
+        self.last_id = ""
+
+    def observe(self, event: StreamEvent) -> None:
+        if event.type != "messages-tuple" or event.data.get("type") != "ai":
+            return
+        if delta := event.data.get("content", ""):
+            msg_id = event.data.get("id") or ""
+            self._chunks.setdefault(msg_id, []).append(delta)
+            self.last_id = msg_id
+
+    def answer(self) -> str:
+        return "".join(self._chunks.get(self.last_id, ()))
+
+
 class DeerFlowClient:
     """Embedded Python client for DeerFlow agent system.
 
@@ -231,7 +255,7 @@ class DeerFlowClient:
         self._checkpoint_channel_mode = freeze_checkpoint_channel_mode(self._app_config.database.checkpoint_channel_mode)
         self._checkpoint_snapshot_frequency = freeze_checkpoint_snapshot_frequency(self._app_config.database.checkpoint_delta.snapshot_frequency)
 
-        if agent_name is not None and not AGENT_NAME_PATTERN.match(agent_name):
+        if agent_name is not None and not AGENT_NAME_PATTERN.fullmatch(agent_name):
             raise ValueError(f"Invalid agent name '{agent_name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
 
         self._checkpointer = checkpointer
@@ -381,8 +405,47 @@ class DeerFlowClient:
         if model_name is None and self._app_config.models:
             model_name = self._app_config.models[0].name
         model_name = _authorize_model_name(model_name, context=cfg, app_config=self._app_config)
+        # Phase 3: enforce skill authorization (Layer 1) on the embedded path
+        # too, mirroring ``_make_lead_agent`` (agent.py:675). Without this, a
+        # caller building the agent via ``DeerFlowClient(available_skills=...)``
+        # bypasses the role's ``skills`` policy: ``SkillActivationMiddleware``
+        # and the catalog/prompt would see the unfiltered set. ``self._available_skills``
+        # is left untouched (it feeds the cache key at line 282); the filtered
+        # result is a local used for assembly only.
+        from deerflow.authz.skill_filter import filter_available_skills_by_authorization, resolve_skill_authorization
+
+        # One effective identity for the whole skill surface: the filter's
+        # candidate universe, the candidate pre-load's cache bucket, and the
+        # middleware's user-scoped storage must all resolve the same user, or
+        # per-user custom skills visible to the middleware would be missing
+        # from the filtered set (and vice versa). Resolved before anything
+        # consumes a user id below.
+        effective_user_id = cfg.get("user_id") or get_effective_user_id()
+
+        skill_authorization = resolve_skill_authorization(cfg, self._app_config)
+        # Resolve the filter's candidate names through the cached catalog
+        # loader (same source and same user bucket as ``skills_list`` below)
+        # instead of letting the filter rescan storage on every build; only
+        # relevant when no agent-level allowlist is set.
+        candidate_skill_names = None
+        if self._available_skills is None and skill_authorization is not None:
+            try:
+                candidate_skill_names = [s.name for s in get_enabled_skills_for_config(self._app_config, user_id=effective_user_id)]
+            except Exception:
+                logger.warning("Failed to pre-load enabled skills for authorization candidates", exc_info=True)
+                # Leave None: the filter resolves candidates itself and applies
+                # its fail-closed semantics when that resolution also fails.
+
+        available_skills = filter_available_skills_by_authorization(
+            self._available_skills,
+            context=cfg,
+            app_config=self._app_config,
+            user_id=effective_user_id,
+            candidate_skill_names=candidate_skill_names,
+            authorization=skill_authorization,
+        )
         subagent_enabled = cfg.get("subagent_enabled", False)
-        from deerflow.config.subagents_config import effective_subagent_concurrency
+        from deerflow.config.subagents_config import effective_subagent_concurrency, effective_total_subagents_per_run
 
         # Lightweight integrations and older tests may construct a client via
         # ``__new__`` and inject only ``_app_config``. Production clients keep
@@ -398,19 +461,22 @@ class DeerFlowClient:
             self._app_config,
             execution_capacity=subagent_execution_capacity,
         )
-        max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
+        max_total_subagents = effective_total_subagents_per_run(cfg.get("max_total_subagents"), self._app_config)
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled, mcp_plugins=mcp_plugins)
 
         # Add framework-provided tools before authorization so Layer 1 sees
         # every capability that can become model-visible.
-        skills_list = get_enabled_skills_for_config(self._app_config)
-        if self._available_skills is not None:
-            skills_list = [s for s in skills_list if s.name in self._available_skills]
+        # Same effective user as the filter/candidates above so the catalog
+        # shares the per-user cache bucket and the same skill universe.
+        skills_list = get_enabled_skills_for_config(self._app_config, user_id=effective_user_id)
+        if available_skills is not None:
+            skills_list = [s for s in skills_list if s.name in available_skills]
         skill_setup = build_skill_search_setup(
             skills_list,
             enabled=self._app_config.skills.deferred_discovery,
             container_base_path=self._app_config.skills.container_path,
+            skill_authorization=skill_authorization,
         )
         from deerflow.agents.task_continuity.tools import append_task_continuity_tools
 
@@ -445,7 +511,7 @@ class DeerFlowClient:
                 config,
                 model_name=model_name,
                 agent_name=self._agent_name,
-                available_skills=self._available_skills,
+                available_skills=available_skills,
                 memory_enabled=memory_enabled,
                 custom_middlewares=self._middlewares,
                 app_config=self._app_config,
@@ -453,6 +519,7 @@ class DeerFlowClient:
                 mcp_routing_middleware=mcp_routing_middleware,
                 user_id=effective_user_id,
                 authorization_provider=_authz_provider,
+                skill_authorization=skill_authorization,
                 subagent_execution_capacity=subagent_execution_capacity,
             ),
             outcome=layer_one,
@@ -480,7 +547,7 @@ class DeerFlowClient:
                 max_concurrent_subagents=max_concurrent_subagents,
                 max_total_subagents=max_total_subagents,
                 agent_name=self._agent_name,
-                available_skills=self._available_skills,
+                available_skills=available_skills,
                 app_config=self._app_config,
                 deferred_names=deferred_setup.deferred_names,
                 mcp_routing_hints_section=mcp_routing_hints_section,
@@ -488,6 +555,7 @@ class DeerFlowClient:
                 skill_names=skill_setup.skill_names or None,
                 subagent_execution_capacity=subagent_execution_capacity,
                 memory_enabled=memory_enabled,
+                bash_available=has_bash_tool(authorized_tools),
             ),
             "state_schema": get_thread_state_schema(self._checkpoint_channel_mode, self._checkpoint_snapshot_frequency),
         }
@@ -1257,18 +1325,10 @@ class DeerFlowClient:
             The accumulated text of the last AI message, or empty string
             if no AI text was produced.
         """
-        # Per-id delta lists joined once at the end — avoids the O(n²) cost
-        # of repeated ``str + str`` on a growing buffer for long responses.
-        chunks: dict[str, list[str]] = {}
-        last_id: str = ""
+        answer = _AIMessageAccumulator()
         for event in self.stream(message, thread_id=thread_id, **kwargs):
-            if event.type == "messages-tuple" and event.data.get("type") == "ai":
-                msg_id = event.data.get("id") or ""
-                delta = event.data.get("content", "")
-                if delta:
-                    chunks.setdefault(msg_id, []).append(delta)
-                    last_id = msg_id
-        return "".join(chunks.get(last_id, ()))
+            answer.observe(event)
+        return answer.answer()
 
     # ------------------------------------------------------------------
     # Public API — configuration queries

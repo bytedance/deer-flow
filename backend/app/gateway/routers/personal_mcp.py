@@ -12,6 +12,7 @@ from app.gateway.routers import mcp
 from deerflow.capabilities.runtime import ambiguous_installation_ids
 from deerflow.config.extensions_config import ExtensionsConfig, atomic_write_extensions_config, extensions_config_file_lock, extensions_config_write_lock
 from deerflow.mcp.user_config import read_user_mcp_config, user_mcp_config_path
+from deerflow.utils.file_io import await_drained
 
 router = APIRouter(prefix="/api/mcp/personal/config", tags=["mcp"])
 
@@ -102,7 +103,7 @@ async def get_configuration(request: Request):
 async def _write(request: Request, operation: str, body):
     owner = await _owner(request)
     admin = await is_admin_user(request)
-    raw = await asyncio.to_thread(_mutate, owner, operation, body, admin=admin)
+    raw = await await_drained(asyncio.to_thread(_mutate, owner, operation, body, admin=admin))
     return _response(raw)
 
 

@@ -74,6 +74,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [Sandbox 与文件系统](#sandbox-与文件系统)
     - [Agentic Browser Control](#agentic-browser-control)
     - [Context Engineering](#context-engineering)
+    - [当前任务笔记](#当前任务笔记)
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
@@ -728,7 +729,7 @@ Web UI 输入框支持浏览器侧语音听写。浏览器提供 Web Speech API 
 /goal clear        # 清除它
 ```
 
-每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容拿去和激活的 goal 比对。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。
+每次 Gateway 驱动的 run 结束后，DeerFlow 会用一个 non-thinking 的评估模型，把可见的对话内容（包括助手的工具调用和截短的工具结果）拿去和激活的 goal 比对。工具调用成功本身不代表 goal 已完成；如果助手不得不猜测缺失或含糊的信息，评估模型会报告 `needs_user_input`。评估模型必须返回一个带类型的 blocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait` 或 `goal_not_met_yet`），并附上可见证据。只有在最近一轮 assistant 回复已被持久化 checkpoint、blocker 是 `goal_not_met_yet`、评估期间 thread 没有变化、且无进展熔断器没有触发时，DeerFlow 才会注入一次 hidden continuation。安全上限默认是 8 次 hidden continuation；连续两次相同的无进展评估后就会停止。`/goal clear` 以及任何用户手动输入的新内容，优先级都高于排队中的 continuation。当 goal 被满足时，DeerFlow 会自动清除它，并发布更新后的 thread 状态。
 
 Web UI 会在输入框上方展示当前激活的 goal。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
 
@@ -796,6 +797,15 @@ workspace 的 Browser Live 客户端通过二进制 JPEG WebSocket 帧协商画�
 Gateway API 调用方可以启用 `read_conversation`，并在一次 run 中提交 `conversation_references` 列表。主 agent 随后可以分页读取这些归属会话当前可见文本的有界页面。读取权限随该次 run 结束而失效，旧消息中的文本不会授予访问权限。访问权限失效或来源被删除后，agent 已经读过的文本仍会保留在目标会话中。一条消息如果单次读取放不下，会带有续接，agent 可以继续读取剩余部分；只有在那次读取不可用时，它才会请求缺失的部分。
 
 无法在请求顶层添加字段的 SDK 客户端可以把同样的列表放在 `context.conversation_references` 中发送，`GET /api/features` 会报告该工具是否启用。启用后，Web UI 输入框会在附件按钮旁边显示一个"引用会话"按钮：最多选择你最近的三个会话，它们只附加到下一条消息上，以 chips 的形式显示在输入框与对话记录里。不会自动搜索历史。参见[配置](backend/docs/CONFIGURATION.md#reading-referenced-conversations)与[请求契约](backend/docs/API.md#referencing-a-previous-conversation)。
+
+### 当前任务笔记
+
+当前任务可通过 `task_continuity.enabled: true` 开启[任务笔记与历史回查](docs/task-continuity.md)。
+任务笔记最多八条；并行新增超出剩余名额时返回 `note_capacity`，保留原有笔记。
+启用资源句柄解析时按解析后的实际 key 计数，指向同一笔记的别名共用名额。
+同批调用中格式异常的非字典参数不会占用名额或影响正常笔记调用。
+无效 key、超过 750 字符的内容、超过四个引用或格式无效的引用 ID 也不会占用名额。
+已有 key 仍可替换或删除；同批删除及运行时失败（如来源不可读或策略拒绝）释放的名额在下一批可用，可届时重试。
 
 ### 长期记忆
 
@@ -967,11 +977,23 @@ deerflow --json  "hello"                       # 无头模式，输出按行分�
 DeerFlow 具备**系统指令执行、资源操作、业务逻辑调用**等关键高权限能力，默认设计为**部署在本地可信环境（仅本机 127.0.0.1 回环访问）**。若您将 agent 部署至不可信局域网、公网云服务器等可被多终端访问的网络环境，且未采取严格的安全防护措施，可能导致安全风险，例如：
 
 - **未授权的非法调用**：agent 功能被未授权的第三方、公网恶意扫描程序探测到，进而发起批量非法调用请求，执行系统命令、文件读写等高危操作，可能导致安全后果。
-- **合规与法律风险**：若 agent 被非法调用用于实施网络攻击、信息窃取等违法违规行为，可能产生法律责任与合规风险。
+- **合规与法律风险**：若 agent 被非法调用用于实施网络攻击、信息窃取等违法违规行为，可能面临法律责任与合规风险。
 
 ### Gateway 管理员权限等同于代码执行
 
-管理员可以注册 stdio 类型的 MCP server，其命令会在 Gateway 容器内执行。API 会把可执行命令限制在一个允许清单内（默认为 `npx`、`uvx`，可通过 `DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST` 扩展），并拒绝会导致任意代码求值的参数与环境变量。这属于纵深防御，而不是安全边界：这类启动器本身的用途就是拉取并运行远程包，因此请**将 Gateway 管理员权限视为等同于在宿主机上执行代码**，并据此谨慎授权。
+管理员可以注册 stdio 类型的 MCP server，其命令会在 Gateway 容器内执行。API 会将可执行命令限制在允许清单内（默认为 `npx`、`uvx`，可通过 `DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST` 扩展），并拒绝会导致任意代码求值的参数与环境变量。这属于纵深防御，而不是安全边界：这类启动器本身的用途就是拉取并运行远程包，因此请**将 Gateway 管理员权限视为等同于在宿主机上执行代码**，并据此谨慎授权。
+
+### 外部聊天消息角色 (External Chat Message Roles)
+
+Gateway 的 run 请求与手动线程状态更新会拒绝客户端提交的 `system` / `developer` 消息，并返回 HTTP 400，包括等价的序列化消息形式。普通聊天、附件以及 assistant/tool 历史回放仍然受支持。Session 或 PAT 认证并不会授予 system-prompt 权限；受信任的内部 run 生产者保留这一权限。
+
+这一检查用于阻止新的角色注入；它不会重写已有的 checkpoint。如果旧版本接受了一条注入的 system 消息，请使用全新的线程，或让操作人员审查并清理受影响的状态。重启服务不会移除已持久化的指令，而恢复旧的 checkpoint 可能会把它们一并恢复。
+
+本地验证可运行 `python backend/tests/poc_external_system_message_injection.py --help`。这个可选的 PoC 在隔离的旧版本上支持 `--expect vulnerable`，在修复后支持 `--expect blocked`。其帮助信息包含 PAT 创建、thread-ID 选择、浏览器后续操作，以及持久化与模型遵循之间的区别。每次运行请使用一个全新的一次性线程；该测试会追加消息。
+
+在隔离的未修复检出上，`--expect vulnerable` 仅在请求返回 200、且注入的确切消息在正常后续对话后仍以 `type=system` 保留在 checkpoint 中时，才演示“被接受”。网页回答中的标记取决于模型本身，并不能证明角色已被提升。应用修复后，用 `--expect blocked` 运行同一脚本：它要求出现特定的角色拒绝 400、checkpoint 保持不变、一次成功的普通后续对话，并且被拒绝的消息 ID 不再存在。其他 400 响应、认证、冲突或服务器错误均属无法得出结论的情况，而非通过。
+
+PoC 不会自动清理。验证完成后，请用网页侧边栏的删除操作删除该一次性聊天，并在创建了短期 PAT 的情况下吊销它。重启服务不会移除一条已持久化的注入指令。
 
 ### 部署默认值
 
@@ -1004,10 +1026,10 @@ DeerFlow 建立在开源社区大量优秀工作的基础上。所有让 DeerFlo
 
 特别感谢以下项目带来的关键支持：
 
-- **[LangChain](https://github.com/langchain-ai/langchain)**：它们提供的优秀框架支撑了我们的 LLM 交互与 chains，让整体集成和能力编排顺畅可用。
-- **[LangGraph](https://github.com/langchain-ai/langgraph)**：它们在多 agent 编排上的创新方式，是 DeerFlow 复杂工作流得以成立的重要基础。
+- **[LangChain](https://github.com/langchain-ai/langchain)**：它提供的优秀框架支撑了我们的 LLM 交互与 chains，让整体集成和能力编排顺畅可用。
+- **[LangGraph](https://github.com/langchain-ai/langgraph)**：它在多 agent 编排上的创新方式，是 DeerFlow 复杂工作流得以成立的重要基础。
 
-这些项目体现了开源协作真正的力量，我们也很高兴能继续建立在这些基础之上。
+这些项目体现了开源协作真正的力量，我们也很高兴能继续在此基础上建立。
 
 ### 核心贡献者
 

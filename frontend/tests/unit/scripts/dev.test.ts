@@ -24,6 +24,39 @@ describe("frontend dev launcher", () => {
       "--webpack",
       "--port",
       "3302",
+      "--hostname",
+      "127.0.0.1",
+    ]);
+  });
+
+  test("binds loopback by default on Windows only", () => {
+    expect(getNextDevArgs("win32")).toEqual([
+      "dev",
+      "--webpack",
+      "--hostname",
+      "127.0.0.1",
+    ]);
+    expect(getNextDevArgs("linux")).toEqual(["dev", "--webpack"]);
+    expect(getNextDevArgs("darwin")).toEqual(["dev", "--webpack"]);
+  });
+
+  test("keeps an explicit Windows hostname passthrough", () => {
+    expect(getNextDevArgs("win32", ["--", "--hostname", "0.0.0.0"])).toEqual([
+      "dev",
+      "--webpack",
+      "--hostname",
+      "0.0.0.0",
+    ]);
+    expect(getNextDevArgs("win32", ["--", "--hostname=0.0.0.0"])).toEqual([
+      "dev",
+      "--webpack",
+      "--hostname=0.0.0.0",
+    ]);
+    expect(getNextDevArgs("win32", ["--", "-H", "0.0.0.0"])).toEqual([
+      "dev",
+      "--webpack",
+      "-H",
+      "0.0.0.0",
     ]);
   });
 
@@ -31,7 +64,12 @@ describe("frontend dev launcher", () => {
     expect(getDevBundler("win32")).toBe("webpack");
     expect(getDevBundler("linux")).toBe("webpack");
     expect(getDevBundler("darwin")).toBe("webpack");
-    expect(getNextDevArgs("win32")).toEqual(["dev", "--webpack"]);
+    expect(getNextDevArgs("win32")).toEqual([
+      "dev",
+      "--webpack",
+      "--hostname",
+      "127.0.0.1",
+    ]);
     expect(getNextDevArgs("linux")).toEqual(["dev", "--webpack"]);
   });
 });
