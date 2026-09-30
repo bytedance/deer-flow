@@ -36,8 +36,10 @@ def _extract_reasoning_text(
     strip_parts: bool = True,
 ) -> str | None:
     if isinstance(reasoning, str):
-        value = reasoning.strip() if strip_parts else reasoning
-        return value if value.strip() else None
+        if strip_parts:
+            value = reasoning.strip()
+            return value if value else None
+        return reasoning if reasoning else None
 
     if not isinstance(reasoning, list):
         return None
@@ -48,9 +50,12 @@ def _extract_reasoning_text(
             continue
         text = item.get("text")
         if isinstance(text, str):
-            normalized = text.strip() if strip_parts else text
-            if normalized.strip():
-                parts.append(normalized)
+            if strip_parts:
+                normalized = text.strip()
+                if normalized:
+                    parts.append(normalized)
+            elif text != "":
+                parts.append(text)
 
     return "\n\n".join(parts) if parts else None
 
@@ -197,7 +202,7 @@ class PatchedChatMiniMax(ChatOpenAI):
         if isinstance(message_chunk, AIMessageChunk):
             if usage_metadata:
                 message_chunk.usage_metadata = usage_metadata
-            if reasoning:
+            if reasoning is not None:
                 message_chunk = _with_reasoning_content(
                     message_chunk,
                     reasoning,

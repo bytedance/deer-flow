@@ -251,3 +251,23 @@ def test_convert_chunk_to_generation_chunk_preserves_reasoning_content_deltas():
 
     assert combined.additional_kwargs["reasoning_content"] == "The user asks."
     assert combined.content == "最终答案"
+
+
+def test_convert_chunk_to_generation_chunk_preserves_whitespace_reasoning_deltas():
+    model = _make_model()
+    chunks = []
+    for reasoning in ["The", " ", "user", "\n  "]:
+        chunks.append(
+            model._convert_chunk_to_generation_chunk(
+                {"choices": [{"delta": {"reasoning_content": reasoning}}]},
+                AIMessageChunk,
+                {},
+            )
+        )
+
+    assert all(chunk is not None for chunk in chunks)
+    combined = chunks[0].message
+    for chunk in chunks[1:]:
+        combined = combined + chunk.message
+
+    assert combined.additional_kwargs["reasoning_content"] == "The user\n  "
