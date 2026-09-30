@@ -883,8 +883,8 @@ class DiscordChannel(Channel):
                 # Keep the newline that terminates this chunk, otherwise the
                 # line break is dropped and the reader sees the two messages
                 # joined together (GH#6055).
-                chunks.append(remaining[:split_at + 1])
-                remaining = remaining[split_at + 1:]
+                chunks.append(remaining[: split_at + 1])
+                remaining = remaining[split_at + 1 :]
 
         if remaining:
             chunks.append(remaining)
