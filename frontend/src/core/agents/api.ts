@@ -2,7 +2,12 @@ import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 export { fetchAgentsApiEnabled } from "@/core/features/api";
 
-import type { Agent, CreateAgentRequest, UpdateAgentRequest } from "./types";
+import type {
+  Agent,
+  AgentPackage,
+  CreateAgentRequest,
+  UpdateAgentRequest,
+} from "./types";
 
 const BACKEND_UNAVAILABLE_STATUSES = new Set([502, 503, 504]);
 
@@ -61,6 +66,34 @@ export async function createAgent(request: CreateAgentRequest): Promise<Agent> {
       throw new AgentsApiDisabledError(err.detail!);
     }
     throw new Error(err.detail ?? `Failed to create agent: ${res.statusText}`);
+  }
+  return res.json() as Promise<Agent>;
+}
+
+export async function exportAgentPackage(name: string): Promise<AgentPackage> {
+  const res = await fetch(
+    `${getBackendBaseURL()}/api/agents/${encodeURIComponent(name)}/export`,
+  );
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(err.detail ?? `Failed to export agent: ${res.statusText}`);
+  }
+  return res.json() as Promise<AgentPackage>;
+}
+
+export async function importAgentPackage(
+  agentPackage: unknown,
+  name?: string,
+): Promise<Agent> {
+  const query = name ? `?name=${encodeURIComponent(name)}` : "";
+  const res = await fetch(`${getBackendBaseURL()}/api/agents/import${query}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(agentPackage),
+  });
+  if (!res.ok) {
+    const err = (await res.json().catch(() => ({}))) as { detail?: string };
+    throw new Error(err.detail ?? `Failed to import agent: ${res.statusText}`);
   }
   return res.json() as Promise<Agent>;
 }

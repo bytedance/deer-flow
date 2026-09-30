@@ -96,6 +96,10 @@ File-type detection uses the basename so extensionless `Dockerfile` and
    definitions. Only administrators see managed-definition mutation controls;
    Custom Agent settings consume the same query and preserve stale selected names
    as removable "missing" entries instead of silently widening the allowlist.
+   The Agents gallery imports and exports versioned JSON packages through
+   `core/agents`; it may prefill an import name from untrusted JSON, but only the
+   Gateway validates or persists the package. A 409 is an explicit rename
+   prompt/error, never permission to overwrite the existing Agent.
 6. Components subscribe to thread state and render updates
 
 AI message grouping uses `extractContentFromMessage()` to identify visible answer content. A non-empty content array may contain only Anthropic thinking blocks; keep it in `assistant:processing` until answer content arrives. Cover both streamed snapshots in `tests/unit/core/messages/utils.test.ts`.
