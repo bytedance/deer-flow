@@ -172,7 +172,7 @@ export function getFileName(filepath: string) {
 }
 
 export function getFileExtension(filepath: string) {
-  return filepath.split(".").pop()!.toLocaleLowerCase();
+  return getFileName(filepath).split(".").pop()!.toLocaleLowerCase();
 }
 
 export function checkCodeFile(
