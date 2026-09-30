@@ -361,6 +361,39 @@ class TestListFilesInDir:
         assert result["count"] == 4
         assert [f["filename"] for f in result["files"]] == [".env", ".upload-note.txt", "draft.part", "visible.txt"]
 
+    def test_skips_entry_removed_during_scan(self, tmp_path):
+        """A concurrent upload cleanup must not turn listing into a 500."""
+
+        surviving = tmp_path / "present.txt"
+        surviving.write_bytes(b"ok")
+        surviving_stat = surviving.stat()
+
+        class _Entry:
+            def __init__(self, name):
+                self.name = name
+                self.path = str(tmp_path / name)
+
+            def is_file(self, follow_symlinks=False):
+                return True
+
+            def stat(self, follow_symlinks=False):
+                if self.name == "gone.txt":
+                    raise FileNotFoundError("simulated concurrent delete")
+                return surviving_stat
+
+        class _Scan:
+            def __enter__(self):
+                return iter([_Entry("gone.txt"), _Entry("present.txt")])
+
+            def __exit__(self, *args):
+                return False
+
+        with patch.object(os, "scandir", return_value=_Scan()):
+            result = list_files_in_dir(tmp_path)
+
+        assert result["count"] == 1
+        assert [entry["filename"] for entry in result["files"]] == ["present.txt"]
+
 
 # ---------------------------------------------------------------------------
 # cleanup_stale_upload_staging_files
