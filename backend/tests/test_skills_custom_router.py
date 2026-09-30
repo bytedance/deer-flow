@@ -1403,3 +1403,152 @@ class TestMultiUserSkillIsolation:
             response = client.put("/api/skills/alice-custom-skill", json={"enabled": False})
             assert response.status_code == 200
             assert response.json()["enabled"] is False
+
+
+def _make_drain_test_config(skills_root: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_custom_skill_drains_mutation_tail_across_cancellation(monkeypatch, tmp_path):
+    """A cancelled edit still settles the write/history/cache tail before unwinding."""
+    import asyncio
+    import threading
+
+    skills_root = tmp_path / "skills"
+    user_custom = _user_custom_dir(tmp_path, "default")
+    custom_dir = user_custom / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    (custom_dir / "SKILL.md").write_text(_skill_content("demo-skill"), encoding="utf-8")
+
+    from deerflow.config.paths import Paths
+
+    config = _make_drain_test_config(skills_root)
+    # Patch paths BEFORE constructing UserScopedSkillStorage: __init__ calls
+    # get_paths() to resolve the user custom root.
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: storage)
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+    monkeypatch.setattr(skills_router, "scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+
+    async def _no_static_findings(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(skills_router, "_scan_static_skill_markdown_or_raise", _no_static_findings)
+
+    refresh_calls = []
+
+    async def _refresh(user_id: str):
+        refresh_calls.append(user_id)
+
+    monkeypatch.setattr(skills_router, "refresh_user_skills_system_prompt_cache_async", _refresh)
+
+    started = threading.Event()
+    release = threading.Event()
+    original_write = UserScopedSkillStorage.write_custom_skill
+
+    def _blocked_write(self, name, relative_path, content):
+        started.set()
+        assert release.wait(timeout=5)
+        return original_write(self, name, relative_path, content)
+
+    monkeypatch.setattr(UserScopedSkillStorage, "write_custom_skill", _blocked_write)
+
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    body = skills_router.CustomSkillUpdateRequest(content=_skill_content("demo-skill", "Edited skill"))
+
+    task = asyncio.create_task(skills_router.update_custom_skill("demo-skill", body, request, config))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == body.content
+    history = storage.read_history("demo-skill")
+    assert history[-1]["action"] == "human_edit"
+    assert history[-1]["new_content"] == body.content
+    assert refresh_calls == ["default"]
+
+
+@pytest.mark.asyncio
+async def test_delete_custom_skill_drains_mutation_tail_across_cancellation(monkeypatch, tmp_path):
+    """A cancelled delete still settles the removal and the cache refresh before unwinding."""
+    import asyncio
+    import threading
+
+    skills_root = tmp_path / "skills"
+    user_custom = _user_custom_dir(tmp_path, "default")
+    custom_dir = user_custom / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    (custom_dir / "SKILL.md").write_text(_skill_content("demo-skill"), encoding="utf-8")
+
+    from deerflow.config.paths import Paths
+
+    config = _make_drain_test_config(skills_root)
+    # Patch paths BEFORE constructing UserScopedSkillStorage: __init__ calls
+    # get_paths() to resolve the user custom root.
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: storage)
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+
+    refresh_calls = []
+
+    async def _refresh(user_id: str):
+        refresh_calls.append(user_id)
+
+    monkeypatch.setattr(skills_router, "refresh_user_skills_system_prompt_cache_async", _refresh)
+
+    started = threading.Event()
+    release = threading.Event()
+    original_delete = UserScopedSkillStorage.delete_custom_skill
+
+    def _blocked_delete(self, name, *, history_meta=None):
+        started.set()
+        assert release.wait(timeout=5)
+        return original_delete(self, name, history_meta=history_meta)
+
+    monkeypatch.setattr(UserScopedSkillStorage, "delete_custom_skill", _blocked_delete)
+
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+
+    task = asyncio.create_task(skills_router.delete_custom_skill("demo-skill", request, config))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert not custom_dir.exists()
+    assert refresh_calls == ["default"]

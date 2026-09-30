@@ -44,6 +44,7 @@ from deerflow.skills.security_static_scanner import (
 )
 from deerflow.skills.storage import SkillStorage, get_or_new_user_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -553,21 +554,28 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
         prev_content = storage.read_custom_skill(skill_name)
-        await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, body.content)
-        await asyncio.to_thread(
-            storage.append_history,
-            skill_name,
-            {
-                "action": "human_edit",
-                "author": "human",
-                "thread_id": None,
-                "file_path": SKILL_MD_FILE,
-                "prev_content": prev_content,
-                "new_content": body.content,
-                "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
-            },
-        )
-        await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+
+        async def _persist_edit() -> None:
+            # The write and its history entry must settle together, and the
+            # prompt cache must not stay stale behind them: a cancelled caller
+            # drains the whole mutation tail instead of cutting it mid-sequence.
+            await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, body.content)
+            await asyncio.to_thread(
+                storage.append_history,
+                skill_name,
+                {
+                    "action": "human_edit",
+                    "author": "human",
+                    "thread_id": None,
+                    "file_path": SKILL_MD_FILE,
+                    "prev_content": prev_content,
+                    "new_content": body.content,
+                    "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
+                },
+            )
+            await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+
+        await await_drained(_persist_edit())
         return await _read_custom_skill_response(skill_name, config)
     except HTTPException:
         raise
@@ -586,20 +594,27 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         storage = _get_user_skill_storage(config)
-        await asyncio.to_thread(
-            storage.delete_custom_skill,
-            skill_name,
-            history_meta={
-                "action": "human_delete",
-                "author": "human",
-                "thread_id": None,
-                "file_path": SKILL_MD_FILE,
-                "prev_content": None,
-                "new_content": None,
-                "scanner": {"decision": "allow", "reason": "Deletion requested."},
-            },
-        )
-        await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+
+        async def _persist_delete() -> None:
+            # Same cancellation contract as the edit and rollback tails: the
+            # deletion and its history record settle before a cancelled caller
+            # unwinds, and the prompt cache reflects the removal.
+            await asyncio.to_thread(
+                storage.delete_custom_skill,
+                skill_name,
+                history_meta={
+                    "action": "human_delete",
+                    "author": "human",
+                    "thread_id": None,
+                    "file_path": SKILL_MD_FILE,
+                    "prev_content": None,
+                    "new_content": None,
+                    "scanner": {"decision": "allow", "reason": "Deletion requested."},
+                },
+            )
+            await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+
+        await await_drained(_persist_delete())
         return {"success": True}
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -683,9 +698,16 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
         if scan.decision == "block":
             await asyncio.to_thread(storage.append_history, skill_name, history_entry)
             raise HTTPException(status_code=400, detail=f"Rollback blocked by security scanner: {scan.reason}")
-        await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, target_content)
-        await asyncio.to_thread(storage.append_history, skill_name, history_entry)
-        await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+
+        async def _persist_rollback() -> None:
+            # The restore write and its history entry must settle together, and
+            # the prompt cache must reflect the restored content, before a
+            # cancelled caller unwinds.
+            await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, target_content)
+            await asyncio.to_thread(storage.append_history, skill_name, history_entry)
+            await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+
+        await await_drained(_persist_rollback())
         return await _read_custom_skill_response(skill_name, config)
     except HTTPException:
         raise
