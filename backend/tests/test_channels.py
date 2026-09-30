@@ -8893,6 +8893,11 @@ class TestSlackAllowedUsers:
 
         assert text == "ask <@U999> about <https://example.com|the doc> > now"
 
+    def test_inbound_text_decodes_entities_inside_slack_link_labels(self):
+        text = self._inbound_text_for({"text": "see <https://x.com|a&amp;b>"})
+
+        assert text == "see <https://x.com|a&b>"
+
     def test_app_mention_strips_labelled_leading_bot_mention(self):
         from app.channels.slack import SlackChannel
 
