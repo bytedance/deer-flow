@@ -223,11 +223,21 @@ def _externalize_to_sandbox(
         # raising, so we cannot rely on exception propagation here.
         sandbox.execute_command(f"mkdir -p {shlex.quote(virtual_dir)}")
         sandbox.write_file(virtual_path, content)
-        # Validate the file landed: execute_command may have silently failed
-        # to create the directory, and write_file backends differ. Refuse to
-        # hand the model an unreadable read_file path.
-        check = sandbox.execute_command(f"test -s {shlex.quote(virtual_path)} && echo OK || echo MISSING")
-        if not isinstance(check, str) or check.strip() != "OK":
+        # Validate the file landed *in full*: execute_command may have silently
+        # failed to create the directory, and write_file backends differ. A
+        # non-empty check is not enough - a write truncated part-way still
+        # passes `test -s`, and the model would then read_file a half-written
+        # output believing it complete. Compare the byte count instead.
+        # Validate the file landed *in full*: execute_command may have silently
+        # failed to create the directory, and write_file backends differ. A
+        # non-empty check is not enough - a write truncated part-way still
+        # passes `test -s`, and the model would then read_file a half-written
+        # output believing it complete. Compare the byte count instead.
+        expected_bytes = len(content.encode("utf-8"))
+        check = sandbox.execute_command(
+            f"wc -c < {shlex.quote(virtual_path)} 2>/dev/null || echo MISSING"
+        )
+        if not isinstance(check, str) or check.strip() != str(expected_bytes):
             logger.warning(
                 "Sandbox externalize validation failed: path=%s, check=%r",
                 virtual_path,
