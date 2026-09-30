@@ -280,6 +280,54 @@ def test_numeric_knob_written_without_a_value_keeps_its_default(
 
 
 @pytest.mark.parametrize(
+    ("section", "key", "attr", "default"),
+    [
+        (None, "api_key_env", "api_key_env", "OPENVIKING_API_KEY"),
+        (None, "base_url", "base_url", "http://127.0.0.1:1933"),
+        (None, "storage_path", "storage_path", ""),
+        (None, "default_peer_id", "default_peer_id", "deerflow"),
+        (None, "startup_policy", "startup_policy", "fail_fast"),
+        ("retrieval", "content_mode", "content_mode", "overview"),
+        (
+            "retrieval",
+            "injection_query",
+            "injection_query",
+            "user profile preferences important entities events ongoing goals constraints and prior decisions",
+        ),
+        ("failure_policy", "read", "read_failure_policy", "fail_open"),
+        ("failure_policy", "write", "write_failure_policy", "log_and_drop"),
+    ],
+)
+def test_string_knob_written_without_a_value_keeps_its_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    section: str | None,
+    key: str,
+    attr: str,
+    default: str,
+) -> None:
+    """``default_peer_id:`` with no value parses as None, which str() used to
+    turn into a peer literally named "None"."""
+    monkeypatch.setenv("OPENVIKING_API_KEY", "user-key")
+    config = _backend_config(tmp_path)
+    target = config if section is None else config.setdefault(section, {})
+    target[key] = None
+
+    cfg = OpenVikingConfig.from_backend_config(config)
+
+    assert getattr(cfg, attr) == default
+
+
+def test_owner_user_id_written_without_a_value_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A value-less ``owner_user_id:`` must not become a user named "None"."""
+    monkeypatch.setenv("OPENVIKING_API_KEY", "user-key")
+    config = _backend_config(tmp_path, owner_user_id=None)
+
+    with pytest.raises(ValueError, match="owner_user_id must not be empty"):
+        OpenVikingConfig.from_backend_config(config)
+
+
+@pytest.mark.parametrize(
     ("section", "key", "value"),
     [
         (None, "timeout_seconds", "soon"),

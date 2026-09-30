@@ -532,6 +532,17 @@ This release closes that milestone with **301 merged pull requests**.
   prompt now resolve the cap through one helper that treats `null` as unset and
   clamps to 1-50, so the extension-facing host policy and the release policy
   also report the enforced cap rather than an out-of-range request. ([#6088])
+- **memory:** A string knob in the Honcho, mem0, or OpenViking `backend_config`
+  written without a value (`assistant_peer:`, `api_key_env:`,
+  `default_peer_id:`, ...) now keeps its default instead of becoming the
+  literal string `"None"`. YAML parses a value-less key as `null`, the key is
+  present, so `dict.get(key, default)` returned `None` and `str()` turned it
+  into `"None"`: Honcho then used workspaces prefixed `None` instead of
+  `deerflow-u-` and an assistant peer named `None`, mem0 looked up an environment variable named
+  `None`, and OpenViking stored sessions under a `None/` directory. A
+  value-less `owner_user_id:` is now rejected as empty rather than accepted as
+  a user named `None`. Numeric knobs already treated `null` as unset
+  ([#5555]). ([#PRNUM])
 - **scheduler:** Fixed-hour cron tasks no longer fire twice on the daylight-saving
   fall-back day. `croniter` returns both occurrences of an ambiguous wall-clock
   hour (the first with `fold=0`, the second with `fold=1`). For tasks where
@@ -7550,6 +7561,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
 [#6101]: https://github.com/bytedance/deer-flow/pull/6101
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
+[#PRNUM]: https://github.com/bytedance/deer-flow/pull/PRNUM
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135
