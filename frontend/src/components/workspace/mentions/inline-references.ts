@@ -1,3 +1,7 @@
+import type { ConversationReference } from "@/core/conversation-references";
+
+export const MAX_EXPLICIT_SKILLS = 16;
+
 export type InlineReference = {
   kind: "skill" | "file" | "conversation";
   id: string;
@@ -128,4 +132,41 @@ export function renderReferenceEditor(root: HTMLElement, text: string) {
   fragment.append(document.createTextNode(text.slice(end)));
   root.replaceChildren(fragment);
   if (caret !== null) focusReferenceAt(root, Math.min(caret, text.length));
+}
+
+export function reconcileConversationReferences(
+  text: string,
+  known: ConversationReference[],
+  capability: { enabled: boolean; maxReferences: number; isLoading: boolean },
+  threadId: string,
+): { text: string; references: ConversationReference[] } {
+  // Keep the draft intact while discovery is pending; sending waits for it.
+  if (capability.isLoading) return { text, references: [] };
+  const references = new Map<string, ConversationReference>();
+  const limit = capability.enabled ? capability.maxReferences : 0;
+  const tokens = inlineReferences(text).filter(
+    (ref) => ref.kind === "conversation",
+  );
+  for (const ref of tokens) {
+    if (
+      !ref.id ||
+      ref.id === threadId ||
+      references.has(ref.id) ||
+      references.size >= limit
+    )
+      continue;
+    references.set(
+      ref.id,
+      known.find((item) => item.threadId === ref.id) ?? {
+        threadId: ref.id,
+        title: ref.label,
+      },
+    );
+  }
+  // Disabled, self, and over-limit references become honest ordinary text.
+  for (const ref of tokens.reverse()) {
+    if (!references.has(ref.id))
+      text = text.slice(0, ref.start) + `@${ref.label}` + text.slice(ref.end);
+  }
+  return { text, references: [...references.values()] };
 }

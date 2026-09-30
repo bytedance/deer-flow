@@ -311,7 +311,10 @@ Submission expands tokens to readable `@label` text and sends skill IDs in
 resolves every ID against the current user registry and agent allowlist before
 loading anything. Legacy leading slash commands remain supported.
 Project documents still use confirmed `additional_kwargs.files`; conversations
-use explicit run context. Deleting an inline object removes that context, and
+use explicit run context reconciled from tokens on every entry/send path against
+the current capability and limit. Over-limit skill sends are rejected locally.
+Confirmed thread creation seeds metadata before draft migration; reference
+mutations stay locked throughout file attachment. Deleting an inline object removes its context, and
 undo restores references already attached to this draft. Display labels grant no
 read authority. IME, selection/caret, thread changes and async attachment fences
 apply to the editor and picker. The `@` and attachment buttons share the picker.

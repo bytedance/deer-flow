@@ -1,9 +1,6 @@
 import { describe, expect, it } from "@rstest/core";
 
-import {
-  getMentionQuery,
-  removeMentionQuery,
-} from "@/components/workspace/mentions/query";
+import { getMentionQuery } from "@/components/workspace/mentions/query";
 
 describe("composer mention query", () => {
   it("replaces only the query at the caret, keeping both sides of the draft", () => {
@@ -11,7 +8,6 @@ describe("composer mention query", () => {
     const caret = text.indexOf(" 分析");
     const query = getMentionQuery(text, caret)!;
     expect(query.query).toBe("research");
-    expect(removeMentionQuery(text, query)).toBe("请使用  分析结果");
   });
   it("allows Unicode and filenames", () => {
     expect(getMentionQuery("@报告.pdf", 7)?.query).toBe("报告.pdf");

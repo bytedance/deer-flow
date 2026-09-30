@@ -263,7 +263,13 @@ export default function ChatPage() {
       return;
     }
     try {
-      await createThread(threadId, projectParam);
+      const created = await createThread(threadId, projectParam);
+      // Keep confirmed membership available while the first metadata read is pending
+      // or fails after the composer materializes this new project thread.
+      queryClient.setQueryData(
+        ["thread", "metadata", threadId, false],
+        created,
+      );
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
       });

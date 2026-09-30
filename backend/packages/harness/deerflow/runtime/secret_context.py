@@ -116,9 +116,10 @@ def read_slash_skill_source_paths(context: Any, *, owner_token: str) -> tuple[st
     first = read_slash_skill_source_path(context, owner_token=owner_token)
     if first is None:
         return ()
-    paths = context[_SLASH_SECRET_SOURCE_KEY].get("paths")
-    if paths is None:
+    source = context[_SLASH_SECRET_SOURCE_KEY]
+    if "paths" not in source:
         return (first,)
+    paths = source["paths"]
     if not isinstance(paths, list) or not 1 <= len(paths) <= 16 or paths[0] != first or any(not isinstance(path, str) or not path for path in paths):
         return ()
     return tuple(dict.fromkeys(paths))

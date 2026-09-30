@@ -16,12 +16,14 @@ export function SlashSkillChip({
   className,
   onRemove,
   removeLabel,
+  disabled = false,
 }: {
   name: string;
   className?: string;
   /** When provided, the chip renders as a removable button with a close icon. */
   onRemove?: () => void;
   removeLabel?: string;
+  disabled?: boolean;
 }) {
   if (onRemove) {
     return (
@@ -32,6 +34,7 @@ export function SlashSkillChip({
           "hover:bg-primary/20 cursor-pointer gap-1 transition-colors",
           className,
         )}
+        disabled={disabled}
         onClick={onRemove}
         type="button"
       >

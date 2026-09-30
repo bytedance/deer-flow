@@ -77,6 +77,7 @@ import {
   buildConversationReferenceMetadata,
   type ConversationReference,
 } from "@/core/conversation-references";
+import { useConversationReferencesCapability } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
 import {
@@ -167,6 +168,8 @@ import {
 } from "./input-box-helpers";
 import {
   inlineReferences,
+  reconcileConversationReferences,
+  MAX_EXPLICIT_SKILLS,
   referenceToken,
   readableReferences,
   readReferenceEditor,
@@ -415,6 +418,10 @@ export function InputBox({
   const searchParams = useSearchParams();
   const mentionListId = useId();
   const mentionPickerRef = useRef<MentionPickerHandle>(null);
+  const [activeMentionOption, setActiveMentionOption] = useState<
+    string | undefined
+  >();
+  const conversationCapability = useConversationReferencesCapability();
   const [mentionQuery, setMentionQuery] = useState<MentionQuery | null>(null);
   const [mentionButtonOpen, setMentionButtonOpen] = useState(false);
   const [mentionBusy, setMentionBusy] = useState(false);
@@ -458,7 +465,13 @@ export function InputBox({
   // keeps it across a Strict-Mode effect replay.
   const [projectAttachments, setProjectAttachments] =
     useStagedProjectAttachments(threadId);
-  const { skills, isLoading: skillsLoading } = useSkills();
+  const {
+    skills,
+    isLoading: skillsLoading,
+    isFetching: skillsFetching,
+    error: skillsError,
+    refetch: refetchSkills,
+  } = useSkills();
   const { data: uploadLimits } = useUploadLimits(threadId);
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -470,6 +483,34 @@ export function InputBox({
     [textInput.value],
   );
   const hasInlineReferences = inlineRefs.length > 0;
+  const conversationReferencesLoading =
+    conversationCapability.isLoading &&
+    inlineRefs.some((ref) => ref.kind === "conversation");
+  const reconciledConversations = useMemo(
+    () =>
+      reconcileConversationReferences(
+        textInput.value,
+        conversationReferences,
+        {
+          enabled: conversationCapability.enabled,
+          maxReferences: conversationCapability.maxReferences,
+          isLoading: conversationCapability.isLoading,
+        },
+        threadId,
+      ),
+    [
+      textInput.value,
+      conversationReferences,
+      conversationCapability.enabled,
+      conversationCapability.maxReferences,
+      conversationCapability.isLoading,
+      threadId,
+    ],
+  );
+  useEffect(() => {
+    if (reconciledConversations.text !== textInput.value)
+      setTextInput(reconciledConversations.text);
+  }, [reconciledConversations.text, textInput.value, setTextInput]);
   const [inlineEditorActive, setInlineEditorActive] = useState(false);
   const projectReferenceCache = useRef(
     new Map<string, (typeof projectAttachments)[number]>(),
@@ -510,7 +551,11 @@ export function InputBox({
   >(null);
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
-  const pendingDraftSubmissionKeyRef = useRef<string | null>(null);
+  const pendingDraftSubmissionRef = useRef<{
+    key: string;
+    text: string;
+    skillName: string | null;
+  } | null>(null);
   const acceptedDraftRef = useRef<{
     key: string;
     text: string;
@@ -859,17 +904,35 @@ export function InputBox({
       if (
         !draft.text &&
         !draft.skillName &&
-        pendingDraftSubmissionKeyRef.current === key
+        pendingDraftSubmissionRef.current?.key === key
       ) {
         return null;
       }
-      if (draft.text || draft.skillName) {
-        pendingDraftSubmissionKeyRef.current = null;
+      const pending = pendingDraftSubmissionRef.current;
+      if (
+        pending?.key === key &&
+        (draft.text !== pending.text || draft.skillName !== pending.skillName)
+      ) {
+        pendingDraftSubmissionRef.current = null;
       }
 
+      const reconciled = reconcileConversationReferences(
+        draft.text,
+        conversationReferences,
+        conversationCapability,
+        threadId,
+      );
       draft = {
         ...draft,
-        ...(conversationReferences.length ? { conversationReferences } : {}),
+        text: reconciled.text,
+        conversationReferences: conversationCapability.isLoading
+          ? conversationReferences.filter((item) =>
+              inlineReferences(draft.text).some(
+                (ref) =>
+                  ref.kind === "conversation" && ref.id === item.threadId,
+              ),
+            )
+          : reconciled.references,
       };
       latestDraftRef.current = { key, draft };
       cancelDraftSaveTimer();
@@ -888,7 +951,13 @@ export function InputBox({
       draftSaveTimerRef.current = timer;
       return timer;
     },
-    [cancelDraftSaveTimer, draftKey, conversationReferences],
+    [
+      cancelDraftSaveTimer,
+      draftKey,
+      conversationReferences,
+      conversationCapability,
+      threadId,
+    ],
   );
   const flushLatestDraft = useCallback(
     (expectedKey?: string) => {
@@ -945,7 +1014,7 @@ export function InputBox({
     mentionEpoch.current += 1;
     setInputPolishUndo(null);
     setHydratedDraftKey(null);
-    pendingDraftSubmissionKeyRef.current = null;
+    pendingDraftSubmissionRef.current = null;
     acceptedDraftRef.current = null;
     latestDraftRef.current = null;
     invalidateDraftSaveTimer();
@@ -1344,14 +1413,21 @@ export function InputBox({
       const quotes = sidecar?.conversationQuotes ?? [];
       const quoteIds = quotes.map((quote) => quote.id);
       const quoteContexts = quotes.map((quote) => quote.context);
-      pendingDraftSubmissionKeyRef.current = draftKey;
       const currentReferences = inlineReferences(textInput.value);
-      const activeConversations = conversationReferences.filter((reference) =>
-        currentReferences.some(
-          (item) =>
-            item.kind === "conversation" && item.id === reference.threadId,
-        ),
-      );
+      if (
+        conversationCapability.isLoading &&
+        currentReferences.some((ref) => ref.kind === "conversation")
+      ) {
+        return Promise.reject(
+          new Error("Conversation capability is still loading."),
+        );
+      }
+      const activeConversations = reconcileConversationReferences(
+        textInput.value,
+        conversationReferences,
+        conversationCapability,
+        threadId,
+      ).references;
       const referenceIds = activeConversations.map(
         (reference) => reference.threadId,
       );
@@ -1387,6 +1463,16 @@ export function InputBox({
         !skillReferences.includes(selectedSlashSkill.name)
       )
         skillReferences.unshift(selectedSlashSkill.name);
+      if (skillReferences.length > MAX_EXPLICIT_SKILLS) {
+        toast.warning(t.inputBox.mentionMultipleSkills);
+        return Promise.reject(new Error("Too many skill references."));
+      }
+      pendingDraftSubmissionRef.current = {
+        key: draftKey,
+        text: textInput.value,
+        skillName:
+          selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+      };
       const additionalKwargs = {
         ...(skillReferences.length
           ? { skill_references: skillReferences }
@@ -1416,7 +1502,7 @@ export function InputBox({
         onSent: () => {
           setMentionQuery(null);
           setMentionButtonOpen(false);
-          if (pendingDraftSubmissionKeyRef.current === draftKey) {
+          if (pendingDraftSubmissionRef.current?.key === draftKey) {
             acceptedDraftRef.current = {
               key: draftKey,
               text: textInput.value,
@@ -1425,7 +1511,7 @@ export function InputBox({
                   ? selectedSlashSkill.name
                   : null,
             };
-            pendingDraftSubmissionKeyRef.current = null;
+            pendingDraftSubmissionRef.current = null;
             latestDraftRef.current = null;
             invalidateDraftSaveTimer();
             clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
@@ -1473,6 +1559,9 @@ export function InputBox({
       selectedModel,
       sidecar,
       t.inputBox.suggestionPlaceholderRequired,
+      t.inputBox.mentionMultipleSkills,
+      conversationCapability,
+      threadId,
       uploadLimits,
     ],
   );
@@ -1790,6 +1879,43 @@ export function InputBox({
       const caret =
         mentionQuery?.start ??
         Math.min(composerCaretRef.current, originalText.length);
+      const selectionId =
+        selection.kind === "skill"
+          ? selection.skill.name
+          : selection.kind === "conversation"
+            ? selection.reference.threadId
+            : null;
+      const selected =
+        selectionId &&
+        (inlineReferences(originalText).some(
+          (ref) => ref.kind === selection.kind && ref.id === selectionId,
+        ) ||
+          (selection.kind === "skill" &&
+            selectedSlashSkill?.name === selectionId));
+      if (selected) {
+        let next = mentionQuery
+          ? originalText.slice(0, mentionQuery.start) +
+            originalText.slice(mentionQuery.end)
+          : originalText;
+        for (const ref of inlineReferences(next).reverse()) {
+          if (ref.kind === selection.kind && ref.id === selectionId)
+            next = next.slice(0, ref.start) + next.slice(ref.end);
+        }
+        if (
+          selection.kind === "skill" &&
+          selectedSlashSkill?.name === selectionId
+        )
+          setSelectedSlashSkill(null);
+        if (selection.kind === "conversation")
+          setConversationReferences((previous) =>
+            previous.filter((ref) => ref.threadId !== selectionId),
+          );
+        textInput.setInput(next);
+        setMentionQuery(null);
+        setMentionButtonOpen(false);
+        focusComposerAt(Math.min(caret, next.length));
+        return;
+      }
       let token = "";
       if (selection.kind === "skill")
         token = referenceToken(
@@ -2462,6 +2588,7 @@ export function InputBox({
   const handlePromptTextareaChange = useCallback(
     (event: ChangeEvent<HTMLTextAreaElement>) => {
       acceptedDraftRef.current = null;
+      pendingDraftSubmissionRef.current = null;
       updateMentionQuery(
         event.currentTarget.value,
         event.currentTarget.selectionStart,
@@ -2492,6 +2619,7 @@ export function InputBox({
   const updateInlineSkillTextInput = useCallback(
     (element: HTMLElement) => {
       acceptedDraftRef.current = null;
+      pendingDraftSubmissionRef.current = null;
       if (voiceListening) {
         abortVoiceInput();
       }
@@ -2499,20 +2627,15 @@ export function InputBox({
       promptHistoryDraftRef.current = "";
       const nextText = readReferenceEditor(element);
       const refs = inlineReferences(nextText);
-      setConversationReferences((previous) => {
-        const unique = new Map(
-          refs
-            .filter((ref) => ref.kind === "conversation")
-            .map((ref) => [ref.id, ref]),
-        );
-        return [...unique.values()].slice(0, 3).map(
-          (ref) =>
-            previous.find((item) => item.threadId === ref.id) ?? {
-              threadId: ref.id,
-              title: ref.label,
-            },
-        );
-      });
+      setConversationReferences(
+        (previous) =>
+          reconcileConversationReferences(
+            nextText,
+            previous,
+            conversationCapability,
+            threadId,
+          ).references,
+      );
       setProjectAttachments((previous) => {
         const ids = new Set(
           refs.filter((ref) => ref.kind === "file").map((ref) => ref.id),
@@ -2538,6 +2661,8 @@ export function InputBox({
       });
     },
     [
+      conversationCapability,
+      threadId,
       abortVoiceInput,
       abortInputPolishRequest,
       setProjectAttachments,
@@ -2649,6 +2774,7 @@ export function InputBox({
   );
 
   const clearSelectedSlashSkill = useCallback(() => {
+    if (mentionInFlight.current) return;
     setSelectedSlashSkill(null);
     requestAnimationFrame(() => {
       textareaRef.current?.focus();
@@ -2856,7 +2982,12 @@ export function InputBox({
                 .map((ref) => ref.id),
               ...(selectedSlashSkill ? [selectedSlashSkill.name] : []),
             ]}
-            references={conversationReferences}
+            references={reconciledConversations.references}
+            capability={conversationCapability}
+            skillsLoading={skillsLoading || skillsFetching}
+            skillsError={skillsError}
+            onRetrySkills={refetchSkills}
+            onActiveOptionChange={setActiveMentionOption}
             threadId={threadId}
             projectId={projectId}
             busy={mentionBusy}
@@ -3017,6 +3148,7 @@ export function InputBox({
                 <SlashSkillChip
                   name={selectedSlashSkill.name}
                   className="mr-2 border-0 bg-transparent px-0 align-baseline font-sans text-base text-blue-600 shadow-none"
+                  disabled={composerLocked}
                   onRemove={clearSelectedSlashSkill}
                   removeLabel={t.inputBox.mentionRemoveSkill}
                 />
@@ -3038,6 +3170,9 @@ export function InputBox({
                 }}
                 onFocus={() => setTextareaFocused(true)}
                 aria-controls={showMentions ? mentionListId : undefined}
+                aria-activedescendant={
+                  showMentions ? activeMentionOption : undefined
+                }
                 onClick={(event) =>
                   updateMentionQuery(
                     readReferenceEditor(event.currentTarget),
@@ -3082,6 +3217,9 @@ export function InputBox({
               defaultValue={initialValue}
               onBlur={() => setTextareaFocused(false)}
               aria-controls={showMentions ? mentionListId : undefined}
+              aria-activedescendant={
+                showMentions ? activeMentionOption : undefined
+              }
               onSelect={(event) => {
                 const input = event.currentTarget;
                 if (!mentionButtonOpen && !mentionInFlight.current)
@@ -3427,7 +3565,12 @@ export function InputBox({
             </ModelPicker>
             <PromptInputSubmit
               className="rounded-full"
-              disabled={composerLocked || stopDenied || sendDenied}
+              disabled={
+                composerLocked ||
+                stopDenied ||
+                sendDenied ||
+                (status !== "streaming" && conversationReferencesLoading)
+              }
               variant="outline"
               status={status}
               // A bare disabled square reads as a broken composer; explain

@@ -195,9 +195,10 @@ class SkillActivationMiddleware(AgentMiddleware):
         )
 
     @staticmethod
-    def _build_activation_reminder(activation: _Activation) -> str:
+    def _build_activation_reminder(activation: _Activation, *, include_user_request: bool = True) -> str:
         user_request = activation.remaining_text or ("No additional task text was provided after the slash skill command. Ask the user what they want to do with this skill if the next step is unclear.")
         escaped_user_request = html.escape(user_request, quote=False)
+        request_block = f"Treat the task text as:\n<user_request>\n{escaped_user_request}\n</user_request>\n" if include_user_request else ""
         escaped_skill_content = html.escape(activation.skill_content, quote=False)
         escaped_skill_name = html.escape(activation.skill_name, quote=True)
         escaped_category = html.escape(activation.category, quote=True)
@@ -206,11 +207,7 @@ class SkillActivationMiddleware(AgentMiddleware):
         editable_str = "true" if activation.editable else "false"
         return f"""<slash_skill_activation>
 The user explicitly activated the `{escaped_skill_name}` skill for this turn.
-Treat the task text as:
-<user_request>
-{escaped_user_request}
-</user_request>
-
+{request_block}
 Follow this skill before choosing a general workflow. Load supporting resources from the same skill directory only when needed.
 
 <skill name="{escaped_skill_name}" category="{escaped_category}" path="{escaped_path}" sha256="{escaped_content_hash}" editable="{editable_str}">
@@ -300,7 +297,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
 
         content = get_original_user_content_text(target.content, target.additional_kwargs)
         names = target.additional_kwargs.get("skill_references")
-        if names is not None:
+        if names is not None and names != []:
             if not isinstance(names, list) or not 1 <= len(names) <= 16:
                 resolution = _ActivationResolution(failure_message="Select between 1 and 16 skills.")
             else:
@@ -383,7 +380,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
         # (computed once there, threaded through here) rather than recomputed.
         if run_context is not None:
             run_context[_SLASH_SKILL_ACTIVATION_RUN_KEY] = run_key
-        activation_msg = self._make_activation_message(target, "\n\n".join(self._build_activation_reminder(item) for item in (activation, *activation.additional_activations)))
+        activation_msg = self._make_activation_message(target, "\n\n".join(self._build_activation_reminder(item, include_user_request=index == 0) for index, item in enumerate((activation, *activation.additional_activations))))
         messages = list(request.messages)
         messages.insert(target_index, activation_msg)
         return request.override(messages=messages), activation

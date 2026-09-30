@@ -343,7 +343,8 @@ export const zhCN: Translations = {
     mentionRetry: "重试",
     mentionAttaching: "正在添加文件…",
     mentionAttachFailed: "文件添加失败，请重试。",
-    mentionSingleSkill: "每条消息使用一个技能，选择其他技能会替换当前技能。",
+    mentionMultipleSkills:
+      "每条消息最多选择 16 个技能，再次选择已勾选技能可移除。",
     mentionNoProject: "在项目对话中可引用该项目的文档。",
     mentionRemoveSkill: "移除技能",
     mentionUnavailable: "文件不可用",

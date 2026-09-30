@@ -7,14 +7,19 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 
 import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
 import { InputBox } from "@/components/workspace/input-box";
+import { referenceToken } from "@/components/workspace/mentions/inline-references";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { DEFAULT_LOCALE } from "@/core/i18n";
 import { I18nProvider } from "@/core/i18n/context";
+import {
+  buildComposerDraftKey,
+  writeComposerDraft,
+} from "@/core/threads/composer-draft";
 
 rs.mock("next/navigation", () => ({
   useRouter: () => ({ push: rs.fn(), replace: rs.fn(), refresh: rs.fn() }),
@@ -33,6 +38,11 @@ rs.mock("@/core/models/hooks", () => ({
   }),
 }));
 
+const skillsQuery = {
+  isLoading: false,
+  error: null as Error | null,
+  refetch: rs.fn(),
+};
 rs.mock("@/core/skills/hooks", () => ({
   useSkills: () => ({
     skills: [
@@ -45,8 +55,7 @@ rs.mock("@/core/skills/hooks", () => ({
         editable: false,
       },
     ],
-    isLoading: false,
-    error: null,
+    ...skillsQuery,
   }),
 }));
 
@@ -57,6 +66,7 @@ function renderComposer(
   threadId = "mentions-thread",
   onSubmit = rs.fn(),
   onPrepareThread = rs.fn(),
+  props: Partial<ComponentProps<typeof InputBox>> = {},
 ) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -84,6 +94,7 @@ function renderComposer(
                 onPrepareThread={onPrepareThread}
                 status="ready"
                 context={{ mode: "flash" } as never}
+                {...props}
               />
             </PromptInputProvider>
           </ThreadContext.Provider>
@@ -145,6 +156,11 @@ rs.mock("@/core/threads/hooks", () => ({
 
 beforeEach(() => {
   capability.enabled = true;
+  capability.maxReferences = 3;
+  capability.isLoading = false;
+  skillsQuery.isLoading = false;
+  skillsQuery.error = null;
+  skillsQuery.refetch.mockReset();
   attach.mockReset();
   attach.mockResolvedValue({
     filename: "report.pdf",
@@ -343,4 +359,245 @@ describe("unified composer mentions", () => {
       screen.getByRole("option", { name: "Brief 4" }).hasAttribute("disabled"),
     ).toBe(false);
   });
+});
+
+function saveDraft(threadId: string, text: string, extra = {}) {
+  writeComposerDraft(
+    window.sessionStorage,
+    buildComposerDraftKey({
+      userId: "user-1",
+      agentName: null,
+      threadId,
+    }),
+    { text, skillName: null, ...extra },
+  );
+}
+
+describe("reference review regressions", () => {
+  for (const entry of ["paste", "draft"] as const) {
+    it(`resolves conversation tokens from ${entry} without another editor input`, async () => {
+      const text =
+        referenceToken("conversation", "source-1", "Writer brief") +
+        " summarize";
+      if (entry === "draft") saveDraft("raw-token", text);
+      const submit = rs.fn();
+      const { container } = renderComposer("raw-token", submit);
+      if (entry === "paste") enterMention(container, text);
+      await waitFor(() =>
+        expect(screen.getByTestId("conversation-reference-chip")).toBeTruthy(),
+      );
+      fireEvent.submit(container.querySelector("form")!);
+      await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+      expect(submit.mock.calls[0]![1].conversationReferences).toEqual([
+        "source-1",
+      ]);
+      expect(
+        submit.mock.calls[0]![1].additionalKwargs.conversation_references,
+      ).toEqual([{ thread_id: "source-1", title: "Writer brief" }]);
+    });
+  }
+  it("drops disabled restored context and renders its label as ordinary text", async () => {
+    capability.enabled = false;
+    saveDraft(
+      "disabled-restore",
+      referenceToken("conversation", "source-1", "Writer brief") + " summarize",
+      {
+        conversationReferences: [
+          { threadId: "source-1", title: "Writer brief" },
+        ],
+      },
+    );
+    const submit = rs.fn();
+    const { container } = renderComposer("disabled-restore", submit);
+    await waitFor(() =>
+      expect(screen.queryByTestId("conversation-reference-chip")).toBeNull(),
+    );
+    fireEvent.submit(container.querySelector("form")!);
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(submit.mock.calls[0]![1].conversationReferences).toBeUndefined();
+    expect(submit.mock.calls[0]![0].text).toContain("@Writer brief");
+  });
+  it("uses the current capability limit on paste, edits, and picker counts", async () => {
+    capability.maxReferences = 4;
+    const submit = rs.fn();
+    const { container } = renderComposer("cap-four", submit);
+    enterMention(
+      container,
+      [1, 2, 3, 4, 5]
+        .map((id) =>
+          referenceToken("conversation", `source-${id}`, `Brief ${id}`),
+        )
+        .join(" "),
+    );
+    await waitFor(() =>
+      expect(screen.getAllByTestId("conversation-reference-chip")).toHaveLength(
+        4,
+      ),
+    );
+    const editor = container.querySelector('[contenteditable="true"]')!;
+    fireEvent.input(editor);
+    fireEvent.submit(container.querySelector("form")!);
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(submit.mock.calls[0]![1].conversationReferences).toEqual([
+      "source-1",
+      "source-2",
+      "source-3",
+      "source-4",
+    ]);
+  });
+  it("does not send while conversation capability is loading", async () => {
+    capability.isLoading = true;
+    const submit = rs.fn();
+    const { container } = renderComposer("cap-loading", submit);
+    enterMention(
+      container,
+      referenceToken("conversation", "source-1", "Brief"),
+    );
+    fireEvent.submit(container.querySelector("form")!);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(submit).not.toHaveBeenCalled();
+  });
+  it("rejects pasted skill batches over the cap without losing the draft", async () => {
+    const submit = rs.fn();
+    const { container } = renderComposer("skill-cap", submit);
+    enterMention(
+      container,
+      Array.from({ length: 17 }, (_, i) =>
+        referenceToken("skill", `skill-${i}`, `skill-${i}`),
+      ).join(" "),
+    );
+    fireEvent.submit(container.querySelector("form")!);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(submit).not.toHaveBeenCalled();
+    expect(screen.getAllByTestId("inline-skill-reference")).toHaveLength(17);
+  });
+  it("toggles an already selected skill instead of inserting duplicate tokens", async () => {
+    const { container } = renderComposer("toggle-skill");
+    enterMention(container, "@res");
+    fireEvent.click(
+      screen.getByRole("option", { name: "research Research a topic" }),
+    );
+    enterMention(container, "@res");
+    const option = screen.getByRole("option", {
+      name: "research Research a topic",
+    });
+    expect(option.getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(option);
+    await waitFor(() =>
+      expect(screen.queryByTestId("inline-skill-reference")).toBeNull(),
+    );
+  });
+  it("reports skills loading and retries a failed skills query", () => {
+    skillsQuery.error = new Error("offline");
+    renderComposer("skill-error");
+    fireEvent.click(screen.getByTestId("mention-button"));
+    expect(screen.getByRole("alert").textContent).toContain("Could not load");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(skillsQuery.refetch).toHaveBeenCalledTimes(1);
+  });
+  it("exposes the keyboard highlight separately from actual selections", () => {
+    const { container } = renderComposer("aria");
+    const input = enterMention(container, "@res");
+    const option = screen.getByRole("option", {
+      name: "research Research a topic",
+    });
+    expect(option.getAttribute("aria-selected")).toBe("false");
+    expect(option.id).not.toBe("");
+    expect(input.getAttribute("aria-activedescendant")).toBe(option.id);
+  });
+  it("locks legacy skill removal until attachment migration settles", async () => {
+    let finish!: (value: unknown) => void;
+    attach.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    saveDraft("new", "Read @report", { skillName: "research" });
+    const materialized = rs.fn();
+    const { container } = renderComposer("materialized", rs.fn(), rs.fn(), {
+      draftThreadId: "new",
+      onReferenceFileAttached: materialized,
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Remove skill" })).toBeTruthy(),
+    );
+    fireEvent.click(screen.getByTestId("mention-button"));
+    fireEvent.click(screen.getByRole("option", { name: "report.pdf" }));
+    await waitFor(() => expect(attach).toHaveBeenCalled());
+    const remove = screen.getByRole("button", { name: "Remove skill" });
+    expect(remove.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(remove);
+    finish({
+      filename: "report.pdf",
+      size_bytes: 10,
+      virtual_path: "/mnt/user-data/uploads/report.pdf",
+      artifact_url: "/artifact",
+    });
+    await waitFor(() => expect(materialized).toHaveBeenCalledTimes(1));
+    expect(container.textContent).toContain("@research");
+  });
+});
+
+it("announces a pending skills request in the picker", () => {
+  skillsQuery.isLoading = true;
+  renderComposer("skills-pending");
+  fireEvent.click(screen.getByTestId("mention-button"));
+  expect(screen.getByRole("listbox").getAttribute("aria-busy")).toBe("true");
+  expect(screen.getByRole("status").textContent).toContain("Loading");
+});
+
+it("the picker search exposes its active option while selected state remains independent", () => {
+  renderComposer("search-aria");
+  fireEvent.click(screen.getByTestId("mention-button"));
+  const search = screen.getByRole("combobox");
+  const research = screen.getByRole("option", {
+    name: "research Research a topic",
+  });
+  expect(search.getAttribute("aria-activedescendant")).toBe(research.id);
+  expect(research.getAttribute("aria-selected")).toBe("false");
+  fireEvent.keyDown(search, { key: "ArrowDown" });
+  expect(search.getAttribute("aria-activedescendant")).toBe(
+    screen.getByRole("option", { name: "report.pdf" }).id,
+  );
+  expect(research.getAttribute("aria-selected")).toBe("false");
+});
+
+it("pasted file labels never manufacture confirmed attachment context", async () => {
+  const submit = rs.fn();
+  const { container } = renderComposer("file-paste", submit);
+  enterMention(
+    container,
+    referenceToken("file", "doc-1", "report.pdf") + " read",
+  );
+  fireEvent.submit(container.querySelector("form")!);
+  await waitFor(() => expect(submit).toHaveBeenCalled());
+  expect(submit.mock.calls[0]![1].additionalKwargs?.files).toBeUndefined();
+  expect(attach).not.toHaveBeenCalled();
+});
+
+it("a capability rerender before send acceptance cannot revive the accepted draft", async () => {
+  let accepted!: () => void;
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const submit = rs.fn((_message, options) => {
+    accepted = options.onSent;
+    return pending;
+  });
+  const { container } = renderComposer("accepted-rerender", submit);
+  enterMention(container, "Accepted task");
+  fireEvent.submit(container.querySelector("form")!);
+  await waitFor(() => expect(submit).toHaveBeenCalledTimes(1));
+  // Opening the picker changes state without editing the submitted snapshot.
+  fireEvent.click(screen.getByTestId("mention-button"));
+  await waitFor(() =>
+    expect(screen.getByTestId("mention-picker")).toBeTruthy(),
+  );
+  accepted();
+  fireEvent(window, new Event("pagehide"));
+  expect(Object.values(window.sessionStorage).join("\n")).not.toContain(
+    "Accepted task",
+  );
+  release();
 });

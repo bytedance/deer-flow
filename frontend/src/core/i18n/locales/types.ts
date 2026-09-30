@@ -314,7 +314,7 @@ export interface Translations {
     mentionRetry: string;
     mentionAttaching: string;
     mentionAttachFailed: string;
-    mentionSingleSkill: string;
+    mentionMultipleSkills: string;
     mentionNoProject: string;
     mentionRemoveSkill: string;
     mentionUnavailable: string;

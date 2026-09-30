@@ -19,7 +19,6 @@ import {
 } from "react";
 
 import type { ConversationReference } from "@/core/conversation-references";
-import { useConversationReferencesCapability } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { useInfiniteProjectDocuments } from "@/core/projects/hooks";
 import type { ProjectDocument } from "@/core/projects/types";
@@ -28,6 +27,8 @@ import { useInfiniteThreads } from "@/core/threads/hooks";
 import { agentNameOfThread, titleOfThread } from "@/core/threads/utils";
 import { isCompositionConfirmEnter, isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
+
+import { MAX_EXPLICIT_SKILLS } from "./inline-references";
 
 export type MentionSelection =
   | { kind: "skill"; skill: Skill }
@@ -51,6 +52,11 @@ export function MentionPicker({
   query,
   searchInput = false,
   skills,
+  skillsLoading = false,
+  skillsError,
+  onRetrySkills,
+  capability,
+  onActiveOptionChange,
   selectedSkills,
   references,
   threadId,
@@ -65,6 +71,11 @@ export function MentionPicker({
   query: string;
   searchInput?: boolean;
   skills: Skill[];
+  skillsLoading?: boolean;
+  skillsError?: unknown;
+  onRetrySkills?: () => unknown;
+  capability: { enabled: boolean; maxReferences: number; isLoading: boolean };
+  onActiveOptionChange?: (id: string | undefined) => void;
   selectedSkills?: string[];
   references: ConversationReference[];
   threadId: string;
@@ -77,7 +88,6 @@ export function MentionPicker({
 }) {
   const { t } = useI18n();
   const labels = t.inputBox;
-  const capability = useConversationReferencesCapability();
   const documents = useInfiniteProjectDocuments(projectId ?? "", {
     enabled: !!projectId,
   });
@@ -100,7 +110,7 @@ export function MentionPicker({
         selected: selectedSkills?.includes(skill.name),
         disabled:
           !selectedSkills?.includes(skill.name) &&
-          new Set(selectedSkills).size >= 16,
+          new Set(selectedSkills).size >= MAX_EXPLICIT_SKILLS,
       }));
     for (const document of documents.data?.pages.flatMap(
       (page) => page.documents,
@@ -169,6 +179,15 @@ export function MentionPicker({
     (filter
       ? available.find((option) => option.selection.kind !== "upload")
       : available[0]);
+  const optionId = (id: string) => `${listId}-${encodeURIComponent(id)}`;
+  const activeOptionId = active ? optionId(active.id) : undefined;
+  useEffect(() => {
+    onActiveOptionChange?.(searchInput ? undefined : activeOptionId);
+  }, [activeOptionId, searchInput, onActiveOptionChange]);
+  useEffect(
+    () => () => onActiveOptionChange?.(undefined),
+    [onActiveOptionChange],
+  );
   const choose = (option: Option) => {
     if (!busy && !option.disabled) onSelect(option.selection);
   };
@@ -199,15 +218,18 @@ export function MentionPicker({
   };
   useImperativeHandle(ref, () => ({ onKeyDown }));
   useEffect(() => {
-    rootRef.current
-      ?.querySelector('[aria-selected="true"]')
-      ?.scrollIntoView?.({ block: "nearest" });
-  }, [active?.id]);
+    if (activeOptionId)
+      document
+        .getElementById(activeOptionId)
+        ?.scrollIntoView?.({ block: "nearest" });
+  }, [activeOptionId]);
   const loading =
+    skillsLoading ||
     capability.isLoading ||
     (!!projectId && documents.isPending) ||
     (capability.enabled && conversations.isPending);
   const failed =
+    !!skillsError ||
     (!!projectId && documents.isError) ||
     (capability.enabled && conversations.isError);
   const groups = [
@@ -232,6 +254,11 @@ export function MentionPicker({
             aria-label={labels.mentionSearch}
             autoFocus
             className="min-w-0 flex-1 bg-transparent text-sm outline-none"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls={listId}
+            aria-activedescendant={activeOptionId}
+            aria-autocomplete="list"
             placeholder={labels.mentionSearch}
             value={search}
             onChange={(event) => {
@@ -259,6 +286,7 @@ export function MentionPicker({
       <div
         id={listId}
         role="listbox"
+        aria-multiselectable="true"
         aria-label={labels.mentionPicker}
         aria-busy={busy || loading}
         className="max-h-72 overflow-y-auto"
@@ -284,7 +312,8 @@ export function MentionPicker({
                   key={option.id}
                   type="button"
                   role="option"
-                  aria-selected={active?.id === option.id}
+                  id={optionId(option.id)}
+                  aria-selected={option.selected === true}
                   aria-disabled={busy || option.disabled}
                   disabled={busy || option.disabled}
                   onMouseDown={(event) => event.preventDefault()}
@@ -328,8 +357,10 @@ export function MentionPicker({
           <button
             type="button"
             onClick={() => {
-              if (projectId) void documents.refetch();
-              if (capability.enabled) void conversations.refetch();
+              if (skillsError) void onRetrySkills?.();
+              if (projectId && documents.isError) void documents.refetch();
+              if (capability.enabled && conversations.isError)
+                void conversations.refetch();
             }}
           >
             {labels.mentionRetry}
@@ -359,7 +390,7 @@ export function MentionPicker({
         </p>
       )}
       <p className="text-muted-foreground px-2 py-1 text-xs">
-        {labels.mentionSingleSkill}
+        {labels.mentionMultipleSkills}
       </p>
       {capability.enabled && (
         <p className="text-muted-foreground px-2 py-1 text-xs">

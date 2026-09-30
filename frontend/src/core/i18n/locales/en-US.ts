@@ -360,7 +360,8 @@ export const enUS: Translations = {
     mentionRetry: "Retry",
     mentionAttaching: "Adding file…",
     mentionAttachFailed: "Could not add this file. Try again.",
-    mentionSingleSkill: "One skill per message; choosing another replaces it.",
+    mentionMultipleSkills:
+      "Select up to 16 skills per message; select a checked skill again to remove it.",
     mentionNoProject: "Open a project chat to reference its documents.",
     mentionRemoveSkill: "Remove skill",
     mentionUnavailable: "File unavailable",

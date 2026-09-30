@@ -158,3 +158,41 @@ test("mouse upload entry and mobile picker stay usable", async ({
   });
   await expect(page.getByText("note.txt", { exact: true })).toBeVisible();
 });
+
+for (const metadataState of ["pending", "failed"] as const) {
+  test(`keeps confirmed project files after materialization when metadata is ${metadataState}`, async ({
+    page,
+  }) => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route(
+      /\/api\/(?:langgraph\/)?threads\/[^/]+$/,
+      async (route) => {
+        if (route.request().method() !== "GET") return route.fallback();
+        if (metadataState === "pending") await pending;
+        return route.fulfill({
+          status: 503,
+          json: { detail: "metadata unavailable" },
+        });
+      },
+    );
+    try {
+      await page.goto("/workspace/chats/new?project=proj-1");
+      await composer(page).fill("Read @report");
+      await page.getByRole("option", { name: "report.pdf" }).click();
+      await expect(page).not.toHaveURL(/\/new/);
+      await expect(page.getByTestId("project-attachment-chip")).toBeVisible();
+      await page.getByTestId("mention-button").click();
+      await expect(
+        page.getByRole("option", { name: "report.pdf" }),
+      ).toBeVisible();
+      await expect(
+        page.getByText("Open a project chat to reference project files."),
+      ).toBeHidden();
+    } finally {
+      release();
+    }
+  });
+}
