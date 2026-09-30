@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class RunEventsConfig(BaseModel):
@@ -25,8 +25,17 @@ class RunEventsConfig(BaseModel):
     )
     max_trace_content: int = Field(
         default=10240,
+        ge=1,
         description="Maximum trace content size in bytes before truncation (db backend only).",
     )
+
+    @field_validator("max_trace_content", mode="before")
+    @classmethod
+    def _reject_boolean_max_trace_content(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be an integer, not a boolean")
+        return value
+
     track_token_usage: bool = Field(
         default=True,
         description="Whether RunJournal should accumulate token counts to RunRow.",

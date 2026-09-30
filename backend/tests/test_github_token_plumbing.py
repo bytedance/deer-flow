@@ -425,6 +425,7 @@ def test_bash_tool_routes_subagent_command_to_its_shell_scope(
         state={"sandbox": {"sandbox_id": "aio:xyz"}},
         context={
             "thread_id": "t1",
+            "user_id": "u-test",
             "sandbox_command_scope_id": "subagent:task-1",
         },
         config={},
@@ -464,7 +465,7 @@ def test_bash_tool_routes_subagent_command_to_its_shell_scope(
 
     assert result == "done"
     assert captured["scope_id"] == "subagent:task-1"
-    assert captured["command"] == "cd /mnt/user-data/workspace; ls"
+    assert captured["command"] == "export DEERFLOW_USER_ID=u-test; cd /mnt/user-data/workspace; ls"
 
 
 # ---------------------------------------------------------------------------

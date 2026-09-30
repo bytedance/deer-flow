@@ -45,7 +45,7 @@ same resulting prompt. Empty overlays preserve bytes.
 - `is_plan_mode` - Enable TodoList middleware
 - `subagent_enabled` - Enable task delegation tool
 - `max_concurrent_subagents` - Per-response `task` call concurrency limit (clamped by `SubagentLimitMiddleware`)
-- `max_total_subagents` - Optional per-run total delegation cap override (falls back to `subagents.max_total_per_run`, clamped to 1-50)
+- `max_total_subagents` - Per-run total delegation cap override (unset/`null` uses `subagents.max_total_per_run`, clamped to 1-50)
   Gateway and `DeerFlowClient.stream()` always provide the runtime `run_id`; custom
   graph integrations must do the same. If it is absent, enforcement deliberately
   counts the thread's full delegation ledger (fail-restrictive) and emits a warning.

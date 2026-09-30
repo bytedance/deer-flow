@@ -7,7 +7,7 @@ from typing import Any, Literal, Self
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agent_storage_config import AgentStorageConfig
@@ -77,8 +77,23 @@ CONFIG_FILE_DATABASE_DEFAULTS = {
 class CircuitBreakerConfig(BaseModel):
     """Configuration for the LLM Circuit Breaker."""
 
-    failure_threshold: int = Field(default=5, description="Number of consecutive failures before tripping the circuit")
-    recovery_timeout_sec: int = Field(default=60, description="Time in seconds before attempting to recover the circuit")
+    failure_threshold: int = Field(
+        default=5,
+        ge=1,
+        description="Number of consecutive failures before tripping the circuit",
+    )
+    recovery_timeout_sec: int = Field(
+        default=60,
+        gt=0,
+        description="Time in seconds before attempting to recover the circuit",
+    )
+
+    @field_validator("failure_threshold", "recovery_timeout_sec", mode="before")
+    @classmethod
+    def _reject_boolean_circuit_settings(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be an integer, not a boolean")
+        return value
 
 
 class LlmCallConfig(BaseModel):
