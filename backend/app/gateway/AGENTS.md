@@ -23,6 +23,10 @@ is drained across host cancellation before later runtime resources unwind; each
 service `stop()` remains bounded by its 30-second `asyncio.timeout`, so include
 that bound in pod grace-period budgeting.
 
+Managed-model saves drain their worker across request cancellation. The worker
+logs storage and unexpected failures before `await_drained` can consume them;
+log only the HTTP status or exception type because errors may contain credentials.
+
 Gateway lifespan closes the MCP session pool after `langgraph_runtime` exits:
 its run drain and extension-service teardown can still make MCP calls during
 earlier shutdown hooks. Keep the pool close bounded and failure-isolated, but

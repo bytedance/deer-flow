@@ -1,6 +1,7 @@
 """Admin-only shared model management. Credentials never leave the server."""
 
 import asyncio
+import logging
 
 from fastapi import APIRouter, HTTPException, Request
 from langchain_core.messages import HumanMessage
@@ -12,6 +13,7 @@ from deerflow.config.managed_models import ManagedModel, ManagedModelStore
 from deerflow.reflection import resolve_class
 from deerflow.utils.file_io import await_drained
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/managed-models", tags=["models"])
 _ADMIN = "Admin privileges are required to manage shared models."
 
@@ -55,10 +57,24 @@ def _save(body: SaveModelRequest):
         raise HTTPException(503, "Managed model storage is unavailable") from None
 
 
+def _save_with_failure_logging(body: SaveModelRequest):
+    """Record save failures before a cancelled caller consumes the worker result."""
+    try:
+        return _save(body)
+    except HTTPException as exc:
+        if exc.status_code >= 500:
+            logger.error("Managed model save failed (HTTP %d)", exc.status_code)
+        raise
+    except Exception as exc:
+        # Storage exceptions can contain credentials; retain only the type.
+        logger.error("Managed model save failed (%s)", type(exc).__name__)
+        raise
+
+
 @router.put("")
 async def save_model(request: Request, body: SaveModelRequest):
     await require_admin_user(request, detail=_ADMIN)
-    return await await_drained(asyncio.to_thread(_save, body))
+    return await await_drained(asyncio.to_thread(_save_with_failure_logging, body))
 
 
 def _probe_config(body: SaveModelRequest):
