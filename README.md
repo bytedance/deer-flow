@@ -1670,6 +1670,15 @@ the stable English `name`. API callers can pass `display_name` to agent creation
 or update requests; an omitted update preserves it and `null` clears it. The
 same optional field is supported in the agent's `config.yaml`.
 
+Custom Agents can also be moved between DeerFlow users or deployments from the
+Agents gallery. **Export Agent** downloads a versioned
+`*.deerflow-agent.json` package containing the portable definition and
+`SOUL.md`; **Import Agent** validates that package and lets the receiving user
+choose a local name. Imports never overwrite an existing agent. Packages carry
+model, tool/MCP, skill, knowledge, sub-agent, reasoning, and memory-policy
+settings, but deliberately exclude memory contents, conversations, credentials,
+and operator-owned GitHub bindings.
+
 Sub-agents are an optimization, not the default response to a complex request.
 
 After Stop interrupts a delegated task before it returns a reply, the next user

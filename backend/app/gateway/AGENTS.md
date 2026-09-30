@@ -26,6 +26,13 @@ that bound in pod grace-period budgeting.
 Managed-model saves drain on cancellation. Log worker failures before
 `await_drained` consumes them; omit exception text.
 
+Custom Agent packages are strict, versioned JSON documents. Export reads only
+the caller-owned `AgentConfig` plus SOUL and explicitly projects the portable
+allowlist; do not serialize `github`, memory data, threads, or credentials.
+Import uses the same validated create path and effective-user store as ordinary
+creation. An optional target name supports safe sharing, while an existing name
+must remain a 409 rather than becoming an overwrite or upsert.
+
 Gateway lifespan closes the MCP session pool after `langgraph_runtime` exits:
 its run drain and extension-service teardown can still make MCP calls during
 earlier shutdown hooks. Keep the pool close bounded and failure-isolated, but

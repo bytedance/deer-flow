@@ -29,6 +29,8 @@ rs.mock("@/core/config", () => ({
 import {
   AgentsApiDisabledError,
   checkAgentName,
+  exportAgentPackage,
+  importAgentPackage,
   updateAgent,
 } from "@/core/agents/api";
 import { fetch as fetcher } from "@/core/api/fetcher";
@@ -203,5 +205,55 @@ describe("updateAgent", () => {
     expect(JSON.parse(init?.body as string)).toEqual({
       allowed_subagents: null,
     });
+  });
+});
+
+describe("agent portability", () => {
+  const agentPackage = {
+    format: "deerflow.custom-agent" as const,
+    version: 1 as const,
+    agent: {
+      name: "research-lead",
+      description: "Coordinates research",
+      model: "agent-model",
+      tool_groups: ["web"],
+      skills: ["literature-review"],
+      allowed_subagents: ["researcher"],
+      soul: "Delegate and synthesize.",
+    },
+  };
+
+  test("exports the versioned package", async () => {
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, agentPackage));
+
+    await expect(exportAgentPackage("research lead/unsafe")).resolves.toEqual(
+      agentPackage,
+    );
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/api/agents/research%20lead%2Funsafe/export",
+    );
+  });
+
+  test("imports the exact package with an optional target name", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(201, { ...agentPackage.agent, name: "research-copy" }),
+    );
+
+    await importAgentPackage(agentPackage, "research-copy");
+
+    const [url, init] = mockedFetch.mock.calls[0]!;
+    expect(url).toBe("/api/agents/import?name=research-copy");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(init?.body as string)).toEqual(agentPackage);
+  });
+
+  test("surfaces explicit import conflicts from the backend", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(409, { detail: "Agent 'research-lead' already exists" }),
+    );
+
+    await expect(importAgentPackage(agentPackage)).rejects.toThrow(
+      "Agent 'research-lead' already exists",
+    );
   });
 });
