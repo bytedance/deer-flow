@@ -488,3 +488,15 @@ async def test_id_token_nonce_match_with_non_ascii_is_accepted():
     claims = await service.validate_id_token(metadata=_metadata(), client_id="deer-flow", id_token=_id_token(private_key, "nònce-é"), nonce="nònce-é")
 
     assert claims["nonce"] == "nònce-é"
+
+
+@pytest.mark.asyncio
+async def test_id_token_nonce_claim_of_non_string_type_is_rejected_not_an_attribute_error():
+    """A provider returning a truthy non-string nonce claim (e.g. an int) must
+    reject with OIDCValidationError like every other malformed nonce; reaching
+    the comparison helper raised AttributeError on .encode() and turned the
+    callback's sso_failed redirect into a 500."""
+    service, private_key = _service_with_signing_key()
+
+    with pytest.raises(OIDCValidationError, match="nonce claim is not a string"):
+        await service.validate_id_token(metadata=_metadata(), client_id="deer-flow", id_token=_id_token(private_key, 12345), nonce="expected")

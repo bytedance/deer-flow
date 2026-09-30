@@ -329,6 +329,11 @@ class OIDCService:
             token_nonce = claims.get("nonce")
             if not token_nonce:
                 raise OIDCValidationError("ID token is missing the nonce claim")
+            # A non-string claim is malformed the same way: comparing it would
+            # raise AttributeError inside the shared helper, so reject it here
+            # to keep the sso_failed redirect contract.
+            if not isinstance(token_nonce, str):
+                raise OIDCValidationError("ID token nonce claim is not a string")
             # The nonce claim is provider-controlled text; the shared comparison
             # encodes before comparing so non-ASCII content rejects instead of
             # raising TypeError (which the callback turns into a 500, not the
