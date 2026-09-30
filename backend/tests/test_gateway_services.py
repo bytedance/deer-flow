@@ -3683,27 +3683,41 @@ def test_launch_mcp_task_notification_run_hides_internal_prompt(_stub_app_config
     assert result == {"run_id": "run-notification", "thread_id": "thread-notification"}
 
 
+def test_start_run_marks_run_manager_conflict_as_busy(_stub_app_config):
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.services import BusyThreadConflict, start_run
+    from deerflow.runtime.runs.manager import ConflictError
+
+    async def _scenario():
+        request, _run_store, _thread_store = _make_start_run_persistence_context()
+        request.app.state.run_manager.create_or_reject = AsyncMock(side_effect=ConflictError("Thread already has an active run"))
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.ensure_checkpoint_history_seeded", new_callable=AsyncMock),
+            pytest.raises(BusyThreadConflict) as exc_info,
+        ):
+            await start_run(_run_create_request(), "thread-busy", request)
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == "Thread already has an active run"
+
+    asyncio.run(_scenario())
+
+
 def test_launch_mcp_task_notification_run_restores_busy_thread_conflict(_stub_app_config):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import patch
 
-    from fastapi import HTTPException
-
-    from app.gateway.services import launch_mcp_task_notification_run
+    from app.gateway.services import BusyThreadConflict, launch_mcp_task_notification_run
     from deerflow.runtime.runs.manager import ConflictError
-
-    async def busy_start_run(*_args, **_kwargs):
-        try:
-            raise ConflictError("Thread already has an active run")
-        except ConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     async def _scenario():
         with (
             patch(
                 "app.gateway.services.start_run",
-                side_effect=busy_start_run,
+                side_effect=BusyThreadConflict("Thread already has an active run"),
             ),
             pytest.raises(ConflictError, match="Thread already has an active run"),
         ):
