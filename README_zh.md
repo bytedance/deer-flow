@@ -967,21 +967,21 @@ deerflow --json  "hello"                       # 无头模式，输出按行分�
 DeerFlow 具备**系统指令执行、资源操作、业务逻辑调用**等关键高权限能力，默认设计为**部署在本地可信环境（仅本机 127.0.0.1 回环访问）**。若您将 agent 部署至不可信局域网、公网云服务器等可被多终端访问的网络环境，且未采取严格的安全防护措施，可能导致安全风险，例如：
 
 - **未授权的非法调用**：agent 功能被未授权的第三方、公网恶意扫描程序探测到，进而发起批量非法调用请求，执行系统命令、文件读写等高危操作，可能导致安全后果。
-- **合规与法律风险**：若 agent 被非法调用用于实施网络攻击、信息窃取等违法违规行为，可能产生法律责任与合规风险。
+- **合规与法律风险**：若 agent 被非法调用用于实施网络攻击、信息窃取等违法违规行为，可能面临法律责任与合规风险。
 
 ### Gateway 管理员权限等同于代码执行
 
-管理员可以注册 stdio 类型的 MCP server，其命令会在 Gateway 容器内执行。API 会把可执行命令限制在一个允许清单内（默认为 `npx`、`uvx`，可通过 `DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST` 扩展），并拒绝会导致任意代码求值的参数与环境变量。这属于纵深防御，而不是安全边界：这类启动器本身的用途就是拉取并运行远程包，因此请**将 Gateway 管理员权限视为等同于在宿主机上执行代码**，并据此谨慎授权。
+管理员可以注册 stdio 类型的 MCP server，其命令会在 Gateway 容器内执行。API 会将可执行命令限制在允许清单内（默认为 `npx`、`uvx`，可通过 `DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST` 扩展），并拒绝会导致任意代码求值的参数与环境变量。这属于纵深防御，而不是安全边界：这类启动器本身的用途就是拉取并运行远程包，因此请**将 Gateway 管理员权限视为等同于在宿主机上执行代码**，并据此谨慎授权。
 
 ### 外部聊天消息角色 (External Chat Message Roles)
 
-Gateway 的 run 请求与手动线程状态更新会拒绝客户端提交的 `system` / `developer` 消息，并返回 HTTP 400，包括等价的序列化消息形式。普通聊天、附件以及 assistant/tool 历史回放仍然受支持。Session 或 PAT 认证并不会授予 system-prompt 权限；受信任的内部 run 生产者保留这一能力。
+Gateway 的 run 请求与手动线程状态更新会拒绝客户端提交的 `system` / `developer` 消息，并返回 HTTP 400，包括等价的序列化消息形式。普通聊天、附件以及 assistant/tool 历史回放仍然受支持。Session 或 PAT 认证并不会授予 system-prompt 权限；受信任的内部 run 生产者保留这一权限。
 
 这一检查用于阻止新的角色注入；它不会重写已有的 checkpoint。如果旧版本接受了一条注入的 system 消息，请使用全新的线程，或让操作人员审查并清理受影响的状态。重启服务不会移除已持久化的指令，而恢复旧的 checkpoint 可能会把它们一并恢复。
 
 本地验证可运行 `python backend/tests/poc_external_system_message_injection.py --help`。这个可选的 PoC 在隔离的旧版本上支持 `--expect vulnerable`，在修复后支持 `--expect blocked`。其帮助信息包含 PAT 创建、thread-ID 选择、浏览器后续操作，以及持久化与模型遵循之间的区别。每次运行请使用一个全新的一次性线程；该测试会追加消息。
 
-在隔离的未修复检出上，`--expect vulnerable` 仅在请求返回 200、且注入的确切消息在正常后续对话后仍以 `type=system` 保留在 checkpoint 中时，才演示"被接受"。网页回答中的标记取决于模型，本身并不能证明角色已被提升。应用修复后，用 `--expect blocked` 运行同一脚本：它要求出现特定的角色拒绝 400、checkpoint 保持不变、一次成功的普通后续对话，并且被拒绝的消息 ID 不再存在。其他 400 响应以及认证、冲突或服务器错误均属无法得出结论的情况，而非通过。
+在隔离的未修复检出上，`--expect vulnerable` 仅在请求返回 200、且注入的确切消息在正常后续对话后仍以 `type=system` 保留在 checkpoint 中时，才演示“被接受”。网页回答中的标记取决于模型本身，并不能证明角色已被提升。应用修复后，用 `--expect blocked` 运行同一脚本：它要求出现特定的角色拒绝 400、checkpoint 保持不变、一次成功的普通后续对话，并且被拒绝的消息 ID 不再存在。其他 400 响应、认证、冲突或服务器错误均属无法得出结论的情况，而非通过。
 
 PoC 不会自动清理。验证完成后，请用网页侧边栏的删除操作删除该一次性聊天，并在创建了短期 PAT 的情况下吊销它。重启服务不会移除一条已持久化的注入指令。
 
@@ -1016,10 +1016,10 @@ DeerFlow 建立在开源社区大量优秀工作的基础上。所有让 DeerFlo
 
 特别感谢以下项目带来的关键支持：
 
-- **[LangChain](https://github.com/langchain-ai/langchain)**：它们提供的优秀框架支撑了我们的 LLM 交互与 chains，让整体集成和能力编排顺畅可用。
-- **[LangGraph](https://github.com/langchain-ai/langgraph)**：它们在多 agent 编排上的创新方式，是 DeerFlow 复杂工作流得以成立的重要基础。
+- **[LangChain](https://github.com/langchain-ai/langchain)**：它提供的优秀框架支撑了我们的 LLM 交互与 chains，让整体集成和能力编排顺畅可用。
+- **[LangGraph](https://github.com/langchain-ai/langgraph)**：它在多 agent 编排上的创新方式，是 DeerFlow 复杂工作流得以成立的重要基础。
 
-这些项目体现了开源协作真正的力量，我们也很高兴能继续建立在这些基础之上。
+这些项目体现了开源协作真正的力量，我们也很高兴能继续在此基础上建立。
 
 ### 核心贡献者
 
