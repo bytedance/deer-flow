@@ -71,6 +71,45 @@ def _lease_test_bridge():
 
 
 @pytest.mark.anyio
+async def test_admission_hook_holds_durable_thread_exclusivity_until_checkpoint_preflight() -> None:
+    """A peer cannot admit a run while retention is paused in the pre-read hook."""
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="owner")
+    peer = RunManager(store=store, worker_id="peer")
+    record = await owner.create_or_reject("retention-admission-race")
+    hook_entered = asyncio.Event()
+    release_hook = asyncio.Event()
+
+    async def hold_admission(_record) -> None:
+        hook_entered.set()
+        await release_hook.wait()
+
+    class EmptyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield {"messages": []}
+
+    task = asyncio.create_task(
+        run_agent(
+            _lease_test_bridge(),
+            owner,
+            record,
+            ctx=RunContext(checkpointer=None, on_run_admitted=hold_admission),
+            agent_factory=lambda **_kwargs: EmptyAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    await asyncio.wait_for(hook_entered.wait(), timeout=1)
+    with pytest.raises(ConflictError, match="active run"):
+        await peer.create_or_reject("retention-admission-race")
+
+    release_hook.set()
+    await asyncio.wait_for(task, timeout=1)
+    assert record.status == RunStatus.success
+
+
+@pytest.mark.anyio
 async def test_run_agent_releases_execution_lease_when_graph_raises():
     provider = MagicMock()
     provider.get.return_value = MagicMock()

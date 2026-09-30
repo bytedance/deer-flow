@@ -315,6 +315,16 @@ class CachedHistorySaver(BaseCheckpointSaver):
         if delete is not None:
             await delete(self._key_prefix, thread_id)
 
+    async def ainvalidate_history_cache(self, thread_id: str) -> None:
+        """Drop cached delta histories after an external chain mutation.
+
+        Storage-level retention deliberately operates on ``_inner`` because the
+        wrapper has no row-deletion API.  Keeping invalidation on the wrapper
+        preserves its lifecycle contract without exposing cache internals to
+        the Gateway.
+        """
+        await self._apurge_thread(thread_id)
+
     async def acopy_thread(self, source_thread_id: str, target_thread_id: str) -> None:
         await self._inner.acopy_thread(source_thread_id, target_thread_id)
 

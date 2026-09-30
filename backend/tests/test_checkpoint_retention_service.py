@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -38,7 +39,10 @@ from app.gateway.checkpoint_retention import (
     enforce_thread_retention,
 )
 from deerflow.agents.thread_state import merge_message_writes
-from deerflow.runtime.runs.worker import _new_checkpoint_marker, persist_run_durations
+from deerflow.runtime.checkpoint_cache.base import make_history_key
+from deerflow.runtime.checkpoint_cache.memory import MemoryCheckpointHistoryCache
+from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
+from deerflow.runtime.runs.worker import _new_checkpoint_marker, persist_run_durations, persist_run_history_metadata
 
 
 class FullState(TypedDict):
@@ -620,6 +624,7 @@ async def test_empty_thread_reports_the_same_before_and_after_stats(saver_env: _
 async def test_completed_run_retention_removes_only_the_trailing_duration_leaf(
     saver_env: _SaverEnv,
     state_schema: Any,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The production hook removes the metadata leaf before a later run can
     make it a permanent ancestor, without touching resumable checkpoints."""
@@ -640,10 +645,11 @@ async def test_completed_run_retention_removes_only_the_trailing_duration_leaf(
     duration_head_id = duration_head.checkpoint["id"]
     assert duration_head_id != resumable_head_id
 
-    report = await enforce_completed_run_retention(
-        checkpointer=saver_env.saver,
-        thread_id=thread_id,
-    )
+    with caplog.at_level(logging.INFO, logger="app.gateway.checkpoint_retention"):
+        report = await enforce_completed_run_retention(
+            checkpointer=saver_env.saver,
+            thread_id=thread_id,
+        )
 
     assert report.deleted_checkpoint_ids == [duration_head_id]
     assert report.stats_before == {}
@@ -653,14 +659,54 @@ async def test_completed_run_retention_removes_only_the_trailing_duration_leaf(
     assert resumed.checkpoint["id"] == resumable_head_id
     materialized = await graph.aget_state(_config(thread_id))
     assert materialized.values["messages"][-1].content == "hello"
+    info_records = [record for record in caplog.records if record.levelno == logging.INFO]
+    assert len(info_records) == 1
+    assert thread_id in info_records[0].message
+    assert duration_head_id in info_records[0].message
+
+    await enforce_completed_run_retention(checkpointer=saver_env.saver, thread_id=thread_id)
+    assert len([record for record in caplog.records if record.levelno == logging.INFO]) == 1
 
 
 @pytest.mark.anyio
-async def test_gateway_completion_hook_keeps_scheduler_notification_after_retention_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Retention is best-effort and must not swallow the scheduler's durable
-    occurrence transition when checkpoint storage is temporarily unavailable."""
+async def test_completed_run_retention_supports_cached_history_saver_and_invalidates_cache(
+    saver_env: _SaverEnv,
+) -> None:
+    """The delta wrapper prunes through its source-of-truth saver and purges
+    cached histories whose checkpoint keys may have just been removed."""
+    cache = MemoryCheckpointHistoryCache(max_entries=16)
+    wrapped = CachedHistorySaver(saver_env.saver, cache, key_prefix="retention-test")
+    graph = _build_graph(DeltaState, wrapped)
+    thread_id = _thread_id()
+    await graph.ainvoke({"messages": [HumanMessage(content="hello")]}, _config(thread_id))
+    assert await persist_run_history_metadata(
+        checkpointer=wrapped,
+        thread_id=thread_id,
+        durations={"run-1": 3},
+        message_run_ids={"message-1": "run-1"},
+    )
+    duration_head = await wrapped.aget_tuple(_config(thread_id))
+    assert duration_head is not None
+    duration_head_id = duration_head.checkpoint["id"]
+    cache_key = make_history_key("retention-test", thread_id, "", duration_head_id, "messages")
+    await cache.aset_many({cache_key: {"writes": []}})
+    assert cache.stats().entries == 1
+
+    report = await enforce_completed_run_retention(
+        checkpointer=wrapped,
+        thread_id=thread_id,
+    )
+
+    assert report.deleted_checkpoint_ids == [duration_head_id]
+    assert cache.stats().entries == 0
+    assert await saver_env.saver.aget_tuple(_config_thread(thread_id, duration_head_id)) is None
+
+
+@pytest.mark.anyio
+async def test_gateway_admission_retention_failure_isolated_from_scheduler_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retention remains best-effort and scheduled completion stays separate."""
     from app.gateway import checkpoint_retention as retention_module
-    from app.gateway.deps import _run_completion_hook
+    from app.gateway.deps import _run_admission_hook, _run_completion_hook
 
     calls: list[tuple[str, Any]] = []
 
@@ -676,8 +722,8 @@ async def test_gateway_completion_hook_keeps_scheduler_notification_after_retent
     checkpointer = object()
     record = SimpleNamespace(thread_id="thread-1", run_id="run-1")
 
+    await _run_admission_hook(checkpointer=checkpointer)(record)
     await _run_completion_hook(
-        checkpointer=checkpointer,
         scheduled_task_service=_Scheduler(),
     )(record)
 

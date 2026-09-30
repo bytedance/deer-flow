@@ -749,8 +749,8 @@ def get_subagent_batch_service(request: Request):
     return val
 
 
-def _run_completion_hook(*, checkpointer: Any, scheduled_task_service: Any | None):
-    """Compose non-fatal checkpoint housekeeping with the scheduler callback."""
+def _run_admission_hook(*, checkpointer: Any):
+    """Prune metadata leaves inside the run's durable admission fence."""
 
     async def handle(record: Any) -> None:
         try:
@@ -762,11 +762,19 @@ def _run_completion_hook(*, checkpointer: Any, scheduled_task_service: Any | Non
             )
         except Exception:
             logger.warning(
-                "Checkpoint retention failed for thread %s after run %s (non-fatal)",
+                "Checkpoint retention failed for thread %s before run %s (non-fatal)",
                 record.thread_id,
                 record.run_id,
                 exc_info=True,
             )
+
+    return handle
+
+
+def _run_completion_hook(*, scheduled_task_service: Any | None):
+    """Notify the scheduler after ordinary run finalization."""
+
+    async def handle(record: Any) -> None:
 
         if scheduled_task_service is not None:
             await scheduled_task_service.handle_run_completion(record)
@@ -797,8 +805,8 @@ def get_run_context(request: Request) -> RunContext:
         mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
+        on_run_admitted=_run_admission_hook(checkpointer=checkpointer),
         on_run_completed=_run_completion_hook(
-            checkpointer=checkpointer,
             scheduled_task_service=scheduled_task_service,
         ),
     )
