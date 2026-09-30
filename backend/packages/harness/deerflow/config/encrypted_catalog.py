@@ -3,7 +3,10 @@
 import json
 import os
 import tempfile
+from contextlib import nullcontext
 from pathlib import Path
+
+from deerflow.config.extensions_config import extensions_config_file_lock
 
 
 class EncryptedCatalog:
@@ -14,11 +17,15 @@ class EncryptedCatalog:
     def _cipher(self, *, create: bool = False):
         from cryptography.fernet import Fernet
 
-        if not self.key_path.exists():
-            if not create or self.path.exists():
-                raise ValueError("Catalog encryption key is missing; restore it from backup")
-            self.write_bytes(self.key_path, Fernet.generate_key())
-        return Fernet(self.key_path.read_bytes())
+        # Catalog paths have separate write locks, but image catalogs share this key.
+        # Hold its lock across both initialization and loading the winning key.
+        lock = extensions_config_file_lock(self.key_path) if create else nullcontext()
+        with lock:
+            if not self.key_path.exists():
+                if not create or self.path.exists():
+                    raise ValueError("Catalog encryption key is missing; restore it from backup")
+                self.write_bytes(self.key_path, Fernet.generate_key())
+            return Fernet(self.key_path.read_bytes())
 
     def read(self) -> list[dict]:
         if not self.path.exists():
