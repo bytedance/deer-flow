@@ -516,6 +516,21 @@ async def test_wecom_send_notification_raises_when_not_connected():
 
 
 @pytest.mark.asyncio
+async def test_wecom_send_notification_parks_when_the_sdk_socket_is_closed():
+    # The real SDK client raises a plain RuntimeError when its socket is not open,
+    # which would count against the retry budget instead of parking the row.
+    aibot = pytest.importorskip("aibot")
+    ws_client = aibot.WSClient(aibot.WSClientOptions(bot_id="bot", secret="secret"))
+    assert ws_client.is_connected is False
+    channel = _wecom_channel(ws_client)
+
+    with pytest.raises(ChannelUnavailable, match="not connected"):
+        await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+    assert channel._ws_transport_up is False
+
+
+@pytest.mark.asyncio
 async def test_wecom_send_notification_wraps_transport_errors_as_unavailable():
     class BrokenWsClient:
         async def send_message(self, chatid, body):

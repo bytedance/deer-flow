@@ -304,6 +304,11 @@ class WeComChannel(Channel):
         """
         if not self._running or not self._ws_client:
             raise ChannelUnavailable("WeCom channel is not connected")
+        # The SDK raises a plain RuntimeError when its socket is closed, so ask
+        # it first: a disconnect must park the row, not spend the retry budget.
+        if getattr(self._ws_client, "is_connected", True) is False:
+            self._ws_transport_up = False
+            raise ChannelUnavailable("WeCom websocket is not connected")
         body = {"msgtype": "markdown", "markdown": {"content": text_markdown}}
 
         async def _send_once() -> Any:
