@@ -50,13 +50,15 @@ class ComposerInput(TextArea):
         column = len(prefix.rsplit("\n", 1)[-1])
         self.move_cursor((row, column))
 
+    # Boundaries are visual rows: TextArea soft-wraps long lines, and its Up/Down
+    # move between wrapped rows of one logical line before leaving it.
     @property
     def can_move_up(self) -> bool:
-        return self.cursor_location[0] > 0
+        return not self.navigator.is_first_wrapped_line(self.cursor_location)
 
     @property
     def can_move_down(self) -> bool:
-        return self.cursor_location[0] < self.document.line_count - 1
+        return not self.navigator.is_last_wrapped_line(self.cursor_location)
 
     def action_submit(self) -> None:
         self.post_message(self.Submitted(self, self.text))

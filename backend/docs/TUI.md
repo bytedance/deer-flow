@@ -78,7 +78,7 @@ for trusted embedded CLI runs.
 |---|---|
 | `Enter` | Send message / accept palette selection |
 | `/` | Open the slash-command palette |
-| `↑` / `↓` | Palette navigation; otherwise move inside multiline input, then use history at the first/last line |
+| `↑` / `↓` | Palette navigation; otherwise move inside multiline input, then use history at the first/last row (wrapped rows included) |
 | `PageUp` / `PageDown` | Scroll the transcript without moving focus from the composer |
 | `Tab` | Complete the highlighted command (adds a trailing space) |
 | `Esc` | Close the palette / overlay |

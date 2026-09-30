@@ -638,3 +638,43 @@ async def test_slash_command_with_surrounding_whitespace_still_runs_as_command()
 
     assert session.client.stream_calls == []
     assert app._history.entries() == ["/help"]
+
+
+_LONG_PROMPT = " ".join(f"word{i}" for i in range(60))  # one logical line that soft-wraps
+
+
+@pytest.mark.asyncio
+async def test_up_inside_a_soft_wrapped_line_moves_the_cursor_not_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test(size=(60, 24)) as pilot:
+        await pilot.pause()
+        app._history.add("previous prompt")
+        composer = app.query_one("#composer")
+        composer.value = _LONG_PROMPT
+        composer.cursor_position = len(_LONG_PROMPT)
+        await pilot.pause()
+        assert len(composer.wrapped_document.get_offsets(0)) >= 1  # really wrapped
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == _LONG_PROMPT
+        assert composer.cursor_position < len(_LONG_PROMPT)
+
+
+@pytest.mark.asyncio
+async def test_down_inside_a_soft_wrapped_line_moves_the_cursor_not_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test(size=(60, 24)) as pilot:
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        composer.value = _LONG_PROMPT
+        composer.cursor_position = 0
+        await pilot.pause()
+        assert len(composer.wrapped_document.get_offsets(0)) >= 1
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == _LONG_PROMPT
+        assert composer.cursor_position > 0
