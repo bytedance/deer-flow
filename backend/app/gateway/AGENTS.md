@@ -53,7 +53,7 @@ hot-reloaded top-level `recursion_limit` setting. A valid request-level value
 takes precedence; invalid values fall back to that default, and
 `max_recursion_limit` caps both sources.
 
-Durable MCP notifications use internal Agent runs. Keep their trusted delivery instruction outside the user-input boundary, and frame serialized remote events as untrusted before model invocation. Strict thread existence/ownership admission dead-letters events whose task outlives its deleted chat instead of recreating the thread.
+Durable MCP notifications use internal Agent runs. Keep their trusted delivery instruction outside the user-input boundary, and frame serialized remote events as untrusted before model invocation. Strict thread existence/ownership admission dead-letters events whose task outlives its deleted chat instead of recreating the thread. `start_run` marks run-manager admission conflicts with `BusyThreadConflict`; the notification launcher retries only that typed 409 and treats other 409 responses as permanent.
 
 CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned. Those clients also need `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): run-creating routes return the run's id in `Content-Location`, which is not CORS-safelisted, so JS cannot read it unless it is exposed — and the LangGraph SDK resolves run metadata from that header alone, so withholding it breaks `useStream`'s `onCreated` and thread-gated actions.
 
