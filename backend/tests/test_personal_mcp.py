@@ -51,7 +51,6 @@ def create(client, user, *, name="github", token=None, role="admin"):
 @pytest.mark.asyncio
 async def test_personal_config_write_drains_started_mutation_across_cancellation(monkeypatch):
     started = asyncio.Event()
-    release = asyncio.Event()
 
     monkeypatch.setattr(personal_mcp, "_owner", AsyncMock(return_value="alice"))
     monkeypatch.setattr(personal_mcp, "is_admin_user", AsyncMock(return_value=True))
