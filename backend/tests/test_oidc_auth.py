@@ -1,6 +1,9 @@
+import time
 from unittest.mock import AsyncMock
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import HTTPException
 
 from app.gateway.auth.models import User
@@ -435,3 +438,53 @@ def test_oidc_callback_rejects_non_ascii_state_as_mismatch(monkeypatch):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "OIDC state mismatch"
+
+
+def _metadata() -> OIDCMetadata:
+    return OIDCMetadata(
+        issuer="https://issuer.example.com",
+        authorization_endpoint="https://issuer.example.com/auth",
+        token_endpoint="https://issuer.example.com/token",
+        userinfo_endpoint=None,
+        jwks_uri="https://issuer.example.com/jwks",
+    )
+
+
+def _service_with_signing_key() -> tuple[OIDCService, object]:
+    service = OIDCService()
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    service._load_jwks = AsyncMock(return_value={})
+    service._resolve_signing_key = AsyncMock(return_value=private_key.public_key())
+    return service, private_key
+
+
+def _id_token(private_key, nonce: str) -> str:
+    now = int(time.time())
+    return jwt.encode(
+        {"iss": "https://issuer.example.com", "aud": "deer-flow", "sub": "s1", "exp": now + 300, "iat": now, "nonce": nonce},
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "k1"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_id_token_nonce_mismatch_with_non_ascii_is_rejected_not_a_type_error():
+    """The nonce claim is provider-controlled text, so a mismatch must reject
+    with OIDCValidationError; the raw str comparison raised TypeError instead,
+    turning the callback's sso_failed redirect into a 500 (#6076 fixed the
+    same five compare sites and left this one behind)."""
+    service, private_key = _service_with_signing_key()
+
+    with pytest.raises(OIDCValidationError, match="nonce does not match"):
+        await service.validate_id_token(metadata=_metadata(), client_id="deer-flow", id_token=_id_token(private_key, "nònce-é"), nonce="expected")
+
+
+@pytest.mark.asyncio
+async def test_id_token_nonce_match_with_non_ascii_is_accepted():
+    """A matching non-ASCII nonce keeps its bytes: equality survives the comparison."""
+    service, private_key = _service_with_signing_key()
+
+    claims = await service.validate_id_token(metadata=_metadata(), client_id="deer-flow", id_token=_id_token(private_key, "nònce-é"), nonce="nònce-é")
+
+    assert claims["nonce"] == "nònce-é"
