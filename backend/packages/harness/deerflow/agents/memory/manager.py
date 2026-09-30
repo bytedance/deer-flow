@@ -425,7 +425,11 @@ class MemoryManager(BaseModel):
         agent_name: str | None = None,
     ) -> dict[str, Any]:
         """Import a memory document into the bucket; return the merged result.
-        Default: unsupported."""
+
+        An explicit ``agent_name`` replaces only that agent's facts. Shared
+        user/history summaries must remain unchanged even when the incoming
+        document contains summary fields. Default: unsupported.
+        """
         raise NotImplementedError(f"import_memory not supported by {type(self).__name__}")
 
     def export_memory(

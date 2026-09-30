@@ -576,6 +576,7 @@ class DeerMem(MemoryManager):
                 memory_data,
                 agent_name=_resolve_agent_name(agent_name),
                 user_id=user_id,
+                replace_shared_summaries=agent_name is None,
             )
         )
         return _compat_document(imported)

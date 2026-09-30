@@ -510,11 +510,11 @@ async def export_memory(request: Request, agent_name: str | None = None) -> Memo
     response_model=MemoryResponse,
     response_model_exclude_none=True,
     summary="Import Memory Data",
-    description="Import and overwrite the selected agent's memory data, using the default bucket when agent_name is omitted.",
+    description="Import the default memory document, or replace only one selected agent's facts while preserving shared summaries.",
 )
 @require_permission("memory", "write")
 async def import_memory(body: MemoryResponse, request: Request, agent_name: str | None = None) -> MemoryResponse:
-    """Import and persist memory data."""
+    """Import memory data, preserving shared summaries for a selected agent."""
     manager = await asyncio.to_thread(get_memory_manager)
     selected_agent = _management_agent_name_or_501(manager, agent_name)
     scope_kwargs = _agent_scope_kwargs(selected_agent)

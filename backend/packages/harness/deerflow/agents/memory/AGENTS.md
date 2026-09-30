@@ -76,6 +76,9 @@ import/export, and fact CRUD; omitting it from clear preserves the legacy
 user-wide clear. Gateway validates the public agent-name grammar but preserves
 the caller's spelling so case-sensitive remote identities remain reachable;
 each backend owns any storage-specific canonicalization.
+Scoped import replaces only the selected agent's facts. It always preserves the
+user's shared `user` and `history` summaries, including when an older or
+fact-only import payload supplies empty summary defaults.
 
 #### Operating modes
 

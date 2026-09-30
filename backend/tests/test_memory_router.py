@@ -273,6 +273,50 @@ def test_scoped_import_and_clear_preserve_requested_agent_name() -> None:
     assert manager.clear_memory.call_args.kwargs == {"user_id": "alice", "agent_name": "Research-Agent"}
 
 
+def test_scoped_fact_import_preserves_shared_summaries(tmp_path) -> None:
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    shared_memory = _sample_memory()
+    shared_memory["user"]["workContext"] = {
+        "summary": "Shared work context",
+        "updatedAt": "2026-09-30T00:00:00Z",
+    }
+    shared_memory["history"]["recentMonths"] = {
+        "summary": "Shared recent history",
+        "updatedAt": "2026-09-30T00:00:00Z",
+    }
+    manager.import_memory(shared_memory, user_id="alice")
+    fact_only_import = {
+        "facts": [
+            {
+                "id": "fact-agent-a",
+                "content": "Agent A preference",
+                "category": "preference",
+                "confidence": 0.9,
+                "createdAt": "2026-09-30T00:00:00Z",
+                "source": "import",
+            }
+        ]
+    }
+
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/api/memory/import?agent_name=agent-a",
+            json=fact_only_import,
+        )
+
+    assert response.status_code == 200
+    imported = response.json()
+    assert [fact["id"] for fact in imported["facts"]] == ["fact-agent-a"]
+    assert imported["user"]["workContext"]["summary"] == "Shared work context"
+    assert imported["history"]["recentMonths"]["summary"] == "Shared recent history"
+
+
 def test_scoped_import_export_and_clear_are_isolated_between_agent_buckets(tmp_path) -> None:
     app = make_authed_test_app()
     app.include_router(memory.router)
