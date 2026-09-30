@@ -1875,6 +1875,25 @@ class TestEnsureAgent:
 
         assert mock_create_agent.call_count == 2
 
+    def test_null_subagent_total_limit_falls_back_to_app_config(self, client, mock_app_config):
+        """An explicit ``null`` cap means "unset", not a value to hand to the clamp."""
+        mock_app_config.subagents.max_total_per_run = 4
+        config = client._get_runnable_config("t1")
+        config["configurable"].update({"subagent_enabled": True, "max_total_subagents": None})
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config)
+
+        assert mock_apply_prompt.call_args.kwargs["max_total_subagents"] == 4
+
     def test_deferred_skill_discovery_wired_when_enabled(self, client, mock_app_config):
         """When skills.deferred_discovery=True, skill_names reaches apply_prompt_template
         (parity with agent.py — config flag must not be a silent no-op on the embedded path)."""
