@@ -31,10 +31,17 @@ def parse_interval_seconds(schedule_spec: dict[str, object]) -> int:
 
 
 def _is_fixed_time_cron(cron_expr: str) -> bool:
-    """Return whether a cron expression specifies fixed minute and hour (no wildcard)."""
+    """Return whether a cron expression specifies a single fixed minute and hour.
+
+    Expressions with wildcards ('*'), steps ('/'), ranges ('-'), or lists (',')
+    in either the minute or hour field (e.g. '0 0-23 * * *' or '*/15 2 * * *')
+    fire multiple times and should preserve all occurrences across repeated hours.
+    """
     parts = cron_expr.strip().split()
     if len(parts) >= 2:
-        return "*" not in parts[0] and "*" not in parts[1]
+        minute, hour = parts[0], parts[1]
+        special = ("*", "/", "-", ",")
+        return not any(ch in minute or ch in hour for ch in special)
     return False
 
 

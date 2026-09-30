@@ -333,7 +333,7 @@ This release closes that milestone with **181 merged pull requests**.
   neither minute nor hour contains a wildcard, the second occurrence is skipped
   to preserve once-per-day semantics (Vixie cron contract), while wildcard
   schedules (such as `0 * * * *`) still run in both occurrences of the repeated
-  hour. ([#6052])
+  hour. (issue #6052, [#6066])
 
 - **config:** `make config-upgrade` (also run by `make dev` / `make start`)
   upgrades the `config.yaml` the Gateway loads. With both
@@ -6255,5 +6255,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5987]: https://github.com/bytedance/deer-flow/pull/5987
 [#5991]: https://github.com/bytedance/deer-flow/pull/5991
 [#6015]: https://github.com/bytedance/deer-flow/pull/6015
-[#6052]: https://github.com/bytedance/deer-flow/issues/6052
-
+[#6066]: https://github.com/bytedance/deer-flow/pull/6066
