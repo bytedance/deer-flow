@@ -30,9 +30,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # PIDs are assigned further down, and early-failure paths (missing Python, a
-# failing case 1) exit before reaching them: initialize both before installing
-# the trap, and kill only assigned PIDs, so `set -u` cannot abort the trap and
-# skip the temporary-directory cleanup.
+# failing case 1) exit before reaching them: initialize all three before
+# installing the trap, and kill only assigned PIDs, so `set -u` cannot abort
+# the trap and skip the temporary-directory cleanup.
 dead_pid=""
 slow_pid=""
 wf_pid=""
@@ -126,6 +126,11 @@ open_port="$(tr -d '\r\n ' <"$TMP/slow.port")"
 wf_out="$TMP/wf.out"
 bash "$ROOT/scripts/wait-for-port.sh" "$open_port" 60 SlowService "$slow_pid" >"$wf_out" 2>&1 &
 wf_pid=$!
+
+# Budget ordering: the 90s observation window below (450 x 0.2s) stays under
+# the launcher's 120s go-file deadline, so a failed observation is never the
+# launcher timing out; wait-for-port's 60s timeout is the inner net for a
+# stall after the go-file.
 
 observed=""
 for _ in $(seq 1 450); do
