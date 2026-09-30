@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
+import re
 import subprocess
 import sys
 import textwrap
+import time
 import urllib.request
 from http.client import HTTPConnection
 from pathlib import Path
@@ -144,6 +147,41 @@ def test_exec_endpoint_round_trips(broker_server) -> None:
     assert payload["stdin"] == "hi"
 
 
+def test_exec_endpoint_logs_each_call(broker_server, caplog, monkeypatch) -> None:
+    """The HTTP log contract does not depend on a POSIX CLI executable."""
+    monkeypatch.setattr(lark_broker, "run_lark_cli", lambda *_args: lark_broker.ExecResult(0, b"", b"", False))
+    host, port = broker_server
+    with caplog.at_level(logging.INFO, logger=lark_broker.__name__):
+        status, _ = _post_exec(host, port, {"args": ["ping"]})
+    assert status == 200
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(re.search(r"lark-cli exec argc=1 exit=0 in \d+\.\d+s", message) for message in messages)
+
+
+def test_exec_endpoint_logs_never_include_argument_values(broker_server, caplog, monkeypatch) -> None:
+    """Neither short secrets nor document bodies may enter server-side logs."""
+    received = []
+
+    def run_cli(_config, args, stdin):
+        received.append((args, stdin))
+        return lark_broker.ExecResult(0, b"", b"", False)
+
+    monkeypatch.setattr(lark_broker, "run_lark_cli", run_cli)
+    host, port = broker_server
+    long_arg = "x" * 500
+    args = ["im", "+messages-send", "--content", "synthetic-private-body", "--token=SYNTHETIC_SECRET", long_arg]
+    with caplog.at_level(logging.INFO, logger=lark_broker.__name__):
+        status, _ = _post_exec(host, port, {"args": args})
+    assert status == 200
+    assert received == [(args, b"")]
+    messages = [record.getMessage() for record in caplog.records if "lark-cli exec" in record.getMessage()]
+    assert messages
+    assert "argc=6" in messages[0]
+    assert "synthetic-private-body" not in messages[0]
+    assert "SYNTHETIC_SECRET" not in messages[0]
+    assert "x" * 200 not in messages[0]
+
+
 @_skip_windows
 def test_exec_endpoint_ignores_client_supplied_credential_paths(broker_server) -> None:
     host, port = broker_server
@@ -218,6 +256,228 @@ def test_shim_fails_loudly_when_broker_unreachable(tmp_path: Path) -> None:
     )
     assert completed.returncode != 0
     assert b"broker unreachable" in completed.stderr
+
+
+@_skip_windows
+def test_shim_terminal_stdin_needs_no_command_wrapper(broker_server, tmp_path: Path) -> None:
+    """The legacy AIO shell is a PTY, which the shim already treats as no input."""
+    import pty
+
+    host, port = broker_server
+    shim = tmp_path / "lark-cli-shim.py"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    master, slave = pty.openpty()
+    try:
+        # Keep the terminal open throughout execution: there is no EOF to read.
+        completed = subprocess.run(
+            [sys.executable, str(shim), "auth", "status"],
+            stdin=slave,
+            capture_output=True,
+            env={**os.environ, lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}"},
+            timeout=5,
+        )
+    finally:
+        os.close(slave)
+        os.close(master)
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["stdin"] == ""
+
+
+@_skip_windows
+def test_shim_open_pipe_stdin_fails_without_executing(broker_server, tmp_path: Path, monkeypatch) -> None:
+    """An open pipe could be a delayed producer; never execute with guessed input."""
+    executions = []
+    monkeypatch.setattr(lark_broker, "run_lark_cli", lambda *args: executions.append(args) or lark_broker.ExecResult(0, b"", b"", False))
+    host, port = broker_server
+    shim = tmp_path / "lark-cli"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    shim.chmod(0o755)
+
+    proc = subprocess.Popen(
+        [sys.executable, str(shim), "auth", "status"],
+        stdin=subprocess.PIPE,  # held open by the parent, never written: no EOF ever arrives
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            **os.environ,
+            lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}",
+            "DEERFLOW_LARK_BROKER_STDIN_GRACE_SECONDS": "0.2",
+        },
+    )
+    try:
+        # Do not use communicate(): it would close stdin and mask the bug.
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("shim blocked waiting for EOF on a session-held stdin pipe")
+    stdout = proc.stdout.read()
+    stderr = proc.stderr.read()
+    proc.stdin.close()
+    assert proc.returncode == 124, stderr
+    assert stdout == b""
+    assert b"stdin" in stderr and b"EOF" in stderr
+    assert executions == []
+
+
+@_skip_windows
+def test_shim_piped_stdin_still_forwarded(broker_server, tmp_path: Path) -> None:
+    """`echo x | lark-cli ...` must still pass stdin through to the broker."""
+    host, port = broker_server
+    shim = tmp_path / "lark-cli"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    shim.chmod(0o755)
+
+    completed = subprocess.run(
+        [sys.executable, str(shim), "docs", "+fetch"],
+        input=b"streamed-input",
+        capture_output=True,
+        env={**os.environ, lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}"},
+        timeout=30,
+    )
+    assert completed.returncode == 0
+    payload = json.loads(completed.stdout.decode())
+    assert payload["stdin"] == "streamed-input"
+
+
+@_skip_windows
+def test_shim_drip_fed_stdin_round_trips(broker_server, tmp_path: Path) -> None:
+    """A slow producer writing in chunks below the idle window keeps its input."""
+    host, port = broker_server
+    shim = tmp_path / "lark-cli"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    shim.chmod(0o755)
+
+    proc = subprocess.Popen(
+        [sys.executable, str(shim), "docs", "+fetch"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}"},
+    )
+    try:
+        for piece in (b"streamed", b"-", b"input"):
+            proc.stdin.write(piece)
+            proc.stdin.flush()
+            time.sleep(0.3)  # each pause stays below the default tail window
+        proc.stdin.close()
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("shim stalled on drip-fed stdin")
+    stdout = proc.stdout.read()
+    stderr = proc.stderr.read()
+    assert proc.returncode == 0, stderr
+    payload = json.loads(stdout.decode())
+    assert payload["stdin"] == "streamed-input"
+    assert b"warning" not in stderr
+
+
+@_skip_windows
+def test_shim_idle_stdin_fails_without_executing_partial_input(broker_server, tmp_path: Path, monkeypatch) -> None:
+    """Never submit a partial document when a producer pauses before EOF."""
+    executions = []
+    monkeypatch.setattr(lark_broker, "run_lark_cli", lambda *args: executions.append(args) or lark_broker.ExecResult(0, b"", b"", False))
+    host, port = broker_server
+    shim = tmp_path / "lark-cli"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    shim.chmod(0o755)
+
+    proc = subprocess.Popen(
+        [sys.executable, str(shim), "docs", "+fetch"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            **os.environ,
+            lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}",
+            "DEERFLOW_LARK_BROKER_STDIN_TAIL_SECONDS": "0.3",
+        },
+    )
+    proc.stdin.write(b"first-chunk")
+    proc.stdin.flush()
+    try:
+        # The producer never writes again and never closes: the tail window fires.
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail("shim stalled on an idle stdin pipe")
+    stdout = proc.stdout.read()
+    stderr = proc.stderr.read()
+    proc.stdin.close()
+    assert proc.returncode == 124, stderr
+    assert stdout == b""
+    assert b"stdin" in stderr and b"EOF" in stderr
+    assert executions == []
+
+
+@_skip_windows
+@pytest.mark.parametrize("window", ["DEERFLOW_LARK_BROKER_STDIN_GRACE_SECONDS", "DEERFLOW_LARK_BROKER_STDIN_TAIL_SECONDS"])
+@pytest.mark.parametrize("value", ["inf", "1e309", "nan", "-1", "junk"])
+def test_shim_invalid_stdin_window_preserves_input(broker_server, tmp_path: Path, window: str, value: str) -> None:
+    """Invalid operator settings fall back rather than discarding valid input."""
+    host, port = broker_server
+    shim = tmp_path / "shim.py"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, str(shim), "docs", "+fetch"],
+        input=b"complete-input",
+        capture_output=True,
+        env={**os.environ, lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}", window: value},
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["stdin"] == "complete-input"
+
+
+@_skip_windows
+def test_shim_delayed_first_byte_within_window_is_preserved(broker_server, tmp_path: Path) -> None:
+    """An explicit larger grace window supports producers with startup latency."""
+    host, port = broker_server
+    shim = tmp_path / "shim.py"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    proc = subprocess.Popen(
+        [sys.executable, str(shim), "docs", "+fetch"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            **os.environ,
+            lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}",
+            "DEERFLOW_LARK_BROKER_STDIN_GRACE_SECONDS": "5",
+        },
+    )
+    try:
+        time.sleep(2.4)
+        stdout, stderr = proc.communicate(input=b"delayed-complete-input", timeout=30)
+        assert proc.returncode == 0, stderr
+        assert json.loads(stdout)["stdin"] == "delayed-complete-input"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.communicate()
+
+
+@_skip_windows
+def test_shim_large_file_input_is_preserved(broker_server, tmp_path: Path) -> None:
+    host, port = broker_server
+    shim = tmp_path / "shim.py"
+    shim.write_text(lark_broker.LARK_CLI_BROKER_SHIM_SCRIPT, encoding="utf-8")
+    contents = "文档内容\n" * 16000
+    input_file = tmp_path / "input.txt"
+    input_file.write_text(contents, encoding="utf-8")
+    with input_file.open("rb") as stdin:
+        completed = subprocess.run(
+            [sys.executable, str(shim), "docs", "+fetch"],
+            stdin=stdin,
+            capture_output=True,
+            env={**os.environ, lark_broker.LARK_BROKER_URL_ENV: f"http://{host}:{port}"},
+            timeout=30,
+        )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["stdin"] == contents
 
 
 def test_install_shim_writes_runtime_layout(tmp_path: Path) -> None:
