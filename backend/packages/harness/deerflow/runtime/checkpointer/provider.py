@@ -28,7 +28,7 @@ from langgraph.types import Checkpointer
 
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.checkpointer_config import CheckpointerConfig, ensure_config_loaded, get_checkpointer_config
-from deerflow.persistence.postgres_schema import dsn_with_search_path, ensure_postgres_schema
+from deerflow.persistence.postgres_schema import dsn_with_search_path, ensure_postgres_schema, normalize_libpq_dsn
 from deerflow.runtime.checkpoint_mode import frozen_checkpoint_channel_mode
 from deerflow.runtime.store._sqlite_utils import ensure_sqlite_parent_dir, resolve_sqlite_conn_str
 
@@ -139,7 +139,7 @@ def _sync_checkpointer_cm(config: CheckpointerConfig) -> Iterator[Checkpointer]:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
         _ensure_postgres_schema(config.connection_string, config.postgres_schema)
-        conn_string = dsn_with_search_path(config.connection_string, config.postgres_schema)
+        conn_string = dsn_with_search_path(normalize_libpq_dsn(config.connection_string), config.postgres_schema)
         with PostgresSaver.from_conn_string(conn_string) as saver:
             saver.setup()
             logger.info("Checkpointer: using PostgresSaver")

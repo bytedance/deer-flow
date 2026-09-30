@@ -25,7 +25,7 @@ from collections.abc import AsyncIterator
 from langgraph.store.base import BaseStore
 
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.persistence.postgres_schema import dsn_with_search_path, ensure_postgres_schema_async
+from deerflow.persistence.postgres_schema import dsn_with_search_path, ensure_postgres_schema_async, normalize_libpq_dsn
 from deerflow.runtime.cancellation import drained_async_context
 from deerflow.runtime.store.provider import (
     POSTGRES_CONN_REQUIRED,
@@ -88,7 +88,7 @@ async def _async_store(config) -> AsyncIterator[BaseStore]:
             raise ValueError(POSTGRES_CONN_REQUIRED)
 
         await _ensure_postgres_schema(config.connection_string, config.postgres_schema)
-        conn_string = dsn_with_search_path(config.connection_string, config.postgres_schema)
+        conn_string = dsn_with_search_path(normalize_libpq_dsn(config.connection_string), config.postgres_schema)
         async with drained_async_context(AsyncPostgresStore.from_conn_string(conn_string)) as store:
             await store.setup()
             logger.info("Store: using AsyncPostgresStore")
