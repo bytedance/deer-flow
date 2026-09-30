@@ -349,7 +349,7 @@ This release closes that milestone with **181 merged pull requests**.
   callers could). The Gateway lead agent, `DeerFlowClient`, and the system
   prompt now resolve the cap through one helper that treats `null` as unset and
   clamps to 1-50, so the extension-facing host policy and the release policy
-  also report the enforced cap rather than an out-of-range request.
+  also report the enforced cap rather than an out-of-range request. ([#6088])
 - **scheduler:** Fixed-hour cron tasks no longer fire twice on the daylight-saving
   fall-back day. `croniter` returns both occurrences of an ambiguous wall-clock
   hour (the first with `fold=0`, the second with `fold=1`). For tasks where
@@ -6293,4 +6293,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6066]: https://github.com/bytedance/deer-flow/pull/6066
 [#6069]: https://github.com/bytedance/deer-flow/pull/6069
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
+[#6088]: https://github.com/bytedance/deer-flow/pull/6088
 
