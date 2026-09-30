@@ -90,7 +90,10 @@ Match zero to three literal spaces before `# ` without trimming indentation;
 mixed space/tab code blocks must fall back to the URL. A trailing hash run
 preceded by a space or tab is CommonMark's optional closing sequence and is
 stripped; literal hashes (`# C#`, `# Release ### notes`) stay in the title.
-Keep this local to title extraction rather than changing the shared streamdown
+Only space/tab/CR may surround the closing sequence, so trailing whitespace is
+removed per-character instead of `trimEnd()`: a hash run closed by non-ASCII
+whitespace (e.g. U+00A0) is literal heading text, never a closer. Keep this
+local to title extraction rather than changing the shared streamdown
 fence parser.
 
 Custom Agent `display_name` is an optional Unicode UI label, edited in

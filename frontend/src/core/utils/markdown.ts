@@ -10,10 +10,13 @@ export function extractTitleFromMarkdown(markdown: string) {
     return undefined;
   }
   // A trailing hash run preceded by a space or tab is CommonMark's optional
-  // closing sequence, not title text. Literal hashes (`# C#`) stay.
+  // closing sequence, not title text. Literal hashes (`# C#`) stay. Only
+  // space/tab/CR may trail the closing sequence, so strip those by hand
+  // instead of trimEnd(): trimEnd also removes non-ASCII whitespace, which
+  // would turn a literal `### ` into a fake closing sequence.
   const title = firstLine
     .slice(headingPrefix[0].length)
-    .trimEnd()
+    .replace(/[ \t\r]+$/, "")
     .replace(/(^|[ \t])#+$/, "")
     .trim();
   return title || undefined;

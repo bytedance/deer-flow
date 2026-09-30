@@ -73,6 +73,17 @@ test("keeps literal hashes that are not a closing sequence", () => {
   expect(extractTitleFromMarkdown("# trailing #hash")).toBe("trailing #hash");
 });
 
+test("keeps a hash run closed by non-ASCII whitespace as literal text", () => {
+  // CommonMark allows only spaces/tabs after a closing sequence, so a hash
+  // run followed by U+00A0 is heading content, not a closer.
+  expect(extractTitleFromMarkdown("# Release Notes ### ")).toBe(
+    "Release Notes ###",
+  );
+  expect(extractTitleFromMarkdown("# Release Notes ###  ")).toBe(
+    "Release Notes ###",
+  );
+});
+
 test("does not report an empty heading as a title", () => {
   expect(extractTitleFromMarkdown("# \n\nbody")).toBeUndefined();
   expect(extractTitleFromMarkdown("#")).toBeUndefined();
