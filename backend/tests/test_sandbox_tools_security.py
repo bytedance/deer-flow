@@ -875,6 +875,26 @@ def test_validate_local_bash_command_paths_still_blocks_ascii_host_path_in_code(
         validate_local_bash_command_paths("python3 -c \"open('/etc/passwd').read()\"", _THREAD_DATA)
 
 
+def test_validate_local_bash_command_paths_allows_quoted_paths_with_spaces() -> None:
+    """Spaces inside quotes belong to the filename; they must not truncate a segment."""
+    validate_local_bash_command_paths('cat "/mnt/user-data/uploads/report. final.txt"', _THREAD_DATA)
+    validate_local_bash_command_paths('cat "/mnt/user-data/uploads/CON notes.txt"', _THREAD_DATA)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'cat "/mnt/user-data/uploads/CON"',
+        'cat "/mnt/user-data/uploads/report."',
+        'cat "/mnt/user-data/uploads/foo bar/../../etc/passwd"',
+        "cat /mnt/user-data/uploads/report. final.txt",
+    ],
+)
+def test_validate_local_bash_command_paths_rejects_quoted_reserved_or_trailing_dot_paths(command: str) -> None:
+    with pytest.raises(PermissionError):
+        validate_local_bash_command_paths(command, _THREAD_DATA)
+
+
 @pytest.mark.parametrize(
     "command",
     [

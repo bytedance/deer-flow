@@ -1050,6 +1050,61 @@ def _split_shell_tokens(command: str) -> list[str]:
         return command.split()
 
 
+_SHELL_PATH_HARD_TERMINATORS = frozenset("\"'`;&|<>()")
+
+
+def _absolute_path_token_occurrences(command: str, tokens: list[str]) -> list[tuple[int, int, str]]:
+    """Locate contiguous occurrences of path-bearing shell tokens in *command*.
+
+    shlex strips quotes, so a quoted path with spaces is one token. Occurrences
+    stay tied to their position so a later quoted ``.../CON notes.txt`` cannot
+    excuse an earlier real ``/.../CON``. Tokens that are not a contiguous
+    substring (newline normalization, escapes) yield no occurrence.
+    """
+    occurrences: list[tuple[int, int, str]] = []
+    for token in tokens:
+        if "/" not in token:
+            continue
+        start = command.find(token)
+        while start != -1:
+            occurrences.append((start, start + len(token), token))
+            start = command.find(token, start + 1)
+    return occurrences
+
+
+def _extend_absolute_path_within_span(command: str, match_start: int, span_end: int) -> str:
+    """Continue a regex path through spaces inside one shell word.
+
+    Stop before quotes and shell metacharacters the absolute-path regex already
+    treats as boundaries, so a trailing dot is not hidden by a closing quote.
+    """
+    chars: list[str] = []
+    for char in command[match_start:span_end]:
+        if char in _SHELL_PATH_HARD_TERMINATORS:
+            break
+        chars.append(char)
+    return "".join(chars)
+
+
+def _shell_absolute_path_candidate(command: str, occurrences: list[tuple[int, int, str]], match: re.Match[str]) -> str | None:
+    """Return the path to validate for one regex match, or None if already covered.
+
+    A match that starts a shell word is validated as that whole word. A later
+    match inside that same absolute-path word is skipped. A match embedded in a
+    larger word is extended through spaces only up to a hard terminator.
+    """
+    covering = [item for item in occurrences if item[0] <= match.start() < item[1]]
+    if not covering:
+        return match.group()
+    start, end, token = max(covering, key=lambda item: item[1] - item[0])
+    if token.startswith("/") and start == match.start():
+        return token
+    if token.startswith("/") and start < match.start():
+        return None
+    extended = _extend_absolute_path_within_span(command, match.start(), end)
+    return extended or match.group()
+
+
 def _is_shell_command_separator(token: str) -> bool:
     return token in _SHELL_COMMAND_SEPARATORS
 
@@ -1274,7 +1329,8 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     config.yaml) are allowed (path-traversal checks only; write prevention
     for bash commands is not enforced here).
     A small allowlist of common system path prefixes is kept for executable
-    and device references (e.g. /bin/sh, /dev/null).
+    and device references (e.g. /bin/sh, /dev/null). Quoted shell words are
+    validated whole, so a space inside quotes is not treated as a new segment.
     """
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
@@ -1287,6 +1343,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
     _validate_local_bash_shell_tokens(command, allowed_paths)
+    path_token_occurrences = _absolute_path_token_occurrences(command, _split_shell_tokens(command))
     url_spans = _non_file_url_spans(command)
 
     for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
@@ -1295,10 +1352,13 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         absolute_path = match.group()
         if _is_non_path_literal_fragment(absolute_path):
             continue
-        if _is_allowed_local_bash_absolute_path(absolute_path, allowed_paths, allow_system_paths=True):
+        candidate = _shell_absolute_path_candidate(command, path_token_occurrences, match)
+        if candidate is None:
+            continue
+        if _is_allowed_local_bash_absolute_path(candidate, allowed_paths, allow_system_paths=True):
             continue
 
-        unsafe_paths.append(absolute_path)
+        unsafe_paths.append(candidate)
 
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
