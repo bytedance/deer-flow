@@ -176,12 +176,12 @@ This release closes that milestone with **181 merged pull requests**.
   option that preserves an unexpired binding command; credentials are saved on
   the backend and only the WeChat channel restarts. New WeChat connections
   default to QR login, with manual token entry still available. ([#5582])
-- **scheduler / channels:** Push scheduled-task outcomes to the owner's bound
+- **scheduler:** Push scheduled-task outcomes to the owner's bound
   IM identities via a durable `notification_deliveries` outbox and
   `NotificationDeliveryWorker`. Activates only when `channel_connections.enabled`
   is true and a channel service is running; manual triggers and interrupts stay
   silent. WeCom implements proactive `send_notification`; other providers fail
-  visibly in the outbox until they grow a push path. ([#4843], [#4254])
+  visibly in the outbox until they grow a push path. (issue #4254, [#4843])
 
 #### Auth & guardrails
 
@@ -5586,7 +5586,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4250]: https://github.com/bytedance/deer-flow/pull/4250
 [#4251]: https://github.com/bytedance/deer-flow/pull/4251
 [#4253]: https://github.com/bytedance/deer-flow/pull/4253
-[#4254]: https://github.com/bytedance/deer-flow/issues/4254
 [#4255]: https://github.com/bytedance/deer-flow/pull/4255
 [#4256]: https://github.com/bytedance/deer-flow/pull/4256
 [#4260]: https://github.com/bytedance/deer-flow/pull/4260

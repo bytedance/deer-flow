@@ -173,6 +173,12 @@
   过期与重试状态，以及一个保留未过期绑定指令的“再次扫描”选项；
   凭据保存在后端，且只有微信渠道会重启。
   新的微信连接默认走扫码登录，手动输入 token 仍然可用。([#5582])
+- **scheduler:** 把定时任务的运行结果推送到任务所有者已绑定的 IM 身份：
+  完成钩子把结果写入持久化的 `notification_deliveries` outbox，
+  由 `NotificationDeliveryWorker` 负责投递。仅当 `channel_connections.enabled`
+  为 true 且渠道服务在运行时生效；手动触发和中断不推送。目前只有企业微信实现了
+  主动推送 `send_notification`，其它渠道在实现之前会在 outbox 中显式失败。
+  (issue #4254, [#4843])
 
 #### 认证与防护
 
@@ -4853,6 +4859,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#4839]: https://github.com/bytedance/deer-flow/pull/4839
 [#4840]: https://github.com/bytedance/deer-flow/pull/4840
 [#4842]: https://github.com/bytedance/deer-flow/pull/4842
+[#4843]: https://github.com/bytedance/deer-flow/pull/4843
 [#4844]: https://github.com/bytedance/deer-flow/pull/4844
 [#4846]: https://github.com/bytedance/deer-flow/pull/4846
 [#4848]: https://github.com/bytedance/deer-flow/pull/4848
