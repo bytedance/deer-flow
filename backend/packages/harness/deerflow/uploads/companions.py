@@ -42,7 +42,7 @@ def register_companion(original: Path, markdown: Path) -> None:
                     "original": original.name,
                     "markdown": markdown.name,
                     "source_identity": [source_stat.st_dev, source_stat.st_ino, source_stat.st_size],
-                    "markdown_identity": [markdown_stat.st_dev, markdown_stat.st_ino, markdown_stat.st_size],
+                    "markdown_identity": [markdown_stat.st_dev, markdown_stat.st_ino, markdown_stat.st_size, markdown_stat.st_ctime_ns],
                 },
                 output,
             )
@@ -54,6 +54,24 @@ def register_companion(original: Path, markdown: Path) -> None:
 
 def unregister_companion(original: Path) -> None:
     _record_path(original.parent, original.name).unlink(missing_ok=True)
+
+
+def invalidate_overwritten_upload(path: Path) -> None:
+    """Forget any relationship involving a file independently re-uploaded in place."""
+    unregister_companion(path)
+    if path.suffix.lower() != ".md":
+        return
+    records_dir = _records_dir(path.parent)
+    if not records_dir.is_dir():
+        return
+    for record in records_dir.glob("*.json"):
+        try:
+            if record.is_symlink():
+                continue
+            if json.loads(record.read_text(encoding="utf-8")).get("markdown") == path.name:
+                record.unlink(missing_ok=True)
+        except (OSError, ValueError, AttributeError):
+            continue
 
 
 def resolve_companion(original: Path) -> Path | None:
@@ -75,7 +93,7 @@ def resolve_companion(original: Path) -> Path | None:
         if not markdown.is_file() or markdown.is_symlink():
             return None
         markdown_stat = markdown.stat(follow_symlinks=False)
-        if data.get("markdown_identity") != [markdown_stat.st_dev, markdown_stat.st_ino, markdown_stat.st_size]:
+        if data.get("markdown_identity") != [markdown_stat.st_dev, markdown_stat.st_ino, markdown_stat.st_size, markdown_stat.st_ctime_ns]:
             return None
         return markdown
     except (OSError, ValueError, KeyError, TypeError):
