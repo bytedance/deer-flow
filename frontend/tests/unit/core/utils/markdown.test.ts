@@ -25,6 +25,16 @@ test("preserves literal hashes that are not closing ATX syntax", () => {
   );
 });
 
+test("handles long non-matching whitespace in linear time without backtracking", () => {
+  const longHeading = `# Title${" ".repeat(50000)}#x\n\nbody`;
+  const start = performance.now();
+  const title = extractTitleFromMarkdown(longHeading);
+  const duration = performance.now() - start;
+
+  expect(title).toBe(`Title${" ".repeat(50000)}#x`);
+  expect(duration).toBeLessThan(50);
+});
+
 test("skips blank lines before the first heading", () => {
   expect(extractTitleFromMarkdown("\n# Real Title\n\nbody")).toBe("Real Title");
   expect(extractTitleFromMarkdown("  \n\n# Real Title")).toBe("Real Title");
