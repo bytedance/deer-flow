@@ -273,8 +273,8 @@ class ClaudeChatModel(ChatAnthropic):
         if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= MIN_THINKING_BUDGET_TOKENS:
             raise ValueError(f"Claude extended thinking requires max_tokens > {MIN_THINKING_BUDGET_TOKENS}; got {max_tokens}")
 
-        if "budget_tokens" in thinking:
-            budget_tokens = thinking["budget_tokens"]
+        budget_tokens = thinking.get("budget_tokens")
+        if budget_tokens is not None:
             if not isinstance(budget_tokens, int) or isinstance(budget_tokens, bool) or not MIN_THINKING_BUDGET_TOKENS <= budget_tokens < max_tokens:
                 raise ValueError(f"Claude extended thinking requires budget_tokens to be an integer between {MIN_THINKING_BUDGET_TOKENS} and max_tokens ({max_tokens}); got {budget_tokens}")
             return

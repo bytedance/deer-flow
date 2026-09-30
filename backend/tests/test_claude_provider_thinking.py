@@ -32,6 +32,33 @@ def test_auto_budget_clamps_to_minimum_when_max_tokens_allows_it():
     assert payload["thinking"]["budget_tokens"] == 1024
 
 
+def test_auto_budget_uses_eighty_percent_for_large_max_tokens():
+    model = _make_model()
+    payload = {"thinking": {"type": "enabled"}, "max_tokens": 8192}
+
+    model._apply_thinking_budget(payload)
+
+    assert payload["thinking"]["budget_tokens"] == 6553
+
+
+def test_null_budget_is_treated_as_unset():
+    model = _make_model()
+    payload = {"thinking": {"type": "enabled", "budget_tokens": None}, "max_tokens": 8192}
+
+    model._apply_thinking_budget(payload)
+
+    assert payload["thinking"]["budget_tokens"] == 6553
+
+
+def test_disabled_thinking_does_not_validate_small_max_tokens():
+    model = _make_model()
+    payload = {"thinking": {"type": "disabled"}, "max_tokens": 100}
+
+    model._apply_thinking_budget(payload)
+
+    assert payload == {"thinking": {"type": "disabled"}, "max_tokens": 100}
+
+
 def test_explicit_budget_is_left_unchanged():
     model = _make_model()
     payload = {"thinking": {"type": "enabled", "budget_tokens": 2048}, "max_tokens": 4096}
