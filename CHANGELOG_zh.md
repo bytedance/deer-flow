@@ -332,6 +332,12 @@
 
 ### 修复
 
+- **Gateway：** 含非 ASCII 字符的 CSRF token、GitHub webhook 签名、内部认证 token、
+  OIDC `state` 或 provisioner `X-API-Key` 现在按常规返回 403/401，而不是 500。
+  `hmac.compare_digest` 遇到含非 ASCII 字符的 `str` 参数会抛出 `TypeError`，而
+  Starlette 以 latin-1 解码请求头字节，一个 `0xE9` 字节就能让比较崩溃。Gateway 现在通过统一的
+  `app.gateway.utils.constant_time_equals` 比较 UTF-8 字节，独立部署的 provisioner
+  则在原处编码后比较。此前不存在绕过，请求本就会失败，只是状态码错误。([#6076])
 - **智能体：** 上下文压缩的 fraction 触发器与 fraction 保留量现在使用当前运行
   模型的上下文 profile；单独配置的 `summarization.model_name` 只负责生成摘要。
   这避免运行模型与摘要模型的窗口不一致时压缩过晚或过早。中间件发布身份现在
@@ -343,6 +349,13 @@
   `run_events.backend: jsonl` 下，`run.1` 这类 ID 会抛出 `ValueError`，而内存与
   数据库存储返回空结果。现在 JSONL 的读取与删除把这类 ID 视为不存在的 run，写入
   仍会拒绝它。([#6070])
+- **智能体：** 运行上下文中带有 `"max_total_subagents": null` 时，现在会使用配置的
+  `subagents.max_total_per_run`，而不是抛出 `TypeError`。该键存在时
+  `dict.get(key, default)` 会返回 `None`，构建 `SubagentLimitMiddleware` 时该次运行
+  便以内部错误失败（Web UI 从不发送该键，但 API 与嵌入式客户端调用方可能发送）。
+  Gateway lead agent、`DeerFlowClient` 与系统提示词现在通过同一个辅助函数解析上限：
+  `null` 视为未设置，并限制在 1-50，因此面向扩展的 host policy 与 release policy
+  报告的也是实际执行的上限，而非超出范围的请求值。([#6088])
 - **调度器：** 固定小时的 cron 任务在夏令时回退（DST fall-back）当天不再重复运行两次。
   `croniter` 会返回模糊本地时间的两个实例（首个为 `fold=0`，第二个为 `fold=1`）。
   对于分和时字段不包含通配符的固定任务，现在会跳过第二个重复实例（`fold=1`），保持每天只运行一次
@@ -5329,3 +5342,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6066]: https://github.com/bytedance/deer-flow/pull/6066
 [#6069]: https://github.com/bytedance/deer-flow/pull/6069
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
+[#6076]: https://github.com/bytedance/deer-flow/pull/6076
+[#6088]: https://github.com/bytedance/deer-flow/pull/6088

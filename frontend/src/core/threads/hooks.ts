@@ -3438,6 +3438,7 @@ export function useInfiniteThreads(
     sortOrder: "desc",
     select: ["thread_id", "updated_at", "values", "metadata"],
   },
+  { enabled = true }: { enabled?: boolean } = {},
 ) {
   const apiClient = getAPIClient();
   return useInfiniteQuery<
@@ -3459,6 +3460,7 @@ export function useInfiniteThreads(
     getNextPageParam: (lastPage, allPages) =>
       getInfiniteThreadsNextPageParam(lastPage, allPages),
     refetchOnWindowFocus: false,
+    enabled,
   });
 }
 

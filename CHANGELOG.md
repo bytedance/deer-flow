@@ -327,6 +327,15 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **gateway:** A non-ASCII CSRF token, GitHub webhook signature, internal auth
+  token, OIDC `state`, or provisioner `X-API-Key` is now rejected with the
+  usual 403/401 instead of a 500. `hmac.compare_digest` raises `TypeError` for
+  `str` operands with non-ASCII characters, and Starlette decodes header bytes
+  as latin-1, so a single `0xE9` byte crashed the comparison. The Gateway now
+  compares the UTF-8 bytes through one helper,
+  `app.gateway.utils.constant_time_equals`, and the standalone provisioner
+  encodes inline. No bypass was possible; the request was already failing, just
+  with the wrong status. ([#6076])
 - **agents:** Context-compaction fraction triggers and fraction-based retention
   now use the active run model's context profile; a separate
   `summarization.model_name` remains generation-only. This prevents mismatched
@@ -341,6 +350,15 @@ This release closes that milestone with **181 merged pull requests**.
   while the memory and database stores return an empty result. JSONL reads and
   deletes now treat such an ID as an unknown run; writes still reject it.
   ([#6070])
+- **agents:** A run started with `"max_total_subagents": null` in its context
+  now uses the configured `subagents.max_total_per_run` instead of failing with
+  a `TypeError`. The key was present, so `dict.get(key, default)` returned
+  `None`, and building `SubagentLimitMiddleware` crashed that run with an
+  internal error (the web UI never sends the key; API and embedded-client
+  callers could). The Gateway lead agent, `DeerFlowClient`, and the system
+  prompt now resolve the cap through one helper that treats `null` as unset and
+  clamps to 1-50, so the extension-facing host policy and the release policy
+  also report the enforced cap rather than an out-of-range request. ([#6088])
 - **scheduler:** Fixed-hour cron tasks no longer fire twice on the daylight-saving
   fall-back day. `croniter` returns both occurrences of an ambiguous wall-clock
   hour (the first with `fold=0`, the second with `fold=1`). For tasks where
@@ -6284,4 +6302,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6066]: https://github.com/bytedance/deer-flow/pull/6066
 [#6069]: https://github.com/bytedance/deer-flow/pull/6069
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
+[#6076]: https://github.com/bytedance/deer-flow/pull/6076
+[#6088]: https://github.com/bytedance/deer-flow/pull/6088
 

@@ -405,3 +405,33 @@ def test_oidc_redirect_uri_fallback_plain_host_when_no_proxy_headers():
     result = _resolve_oidc_redirect_uri(req, "keycloak", cfg)
 
     assert result == "http://localhost:8001/api/v1/auth/callback/keycloak"
+
+
+def test_oidc_callback_rejects_non_ascii_state_as_mismatch(monkeypatch):
+    """A percent-encoded non-ASCII ``state`` is a 403 mismatch, not a 500."""
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import deerflow.config.app_config as app_config_module
+    from app.gateway.auth.config import AuthConfig, get_auth_config, set_auth_config
+    from app.gateway.auth.oidc_state import OIDCStatePayload, _sign_state_payload
+    from app.gateway.routers import auth as auth_router
+
+    previous_auth_config = get_auth_config()
+    set_auth_config(AuthConfig(jwt_secret="test-secret-key-for-oidc-state-mismatch-min-32"))
+    try:
+        oidc_config = SimpleNamespace(enabled=True, providers={"keycloak": _provider_config()})
+        monkeypatch.setattr(app_config_module, "get_app_config", lambda: SimpleNamespace(auth=SimpleNamespace(oidc=oidc_config)))
+        app = FastAPI()
+        app.include_router(auth_router.router)
+        client = TestClient(app)
+        client.cookies.set("df_oidc_state_keycloak", _sign_state_payload(OIDCStatePayload(provider="keycloak", state="expected-state")))
+
+        response = client.get("/api/v1/auth/callback/keycloak", params={"code": "code", "state": "expected-st\xe4te"})
+    finally:
+        set_auth_config(previous_auth_config)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "OIDC state mismatch"

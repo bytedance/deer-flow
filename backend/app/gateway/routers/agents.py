@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -26,9 +27,43 @@ from deerflow.config.paths import get_paths
 from deerflow.knowledge_scope import KnowledgeScope, canonicalize_knowledge_scope
 from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
+
+
+async def _drained_write[**P, T](
+    action: str,
+    func: Callable[P, T],
+    expected_errors: tuple[type[Exception], ...] = (),
+    /,
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> T:
+    """Run a persistent write off the event loop and drain it across cancellation.
+
+    A client that disconnects mid-request cancels the handler task: a bare
+    ``asyncio.to_thread`` either cancels a still-queued worker — the write
+    silently never happens — or detaches from a running one, dropping its
+    failure because the handler's ``except`` never runs. ``await_drained``
+    lets the worker finish first; expected domain errors re-raise unlogged
+    (the caller maps them to a 4xx while still connected), anything else is
+    logged with the exception type only — the text can carry user content.
+    """
+
+    def _logged() -> T:
+        try:
+            return func(*args, **kwargs)
+        except expected_errors:
+            raise
+        except Exception as exc:
+            # Non-cancelled failures are logged again by the outer route handler.
+            logger.error("%s failed (%s)", action, type(exc).__name__)
+            raise
+
+    return await await_drained(asyncio.to_thread(_logged))
+
 
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
@@ -108,7 +143,7 @@ def _validate_agent_name(name: str) -> None:
     Raises:
         HTTPException: 422 if the name is invalid.
     """
-    if not AGENT_NAME_PATTERN.match(name):
+    if not AGENT_NAME_PATTERN.fullmatch(name):
         raise HTTPException(
             status_code=422,
             detail=f"Invalid agent name '{name}'. Must match ^[A-Za-z0-9-]+$ (letters, digits, and hyphens only).",
@@ -376,7 +411,7 @@ async def create_agent_endpoint(body: AgentCreateRequest, request: Request) -> A
         return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
 
     try:
-        return await asyncio.to_thread(_create_agent)
+        return await _drained_write("Create agent", _create_agent, (AgentExistsError,))
     except AgentExistsError:
         raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
     except Exception as e:
@@ -501,7 +536,7 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
             def _update_agent() -> None:
                 get_agent_store().update(name, updated, body.soul, user_id=user_id)
 
-            await asyncio.to_thread(_update_agent)
+            await _drained_write("Update agent", _update_agent)
 
         logger.info(f"Updated agent '{name}'")
 
@@ -600,7 +635,7 @@ async def update_user_profile(body: UserProfileUpdateRequest, request: Request) 
         return user_md_path
 
     try:
-        user_md_path = await asyncio.to_thread(_write_profile)
+        user_md_path = await _drained_write("Update user profile", _write_profile)
         logger.info(f"Updated USER.md at {user_md_path}")
         return UserProfileResponse(content=body.content or None)
     except Exception as e:
@@ -633,7 +668,7 @@ async def delete_agent(name: str, request: Request) -> None:
     try:
         # Off the event loop: resolve store + cancel → delete → cancel-on-success
         # (get_agent_store / memory manager do blocking config and FS I/O).
-        outcome = await asyncio.to_thread(_delete_agent_with_memory_cancel, name, user_id)
+        outcome = await _drained_write("Delete agent", _delete_agent_with_memory_cancel, (), name, user_id)
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
