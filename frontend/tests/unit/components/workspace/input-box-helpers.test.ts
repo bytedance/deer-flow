@@ -518,3 +518,14 @@ describe("findSuggestionTemplatePlaceholder", () => {
     expect(findSuggestionTemplatePlaceholder("no placeholder here")).toBeNull();
   });
 });
+
+it("never offers filesystem-discovered names outside the activation grammar", () => {
+  const names = ["research", "a--b", "a_b", "Research", "a-", "context"];
+  expect(
+    getMatchingSkillSuggestions(
+      names.map((name) => makeSkill(name)),
+      "",
+      [],
+    ).map((item) => item.name),
+  ).toEqual(["research", "context"]);
+});

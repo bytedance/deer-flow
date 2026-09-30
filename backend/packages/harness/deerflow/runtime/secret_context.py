@@ -103,6 +103,28 @@ def read_slash_skill_source_path(context: Any, *, owner_token: str) -> str | Non
     return path if isinstance(path, str) and path else None
 
 
+def write_slash_skill_source_paths(context: Any, paths: tuple[str, ...], *, owner_token: str) -> None:
+    """Bind all explicitly selected skills with the same private owner token."""
+    if paths:
+        write_slash_skill_source_path(context, paths[0], owner_token=owner_token)
+        if read_slash_skill_source_path(context, owner_token=owner_token) == paths[0]:
+            context[_SLASH_SECRET_SOURCE_KEY]["paths"] = list(dict.fromkeys(paths))
+
+
+def read_slash_skill_source_paths(context: Any, *, owner_token: str) -> tuple[str, ...]:
+    """Authenticate before accepting a list; retain the legacy single-path shape."""
+    first = read_slash_skill_source_path(context, owner_token=owner_token)
+    if first is None:
+        return ()
+    source = context[_SLASH_SECRET_SOURCE_KEY]
+    if "paths" not in source:
+        return (first,)
+    paths = source["paths"]
+    if not isinstance(paths, list) or not 1 <= len(paths) <= 16 or paths[0] != first or any(not isinstance(path, str) or not path for path in paths):
+        return ()
+    return tuple(dict.fromkeys(paths))
+
+
 # Reserved run-context key holding the per-model-step ``skill:activate``
 # decisions for persisted ``skill_context`` entry paths, keyed by normalized
 # container SKILL.md path. Published by the skill-activation middleware (async

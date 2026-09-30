@@ -1,4 +1,8 @@
-import { RESERVED_SLASH_SKILL_NAMES, type Skill } from "@/core/skills";
+import {
+  parseSlashSkillReference,
+  RESERVED_SLASH_SKILL_NAMES,
+  type Skill,
+} from "@/core/skills";
 export {
   SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN,
   findSuggestionTemplatePlaceholder,
@@ -204,7 +208,10 @@ export function getMatchingSkillSuggestions(
       name: skill.name.toLowerCase(),
     }))
     .filter(({ skill, name }) => {
-      if (!skill.enabled) {
+      if (
+        !skill.enabled ||
+        parseSlashSkillReference(`/${skill.name}`)?.name !== skill.name
+      ) {
         return false;
       }
       if (reservedNames.has(name) && name !== "context") {
