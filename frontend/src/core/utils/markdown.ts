@@ -9,5 +9,10 @@ export function extractTitleFromMarkdown(markdown: string) {
   if (!headingPrefix) {
     return undefined;
   }
-  return firstLine.slice(headingPrefix[0].length).trim() || undefined;
+  return (
+    firstLine
+      .slice(headingPrefix[0].length)
+      .replace(/(?:^|[ \t]+)#+[ \t]*\r?$/, "")
+      .trim() || undefined
+  );
 }

@@ -6,6 +6,25 @@ test("reads the title from a leading ATX heading", () => {
   expect(extractTitleFromMarkdown("# Real Title\n\nbody")).toBe("Real Title");
 });
 
+test.each([
+  ["# Release Notes ###", "Release Notes"],
+  ["# Release Notes ###   ", "Release Notes"],
+  ["# Release Notes\t###\t", "Release Notes"],
+  ["# Release Notes ###\r\nbody", "Release Notes"],
+  ["# ###", undefined],
+])("removes a closing ATX heading sequence from %j", (markdown, expected) => {
+  expect(extractTitleFromMarkdown(markdown)).toBe(expected);
+});
+
+test.each([
+  ["# C#", "C#"],
+  ["# Release ### notes", "Release ### notes"],
+  ["# Release ###x", "Release ###x"],
+  ["# Release \\###", "Release \\###"],
+])("preserves literal hashes in %j", (markdown, expected) => {
+  expect(extractTitleFromMarkdown(markdown)).toBe(expected);
+});
+
 test("skips blank lines before the first heading", () => {
   expect(extractTitleFromMarkdown("\n# Real Title\n\nbody")).toBe("Real Title");
   expect(extractTitleFromMarkdown("  \n\n# Real Title")).toBe("Real Title");
