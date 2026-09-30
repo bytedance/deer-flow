@@ -859,44 +859,107 @@ def test_lock_scope_resolves_overwrite_wrapped_sandbox():
     assert ReadBeforeWriteMiddleware._lock_scope(req) == "sb-fork-lock"
 
 
-class TestBlockMessageLineCount:
+@pytest.mark.parametrize(
+    "tool,content,expected_desc",
+    [
+        ("write_file", "line1\nline2\nline3", "3 lines"),
+        ("write_file", "line1\n", "1 line"),
+        ("write_file", "line1", "1 line"),
+        ("write_file", "", "0 lines"),
+        ("str_replace", "line1\nline2\n", "2 lines"),
+        # Exotic separators: \f and \u2028 are NOT line boundaries in LocalSandbox
+        # (Python text-mode iterates only \n/\r\n/\r), so count must match LocalSandbox.
+        ("write_file", "x\fx\n", "1 line"),
+        ("write_file", "x\u2028x\n", "1 line"),
+    ],
+)
+def test_block_message_line_desc(tool, content, expected_desc):
+    PATH = "/mnt/user-data/outputs/report.md"
+    args = {"description": "d", "path": PATH, "content": "v2"} if tool == "write_file" else {"description": "d", "path": PATH, "old_str": "a", "new_str": "b"}
+    mw = _middleware({PATH: content})
+    result = mw.wrap_tool_call(_make_request(tool, args), MagicMock())
+    assert result.status == "error"
+    assert f"{PATH} already exists ({expected_desc}) and you have not read" in result.content
+
+
+@pytest.mark.parametrize("line_count", [401, 403, 404, 500])
+def test_gate_block_on_numeric_line_count_is_recoverable(line_count):
+    """Files with 401/403/404/500 lines must not be misclassified as HTTP error codes."""
+    from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+
+    PATH = "/mnt/user-data/outputs/report.md"
+    # Build a file with exactly `line_count` lines (no trailing newline).
+    content = "\n" * (line_count - 1) + "x"
+    mw = _middleware({PATH: content})
+    result = mw.wrap_tool_call(
+        _make_request("write_file", {"description": "d", "path": PATH, "content": "v2"}),
+        MagicMock(),
+    )
+    assert result.status == "error"
+    meta = (result.additional_kwargs or {}).get(TOOL_META_KEY)
+    assert meta is not None, f"gate block on {line_count}-line file must carry deerflow_tool_meta"
+    assert meta["recoverable_by_model"] is True, f"{line_count}-line file must not be classified as a fatal auth/server error"
+    assert meta["recommended_next_action"] != "stop", f"{line_count}-line gate block must not tell the agent to stop"
+
+
+class TestStampingGateBugFix:
+    """In-band no-content results from read_file must not stamp a read mark (issue #6019)."""
+
     PATH = "/mnt/user-data/outputs/report.md"
 
-    def test_block_message_includes_line_count_multi_line(self):
-        content = "line1\nline2\nline3"
-        mw = _middleware({self.PATH: content})
-        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
-        result = mw.wrap_tool_call(request, MagicMock())
-        assert result.status == "error"
-        assert f"{self.PATH} already exists (3 lines) and you have not read" in result.content
+    @pytest.mark.parametrize(
+        "no_content_result",
+        [
+            pytest.param("READ_FILE_EMPTY_RANGE", id="empty_range"),
+            pytest.param("READ_FILE_START_LINE_EXCEEDS", id="start_exceeds"),
+            pytest.param("READ_FILE_INVALID_START_LINE", id="invalid_start"),
+            pytest.param("READ_FILE_INVALID_END_LINE", id="invalid_end"),
+        ],
+    )
+    def test_in_band_error_read_does_not_stamp_mark(self, no_content_result):
+        from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_KEY
+        from deerflow.sandbox import read_file_contract as c
 
-    def test_block_message_includes_line_count_single_line(self):
-        content = "line1\n"
-        mw = _middleware({self.PATH: content})
-        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
-        result = mw.wrap_tool_call(request, MagicMock())
-        assert result.status == "error"
-        assert f"{self.PATH} already exists (1 line) and you have not read" in result.content
+        result_string = getattr(c, no_content_result)
+        mw = _middleware({self.PATH: "a\nb\nc\n"})
+        req = _make_request("read_file", {"description": "d", "path": self.PATH})
+        res = mw.wrap_tool_call(
+            req,
+            lambda r: ToolMessage(content=result_string, tool_call_id="call-1", name="read_file"),
+        )
+        assert READ_MARK_KEY not in res.additional_kwargs, f"in-band error '{result_string}' must not stamp a read mark"
 
-    def test_block_message_includes_line_count_single_line_no_newline(self):
-        content = "line1"
-        mw = _middleware({self.PATH: content})
-        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
-        result = mw.wrap_tool_call(request, MagicMock())
-        assert result.status == "error"
-        assert f"{self.PATH} already exists (1 line) and you have not read" in result.content
+    def test_in_band_error_read_leaves_gate_closed(self):
+        """A write after an in-band-error read must still be blocked."""
+        from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_KEY
+        from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY_RANGE
 
-    def test_block_message_includes_line_count_empty_file(self):
+        mw = _middleware({self.PATH: "a\nb\nc\n"})
+        req = _make_request("read_file", {"description": "d", "path": self.PATH})
+        read_res = mw.wrap_tool_call(
+            req,
+            lambda r: ToolMessage(content=READ_FILE_EMPTY_RANGE, tool_call_id="call-1", name="read_file"),
+        )
+        assert READ_MARK_KEY not in read_res.additional_kwargs
+        write_req = _make_request(
+            "write_file",
+            {"description": "d", "path": self.PATH, "content": "x"},
+            messages=[read_res],
+        )
+        handler = MagicMock(return_value=ToolMessage(content="OK", tool_call_id="call-1", name="write_file"))
+        result = mw.wrap_tool_call(write_req, handler)
+        handler.assert_not_called()
+        assert result.status == "error"
+
+    def test_empty_file_read_still_stamps_mark(self):
+        """READ_FILE_EMPTY (genuine empty-file read) must still stamp a mark."""
+        from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_KEY
+        from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY
+
         mw = _middleware({self.PATH: ""})
-        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
-        result = mw.wrap_tool_call(request, MagicMock())
-        assert result.status == "error"
-        assert f"{self.PATH} already exists (0 lines) and you have not read" in result.content
-
-    def test_block_message_includes_line_count_trailing_newline(self):
-        content = "line1\nline2\n"
-        mw = _middleware({self.PATH: content})
-        request = _make_request("str_replace", {"description": "d", "path": self.PATH, "old_str": "a", "new_str": "b"})
-        result = mw.wrap_tool_call(request, MagicMock())
-        assert result.status == "error"
-        assert f"{self.PATH} already exists (2 lines) and you have not read" in result.content
+        req = _make_request("read_file", {"description": "d", "path": self.PATH})
+        res = mw.wrap_tool_call(
+            req,
+            lambda r: ToolMessage(content=READ_FILE_EMPTY, tool_call_id="call-1", name="read_file"),
+        )
+        assert READ_MARK_KEY in res.additional_kwargs, "a full read of a genuinely empty file must stamp a read mark"

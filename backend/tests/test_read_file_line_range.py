@@ -103,8 +103,21 @@ def test_end_line_past_eof_clamps_to_last_line(tmp_path, monkeypatch) -> None:
     assert result == _FIVE_LINES
 
 
-def test_contract_constants_membership() -> None:
-    from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY_RANGE, READ_FILE_NO_CONTENT_RESULTS
+def test_contract_constants_parity_with_localsandbox() -> None:
+    """count_file_lines must agree with LocalSandbox line numbering and all no-content
+    strings must remain in READ_FILE_NO_CONTENT_RESULTS."""
+    from deerflow.sandbox.read_file_contract import (
+        READ_FILE_INVALID_RANGE,
+        READ_FILE_NO_CONTENT_RESULTS,
+        count_file_lines,
+    )
 
-    assert READ_FILE_EMPTY_RANGE == "(invalid line range: start_line must be <= end_line)"
-    assert READ_FILE_EMPTY_RANGE in READ_FILE_NO_CONTENT_RESULTS
+    assert READ_FILE_INVALID_RANGE in READ_FILE_NO_CONTENT_RESULTS
+
+    # Parity with LocalSandbox.read_file (Python text-mode, universal \n only):
+    assert count_file_lines("") == 0
+    assert count_file_lines("line1\n") == 1
+    assert count_file_lines("line1\nline2\n") == 2
+    assert count_file_lines("line1\nline2") == 2  # no trailing newline
+    assert count_file_lines("page\fend\n") == 1  # \f not a line separator
+    assert count_file_lines("x\u2028y\n") == 1  # \u2028 not a line separator
