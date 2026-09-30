@@ -230,7 +230,7 @@ class DeerFlowClient:
         self._checkpoint_channel_mode = freeze_checkpoint_channel_mode(self._app_config.database.checkpoint_channel_mode)
         self._checkpoint_snapshot_frequency = freeze_checkpoint_snapshot_frequency(self._app_config.database.checkpoint_delta.snapshot_frequency)
 
-        if agent_name is not None and not AGENT_NAME_PATTERN.match(agent_name):
+        if agent_name is not None and not AGENT_NAME_PATTERN.fullmatch(agent_name):
             raise ValueError(f"Invalid agent name '{agent_name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
 
         self._checkpointer = checkpointer

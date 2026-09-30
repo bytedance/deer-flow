@@ -121,6 +121,13 @@ class TestClientInit:
             with pytest.raises(ValueError, match="Invalid agent name"):
                 DeerFlowClient(agent_name="../path/traversal")
 
+    def test_agent_name_with_trailing_newline_rejected(self, mock_app_config):
+        with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+            # The client's own guard must reject this at construction; the
+            # memory store's later fullmatch check uses different phrasing.
+            with pytest.raises(ValueError, match="Must match pattern"):
+                DeerFlowClient(agent_name="reviewer\n")
+
     def test_custom_config_path(self, mock_app_config):
         with (
             patch("deerflow.client.reload_app_config") as mock_reload,
