@@ -16,6 +16,7 @@ from deerflow.config.subagents_config import (
     clamp_subagent_concurrency,
     clamp_total_subagents_per_run,
     effective_subagent_concurrency,
+    effective_total_subagents_per_run,
 )
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
@@ -1039,11 +1040,7 @@ def apply_prompt_template(
             execution_capacity=subagent_execution_capacity,
         )
     )
-    total = max_total_subagents
-    if total is None:
-        subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None
-        total = getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
-    total = clamp_total_subagents_per_run(total)
+    total = effective_total_subagents_per_run(max_total_subagents, app_config)
     if subagent_enabled:
         from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
 

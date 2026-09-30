@@ -343,6 +343,13 @@
   `run_events.backend: jsonl` 下，`run.1` 这类 ID 会抛出 `ValueError`，而内存与
   数据库存储返回空结果。现在 JSONL 的读取与删除把这类 ID 视为不存在的 run，写入
   仍会拒绝它。([#6070])
+- **智能体：** 运行上下文中带有 `"max_total_subagents": null` 时，现在会使用配置的
+  `subagents.max_total_per_run`，而不是抛出 `TypeError`。该键存在时
+  `dict.get(key, default)` 会返回 `None`，构建 `SubagentLimitMiddleware` 时该次运行
+  便以内部错误失败（Web UI 从不发送该键，但 API 与嵌入式客户端调用方可能发送）。
+  Gateway lead agent、`DeerFlowClient` 与系统提示词现在通过同一个辅助函数解析上限：
+  `null` 视为未设置，并限制在 1-50，因此面向扩展的 host policy 与 release policy
+  报告的也是实际执行的上限，而非超出范围的请求值。
 - **调度器：** 固定小时的 cron 任务在夏令时回退（DST fall-back）当天不再重复运行两次。
   `croniter` 会返回模糊本地时间的两个实例（首个为 `fold=0`，第二个为 `fold=1`）。
   对于分和时字段不包含通配符的固定任务，现在会跳过第二个重复实例（`fold=1`），保持每天只运行一次
