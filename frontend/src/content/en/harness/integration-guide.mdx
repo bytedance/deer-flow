@@ -33,6 +33,8 @@ The client is thread-safe and designed to be instantiated once and reused across
 
 The recommended integration pattern is streaming. `stream()` is a sync generator, so no asyncio is required — it gives you real-time access to each token and event as the agent produces it:
 
+Tool artifacts can contain native Python objects. `default=str` represents objects that are not JSON serializable as strings so these events do not interrupt the stream.
+
 ```python
 import json
 
@@ -47,7 +49,7 @@ def run_agent(thread_id: str, user_message: str):
         # one before it goes over the wire: Starlette calls `.encode()` on any
         # chunk that is not already `str` / `bytes`, so yielding the dataclass
         # raises `AttributeError` on the very first event.
-        yield f"event: {event.type}\ndata: {json.dumps(event.data)}\n\n"
+        yield f"event: {event.type}\ndata: {json.dumps(event.data, default=str)}\n\n"
 
 # In a FastAPI handler:
 # from fastapi.responses import StreamingResponse
@@ -130,7 +132,7 @@ async def chat(thread_id: str, body: dict):
         for event in client.stream(message=body["message"], thread_id=thread_id):
             # Serialise the `StreamEvent` dataclass; a raw f-string of the object
             # would ship its `repr()`, which no SSE client can parse.
-            yield f"event: {event.type}\ndata: {json.dumps(event.data)}\n\n"
+            yield f"event: {event.type}\ndata: {json.dumps(event.data, default=str)}\n\n"
     return StreamingResponse(generate(), media_type="text/event-stream")
 ```
 
@@ -158,12 +160,7 @@ from deerflow.client import DeerFlowClient
 client = DeerFlowClient()
 ```
 
-Or pass the path directly:
-
-```python
-from deerflow.client import DeerFlowClient
-client = DeerFlowClient(config_path="/path/to/my-deerflow-config.yaml")
-```
+Set `DEER_FLOW_CONFIG_PATH` before constructing the client and keep it set for subsequent calls, since configuration is resolved again when the client runs.
 
 ## MCP server integration
 

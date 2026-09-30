@@ -31,6 +31,8 @@ client = DeerFlowClient()
 
 推荐的集成模式是流式传输。`stream()` 是同步生成器，无需 asyncio，即可在 Agent 生成响应时实时访问每个 token 和事件：
 
+工具产物可能包含原生 Python 对象。`default=str` 将不可 JSON 序列化的对象转换为字符串，避免中断事件流。
+
 ```python
 import json
 
@@ -44,7 +46,7 @@ def run_agent(thread_id: str, user_message: str):
         # `stream()` 产出的是 `StreamEvent` 数据类实例，而不是字符串。发送前必须
         # 先序列化：Starlette 会对非 `str` / `bytes` 的分块调用 `.encode()`，
         # 直接产出数据类会在第一个事件上抛出 `AttributeError`。
-        yield f"event: {event.type}\ndata: {json.dumps(event.data)}\n\n"
+        yield f"event: {event.type}\ndata: {json.dumps(event.data, default=str)}\n\n"
 
 # 在 FastAPI 处理器中：
 # from fastapi.responses import StreamingResponse
@@ -127,7 +129,7 @@ async def chat(thread_id: str, body: dict):
         for event in client.stream(message=body["message"], thread_id=thread_id):
             # 序列化 `StreamEvent` 数据类；直接对对象做 f-string 会发送它的
             # `repr()`，SSE 客户端无法解析。
-            yield f"event: {event.type}\ndata: {json.dumps(event.data)}\n\n"
+            yield f"event: {event.type}\ndata: {json.dumps(event.data, default=str)}\n\n"
     return StreamingResponse(generate(), media_type="text/event-stream")
 ```
 
@@ -143,12 +145,7 @@ from deerflow.client import DeerFlowClient
 client = DeerFlowClient()
 ```
 
-或直接传递路径：
-
-```python
-from deerflow.client import DeerFlowClient
-client = DeerFlowClient(config_path="/path/to/my-deerflow-config.yaml")
-```
+在创建客户端前设置 `DEER_FLOW_CONFIG_PATH`，并在后续调用期间保留该设置，因为客户端运行时会再次解析配置路径。
 
 <Cards num={2}>
   <Cards.Card title="自定义与扩展" href="/docs/harness/customization" />

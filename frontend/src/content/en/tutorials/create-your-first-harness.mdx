@@ -58,8 +58,8 @@ from deerflow.client import DeerFlowClient
 
 os.environ["OPENAI_API_KEY"] = "sk-..."
 
-# The client loads config.yaml itself (default resolution, or
-# DEER_FLOW_CONFIG_PATH); pass config_path=... for a specific file.
+# The client loads config.yaml itself. To select a specific file,
+# set DEER_FLOW_CONFIG_PATH before constructing the client.
 client = DeerFlowClient()
 
 for event in client.stream(

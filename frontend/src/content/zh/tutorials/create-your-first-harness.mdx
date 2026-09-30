@@ -53,8 +53,8 @@ from deerflow.client import DeerFlowClient
 # 设置 API Key
 os.environ["OPENAI_API_KEY"] = "sk-..."
 
-# 客户端自行加载 config.yaml（默认解析路径，或 DEER_FLOW_CONFIG_PATH）；
-# 如需指定文件，传入 config_path=...
+# 客户端自行加载 config.yaml；如需指定文件，
+# 请在创建客户端前设置 DEER_FLOW_CONFIG_PATH。
 client = DeerFlowClient()
 
 for event in client.stream(
