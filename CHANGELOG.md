@@ -334,6 +334,7 @@ This release closes that milestone with **181 merged pull requests**.
   with `run_events.backend: jsonl` an ID such as `run.1` raised `ValueError`,
   while the memory and database stores return an empty result. JSONL reads and
   deletes now treat such an ID as an unknown run; writes still reject it.
+  ([#6070])
 
 - **config:** `make config-upgrade` (also run by `make dev` / `make start`)
   upgrades the `config.yaml` the Gateway loads. With both
@@ -6255,4 +6256,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5987]: https://github.com/bytedance/deer-flow/pull/5987
 [#5991]: https://github.com/bytedance/deer-flow/pull/5991
 [#6015]: https://github.com/bytedance/deer-flow/pull/6015
+[#6070]: https://github.com/bytedance/deer-flow/pull/6070
 
