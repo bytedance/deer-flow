@@ -35,7 +35,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
-from deerflow.agents.lead_agent.prompt import apply_prompt_template
+from deerflow.agents.lead_agent.prompt import apply_prompt_template, has_bash_tool
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
@@ -1139,6 +1139,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             subagent_execution_capacity=subagent_execution_capacity,
             interaction_policy=interaction_policy,
             memory_enabled=memory_enabled,
+            bash_available=has_bash_tool(authorized_tools),
         )
         graph = create_agent(
             model=chat_model,
@@ -1272,6 +1273,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         subagent_execution_capacity=subagent_execution_capacity,
         interaction_policy=interaction_policy,
         memory_enabled=memory_enabled,
+        bash_available=has_bash_tool(authorized_tools),
     )
     graph = create_agent(
         model=chat_model,

@@ -34,7 +34,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Sys
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import _authorize_model_name, build_middlewares
-from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config
+from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config, has_bash_tool
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
@@ -476,6 +476,7 @@ class DeerFlowClient:
                 skill_names=skill_setup.skill_names or None,
                 subagent_execution_capacity=subagent_execution_capacity,
                 memory_enabled=memory_enabled,
+                bash_available=has_bash_tool(authorized_tools),
             ),
             "state_schema": get_thread_state_schema(self._checkpoint_channel_mode, self._checkpoint_snapshot_frequency),
         }
