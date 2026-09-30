@@ -1094,6 +1094,7 @@ export const zhCN: Translations = {
     saveChanges: "保存修改",
     descriptions: {
       buzz: "通过 DeerFlow 智能体接收 Buzz 频道消息和私聊。",
+      qq: "通过 WebSocket 接收 QQ 私聊和群聊 @机器人消息。",
       telegram: "通过 DeerFlow Bot 接收 Telegram 私聊消息。",
       slack: "接收 Slack 工作区消息和提及。",
       discord: "通过 DeerFlow Bot 接收 Discord 服务器消息。",

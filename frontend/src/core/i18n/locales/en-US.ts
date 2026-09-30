@@ -1170,6 +1170,7 @@ export const enUS: Translations = {
     saveChanges: "Save changes",
     descriptions: {
       buzz: "Buzz channels and direct messages through your DeerFlow agent.",
+      qq: "QQ direct messages and group @mentions over WebSocket.",
       telegram: "Telegram direct messages through your DeerFlow bot.",
       slack: "Slack workspace messages and mentions.",
       discord: "Discord server messages through your DeerFlow bot.",
