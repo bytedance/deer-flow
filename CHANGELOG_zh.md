@@ -415,7 +415,7 @@
 - **渠道：** Discord 现在会在智能体生成回复期间真正显示"正在输入"提示。`_start_typing()` 调用的
   `channel.trigger_typing()` 已在 discord.py 2.0 中移除（项目要求 `>=2.7.0`），而其循环吞掉了
   所有异常，因此每次都抛出 `AttributeError`，提示从未发送。现在改为 await 2.x 的
-  `channel.typing()` 发送一次提示，失败时以 DEBUG 级别记录日志，而不是直接丢弃。
+  `channel.typing()` 发送一次提示，失败时以 DEBUG 级别记录日志，而不是直接丢弃。([#6138])
 - **渠道：** 停止或重启 Slack、飞书、钉钉、Discord 渠道不再冻结 Gateway 事件循环。
   `SlackChannel.stop()` 直接调用 `SocketModeClient.close()`，它会 join SDK 的消息处理线程
   （每次约 0.7 秒），并等待正在执行的事件监听器，而监听器中阻塞的 Slack Web API 调用
@@ -6303,3 +6303,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
+[#6138]: https://github.com/bytedance/deer-flow/pull/6138

@@ -438,7 +438,7 @@ This release closes that milestone with **301 merged pull requests**.
   discord.py removed in 2.0 (the project requires `>=2.7.0`), and its loop
   swallowed every exception, so each tick raised `AttributeError` and nothing
   was ever sent. It now awaits `channel.typing()`, the 2.x API that sends one
-  indicator, and logs a failed tick at DEBUG instead of dropping it.
+  indicator, and logs a failed tick at DEBUG instead of dropping it. ([#6138])
 - **channels:** Stopping or restarting the Slack, Feishu, DingTalk or Discord
   channel no longer freezes the Gateway event loop. `SlackChannel.stop()` called
   `SocketModeClient.close()` inline, which joins the SDK's message-processor
@@ -7509,4 +7509,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
+[#6138]: https://github.com/bytedance/deer-flow/pull/6138
 
