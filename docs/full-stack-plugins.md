@@ -242,6 +242,30 @@ as `plugin_actions` and `plugin_management`. A role with no policy for a
 resource is **unrestricted** for it, so list these keys explicitly wherever you
 want to constrain them; `config.example.yaml` shows the shape.
 
+### Middleware-declared tools
+
+A contributed middleware may declare tools through LangChain's `middleware.tools`
+attribute. When authorization is enabled, every build collects those declarations
+after the middleware stack is assembled and applies the same `tools` policy as for
+explicitly configured tools, seeded with the build's Layer-1 verdicts (a name
+denied for the build cannot be resurrected by declaring it). A middleware whose
+declaration is denied is replaced in that build's stack by an independent,
+state-preserving copy carrying only the authorized declarations — the contributor's
+own instance is never mutated, so a later build under a more permissive principal
+binds the declaration again. Declarations must be `BaseTool` instances with a
+usable name: anything else (for example a plain callable, which LangChain would
+otherwise auto-convert and bind unchecked) cannot be authorized by name and is
+removed from the bound stack with a warning when authorization is enabled — wrap
+callables in a `StructuredTool`. Three author-visible rules follow: declare tools as a
+plain instance attribute holding a `list` or `tuple` (a `tools` property cannot be
+narrowed safely and fails the build, and any other container shape — a `set`,
+generator, `dict_values`, … — would be iterated and bound by LangChain as-is, so it
+likewise fails the build), and if you customize `__copy__`, it must return an
+independent copy that preserves current instance state — returning `self` or
+rebuilding from constructor arguments fails the build loudly rather than silently
+restoring a denied tool. With `authorization.enabled: false` nothing is collected or
+narrowed.
+
 ### Guarding a contributed management route
 
 A contributed router is not covered by the registered-action dispatcher, so it

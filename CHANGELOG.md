@@ -37,6 +37,27 @@ This release closes that milestone with **301 merged pull requests**.
   discard previously collected pages. `total_count` still covers all filtered
   matches and no new dependency, storage layer, or HTTP endpoint is involved.
   ([#5570])
+- **agents:** Middleware-declared tools are now covered by Layer-1 tool
+  authorization on every assembly path (lead agent, native subagents, and the
+  embedded client). LangChain merges each middleware's `tools` into the bound
+  tool set *after* the host's explicit-list filter, so declarations such as an
+  extension-contributed tool or plan mode's `write_todos` previously bypassed
+  the `tools` policy entirely. Each build now collects declarations from the
+  assembled stack, decides only the names the ordinary pass never saw —
+  seeded with that pass's verdicts so a name denied for the build (including
+  by a fail-closed provider failure) stays denied — and narrows the stack on
+  independent state-preserving copies without mutating caller-owned
+  middleware instances. **Behavior change:** with `authorization.enabled`
+  and an explicit `tools` policy that does not allow `write_todos`, plan-mode
+  builds no longer bind `write_todos`, and `TodoMiddleware` correspondingly
+  stops injecting the todo system prompt and incomplete-todo completion
+  reminders; the built-in RBAC default (missing tool policy = unrestricted)
+  is unchanged, as is every deployment with authorization disabled. Layer 2
+  also forwards host-resolved tool provenance into
+  `AuthzRequest.context["tool_provenance"]` and binds the infrastructure
+  exemption (the generated `tool_search` helper) to the concrete host-created
+  tool object instead of its name, so a same-named foreign tool can no longer
+  inherit the exemption.
 - **agents:** Custom agents can persist a default knowledge scope in agent
   settings, so a specialized agent starts each conversation with its own
   corpus instead of all operator-approved knowledge bases. When a new turn
