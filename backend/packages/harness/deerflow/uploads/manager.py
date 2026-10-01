@@ -59,7 +59,7 @@ def normalize_filename(filename: str) -> str:
         Safe filename (basename only).
 
     Raises:
-        ValueError: If filename is empty or resolves to a traversal pattern.
+        ValueError: If filename is empty, unsafe, too long, or uses the reserved staging pattern.
     """
     if not filename:
         raise ValueError("Filename is empty")
@@ -74,6 +74,8 @@ def normalize_filename(filename: str) -> str:
         raise ValueError(f"Filename contains backslash: {filename!r}")
     if len(safe.encode("utf-8")) > _MAX_FILENAME_BYTES:
         raise ValueError(f"Filename too long: {len(safe)} chars")
+    if is_upload_staging_file(safe):
+        raise ValueError(f"Filename uses reserved upload staging pattern: {filename!r}")
     reason = windows_incompatible_segment(safe)
     if reason:
         raise ValueError(f"Filename is not portable to Windows: {filename!r} ({reason})")

@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 import deerflow.mcp.cache as cache_module
-from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.extensions_config import ExtensionsConfig, atomic_write_extensions_config
 from deerflow.config.file_signature import get_config_signature
 
 _MISSING = object()
@@ -52,6 +52,7 @@ _TRACKED_GLOBALS = (
     "_cache_generation",
     "_mcp_config_snapshot",
     "_initialized_without_config",
+    "_cache_reset_marker_signature",
 )
 
 
@@ -79,7 +80,14 @@ def cache_globals():
 
     cache_module._mcp_tools_cache = None
     cache_module._cache_initialized = False
-    for name in ("_config_path", "_config_signature", "_config_mtime", "_mcp_config_snapshot", "_initialized_without_config"):
+    for name in (
+        "_config_path",
+        "_config_signature",
+        "_config_mtime",
+        "_mcp_config_snapshot",
+        "_initialized_without_config",
+        "_cache_reset_marker_signature",
+    ):
         if hasattr(cache_module, name):
             setattr(cache_module, name, None)
     # threading.Lock is safe across threads and does not bind to event loops,
@@ -800,6 +808,92 @@ def test_explicit_reset_still_clears_after_skills_only_change(cache_globals, mon
     assert cache_module._cache_initialized is False
     assert cache_module._mcp_tools_cache is None
     assert cache_module._mcp_config_snapshot is None
+
+
+def _write_remote_cache_reset_marker(config_path: Path, generation: str) -> Path:
+    """Simulate a reset published by another Gateway worker."""
+    marker_path = cache_module._cache_reset_marker_path(config_path)
+    atomic_write_extensions_config(
+        marker_path,
+        {"version": 1, "generation": generation},
+    )
+    return marker_path
+
+
+def test_initialization_records_existing_shared_reset_marker(cache_globals, monkeypatch, tmp_path):
+    """A restarted worker adopts the current generation without a needless reset."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    marker_path = _write_remote_cache_reset_marker(cfg, "before-worker-start")
+
+    _initialize_against(monkeypatch, cfg)
+
+    assert cache_module._cache_reset_marker_signature == get_config_signature(marker_path)
+    assert cache_module._is_cache_stale() is False
+
+
+def test_remote_shared_reset_marker_invalidates_unchanged_mcp_config(cache_globals, monkeypatch, tmp_path):
+    """A reset in another worker retires tools even when config bytes did not change."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    _initialize_against(monkeypatch, cfg)
+    assert cache_module._is_cache_stale() is False
+
+    _write_remote_cache_reset_marker(cfg, "remote-worker-reset")
+
+    assert cache_module._is_cache_stale() is True
+
+
+def test_same_shared_reset_generation_is_a_noop(cache_globals, monkeypatch, tmp_path):
+    """Repeated cache reads do not retire tools again for an observed generation."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    _write_remote_cache_reset_marker(cfg, "stable-generation")
+    _initialize_against(monkeypatch, cfg)
+
+    assert cache_module._is_cache_stale() is False
+    assert cache_module._is_cache_stale() is False
+
+
+def test_shared_reset_during_initialization_discards_stale_tools(cache_globals, monkeypatch, tmp_path):
+    """A remote reset fences discovery that started under the previous generation."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+    async def _fake_tools(**_kwargs):
+        _write_remote_cache_reset_marker(cfg, "changed-during-discovery")
+        return ["stale-tools"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+    result = asyncio.run(cache_module.initialize_mcp_tools())
+
+    assert result == []
+    assert cache_module._cache_initialized is False
+    assert cache_module._mcp_tools_cache is None
+
+
+def test_publish_shared_reset_changes_marker_and_resets_local_cache(cache_globals, monkeypatch, tmp_path):
+    """Each admin reset publishes a fresh durable generation before local retirement."""
+    cfg = tmp_path / "extensions_config.json"
+    _write_extensions_config(cfg, {"srv1": _server()})
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+    local_resets: list[bool] = []
+    monkeypatch.setattr(cache_module, "reset_mcp_tools_cache", lambda: local_resets.append(True))
+
+    first = cache_module.publish_mcp_tools_cache_reset()
+    marker_path = cache_module._cache_reset_marker_path(cfg)
+    first_signature = get_config_signature(marker_path)
+    second = cache_module.publish_mcp_tools_cache_reset()
+    second_signature = get_config_signature(marker_path)
+
+    assert first is not None
+    assert second is not None
+    assert first != second
+    assert first_signature != second_signature
+    assert local_resets == [True, True]
+    assert not list(tmp_path.glob(f".{marker_path.name}.*.tmp"))
 
 
 def test_malformed_config_is_still_stale(cache_globals, monkeypatch, tmp_path):

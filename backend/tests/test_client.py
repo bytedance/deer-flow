@@ -2849,6 +2849,22 @@ class TestUploads:
         with pytest.raises(FileNotFoundError):
             client.upload_files("thread-1", ["/nonexistent/file.txt"])
 
+    def test_upload_files_rejects_reserved_name_before_copying_batch(self, client, tmp_path):
+        normal = tmp_path / "normal.txt"
+        normal.write_bytes(b"normal document")
+        reserved = tmp_path / ".upload-notes.part"
+        reserved.write_bytes(b"reserved document")
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+
+        with patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+            with pytest.raises(ValueError, match="reserved upload staging"):
+                client.upload_files("thread-1", [normal, reserved])
+
+        assert list(uploads_dir.iterdir()) == []
+        assert normal.read_bytes() == b"normal document"
+        assert reserved.read_bytes() == b"reserved document"
+
     def test_upload_files_rejects_directory_path(self, client):
         with tempfile.TemporaryDirectory() as tmp:
             with pytest.raises(ValueError, match="Path is not a file"):

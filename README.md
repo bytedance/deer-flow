@@ -667,6 +667,7 @@ Plugin brand icons are bundled locally. When adding or editing one personal MCP 
 Capability Center > Plugins adds, replaces, and deletes one MCP server at a time through targeted mutations that preserve concurrent sibling changes; deletes use a bodyless URL-addressed request. An invalid stdio command on one server no longer blocks toggling another, while enabling that invalid server remains protected by the command allowlist and surfaces the backend validation message in the UI.
 Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport` field for SSE/HTTP servers.
 Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written.
+The admin MCP cache reset advances a durable generation marker in the writable config directory. Every Gateway worker mounting that same directory retires its own cached tools and pooled sessions before the next lookup; replicas with independent filesystems are not implicitly covered. If no config path is available, the API reports a process-local reset instead.
 `extensions_config.json` accepts UTF-8 with or without a leading byte-order mark (BOM), including files saved as UTF-8 with BOM by an editor.
 MCP routing hints can also prefer a specific MCP tool for matching requests without forbidding other tools. When `tool_search` defers MCP schemas, matching routing metadata can auto-promote up to `tool_search.auto_promote_top_k` deferred schemas before the model call.
 
@@ -1638,6 +1639,8 @@ The chat header also shows a context-window gauge when the selected model has a 
 
 ### Sub-Agents
 
+When a sub-agent ends with `return_direct=True` tools, including tools contributed by extension middleware, their outputs are returned in tool-call order. A failed tool marks the task as failed while preserving the batch outputs.
+
 Ordinary `task` calls accept `context_mode="isolated"` (default) or
 `context_mode="snapshot"`. Isolated tasks receive their delegated prompt as
 before. Snapshot tasks also receive the parent's retained conversation and
@@ -1879,6 +1882,19 @@ Failed upload commits report the original error even if temporary-file cleanup
 also fails, for example because of a Windows sharing violation.
 Once the file is published, a temporary-file cleanup failure is logged without
 failing the upload; hidden staging files are left for the startup sweep.
+
+Uploaded filenames matching `.upload-*.part` are rejected because that pattern is
+reserved for temporary staging files. Rename such a file before uploading it.
+The HTTP check recognizes both `/` and `\` as path separators, including on
+Linux, when extracting the basename. The endpoint returns `400` with a rename
+hint before publishing any file in a batch containing a reserved name, so the
+chat reports the upload error instead
+of continuing without the attachment. The SDK validates filenames for the whole
+batch before copying any files. Project document names follow the same
+restriction; an older shelf document with a reserved name
+remains downloadable but cannot be attached directly. Download it, rename it,
+and upload it to the thread. This change does not recover or migrate older
+thread uploads that already match the staging pattern.
 
 This is the difference between a chatbot with tool access and an agent with an actual execution environment.
 
