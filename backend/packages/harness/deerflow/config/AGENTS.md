@@ -53,9 +53,13 @@ application repositories continue to use `database`.
 
 Configuration priority:
 1. Explicit `config_path` argument
-2. `DEER_FLOW_CONFIG_PATH` environment variable
-3. `config.yaml` in current directory (backend/)
-4. `config.yaml` in parent directory (project root - **recommended location**)
+2. `DEER_FLOW_CONFIG_PATH` environment variable (a missing file is an error, not a fallthrough)
+3. `config.yaml` under `DEER_FLOW_PROJECT_ROOT`, or the current directory when it is unset
+4. Legacy `backend/config.yaml`, then repository-root `config.yaml` (project root is the **recommended location**)
+
+`scripts/config-upgrade.sh` calls `AppConfig.resolve_config_path` rather than copying this order.
+The legacy locations are anchored to the installed harness source, not to the caller's checkout.
+`scripts/doctor.py` calls `AppConfig.resolve_config_path` rather than copying this order.
 
 Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.

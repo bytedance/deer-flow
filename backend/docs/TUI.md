@@ -36,6 +36,13 @@ Launch modes:
 If no TTY is available and no headless flag is given, `deerflow` prints guidance
 instead of hanging.
 
+Provider failures (for example an expired credential) usually do not raise: the
+LLM error middleware turns them into a final AI message flagged
+`deerflow_error_fallback`. Headless runs treat that as a failure too — `--print`
+still writes the fallback text to stdout, then prints
+`Error: LLM request failed (error_type=…, error_reason=…)` to stderr; `--json`
+appends the same terminal `{"type": "error"}` record. Both exit `1`.
+
 Transparent rendering is opt-in; the solid DeerFlow palette remains the default.
 The transparent mode uses Textual's `ansi_default` background for the main
 screen, header, transcript, status, palette, composer, and modal surfaces while

@@ -73,6 +73,25 @@ def _has_rich_constructs(text: str) -> bool:
     return _TELEGRAM_RICH_CONSTRUCT_RE.search(text) is not None
 
 
+def _utf16_width(char: str) -> int:
+    """UTF-16 code units taken by *char*, the unit Telegram measures message limits in."""
+    return 2 if ord(char) > 0xFFFF else 1
+
+
+def _first_utf16_chunk(text: str, limit: int) -> tuple[str, bool]:
+    """The longest prefix of *text* fitting in *limit* UTF-16 code units, and whether anything was left out.
+
+    Stops at the first character that does not fit, so previewing a bounded
+    number of units out of a growing reply costs the limit, not the reply.
+    """
+    units = 0
+    for index, char in enumerate(text):
+        units += _utf16_width(char)
+        if units > limit:
+            return text[:index], True
+    return text, False
+
+
 def _load_telegram_input_file(path, filename: str):
     from telegram import InputFile
 
@@ -265,9 +284,14 @@ class TelegramChannel(Channel):
         if not text:
             return
 
-        display = text
-        if len(display) > TELEGRAM_MAX_MESSAGE_LENGTH:
-            display = display[: TELEGRAM_MAX_MESSAGE_LENGTH - 1] + "…"
+        # The manager republishes the whole cumulative reply as it grows, so the
+        # preview is clipped by a bounded scan instead of measuring and splitting
+        # the full text on every update.
+        display, over_limit = _first_utf16_chunk(text, TELEGRAM_MAX_MESSAGE_LENGTH)
+        if over_limit:
+            # Clip again with one unit free, so the ellipsis stays inside the limit.
+            display, _ = _first_utf16_chunk(display, TELEGRAM_MAX_MESSAGE_LENGTH - 1)
+            display += "…"
 
         bot = self._application.bot
         state = self._stream_messages.get(key)
@@ -812,7 +836,28 @@ class TelegramChannel(Channel):
 
     @staticmethod
     def _split_message(text: str) -> list[str]:
-        return [text[i : i + TELEGRAM_MAX_MESSAGE_LENGTH] for i in range(0, len(text), TELEGRAM_MAX_MESSAGE_LENGTH)] or [text]
+        """Split *text* into chunks that fit Telegram's 4096 UTF-16 code unit limit.
+
+        Slicing by code points hands sendMessage up to twice the limit when the
+        reply is emoji-heavy (a non-BMP character costs 2 units), the retry policy
+        repeats the rejected 400 "Message is too long" and the reply is dropped.
+        A split can still fall inside one user-perceived character (a combining
+        mark, a ZWJ emoji sequence, the second half of a flag emoji); every chunk
+        stays within budget, so a seam is a rendering artifact, not a failed send.
+        """
+        chunks: list[str] = []
+        current: list[str] = []
+        units = 0
+        for char in text:
+            width = _utf16_width(char)
+            if units + width > TELEGRAM_MAX_MESSAGE_LENGTH:
+                chunks.append("".join(current))
+                current = []
+                units = 0
+            current.append(char)
+            units += width
+        chunks.append("".join(current))
+        return chunks
 
     async def _send_running_reply(self, chat_id: str, reply_to_message_id: int) -> None:
         """Send a 'Working on it...' reply and register it as the stream target."""

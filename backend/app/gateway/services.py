@@ -104,6 +104,13 @@ from deerflow.utils.thread_id import validate_thread_id
 logger = logging.getLogger(__name__)
 
 
+class BusyThreadConflict(HTTPException):
+    """A retryable run-manager admission conflict exposed as HTTP 409."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(status_code=409, detail=detail)
+
+
 @asynccontextmanager
 async def reserve_checkpoint_write(
     request: Request,
@@ -2125,7 +2132,7 @@ async def start_run(
                     )
                     raise
         except ConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise BusyThreadConflict(str(exc)) from exc
         except UnsupportedStrategyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
 
@@ -2286,9 +2293,9 @@ async def launch_mcp_task_notification_run(
                 require_existing_thread=True,
             )
     except HTTPException as exc:
-        if exc.status_code == 409:
+        if isinstance(exc, BusyThreadConflict):
             raise ConflictError(str(exc.detail)) from exc
-        if exc.status_code == 404:
+        if exc.status_code in {400, 401, 403, 404, 409, 422, 501}:
             raise PermanentNotificationError(str(exc.detail)) from exc
         raise
     return {"run_id": record.run_id, "thread_id": record.thread_id}

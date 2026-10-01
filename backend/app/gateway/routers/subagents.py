@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -20,6 +21,7 @@ from deerflow.persistence.managed_subagents.base import (
     normalize_managed_subagent_name,
 )
 from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
+from deerflow.utils.file_io import await_drained
 
 router = APIRouter(prefix="/api/subagents", tags=["subagents"])
 _ADMIN_REQUIRED_DETAIL = "Admin privileges are required to manage subagents."
@@ -72,6 +74,11 @@ class ManagedSubagentUpdateRequest(BaseModel):
     max_turns: int | None = Field(default=None, ge=1)
     timeout_seconds: int | None = Field(default=None, ge=1)
     enabled: bool | None = None
+
+
+async def _run_store_mutation[**P, T](func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    """Drain persistent managed-subagent writes before cancellation propagates."""
+    return await await_drained(asyncio.to_thread(func, *args, **kwargs))
 
 
 def _validate_model(model: str, app_config) -> None:
@@ -180,7 +187,7 @@ async def create_managed_subagent(request: Request, body: ManagedSubagentCreateR
         raise HTTPException(status_code=409, detail=f"Subagent name '{definition.name}' is reserved by a built-in or config.yaml definition.")
     store = get_managed_subagent_store(app_config)
     try:
-        await asyncio.to_thread(store.create, definition)
+        await _run_store_mutation(store.create, definition)
     except ManagedSubagentExistsError:
         raise HTTPException(status_code=409, detail=f"Managed subagent '{definition.name}' already exists")
     return SubagentResponse(
@@ -211,7 +218,7 @@ async def update_managed_subagent(name: str, request: Request, body: ManagedSuba
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
     _validate_model(updated.model, app_config)
     try:
-        await asyncio.to_thread(store.update, updated)
+        await _run_store_mutation(store.update, updated)
     except FileNotFoundError:
         # The definition may be deleted by another administrator after the
         # read above. Preserve the endpoint's not-found contract instead of
@@ -234,5 +241,5 @@ async def delete_managed_subagent(name: str, request: Request) -> None:
     name = _validate_path_name(name)
     app_config = await asyncio.to_thread(get_app_config)
     store = get_managed_subagent_store(app_config)
-    if not await asyncio.to_thread(store.delete, name):
+    if not await _run_store_mutation(store.delete, name):
         raise HTTPException(status_code=404, detail=f"Managed subagent '{name}' not found")

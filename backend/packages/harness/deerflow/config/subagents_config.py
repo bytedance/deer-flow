@@ -42,6 +42,19 @@ def clamp_total_subagents_per_run(value: int) -> int:
     return max(MIN_TOTAL_SUBAGENTS_PER_RUN, min(MAX_TOTAL_SUBAGENTS_PER_RUN, value))
 
 
+def effective_total_subagents_per_run(value: int | None, app_config: object) -> int:
+    """Resolve one per-run delegation cap for prompt, middleware, and policy.
+
+    ``None`` means the run did not choose a cap, so the configured
+    ``subagents.max_total_per_run`` applies. That includes an explicit
+    ``null`` from API callers, which ``dict.get(key, default)`` would pass
+    through unchanged.
+    """
+    subagents = getattr(app_config, "subagents", None)
+    requested = getattr(subagents, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN) if value is None else value
+    return clamp_total_subagents_per_run(int(requested))
+
+
 def default_subagent_token_budget(*, summarization_enabled: bool = False) -> TokenBudgetConfig:
     """Default per-run token budget for subagents (#3875 Phase 2 → Phase 3 coupling).
 

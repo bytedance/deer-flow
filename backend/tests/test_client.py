@@ -25,7 +25,7 @@ from app.gateway.routers.threads import ThreadGoalResponse
 from app.gateway.routers.uploads import UploadResponse
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import DeltaThreadState, ThreadState
-from deerflow.client import DeerFlowClient
+from deerflow.client import DeerFlowClient, StreamEvent
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
@@ -120,6 +120,13 @@ class TestClientInit:
                 DeerFlowClient(agent_name="invalid name with spaces!")
             with pytest.raises(ValueError, match="Invalid agent name"):
                 DeerFlowClient(agent_name="../path/traversal")
+
+    def test_agent_name_with_trailing_newline_rejected(self, mock_app_config):
+        with patch("deerflow.client.get_app_config", return_value=mock_app_config):
+            # The client's own guard must reject this at construction; the
+            # memory store's later fullmatch check uses different phrasing.
+            with pytest.raises(ValueError, match="Must match pattern"):
+                DeerFlowClient(agent_name="reviewer\n")
 
     def test_custom_config_path(self, mock_app_config):
         with (
@@ -753,6 +760,32 @@ class TestStream:
         assert any(event.data.get("additional_kwargs", {}).get("token_usage_attribution", {}).get("kind") == "final_answer" for event in ai_events)
 
     @pytest.mark.parametrize("streamed", [True, False])
+    def test_stream_carries_llm_error_fallback_flag_to_headless_cli(self, client, streamed):
+        """``deerflow --print`` / ``--json`` read the fallback flag from stream events to exit non-zero."""
+        from deerflow.tui.cli import _RunOutcome
+
+        fallback = AIMessage(
+            content="The configured LLM provider rejected the request because authentication or access is invalid.",
+            id="ai-1",
+            additional_kwargs={"deerflow_error_fallback": True, "error_type": "AuthenticationError", "error_reason": "auth"},
+        )
+        chunks = [("values", {"messages": [HumanMessage(content="hi", id="h-1"), fallback]})]
+        if streamed:
+            chunks.insert(0, ("messages", (AIMessageChunk(content=fallback.content, id="ai-1"), {})))
+        agent = _make_agent_mock(chunks)
+
+        with (
+            patch.object(client, "_ensure_agent"),
+            patch.object(client, "_agent", agent),
+        ):
+            outcome = _RunOutcome()
+            for event in client.stream("hi", thread_id="t-stream-fallback"):
+                outcome.observe(event)
+
+        assert outcome.answer() == fallback.content
+        assert outcome.error_text() == "LLM request failed (error_type=AuthenticationError, error_reason=auth)"
+
+    @pytest.mark.parametrize("streamed", [True, False])
     def test_stream_emits_text_a_later_node_appends_to_a_sent_ai_message(self, client, streamed):
         """A guard's ``after_model`` replaces the message under the same id after it was sent."""
         call = {"name": "bash", "args": {"command": "ls"}, "id": "call-1"}
@@ -1224,6 +1257,54 @@ class TestStream:
 
 
 class TestChat:
+    @pytest.mark.parametrize(
+        ("events", "expected"),
+        [
+            pytest.param(
+                [
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "draft", "content": "draft"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "answer", "content": "fi"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "draft", "content": " revised"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "answer", "content": "nal"}),
+                    StreamEvent(type="messages-tuple", data={"type": "tool", "id": "tool", "content": "ignored"}),
+                    StreamEvent(type="values", data={"messages": [{"type": "ai", "content": "ignored"}]}),
+                ],
+                "final",
+                id="interleaved-message-ids",
+            ),
+            pytest.param(
+                [
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "answer", "content": "answer"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "empty", "content": "", "additional_kwargs": {"reasoning_content": "thinking"}}),
+                    StreamEvent(type="end"),
+                ],
+                "answer",
+                id="metadata-only-message",
+            ),
+            pytest.param(
+                [
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "content": "no"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": None, "content": " id"}),
+                    StreamEvent(type="messages-tuple", data={"type": "ai", "id": "", "content": " answer"}),
+                ],
+                "no id answer",
+                id="missing-message-id",
+            ),
+            pytest.param([StreamEvent(type="messages-tuple", data={"type": "ai", "id": "empty", "content": ""})], "", id="no-ai-text"),
+        ],
+    )
+    def test_headless_and_chat_share_final_answer_selection(self, client, events, expected):
+        """The CLI and chat must agree on interleaved deltas and metadata-only events."""
+        from deerflow.tui.cli import _RunOutcome
+
+        with patch.object(client, "stream", return_value=iter(events)):
+            assert client.chat("q", thread_id="t-shared-answer") == expected
+
+        outcome = _RunOutcome()
+        for event in events:
+            outcome.observe(event)
+        assert outcome.answer() == expected
+
     def test_returns_last_message(self, client):
         """chat() returns the last AI message text."""
         ai1 = AIMessage(content="thinking...", id="ai-1")
@@ -1453,6 +1534,24 @@ class TestEnsureAgent:
         assert mock_build_middlewares.call_args.kwargs["memory_enabled"] is expected_memory_enabled
         assert mock_apply_prompt.call_args.kwargs["memory_enabled"] is expected_memory_enabled
 
+    @pytest.mark.parametrize(("tool_names", "expected"), [(["read_file", "write_file", "bash"], True), (["read_file", "write_file"], False)])
+    def test_tells_the_prompt_whether_bash_is_bound(self, client, tool_names, expected):
+        config = client._get_runnable_config("t1")
+        tools = [StructuredTool.from_function(lambda: "", name=name, description=name) for name in tool_names]
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=tools),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config, context={"user_id": "owner-1"})
+
+        assert mock_apply_prompt.call_args.kwargs["bash_available"] is expected
+
     def test_reuses_named_agent_config_on_cached_agent_fast_path(self, client):
         client._agent_name = "stateful-agent"
         config = client._get_runnable_config("t1")
@@ -1579,6 +1678,7 @@ class TestEnsureAgent:
             patch.object(client, "_get_tools", return_value=[safe_tool, denied_tool]),
             patch("deerflow.authz.tool_filter.resolve_authorization_provider", return_value=provider),
             patch("deerflow.agents.lead_agent.agent.resolve_authorization_provider", return_value=provider),
+            patch("deerflow.authz.skill_filter.resolve_authorization_provider", return_value=provider),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
         ):
             client._ensure_agent(client._get_runnable_config("t1"), context={"user_role": "user"})
@@ -1874,6 +1974,25 @@ class TestEnsureAgent:
             client._ensure_agent(config2)
 
         assert mock_create_agent.call_count == 2
+
+    def test_null_subagent_total_limit_falls_back_to_app_config(self, client, mock_app_config):
+        """An explicit ``null`` cap means "unset", not a value to hand to the clamp."""
+        mock_app_config.subagents.max_total_per_run = 4
+        config = client._get_runnable_config("t1")
+        config["configurable"].update({"subagent_enabled": True, "max_total_subagents": None})
+
+        with (
+            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.create_agent", return_value=MagicMock()),
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
+            patch("deerflow.client.get_enabled_skills_for_config", return_value=[]),
+            patch.object(client, "_get_tools", return_value=[]),
+            patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
+        ):
+            client._ensure_agent(config)
+
+        assert mock_apply_prompt.call_args.kwargs["max_total_subagents"] == 4
 
     def test_deferred_skill_discovery_wired_when_enabled(self, client, mock_app_config):
         """When skills.deferred_discovery=True, skill_names reaches apply_prompt_template
@@ -2729,6 +2848,22 @@ class TestUploads:
     def test_upload_files_not_found(self, client):
         with pytest.raises(FileNotFoundError):
             client.upload_files("thread-1", ["/nonexistent/file.txt"])
+
+    def test_upload_files_rejects_reserved_name_before_copying_batch(self, client, tmp_path):
+        normal = tmp_path / "normal.txt"
+        normal.write_bytes(b"normal document")
+        reserved = tmp_path / ".upload-notes.part"
+        reserved.write_bytes(b"reserved document")
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+
+        with patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir):
+            with pytest.raises(ValueError, match="reserved upload staging"):
+                client.upload_files("thread-1", [normal, reserved])
+
+        assert list(uploads_dir.iterdir()) == []
+        assert normal.read_bytes() == b"normal document"
+        assert reserved.read_bytes() == b"reserved document"
 
     def test_upload_files_rejects_directory_path(self, client):
         with tempfile.TemporaryDirectory() as tmp:

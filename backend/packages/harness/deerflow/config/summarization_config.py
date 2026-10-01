@@ -3,7 +3,7 @@
 import math
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 ContextSizeType = Literal["fraction", "tokens", "messages"]
 DEFAULT_SKILL_FILE_READ_TOOL_NAMES: tuple[str, ...] = ("read_file", "read", "view", "cat")
@@ -82,8 +82,17 @@ class SummarizationConfig(BaseModel):
     )
     trim_tokens_to_summarize: int | None = Field(
         default=4000,
+        ge=1,
         description="Maximum tokens to keep when preparing messages for summarization. Pass null to skip trimming.",
     )
+
+    @field_validator("trim_tokens_to_summarize", mode="before")
+    @classmethod
+    def _reject_boolean_trim_tokens(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be an integer, not a boolean")
+        return value
+
     summary_prompt: str | None = Field(
         default=None,
         description="Custom prompt template for generating summaries. If not provided, uses the default LangChain prompt.",

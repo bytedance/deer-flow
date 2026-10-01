@@ -94,6 +94,27 @@ and pointing the provisioner at it:
 Bound to loopback only. In K8s the sandbox and sidecar share the Pod network
 namespace, so `127.0.0.1` reaches the sidecar and nothing outside the Pod can.
 
+### Stdin and execution logs
+
+AIO's fresh non-interactive Bash runs close inherited pipe stdin, so commands
+without input receive immediate EOF. Persistent Shell terminal commands remain
+unchanged; the shim ignores their TTY stdin. Explicit pipelines, heredocs, and
+file redirections supply input normally. The shim forwards pipe/file stdin only
+after EOF; a pipe that exceeds its idle budget exits `124` before contacting
+the broker, so incomplete input cannot execute a partial write.
+
+The sandbox process can override the first-byte budget with
+`DEERFLOW_LARK_BROKER_STDIN_GRACE_SECONDS` and the between-chunk idle budget with
+`DEERFLOW_LARK_BROKER_STDIN_TAIL_SECONDS`. Both default to 2 seconds and accept
+finite values in `(0, 600]`; invalid values fall back to the default. Increase the
+appropriate budget when an explicit input producer needs longer startup or pauses.
+These settings belong on the sandbox invocation, not the broker sidecar.
+
+Execution logs record argument count, exit code, elapsed time, and output
+truncation, but never argument values or stdin. Updating the Gateway alone does
+not update an installed shim: rebuild and publish this broker image with a new
+immutable tag or digest, update `LARK_CLI_BROKER_IMAGE`, and recreate sandbox Pods.
+
 ### No file I/O relative to the sandbox cwd
 
 The broker runs `lark-cli` in the **sidecar's** working directory and cannot see

@@ -29,7 +29,6 @@ import logging
 import os
 import posixpath
 import shlex
-import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any, override
@@ -151,6 +150,15 @@ def _sanitize_tool_name(name: str) -> str:
     return safe or "unknown"
 
 
+def _sanitize_tool_call_id(tool_call_id: str) -> str:
+    """Make a tool call id safe to use inside a filename.
+
+    The id reaches us from the model/provider, so it gets the same treatment as
+    a tool name: no separators and no traversal components.
+    """
+    return _sanitize_tool_name(tool_call_id)
+
+
 def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
     """Build the on-disk filename for an externalized tool output.
 
@@ -159,8 +167,11 @@ def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
     """
     safe_name = _sanitize_tool_name(tool_name)
     ext = _EXT_MAP.get(tool_name, "txt")
-    short_id = uuid.uuid4().hex[:12]
-    return f"{safe_name}-{short_id}.{ext}"
+    # Derived from the call id so the host-disk and sandbox paths agree on one
+    # name for a given call, and so externalizing the same output twice is
+    # idempotent instead of leaving two files behind.
+    safe_id = _sanitize_tool_call_id(tool_call_id)
+    return f"{safe_name}-{safe_id}.{ext}"
 
 
 def _externalize(
@@ -186,10 +197,20 @@ def _externalize(
     if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
         return None
 
+    # Publish through a sibling temp file: a write that fails part-way (disk
+    # full, interrupted request) used to leave a truncated file under the final
+    # name even though this function reported failure, so the outputs directory
+    # accumulated half-written files that nothing references.
+    tmp_path = f"{filepath}.tmp"
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(content)
+        os.replace(tmp_path, filepath)
     except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
         return None
 
     return f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}/{filename}"
@@ -223,14 +244,18 @@ def _externalize_to_sandbox(
         # raising, so we cannot rely on exception propagation here.
         sandbox.execute_command(f"mkdir -p {shlex.quote(virtual_dir)}")
         sandbox.write_file(virtual_path, content)
-        # Validate the file landed: execute_command may have silently failed
-        # to create the directory, and write_file backends differ. Refuse to
-        # hand the model an unreadable read_file path.
-        check = sandbox.execute_command(f"test -s {shlex.quote(virtual_path)} && echo OK || echo MISSING")
+        # Validate the file landed completely: execute_command may have silently
+        # failed to create the directory, or write_file may have truncated the
+        # content (disk full, backend pipe error). Refuse to hand the model an
+        # incomplete or unreadable read_file path.
+        expected_bytes = len(content.encode("utf-8"))
+        quoted_path = shlex.quote(virtual_path)
+        check = sandbox.execute_command(f'test -f {quoted_path} && test "$(wc -c < {quoted_path})" -eq {expected_bytes} && echo OK || echo MISSING')
         if not isinstance(check, str) or check.strip() != "OK":
             logger.warning(
-                "Sandbox externalize validation failed: path=%s, check=%r",
+                "Sandbox externalize validation failed: path=%s, expected_bytes=%d, check=%r",
                 virtual_path,
+                expected_bytes,
                 check,
             )
             return None
@@ -342,7 +367,9 @@ def _resolve_sandbox(request: ToolCallRequest) -> Sandbox | None:
     state = getattr(runtime, "state", None)
     if not isinstance(state, dict):
         return None
-    sandbox_state = state.get("sandbox")
+    from deerflow.sandbox.overwrite import unwrap_sandbox
+
+    sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
     if not isinstance(sandbox_state, dict):
         return None
     sandbox_id = sandbox_state.get("sandbox_id")

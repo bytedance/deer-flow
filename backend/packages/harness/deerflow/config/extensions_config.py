@@ -198,7 +198,19 @@ class McpOAuthConfig(BaseModel):
     token_type_field: str = Field(default="token_type", description="Field name containing token type in token response")
     expires_in_field: str = Field(default="expires_in", description="Field name containing expiry (seconds) in token response")
     default_token_type: str = Field(default="Bearer", description="Default token type when missing in token response")
-    refresh_skew_seconds: int = Field(default=60, description="Refresh token this many seconds before expiry")
+    refresh_skew_seconds: int = Field(
+        default=60,
+        ge=0,
+        description="Refresh token this many seconds before expiry",
+    )
+
+    @field_validator("refresh_skew_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_refresh_skew(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be an integer, not a boolean")
+        return value
+
     extra_token_params: dict[str, str] = Field(default_factory=dict, description="Additional form params sent to token endpoint")
     model_config = ConfigDict(extra="allow")
 
@@ -232,10 +244,14 @@ class McpServerConfig(BaseModel):
     )
     tool_call_timeout: float | None = Field(
         default=None,
+        gt=0,
+        allow_inf_nan=False,
         description=("Timeout in seconds for individual stdio MCP tool calls and durable-task calls on every transport. Other HTTP/SSE tools use transport-level timeouts. None means no call-level timeout."),
     )
     session_init_timeout: float | None = Field(
         default=DEFAULT_MCP_SESSION_INIT_TIMEOUT,
+        gt=0,
+        allow_inf_nan=False,
         description=(
             "Timeout in seconds for MCP server bring-up: tool discovery (subprocess spawn + initialize + tools/list) "
             "and persistent stdio session initialization, plus ephemeral HTTP/SSE durable-task session "
@@ -243,6 +259,14 @@ class McpServerConfig(BaseModel):
             "construction or the task poller indefinitely. None means no timeout."
         ),
     )
+
+    @field_validator("tool_call_timeout", "session_init_timeout", mode="before")
+    @classmethod
+    def _reject_boolean_mcp_timeouts(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be a number, not a boolean")
+        return value
+
     task_toolsets: list[McpTaskToolsetConfig] = Field(
         default_factory=list,
         description="Ordinary submit/status/cancel tool groups managed by the durable MCP task runtime",
