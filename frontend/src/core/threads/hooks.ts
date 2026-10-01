@@ -672,8 +672,10 @@ export function reconcileThreadHistoryRows(
   // the position it first occupied (see buildVisibleHistoryMessages).
   // Re-anchor the surviving row to the earliest seq the identity held in
   // this window, otherwise a re-persisted update pushes the message towards
-  // the tail.
+  // the tail. Prefer visible rows so a hidden control copy cannot move its
+  // visible twin; hidden rows provide a fallback only when no visible copy exists.
   const earliestSeqByRunIdentity = new Map<string, number>();
+  const earliestVisibleSeqByRunIdentity = new Map<string, number>();
   for (const row of sortedRows) {
     const identity = messageIdentity(row.content);
     if (!identity || !isValidMessageSeq(row.seq)) {
@@ -684,20 +686,30 @@ export function reconcileThreadHistoryRows(
     if (known === undefined || row.seq < known) {
       earliestSeqByRunIdentity.set(key, row.seq);
     }
+    if (!isHiddenFromUIMessage(row.content)) {
+      const knownVisible = earliestVisibleSeqByRunIdentity.get(key);
+      if (knownVisible === undefined || row.seq < knownVisible) {
+        earliestVisibleSeqByRunIdentity.set(key, row.seq);
+      }
+    }
   }
   const anchored = reconciled.map((row) => {
     const identity = messageIdentity(row.content);
     if (!identity) {
       return row;
     }
-    const earliestSeq = earliestSeqByRunIdentity.get(
-      `${row.run_id}:${identity}`,
-    );
+    const key = `${row.run_id}:${identity}`;
+    const earliestSeq =
+      earliestVisibleSeqByRunIdentity.get(key) ??
+      earliestSeqByRunIdentity.get(key);
     if (earliestSeq === undefined || row.seq === earliestSeq) {
       return row;
     }
     return { ...row, seq: earliestSeq };
   });
+  // Re-anchoring can change row order. Sort before comparing with the retained
+  // snapshot so unchanged reconciliations can still reuse the previous array.
+  anchored.sort((left, right) => left.seq - right.seq);
   if (
     anchored.length === previousRows.length &&
     anchored.every((row, index) => {
