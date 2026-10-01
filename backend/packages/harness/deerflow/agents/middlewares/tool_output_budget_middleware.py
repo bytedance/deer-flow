@@ -223,14 +223,18 @@ def _externalize_to_sandbox(
         # raising, so we cannot rely on exception propagation here.
         sandbox.execute_command(f"mkdir -p {shlex.quote(virtual_dir)}")
         sandbox.write_file(virtual_path, content)
-        # Validate the file landed: execute_command may have silently failed
-        # to create the directory, and write_file backends differ. Refuse to
-        # hand the model an unreadable read_file path.
-        check = sandbox.execute_command(f"test -s {shlex.quote(virtual_path)} && echo OK || echo MISSING")
+        # Validate the file landed completely: execute_command may have silently
+        # failed to create the directory, or write_file may have truncated the
+        # content (disk full, backend pipe error). Refuse to hand the model an
+        # incomplete or unreadable read_file path.
+        expected_bytes = len(content.encode("utf-8"))
+        quoted_path = shlex.quote(virtual_path)
+        check = sandbox.execute_command(f'test -f {quoted_path} && test "$(wc -c < {quoted_path})" -eq {expected_bytes} && echo OK || echo MISSING')
         if not isinstance(check, str) or check.strip() != "OK":
             logger.warning(
-                "Sandbox externalize validation failed: path=%s, check=%r",
+                "Sandbox externalize validation failed: path=%s, expected_bytes=%d, check=%r",
                 virtual_path,
+                expected_bytes,
                 check,
             )
             return None
