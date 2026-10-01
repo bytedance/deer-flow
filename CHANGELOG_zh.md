@@ -454,6 +454,12 @@
   跟踪窗口、工具频率和按工具覆盖项中的布尔值也会把对应限制缩小为
   1。现在所有整数阈值字段都会在配置加载阶段按字段名报错，同时保持
   有效整数和数字字符串的既有行为。([#6017])
+- **智能体：** 应用配置的整数设置现在会拒绝 YAML 布尔值，而不是把 `true`
+  静默转换为 `1`。此前若配置 `recursion_limit: true`，所有未自带递归上限的
+  Gateway 运行都会在第一个 LangGraph 超级步就触达递归上限；`llm_call` 下的
+  整数字段（`retry_max_attempts`、`max_concurrent_calls` 与两个退避延迟）中的
+  布尔值也会把重试次数和并发上限缩小为 1。现在全部七个整数字段都会在配置
+  加载阶段按字段名报错，同时保持有效整数和数字字符串的既有行为。([#6171])
 - **上传：** 文档转换时现在会记录原文件与 Markdown 的归属关系。
   `list_uploaded_files` 只隐藏归属已验证的转换文件，文档大纲也只读取
   记录中指定的 Markdown；用户自行上传的同名文件会正常显示，不会被
@@ -6360,5 +6366,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135
 [#6138]: https://github.com/bytedance/deer-flow/pull/6138
 [#6140]: https://github.com/bytedance/deer-flow/pull/6140
+[#6171]: https://github.com/bytedance/deer-flow/pull/6171
 [#6201]: https://github.com/bytedance/deer-flow/pull/6201
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202

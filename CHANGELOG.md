@@ -513,6 +513,14 @@ This release closes that milestone with **301 merged pull requests**.
   limits to one. All integer threshold fields now fail configuration loading
   with a field-specific error while valid integers and numeric strings retain
   their existing behavior.([#6017])
+- **agents:** App-config integer settings now reject YAML booleans instead of
+  coercing `true` to `1`. A configuration such as `recursion_limit: true`
+  previously made every Gateway run that does not supply its own limit hit the
+  LangGraph recursion ceiling at the first super-step, and booleans on the
+  `llm_call` integers (`retry_max_attempts`, `max_concurrent_calls`, the two
+  backoff delays) collapsed retries and the concurrency cap to one. All seven
+  integer fields now fail configuration loading with a field-specific error
+  while valid integers and numeric strings retain their existing behavior.([#6171])
 - **uploads:** Converted Markdown ownership is now recorded when a document is
   converted. `list_uploaded_files` hides only verified conversion outputs, and
   document outlines use only the recorded companion; a user-uploaded Markdown
@@ -7611,3 +7619,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6201]: https://github.com/bytedance/deer-flow/pull/6201
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
 
+[#6171]: https://github.com/bytedance/deer-flow/pull/6171
