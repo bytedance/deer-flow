@@ -31,6 +31,26 @@ from deerflow.extensions.manager import (
 from deerflow.tui.cli import main as deerflow_main
 
 
+@pytest.fixture(autouse=True)
+def _pin_official_package_index(monkeypatch) -> None:
+    """Keep host uv index configuration (e.g. a blocking mirror) out of this suite.
+
+    The source-build tests shell out to uv and resolve build backends such as
+    hatchling from the package index, so a host-configured mirror that blocks
+    those packages fails the suite even though the code under test is fine.
+    Pin the default index (which also wins over the legacy ``UV_INDEX_URL``)
+    and drop the extra-index env channels, whose entries take priority over
+    the default index. ``UV_NO_CONFIG=1`` would additionally drop the host
+    ``uv.toml`` ``[[index]]`` channel, but also the fixture's own ``[tool.uv]``
+    pyproject settings the assertions rely on, so file-based extra indexes
+    stay out of scope. Tests that install their own index (the local
+    simple-index servers) set their own env afterwards and keep precedence.
+    """
+    monkeypatch.setenv("UV_DEFAULT_INDEX", "https://pypi.org/simple")
+    monkeypatch.delenv("UV_INDEX", raising=False)
+    monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+
+
 def _write_local_extension(
     source: Path,
     *,
@@ -1522,7 +1542,7 @@ def test_failed_entry_point_discovery_rolls_back_dependency_and_lock(tmp_path: P
     assert not (root / "backend" / "uv.lock").exists()
     absent = subprocess.run(
         [
-            str(root / "backend" / ".venv" / "bin" / "python"),
+            str(root / "backend" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")),
             "-c",
             "from importlib.metadata import PackageNotFoundError, version; \ntry: version('deerflow-extension-demo')\nexcept PackageNotFoundError: raise SystemExit(0)\nraise SystemExit(1)",
         ],
@@ -2033,7 +2053,7 @@ def test_remove_rolls_back_package_lock_config_source_and_environment_when_confi
     assert managed_source.is_dir()
     present = subprocess.run(
         [
-            str(root / "backend" / ".venv" / "bin" / "python"),
+            str(root / "backend" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")),
             "-c",
             "from importlib.metadata import version; assert version('deerflow-extension-demo') == '1.0.0'",
         ],
@@ -2403,7 +2423,10 @@ def test_install_uses_one_controlled_uv_project_and_deferred_sync(
     assert ["--project", backend] == add[add.index("--project") : add.index("--project") + 2]
     assert "--no-sync" in add
     assert "--no-workspace" in add
-    assert add[-2:] == ["--", "extensions/sources/deerflow-extension-demo"]
+    assert add[-2] == "--"
+    # The manager passes the snapshot's native relative path; compare as paths
+    # so the assertion is separator-neutral.
+    assert Path(add[-1]) == Path("extensions/sources/deerflow-extension-demo")
     assert ["--project", backend] == sync[sync.index("--project") : sync.index("--project") + 2]
     assert "--locked" in sync
     assert "--no-sync" not in sync

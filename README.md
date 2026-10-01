@@ -286,6 +286,7 @@ It is disabled by default; see the linked guide to enable it.
    ```
 
    - Codex CLI reads `~/.codex/auth.json`
+   - The Codex model provider returns completed responses without waiting for the SSE connection to close. Failed or incomplete responses report the provider's error or reason; partial output is not returned as a successful answer. Non-object error details are reported as text.
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
    - ACP agent entries are separate from model providers — if you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`
    - MiniMax Code speaks ACP directly. Install and authenticate it, then add it as an ACP agent:
@@ -669,6 +670,7 @@ Plugin brand icons are bundled locally. When adding or editing one personal MCP 
 Capability Center > Plugins adds, replaces, and deletes one MCP server at a time through targeted mutations that preserve concurrent sibling changes; deletes use a bodyless URL-addressed request. An invalid stdio command on one server no longer blocks toggling another, while enabling that invalid server remains protected by the command allowlist and surfaces the backend validation message in the UI.
 Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport` field for SSE/HTTP servers.
 Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written.
+The admin MCP cache reset advances a durable generation marker in the writable config directory. Every Gateway worker mounting that same directory retires its own cached tools and pooled sessions before the next lookup; replicas with independent filesystems are not implicitly covered. If no config path is available, the API reports a process-local reset instead.
 `extensions_config.json` accepts UTF-8 with or without a leading byte-order mark (BOM), including files saved as UTF-8 with BOM by an editor.
 MCP routing hints can also prefer a specific MCP tool for matching requests without forbidding other tools. When `tool_search` defers MCP schemas, matching routing metadata can auto-promote up to `tool_search.auto_promote_top_k` deferred schemas before the model call.
 
@@ -1207,7 +1209,7 @@ uv run python -m deerflow.skills.review.cli ../skills/public/data-analysis --for
 
 Public-skill CI waivers are exact, expiring exceptions in `.github/skill-review-waivers.v1.json`. Because only the trusted base manifest can suppress a finding, a file-changing pull request can be preauthorized safely by first merging a manifest-only change that lists the reviewed future full-file SHA-256 in `preapproved_file_sha256s`; the file change can then land in a later pull request.
 
-Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, and SearXNG search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
+Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, SearXNG, and Serper search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
 
 For DDG web search and DDG image search, `max_results` in `config.yaml` can be a positive integer or an environment-variable reference such as `max_results: $DDG_MAX_RESULTS` with `DDG_MAX_RESULTS=5`. The configured value takes precedence over the tool call's `max_results` argument. Invalid values (for example, `abc`, an empty string, or `3.5`), zero, and negative counts produce a warning and fall back to the default of 5 results.
 
@@ -1640,6 +1642,8 @@ The chat header also shows a context-window gauge when the selected model has a 
 
 ### Sub-Agents
 
+When a sub-agent ends with `return_direct=True` tools, including tools contributed by extension middleware, their outputs are returned in tool-call order. A failed tool marks the task as failed while preserving the batch outputs.
+
 Ordinary `task` calls accept `context_mode="isolated"` (default) or
 `context_mode="snapshot"`. Isolated tasks receive their delegated prompt as
 before. Snapshot tasks also receive the parent's retained conversation and
@@ -1757,6 +1761,13 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
+Host-externalized tool outputs use the Gateway's normal file-creation umask.
+Mounted sandboxes running under another UID need read access through the shared
+storage permissions. An unclean shutdown can leave `.tool-output-*.tmp` files in
+`tool_output.storage_subdir` (default `.tool-results`) under thread outputs.
+Remove leftovers during thread-data maintenance with all Gateway writers stopped,
+or when deleting the corresponding inactive thread's data.
+
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
 `acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn
 automatically. Clients can use the structured error to schedule a retry.
@@ -1834,7 +1845,7 @@ Image bytes loaded for a vision-model call are transient: DeerFlow removes the h
 
 After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes, and stdio MCP temporary/debug files under the DeerFlow-owned `.mcp/` namespace are excluded because they are process-internal state (like `.git/` and `node_modules/`, any directory named `.mcp` is excluded at any depth). Large, binary, or sensitive-looking files are shown as metadata only.
 
-Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names.
+Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
 CSV and TSV artifacts open as tables in the artifact panel and in a separate window. The preview preserves text values (including leading zeros), supports an optional header row, and pages through up to 200 rows and 50 columns from the initial sample. Long or multiline cells can be opened and copied in full. Switch to source to inspect or edit the file; downloads and separate windows use the saved version.
 
@@ -1881,6 +1892,19 @@ Failed upload commits report the original error even if temporary-file cleanup
 also fails, for example because of a Windows sharing violation.
 Once the file is published, a temporary-file cleanup failure is logged without
 failing the upload; hidden staging files are left for the startup sweep.
+
+Uploaded filenames matching `.upload-*.part` are rejected because that pattern is
+reserved for temporary staging files. Rename such a file before uploading it.
+The HTTP check recognizes both `/` and `\` as path separators, including on
+Linux, when extracting the basename. The endpoint returns `400` with a rename
+hint before publishing any file in a batch containing a reserved name, so the
+chat reports the upload error instead
+of continuing without the attachment. The SDK validates filenames for the whole
+batch before copying any files. Project document names follow the same
+restriction; an older shelf document with a reserved name
+remains downloadable but cannot be attached directly. Download it, rename it,
+and upload it to the thread. This change does not recover or migrate older
+thread uploads that already match the staging pattern.
 
 This is the difference between a chatbot with tool access and an agent with an actual execution environment.
 
@@ -2227,6 +2251,7 @@ Current MVP capabilities:
 - Pause, resume, trigger, inspect history, and delete tasks
 - Search task titles or prompts, combined with status/type filters and the current thread scope.
 - Execute scheduled work through the normal DeerFlow run lifecycle
+- When `channel_connections.enabled: true`, push a summary to the task owner's connected IM identities when a scheduled run finishes as success or failed (outbox + delivery worker). Manual "run now" and interrupts stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, restart recovery). Channel/transport outages park deliveries without exhausting retries, for up to about a day; platform rejections retry for roughly 15 minutes before settling as `failed`. An identity you disconnect while a delivery is waiting is never pushed to: the row is dropped as `failed`. Proactive push is currently implemented for WeCom; other connected providers enqueue but fail until they grow a `send_notification` path.
 - Browse execution history in pages of 50; older pages pause automatic refresh, with an explicit return to the latest runs. Counts appear only after a successful read; loading and failed reads are not reported as zero runs.
 
 **Filter execution history through the API**
@@ -2239,7 +2264,7 @@ Current MVP limits:
 
 - No conversation-created `schedule_task` tool yet
 - No text-only notification jobs
-- No channel or GitHub dispatch targets
+- No channel or GitHub dispatch targets (result push above is not a dispatch target)
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 

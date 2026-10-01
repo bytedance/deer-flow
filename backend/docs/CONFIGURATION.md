@@ -520,6 +520,7 @@ Notes:
 - Create/update accept `once`, `cron`, and `interval`. Interval uses `schedule_spec.every_seconds` (UTC `now + N`, no missed-beat catch-up). N is at least `min_once_delay_seconds` (default 60) and at most 30 days.
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
+- With `channel_connections.enabled: true`, the scheduler enqueues IM outcome notifications for the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them. Only runs that finish as success or failed notify: manual triggers and interrupts stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, restart recovery). Channel/transport outages park rows without consuming the retry budget, for up to about a day; platform rejections exhaust ~15 minutes of counted retries then settle `failed`. The worker re-checks the binding right before sending: a target the owner has disconnected since enqueue is dropped as `failed`, never pushed. Only WeCom currently implements proactive `send_notification`.
 
 ### Agent Storage
 
@@ -609,8 +610,14 @@ cannot cancel work already started by Jina. Enabling retries can send up to `1 +
 and incur additional cost. Successful content and final `Error:` results retain
 the existing contract.
 
+Serper `web_search` also accepts the optional model argument
+`time_range: "day" | "week" | "month" | "year"`. For example,
+`{"query": "Python releases", "time_range": "week"}` sends `tbs: "qdr:w"`
+to Serper. Omitting `time_range` or passing `null` keeps the existing unrestricted
+search request. This option does not change Serper `image_search`.
+
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya)
 - `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)

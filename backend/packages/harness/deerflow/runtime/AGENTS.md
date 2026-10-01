@@ -26,6 +26,8 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Message sequence placement:** Keep backend and frontend message identity rules aligned. Details: `backend/docs/runtime-guidance-details.md`.
 
+**Thread message cursors:** `list_messages` applies both exclusive bounds before `limit`, paging forward whenever `after_seq` is supplied.
+
 **Human-input capture** (`runtime/journal.py`): track capture separately from
 the optional display summary. Image-only input has no text but must still stop
 the batch scan and later model calls from appending another human-input event.

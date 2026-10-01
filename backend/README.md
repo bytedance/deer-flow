@@ -118,6 +118,14 @@ LLM-powered persistent context retention across conversations:
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
 
+### Run Event Storage
+
+For direct `RunEventStore.list_messages` callers, `after_seq` and `before_seq`
+bound an exclusive message window. With both cursors, reads return the first
+`limit` messages inside that window in ascending sequence order across memory,
+JSONL, and database backends. Keep `before_seq` fixed and advance `after_seq`
+to the last returned sequence to page forward through a bounded history range.
+
 ### Gateway API
 
 FastAPI application providing REST endpoints for frontend integration:

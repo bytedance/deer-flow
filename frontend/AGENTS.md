@@ -87,8 +87,13 @@ More specific `AGENTS.md` files under `src/` contain the frontend sections split
 
 `core/utils/markdown.ts` reads web-fetch titles from the first nonblank line.
 Match zero to three literal spaces before `# ` without trimming indentation;
-mixed space/tab code blocks must fall back to the URL. Keep this local to title
-extraction rather than changing the shared streamdown fence parser.
+mixed space/tab code blocks must fall back to the URL. Strip optional closing
+hashes with a backwards scan so long fetched titles cannot cause quadratic regex
+backtracking. Closing hashes require a preceding space/tab (or an empty title)
+and only ASCII spaces/tabs afterward, apart from the terminal CR in CRLF input.
+Non-ASCII trailing whitespace must not turn literal hashes into closing syntax.
+Keep this local to title extraction rather than changing the shared streamdown
+fence parser.
 
 Custom Agent `display_name` is an optional Unicode UI label, edited in
 `AgentSettingsDialog`. Use it with a fallback to `name` for gallery/chat text;
@@ -309,7 +314,9 @@ conversation-action callbacks reject Promise returns while consuming rejections.
 and atomic references. Render labels as DOM text, never HTML; canonical tokens
 preserve draft positions. Submission expands tokens to `@label` and sends up to
 16 unique skill IDs in `additional_kwargs.skill_references`; the backend checks
-each against the user registry and agent allowlist. Legacy slash input remains.
+each against the user registry and agent allowlist. The web slash picker lists
+only `/goal` and `/compact`; skill selection uses `@`. Legacy typed slash text
+continues through normal message submission for backend and channel compatibility.
 Project files require confirmed `additional_kwargs.files`. Conversation context
 is reconciled from tokens against the current capability and limit. Only successful
 discovery may flatten references; pending/errors preserve IDs and block reference
