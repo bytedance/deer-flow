@@ -487,7 +487,6 @@ def test_validate_local_tool_path_allows_user_data_write() -> None:
     validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/file.txt", _THREAD_DATA, read_only=False)
 
 
-
 def test_validate_local_tool_path_read_allows_nonportable_names() -> None:
     """Reads must not fail solely because the name is not Windows-portable."""
     validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/uploads/aux.pdf", _THREAD_DATA, read_only=True)
@@ -896,7 +895,6 @@ def test_validate_local_bash_command_paths_allows_quoted_paths_with_spaces() -> 
     """Spaces inside quotes belong to the filename; they must not truncate a segment."""
     validate_local_bash_command_paths('cat "/mnt/user-data/uploads/report. final.txt"', _THREAD_DATA)
     validate_local_bash_command_paths('cat "/mnt/user-data/uploads/CON notes.txt"', _THREAD_DATA)
-
 
 
 def _windows_extended(path: Path) -> str:
