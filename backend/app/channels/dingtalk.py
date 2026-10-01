@@ -228,7 +228,9 @@ class DingTalkChannel(Channel):
         self._card_repliers.clear()
         self._card_track_ids.clear()
         if self._thread:
-            self._thread.join(timeout=5)
+            # The SDK thread only returns on a fatal error, so this join
+            # normally waits out its full timeout; keep it off the event loop.
+            await asyncio.to_thread(self._thread.join, timeout=5)
             self._thread = None
         logger.info("DingTalk channel stopped")
 
