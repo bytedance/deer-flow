@@ -332,11 +332,12 @@
 
 ### 修复
 
-- **渠道：** 停止或重启 Slack、飞书、钉钉渠道不再冻结 Gateway 事件循环。
+- **渠道：** 停止或重启 Slack、飞书、钉钉、Discord 渠道不再冻结 Gateway 事件循环。
   `SlackChannel.stop()` 直接调用 `SocketModeClient.close()`，它会 join SDK 的消息处理线程
   （每次约 0.7 秒），并等待正在执行的事件监听器，而监听器中阻塞的 Slack Web API 调用
   最长可持续到客户端超时；飞书与钉钉则直接以 5 秒超时 join SDK 线程，由于这些线程
-  只在致命错误时退出，这次 join 通常会等满 5 秒。期间 Gateway 上的所有运行、流和渠道
+  只在致命错误时退出，这次 join 通常会等满 5 秒；Discord 直接以 10 秒超时 join 客户端线程，
+  客户端关闭超时或清理缓慢时会用满这段时间。期间 Gateway 上的所有运行、流和渠道
   都会停顿，`POST /api/channels/{name}/restart` 也不例外。现在这些清理都在工作线程中执行；
   Slack 的 close 会被 shield 并跟踪，因此被取消的关闭流程不会中断它，重试的 `stop()`
   会等待同一个 close，而不会再关闭一次。([#6134])

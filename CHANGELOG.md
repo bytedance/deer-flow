@@ -327,14 +327,16 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
-- **channels:** Stopping or restarting the Slack, Feishu or DingTalk channel no
-  longer freezes the Gateway event loop. `SlackChannel.stop()` called
+- **channels:** Stopping or restarting the Slack, Feishu, DingTalk or Discord
+  channel no longer freezes the Gateway event loop. `SlackChannel.stop()` called
   `SocketModeClient.close()` inline, which joins the SDK's message-processor
   thread (about 0.7s every time) and waits for in-flight event listeners, whose
   blocking Slack Web API calls can run up to the client timeout; Feishu and
   DingTalk joined their SDK threads inline with a 5s timeout, and because those
-  threads only exit on a fatal error the join normally waited the full 5s. Every
-  run, stream and channel on the Gateway stalled meanwhile, including on
+  threads only exit on a fatal error the join normally waited the full 5s;
+  Discord joined its client thread inline with a 10s timeout, which a timed-out
+  client close or a slow drain could use up. Every run, stream and channel on
+  the Gateway stalled meanwhile, including on
   `POST /api/channels/{name}/restart`. The teardown now runs in a worker thread;
   Slack's close is shielded and tracked, so a cancelled shutdown leaves it
   running and a retried `stop()` awaits it instead of closing twice. ([#6134])

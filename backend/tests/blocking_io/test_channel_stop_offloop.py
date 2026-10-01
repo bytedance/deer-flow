@@ -8,6 +8,8 @@ every run, stream and channel the Gateway serves:
   and waits for in-flight listeners.
 - Feishu / DingTalk: ``stop()`` joins the SDK thread with a 5s timeout, and
   that thread only returns on a fatal error.
+- Discord: ``stop()`` joins the client thread with a 10s timeout, which a
+  timed-out client close or a slow ``_run_client()`` drain can use up.
 
 Each test drives the real ``stop()`` (and, for Slack, a real slack-sdk client).
 If a join or close regresses back onto the event loop, the strict Blockbuster
@@ -21,6 +23,7 @@ import threading
 import pytest
 
 from app.channels.dingtalk import DingTalkChannel
+from app.channels.discord import DiscordChannel
 from app.channels.feishu import FeishuChannel
 from app.channels.message_bus import MessageBus
 from app.channels.slack import SlackChannel
@@ -44,7 +47,7 @@ async def test_slack_stop_closes_real_socket_mode_client_off_loop() -> None:
     assert channel._socket_client is None
 
 
-@pytest.mark.parametrize("channel_cls", [FeishuChannel, DingTalkChannel])
+@pytest.mark.parametrize("channel_cls", [FeishuChannel, DingTalkChannel, DiscordChannel])
 async def test_stop_joins_sdk_thread_off_loop(channel_cls) -> None:
     release = threading.Event()
     sdk_thread = threading.Thread(target=release.wait, daemon=True)
