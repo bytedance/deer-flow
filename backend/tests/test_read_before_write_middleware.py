@@ -857,3 +857,18 @@ def test_lock_scope_resolves_overwrite_wrapped_sandbox():
         runtime=MagicMock(context={}),
     )
     assert ReadBeforeWriteMiddleware._lock_scope(req) == "sb-fork-lock"
+
+
+def test_read_before_write_config_rejects_booleans():
+    """elide_min_chars must reject boolean values, matching the pattern in database_config."""
+    import pytest
+    from pydantic import ValidationError
+
+    from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
+
+    with pytest.raises(ValidationError, match="must be an integer, not a boolean"):
+        ReadBeforeWriteConfig(elide_min_chars=True)
+    with pytest.raises(ValidationError, match="must be an integer, not a boolean"):
+        ReadBeforeWriteConfig(elide_min_chars=False)
+    assert ReadBeforeWriteConfig(elide_min_chars=0).elide_min_chars == 0
+    assert ReadBeforeWriteConfig(elide_min_chars=100).elide_min_chars == 100
