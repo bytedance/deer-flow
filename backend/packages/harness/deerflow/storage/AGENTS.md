@@ -8,9 +8,9 @@ a reader can verify what it got back. Contract: `storage/contract.py`
 Operator-facing behaviour and the producer migration plan: `docs/blob-storage.md`.
 Factory: `storage/manager.py`.
 
-**Disabled by default**: `blob_storage.enabled` is `false`, and no producer has
-been migrated, so an untouched deployment behaves exactly as before. Producers
-call `get_blob_store_if_enabled()` and keep their existing local-path code for the
+**Disabled by default**: `blob_storage.enabled` is `false`, so an untouched
+deployment behaves exactly as before. Migrated producers call
+`get_blob_store_if_enabled()` and keep their existing local-path code for the
 `None` case; only a caller that genuinely requires the store uses
 `get_blob_store()`, which raises `BlobNotConfiguredError` when it is disabled.
 Both accessors are exported from this package — prefer
@@ -20,6 +20,14 @@ cached store, so hot-reloaded `blob_storage` edits take effect on new accesses.
 Replaced stores stay open for callers that already hold them and are closed by
 `reset_blob_store()`; changing a root requires preserving existing blob refs
 and coordinating deployment instances.
+
+`view_image_tool` is the first migrated producer: it persists validated image
+bytes as `kind="viewed-image"`, checkpoints the JSON-safe ref beside
+`actual_path`, and treats a configured-store write failure as a failed tool call
+rather than claiming cross-instance durability. `ViewImageMiddleware` accepts a
+ref only when its kind, digest, size and content type agree with the separately
+recorded image metadata; reads are blob-first and retain the existing
+sandbox/host compatibility path as fallback.
 
 **Layout** (local_fs, the default)::
 

@@ -4,7 +4,7 @@ Resolves the multi-instance half of [#4189](https://github.com/bytedance/deer-fl
 
 | Producer | Write | Reads |
 |---|---|---|
-| Viewed images | `view_image_tool` → `ViewedImageData.actual_path` (`deerflow/agents/thread_state.py:52`) | `ViewImageMiddleware._read_image_as_data_url`, gateway artifact routes, IM channels, `present_file_tool` |
+| Viewed images | `view_image_tool` → `ViewedImageData.blob_ref` plus compatibility `actual_path` | `ViewImageMiddleware._read_image_as_data_url`, gateway artifact routes, IM channels, `present_file_tool` |
 | Externalized tool results | `ToolOutputBudgetMiddleware._externalize` → virtual path under the thread `outputs` tree | model `read_file` via the thread-data mount |
 
 On a single gateway both are correct. Behind a load balancer, the instance handling the read is frequently not the instance that wrote the file. The blob store replaces **"where on this machine"** with **"which content"**, so every instance that can reach the backing store resolves the same bytes.
@@ -52,14 +52,23 @@ Fail-fast on an unresolvable backend (`ValueError`), mirroring `MemoryConfig.man
 
 The factory checks the effective backend and backend configuration on each access. After a `config.yaml` edit, new accesses use the new store; disabling storage makes the optional accessor return `None` and the required accessor raise `BlobNotConfiguredError`. A store already handed to an in-flight caller remains usable and is closed by `reset_blob_store()` rather than during the switch. When changing a storage root in a multi-instance deployment, coordinate the rollout and keep previously written blobs available until existing references have been migrated.
 
-## What this PR deliberately does not do
+## Producer migration status
 
-**No producer is migrated.** `blob_storage.enabled` defaults to `false`, no existing call site changed, and the diff is purely additive — a deployment that never sets the key behaves exactly as before.
+`blob_storage.enabled` defaults to `false`, so a deployment that never sets the
+key behaves exactly as before.
 
-Migration happens in two follow-up PRs, each independently revertible:
+The producer migrations are independently revertible:
 
-1. **Viewed images.** `ViewedImageData` gains an optional `blob_ref` (`actual_path` is kept); `view_image_tool` writes the blob when the store is enabled; `ViewImageMiddleware._read_image_as_data_url` resolves blob-first, path-second. The gateway artifact routes and IM channels keep their local-path reads until they can be exercised against a multi-instance deployment.
-2. **Externalized tool results.** `ToolOutputBudgetMiddleware._externalize` records a ref alongside the virtual path; the sandbox variant (`_externalize_to_sandbox`, issue #3416) stays as-is — sandbox-resident content is a different failure mode one layer down.
+1. **Viewed images — migrated.** `ViewedImageData` carries an optional
+   `blob_ref` while retaining `actual_path`; `view_image_tool` writes validated
+   bytes when the store is enabled, and `ViewImageMiddleware` resolves the
+   digest-bound blob before the sandbox/local compatibility paths. The gateway
+   artifact routes and IM channels keep their local-path reads until they can be
+   exercised against a multi-instance deployment.
+2. **Externalized tool results — pending.** `ToolOutputBudgetMiddleware._externalize`
+   will record a ref alongside the virtual path; the sandbox variant
+   (`_externalize_to_sandbox`, issue #3416) stays as-is — sandbox-resident
+   content is a different failure mode one layer down.
 
 ## Interaction with checkpoint retention (#5255)
 

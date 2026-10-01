@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import importlib
 import os
 from pathlib import Path
@@ -6,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from deerflow.storage import BlobRef, BlobWriteError
 from deerflow.tools.builtins.view_image_tool import view_image_tool
 
 view_image_module = importlib.import_module("deerflow.tools.builtins.view_image_tool")
@@ -74,6 +76,73 @@ def test_view_image_reads_virtual_uploads_path(tmp_path: Path) -> None:
     assert viewed_image["mime_type"] == "image/png"
     assert viewed_image["size"] == len(PNG_BYTES)
     assert viewed_image["actual_path"] == str(image_path)
+
+
+def test_view_image_persists_blob_ref_when_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    thread_data = _make_thread_data(tmp_path)
+    image_path = Path(thread_data["uploads_path"]) / "shared.png"
+    image_path.write_bytes(PNG_BYTES)
+    calls: list[dict] = []
+
+    class RecordingStore:
+        def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+            calls.append({"data": data, **kwargs})
+            return BlobRef(
+                sha256=hashlib.sha256(data).hexdigest(),
+                size=len(data),
+                kind=kwargs["kind"],
+                content_type=kwargs["content_type"],
+            )
+
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: RecordingStore())
+
+    result = view_image_tool.func(
+        runtime=_make_runtime(thread_data),
+        image_path="/mnt/user-data/uploads/shared.png",
+        tool_call_id="tc-shared",
+    )
+
+    assert _message_content(result) == "Successfully read image"
+    metadata = result.update["viewed_images"]["/mnt/user-data/uploads/shared.png"]
+    assert metadata["blob_ref"] == {
+        "sha256": hashlib.sha256(PNG_BYTES).hexdigest(),
+        "size": len(PNG_BYTES),
+        "kind": "viewed-image",
+        "content_type": "image/png",
+    }
+    assert calls == [
+        {
+            "data": PNG_BYTES,
+            "kind": "viewed-image",
+            "content_type": "image/png",
+            "thread_id": "thread-1",
+        }
+    ]
+
+
+def test_view_image_does_not_claim_success_when_configured_blob_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_data = _make_thread_data(tmp_path)
+    image_path = Path(thread_data["uploads_path"]) / "shared.png"
+    image_path.write_bytes(PNG_BYTES)
+
+    class FailingStore:
+        def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+            raise BlobWriteError("backend detail must not reach the model")
+
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: FailingStore())
+
+    result = view_image_tool.func(
+        runtime=_make_runtime(thread_data),
+        image_path="/mnt/user-data/uploads/shared.png",
+        tool_call_id="tc-shared-failure",
+    )
+
+    assert _message_content(result) == "Error: Failed to persist image in shared blob storage"
+    assert "viewed_images" not in result.update
+    assert "backend detail" not in _message_content(result)
 
 
 def test_view_image_reads_gif(tmp_path: Path) -> None:
