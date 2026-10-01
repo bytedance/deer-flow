@@ -47,6 +47,13 @@ port is the entire external surface. Any new published port needs an explicit bi
 address; `backend/tests/test_compose_default_bind_host.py` pins this for every service in
 both compose files.
 
+The proxy also canonicalizes the loopback origin onto `localhost`: browsers scope
+cookies per host, so serving both `localhost:2026` and `127.0.0.1:2026` (or `[::1]`)
+would split the login session into separate jars (#6156). All three nginx configs map
+the numeric spellings to `localhost` with a 301 that preserves the caller's port, for
+safe methods only — API POSTs are never redirected. `backend/tests/test_nginx_loopback_canonical.py`
+pins the maps across `docker/nginx/nginx.conf`, `nginx.local.conf`, and the Helm ConfigMap.
+
 ## Repository Map
 
 ```
