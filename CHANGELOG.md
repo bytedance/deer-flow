@@ -333,7 +333,7 @@ This release closes that milestone with **181 merged pull requests**.
   full or pipe failure), the partial file previously passed validation, handing
   the model a truncated file path. It now verifies the file size exactly matches
   the payload, returning `None` and falling back to inline truncation if a write
-  was truncated. ([#6110])
+  was truncated. ([#6112])
 
 - **gateway:** A non-ASCII CSRF token, GitHub webhook signature, internal auth
   token, OIDC `state`, or provisioner `X-API-Key` is now rejected with the
@@ -6312,5 +6312,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
 [#6076]: https://github.com/bytedance/deer-flow/pull/6076
 [#6088]: https://github.com/bytedance/deer-flow/pull/6088
-[#6110]: https://github.com/bytedance/deer-flow/issues/6110
+[#6112]: https://github.com/bytedance/deer-flow/pull/6112
 
