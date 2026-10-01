@@ -450,8 +450,10 @@ app = FastAPI(title="DeerFlow Sandbox Provisioner", lifespan=lifespan)
 @app.middleware("http")
 async def verify_api_key(request: Request, call_next):
     if request.url.path.startswith("/api/"):
-        key = request.headers.get("X-API-Key", "")
-        if not PROVISIONER_API_KEY or not secrets.compare_digest(key, PROVISIONER_API_KEY):
+        # Compare bytes: compare_digest raises TypeError for non-ASCII str,
+        # and header values are client-controlled (decoded as latin-1).
+        key = request.headers.get("X-API-Key", "").encode("utf-8", "surrogatepass")
+        if not PROVISIONER_API_KEY or not secrets.compare_digest(key, PROVISIONER_API_KEY.encode("utf-8", "surrogatepass")):
             logger.warning("provisioner auth rejected: %s %s", request.method, request.url.path)
             return Response(status_code=401, content="Unauthorized")
     return await call_next(request)

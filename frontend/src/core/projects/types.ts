@@ -82,6 +82,9 @@ export type PromoteThreadFileInput = {
  * the ingested thread upload the composer adds to its attachment list.
  */
 export type AttachProjectDocumentResult = {
+  /** Client draft provenance for deduplicating picker selections. */
+  source_document_id?: string;
+  source_project_id?: string;
   filename: string;
   size_bytes: number;
   virtual_path: string;

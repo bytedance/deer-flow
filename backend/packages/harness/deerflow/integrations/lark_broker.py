@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -120,6 +121,8 @@ def render_launcher_script(shim_path: str) -> str:
 # so a broker outage never looks like a successful lark-cli run. It is invoked as
 # ``<python> lark-cli-shim.py <args...>`` by the launcher above (so it does not
 # rely on its own shebang being resolvable), and stdin/argv pass straight through.
+# It runs as a standalone script inside the sandbox, so it carries its own
+# imports (select/time included) that deliberately duplicate this module's.
 LARK_CLI_BROKER_SHIM_SCRIPT = r'''#!/usr/bin/env python3
 """DeerFlow lark-cli broker shim (Pattern B). Forwards argv/stdin to the broker.
 
@@ -129,12 +132,35 @@ that read/write files relative to the sandbox cwd are unsupported in broker mode
 """
 import base64
 import json
+import math
 import os
+import select
 import sys
+import time
 import urllib.error
 import urllib.request
 
 BROKER_URL = os.environ.get("DEERFLOW_LARK_BROKER_URL", "http://127.0.0.1:8788")
+
+# Non-interactive executors must close inherited session stdin, while explicit
+# pipes/files are drained to EOF. These idle windows are safety budgets, never
+# evidence that input is complete: timeout must abort before calling the broker.
+_STDIN_GRACE_DEFAULT = 2.0
+_STDIN_TAIL_DEFAULT = 2.0
+STDIN_CHUNK_BYTES = 65536
+
+
+def _stdin_window_seconds(name, default):
+    """Read an operator override for a stdin window; fall back on junk values."""
+    try:
+        value = float(os.environ.get(name, ""))
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) and 0 < value <= 600 else default
+
+
+STDIN_GRACE_SECONDS = _stdin_window_seconds("DEERFLOW_LARK_BROKER_STDIN_GRACE_SECONDS", _STDIN_GRACE_DEFAULT)
+STDIN_TAIL_SECONDS = _stdin_window_seconds("DEERFLOW_LARK_BROKER_STDIN_TAIL_SECONDS", _STDIN_TAIL_DEFAULT)
 
 
 def _fail(message, code=127):
@@ -142,11 +168,35 @@ def _fail(message, code=127):
     sys.exit(code)
 
 
+def _read_stdin():
+    """Read complete input, or abort without executing a partial command."""
+    if sys.stdin is None or sys.stdin.isatty():
+        return b""
+    if os.name == "nt":
+        # select() cannot wait on Windows pipes; deployed sandbox images are POSIX.
+        return sys.stdin.buffer.read()
+    fd = sys.stdin.fileno()
+    chunks = []
+    idle_deadline = time.monotonic() + STDIN_GRACE_SECONDS
+    while True:
+        remaining = idle_deadline - time.monotonic()
+        if remaining <= 0:
+            _fail("stdin timed out before EOF; command was not executed", 124)
+        ready, _, _ = select.select([fd], [], [], remaining)
+        if not ready:
+            _fail("stdin timed out before EOF; command was not executed", 124)
+        chunk = os.read(fd, STDIN_CHUNK_BYTES)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        idle_deadline = time.monotonic() + STDIN_TAIL_SECONDS
+
+
 def main():
     try:
-        stdin_bytes = b"" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.buffer.read()
+        stdin_bytes = _read_stdin()
     except Exception:
-        stdin_bytes = b""
+        _fail("cannot read stdin; command was not executed")
     payload = json.dumps(
         {
             "args": sys.argv[1:],
@@ -353,8 +403,10 @@ def make_handler(config: BrokerConfig) -> type[BaseHTTPRequestHandler]:
                 return
 
             if not semaphore.acquire(blocking=False):
+                logger.warning("lark-cli exec rejected: broker busy (concurrency cap %d)", LARK_BROKER_MAX_CONCURRENCY)
                 self._send_json(503, {"error": "broker busy"})
                 return
+            started = time.monotonic()
             try:
                 result = run_lark_cli(config, args, stdin)
             except Exception:  # noqa: BLE001 - keep the wire contract uniform
@@ -369,6 +421,13 @@ def make_handler(config: BrokerConfig) -> type[BaseHTTPRequestHandler]:
             finally:
                 semaphore.release()
 
+            logger.info(
+                "lark-cli exec argc=%d exit=%d in %.2fs%s",
+                len(args),
+                result.exit_code,
+                time.monotonic() - started,
+                " (output truncated)" if result.truncated else "",
+            )
             self._send_json(
                 200,
                 {

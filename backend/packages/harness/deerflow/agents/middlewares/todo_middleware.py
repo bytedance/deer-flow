@@ -251,6 +251,25 @@ class TodoMiddleware(TodoListMiddleware):
                 self._touch_completion_reminder_key_locked(key)
             return reminders
 
+    def _restore_completion_reminders(self, runtime: Runtime, reminders: list[str]) -> None:
+        """Requeue reminders taken for a model call that raised.
+
+        LLMErrorHandlingMiddleware sits outside this middleware and retries a
+        failed call by running this wrap again, so the retry must still find
+        the reminder. The count is not bumped again: it was spent when the
+        reminder was queued. A run whose reminder state was dropped meanwhile
+        stays dropped.
+        """
+        if not reminders:
+            return
+        key = self._pending_key(runtime)
+        with self._lock:
+            if key not in self._completion_reminder_counts:
+                return
+            queued = self._pending_completion_reminders.setdefault(key, [])
+            queued[:0] = [reminder for reminder in reminders if reminder not in queued]
+            self._touch_completion_reminder_key_locked(key)
+
     def _clear_other_run_completion_reminders(self, runtime: Runtime) -> None:
         thread_id, current_run_id = self._pending_key(runtime)
         with self._lock:
@@ -343,8 +362,7 @@ class TodoMiddleware(TodoListMiddleware):
     def _format_pending_completion_reminders(reminders: list[str]) -> str:
         return "\n\n".join(dict.fromkeys(reminders))
 
-    def _augment_request(self, request: ModelRequest) -> ModelRequest:
-        reminders = self._drain_completion_reminders(request.runtime)
+    def _inject_completion_reminders(self, request: ModelRequest, reminders: list[str]) -> ModelRequest:
         if not reminders:
             return request
         new_messages = [
@@ -367,7 +385,12 @@ class TodoMiddleware(TodoListMiddleware):
         # without calling it the model is never told about the todo list feature.
         # Augment with pending completion reminders on the request that already
         # carries the injected system prompt.
-        return super().wrap_model_call(request, lambda req: handler(self._augment_request(req)))
+        reminders = self._drain_completion_reminders(request.runtime)
+        try:
+            return super().wrap_model_call(request, lambda req: handler(self._inject_completion_reminders(req, reminders)))
+        except Exception:
+            self._restore_completion_reminders(request.runtime, reminders)
+            raise
 
     @override
     async def awrap_model_call(
@@ -376,10 +399,16 @@ class TodoMiddleware(TodoListMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
         # See wrap_model_call: preserve the base class system-prompt injection.
-        async def augmented_handler(req: ModelRequest) -> ModelResponse:
-            return await handler(self._augment_request(req))
+        reminders = self._drain_completion_reminders(request.runtime)
 
-        return await super().awrap_model_call(request, augmented_handler)
+        async def augmented_handler(req: ModelRequest) -> ModelResponse:
+            return await handler(self._inject_completion_reminders(req, reminders))
+
+        try:
+            return await super().awrap_model_call(request, augmented_handler)
+        except Exception:
+            self._restore_completion_reminders(request.runtime, reminders)
+            raise
 
     @override
     def after_agent(self, state: ThreadState, runtime: Runtime) -> dict[str, Any] | None:
