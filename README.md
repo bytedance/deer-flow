@@ -122,7 +122,7 @@ paces requests to help stay within provider request-per-minute limits.
 It is disabled by default; see the linked guide to enable it.
 
 For Google's official Gemini OpenAI-compatible endpoint, use the
-[Gemini reasoning profile](backend/docs/CONFIGURATION.md#gemini-with-thinking-via-openai-compatible-gateway).
+[Gemini reasoning profile](backend/docs/CONFIGURATION.md#gemini-via-googles-openai-compatible-endpoint).
 
 1. **Clone the DeerFlow repository**
 

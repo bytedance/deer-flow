@@ -269,7 +269,7 @@ models:
           type: enabled
 ```
 
-#### Gemini with thinking via OpenAI-compatible gateway
+#### Gemini via Google's OpenAI-compatible endpoint
 
 When routing Gemini through an OpenAI-compatible proxy (Vertex AI OpenAI compat endpoint, AI Studio, or third-party gateways) with thinking enabled, the API attaches a `thought_signature` to each tool-call object returned in the response.  Every subsequent request that replays those assistant messages **must** echo those signatures back on the tool-call entries or the API returns:
 
