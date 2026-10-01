@@ -256,12 +256,15 @@ binds the declaration again. Declarations must be `BaseTool` instances with a
 usable name: anything else (for example a plain callable, which LangChain would
 otherwise auto-convert and bind unchecked) cannot be authorized by name and is
 removed from the bound stack with a warning when authorization is enabled — wrap
-callables in a `StructuredTool`. Two author-visible rules follow: declare tools as a
-plain instance attribute (a `tools` property cannot be narrowed safely and fails
-the build), and if you customize `__copy__`, it must return an independent copy
-that preserves current instance state — returning `self` or rebuilding from
-constructor arguments fails the build loudly rather than silently restoring a
-denied tool. With `authorization.enabled: false` nothing is collected or narrowed.
+callables in a `StructuredTool`. Three author-visible rules follow: declare tools as a
+plain instance attribute holding a `list` or `tuple` (a `tools` property cannot be
+narrowed safely and fails the build, and any other container shape — a `set`,
+generator, `dict_values`, … — would be iterated and bound by LangChain as-is, so it
+likewise fails the build), and if you customize `__copy__`, it must return an
+independent copy that preserves current instance state — returning `self` or
+rebuilding from constructor arguments fails the build loudly rather than silently
+restoring a denied tool. With `authorization.enabled: false` nothing is collected or
+narrowed.
 
 ### Guarding a contributed management route
 

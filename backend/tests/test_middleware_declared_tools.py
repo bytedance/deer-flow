@@ -114,6 +114,19 @@ class TestDisabledAuthorization:
         verify_declared_tool_view(view, authorized_names=authorized_names)  # no-op
         assert view[0] is middleware
 
+    def test_non_sequence_tools_attribute_is_not_even_inspected(self):
+        """The disabled path is a strict no-op: a set-declared stack rides
+        through untouched (LangChain will iterate it as-is, matching the
+        pre-authorization behavior)."""
+        middleware = _DeclaringMiddleware({object()})
+        stack = [middleware]
+
+        view, authorized_names = _narrow(stack, provider=None, outcome=_outcome([], []))
+
+        assert view is stack
+        assert authorized_names is None
+        verify_declared_tool_view(view, authorized_names=authorized_names)  # no-op
+
 
 class TestCollectAndDecide:
     def test_collect_keeps_base_tools_in_middleware_order(self):
@@ -133,6 +146,29 @@ class TestCollectAndDecide:
         assert "cannot be authorized" in caplog.text
         # The middleware itself is untouched — the entry was never a decision input.
         assert len(middleware.tools) == 2
+
+    @pytest.mark.parametrize(
+        "container",
+        [
+            pytest.param(lambda entry: {entry}, id="set"),
+            pytest.param(lambda entry: (x for x in [entry]), id="generator"),
+            pytest.param(lambda entry: {"decl": entry}.values(), id="dict_values"),
+        ],
+    )
+    def test_non_sequence_tools_attribute_fails_the_build_loudly(self, container):
+        """LangChain's factory iterates ``middleware.tools`` as-is, so a
+        non-list/tuple container would bind with no Layer-1 decision — refuse
+        the build instead of warning and skipping."""
+        middleware = _DeclaringMiddleware(container(object()))
+
+        with pytest.raises(DeclaredToolViewError, match="not a list/tuple"):
+            collect_declared_tools([middleware])
+        # Same refusal through the narrowing view and the post-chain verify:
+        # no path re-admits the shape.
+        with pytest.raises(DeclaredToolViewError, match="not a list/tuple"):
+            _narrow([middleware], provider=_FilterProvider(["decl"]), outcome=_outcome([], []))
+        with pytest.raises(DeclaredToolViewError, match="not a list/tuple"):
+            verify_declared_tool_view([middleware], authorized_names=frozenset({"decl"}))
 
     def test_decision_skips_the_provider_when_the_delta_is_empty(self):
         provider = _FilterProvider([])

@@ -10,12 +10,16 @@ middleware stack exists:
 1. **Record** — :func:`layer_one_outcome` captures the ordinary pass's verdict
    as two name sets at the existing Layer-1 call site.
 2. **Collect** — :func:`collect_declared_tools` reads ``getattr(m, "tools",
-   ())`` off the built stack. Entries that are not ``BaseTool`` instances with
-   a usable name cannot be authorized by name; with authorization enabled they
-   are warned about here and removed from the bound stack at view time
-   (LangChain would otherwise convert them through ``create_tool`` and bind
-   them unchecked). A contributor who needs a plain callable must wrap it in
-   a ``StructuredTool``.
+   ())`` off the built stack. The attribute must be a ``list`` or ``tuple``:
+   LangChain's factory iterates whatever it finds as-is, so any other
+   container (a ``set``, a generator, ``dict_values``, ...) would bind with
+   no decision at all — that shape fails the build loudly with
+   :class:`DeclaredToolViewError` rather than riding through. Entries that
+   are not ``BaseTool`` instances with a usable name cannot be authorized by
+   name; with authorization enabled they are warned about here and removed
+   from the bound stack at view time (LangChain would otherwise convert them
+   through ``create_tool`` and bind them unchecked). A contributor who needs
+   a plain callable must wrap it in a ``StructuredTool``.
 3. **Decide, seeded** — :func:`decide_declared_tools` submits only names the
    ordinary pass never saw, through the *same* provider instance, context, and
    app config. A name the ordinary pass already decided reuses that verdict:
@@ -117,12 +121,14 @@ def _iter_declared(middleware: object) -> tuple[Any, ...]:
     if tools is None:
         return ()
     if not isinstance(tools, (list, tuple)):
-        logger.warning(
-            "Middleware %s declares 'tools' as %s, not a list/tuple; skipping its tool declarations",
-            _middleware_name(middleware),
-            type(tools).__name__,
+        # Fail loudly, not a warning-and-skip: LangChain's factory iterates
+        # the attribute as-is, so a non-sequence container (set, generator,
+        # dict_values, ...) would still bind with no Layer-1 decision. Only
+        # reachable on the authorization-enabled paths — when authorization
+        # is disabled this module never inspects the stack.
+        raise DeclaredToolViewError(
+            f"Middleware {_middleware_name(middleware)} ({type(middleware).__name__}) declares 'tools' as {type(tools).__name__}, not a list/tuple; LangChain would iterate and bind it unchecked. Declare tools as a list or tuple."
         )
-        return ()
     return tuple(tools)
 
 
