@@ -13,6 +13,7 @@ from deerflow.config.image_generation import (
     ImageConfigurationError,
     ImageConnectionStatus,
     ImageGenerationDefaultStore,
+    ImageGenerationProfile,
     ManagedImageGenerationProfile,
     ManagedImageGenerationProfileStore,
     ServerImageProbeStore,
@@ -63,6 +64,14 @@ def _empty_status(status: ImageConnectionStatus) -> dict:
     }
 
 
+def _server_probe_results(profile: ImageGenerationProfile) -> dict[str, str]:
+    """A lost probe sidecar removes readiness evidence, not the image profile."""
+    try:
+        return ServerImageProbeStore().results(profile)
+    except (ValueError, OSError):
+        return {}
+
+
 def _status() -> dict:
     try:
         profile, source, managed = resolve_image_generation_profile(get_app_config().image_generation_environment)
@@ -71,7 +80,7 @@ def _status() -> dict:
     if profile is None:
         return _empty_status(ImageConnectionStatus.NOT_CONFIGURED)
     configured = profile.usable()
-    results = ServerImageProbeStore().results(profile) if source == "sandbox_environment" else {}
+    results = _server_probe_results(profile) if source == "sandbox_environment" else {}
     generation = configured and (bool(managed and managed.verified_generation) or results.get("generation") == "success")
     edit = configured and (bool(managed and managed.verified_edit) or results.get("edit") == "success")
     failed_results = {managed.last_generation_result, managed.last_edit_result} if managed else set(results.values())
@@ -118,7 +127,7 @@ def _list_profiles() -> dict:
         item["selected"] = managed_selected and item["enabled"] and not choice_required
         item["conflict"] = item["enabled"] and choice_required
     if legacy is not None:
-        results = ServerImageProbeStore().results(legacy)
+        results = _server_probe_results(legacy)
         profiles.insert(
             0,
             {
