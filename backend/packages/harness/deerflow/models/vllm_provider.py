@@ -104,6 +104,12 @@ def _reasoning_to_text(reasoning: Any) -> str:
         return str(reasoning)
 
 
+def _pick_reasoning(fields: Mapping[str, Any]) -> Any:
+    """Prefer non-null ``reasoning`` (including empty strings) over the legacy field."""
+    reasoning = fields.get("reasoning")
+    return fields.get("reasoning_content") if reasoning is None else reasoning
+
+
 def _convert_delta_to_message_chunk_with_reasoning(_dict: Mapping[str, Any], default_class: type[BaseMessageChunk]) -> BaseMessageChunk:
     """Convert a streaming delta to a LangChain message chunk while preserving reasoning."""
     id_ = _dict.get("id")
@@ -117,9 +123,7 @@ def _convert_delta_to_message_chunk_with_reasoning(_dict: Mapping[str, Any], def
             function_call["name"] = ""
         additional_kwargs["function_call"] = function_call
 
-    reasoning = _dict.get("reasoning")
-    if reasoning is None:
-        reasoning = _dict.get("reasoning_content")
+    reasoning = _pick_reasoning(_dict)
     if reasoning is not None:
         additional_kwargs["reasoning"] = reasoning
         reasoning_text = _reasoning_to_text(reasoning)
@@ -164,9 +168,7 @@ def _convert_delta_to_message_chunk_with_reasoning(_dict: Mapping[str, Any], def
 
 def _restore_reasoning_field(payload_msg: dict[str, Any], orig_msg: AIMessage) -> None:
     """Re-inject vLLM reasoning onto outgoing assistant messages."""
-    reasoning = orig_msg.additional_kwargs.get("reasoning")
-    if reasoning is None:
-        reasoning = orig_msg.additional_kwargs.get("reasoning_content")
+    reasoning = _pick_reasoning(orig_msg.additional_kwargs)
     if reasoning is not None:
         payload_msg["reasoning"] = reasoning
 
@@ -260,10 +262,7 @@ class VllmChatModel(ChatOpenAI):
             message = generation.message
             if not isinstance(message, AIMessage):
                 continue
-            message_fields = choice.get("message") or {}
-            reasoning = message_fields.get("reasoning")
-            if reasoning is None:
-                reasoning = message_fields.get("reasoning_content")
+            reasoning = _pick_reasoning(choice.get("message") or {})
             if reasoning is None:
                 continue
             message.additional_kwargs["reasoning"] = reasoning
