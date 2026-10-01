@@ -4,7 +4,7 @@
 
 Apply each subagent's prompt overlay after assembling its full SystemMessage.
 Registry overrides must not mutate `BUILTIN_SUBAGENTS`.
-Direct-return batches match current-turn call IDs and return outputs in call order; keep ordinary assistant replies and guard-cap recovery unchanged.
+Direct returns use the compiled tool registry, including middleware tools. Match current-turn IDs in call order; error ToolMessages fail the task with outputs preserved.
 Durable batch specs store overlays as JSON and restore them before execution.
 
 **Remote empty files**: GNU stat's `regular file`/`regular empty file` are regular files. Empty files pass exists/file_written, fail non-empty; reject symlinks, directories, FIFOs.

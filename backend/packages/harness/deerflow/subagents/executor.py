@@ -268,6 +268,24 @@ class SubagentResult:
             return True
 
 
+def _terminal_direct_results(final_state: Any, return_direct_tools: set[str]) -> list[ToolMessage] | None:
+    """Match a complete terminal direct-tool batch in call order."""
+    if not final_state or not return_direct_tools:
+        return None
+    messages = final_state.get("messages", [])
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, AIMessage):
+            continue
+        calls = message.tool_calls
+        if calls and all(call["name"] in return_direct_tools for call in calls):
+            results = {item.tool_call_id: item for item in messages[index + 1 :] if isinstance(item, ToolMessage)}
+            if all(call["id"] in results for call in calls):
+                return [results[call["id"]] for call in calls]
+        return None
+    return None
+
+
 def _extract_final_result(final_state: Any, *, trace_id: str, name: str, return_direct_tools: set[str] | None = None) -> str:
     """Extract a human-readable result string from the streamed subagent state.
 
@@ -291,24 +309,12 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str, return_
     messages = final_state.get("messages", [])
     logger.info(f"[trace={trace_id}] Subagent {name} final messages count: {len(messages)}")
 
-    last_ai_message = None
-    for index in range(len(messages) - 1, -1, -1):
-        msg = messages[index]
-        if isinstance(msg, AIMessage):
-            last_ai_message = msg
-            calls = msg.tool_calls
-            if calls and return_direct_tools and all(call["name"] in return_direct_tools for call in calls):
-                # LangChain ends after this tool batch without another model
-                # reply. The assistant text is only a preamble, not its result.
-                # Match this turn's call IDs; older/unrelated results cannot
-                # complete an unanswered call. Preserve call order even if
-                # tool results arrive in a different order.
-                results = {message.tool_call_id: message for message in messages[index + 1 :] if isinstance(message, ToolMessage)}
-                if all(call["id"] in results for call in calls):
-                    texts = [message_content_to_text(results[call["id"]].content) for call in calls]
-                    return "\n\n".join(text for text in texts if text) or "No response generated"
-            break
+    direct_results = _terminal_direct_results(final_state, return_direct_tools or set())
+    if direct_results is not None:
+        texts = [message_content_to_text(message.content) for message in direct_results]
+        return "\n\n".join(text for text in texts if text) or "No response generated"
 
+    last_ai_message = next((message for message in reversed(messages) if isinstance(message, AIMessage)), None)
     if last_ai_message is not None:
         text = message_content_to_text(last_ai_message.content)
         return text if text else "No response generated"
@@ -954,6 +960,7 @@ class SubagentExecutor:
         # not just the first — because the v2 contract advertises more than one
         # cap reason.
         self._stop_reason_middlewares: list[Any] = []
+        self._return_direct_tools: set[str] = set()
         # LangGraph super-step budget that buys ``config.max_turns`` turns,
         # resolved in ``_create_agent`` once the middleware chain — and with it
         # the compiled graph's per-turn node count — is known. Stays ``None``
@@ -1044,6 +1051,13 @@ class SubagentExecutor:
             state_schema=ThreadState,
             checkpointer=False,
         )
+        # Use the compiled registry: it includes middleware tools, normalized
+        # callables, and LangChain's last-definition-wins name precedence.
+        from langgraph.prebuilt import ToolNode
+
+        tool_graph_node = agent.get_graph().nodes.get("tools")
+        tool_node = tool_graph_node.data if tool_graph_node is not None else None
+        self._return_direct_tools = {tool.name for tool in tool_node.tools_by_name.values() if tool.return_direct} if isinstance(tool_node, ToolNode) else set()
         self._describe_assembly(
             app_config=app_config,
             tools=bound_tools,
@@ -1726,8 +1740,18 @@ class SubagentExecutor:
                     final_state,
                     trace_id=self.trace_id,
                     name=self.config.name,
-                    return_direct_tools={tool.name for tool in final_tools if tool.return_direct},
+                    return_direct_tools=self._return_direct_tools,
                 )
+                direct_results = _terminal_direct_results(final_state, self._return_direct_tools)
+                if direct_results is not None and any(message.status == "error" for message in direct_results):
+                    result.try_set_terminal(
+                        SubagentStatus.FAILED,
+                        result=final_result,
+                        error=f"Direct-return tool failure:\n{final_result}",
+                        token_usage_records=token_usage_records,
+                        tool_receipts=terminal_receipts(),
+                    )
+                    return result
                 # A guard hard-stop (token budget or loop detection) does not raise
                 # — it strips tool_calls so the run completes with a final answer.
                 # ``consume_stop_reason`` on each guard tells us whether that

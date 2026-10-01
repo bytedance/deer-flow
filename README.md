@@ -1627,7 +1627,7 @@ The chat header also shows a context-window gauge when the selected model has a 
 
 ### Sub-Agents
 
-When a sub-agent ends with `return_direct=True` tools, their outputs are returned to the caller in tool-call order, without requiring another model reply.
+When a sub-agent ends with `return_direct=True` tools, including tools contributed by extension middleware, their outputs are returned in tool-call order. A failed tool marks the task as failed while preserving the batch outputs.
 
 Ordinary `task` calls accept `context_mode="isolated"` (default) or
 `context_mode="snapshot"`. Isolated tasks receive their delegated prompt as
