@@ -23,7 +23,8 @@ def _article(links: str, *, head: str = "") -> str:
 async def test_web_fetch_resolves_relative_links_through_real_extraction(monkeypatch, provider):
     module = importlib.import_module(f"deerflow.community.{provider}.tools")
     html = _article('<a href="../next">Next</a> <a href="/reference">Reference</a>')
-    monkeypatch.setattr(module, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: None))
+    tool_config = SimpleNamespace(model_extra={"network_isolation_confirmed": True}) if provider == "browserless" else None
+    monkeypatch.setattr(module, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: tool_config))
     if provider == "jina_ai":
         monkeypatch.setattr(module.JinaClient, "crawl", AsyncMock(return_value=html))
     elif provider == "infoquest":

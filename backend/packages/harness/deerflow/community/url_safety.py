@@ -76,3 +76,43 @@ def validate_public_http_url(
     if any(is_blocked_address(addr) for addr in candidates):
         return f"Error: Refusing to {action} a private, loopback, or metadata address"
     return None
+
+
+def validate_delegated_fetch_backend(
+    backend_url: str,
+    *,
+    service_name: str,
+    allow_private_addresses: bool = False,
+    network_isolation_confirmed: bool = False,
+    resolver: Callable[[str], list[ipaddress._BaseAddress]] | None = None,
+) -> str | None:
+    """Fail closed when a delegated fetcher can reach the deployment network.
+
+    Browser/render services resolve and follow the target URL themselves.  A
+    Gateway preflight therefore cannot protect a private-network service from
+    redirects, subresource requests, split-horizon DNS, or DNS rebinding.  A
+    private backend is usable only when the operator either explicitly allows
+    private targets or confirms that the backend's egress is isolated.
+
+    Public SaaS backends are outside the DeerFlow deployment trust boundary and
+    remain usable without the self-hosted isolation acknowledgement.
+    """
+    bypass_private_address_check = allow_private_addresses or network_isolation_confirmed
+    error = validate_public_http_url(
+        backend_url,
+        allow_private_addresses=bypass_private_address_check,
+        action=f"connect to the {service_name} backend at",
+        resolver=resolver,
+    )
+    if error is None:
+        return None
+    if bypass_private_address_check:
+        return error
+    return (
+        f"Error: Refusing to delegate URL fetching to {service_name} at a "
+        "private or unverifiable network address. Initial URL validation cannot "
+        "stop redirects or DNS rebinding inside that service. Isolate its egress "
+        "from private/metadata networks, then set network_isolation_confirmed: "
+        "true; or set allow_private_addresses: true only when internal targets "
+        "are intentional."
+    )

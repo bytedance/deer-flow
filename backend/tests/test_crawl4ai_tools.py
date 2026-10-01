@@ -163,6 +163,48 @@ class TestCrawl4AiClient:
 class TestCrawl4AiTools:
     """Tests for the Crawl4AI tool functions."""
 
+    @pytest.fixture(autouse=True)
+    def _resolve_example_com(self):
+        """Keep tool tests offline while preserving URL-safety validation."""
+        with patch(
+            "deerflow.community.url_safety.resolve_host_addresses",
+            return_value=[ipaddress.ip_address("93.184.216.34")],
+        ):
+            yield
+
+    @patch("deerflow.community.crawl4ai.tools._build_client")
+    async def test_web_fetch_tool_rejects_unisolated_private_fetch_backend(self, mock_build):
+        """A private Crawl4AI service can follow redirects after our URL preflight."""
+        from deerflow.community.crawl4ai import tools
+
+        with patch(
+            "deerflow.community.crawl4ai.tools._get_tool_config",
+            return_value={"base_url": "http://127.0.0.1:11235"},
+        ):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com/article")
+
+        assert "network_isolation_confirmed" in result
+        mock_build.assert_not_called()
+
+    @patch("deerflow.community.crawl4ai.tools._build_client")
+    async def test_web_fetch_tool_allows_isolated_private_fetch_backend(self, mock_build):
+        from deerflow.community.crawl4ai import tools
+
+        mock_client = MagicMock()
+        mock_client.fetch_markdown = AsyncMock(return_value="# isolated")
+        mock_build.return_value = mock_client
+        with patch(
+            "deerflow.community.crawl4ai.tools._get_tool_config",
+            return_value={
+                "base_url": "http://127.0.0.1:11235",
+                "network_isolation_confirmed": True,
+            },
+        ):
+            result = await tools.web_fetch_tool.ainvoke("https://example.com/article")
+
+        assert result == "# isolated"
+        mock_client.fetch_markdown.assert_called_once()
+
     @patch("deerflow.community.crawl4ai.tools._build_client")
     async def test_web_fetch_tool_success(self, mock_build):
         from deerflow.community.crawl4ai import tools
@@ -171,7 +213,7 @@ class TestCrawl4AiTools:
         mock_client.fetch_markdown = AsyncMock(return_value="# Title\n\nContent")
         mock_build.return_value = mock_client
 
-        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=None):
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value={"network_isolation_confirmed": True}):
             result = await tools.web_fetch_tool.ainvoke("https://example.com/article")
 
         assert result == "# Title\n\nContent"
@@ -185,7 +227,7 @@ class TestCrawl4AiTools:
         mock_client.fetch_markdown = AsyncMock(return_value="x" * 5000)
         mock_build.return_value = mock_client
 
-        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=None):
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value={"network_isolation_confirmed": True}):
             result = await tools.web_fetch_tool.ainvoke("https://example.com")
 
         assert len(result) == 4096
@@ -198,7 +240,7 @@ class TestCrawl4AiTools:
         mock_client.fetch_markdown = AsyncMock(return_value="Error: Crawl4AI returned empty markdown")
         mock_build.return_value = mock_client
 
-        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=None):
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value={"network_isolation_confirmed": True}):
             result = await tools.web_fetch_tool.ainvoke("https://example.com")
 
         assert result.startswith("Error:")
@@ -211,7 +253,7 @@ class TestCrawl4AiTools:
         mock_client.fetch_markdown = AsyncMock(side_effect=Exception("boom"))
         mock_build.return_value = mock_client
 
-        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=None):
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value={"network_isolation_confirmed": True}):
             result = await tools.web_fetch_tool.ainvoke("https://example.com")
 
         assert result.startswith("Error:")
@@ -220,7 +262,7 @@ class TestCrawl4AiTools:
     async def test_web_fetch_tool_rejects_metadata_ip(self, mock_build):
         from deerflow.community.crawl4ai import tools
 
-        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=None):
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value={"network_isolation_confirmed": True}):
             result = await tools.web_fetch_tool.ainvoke("http://169.254.169.254/latest/meta-data/")
 
         assert "private, loopback, or metadata" in result
@@ -230,7 +272,7 @@ class TestCrawl4AiTools:
     async def test_web_fetch_tool_rejects_dns_resolving_to_private(self, mock_build):
         from deerflow.community.crawl4ai import tools
 
-        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=None):
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value={"network_isolation_confirmed": True}):
             with patch(
                 "deerflow.community.url_safety.resolve_host_addresses",
                 return_value=[ipaddress.ip_address("10.0.0.5")],
@@ -263,7 +305,7 @@ class TestCrawl4AiTools:
         mock_client.fetch_markdown = AsyncMock(return_value="# ok")
         mock_build.return_value = mock_client
 
-        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value={}) as mock_cfg:
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value={"network_isolation_confirmed": True}) as mock_cfg:
             await tools.web_fetch_tool.ainvoke("https://example.com")
 
         mock_cfg.assert_called_once_with("web_fetch")
@@ -276,7 +318,7 @@ class TestCrawl4AiTools:
         mock_client.fetch_markdown = AsyncMock(return_value="# ok")
         mock_build.return_value = mock_client
 
-        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value={"filter": "raw"}):
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value={"network_isolation_confirmed": True, "filter": "raw"}):
             await tools.web_fetch_tool.ainvoke("https://example.com")
 
         mock_client.fetch_markdown.assert_called_once()
@@ -290,7 +332,7 @@ class TestCrawl4AiTools:
         mock_client.fetch_markdown = AsyncMock(return_value="# ok")
         mock_build.return_value = mock_client
 
-        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value={"filter": "BOGUS"}):
+        with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value={"network_isolation_confirmed": True, "filter": "BOGUS"}):
             await tools.web_fetch_tool.ainvoke("https://example.com")
 
         assert mock_client.fetch_markdown.call_args.kwargs.get("filter_mode") == "fit"
