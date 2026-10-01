@@ -225,6 +225,9 @@ class RunEventStore(abc.ABC):
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
         - before_seq: return the last ``limit`` records with seq < before_seq (ascending)
         - neither: return the latest ``limit`` records (ascending)
+
+        When both cursors are supplied, return the first ``limit`` records in
+        the exclusive window ``after_seq < seq < before_seq`` (ascending).
         """
 
     @abc.abstractmethod
