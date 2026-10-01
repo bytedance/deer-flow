@@ -770,6 +770,8 @@ lead agent 只会在委派具有明确净收益时动态拉起 sub-agents，例�
 
 ### Sandbox 与文件系统
 
+上传文档的转换大纲和预览会校验原文件版本，包括修改时间戳。原文件被修改后，即使大小不变，也不会再使用旧转换结果。缺少原文件时间戳的旧归属记录同样会被拒绝；可在启用 `uploads.auto_convert_documents: true` 后重新上传原文件以恢复转换大纲。文件都会保留，未通过校验的转换 Markdown 会在 Agent 的历史文件列表中作为独立文件显示。
+
 DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电脑”。
 
 每个任务都运行在隔离的 Docker 容器里，里面有完整的文件系统，包括 skills、workspace、uploads、outputs。agent 可以读写和编辑文件，可以执行 bash 命令和代码，也可以查看图片。整个过程都在 sandbox 内完成，可审计、会隔离，不会在不同 session 之间互相污染。

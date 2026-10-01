@@ -41,7 +41,7 @@ def register_companion(original: Path, markdown: Path) -> None:
                 {
                     "original": original.name,
                     "markdown": markdown.name,
-                    "source_identity": [source_stat.st_dev, source_stat.st_ino, source_stat.st_size],
+                    "source_identity": [source_stat.st_dev, source_stat.st_ino, source_stat.st_size, source_stat.st_mtime_ns, source_stat.st_ctime_ns],
                     "markdown_identity": [markdown_stat.st_dev, markdown_stat.st_ino, markdown_stat.st_size, markdown_stat.st_ctime_ns],
                 },
                 output,
@@ -87,7 +87,9 @@ def resolve_companion(original: Path) -> Path | None:
         if data["original"] != original.name or not isinstance(name, str) or Path(name).name != name or not name.endswith(".md"):
             return None
         source_stat = original.stat(follow_symlinks=False)
-        if data.get("source_identity") != [source_stat.st_dev, source_stat.st_ino, source_stat.st_size]:
+        # Legacy three-field records cannot establish whether an equal-size
+        # source edit happened. Reject them rather than backfilling timestamps.
+        if data.get("source_identity") != [source_stat.st_dev, source_stat.st_ino, source_stat.st_size, source_stat.st_mtime_ns, source_stat.st_ctime_ns]:
             return None
         markdown = original.parent / name
         if not markdown.is_file() or markdown.is_symlink():

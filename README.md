@@ -1839,6 +1839,13 @@ Outline titles are limited to 200 characters and fallback previews to 2,000
 characters per file, with truncation markers. Full uploaded files remain available
 for targeted reads.
 
+Converted upload outlines and previews require a matching source version, including
+modification timestamps. Editing the source invalidates its previous conversion,
+including equal-length edits. Older ownership records without source timestamps
+are also rejected; re-upload the source with `uploads.auto_convert_documents: true`
+to restore conversion-backed outlines. Files remain available, and unvalidated
+Markdown conversions appear as standalone files in the agent's historical listing.
+
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 
 After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes, and stdio MCP temporary/debug files under the DeerFlow-owned `.mcp/` namespace are excluded because they are process-internal state (like `.git/` and `node_modules/`, any directory named `.mcp` is excluded at any depth). Large, binary, or sensitive-looking files are shown as metadata only.
