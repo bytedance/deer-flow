@@ -338,6 +338,14 @@ This release closes that milestone with **181 merged pull requests**.
   `POST /api/channels/{name}/restart`. The teardown now runs in a worker thread;
   Slack's close is shielded and tracked, so a cancelled shutdown leaves it
   running and a retried `stop()` awaits it instead of closing twice. ([#6134])
+- **middleware:** `_externalize_to_sandbox` now validates the full byte count
+  of externalized tool outputs instead of only testing non-emptiness with
+  `test -s`. When a remote sandbox write truncated the file part-way (e.g. disk
+  full or pipe failure), the partial file previously passed validation, handing
+  the model a truncated file path. It now verifies the file size exactly matches
+  the payload, returning `None` and falling back to inline truncation if a write
+  was truncated. ([#6112])
+
 - **gateway:** A non-ASCII CSRF token, GitHub webhook signature, internal auth
   token, OIDC `state`, or provisioner `X-API-Key` is now rejected with the
   usual 403/401 instead of a 500. `hmac.compare_digest` raises `TypeError` for
@@ -6315,5 +6323,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
 [#6076]: https://github.com/bytedance/deer-flow/pull/6076
 [#6088]: https://github.com/bytedance/deer-flow/pull/6088
+[#6112]: https://github.com/bytedance/deer-flow/pull/6112
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
 
