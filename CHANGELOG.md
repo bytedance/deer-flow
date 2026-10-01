@@ -433,6 +433,12 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **channels:** The Discord typing indicator is now actually sent while the
+  agent works on a reply. `_start_typing()` called `channel.trigger_typing()`, which
+  discord.py removed in 2.0 (the project requires `>=2.7.0`), and its loop
+  swallowed every exception, so each tick raised `AttributeError` and nothing
+  was ever sent. It now awaits `channel.typing()`, the 2.x API that sends one
+  indicator, and logs a failed tick at DEBUG instead of dropping it.
 - **channels:** Stopping or restarting the Slack, Feishu, DingTalk or Discord
   channel no longer freezes the Gateway event loop. `SlackChannel.stop()` called
   `SocketModeClient.close()` inline, which joins the SDK's message-processor

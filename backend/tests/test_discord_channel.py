@@ -143,6 +143,66 @@ async def test_discord_stop_joins_client_thread_off_the_event_loop() -> None:
     assert channel._thread is None
 
 
+class _TypingTarget:
+    """Messageable stand-in shaped like discord.py 2.x.
+
+    discord.py 2.0 removed ``Messageable.trigger_typing()``: ``typing()``
+    returns a ``Typing`` object, and awaiting it sends one indicator. This
+    fake deliberately has no ``trigger_typing``, so code still calling the
+    1.x API fails here the way it fails against the real library.
+    """
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.sent = asyncio.Event()
+        self.calls = 0
+        self._error = error
+
+    def typing(self):
+        return self._send()
+
+    async def _send(self) -> None:
+        self.calls += 1
+        self.sent.set()
+        if self._error is not None:
+            raise self._error
+
+
+@pytest.mark.asyncio
+async def test_start_typing_sends_indicator_through_discord_typing_api() -> None:
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    channel._running = True
+    target = _TypingTarget()
+
+    await channel._start_typing(target, "chat-1")
+    try:
+        await asyncio.wait_for(target.sent.wait(), timeout=1)
+    finally:
+        await channel._stop_typing("chat-1")
+
+    assert target.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_start_typing_logs_indicator_failure_and_keeps_looping(caplog) -> None:
+    """A failed indicator is logged instead of silently dropped, and the
+    loop survives it so the next tick can retry."""
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    channel._running = True
+    target = _TypingTarget(error=RuntimeError("rate limited"))
+
+    with caplog.at_level("DEBUG", logger="app.channels.discord"):
+        await channel._start_typing(target, "chat-1")
+        typing_task = channel._typing_tasks["chat-1"]
+        try:
+            await asyncio.wait_for(target.sent.wait(), timeout=1)
+            await asyncio.sleep(0)
+            assert not typing_task.done()
+        finally:
+            await channel._stop_typing("chat-1")
+
+    assert any("failed to send typing indicator" in record.message for record in caplog.records)
+
+
 def _make_discord_message(text: str):
     return SimpleNamespace(
         id=111,

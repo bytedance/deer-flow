@@ -370,9 +370,11 @@ class DiscordChannel(Channel):
             try:
                 while True:
                     try:
-                        await channel.trigger_typing()
+                        # discord.py 2.x removed ``trigger_typing()``; awaiting
+                        # ``typing()`` sends one indicator (~10s on screen).
+                        await channel.typing()
                     except Exception:
-                        pass
+                        logger.debug("[Discord] failed to send typing indicator to %s", target_id, exc_info=True)
                     await asyncio.sleep(10)
             except asyncio.CancelledError:
                 pass
