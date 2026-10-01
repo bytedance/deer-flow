@@ -108,7 +108,7 @@ class DiscordChannel(Channel):
         try:
             import discord
         except ImportError:
-            logger.error("discord.py is not installed. Install it with: uv add discord.py")
+            logger.error("discord.py is not installed. The Discord channel needs the 'discord' extra: run `cd backend && uv sync --extra discord`.")
             return
 
         if not self._bot_token:

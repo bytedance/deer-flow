@@ -416,6 +416,13 @@
   `channel.trigger_typing()` 已在 discord.py 2.0 中移除（项目要求 `>=2.7.0`），而其循环吞掉了
   所有异常，因此每次都抛出 `AttributeError`，提示从未发送。现在改为 await 2.x 的
   `channel.typing()` 发送一次提示，失败时以 DEBUG 级别记录日志，而不是直接丢弃。([#6138])
+- **智能体：** 计划模式下被重试的模型调用不再丢失 `TodoMiddleware`
+  已为其排队的待办完成提醒。该中间件在 `wrap_model_call` 中取出提醒；由于
+  `LLMErrorHandlingMiddleware` 包裹着它并通过再次调用自己的 handler 来重试，
+  第二次尝试在没有提醒的情况下发出，而该 run 已经为它消耗了两次提醒额度中的一次。
+  现在 `TodoMiddleware` 会在 handler 抛出时把取出的提醒放回队列，且不重复计数，
+  从而让重试带上提醒，上限仍允许发送第二次提醒。成功调用的行为不变；
+  若该 run 的提醒状态在此期间已被清除，提醒不会被恢复。([#6132])
 - **渠道：** 停止或重启 Slack、飞书、钉钉、Discord 渠道不再冻结 Gateway 事件循环。
   `SlackChannel.stop()` 直接调用 `SocketModeClient.close()`，它会 join SDK 的消息处理线程
   （每次约 0.7 秒），并等待正在执行的事件监听器，而监听器中阻塞的 Slack Web API 调用
@@ -429,7 +436,6 @@
   而不再仅使用 `test -s` 检查文件是否非空。此前当远程沙箱写入中途被截断时（如磁盘满
   或管道故障），残缺的文件也会通过校验并把错误路径交付给模型；现在会严格核对字节数与负载一致，
   发生截断时返回 `None` 并回退到内联截断。([#6112])
-
 - **Gateway：** 含非 ASCII 字符的 CSRF token、GitHub webhook 签名、内部认证 token、
   OIDC `state` 或 provisioner `X-API-Key` 现在按常规返回 403/401，而不是 500。
   `hmac.compare_digest` 遇到含非 ASCII 字符的 `str` 参数会抛出 `TypeError`，而
@@ -6302,5 +6308,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6091]: https://github.com/bytedance/deer-flow/pull/6091
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
+[#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
 [#6138]: https://github.com/bytedance/deer-flow/pull/6138

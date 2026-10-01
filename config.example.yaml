@@ -2985,6 +2985,8 @@ run_ownership:
 #     allowed_users: []               # empty = allow all
 #     card_template_id: ""            # Optional: AI Card template ID for streaming updates
 #
+#   # Discord joins as a bot; requires the `discord` dependency extra
+#   # (uv sync --extra discord) for discord.py.
 #   discord:
 #     enabled: false
 #     bot_token: $DISCORD_BOT_TOKEN

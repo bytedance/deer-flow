@@ -439,6 +439,16 @@ This release closes that milestone with **301 merged pull requests**.
   swallowed every exception, so each tick raised `AttributeError` and nothing
   was ever sent. It now awaits `channel.typing()`, the 2.x API that sends one
   indicator, and logs a failed tick at DEBUG instead of dropping it. ([#6138])
+- **agents:** A retried model call in plan mode no longer loses the todo
+  completion reminder that `TodoMiddleware` had queued for it. The middleware
+  drained the reminder inside `wrap_model_call`; because
+  `LLMErrorHandlingMiddleware` wraps it and retries by calling its handler again,
+  the second attempt went out without the reminder while the run had already
+  spent one of its two reminders on it. `TodoMiddleware` now puts the drained
+  reminder back when the handler raises, without counting it again, so the retry
+  carries it and the cap still allows the second reminder. Successful calls are
+  unchanged, and a run whose reminder state was cleared meanwhile does not get
+  it back. ([#6132])
 - **channels:** Stopping or restarting the Slack, Feishu, DingTalk or Discord
   channel no longer freezes the Gateway event loop. `SlackChannel.stop()` called
   `SocketModeClient.close()` inline, which joins the SDK's message-processor
@@ -7508,6 +7518,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6091]: https://github.com/bytedance/deer-flow/pull/6091
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
+[#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
 [#6138]: https://github.com/bytedance/deer-flow/pull/6138
 
