@@ -600,10 +600,12 @@ responses that keep delivering data. The existing `timeout` remains Jina's
 Only HTTP 502/503/504 and HTTPX connection-establishment errors (`ConnectError`,
 `ConnectTimeout`) are retried. Authentication/client errors, 429, other statuses,
 empty successful responses, read/write timeouts and arbitrary exceptions are not
-retried. `Retry-After` is not interpreted. Backoff waits asynchronously for 0.5, 1,
-2, then at most 4 seconds, capped by the remaining budget. Cancellation propagates
-during requests and waits. This stops local work; it cannot cancel work already
-started by Jina. Enabling retries can send up to `1 + max_retries` upstream requests
+retried. `Retry-After` is not interpreted. Backoff ceilings start at 0.5 seconds,
+double to 1 and 2 seconds, then stay at 4 seconds. Each asynchronous wait caps its
+ceiling by the remaining budget and independently samples a uniform factor from
+0.5 to 1.0, reducing synchronized retries without increasing the wait cap.
+Cancellation propagates during requests and waits. This stops local work; it
+cannot cancel work already started by Jina. Enabling retries can send up to `1 + max_retries` upstream requests
 and incur additional cost. Successful content and final `Error:` results retain
 the existing contract.
 

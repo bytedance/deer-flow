@@ -2,6 +2,7 @@ import asyncio
 import logging
 import math
 import os
+import random
 
 import httpx
 
@@ -66,7 +67,7 @@ class JinaClient:
                         remaining = deadline - asyncio.get_running_loop().time()
                         if remaining <= 0:
                             raise TimeoutError
-                        await asyncio.sleep(min(delay, remaining))
+                        await asyncio.sleep(min(delay, remaining) * random.uniform(0.5, 1.0))
                         delay = min(delay * 2, 4.0)
         except Exception as e:
             if isinstance(e, TimeoutError) and max_retries and asyncio.get_running_loop().time() >= deadline:

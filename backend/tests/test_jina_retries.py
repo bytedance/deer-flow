@@ -1,8 +1,9 @@
 """Offline coverage of Jina's opt-in retry policy."""
 
 import asyncio
+import random
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -28,10 +29,13 @@ def requests(monkeypatch):
     return post
 
 
-async def test_default_single_attempt(requests):
+async def test_default_single_attempt(requests, monkeypatch):
+    jitter = Mock()
+    monkeypatch.setattr(random, "uniform", jitter)
     requests.return_value = httpx.Response(503, text="unavailable")
     assert "503" in await JinaClient().crawl("https://example.com")
     assert requests.await_count == 1
+    jitter.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", [httpx.Response(502), httpx.Response(503), httpx.Response(504), httpx.ConnectError("offline"), httpx.ConnectTimeout("offline")])
@@ -49,17 +53,54 @@ async def test_permanent_failure(requests, failure):
     assert requests.await_count == 1
 
 
-async def test_exhaustion_and_capped_backoff(requests, monkeypatch):
+@pytest.mark.parametrize(
+    ("jitter_factor", "expected_waits"),
+    [(0.5, [0.25, 0.5, 1, 2, 2, 2]), (0.75, [0.375, 0.75, 1.5, 3, 3, 3]), (1.0, [0.5, 1, 2, 4, 4, 4])],
+)
+async def test_exhaustion_and_capped_backoff(requests, monkeypatch, jitter_factor, expected_waits):
     sleep = AsyncMock()
+    jitter = Mock(return_value=jitter_factor)
     monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(random, "uniform", jitter)
     requests.return_value = httpx.Response(503, text="unavailable")
     assert "503" in await JinaClient().crawl("https://example.com", max_retries=6)
     assert requests.await_count == 7
-    assert [call.args[0] for call in sleep.await_args_list] == [0.5, 1, 2, 4, 4, 4]
+    assert [call.args[0] for call in sleep.await_args_list] == expected_waits
+    assert jitter.call_count == 6
+    assert all(call.args == (0.5, 1.0) for call in jitter.call_args_list)
+
+
+async def test_each_retry_samples_new_jitter(requests, monkeypatch):
+    sleep = AsyncMock()
+    jitter = Mock(side_effect=[0.5, 1.0, 0.75])
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(random, "uniform", jitter)
+    requests.return_value = httpx.Response(503, text="unavailable")
+
+    assert "503" in await JinaClient().crawl("https://example.com", max_retries=3)
+
+    assert requests.await_count == 4
+    assert [call.args[0] for call in sleep.await_args_list] == [0.25, 1, 1.5]
+    assert jitter.call_count == 3
+
+
+async def test_backoff_jitter_is_capped_by_remaining_budget(requests, monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(random, "uniform", lambda low, high: 0.5)
+    requests.side_effect = [httpx.Response(503), httpx.Response(200, text="success")]
+
+    assert await JinaClient().crawl("https://example.com", max_retries=1, retry_budget_seconds=0.1) == "success"
+
+    assert requests.await_count == 2
+    sleep.assert_awaited_once()
+    assert 0 < sleep.await_args.args[0] <= 0.05
 
 
 @pytest.mark.parametrize("during_backoff", [False, True])
-async def test_shared_deadline(requests, during_backoff):
+async def test_shared_deadline(requests, monkeypatch, during_backoff):
+    monkeypatch.setattr(random, "uniform", lambda low, high: 1.0)
+
     async def post(*args, **kwargs):
         assert 0 < kwargs["timeout"] <= 0.05
         if not during_backoff:
