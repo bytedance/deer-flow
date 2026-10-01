@@ -150,6 +150,66 @@ def test_server_profile_can_be_probed_and_status_is_projected(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_corrupt_server_probe_does_not_hide_healthy_managed_profiles(tmp_path, monkeypatch):
+    from app.gateway.routers import image_generation as router
+    from deerflow.config.image_generation import ManagedImageGenerationProfile, ManagedImageGenerationProfileStore, ServerImageProbeStore, resolve_server_image_profile
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    config = _config()
+    monkeypatch.setattr(router, "get_app_config", lambda: config)
+    ManagedImageGenerationProfileStore().save(
+        ManagedImageGenerationProfile(name="web", provider="openai", model="web-image", base_url="https://images.example/v1", api_key="synthetic-web-key", enabled=False),
+        expected_revision=None,
+    )
+    server = resolve_server_image_profile(config)
+    assert server is not None
+    probes = ServerImageProbeStore()
+    probes.record(server, "generation", "success")
+    admin = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    assert (await router.image_generation_status(admin))["supports_generation"] is True
+
+    corrupt_sidecar = b"invalid synthetic probe catalog"
+    probes._catalog.path.write_bytes(corrupt_sidecar)
+    status = await router.image_generation_status(admin)
+    listed = await router.list_image_profiles(admin)
+
+    assert status["status"] == "configured_unverified"
+    assert status["supports_generation"] is False
+    assert {item["source"] for item in listed["profiles"]} == {"config", "managed"}
+    server_entry = next(item for item in listed["profiles"] if item["source"] == "config")
+    assert server_entry["verified_generation"] is False
+    assert server_entry["last_generation_result"] is None
+    with pytest.raises(ValueError, match="Cannot read encrypted catalog"):
+        probes.record(server, "edit", "success")
+    assert probes._catalog.path.read_bytes() == corrupt_sidecar
+
+
+@pytest.mark.asyncio
+async def test_missing_server_probe_key_keeps_config_only_status_available(tmp_path, monkeypatch):
+    from app.gateway.routers import image_generation as router
+    from deerflow.config.image_generation import ServerImageProbeStore, resolve_server_image_profile
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    config = _config()
+    monkeypatch.setattr(router, "get_app_config", lambda: config)
+    server = resolve_server_image_profile(config)
+    assert server is not None
+    probes = ServerImageProbeStore()
+    probes.record(server, "generation", "success")
+    probes._catalog.key_path.unlink()
+    admin = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+
+    status = await router.image_generation_status(admin)
+    listed = await router.list_image_profiles(admin)
+
+    assert status["status"] == "configured_unverified"
+    assert status["supports_generation"] is False
+    assert [item["source"] for item in listed["profiles"]] == ["config"]
+    assert listed["profiles"][0]["verified_generation"] is False
+    assert not probes._catalog.key_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_server_probe_requires_admin_and_rejects_stale_model(tmp_path, monkeypatch):
     from fastapi import HTTPException
 
