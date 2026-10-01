@@ -1885,6 +1885,8 @@ failing the upload; hidden staging files are left for the startup sweep.
 
 Uploaded filenames matching `.upload-*.part` are rejected because that pattern is
 reserved for temporary staging files. Rename such a file before uploading it.
+The restriction includes Windows aliases with trailing dots or spaces, such as
+`.upload-notes.part.` and `.upload-notes.part `, on every host.
 The HTTP check recognizes both `/` and `\` as path separators, including on
 Linux, when extracting the basename. The endpoint returns `400` with a rename
 hint before publishing any file in a batch containing a reserved name, so the
