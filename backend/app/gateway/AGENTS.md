@@ -156,6 +156,12 @@ still reads threads), and `services.py::normalize_input` strips the
 server-owned key from client input (#4380). Mechanism and identity rule:
 `packages/harness/deerflow/runtime/AGENTS.md`.
 
+`ToolOutputBudgetMiddleware` stamps `deerflow_tool_output_blob` only after a
+host-externalized result is durably written to shared blob storage. Treat this
+as a server-owned filesystem capability: `services.py` strips caller-supplied
+copies at both run-input and direct state-write boundaries before checkpoint
+state can reach the middleware's pre-model restoration path.
+
 **Workspace change review**: `packages/harness/deerflow/workspace_changes/`
 captures a pre-run and post-run snapshot of the thread-owned `workspace` and
 `outputs` directories. `runtime/runs/worker.py` performs the filesystem scan via
