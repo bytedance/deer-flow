@@ -45,9 +45,9 @@ rs.mock("@/core/skills/hooks", () => ({
   }),
 }));
 
-// Each test gets its own thread id: the composer persists the selected skill in
+// Each test gets its own thread id: the composer persists its text in
 // a debounced, thread-scoped draft, and a shared id would let the first test's
-// selection land in the second test's storage key.
+// draft land in the second test's storage key.
 function renderComposer(threadId: string) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -83,14 +83,14 @@ function renderComposer(threadId: string) {
 }
 
 /** Focus the composer and type a leading slash query that opens the catalog. */
-function openSkillCatalog(container: HTMLElement): HTMLTextAreaElement {
+function openCommandCatalog(container: HTMLElement): HTMLTextAreaElement {
   const textarea = container.querySelector("textarea");
   if (!(textarea instanceof HTMLTextAreaElement)) {
     throw new Error("composer textarea not rendered");
   }
   fireEvent.focus(textarea);
-  fireEvent.change(textarea, { target: { value: "/res" } });
-  screen.getByRole("listbox", { name: "Skill suggestions" });
+  fireEvent.change(textarea, { target: { value: "/go" } });
+  screen.getByRole("listbox", { name: "Command suggestions" });
   return textarea;
 }
 
@@ -100,22 +100,22 @@ afterEach(() => {
   cleanup();
 });
 
-describe("InputBox skill suggestion IME handling", () => {
+describe("InputBox command suggestion IME handling", () => {
   it("leaves Enter to the IME candidate window while the catalog is open", () => {
     const { container } = renderComposer("thread-ime-composing");
-    const textarea = openSkillCatalog(container);
+    const textarea = openCommandCatalog(container);
 
     // 229 is the keyCode browsers report for a keydown consumed by an active
     // IME composition; the catalog must not claim it.
     fireEvent.keyDown(textarea, { key: "Enter", keyCode: 229 });
 
     expect(screen.queryByRole("button", { name: "Remove skill" })).toBeNull();
-    expect(textarea.value).toBe("/res");
+    expect(textarea.value).toBe("/go");
   });
 
   it("does not apply a suggestion for the Enter that follows compositionend", () => {
     const { container } = renderComposer("thread-ime-composition-end");
-    const textarea = openSkillCatalog(container);
+    const textarea = openCommandCatalog(container);
 
     // Safari reports the confirming Enter after compositionend, with neither
     // isComposing nor keyCode 229 set.
@@ -123,12 +123,12 @@ describe("InputBox skill suggestion IME handling", () => {
     fireEvent.keyDown(textarea, { key: "Enter", keyCode: 13 });
 
     expect(screen.queryByRole("button", { name: "Remove skill" })).toBeNull();
-    expect(textarea.value).toBe("/res");
+    expect(textarea.value).toBe("/go");
   });
 
-  it("still selects the highlighted skill once the confirm window has passed", () => {
+  it("still selects the highlighted command once the confirm window has passed", () => {
     const { container } = renderComposer("thread-ime-after-window");
-    const textarea = openSkillCatalog(container);
+    const textarea = openCommandCatalog(container);
     const endedAt = Date.now();
     const now = rs.spyOn(Date, "now");
     now.mockReturnValue(endedAt);
@@ -137,15 +137,15 @@ describe("InputBox skill suggestion IME handling", () => {
 
     fireEvent.keyDown(textarea, { key: "Enter", keyCode: 13 });
 
-    expect(screen.getByRole("button", { name: "Remove skill" })).toBeTruthy();
+    expect(textarea.value).toBe("/goal ");
   });
 
-  it("still selects the highlighted skill on a plain Enter", () => {
+  it("still selects the highlighted command on a plain Enter", () => {
     const { container } = renderComposer("thread-plain-enter");
-    const textarea = openSkillCatalog(container);
+    const textarea = openCommandCatalog(container);
 
     fireEvent.keyDown(textarea, { key: "Enter" });
 
-    expect(screen.getByRole("button", { name: "Remove skill" })).toBeTruthy();
+    expect(textarea.value).toBe("/goal ");
   });
 });
