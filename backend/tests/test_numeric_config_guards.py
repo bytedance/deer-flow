@@ -17,7 +17,7 @@ from deerflow.config.app_config import CircuitBreakerConfig
 from deerflow.config.extensions_config import McpOAuthConfig, McpServerConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.run_events_config import RunEventsConfig
-from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.sandbox_config import SandboxConfig, SandboxOwnershipConfig
 from deerflow.config.summarization_config import SummarizationConfig
 
 
@@ -54,7 +54,7 @@ class TestMcpTimeoutGuards:
     @pytest.mark.parametrize("bad", [-1, True])
     def test_refresh_skew_rejects_negative_and_boolean(self, bad: int | bool) -> None:
         with pytest.raises(ValidationError):
-            McpOAuthConfig(refresh_skew_seconds=bad)
+            McpOAuthConfig(token_url="https://sso.example.org/token", refresh_skew_seconds=bad)
 
 
 class TestStreamChunkTimeoutGuard:
@@ -102,10 +102,6 @@ class TestSiblingBoolRejection:
     """Same-class siblings with bounds but no boolean rejection, flagged in review."""
 
     def test_sandbox_numeric_fields_reject_booleans(self) -> None:
-        import pytest
-
-        from deerflow.config.sandbox_config import SandboxOwnershipConfig
-
         with pytest.raises(ValidationError):
             SandboxConfig(use="local", replicas=True)
         with pytest.raises(ValidationError):
@@ -128,8 +124,6 @@ class TestSiblingBoolRejection:
             SandboxOwnershipConfig(ttl_multiplier=True)
 
     def test_ownership_defaults_still_pass(self) -> None:
-        from deerflow.config.sandbox_config import SandboxOwnershipConfig
-
         config = SandboxOwnershipConfig()
         assert config.renewal_interval_seconds == 30.0
         assert config.ttl_multiplier == 4.0
