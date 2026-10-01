@@ -422,7 +422,8 @@
 - **渠道：** Discord 现在会在智能体生成回复期间真正显示"正在输入"提示。`_start_typing()` 调用的
   `channel.trigger_typing()` 已在 discord.py 2.0 中移除（项目要求 `>=2.7.0`），而其循环吞掉了
   所有异常，因此每次都抛出 `AttributeError`，提示从未发送。现在改为 await 2.x 的
-  `channel.typing()` 发送一次提示，失败时以 DEBUG 级别记录日志，而不是直接丢弃。([#6138])
+  `channel.typing()` 发送一次提示。每个输入提示循环的首次失败以 WARNING 级别记录（缺少权限或持续限流
+  在默认日志级别下即可见），之后的失败以 DEBUG 级别记录，而不是直接丢弃。([#6138])
 - **智能体：** 循环检测的整数阈值现在会拒绝 YAML 布尔值，而不是把
   `true` 静默转换为 `1`。此前若配置 `warn_threshold: true` 和
   `hard_limit: true`，第一组工具调用就会达到硬上限并强制终止智能体；

@@ -465,7 +465,9 @@ This release closes that milestone with **301 merged pull requests**.
   discord.py removed in 2.0 (the project requires `>=2.7.0`), and its loop
   swallowed every exception, so each tick raised `AttributeError` and nothing
   was ever sent. It now awaits `channel.typing()`, the 2.x API that sends one
-  indicator, and logs a failed tick at DEBUG instead of dropping it. ([#6138])
+  indicator. A typing loop's first failed tick is logged at WARNING (a missing
+  permission or sustained rate limiting is visible at the default level) and
+  later ticks at DEBUG, instead of being dropped. ([#6138])
 - **agents:** Loop-detection integer thresholds now reject YAML booleans instead
   of coercing `true` to `1`. A configuration such as `warn_threshold: true`
   and `hard_limit: true` previously made the first tool-call set meet the hard

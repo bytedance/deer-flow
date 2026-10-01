@@ -367,6 +367,10 @@ class DiscordChannel(Channel):
             return  # Already typing for this target
 
         async def _typing_loop():
+            # The loop's first failure logs at WARNING, so an indicator that
+            # never works (missing permission, sustained 429s) shows at the
+            # default level; later ticks drop to DEBUG so retries cannot flood.
+            failure_level = logging.WARNING
             try:
                 while True:
                     try:
@@ -374,7 +378,8 @@ class DiscordChannel(Channel):
                         # ``typing()`` sends one indicator (~10s on screen).
                         await channel.typing()
                     except Exception:
-                        logger.debug("[Discord] failed to send typing indicator to %s", target_id, exc_info=True)
+                        logger.log(failure_level, "[Discord] failed to send typing indicator to %s", target_id, exc_info=True)
+                        failure_level = logging.DEBUG
                     await asyncio.sleep(10)
             except asyncio.CancelledError:
                 pass

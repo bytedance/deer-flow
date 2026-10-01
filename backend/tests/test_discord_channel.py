@@ -6,6 +6,7 @@ import asyncio
 import builtins
 import gc
 import json
+import logging
 import sys
 import threading
 import weakref
@@ -199,25 +200,58 @@ async def test_start_typing_sends_indicator_through_discord_typing_api() -> None
     assert target.calls == 1
 
 
+async def _wait_for_typing_calls(target: _TypingTarget, count: int, sleep) -> None:
+    for _ in range(1000):
+        if target.calls >= count:
+            return
+        await sleep(0)
+    raise AssertionError(f"typing loop made {target.calls} calls, expected {count}")
+
+
 @pytest.mark.asyncio
-async def test_start_typing_logs_indicator_failure_and_keeps_looping(caplog) -> None:
-    """A failed indicator is logged instead of silently dropped, and the
-    loop survives it so the next tick can retry."""
+async def test_start_typing_warns_on_first_failure_then_logs_at_debug(caplog, monkeypatch) -> None:
+    """A loop's first failed indicator logs at WARNING so a permanently dead
+    indicator is visible at the default level; later ticks of the same loop
+    log at DEBUG, and the loop keeps retrying. A new loop warns again."""
+    import app.channels.discord as discord_module
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_delay):
+        await real_sleep(0)
+
+    # Collapse the 10s tick so several ticks run inside the test.
+    monkeypatch.setattr(discord_module.asyncio, "sleep", fast_sleep)
     channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
     channel._running = True
-    target = _TypingTarget(error=RuntimeError("rate limited"))
+    target = _TypingTarget(error=RuntimeError("missing permissions"))
+
+    def failure_records():
+        return [record for record in caplog.records if "failed to send typing indicator" in record.getMessage()]
 
     with caplog.at_level("DEBUG", logger="app.channels.discord"):
         await channel._start_typing(target, "chat-1")
         typing_task = channel._typing_tasks["chat-1"]
         try:
-            await asyncio.wait_for(target.sent.wait(), timeout=1)
-            await asyncio.sleep(0)
+            await _wait_for_typing_calls(target, 3, real_sleep)
             assert not typing_task.done()
         finally:
             await channel._stop_typing("chat-1")
 
-    assert any("failed to send typing indicator" in record.message for record in caplog.records)
+        first_loop = failure_records()
+        assert [record.levelno for record in first_loop[:3]] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+        assert [record.levelno for record in first_loop].count(logging.WARNING) == 1
+        assert first_loop[0].exc_info is not None
+
+        caplog.clear()
+        target.calls = 0
+        await channel._start_typing(target, "chat-1")
+        try:
+            await _wait_for_typing_calls(target, 1, real_sleep)
+        finally:
+            await channel._stop_typing("chat-1")
+
+    assert failure_records()[0].levelno == logging.WARNING
 
 
 def _make_discord_message(text: str):
