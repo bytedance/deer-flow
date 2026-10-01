@@ -203,6 +203,22 @@ def test_probe_caches_unavailability_when_npm_install_fails(monkeypatch):
         _readability_available.cache_clear()
 
 
+def test_probe_tolerates_missing_have_node_helper(monkeypatch):
+    """A readabilipy upgrade that drops its internal helper must disable the probe, not break the import."""
+    import deerflow.utils.readability as readability_module
+    from deerflow.utils.readability import _readability_available
+
+    _readability_available.cache_clear()
+    try:
+        # Simulates readabilipy.simple_json.have_node becoming unavailable.
+        monkeypatch.setattr(readability_module, "have_node", None)
+
+        assert _readability_available() is False
+        assert _readability_available() is False  # Cached, the warning must not repeat either.
+    finally:
+        _readability_available.cache_clear()
+
+
 def test_article_to_message_with_images():
     """Article.to_message should handle articles containing images without AttributeError."""
     # Absolute image URL without source url

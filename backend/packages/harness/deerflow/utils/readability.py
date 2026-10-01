@@ -9,7 +9,14 @@ from urllib.parse import urljoin, urlparse, uses_relative
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 from readabilipy import simple_json_from_html_string
-from readabilipy.simple_json import have_node
+
+try:
+    # An internal helper: readabilipy only promises >=0.3.0 compatibility, and a
+    # future upgrade may move or drop it. Failing gracefully here keeps every
+    # web_fetch alive on the Python fallback instead of breaking the import.
+    from readabilipy.simple_json import have_node
+except ImportError:  # pragma: no cover - depends on the installed readabilipy version
+    have_node = None
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +168,15 @@ def _readability_available() -> bool:
     for environments where Node.js can never be found, such as Windows
     hosts where ``npm`` is only resolvable as ``npm.cmd``.
     """
+    if have_node is None:
+        # readabilipy reorganized its internals; the probe must degrade to the
+        # link-preserving Python fallback rather than fail the module import.
+        logger.warning(
+            "readabilipy does not expose simple_json.have_node; Readability.js "
+            "extraction is disabled and the link-preserving Python fallback "
+            "will be used for every fetch"
+        )
+        return False
     try:
         return bool(have_node())
     except (OSError, subprocess.SubprocessError, ValueError):
