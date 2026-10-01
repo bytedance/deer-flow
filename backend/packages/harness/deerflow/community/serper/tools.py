@@ -226,7 +226,7 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     Args:
         query: Search keywords describing what you want to find. Be specific for better results.
         max_results: Maximum number of search results to return. Default is 5, capped at 10.
-        time_range: Optional recency filter: day, week, month, or year. Omit to search without a time limit.
+        time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
     config = get_app_config().get_tool_config("web_search")
     if config is not None and "max_results" in config.model_extra:

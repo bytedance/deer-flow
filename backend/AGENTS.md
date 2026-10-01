@@ -317,14 +317,13 @@ When using `make dev` from root, the frontend automatically connects through ngi
 
 ### Web Search Recency
 
-DDG, Brave, Tavily, SearXNG, Serper, and Sofya `web_search` share optional
-`time_range=day|week|month|year`; omission preserves request shape. DDG maps to
-`d|w|m|y`, Brave to `pd|pw|pm|py`, Tavily/SearXNG pass values unchanged, and
-Sofya passes them unchanged as `freshness`. Serper maps to `qdr:d|w|m|y` in
-`tbs`; omitted/null values omit `tbs`, and image search remains unchanged.
-For recency, DDGS 9.14.1 uses only enabled Brave, DuckDuckGo, and Yahoo engines
-that honor `timelimit`: `auto`/`all` resolves to this set, incompatible configured
-engines are removed, and an empty set falls back to it. Re-check on DDGS upgrades.
+Optional `web_search` `time_range=day|week|month|year` mappings:
+DDG → `d|w|m|y`; Brave → `pd|pw|pm|py`; Tavily/SearXNG → unchanged;
+Sofya → unchanged in `freshness`; Serper → `qdr:d|w|m|y` in `tbs`.
+Omission preserves request shape; Serper null also omits `tbs`. Image search is unchanged.
+DDGS 9.14.1 recency uses only enabled Brave/DuckDuckGo/Yahoo engines honoring
+`timelimit`: `auto`/`all` selects this set; drop incompatible engines and fall back
+to this set if empty. Re-check on DDGS upgrades.
 
 ### Tavily Fetch
 
