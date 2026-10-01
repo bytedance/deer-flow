@@ -79,10 +79,10 @@ def _evaluate_map(entries: list[tuple[str, str]], key: str) -> str:
     return default
 
 
-def _canonical_origin(content: str, method: str, host: str) -> str:
+def _canonical_origin(content: str, method: str, host: str, upgrade: str = "") -> str:
     """The redirect target the two-map pipeline produces, or "" for no redirect."""
     canonical_host = _evaluate_map(_extract_map(content, "loopback_canonical_host"), host)
-    origin = _evaluate_map(_extract_map(content, "loopback_origin"), f"{method}:{canonical_host}")
+    origin = _evaluate_map(_extract_map(content, "loopback_origin"), f"{method}:{upgrade}:{canonical_host}")
     return origin.replace("$loopback_canonical_host", canonical_host)
 
 
@@ -114,6 +114,13 @@ def _canonical_origin(content: str, method: str, host: str) -> str:
 )
 def test_loopback_canonicalization(config_path: str, method: str, host: str, expected: str) -> None:
     assert _canonical_origin(read_config(config_path), method, host) == expected
+
+
+@pytest.mark.parametrize("config_path", NGINX_CONFIGS)
+@pytest.mark.parametrize("host", ["127.0.0.1:2026", "[::1]:2026", "127.0.0.1:18080"])
+def test_websocket_handshake_is_not_redirected(config_path: str, host: str) -> None:
+    # WS clients do not follow 301s; the upgrade request must reach the proxy as-is.
+    assert _canonical_origin(read_config(config_path), "GET", host, upgrade="websocket") == ""
 
 
 @pytest.mark.parametrize("config_path", NGINX_CONFIGS)
