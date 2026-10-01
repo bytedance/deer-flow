@@ -144,7 +144,8 @@ def test_aio_sandbox_env_routes_through_bash_exec() -> None:
     out = sbx.execute_command("gh pr create", env={"GH_TOKEN": "tok-123"})
 
     assert out == "ok"
-    assert captured["command"] == "gh pr create"
+    assert captured["command"] == "exec < /dev/null\ngh pr create"
+    assert "tok-123" not in captured["command"]
     assert captured["env"] == {"GH_TOKEN": "tok-123"}
     assert captured["created_session"] == captured["exec_session"] == captured["closed_session"]
     assert captured["create_options"] == {
@@ -175,7 +176,7 @@ def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
     sbx._recovery_session_id = None
     sbx._default_shell_corrupted = False
 
-    sbx.execute_command("echo hello")
+    assert sbx.execute_command("echo hello") == "ok"
 
     assert captured["command"] == "echo hello"
 
