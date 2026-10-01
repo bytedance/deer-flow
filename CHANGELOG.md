@@ -336,7 +336,7 @@ This release closes that milestone with **181 merged pull requests**.
   reminder back when the handler raises, without counting it again, so the retry
   carries it and the cap still allows the second reminder. Successful calls are
   unchanged, and a run whose reminder state was cleared meanwhile does not get
-  it back.
+  it back. ([#6132])
 - **gateway:** A non-ASCII CSRF token, GitHub webhook signature, internal auth
   token, OIDC `state`, or provisioner `X-API-Key` is now rejected with the
   usual 403/401 instead of a 500. `hmac.compare_digest` raises `TypeError` for
@@ -6314,4 +6314,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
 [#6076]: https://github.com/bytedance/deer-flow/pull/6076
 [#6088]: https://github.com/bytedance/deer-flow/pull/6088
+[#6132]: https://github.com/bytedance/deer-flow/pull/6132
 

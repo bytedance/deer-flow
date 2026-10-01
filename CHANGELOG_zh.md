@@ -338,7 +338,7 @@
   第二次尝试在没有提醒的情况下发出，而该 run 已经为它消耗了两次提醒额度中的一次。
   现在 `TodoMiddleware` 会在 handler 抛出时把取出的提醒放回队列，且不重复计数，
   从而让重试带上提醒，上限仍允许发送第二次提醒。成功调用的行为不变；
-  若该 run 的提醒状态在此期间已被清除，提醒不会被恢复。
+  若该 run 的提醒状态在此期间已被清除，提醒不会被恢复。([#6132])
 - **Gateway：** 含非 ASCII 字符的 CSRF token、GitHub webhook 签名、内部认证 token、
   OIDC `state` 或 provisioner `X-API-Key` 现在按常规返回 403/401，而不是 500。
   `hmac.compare_digest` 遇到含非 ASCII 字符的 `str` 参数会抛出 `TypeError`，而
@@ -5351,3 +5351,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
 [#6076]: https://github.com/bytedance/deer-flow/pull/6076
 [#6088]: https://github.com/bytedance/deer-flow/pull/6088
+[#6132]: https://github.com/bytedance/deer-flow/pull/6132
