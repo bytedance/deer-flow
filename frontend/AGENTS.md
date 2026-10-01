@@ -314,7 +314,9 @@ conversation-action callbacks reject Promise returns while consuming rejections.
 and atomic references. Render labels as DOM text, never HTML; canonical tokens
 preserve draft positions. Submission expands tokens to `@label` and sends up to
 16 unique skill IDs in `additional_kwargs.skill_references`; the backend checks
-each against the user registry and agent allowlist. Legacy slash input remains.
+each against the user registry and agent allowlist. The web slash picker lists
+only `/goal` and `/compact`; skill selection uses `@`. Legacy typed slash text
+continues through normal message submission for backend and channel compatibility.
 Project files require confirmed `additional_kwargs.files`. Conversation context
 is reconciled from tokens against the current capability and limit. Only successful
 discovery may flatten references; pending/errors preserve IDs and block reference

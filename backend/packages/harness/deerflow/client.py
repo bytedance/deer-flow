@@ -35,6 +35,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.agent import _authorize_model_name, build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config, has_bash_tool
+from deerflow.agents.middlewares.tool_declarations import layer_one_outcome, narrow_declared_tools, verify_declared_tool_view
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
@@ -494,6 +495,7 @@ class DeerFlowClient:
             context=cfg,
             app_config=self._app_config,
         )
+        layer_one = layer_one_outcome([*tools, *late_tools], authorized_tools)
         tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
         late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
         final_tools, deferred_setup = assemble_deferred_tools(tools, enabled=self._app_config.tool_search.enabled)
@@ -505,6 +507,34 @@ class DeerFlowClient:
         )
         mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=deferred_setup.deferred_names)
 
+        middlewares, declared_authorized = narrow_declared_tools(
+            build_middlewares(
+                config,
+                model_name=model_name,
+                agent_name=self._agent_name,
+                available_skills=available_skills,
+                memory_enabled=memory_enabled,
+                custom_middlewares=self._middlewares,
+                app_config=self._app_config,
+                deferred_setup=deferred_setup,
+                mcp_routing_middleware=mcp_routing_middleware,
+                user_id=effective_user_id,
+                authorization_provider=_authz_provider,
+                skill_authorization=skill_authorization,
+                subagent_execution_capacity=subagent_execution_capacity,
+            ),
+            outcome=layer_one,
+            context=cfg,
+            app_config=self._app_config,
+            authorization_provider=_authz_provider,
+        )
+        bound_middlewares = normalize_middleware_state_schemas(
+            middlewares,
+            self._checkpoint_channel_mode,
+            self._checkpoint_snapshot_frequency,
+        )
+        verify_declared_tool_view(bound_middlewares, authorized_names=declared_authorized)
+
         kwargs: dict[str, Any] = {
             # attach_tracing=False because ``stream()`` injects tracing
             # callbacks at the graph invocation root so a single embedded run
@@ -512,25 +542,7 @@ class DeerFlowClient:
             # Attaching them again on the model would emit duplicate spans.
             "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False),
             "tools": final_tools,
-            "middleware": normalize_middleware_state_schemas(
-                build_middlewares(
-                    config,
-                    model_name=model_name,
-                    agent_name=self._agent_name,
-                    available_skills=available_skills,
-                    memory_enabled=memory_enabled,
-                    custom_middlewares=self._middlewares,
-                    app_config=self._app_config,
-                    deferred_setup=deferred_setup,
-                    mcp_routing_middleware=mcp_routing_middleware,
-                    user_id=effective_user_id,
-                    authorization_provider=_authz_provider,
-                    skill_authorization=skill_authorization,
-                    subagent_execution_capacity=subagent_execution_capacity,
-                ),
-                self._checkpoint_channel_mode,
-                self._checkpoint_snapshot_frequency,
-            ),
+            "middleware": bound_middlewares,
             "system_prompt": apply_prompt_template(
                 subagent_enabled=subagent_enabled,
                 max_concurrent_subagents=max_concurrent_subagents,
@@ -1722,6 +1734,7 @@ class DeerFlowClient:
                 or its filename is unsafe or reserved for upload staging.
         """
         validate_thread_id(thread_id)
+        from deerflow.uploads.companions import invalidate_overwritten_upload, register_companion
         from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
         # Validate all files upfront to avoid partial uploads.
@@ -1767,6 +1780,7 @@ class DeerFlowClient:
                     logger.warning("Skipping upload with unsafe destination: %s", dest_name)
                     skipped_files.append(dest_name)
                     continue
+                invalidate_overwritten_upload(dest)
 
                 info: dict[str, Any] = {
                     "filename": dest_name,
@@ -1815,6 +1829,7 @@ class DeerFlowClient:
                         md_path = None
 
                     if md_path is not None:
+                        register_companion(dest, md_path)
                         info["markdown_file"] = md_path.name
                         info["markdown_path"] = str(uploads_dir / md_path.name)
                         info["markdown_virtual_path"] = upload_virtual_path(md_path.name)

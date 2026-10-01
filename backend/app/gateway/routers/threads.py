@@ -72,6 +72,7 @@ from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.worker import RUN_MESSAGE_IDS_METADATA_KEY, valid_duration_entry, valid_run_message_id_entry
 from deerflow.runtime.secret_context import redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.uploads.companions import register_companion, resolve_companion
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.thread_id import ThreadId, resolve_thread_id, validate_thread_id
 from deerflow.utils.time import coerce_iso, now_iso
@@ -331,6 +332,17 @@ def _copy_branch_user_data_sync(paths: Paths, source_thread_id: str, target_thre
         return "not_found"
 
     shutil.copytree(source, target, ignore=_ignore_branch_user_data, dirs_exist_ok=True)
+    source_uploads = paths.sandbox_uploads_dir(source_thread_id, user_id=user_id)
+    target_uploads = paths.sandbox_uploads_dir(target_thread_id, user_id=user_id)
+    if source_uploads.is_dir() and target_uploads.is_dir():
+        for original in source_uploads.iterdir():
+            markdown = resolve_companion(original)
+            if markdown is None:
+                continue
+            copied_original = target_uploads / original.name
+            copied_markdown = target_uploads / markdown.name
+            if copied_original.is_file() and not copied_original.is_symlink() and copied_markdown.is_file() and not copied_markdown.is_symlink():
+                register_companion(copied_original, copied_markdown)
     return "current_thread_best_effort"
 
 

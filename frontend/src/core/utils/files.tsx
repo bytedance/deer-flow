@@ -182,7 +182,7 @@ export function checkCodeFile(
   | { isCodeFile: true; language: string }
   | { isCodeFile: false; language: null } {
   const extension = getFileExtension(filepath);
-  const isCodeFile = extension in extensionMap;
+  const isCodeFile = Object.hasOwn(extensionMap, extension);
   if (isCodeFile) {
     return {
       isCodeFile: true,
