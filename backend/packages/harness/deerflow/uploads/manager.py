@@ -138,11 +138,11 @@ def is_upload_staging_file(filename: str) -> bool:
 def is_reserved_upload_filename(filename: str) -> bool:
     """Check a new basename against the staging namespace, including Win32 aliases.
 
-    Win32 trims trailing dots and spaces before opening a path. Reject those
-    aliases on every host, without changing the name or the on-disk staging
-    predicate used by listings and cleanup of existing POSIX files.
+    Win32 trims trailing dots and spaces and normally ignores case when opening
+    a path. Reject those aliases on every host, without changing the name or
+    the on-disk staging predicate used by listings and cleanup of existing files.
     """
-    return is_upload_staging_file(filename.rstrip(" ."))
+    return is_upload_staging_file(filename.rstrip(" .").lower())
 
 
 def validate_path_traversal(path: Path, base: Path) -> None:

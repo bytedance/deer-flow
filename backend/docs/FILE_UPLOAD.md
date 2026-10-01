@@ -26,9 +26,9 @@ POST /api/threads/{thread_id}/uploads
 
 文件名匹配 `.upload-*.part`（例如 `.upload-notes.part`）时，网关会返回 `400 Bad Request`，提示改名后重新上传。这是系统保留的临时文件命名规则；文件名按去掉目录后的 basename 判断，HTTP 检查在 Linux 上也同时识别 `/` 和 `\` 两种路径分隔符，例如 `folder\.upload-notes.part`。网关会先检查整批文件，再开始写入聊天的上传目录或获取沙箱，因此保留名称排在批次末尾也不会留下部分上传。聊天界面收到该错误后会提示用户，并停止本次消息发送。`.upload-notes.txt`、`notes.part` 和 `.env` 仍可上传。
 
-检查也会拒绝 Windows 去掉末尾点号或空格后会变成保留名称的别名，例如 `.upload-notes.part.` 和 `.upload-notes.part `。这项检查在所有主机上生效，HTTP 上传会在整批文件写入前返回 `400`，提示改名。
+检查也会拒绝 Windows 去掉末尾点号或空格、忽略大小写后会变成保留名称的别名，例如 `.upload-notes.part.`、`.upload-notes.part `、`.UPLOAD-NOTES.PART` 和 `.Upload-NoTeS.Part .`。这项检查在所有主机上生效，HTTP 上传会在整批文件写入前返回 `400`，提示改名。
 
-嵌入式 `DeerFlowClient.upload_files` 同样在复制前检查整批文件名，保留名称会抛出 `ValueError`。项目资料库上传和重命名也遵循这项限制；旧资料库中使用保留名称的文件仍可下载，但直接附加到聊天会返回 `400`。请先下载、改名，再上传到聊天。本修复不会迁移或恢复旧聊天目录中已经匹配该临时文件规则的文件。
+嵌入式 `DeerFlowClient.upload_files` 同样在复制前检查整批文件名，保留名称会抛出 `ValueError`。项目资料库上传和从聊天加入资料库时的重命名也遵循这项限制，包括沿用来源文件名和手动指定新名称两种情况；旧资料库中使用保留名称的文件仍可下载，但直接附加到聊天会返回 `400`。请先下载、改名，再上传到聊天。本修复不会迁移或恢复旧聊天目录中已经匹配该临时文件规则的文件。
 
 **响应：**
 ```json

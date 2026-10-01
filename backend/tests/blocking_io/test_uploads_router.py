@@ -92,7 +92,9 @@ async def test_upload_endpoint_mounted_provider_does_not_block_event_loop(tmp_pa
     assert await asyncio.to_thread(target.read_bytes) == b"hello uploads"
 
 
-@pytest.mark.parametrize("filename", [".upload-notes.part", r"folder\.upload-notes.part", r"C:\users\.upload-notes.part", ".upload-notes.part.", ".upload-notes.part ", r"folder\.upload-notes.part. "])
+@pytest.mark.parametrize(
+    "filename", [".upload-notes.part", r"folder\.upload-notes.part", r"C:\users\.upload-notes.part", ".upload-notes.part.", ".upload-notes.part ", r"folder\.upload-notes.part. ", ".UPLOAD-NOTES.PART", r"folder\.Upload-NoTeS.Part ."]
+)
 async def test_reserved_name_rejects_batch_without_blocking_or_writing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filename: str) -> None:
     # Emulate Linux parsing of the multipart name while keeping disk paths native.
     monkeypatch.setattr(uploads, "Path", lambda value: PurePosixPath(value) if value == filename else Path(value))

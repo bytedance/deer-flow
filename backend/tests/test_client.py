@@ -2849,10 +2849,11 @@ class TestUploads:
         with pytest.raises(FileNotFoundError):
             client.upload_files("thread-1", ["/nonexistent/file.txt"])
 
-    def test_upload_files_rejects_reserved_name_before_copying_batch(self, client, tmp_path):
+    @pytest.mark.parametrize("filename", [".upload-notes.part", ".UPLOAD-NOTES.PART", ".Upload-NoTeS.Part"])
+    def test_upload_files_rejects_reserved_name_before_copying_batch(self, client, tmp_path, filename):
         normal = tmp_path / "normal.txt"
         normal.write_bytes(b"normal document")
-        reserved = tmp_path / ".upload-notes.part"
+        reserved = tmp_path / filename
         reserved.write_bytes(b"reserved document")
         uploads_dir = tmp_path / "uploads"
         uploads_dir.mkdir()

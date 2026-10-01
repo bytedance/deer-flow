@@ -1885,15 +1885,17 @@ failing the upload; hidden staging files are left for the startup sweep.
 
 Uploaded filenames matching `.upload-*.part` are rejected because that pattern is
 reserved for temporary staging files. Rename such a file before uploading it.
-The restriction includes Windows aliases with trailing dots or spaces, such as
-`.upload-notes.part.` and `.upload-notes.part `, on every host.
+The restriction includes Windows aliases with trailing dots or spaces and
+case variants, such as `.upload-notes.part.`, `.upload-notes.part `, and
+`.UPLOAD-NOTES.PART`, on every host.
 The HTTP check recognizes both `/` and `\` as path separators, including on
 Linux, when extracting the basename. The endpoint returns `400` with a rename
 hint before publishing any file in a batch containing a reserved name, so the
 chat reports the upload error instead
 of continuing without the attachment. The SDK validates filenames for the whole
-batch before copying any files. Project document names follow the same
-restriction; an older shelf document with a reserved name
+batch before copying any files. New project document names follow the same
+restriction, whether defaulted from the source or explicitly supplied on upload
+or promotion to the shelf; an older shelf document with a reserved name
 remains downloadable but cannot be attached directly. Download it, rename it,
 and upload it to the thread. This change does not recover or migrate older
 thread uploads that already match the staging pattern.

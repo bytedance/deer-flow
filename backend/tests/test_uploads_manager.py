@@ -83,7 +83,7 @@ class TestNormalizeFilename:
         with pytest.raises(ValueError, match="reserved upload staging"):
             normalize_filename(filename)
 
-    @pytest.mark.parametrize("filename", [".upload-notes.txt", "notes.part", ".env"])
+    @pytest.mark.parametrize("filename", [".upload-notes.txt", "notes.part", ".env", ".UPLOAD-notes.txt", "notes.PART"])
     def test_keeps_non_staging_names(self, filename):
         assert normalize_filename(filename) == filename
 
