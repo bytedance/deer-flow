@@ -2,6 +2,10 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
+`ast`, checking both `encoding` and `errors`; module-wide literal counts can
+hide unpinned calls behind unrelated settings.
+
 ## Lark CLI blocking-I/O fixtures
 
 `blocking_io/test_integrations_router.py` uses a real local CLI stub: a `.cmd`

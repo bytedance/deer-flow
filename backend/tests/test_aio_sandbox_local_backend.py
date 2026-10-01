@@ -1,7 +1,7 @@
+import ast
 import json
 import logging
 import os
-import re
 import socket
 import subprocess
 import time
@@ -2389,12 +2389,20 @@ def test_docker_subprocess_calls_pin_utf8_decoding(monkeypatch):
 
 
 def test_every_text_mode_subprocess_call_pins_utf8():
-    """Static guard: a new text-mode subprocess call must pin the encoding.
+    """Check each text-mode subprocess call's encoding and error handling.
 
     A text-mode call without ``encoding=`` decodes with the platform's
     preferred encoding, which loses output entirely on non-UTF-8 locales.
+    ``errors="replace"`` also keeps malformed bytes from discarding a stream.
     """
     source = Path(local_backend_module.__file__).read_text(encoding="utf-8")
-    text_modes = len(re.findall(r"\btext=True\b", source))
-    pinned = len(re.findall(r'encoding="utf-8"', source))
-    assert text_modes == 0 or pinned >= text_modes, f"{text_modes} text=True call(s) but only {pinned} encoding pins; new text-mode subprocess calls must pass encoding='utf-8' + errors='replace'"
+    calls = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess" and node.func.attr == "run"]
+    assert calls, "expected subprocess.run calls in the local backend"
+    for call in calls:
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+        text_mode = keywords.get("text")
+        if not isinstance(text_mode, ast.Constant) or text_mode.value is not True:
+            continue
+        for name, expected in (("encoding", "utf-8"), ("errors", "replace")):
+            value = keywords.get(name)
+            assert isinstance(value, ast.Constant) and value.value == expected, f"line {call.lineno}: text-mode subprocess.run must pass {name}={expected!r}"
