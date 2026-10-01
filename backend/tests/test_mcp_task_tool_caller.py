@@ -14,7 +14,7 @@ from mcp.types import CONNECTION_CLOSED, ErrorData
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpUserScopedAuthConfig
 from deerflow.config.paths import Paths
-from deerflow.mcp.session_pool import MCPSessionPool
+from deerflow.mcp.session_pool import MCPPoolResource, MCPSessionPool, ServerBinding
 from deerflow.mcp.task_tool_caller import McpTaskToolCaller
 from deerflow.mcp_scope import mcp_session_scope_key
 from deerflow.runtime.user_context import get_current_user, reset_current_user, set_current_user
@@ -76,6 +76,19 @@ class _SessionContext:
         return None
 
 
+def _binding_aware_pool(pool: Any) -> ServerBinding:
+    """Model the pool's per-server binding API for a first-seen stdio server.
+
+    The caller resolves a binding from the BASE connection before touching the
+    pool, via ``ensure_binding`` (one locked read+install). A bare MagicMock
+    would return a truthy value that never matches, so model a first-seen seed
+    and return that binding for the call site to assert on.
+    """
+    binding = ServerBinding(resource=MCPPoolResource(domain="deployment", server_name="reports"), epoch=1, fingerprint="base-fp")
+    pool.ensure_binding = MagicMock(return_value=binding)
+    return binding
+
+
 async def _assert_configured_timeout(awaitable: Coroutine[Any, Any, Any], *, wait_timeout: float = 0.25, expected_message: str | None = None) -> None:
     task = asyncio.create_task(awaitable)
     try:
@@ -116,6 +129,7 @@ async def test_stdio_task_call_reuses_exact_scope_and_raw_tool_name() -> None:
     pool = MagicMock()
     pool.get_session = AsyncMock(return_value=session)
     pool.close_session = AsyncMock()
+    binding = _binding_aware_pool(pool)
     caller = McpTaskToolCaller(_config())
 
     with (
@@ -139,6 +153,7 @@ async def test_stdio_task_call_reuses_exact_scope_and_raw_tool_name() -> None:
         "reports",
         "user-1:thread-1",
         {"transport": "stdio", "command": "report-mcp"},
+        binding=binding,
     )
     session.call_tool.assert_awaited_once_with("status_report", {"task_id": "remote-1"})
     pool.close_session.assert_not_awaited()
@@ -167,6 +182,7 @@ async def test_task_without_applicable_user_auth_preserves_interceptor_context(t
     caller._interceptors.append(inspect_context)
     session = SimpleNamespace(initialize=AsyncMock(), call_tool=AsyncMock(return_value="result"))
     pool = SimpleNamespace(get_session=AsyncMock(return_value=session))
+    binding = _binding_aware_pool(pool) if transport == "stdio" else None
     user_token = set_current_user(ambient_user) if ambient_user is not None else None
     try:
         with (
@@ -184,6 +200,10 @@ async def test_task_without_applicable_user_auth_preserves_interceptor_context(t
         assert result == "result"
         assert observed_users == [ambient_user]
         assert get_current_user() is ambient_user
+        if binding is not None:
+            # The stdio call must forward the binding captured from the BASE
+            # connection, so a concurrent config change fences this wrapper.
+            assert pool.get_session.await_args.kwargs["binding"] is binding
     finally:
         if user_token is not None:
             reset_current_user(user_token)
@@ -205,6 +225,7 @@ async def test_broken_stdio_task_session_is_evicted_for_next_poll_reconnect(disc
     pool.get_session = AsyncMock(return_value=session)
     pool.close_session = AsyncMock()
     pool.close_session_if_current = AsyncMock()
+    _binding_aware_pool(pool)
     caller = McpTaskToolCaller(_config())
 
     with (
@@ -228,6 +249,7 @@ async def test_broken_stdio_task_session_is_evicted_for_next_poll_reconnect(disc
         "reports",
         "user-1:thread-1",
         session,
+        domain="deployment",
     )
     pool.close_session.assert_not_awaited()
 
@@ -240,6 +262,7 @@ async def test_stdio_task_timeout_keeps_healthy_stateful_session() -> None:
     pool.get_session = AsyncMock(return_value=session)
     pool.close_session = AsyncMock()
     pool.close_session_if_current = AsyncMock()
+    _binding_aware_pool(pool)
     caller = McpTaskToolCaller(_config())
 
     with (
@@ -270,6 +293,7 @@ async def test_stdio_task_interceptor_failure_keeps_healthy_session() -> None:
     pool.get_session = AsyncMock(return_value=session)
     pool.close_session = AsyncMock()
     pool.close_session_if_current = AsyncMock()
+    _binding_aware_pool(pool)
     caller = McpTaskToolCaller(_config())
 
     async def reject_call(_request, _handler):
@@ -394,12 +418,13 @@ async def test_stdio_task_session_initialization_respects_configured_timeout() -
     config = _config()
     config.mcp_servers["reports"].session_init_timeout = 0.01
 
-    async def slow_get_session(*_args):
+    async def slow_get_session(*_args, **_kwargs):
         await asyncio.sleep(60)
 
     pool = MagicMock()
     pool.get_session = AsyncMock(side_effect=slow_get_session)
     pool.close_session = AsyncMock()
+    _binding_aware_pool(pool)
     caller = McpTaskToolCaller(config)
 
     with (
@@ -996,3 +1021,60 @@ async def test_sse_task_session_timeout_closes_real_connection(monkeypatch, phas
         results = await asyncio.gather(*handlers, return_exceptions=True)
         await server.wait_closed()
         assert all(not isinstance(result, BaseException) or isinstance(result, asyncio.CancelledError) for result in results), results
+
+
+@pytest.mark.asyncio
+async def test_personal_task_call_resolves_in_the_personal_domain(monkeypatch, tmp_path):
+    """A personal task call must not be fenced by a same-name deployment binding.
+
+    A deployment server may legally use the personal runtime name, so the caller
+    must resolve the personal connection in its own ownership domain. Only the
+    transport is mocked -- the real ``_call_configured_tool`` runs, so this covers
+    the domain that ``connection_scope="personal"`` selects being carried into the
+    binding, the pooled session and the disconnect cleanup.
+    """
+    from deerflow.mcp import task_tool_caller as caller_module
+    from deerflow.mcp.session_pool import get_session_pool, reset_session_pool
+    from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, personal_server_name
+
+    personal_connection = {"type": "stdio", "command": "npx", "args": []}
+    runtime_name = personal_server_name("alice", "notes", personal_connection)
+    assert runtime_name.startswith("personal_")
+
+    # Deployment legitimately owns the same runtime name with a DIFFERENT
+    # connection, so the two domains collide on the name alone.
+    deployment_config = ExtensionsConfig.model_validate({"mcpServers": {runtime_name: {"type": "stdio", "command": "uvx", "args": []}}})
+    personal_config = ExtensionsConfig.model_validate({"mcpServers": {runtime_name: dict(personal_connection)}})
+
+    reset_session_pool()
+    pool = get_session_pool()
+    deployment_binding = pool.ensure_binding(runtime_name, "deployment-fp")
+
+    snapshot = PersonalMcpConfigSnapshot(path=tmp_path / "mcp.json", signature=None, config=personal_config)
+    monkeypatch.setattr(caller_module, "load_user_mcp_config_if_changed", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr(caller_module, "require_personal_mcp_access", AsyncMock())
+
+    session = SimpleNamespace(initialize=AsyncMock(), call_tool=AsyncMock(return_value="ok"))
+    session_cm = MagicMock()
+    session_cm.__aenter__ = AsyncMock(return_value=session)
+    session_cm.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr("langchain_mcp_adapters.sessions.create_session", lambda *_args, **_kwargs: session_cm)
+
+    caller = McpTaskToolCaller(deployment_config)
+    result = await caller.call_tool(
+        server_name=runtime_name,
+        tool_name="status_report",
+        arguments={},
+        user_id="alice",
+        thread_id="thread-1",
+        connection_scope="personal",
+    )
+
+    assert result == "ok"
+    # The personal call resolved in its OWN domain...
+    personal_binding = pool.active_binding(runtime_name, domain="personal")
+    assert personal_binding is not None
+    assert personal_binding.resource == MCPPoolResource(domain="personal", server_name=runtime_name)
+    assert personal_binding.fingerprint != deployment_binding.fingerprint
+    # ...and the deployment binding for the colliding name is untouched.
+    assert pool.active_binding(runtime_name) == deployment_binding

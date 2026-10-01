@@ -20,7 +20,14 @@ from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
 from deerflow.mcp.personal_access import require_personal_mcp_access
-from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
+from deerflow.mcp.session_pool import (
+    MCPPoolDomain,
+    MCPSessionPool,
+    ServerBinding,
+    call_pooled_session_tool,
+    get_session_pool,
+    normalized_connection_fingerprint,
+)
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, load_user_mcp_config_if_changed
 from deerflow.mcp_scope import mcp_session_scope_key
 from deerflow.runtime.user_context import reset_current_user, set_current_user
@@ -58,6 +65,28 @@ def _prepare_stdio_connection(
     env.setdefault("TEMP", str(tmp_dir))
     prepared["env"] = env
     return prepared
+
+
+def _resolve_stdio_binding(
+    pool: MCPSessionPool,
+    server_name: str,
+    connection: Mapping[str, Any],
+    *,
+    domain: MCPPoolDomain = "deployment",
+) -> ServerBinding:
+    """Resolve *server_name*'s binding from the BASE connection.
+
+    Mirrors ``tools._resolve_discovery_binding`` via
+    :meth:`MCPSessionPool.ensure_binding`: a first-seen name is seeded, an
+    unchanged fingerprint re-resolves idempotently, and a tombstone or
+    superseded fingerprint is fenced with ``StaleMCPBindingError`` rather than
+    silently minting a new epoch for a stale connection — all under one
+    ``_lock`` hold so a concurrent reconciliation cannot be overwritten.
+    Callers pass the *base* connection, before ``_prepare_stdio_connection``
+    adds the per-call workspace cwd/TMPDIR, so those additions never affect
+    identity. Fingerprints are never logged.
+    """
+    return pool.ensure_binding(server_name, normalized_connection_fingerprint(connection), domain=domain)
 
 
 class McpTaskToolCaller:
@@ -129,6 +158,7 @@ class McpTaskToolCaller:
                 thread_id=thread_id,
                 thread_incarnation=thread_incarnation,
                 request_scoped_headers=request_scoped_headers,
+                domain="personal",
             )
         if connection_scope != "deployment":
             raise ValueError("Invalid MCP task connection scope")
@@ -169,6 +199,7 @@ class McpTaskToolCaller:
         thread_id: str,
         thread_incarnation: str | None,
         request_scoped_headers: bool,
+        domain: MCPPoolDomain = "deployment",
     ) -> Any:
         is_background_call = not request_scoped_headers
         interceptors = self._interceptors if is_background_call else self._submit_interceptors
@@ -184,18 +215,24 @@ class McpTaskToolCaller:
         )
 
         if transport == "stdio":
+            pool = get_session_pool()
+            # Capture the binding from the BASE connection BEFORE
+            # ``_prepare_stdio_connection`` augments it with the per-call
+            # workspace cwd/TMPDIR: those additions must not affect identity,
+            # and a mid-flight config change must fence this wrapper rather
+            # than silently rebinding it to a new epoch.
+            binding = _resolve_stdio_binding(pool, server_name, connection, domain=domain)
             connection = await asyncio.to_thread(
                 _prepare_stdio_connection,
                 connection,
                 user_id=user_id,
                 thread_id=thread_id,
             )
-            pool = get_session_pool()
             session_init_timeout = server_config.session_init_timeout
             if session_init_timeout is not None:
                 try:
                     session = await asyncio.wait_for(
-                        pool.get_session(server_name, scope_key, connection),
+                        pool.get_session(server_name, scope_key, connection, binding=binding),
                         timeout=session_init_timeout,
                     )
                 except TimeoutError:
@@ -206,7 +243,7 @@ class McpTaskToolCaller:
                     )
                     raise
             else:
-                session = await pool.get_session(server_name, scope_key, connection)
+                session = await pool.get_session(server_name, scope_key, connection, binding=binding)
             return await self._invoke(
                 session=session,
                 pool=pool,
@@ -220,6 +257,7 @@ class McpTaskToolCaller:
                 session_init_timeout_seconds=None,
                 persistent_session=True,
                 interceptors=interceptors,
+                domain=domain,
             )
 
         authorization = await self._oauth_token_manager.get_authorization_header(server_name)
@@ -261,6 +299,7 @@ class McpTaskToolCaller:
         session_init_timeout_seconds: float | None,
         persistent_session: bool,
         interceptors: list[Any],
+        domain: MCPPoolDomain = "deployment",
     ) -> Any:
         from langchain_mcp_adapters.interceptors import MCPToolCallRequest
         from langchain_mcp_adapters.sessions import create_session
@@ -288,6 +327,7 @@ class McpTaskToolCaller:
                     tool_name=request.name,
                     arguments=request.args,
                     call_kwargs=call_kwargs,
+                    domain=domain,
                 )
 
             effective_connection = dict(connection)
