@@ -745,8 +745,8 @@ class McpTaskService:
         if not matches:
             raise LookupError("No active background task matches this request")
         if len(matches) > 1:
-            names = ", ".join(str(item.get("task_name") or item["id"]) for item in matches[:5])
-            raise ValueError(f"More than one active background task matches; specify a task ID: {names}")
+            names = ", ".join(str(item.get("task_name") or item["id"]) for item in matches)
+            raise ValueError(f"More than one active background task matches; cancel by task ID (conflicting names: {names})")
         result = await self.cancel_task(
             task_id=matches[0]["id"],
             thread_id=thread_id,

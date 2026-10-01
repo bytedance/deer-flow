@@ -83,7 +83,7 @@ async def test_cancel_rejects_duplicate_names_across_display_page(tasks):
         await create_task(repo, f"new-{i}", f"new report {i}")
     await create_task(repo, "newest", "STRASSE")
 
-    with pytest.raises(ValueError, match="More than one"):
+    with pytest.raises(ValueError, match=r"More than one active background task matches; cancel by task ID \(conflicting names: (Straße, STRASSE|STRASSE, Straße)\)"):
         await service.cancel_matching_task(**SCOPE, task=" strasse ")
 
     for task_id in ("old-task", "newest"):
