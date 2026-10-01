@@ -19,6 +19,13 @@ an excerpt under an existing ID. Drop entries that cannot fit, with an omission
 notice, while preserving unrelated artifact fields. This honors per-tool and
 fallback limits without exempting citation-bearing results from the budget.
 
+Reserve omission-notice space only when the complete synopsis and evidence
+entries exceed the budget. Precomputation and actual retention share the same
+entry/separator cost calculation; a skipped source does not create a separator
+or consume a citation number. Exact-fit regressions cover one and two sources
+with and without a synopsis, plus a skipped first source followed by retained
+evidence (`tests/test_knowledge_citation_budget.py`).
+
 ## Document validation
 
 `tools.py` validates each dataset's selected documents in batches of at most

@@ -1251,6 +1251,8 @@ Ordinary document-title links in a Sources section open the same evidence as
 inline citations. When a tool-output budget applies, only complete evidence
 entries that fit remain citable; omitted sources are reported rather than
 retaining a source record for a cut-off excerpt.
+If all complete entries fit exactly, they remain citable without reserving
+space for an unused omission notice, including results with a short synopsis.
 
 DeerFlow can optionally connect to a tenant-scoped RAGFlow deployment. The
 `knowledge_search` Agent tool resolves the configured dataset scope, groups

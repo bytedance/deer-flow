@@ -128,21 +128,44 @@ def test_delegated_budget_retains_the_report_reference_and_complete_evidence():
 
 
 @pytest.mark.parametrize("count", [1, 2])
-def test_budget_keeps_all_sources_when_complete_entries_fit(count):
+@pytest.mark.parametrize("summary", ["", "Task completed."])
+def test_budget_keeps_all_sources_when_complete_entries_fit(count, summary):
     sources = [
         {
             "id": f"{'a' * 32}-{index}",
             "provider": "ragflow",
             "dataset_name": "Knowledge",
             "document_name": "Guide",
-            "text": f"Evidence {index}",
+            "text": f"Evidence {index}: " + "detail " * 20,
         }
         for index in range(1, count + 1)
     ]
     artifact = {"knowledge_sources": {"version": 1, "sources": sources}}
+    snapshot = deepcopy(artifact)
     expected = "\n\n".join(f"[citation:{index}](#knowledge-{source['id']}) Knowledge / Guide\n{source['text']}" for index, source in enumerate(sources, start=1))
+    if summary:
+        expected = summary + "\n\n" + expected
 
-    content, result_artifact = budget_source_artifact(expected + "\nExtra report text", artifact, len(expected))
+    content, result_artifact = budget_source_artifact(expected + "\nExtra report text", artifact, len(expected), summary=summary)
 
     assert content == expected
     assert result_artifact == artifact
+    assert artifact == snapshot
+
+
+@pytest.mark.parametrize("summary", ["", "Task completed."])
+def test_budget_skips_oversized_first_source_and_keeps_fitting_second_source(summary):
+    sources = [{"id": f"{'a' * 32}-{index}", "provider": "ragflow", "dataset_name": "Knowledge", "document_name": "Guide", "text": text} for index, text in enumerate(["x" * 1000, "Short evidence."], start=1)]
+    artifact = {"knowledge_sources": {"version": 1, "sources": sources}, "other": "preserve me"}
+    snapshot = deepcopy(artifact)
+    original = "\n\n".join(f"[citation:{index}](#knowledge-{source['id']}) Knowledge / Guide\n{source['text']}" for index, source in enumerate(sources, start=1))
+    retained_entry = f"[citation:1](#knowledge-{sources[1]['id']}) Knowledge / Guide\n{sources[1]['text']}"
+    notice = "Knowledge sources omitted to fit output budget; request smaller excerpts."
+    expected = "\n\n".join(([summary] if summary else []) + [retained_entry, notice])
+
+    content, result_artifact = budget_source_artifact(original, artifact, len(expected), summary=summary)
+
+    assert content == expected
+    assert len(content) == len(expected)
+    assert result_artifact == {"knowledge_sources": {"version": 1, "sources": [sources[1]]}, "other": "preserve me"}
+    assert artifact == snapshot
