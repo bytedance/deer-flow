@@ -37,6 +37,27 @@ This release closes that milestone with **301 merged pull requests**.
   discard previously collected pages. `total_count` still covers all filtered
   matches and no new dependency, storage layer, or HTTP endpoint is involved.
   ([#5570])
+- **agents:** Middleware-declared tools are now covered by Layer-1 tool
+  authorization on every assembly path (lead agent, native subagents, and the
+  embedded client). LangChain merges each middleware's `tools` into the bound
+  tool set *after* the host's explicit-list filter, so declarations such as an
+  extension-contributed tool or plan mode's `write_todos` previously bypassed
+  the `tools` policy entirely. Each build now collects declarations from the
+  assembled stack, decides only the names the ordinary pass never saw —
+  seeded with that pass's verdicts so a name denied for the build (including
+  by a fail-closed provider failure) stays denied — and narrows the stack on
+  independent state-preserving copies without mutating caller-owned
+  middleware instances. **Behavior change:** with `authorization.enabled`
+  and an explicit `tools` policy that does not allow `write_todos`, plan-mode
+  builds no longer bind `write_todos`, and `TodoMiddleware` correspondingly
+  stops injecting the todo system prompt and incomplete-todo completion
+  reminders; the built-in RBAC default (missing tool policy = unrestricted)
+  is unchanged, as is every deployment with authorization disabled. Layer 2
+  also forwards host-resolved tool provenance into
+  `AuthzRequest.context["tool_provenance"]` and binds the infrastructure
+  exemption (the generated `tool_search` helper) to the concrete host-created
+  tool object instead of its name, so a same-named foreign tool can no longer
+  inherit the exemption.
 - **agents:** Custom agents can persist a default knowledge scope in agent
   settings, so a specialized agent starts each conversation with its own
   corpus instead of all operator-approved knowledge bases. When a new turn
@@ -282,6 +303,12 @@ This release closes that milestone with **301 merged pull requests**.
   option that preserves an unexpired binding command; credentials are saved on
   the backend and only the WeChat channel restarts. New WeChat connections
   default to QR login, with manual token entry still available. ([#5582])
+- **scheduler:** Push scheduled-task outcomes to the owner's bound
+  IM identities via a durable `notification_deliveries` outbox and
+  `NotificationDeliveryWorker`. Activates only when `channel_connections.enabled`
+  is true and a channel service is running; manual triggers and interrupts stay
+  silent, and a target disconnected while its delivery waited is dropped. WeCom implements proactive `send_notification`; other providers fail
+  visibly in the outbox until they grow a push path. (issue #4254, [#4843], [#6135])
 
 #### Auth & guardrails
 
@@ -6934,6 +6961,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4839]: https://github.com/bytedance/deer-flow/pull/4839
 [#4840]: https://github.com/bytedance/deer-flow/pull/4840
 [#4842]: https://github.com/bytedance/deer-flow/pull/4842
+[#4843]: https://github.com/bytedance/deer-flow/pull/4843
 [#4844]: https://github.com/bytedance/deer-flow/pull/4844
 [#4846]: https://github.com/bytedance/deer-flow/pull/4846
 [#4848]: https://github.com/bytedance/deer-flow/pull/4848
@@ -7524,3 +7552,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
+[#6135]: https://github.com/bytedance/deer-flow/pull/6135
+

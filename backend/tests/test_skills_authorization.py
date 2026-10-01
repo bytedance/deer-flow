@@ -1075,7 +1075,9 @@ def test_subagent_executor_resolves_skill_authorization_for_chain(monkeypatch):
     executor.authz_attributes = None
     executor.tools = []
 
-    executor._create_agent(tools=[])
+    import asyncio
+
+    asyncio.run(executor._create_agent(tools=[]))
 
     wired = captured["skill_authorization"]
     assert isinstance(wired, ResolvedSkillAuthorization)
@@ -1441,7 +1443,9 @@ def test_subagent_executor_shares_one_skill_authorization_instance(monkeypatch):
     executor.tools = []
 
     asyncio.run(executor._load_skills())
-    executor._create_agent(tools=[])
+    import asyncio
+
+    asyncio.run(executor._create_agent(tools=[]))
 
     layer1 = filter_captured["authorization"]
     layer2 = middleware_captured["skill_authorization"]

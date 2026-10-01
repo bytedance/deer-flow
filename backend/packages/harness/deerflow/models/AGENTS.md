@@ -58,6 +58,17 @@ the same policy first so run metadata reports the effective values. Design note:
 `tests/test_reasoning_contract.py`, the contract section of
 `tests/test_model_factory.py`, `tests/test_models_router_reasoning.py`.
 
+### Codex SSE termination (`packages/harness/deerflow/models/openai_codex_provider.py`)
+
+`response.completed` ends stream consumption immediately, before transport EOF;
+retain the output-item recovery path for empty completed output. Terminal
+`response.failed`, `response.incomplete`, and `error` events raise with their
+error code/message or incomplete reason, closing the response and client without
+returning partial output. Non-object error details or response containers are
+reported as text instead of raising `AttributeError`. SSE failures do not enter
+the HTTP-status retry loop.
+Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
+
 ### Claude Code Credentials (`packages/harness/deerflow/models/credential_loader.py`)
 
 - `ClaudeChatModel.model_post_init` calls `load_claude_code_credential()` for every instance, and `create_chat_model` builds fresh instances per run (lead agent, title, summarization, subagents)

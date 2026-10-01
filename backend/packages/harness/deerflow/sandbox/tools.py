@@ -42,8 +42,8 @@ from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern, normalize_mask_tail, replace_output_path_matches
 from deerflow.sandbox.read_file_contract import (
     READ_FILE_EMPTY,
-    READ_FILE_EMPTY_RANGE,
     READ_FILE_INVALID_END_LINE,
+    READ_FILE_INVALID_RANGE,
     READ_FILE_INVALID_START_LINE,
     READ_FILE_START_LINE_EXCEEDS,
     READ_FILE_TRUNCATION_PREFIX,
@@ -2811,7 +2811,7 @@ def read_file_tool(
         if end_line is not None and end_line < 1:
             return READ_FILE_INVALID_END_LINE
         if end_line is not None and effective_start > end_line:
-            return READ_FILE_EMPTY_RANGE
+            return READ_FILE_INVALID_RANGE
 
         requested_path = path
         use_line_range = start_line is not None or end_line is not None
