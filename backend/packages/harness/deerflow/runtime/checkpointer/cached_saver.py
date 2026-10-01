@@ -60,6 +60,11 @@ class CachedHistorySaver(BaseCheckpointSaver):
         self._compose_hits = 0
         self._full_walks = 0
 
+    @property
+    def source_saver(self) -> BaseCheckpointSaver:
+        """Return the saver that owns the authoritative checkpoint rows."""
+        return self._inner
+
     def __getattr__(self, name: str) -> Any:
         # Safety net for saver-specific extras (e.g. AsyncSqliteSaver.setup).
         # Base-class methods are explicitly delegated below, so this only

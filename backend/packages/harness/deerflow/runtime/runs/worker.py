@@ -1053,7 +1053,7 @@ async def run_agent(
 
         if ctx.on_run_admitted is not None:
             try:
-                await ctx.on_run_admitted(record)
+                await ctx.on_run_admitted(record, config)
             except Exception:
                 logger.warning("Run admission hook failed for %s (non-fatal)", run_id, exc_info=True)
 

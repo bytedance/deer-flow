@@ -752,13 +752,14 @@ def get_subagent_batch_service(request: Request):
 def _run_admission_hook(*, checkpointer: Any):
     """Prune metadata leaves inside the run's durable admission fence."""
 
-    async def handle(record: Any) -> None:
+    async def handle(record: Any, config: dict[str, Any]) -> None:
         try:
             from app.gateway.checkpoint_retention import enforce_completed_run_retention
 
             await enforce_completed_run_retention(
                 checkpointer=checkpointer,
                 thread_id=record.thread_id,
+                protect_checkpoint_ids=_selected_checkpoint_ids(config),
             )
         except Exception:
             logger.warning(
@@ -769,6 +770,19 @@ def _run_admission_hook(*, checkpointer: Any):
             )
 
     return handle
+
+
+def _selected_checkpoint_ids(config: dict[str, Any]) -> frozenset[str]:
+    """Collect checkpoint selectors already validated for an admitted run."""
+    configurable = config.get("configurable", {})
+    selected: set[str] = set()
+    checkpoint_id = configurable.get("checkpoint_id")
+    if isinstance(checkpoint_id, str) and checkpoint_id:
+        selected.add(checkpoint_id)
+    checkpoint_map = configurable.get("checkpoint_map")
+    if isinstance(checkpoint_map, dict):
+        selected.update(value for value in checkpoint_map.values() if isinstance(value, str) and value)
+    return frozenset(selected)
 
 
 def _run_completion_hook(*, scheduled_task_service: Any | None):

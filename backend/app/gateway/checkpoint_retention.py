@@ -54,7 +54,6 @@ from app.gateway.checkpoint_lineage import (
     checkpoint_configurable,
     is_duration_only_checkpoint,
 )
-from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
 
 __all__ = [
     "RetentionPolicy",
@@ -159,10 +158,9 @@ def _mark_duration_leaves_without_the_marker(nodes: dict[tuple[str, str], _Node]
 
 
 def _storage_saver(saver: BaseCheckpointSaver) -> BaseCheckpointSaver:
-    """Return the validated source-of-truth saver behind an optional cache."""
-    if isinstance(saver, CachedHistorySaver):
-        return saver._inner
-    return saver
+    """Resolve a wrapper through its public source-saver contract."""
+    storage = getattr(saver, "source_saver", saver)
+    return storage if isinstance(storage, BaseCheckpointSaver) else saver
 
 
 def _ensure_supported_saver(saver: BaseCheckpointSaver) -> BaseCheckpointSaver:
@@ -181,16 +179,9 @@ def _ensure_supported_saver(saver: BaseCheckpointSaver) -> BaseCheckpointSaver:
     storage = _storage_saver(saver)
     if isinstance(storage, (InMemorySaver, AsyncSqliteSaver)):
         return storage
-    async_postgres_saver: type | None = None
-    try:
-        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
-        async_postgres_saver = AsyncPostgresSaver
-    except Exception:
-        pass
-    if async_postgres_saver is not None and isinstance(storage, async_postgres_saver):
+    if callable(getattr(storage, "_cursor", None)):
         return storage
-    raise NotImplementedError(f"checkpoint retention supports InMemorySaver, AsyncSqliteSaver and AsyncPostgresSaver, got {type(storage).__module__}.{type(storage).__name__}")
+    raise NotImplementedError(f"checkpoint retention requires a supported storage saver, got {type(storage).__module__}.{type(storage).__name__}")
 
 
 async def _thread_storage_stats(saver: Any, thread_id: str) -> dict[str, int]:
@@ -526,8 +517,9 @@ async def enforce_thread_retention(
         # Invalidate before touching source-of-truth rows. If cache deletion
         # fails, fail closed with every checkpoint intact; doing this after the
         # first DELETE could leave a stale wrapper entry for a missing node.
-        if deletable and isinstance(saver, CachedHistorySaver):
-            await saver.ainvalidate_history_cache(thread_id)
+        invalidate_cache = getattr(saver, "ainvalidate_history_cache", None)
+        if deletable and callable(invalidate_cache):
+            await invalidate_cache(thread_id)
 
         for key in deletable:
             await _delete_checkpoint_rows(storage_saver, thread_id, key)
@@ -541,7 +533,12 @@ async def enforce_thread_retention(
         return report
 
 
-async def enforce_completed_run_retention(*, checkpointer: BaseCheckpointSaver, thread_id: str) -> RetentionReport:
+async def enforce_completed_run_retention(
+    *,
+    checkpointer: BaseCheckpointSaver,
+    thread_id: str,
+    protect_checkpoint_ids: frozenset[str] = frozenset(),
+) -> RetentionReport:
     """Run the conservative policy inside the next run's durable admission.
 
     Successful runs append one metadata-only duration checkpoint.  If it is
@@ -565,6 +562,7 @@ async def enforce_completed_run_retention(*, checkpointer: BaseCheckpointSaver, 
             prune_leaf_sibling_branches=False,
             strict_pending_write_guard=True,
             max_delete_per_run=1,
+            protect_checkpoint_ids=protect_checkpoint_ids,
         ),
         thread_lock=_checkpoint_thread_lock(thread_id),
         collect_stats=False,

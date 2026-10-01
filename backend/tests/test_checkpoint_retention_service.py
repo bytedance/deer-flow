@@ -703,6 +703,31 @@ async def test_completed_run_retention_supports_cached_history_saver_and_invalid
 
 
 @pytest.mark.anyio
+async def test_completed_run_retention_preserves_selected_duration_leaf(saver_env: _SaverEnv) -> None:
+    """An admitted run may explicitly resume the metadata leaf it exposed."""
+    graph = _build_graph(FullState, saver_env.saver)
+    thread_id = _thread_id()
+    await graph.ainvoke({"messages": [HumanMessage(content="hello")]}, _config(thread_id))
+    assert await persist_run_durations(
+        checkpointer=saver_env.saver,
+        thread_id=thread_id,
+        durations={"run-1": 3},
+    )
+    selected = await saver_env.saver.aget_tuple(_config(thread_id))
+    assert selected is not None
+    selected_id = selected.checkpoint["id"]
+
+    report = await enforce_completed_run_retention(
+        checkpointer=saver_env.saver,
+        thread_id=thread_id,
+        protect_checkpoint_ids=frozenset({selected_id}),
+    )
+
+    assert report.deleted_checkpoint_ids == []
+    assert await saver_env.saver.aget_tuple(_config_thread(thread_id, selected_id)) is not None
+
+
+@pytest.mark.anyio
 async def test_gateway_admission_retention_failure_isolated_from_scheduler_completion(monkeypatch: pytest.MonkeyPatch) -> None:
     """Retention remains best-effort and scheduled completion stays separate."""
     from app.gateway import checkpoint_retention as retention_module
@@ -710,8 +735,8 @@ async def test_gateway_admission_retention_failure_isolated_from_scheduler_compl
 
     calls: list[tuple[str, Any]] = []
 
-    async def fail_retention(*, checkpointer: Any, thread_id: str):
-        calls.append(("retention", (checkpointer, thread_id)))
+    async def fail_retention(*, checkpointer: Any, thread_id: str, protect_checkpoint_ids: frozenset[str]):
+        calls.append(("retention", (checkpointer, thread_id, protect_checkpoint_ids)))
         raise RuntimeError("checkpoint backend unavailable")
 
     class _Scheduler:
@@ -722,13 +747,16 @@ async def test_gateway_admission_retention_failure_isolated_from_scheduler_compl
     checkpointer = object()
     record = SimpleNamespace(thread_id="thread-1", run_id="run-1")
 
-    await _run_admission_hook(checkpointer=checkpointer)(record)
+    await _run_admission_hook(checkpointer=checkpointer)(
+        record,
+        {"configurable": {"checkpoint_id": "selected", "checkpoint_map": {"child": "mapped"}}},
+    )
     await _run_completion_hook(
         scheduled_task_service=_Scheduler(),
     )(record)
 
     assert calls == [
-        ("retention", (checkpointer, "thread-1")),
+        ("retention", (checkpointer, "thread-1", frozenset({"selected", "mapped"}))),
         ("scheduler", record),
     ]
 
