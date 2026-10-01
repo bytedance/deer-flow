@@ -80,10 +80,12 @@ async def test_missing_sender_and_non_message_events_are_ignored(channel):
 
 
 @pytest.mark.asyncio
-async def test_duplicate_events_are_not_published_twice(channel):
+async def test_duplicate_events_are_forwarded_to_manager_dedupe(channel):
     await channel._handle_inbound(event())
     await channel._handle_inbound(event())
-    assert channel.bus.inbound_queue.qsize() == 1
+    # Provider adapters must not own the retry policy: ChannelManager records
+    # the message id and releases it when downstream handling fails.
+    assert channel.bus.inbound_queue.qsize() == 2
 
 
 @pytest.mark.asyncio
@@ -138,6 +140,20 @@ async def test_bound_owner_is_attached_with_exact_workspace(channel):
     assert inbound.owner_user_id == "owner-a"
     assert inbound.connection_id == "connection-a"
     repo.find_connection_by_external_identity.assert_awaited_once_with(provider="qq", external_account_id="alice", workspace_id="app1:group:group1")
+
+
+@pytest.mark.asyncio
+async def test_identity_failure_allows_provider_redelivery(channel):
+    repo = AsyncMock()
+    repo.find_connection_by_external_identity.side_effect = [RuntimeError("temporary"), None]
+    channel._connection_repo = repo
+
+    with pytest.raises(RuntimeError):
+        await channel._handle_inbound(event())
+    await channel._handle_inbound(event())
+
+    assert channel.bus.inbound_queue.qsize() == 1
+    assert repo.find_connection_by_external_identity.await_count == 2
 
 
 @pytest.mark.asyncio

@@ -81,6 +81,9 @@ async def test_reconnect_resume_invalid_session_reidentify_and_deduplicate(monke
             assert authentications[0]["d"]["intents"] == 1 << 25
             assert authentications[1]["d"]["session_id"] == "fixture-session"
             assert authentications[1]["d"]["seq"] == 2
+            # Duplicate delivery is handled by ChannelManager's failure-aware
+            # dedupe in production; this lifecycle fixture only checks that a
+            # recovered event reaches the bus.
             assert channel.bus.inbound_queue.qsize() == 1
             assert channel.bus.get_inbound_nowait().thread_ts == "fixture-message"
         finally:

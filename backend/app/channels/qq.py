@@ -89,7 +89,6 @@ class QQChannel(Channel):
         self._sequence: int | None = None
         self._bot_id = ""
         self._replies: OrderedDict[tuple[str, str], _ReplyContext] = OrderedDict()
-        self._seen: OrderedDict[tuple[str, str], float] = OrderedDict()
 
     @property
     def is_running(self) -> bool:
@@ -141,7 +140,6 @@ class QQChannel(Channel):
         self._access_token = ""
         self._token_expires_at = 0.0
         self._events = asyncio.Queue(maxsize=INBOUND_BUFFER_SIZE)
-        self._seen.clear()
         self._replies.clear()
 
     async def _get_access_token(self) -> str:
@@ -366,10 +364,7 @@ class QQChannel(Channel):
         scope = "group" if group else "c2c"
         chat_id = f"{scope}:{target}"
         workspace = f"{self._app_id}:group:{target}" if group else f"{self._app_id}:c2c"
-        key = (chat_id, message_id)
         now = time.monotonic()
-        if self._seen.get(key, 0) > now:
-            return
         window = 300 if group else 3600
         timestamp = data.get("timestamp")
         if timestamp is not None:
@@ -388,14 +383,16 @@ class QQChannel(Channel):
             return
         if not code and self._allowed_users and sender not in self._allowed_users:
             return
-        self._seen[key] = now + 3600
-        self._replies[key] = _ReplyContext(
-            f"/v2/{'groups' if group else 'users'}/{quote(target, safe='')}/messages",
-            now + window,
+        key = (chat_id, message_id)
+        self._replies.setdefault(
+            key,
+            _ReplyContext(
+                f"/v2/{'groups' if group else 'users'}/{quote(target, safe='')}/messages",
+                now + window,
+            ),
         )
-        for cache in (self._seen, self._replies):
-            while len(cache) > MAX_CACHED_MESSAGES:
-                cache.popitem(last=False)
+        while len(self._replies) > MAX_CACHED_MESSAGES:
+            self._replies.popitem(last=False)
         if code:
             state = await self._connection_repo.consume_oauth_state(provider="qq", state=code)
             reply = "QQ connection code is invalid or expired."
