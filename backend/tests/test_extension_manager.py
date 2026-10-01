@@ -38,10 +38,17 @@ def _pin_official_package_index(monkeypatch) -> None:
     The source-build tests shell out to uv and resolve build backends such as
     hatchling from the package index, so a host-configured mirror that blocks
     those packages fails the suite even though the code under test is fine.
-    Tests that install their own index (the local simple-index servers) set
-    their own ``UV_DEFAULT_INDEX`` afterwards and keep precedence.
+    Pin the default index (which also wins over the legacy ``UV_INDEX_URL``)
+    and drop the extra-index env channels, whose entries take priority over
+    the default index. ``UV_NO_CONFIG=1`` would additionally drop the host
+    ``uv.toml`` ``[[index]]`` channel, but also the fixture's own ``[tool.uv]``
+    pyproject settings the assertions rely on, so file-based extra indexes
+    stay out of scope. Tests that install their own index (the local
+    simple-index servers) set their own env afterwards and keep precedence.
     """
     monkeypatch.setenv("UV_DEFAULT_INDEX", "https://pypi.org/simple")
+    monkeypatch.delenv("UV_INDEX", raising=False)
+    monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
 
 
 def _write_local_extension(
