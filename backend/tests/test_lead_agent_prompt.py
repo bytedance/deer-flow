@@ -755,6 +755,7 @@ def test_system_prompt_template_preserves_placeholders():
         "{acp_section}",
         "{subagent_reminder}",
         "{skill_first_reminder}",
+        "{workspace_scripts_guidance}",
     ):
         assert ph in template, f"placeholder {ph} accidentally removed"
 

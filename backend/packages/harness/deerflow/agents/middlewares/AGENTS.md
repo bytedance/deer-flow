@@ -19,31 +19,22 @@ stay `in_progress`. Never infer status from reply text.
 
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares` appends lead-only entries. Optional entries require their config/runtime condition.
 
-**Message provenance.** At injection/rewrite, always stamp `additional_kwargs`
-via `deerflow_extension_api.provenance.provenance_kwargs()`:
-`deerflow_content_kind`, `deerflow_producer_kind`, optional
-`deerflow_producer_entity_id`. All are server-owned inbound metadata; stamp even
-without observers, since downstream cannot recover producers. Producers:
-DynamicContext (reminder/memory), DurableContext (contract/data),
+**Message provenance.** Stamp injected/rewritten messages with
+`provenance_kwargs()` from `deerflow_extension_api.provenance`: server-owned
+`deerflow_content_kind`, `deerflow_producer_kind`, and optional entity ID, even
+without observers. Producers: DynamicContext, DurableContext,
 SystemMessageCoalescing, ViewImage, SkillActivation. Summarization/Title use
-`SystemOperationKind.SUMMARIZATION`/`.TITLE` model-call attribution; summaries
-enter via DurableContext's stamped `durable_context_data`, not separate
-messages. Memory only queues extraction; recall uses DynamicContext's
-`dynamic_context_memory` stamp.
+`SystemOperationKind.SUMMARIZATION`/`.TITLE`; summaries enter via DurableContext's
+`durable_context_data`, memory recall via DynamicContext's
+`dynamic_context_memory`. Memory only queues extraction.
 
-**Middleware self-description.** Behaviour-configurable middleware implements
-`release_policy_parameters() -> dict[str, object]` (duck-typed
-`deerflow_extension_api.release.ReleasePolicyProvider`, no base class).
-Use JSON-serialisable values and `canonical_hash` for long text, not prompt
-copies. `collect_release_policies()` gathers stack declarations; update them
-alongside every behaviour-affecting field.
-Summarization declares enabled `task_continuity` retention settings (otherwise
-`None`). DurableContext declares its normalized skills root, sorted read-tool
-names and continuity switch, so each capture/injection policy affects assembly
-identity without depending on private-field probing.
-Continuity history readers share shape validation, including the capture failure
-path and DurableContext rendering, so malformed persisted metadata cannot abort
-ordinary compaction or a model call.
+**Self-description.** Configurable middleware exposes JSON-serialisable
+`release_policy_parameters()` (`ReleasePolicyProvider`, duck typed). Update
+`collect_release_policies()` declarations with behavior; use `canonical_hash`
+for long text. Summarization declares enabled task-continuity retention or None;
+DurableContext declares normalized skills root, sorted read tools and continuity
+switch. History readers, including capture failures, validate persisted metadata
+so malformed values cannot abort compaction/model calls.
 
 **Removing tool calls.** Use `clone_ai_message_with_tool_calls`, not a bare
 `tool_calls` update: adapters resend stale `content` tool-call blocks, which
@@ -107,7 +98,7 @@ Before changing a later authorization phase, read the [authorization RFC](../../
 19. **SkillToolPolicyMiddleware** - Applies `allowed-tools` only after real activation; passive enabled skills and a custom agent's configured skill allowlist do not clamp the lead toolset. A run-scoped slash activation is authoritative and suppresses `skill_context` as a policy source, so reading another skill cannot widen the explicit skill's tools; without slash activation, skills captured after configured `read_file` loads retain the existing union semantics. The middleware filters model-visible schemas and blocks unauthorized execution, resolving canonical paths against the live enabled/agent-allowed registry on every model call, then stores a versioned, JSON-safe, middleware-token-bound decision signed by policy source plus active paths in run context for the resulting tool calls to reuse. The next model call always refreshes it, and malformed, foreign, stale, or unmatched decisions fall back to live resolution. `tool_search` and `describe_skill` remain framework-safe discovery tools under a restrictive policy; they may reveal or promote metadata, but a deferred business tool must still be declared by the active policy before its schema or execution can survive the policy middleware. The decision's owner token is authorization-sensitive, so its reserved context key is owned by `runtime.secret_context` and included in `REDACTED_CONTEXT_KEYS` for observable and persisted context copies. Registry load failures and a non-empty active set with no authorized skill fail closed to framework-safe tools; an individual stale path is skipped only when at least one valid active skill remains. This is best-effort behavioral scoping rather than a hard security boundary: alternate loads such as `bash cat` are not captured, and bounded autonomous `skill_context` can evict old entries. `task` is not framework-exempt, so a restricted skill cannot delegate around its policy. The middleware must remain immediately after `SkillActivationMiddleware` (which publishes the slash source through `runtime.secret_context`'s public path helpers authenticated by a required token shared only within the assembled middleware chain) and immediately before `DurableContextMiddleware`; assembly and compiled-graph tests pin ordering, token sharing, schema filtering, and execution blocking.
 20. **DurableContextMiddleware** - Before compaction, captures task dispatches/result summaries in `ThreadState.delegations` and loaded skill name/path/description references (never bodies) in `ThreadState.skill_context`; projects them into each model request. Static authority rules are injected as a `SystemMessage`; untrusted field values (`summary_text`, delegation results, skill descriptions) are injected separately as a hidden `HumanMessage` data block so compressed history, delegated work, and which skills are active stay visible without being stored as `messages` or promoted to system-role instructions. `build_subagent_runtime_middlewares` also attaches this middleware immediately before subagent summarization so a compacted `summary_text` is projected ahead of a preserved assistant/tool tail instead of leaving strict providers with an assistant-first request. See [tool artifacts](TOOL_ARTIFACTS.md) for projection, retry limits and delegation scope.
 21. **SummarizationMiddleware** - *(optional)* Compacts near token limits. Fraction trigger/keep profiles belong to the active run model; an explicit summary model only generates. Memory flush/manual compaction follow runtime/checkpoint agent policy. Preserve the latest user request and DynamicContext reminders; a backward cutoff may retain old AI/tool turns or make first-turn compaction a no-op.
-22. **TodoListMiddleware** - *(optional, if `is_plan_mode`)* Task tracking with `write_todos`. Skips reminders on `model_length_termination` so capped turns end cleanly.
+22. **TodoListMiddleware** - *(optional, if `is_plan_mode`)* Task tracking with `write_todos`. Skips reminders on `model_length_termination` so capped turns end cleanly. A raising model call requeues its reminder, uncounted, for the retry.
 23. **TokenUsageMiddleware** - *(optional, if `token_usage.enabled`)* Records token usage metrics; subagent usage is read from terminal `ToolMessage.additional_kwargs` in the current run and merged back into the dispatching AIMessage by message position. The same state update marks the ToolMessage with `subagent_token_usage_attributed=true`, so checkpoint replay or middleware re-entry cannot add the cumulative snapshot twice; missing/malformed usage or a result with no matching dispatch remains unmarked and retryable.
 24. **TitleMiddleware** - Auto-generates the thread title after the first complete exchange and normalizes structured message content before prompting the title model. If a first-turn run is interrupted before this middleware can write a title, `runtime/runs/worker.py` keeps the run in a finalizing state, persists a local fallback title from the latest checkpoint or original run input, and then syncs it to `threads_meta.display_name`. Replacement runs admitted by `multitask_strategy="interrupt"` / `"rollback"` wait for older same-thread finalization before entering the graph; the interrupted run only skips the fallback title write once a later run has started and may have advanced the checkpoint.
 25. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses); captures the runtime-resolved user so standalone LangGraph Server reads and writes stay in the same bucket
@@ -131,3 +122,9 @@ Before changing a later authorization phase, read the [authorization RFC](../../
 37. **ModelLengthFinishReasonMiddleware** - Match stamps `stop_reason=model_length_capped` and ends tool loop. Suppresses calls, appends notice even with partial text, and stamps `model_length_termination` so downstream guards stand down. Preserves content blocks.
 38. **SafetyFinishReasonMiddleware** - *(optional, if `safety_finish_reason.enabled`)* Suppresses tool execution when the provider safety-terminated the response (e.g. `finish_reason=content_filter`); registered after terminal-response/custom/configured middlewares so LangChain's reverse-order `after_model` dispatch runs it first
 39. **ClarificationMiddleware** - Intercepts `ask_clarification`, writes a readable `ToolMessage.content` fallback plus a structured `ToolMessage.artifact.human_input` payload, and interrupts via `Command(goto=END)` (must be last). `after_model` drops same-turn sibling tool calls so they cannot run before the user answers; a malformed `ask_clarification` parked on `invalid_tool_calls` is the same stop signal. `disable_clarification` runs keep the siblings. Payloads are versioned — legacy `free_text`/`choice_with_other` stay `version: 1`; the v2 `form` mode (from `fields`) is `version: 2` so older frontends reject it and fall back to plain text. Field normalization is deterministic and lives in the middleware (it short-circuits before tool execution, so tool-arg typing gives no runtime validation), and it is atomic: any structurally broken entry — non-dict, bad/duplicate name, a name colliding with a JS `Object.prototype` member (`__proto__`/`constructor`), or exceeding the caps (16 fields / 24 options per field / 200 chars per text / `MAX_FORM_SERIALIZED_BYTES` = 16KB UTF-8, the per-item caps alone admitting forms whose IM text fallback overruns channel limits) — degrades the whole form to the legacy option/free-text modes, so a card never renders "complete" while missing a field. Benign issues degrade locally (unknown types — incl. unhashable JSON like `type: []`, which must not raise from the membership probe — and option-less selects become `text`); options are trimmed/deduped with blanks dropped (form- and top-level) since the frontend rejects blank labels. XML-to-dict option payloads are recursively flattened from dict/list containers in source order, scalar leaves kept, residual XML tags stripped before that trimming. Checkboxes are booleans defaulting to "no"; `required` on one means consent semantics. The response protocol is unchanged (v1 `text`/`option`): form cards submit a text summary as `response_kind: "text"`, so journal persistence needs no new allowlist entries. `RunJournal` reconciles visible, unpersisted `ToolMessage`s for current-run lead-agent calls at the next lead-agent `on_chat_model_start` after consumption, or at successful root `on_chain_end`. This preserves any middleware short-circuit, including blocked writes, across later model errors and checkpoint compaction (#4666). `_remember_current_run_tool_calls` excludes subagents; their results stay in `subagent.step`. Human Input Card replies are `hide_from_ui` `HumanMessage`s with `additional_kwargs.human_input_response`; `RunJournal` persists only allowlisted hidden sources (currently `ask_clarification`) as `llm.human.input`.
+
+Inline `skill_references` accepts 1–16 names; empty lists retain slash/plain flow.
+Resolve the whole batch through user storage, enabled state and agent allowlist
+before activation; reject any invalid entry. Keep bodies in escaped HumanMessage
+context with task text once. Authenticated paths feed secrets/tool policy; record usage per skill.
+Legacy slash syntax is unchanged.

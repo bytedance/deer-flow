@@ -268,10 +268,29 @@ class SubagentResult:
             return True
 
 
-def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
+def _terminal_direct_results(final_state: Any, return_direct_tools: set[str]) -> list[ToolMessage] | None:
+    """Match a complete terminal direct-tool batch in call order."""
+    if not final_state or not return_direct_tools:
+        return None
+    messages = final_state.get("messages", [])
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, AIMessage):
+            continue
+        calls = message.tool_calls
+        if calls and all(call["name"] in return_direct_tools for call in calls):
+            results = {item.tool_call_id: item for item in messages[index + 1 :] if isinstance(item, ToolMessage)}
+            if all(call["id"] in results for call in calls):
+                return [results[call["id"]] for call in calls]
+        return None
+    return None
+
+
+def _extract_final_result(final_state: Any, *, trace_id: str, name: str, return_direct_tools: set[str] | None = None) -> str:
     """Extract a human-readable result string from the streamed subagent state.
 
-    Finds the last ``AIMessage`` in the conversation and stringifies its
+    Uses the matched tool results when the last assistant turn consists only
+    of direct-return tools. Otherwise finds the last ``AIMessage`` and stringifies its
     content via the shared :func:`message_content_to_text` helper; falls back
     to the last message of any type when no AIMessage is present. Returns a
     sentinel string (``"No response generated"``) when there is nothing to
@@ -290,12 +309,12 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
     messages = final_state.get("messages", [])
     logger.info(f"[trace={trace_id}] Subagent {name} final messages count: {len(messages)}")
 
-    last_ai_message = None
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage):
-            last_ai_message = msg
-            break
+    direct_results = _terminal_direct_results(final_state, return_direct_tools or set())
+    if direct_results is not None:
+        texts = [message_content_to_text(message.content) for message in direct_results]
+        return "\n\n".join(text for text in texts if text) or "No response generated"
 
+    last_ai_message = next((message for message in reversed(messages) if isinstance(message, AIMessage)), None)
     if last_ai_message is not None:
         text = message_content_to_text(last_ai_message.content)
         return text if text else "No response generated"
@@ -941,6 +960,12 @@ class SubagentExecutor:
         # not just the first — because the v2 contract advertises more than one
         # cap reason.
         self._stop_reason_middlewares: list[Any] = []
+        self._return_direct_tools: set[str] = set()
+        # The one skill-authorization context for this execution, resolved
+        # lazily by ``_resolve_skill_authorization`` and shared by the Layer 1
+        # filter and every runtime ``skill:activate`` check (activation
+        # middleware, describe gate, skill-read stamping).
+        self._skill_authorization: Any | None = None
         # LangGraph super-step budget that buys ``config.max_turns`` turns,
         # resolved in ``_create_agent`` once the middleware chain — and with it
         # the compiled graph's per-turn node count — is known. Stays ``None``
@@ -1008,6 +1033,17 @@ class SubagentExecutor:
         authz_provider = getattr(self, "_authz_provider", None)
         if authz_provider is not None:
             middleware_kwargs["authorization_provider"] = authz_provider
+        # Phase 3 (Layer 2): arm the runtime ``skill:activate`` check on the
+        # subagent chain too — a delegated task is a plain HumanMessage, so
+        # task text containing /skill-name reaches the activation middleware.
+        # Resolved through the same memoized helper the Layer 1 filter used
+        # (``_resolve_skill_authorization``): provider factories are
+        # deliberately uncached, so resolving independently here could hand the
+        # runtime checks a different provider instance (and policy snapshot)
+        # than the filter that built ``_available_skill_names``.
+        skill_authorization = self._resolve_skill_authorization()
+        if skill_authorization is not None:
+            middleware_kwargs["skill_authorization"] = skill_authorization
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
@@ -1031,6 +1067,13 @@ class SubagentExecutor:
             state_schema=ThreadState,
             checkpointer=False,
         )
+        # Use the compiled registry: it includes middleware tools, normalized
+        # callables, and LangChain's last-definition-wins name precedence.
+        from langgraph.prebuilt import ToolNode
+
+        tool_graph_node = agent.get_graph().nodes.get("tools")
+        tool_node = tool_graph_node.data if tool_graph_node is not None else None
+        self._return_direct_tools = {tool.name for tool in tool_node.tools_by_name.values() if tool.return_direct} if isinstance(tool_node, ToolNode) else set()
         self._describe_assembly(
             app_config=app_config,
             tools=bound_tools,
@@ -1205,8 +1248,66 @@ class SubagentExecutor:
         # Filter by config.skills whitelist
         if self.config.skills is not None:
             allowed = set(self.config.skills)
+        else:
+            allowed = None
+
+        # Phase 3: enforce skill authorization (Layer 1). Filter the skill
+        # allowlist by the provider's "skill" policy so denied skills never
+        # reach the returned list (and are never turned into tools). Pass the
+        # already-loaded ``all_skills`` names as candidates so we don't pay a
+        # second ``load_skills`` round-trip inside the filter, and the memoized
+        # authorization context so the filter's provider instance is the same
+        # one the runtime ``skill:activate`` checks on this assembly use.
+        from deerflow.authz.skill_filter import filter_available_skills_by_authorization
+
+        resolved_app_config = self.app_config or get_app_config()
+        allowed = filter_available_skills_by_authorization(
+            allowed,
+            context=self._skill_authz_context(),
+            app_config=resolved_app_config,
+            # Same bucket convention as the middleware chain (self.user_id or
+            # DEFAULT_USER_ID); only consulted if candidates were not supplied.
+            user_id=self.user_id or DEFAULT_USER_ID,
+            candidate_skill_names=[s.name for s in all_skills],
+            authorization=self._resolve_skill_authorization(),
+        )
+
+        if allowed is not None:
             return [s for s in all_skills if s.name in allowed]
         return all_skills
+
+    def _resolve_skill_authorization(self):
+        """The one skill-authorization context for this execution.
+
+        Resolved once per executor assembly (executors are built per task
+        dispatch) and shared by the Layer 1 filter in ``_load_skills``, the
+        runtime ``skill:activate`` check on the activation middleware, the
+        ``describe_skill`` gate, and the skill-read stamping middleware — so
+        every layer of this assembly sees the same provider instance and
+        policy snapshot. Providers are uncached by design; resolving per layer
+        would let a custom provider observe different snapshots for visibility
+        and activation within one run.
+        """
+        resolved = getattr(self, "_skill_authorization", None)
+        if resolved is None:
+            from deerflow.authz.skill_filter import resolve_skill_authorization
+
+            resolved = resolve_skill_authorization(self._skill_authz_context(), self._get_resolved_app_config())
+            self._skill_authorization = resolved
+        return resolved
+
+    def _skill_authz_context(self) -> dict[str, Any]:
+        """Identity mapping shared by the Layer 1 filter and the runtime
+        ``skill:activate`` check wired into the subagent middleware chain."""
+        return {
+            "user_id": self.user_id,
+            "user_role": self.user_role,
+            "oauth_provider": self.oauth_provider,
+            "oauth_id": self.oauth_id,
+            "channel_user_id": self.channel_user_id,
+            "is_internal": self.is_internal,
+            "authz_attributes": self.authz_attributes,
+        }
 
     async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool], "DeferredToolSetup"]:
         """Build the initial state for agent execution.
@@ -1241,6 +1342,7 @@ class SubagentExecutor:
             skills,
             enabled=resolved_app_config.skills.deferred_discovery,
             container_base_path=resolved_app_config.skills.container_path,
+            skill_authorization=self._resolve_skill_authorization(),
         )
 
         # Apply authorization Layer 1: filter tools before deferred assembly
@@ -1709,7 +1811,22 @@ class SubagentExecutor:
                     tool_receipts=terminal_receipts(),
                 )
             else:
-                final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
+                final_result = _extract_final_result(
+                    final_state,
+                    trace_id=self.trace_id,
+                    name=self.config.name,
+                    return_direct_tools=self._return_direct_tools,
+                )
+                direct_results = _terminal_direct_results(final_state, self._return_direct_tools)
+                if direct_results is not None and any(message.status == "error" for message in direct_results):
+                    result.try_set_terminal(
+                        SubagentStatus.FAILED,
+                        result=final_result,
+                        error=f"Direct-return tool failure:\n{final_result}",
+                        token_usage_records=token_usage_records,
+                        tool_receipts=terminal_receipts(),
+                    )
+                    return result
                 # A guard hard-stop (token budget or loop detection) does not raise
                 # — it strips tool_calls so the run completes with a final answer.
                 # ``consume_stop_reason`` on each guard tells us whether that

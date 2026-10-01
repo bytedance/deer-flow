@@ -74,6 +74,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [Sandbox 与文件系统](#sandbox-与文件系统)
     - [Agentic Browser Control](#agentic-browser-control)
     - [Context Engineering](#context-engineering)
+    - [当前任务笔记](#当前任务笔记)
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
@@ -317,6 +318,22 @@ make down   # 停止并移除容器
    ```
 
 5. **访问地址**：http://localhost:2026
+
+#### 启动模式
+
+DeerFlow 将 Agent 运行时内嵌在 Gateway API 中运行。开发模式支持热更新；生产模式使用预构建的前端。
+
+| | **本地前台** | **本地守护进程** | **Docker 开发** | **Docker 生产** |
+|---|---|---|---|---|
+| **开发模式** | `./scripts/serve.sh --dev`<br/>`make dev` | `./scripts/serve.sh --dev --daemon`<br/>`make dev-daemon` | `./scripts/docker.sh start`<br/>`make docker-start` | — |
+| **生产模式** | `./scripts/serve.sh --prod`<br/>`make start` | `./scripts/serve.sh --prod --daemon`<br/>`make start-daemon` | — | `./scripts/deploy.sh`<br/>`make up` |
+
+| 操作 | 本地 | Docker 开发 | Docker 生产 |
+|---|---|---|---|
+| **停止** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
+| **重启** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
+
+`make start` 与 `make start-daemon` 每次运行都会用 `next build` 重新构建前端。如需复用上一次的构建结果，可传入 `SKIP_FRONTEND_BUILD=1`（或在直接调用 `./scripts/serve.sh --prod` 时附加 `--skip-frontend-build`）。该选项为可选行为：当 `frontend/.next` 中没有已完成的构建时会快速失败。
 
 #### LangGraph Studio（可选）
 
@@ -796,6 +813,15 @@ workspace 的 Browser Live 客户端通过二进制 JPEG WebSocket 帧协商画�
 Gateway API 调用方可以启用 `read_conversation`，并在一次 run 中提交 `conversation_references` 列表。主 agent 随后可以分页读取这些归属会话当前可见文本的有界页面。读取权限随该次 run 结束而失效，旧消息中的文本不会授予访问权限。访问权限失效或来源被删除后，agent 已经读过的文本仍会保留在目标会话中。一条消息如果单次读取放不下，会带有续接，agent 可以继续读取剩余部分；只有在那次读取不可用时，它才会请求缺失的部分。
 
 无法在请求顶层添加字段的 SDK 客户端可以把同样的列表放在 `context.conversation_references` 中发送，`GET /api/features` 会报告该工具是否启用。启用后，Web UI 输入框会在附件按钮旁边显示一个"引用会话"按钮：最多选择你最近的三个会话，它们只附加到下一条消息上，以 chips 的形式显示在输入框与对话记录里。不会自动搜索历史。参见[配置](backend/docs/CONFIGURATION.md#reading-referenced-conversations)与[请求契约](backend/docs/API.md#referencing-a-previous-conversation)。
+
+### 当前任务笔记
+
+当前任务可通过 `task_continuity.enabled: true` 开启[任务笔记与历史回查](docs/task-continuity.md)。
+任务笔记最多八条；并行新增超出剩余名额时返回 `note_capacity`，保留原有笔记。
+启用资源句柄解析时按解析后的实际 key 计数，指向同一笔记的别名共用名额。
+同批调用中格式异常的非字典参数不会占用名额或影响正常笔记调用。
+无效 key、超过 750 字符的内容、超过四个引用或格式无效的引用 ID 也不会占用名额。
+已有 key 仍可替换或删除；同批删除及运行时失败（如来源不可读或策略拒绝）释放的名额在下一批可用，可届时重试。
 
 ### 长期记忆
 
