@@ -162,7 +162,8 @@ class ToolApprovalRequired(RuntimeError):
 
     Attributes:
         interrupts: The ``{"id", "value"}`` entries from the ``interrupt``
-            event, in order. Feed the payload's action requests to ``resume()``.
+            event, in order. Answer the payload's action requests with
+            ``resume()``, passing the entry's ``id`` as ``interrupt_id``.
         thread_id: The parked thread, which ``resume()`` requires. ``chat()``
             resolves it before streaming, so it is populated even when the
             caller supplied none and the ID was generated for the run.
@@ -181,7 +182,11 @@ class ToolApprovalRequired(RuntimeError):
         self.thread_id = thread_id
         self.partial_text = partial_text
         count = len(interrupts)
-        super().__init__(f"The run parked on {count} tool-approval request(s) and cannot complete as a chat() response. Answer it with resume(decisions, thread_id={thread_id!r}), or use stream() to handle the interrupt event inline.")
+        interrupt_id = interrupts[0].get("id") if interrupts else None
+        super().__init__(
+            f"The run parked on {count} tool-approval request(s) and cannot complete as a chat() response. "
+            f"Answer it with resume(decisions, thread_id={thread_id!r}, interrupt_id={interrupt_id!r}), or use stream() to handle the interrupt event inline."
+        )
 
 
 class DeerFlowClient:
@@ -858,6 +863,26 @@ class DeerFlowClient:
         checkpoints.sort(key=lambda checkpoint: checkpoint["ts"] or "")
         return {"thread_id": thread_id, "checkpoints": checkpoints}
 
+    def _pending_interrupt_ids(self, thread_id: str, **kwargs) -> list[str | None]:
+        """Return the ids of the interrupts the thread's latest checkpoint is parked on.
+
+        Empty when nothing is pending. Reads the checkpoint the same way
+        :meth:`get_thread` does, with the overrides the resume will stream with.
+        """
+        checkpointer = self._get_thread_checkpointer()
+        config = self._get_runnable_config(thread_id, **kwargs)
+        self._ensure_agent(config)
+        if self._agent is None:
+            raise RuntimeError("Agent was not initialized")
+
+        accessor = CheckpointStateAccessor.bind(
+            self._agent,
+            checkpointer,
+            mode=self._checkpoint_channel_mode,
+        )
+        snapshot = accessor.get(config)
+        return [entry["id"] for entry in serialize_interrupts(getattr(snapshot, "interrupts", None))]
+
     # ------------------------------------------------------------------
     # Public API — conversation
     # ------------------------------------------------------------------
@@ -867,6 +892,7 @@ class DeerFlowClient:
         decisions: Sequence[Mapping[str, Any]],
         *,
         thread_id: str,
+        interrupt_id: str,
         **kwargs,
     ) -> Generator[StreamEvent, None, None]:
         """Resume a run parked on a tool-approval interrupt.
@@ -884,6 +910,12 @@ class DeerFlowClient:
                 for ``reject`` / ``respond``).
             thread_id: The parked thread. Required — a resume has no meaning
                 without the checkpoint holding the pending interrupt.
+            interrupt_id: The ``id`` of the interrupt these decisions answer,
+                as carried by the ``interrupt`` event or
+                :class:`ToolApprovalRequired`. Required: a bare
+                ``Command(resume=...)`` answers whatever interrupt is pending
+                *now*, so if another run on the thread parked since the human
+                reviewed, their decisions would apply to different tool calls.
             **kwargs: Same overrides as :meth:`stream`.
 
         Yields:
@@ -891,17 +923,32 @@ class DeerFlowClient:
             further ``interrupt`` event can follow if the run parks again.
 
         Raises:
-            ValueError: If ``thread_id`` is empty or ``decisions`` is empty.
+            ValueError: If ``thread_id``, ``interrupt_id`` or ``decisions`` is
+                empty, or if ``interrupt_id`` is not pending on the thread.
         """
         if not thread_id:
             raise ValueError("resume() requires the thread_id of the parked run")
+        if not interrupt_id:
+            raise ValueError("resume() requires the interrupt_id the decisions answer")
         if not decisions:
             raise ValueError("resume() requires at least one decision")
 
+        # A newer run on the thread replaces the park rather than queueing
+        # behind it, so the interrupt the human reviewed may be gone. Checking
+        # first turns that into an error instead of a resume that silently does
+        # nothing.
+        pending = self._pending_interrupt_ids(thread_id, **kwargs)
+        if interrupt_id not in pending:
+            state = f"pending: {pending}" if pending else "nothing is pending"
+            raise ValueError(f"Interrupt {interrupt_id!r} is not pending on thread {thread_id!r} ({state}); it was already answered or superseded by a newer run")
+
+        # Keyed by id, not a bare value: LangGraph then delivers the decisions
+        # only to that interrupt, so a park that replaces it between the check
+        # above and this write is left pending instead of answered by mistake.
         yield from self.stream(
             "",
             thread_id=thread_id,
-            resume={"decisions": [dict(decision) for decision in decisions]},
+            resume={interrupt_id: {"decisions": [dict(decision) for decision in decisions]}},
             **kwargs,
         )
 

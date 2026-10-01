@@ -230,20 +230,32 @@ class TestRejectionSurvivesSerialization:
 
 
 class TestResumeValidation:
-    """``resume`` needs both a parked thread and at least one decision."""
+    """``resume`` needs a parked thread, the interrupt it answers, and a decision."""
 
     def test_requires_a_thread_id(self):
         client = DeerFlowClient.__new__(DeerFlowClient)
         with pytest.raises(ValueError, match="thread_id"):
-            next(client.resume([{"type": "approve"}], thread_id=""))
+            next(client.resume([{"type": "approve"}], thread_id="", interrupt_id="int-1"))
+
+    def test_requires_an_interrupt_id(self):
+        """Without it the resume would answer whatever is pending now."""
+        client = DeerFlowClient.__new__(DeerFlowClient)
+        with pytest.raises(ValueError, match="interrupt_id"):
+            next(client.resume([{"type": "approve"}], thread_id="t-1", interrupt_id=""))
 
     def test_requires_at_least_one_decision(self):
         client = DeerFlowClient.__new__(DeerFlowClient)
         with pytest.raises(ValueError, match="at least one decision"):
-            next(client.resume([], thread_id="t-1"))
+            next(client.resume([], thread_id="t-1", interrupt_id="int-1"))
+
+    @staticmethod
+    def _parked_client(monkeypatch, pending=("int-1",)):
+        client = DeerFlowClient.__new__(DeerFlowClient)
+        monkeypatch.setattr(client, "_pending_interrupt_ids", lambda thread_id, **kw: list(pending))
+        return client
 
     def test_forwards_decisions_as_a_resume_command(self, monkeypatch):
-        client = DeerFlowClient.__new__(DeerFlowClient)
+        client = self._parked_client(monkeypatch)
         seen = {}
 
         def fake_stream(message, *, thread_id=None, resume=None, **kwargs):
@@ -254,16 +266,17 @@ class TestResumeValidation:
 
         monkeypatch.setattr(client, "stream", fake_stream)
 
-        list(client.resume([{"type": "approve"}], thread_id="t-1"))
+        list(client.resume([{"type": "approve"}], thread_id="t-1", interrupt_id="int-1"))
 
         assert seen["thread_id"] == "t-1"
-        assert seen["resume"] == {"decisions": [{"type": "approve"}]}
+        # Keyed by the interrupt id, so LangGraph delivers it only there.
+        assert seen["resume"] == {"int-1": {"decisions": [{"type": "approve"}]}}
         # A resume must not append a new HumanMessage.
         assert seen["message"] == ""
 
     def test_copies_each_decision_mapping(self, monkeypatch):
         """The payload must not alias caller-owned mappings."""
-        client = DeerFlowClient.__new__(DeerFlowClient)
+        client = self._parked_client(monkeypatch)
         seen = {}
 
         def fake_stream(message, *, thread_id=None, resume=None, **kwargs):
@@ -273,12 +286,77 @@ class TestResumeValidation:
         monkeypatch.setattr(client, "stream", fake_stream)
 
         original = {"type": "approve"}
-        list(client.resume([original], thread_id="t-1"))
+        list(client.resume([original], thread_id="t-1", interrupt_id="int-1"))
 
-        forwarded = seen["resume"]["decisions"][0]
+        forwarded = seen["resume"]["int-1"]["decisions"][0]
         assert forwarded == original
         assert forwarded is not original
         assert isinstance(forwarded, Mapping)
+
+
+class TestResumeChecksThePark:
+    """``resume()`` must not report success for decisions nobody received.
+
+    A newer ordinary run on the thread replaces the park instead of queueing
+    behind it. A bare ``Command(resume=...)`` then either finds nothing pending
+    (a silent no-op) or answers the newer park's tool calls. The client checks
+    the reviewed interrupt is still the pending one, and sends the decisions
+    keyed by its id so LangGraph cannot deliver them anywhere else.
+    """
+
+    @staticmethod
+    def _client(monkeypatch, snapshot_interrupts):
+        """Real ``_pending_interrupt_ids`` over a stubbed graph and checkpointer."""
+        client = DeerFlowClient.__new__(DeerFlowClient)
+        client._agent = SimpleNamespace(get_state=lambda config: SimpleNamespace(interrupts=snapshot_interrupts, metadata={}))
+        client._checkpointer = object()
+        client._checkpoint_channel_mode = "full"
+        monkeypatch.setattr(client, "_get_runnable_config", lambda thread_id, **kw: {"configurable": {"thread_id": thread_id}})
+        monkeypatch.setattr(client, "_ensure_agent", lambda config, context=None: None)
+        streamed = []
+
+        def fake_stream(message, *, thread_id=None, resume=None, **kwargs):
+            streamed.append(resume)
+            yield from ()
+
+        monkeypatch.setattr(client, "stream", fake_stream)
+        return client, streamed
+
+    def test_a_thread_with_nothing_pending_is_refused(self, monkeypatch):
+        """Would otherwise be a silent no-op that looks like a completed resume."""
+        client, streamed = self._client(monkeypatch, ())
+
+        with pytest.raises(ValueError, match="nothing is pending"):
+            list(client.resume([{"type": "approve"}], thread_id="t-1", interrupt_id="int-1"))
+        assert streamed == []
+
+    def test_a_superseded_interrupt_id_is_refused(self, monkeypatch):
+        """A newer park replaced the one the human reviewed."""
+        client, streamed = self._client(monkeypatch, (Interrupt(value={}, id="int-new"),))
+
+        with pytest.raises(ValueError, match="superseded"):
+            list(client.resume([{"type": "approve"}], thread_id="t-1", interrupt_id="int-old"))
+        assert streamed == []
+
+    def test_the_matching_interrupt_id_is_resumed(self, monkeypatch):
+        client, streamed = self._client(monkeypatch, (Interrupt(value={}, id="int-1"),))
+
+        list(client.resume([{"type": "approve"}], thread_id="t-1", interrupt_id="int-1"))
+
+        assert streamed == [{"int-1": {"decisions": [{"type": "approve"}]}}]
+
+    def test_the_interrupt_id_is_not_forwarded_as_a_stream_override(self, monkeypatch):
+        client, _ = self._client(monkeypatch, (Interrupt(value={}, id="int-1"),))
+        seen = {}
+
+        def fake_stream(message, *, thread_id=None, resume=None, **kwargs):
+            seen.update(kwargs)
+            yield from ()
+
+        monkeypatch.setattr(client, "stream", fake_stream)
+        list(client.resume([{"type": "approve"}], thread_id="t-1", interrupt_id="int-1"))
+
+        assert "interrupt_id" not in seen
 
 
 class TestResumeIsNeverDowngraded:

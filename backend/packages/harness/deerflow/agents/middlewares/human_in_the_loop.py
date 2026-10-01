@@ -361,14 +361,24 @@ class DeerFlowHumanInTheLoopMiddleware(HumanInTheLoopMiddleware):
         omitting the key would raise a bare ``KeyError`` from library code before
         any check here could describe the contract.
 
-        Only ``edit`` is checked. The other decision types carry no tool args,
-        and upstream already raises a clear ``ValueError`` for a type that the
-        tool's ``allowed_decisions`` does not permit.
+        Upstream subscripts ``decision["type"]`` for every decision and
+        ``decision["message"]`` for ``respond``, so both are required here;
+        ``reject`` reads ``message`` through ``.get()`` with a default and is left
+        alone. Past that, only ``edit`` carries tool args worth checking. A
+        string ``type`` that is not a decision is deliberately left to upstream,
+        whose ``ValueError`` names the tool's ``allowed_decisions``.
         """
         if not isinstance(decision, Mapping):
             msg = f"Each tool-approval decision must be a mapping, got {type(decision).__name__}."
             raise ValueError(msg)
-        if decision.get("type") != "edit":
+        decision_type = decision.get("type")
+        if not isinstance(decision_type, str):
+            msg = f"A tool-approval decision for {tool_call['name']!r} must carry a string 'type', got {type(decision_type).__name__}."
+            raise ValueError(msg)
+        if decision_type == "respond" and not isinstance(decision.get("message"), str):
+            msg = f"A 'respond' decision for {tool_call['name']!r} must carry a string 'message', got {type(decision.get('message')).__name__}."
+            raise ValueError(msg)
+        if decision_type != "edit":
             return
 
         edited_action = decision.get("edited_action")
@@ -530,6 +540,8 @@ class DeerFlowHumanInTheLoopMiddleware(HumanInTheLoopMiddleware):
 def create_interrupt_middleware(
     app_config: AppConfig | None = None,
     tools: Sequence[BaseTool] | None = None,
+    *,
+    subagent_enabled: bool = False,
 ) -> DeerFlowHumanInTheLoopMiddleware | None:
     """Build the tool-approval middleware from ``tools[].interrupt_on`` config.
 
@@ -538,6 +550,8 @@ def create_interrupt_middleware(
         tools: The agent's assembled tools, used to capture argument schemas for
             the ``edit`` decision. LangGraph's batch-mode request omits the tool
             list, so schemas must be captured here at assembly time.
+        subagent_enabled: Whether this agent can delegate. Subagents are not
+            gated, so a warning is logged for each gated tool one can reach.
 
     Returns:
         The middleware, or ``None`` when no tool requests approval — the common
@@ -578,4 +592,51 @@ def create_interrupt_middleware(
         if schema is not None:
             config["args_schema"] = schema
 
+    if subagent_enabled:
+        _warn_on_subagent_bypass(interrupt_on, resolved_app_config)
+
     return DeerFlowHumanInTheLoopMiddleware(interrupt_on=interrupt_on)
+
+
+# Warnings already logged, keyed by (subagent, gated tools it reaches). The lead
+# agent is rebuilt whenever its config key changes, so without this the same
+# warning would repeat on every rebuild.
+_warned_subagent_bypass: set[tuple[str, tuple[str, ...]]] = set()
+
+
+def _warn_on_subagent_bypass(interrupt_on: Mapping[str, Any], app_config: Any) -> None:
+    """Warn when a gated tool is also reachable through a subagent.
+
+    Subagents are built without this middleware and compiled with
+    ``checkpointer=False``, so they have nowhere to park: a gated tool a subagent
+    can call runs there without review. Delegation is model-driven, which makes
+    this a way around the gate rather than a corner case. Gating subagents is
+    out of scope for now (see docs/TOOL_APPROVAL.md "Subagents are not gated");
+    this at least says so where the operator will see it.
+    """
+    try:
+        from deerflow.subagents.registry import get_available_subagent_names, get_subagent_config
+
+        # Only subagents this runtime exposes: ``bash`` is hidden when host bash
+        # is not allowed, and warning about it then would be noise.
+        subagents = [config for name in get_available_subagent_names(app_config=app_config) if (config := get_subagent_config(name, app_config=app_config)) is not None]
+    except Exception:  # noqa: BLE001 - a diagnostic must never break agent assembly
+        logger.debug("Could not list subagents to check tool-approval coverage", exc_info=True)
+        return
+
+    gated = set(interrupt_on)
+    for subagent in subagents:
+        # ``tools=None`` inherits every parent tool (general-purpose does).
+        reachable = gated if subagent.tools is None else gated & set(subagent.tools)
+        reachable -= set(subagent.disallowed_tools or ())
+        if not reachable:
+            continue
+        key = (subagent.name, tuple(sorted(reachable)))
+        if key in _warned_subagent_bypass:
+            continue
+        _warned_subagent_bypass.add(key)
+        logger.warning(
+            "Tool approval does not cover subagents: %s can call %s without review. Restrict that subagent's tools or disable subagents if every call must be approved.",
+            subagent.name,
+            ", ".join(key[1]),
+        )

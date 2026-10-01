@@ -570,6 +570,86 @@ class TestCreateInterruptMiddleware:
         middleware = create_interrupt_middleware(app_config, tools=[bash_tool])
         assert "args_schema" not in middleware.interrupt_on["bash_tool"]
 
+    @staticmethod
+    def _gated_config(*names):
+        return SimpleNamespace(tools=[ToolConfig(name=name, group="sandbox", use="deerflow.sandbox.tools:bash_tool", interrupt_on=InterruptOnConfigModel(allowed_decisions=["approve"])) for name in names])
+
+    @staticmethod
+    def _subagents(monkeypatch, *configs):
+        """Expose exactly *configs* as this runtime's subagents."""
+        import deerflow.agents.middlewares.human_in_the_loop as hitl
+        import deerflow.subagents.registry as registry
+
+        by_name = {config.name: config for config in configs}
+        monkeypatch.setattr(registry, "get_available_subagent_names", lambda app_config=None: list(by_name))
+        monkeypatch.setattr(registry, "get_subagent_config", lambda name, app_config=None: by_name.get(name))
+        monkeypatch.setattr(hitl, "_warned_subagent_bypass", set())
+
+    def test_warns_when_an_inheriting_subagent_reaches_a_gated_tool(self, monkeypatch, caplog):
+        """``general-purpose`` uses ``tools=None``: it inherits the gated tool, ungated."""
+        from deerflow.subagents.config import SubagentConfig
+
+        self._subagents(monkeypatch, SubagentConfig(name="general-purpose", description="", system_prompt="", tools=None))
+
+        with caplog.at_level("WARNING"):
+            create_interrupt_middleware(self._gated_config("bash"), subagent_enabled=True)
+
+        assert "general-purpose can call bash without review" in caplog.text
+
+    def test_warns_for_an_explicit_allowlist_that_names_a_gated_tool(self, monkeypatch, caplog):
+        from deerflow.subagents.config import SubagentConfig
+
+        self._subagents(monkeypatch, SubagentConfig(name="bash", description="", system_prompt="", tools=["bash", "ls"]))
+
+        with caplog.at_level("WARNING"):
+            create_interrupt_middleware(self._gated_config("bash", "web_search"), subagent_enabled=True)
+
+        assert "bash can call bash without review" in caplog.text
+        assert "web_search" not in caplog.text
+
+    def test_a_denylisted_gated_tool_is_not_reported(self, monkeypatch, caplog):
+        from deerflow.subagents.config import SubagentConfig
+
+        self._subagents(monkeypatch, SubagentConfig(name="general-purpose", description="", system_prompt="", tools=None, disallowed_tools=["bash"]))
+
+        with caplog.at_level("WARNING"):
+            create_interrupt_middleware(self._gated_config("bash"), subagent_enabled=True)
+
+        assert "without review" not in caplog.text
+
+    def test_no_warning_when_subagents_are_disabled(self, monkeypatch, caplog):
+        """Without delegation there is no way around the gate to report."""
+        from deerflow.subagents.config import SubagentConfig
+
+        self._subagents(monkeypatch, SubagentConfig(name="general-purpose", description="", system_prompt="", tools=None))
+
+        with caplog.at_level("WARNING"):
+            create_interrupt_middleware(self._gated_config("bash"))
+
+        assert "without review" not in caplog.text
+
+    def test_the_warning_is_logged_once_across_rebuilds(self, monkeypatch, caplog):
+        """The lead agent is rebuilt on every config-key change."""
+        from deerflow.subagents.config import SubagentConfig
+
+        self._subagents(monkeypatch, SubagentConfig(name="general-purpose", description="", system_prompt="", tools=None))
+
+        with caplog.at_level("WARNING"):
+            create_interrupt_middleware(self._gated_config("bash"), subagent_enabled=True)
+            create_interrupt_middleware(self._gated_config("bash"), subagent_enabled=True)
+
+        assert caplog.text.count("without review") == 1
+
+    def test_a_failing_registry_does_not_break_assembly(self, monkeypatch):
+        import deerflow.subagents.registry as registry
+
+        def _boom(app_config=None):
+            raise RuntimeError("registry unavailable")
+
+        monkeypatch.setattr(registry, "get_available_subagent_names", _boom)
+
+        assert create_interrupt_middleware(self._gated_config("bash"), subagent_enabled=True) is not None
+
     def test_ignores_ask_clarification_defensively(self):
         """Config validation blocks this; the builder must not trust that alone."""
         clarification = ToolConfig.model_construct(
@@ -753,6 +833,62 @@ class TestReplaySafeAcrossContextChange:
         assert tool_message.content == "too risky"
 
 
+class TestResumeKeyedByInterruptId:
+    """``DeerFlowClient.resume()`` sends ``{interrupt_id: {"decisions": ...}}``.
+
+    A newer ordinary run replaces a park instead of queueing behind it, so a
+    bare resume value answers whatever is pending when it lands — possibly a
+    different tool call from the one the human reviewed. Keyed by id, LangGraph
+    delivers the value only to that interrupt; these drive a real compiled graph
+    so the middleware sees exactly what LangGraph hands ``interrupt()``.
+    """
+
+    @staticmethod
+    def _graph(middleware):
+        def node(state, runtime):
+            return middleware.after_model(state, runtime) or {}
+
+        graph = StateGraph(_GraphState, context_schema=dict)
+        graph.add_node("node", node)
+        graph.add_edge(START, "node")
+        graph.add_edge("node", END)
+        return graph.compile(checkpointer=InMemorySaver())
+
+    @staticmethod
+    def _park(compiled, config, command):
+        compiled.invoke(
+            {"messages": [HumanMessage(content="do it"), AIMessage(content="", tool_calls=[_call(args={"command": command}, call_id=f"call-{command}")], id=f"ai-{command}")]},
+            config,
+            context={},
+        )
+        return compiled.get_state(config).interrupts[0].id
+
+    def test_the_matching_id_delivers_the_decisions(self):
+        compiled = self._graph(_middleware(allowed_decisions=("approve", "reject")))
+        config = {"configurable": {"thread_id": "t-1"}}
+        interrupt_id = self._park(compiled, config, "ls")
+
+        compiled.invoke(Command(resume={interrupt_id: {"decisions": [{"type": "reject", "message": "no"}]}}), config, context={})
+
+        tool_message = compiled.get_state(config).values["messages"][-1]
+        assert isinstance(tool_message, ToolMessage)
+        assert (tool_message.tool_call_id, tool_message.status) == ("call-ls", "error")
+        assert compiled.get_state(config).interrupts == ()
+
+    def test_a_superseded_id_does_not_answer_the_newer_park(self):
+        """The bug a bare value has: approving A must never execute B."""
+        compiled = self._graph(_middleware(allowed_decisions=("approve", "reject")))
+        config = {"configurable": {"thread_id": "t-1"}}
+        stale_id = self._park(compiled, config, "ls")
+        newer_id = self._park(compiled, config, "rm")
+
+        compiled.invoke(Command(resume={stale_id: {"decisions": [{"type": "approve"}]}}), config, context={})
+
+        snapshot = compiled.get_state(config)
+        assert [entry.id for entry in snapshot.interrupts] == [newer_id]
+        assert not any(isinstance(message, ToolMessage) for message in snapshot.values["messages"])
+
+
 class TestUnattendedRunsShareOneSignal:
     """ "No human attached" has one definition, and this middleware uses it.
 
@@ -848,6 +984,55 @@ class TestResumePayloadShape:
     def test_a_decision_that_is_not_a_mapping_is_refused(self):
         with _patched_interrupt(None, raw_resume={"decisions": ["approve"]}):
             with pytest.raises(ValueError, match="decision must be a mapping"):
+                _middleware().after_model(_state([_call()]), _runtime())
+
+    @pytest.mark.parametrize(
+        ("decision", "match"),
+        [
+            # Upstream's ``_process_decision`` opens with ``decision["type"]``.
+            pytest.param({}, "must carry a string 'type'", id="empty-mapping"),
+            pytest.param({"message": "no"}, "must carry a string 'type'", id="missing-type"),
+            pytest.param({"type": None}, "must carry a string 'type'", id="null-type"),
+            pytest.param({"type": ["approve"]}, "must carry a string 'type'", id="list-type"),
+            # ...and its ``respond`` branch reads ``decision["message"]`` unguarded.
+            pytest.param({"type": "respond"}, "'respond' decision .* must carry a string 'message'", id="respond-without-message"),
+            pytest.param({"type": "respond", "message": 42}, "'respond' decision .* must carry a string 'message'", id="respond-non-string-message"),
+        ],
+    )
+    def test_a_malformed_decision_is_refused_before_upstream_subscripts_it(self, decision, match):
+        """Each of these escaped the envelope guards as a bare ``KeyError``.
+
+        The envelope was validated, but a single decision was only checked for
+        ``edit``: anything else went straight to upstream's
+        ``_process_decision``, which subscripts ``type`` and, for ``respond``,
+        ``message`` without a guard. A non-string ``message`` is refused too:
+        it would otherwise surface later, from ``ToolMessage`` validation.
+        """
+        with _patched_interrupt(None, raw_resume={"decisions": [decision]}):
+            with pytest.raises(ValueError, match=match):
+                _middleware().after_model(_state([_call()]), _runtime())
+
+    def test_a_reject_without_a_message_still_works(self):
+        """``reject`` uses ``decision.get("message") or <default>`` upstream.
+
+        Requiring ``message`` for it would refuse a decision the library itself
+        accepts, so the new guard must stay scoped to ``respond``.
+        """
+        with _patched_interrupt(None, raw_resume={"decisions": [{"type": "reject"}]}):
+            result = _middleware().after_model(_state([_call()]), _runtime())
+
+        tool_message = result["messages"][-1]
+        assert tool_message.status == "error"
+        assert "rejected" in tool_message.content
+
+    def test_an_unknown_type_still_gets_upstreams_message(self):
+        """A string ``type`` that is not a decision stays upstream's to reject.
+
+        The guard checks shape only; upstream already raises a ``ValueError``
+        naming the tool's ``allowed_decisions``, which is the more useful error.
+        """
+        with _patched_interrupt(None, raw_resume={"decisions": [{"type": "approve-all"}]}):
+            with pytest.raises(ValueError, match="is not allowed for tool"):
                 _middleware().after_model(_state([_call()]), _runtime())
 
 

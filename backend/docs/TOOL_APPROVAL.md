@@ -15,6 +15,10 @@ LangGraph `interrupt()`. The run parks in the checkpoint as a pending task and
 resumes only on `Command(resume={"decisions": [...]})` — what
 `DeerFlowClient.resume()` sends.
 
+**The gate covers the lead agent only.** A subagent that can call a gated tool
+runs it without review; see "Subagents are not gated" before relying on
+`interrupt_on` as a hard control.
+
 ## Two human-in-the-loop paths
 
 `ask_clarification` and tool approval are both "ask the human", and they are not
@@ -222,6 +226,53 @@ its pending write, so the thread can be resumed again — so this is about the
 operator getting a failure that names the contract instead of a `KeyError` from
 wherever Python happened to complain. Pinned by `TestResumePayloadShape`.
 
+The same goes for each entry. Upstream `_process_decision` subscripts
+`decision["type"]`, and `respond` subscripts `decision["message"]`, so
+`_check_decision` requires every decision to be a mapping with a string `type`,
+and a `respond` to carry a string `message`. `reject` is left alone — upstream
+reads its message with `.get()` and falls back to a default — and an unknown
+string `type` still reaches upstream's own "is not allowed for tool" error.
+
+### A resume answers whatever is pending now
+
+`Command(resume=...)` carries no interrupt id: it answers the interrupt pending
+on the thread's latest checkpoint *at the time it lands*. A parked run is
+terminal to `RunManager` (its status is `success`), so `multitask_strategy="reject"`
+does not fence it — an ordinary run on the same thread is admitted, supersedes
+the checkpoint, and may park on a different gated call. Two outcomes follow,
+both silent:
+
+- if the new run finished without parking, the resume finds nothing pending and
+  LangGraph returns without error — the caller's decisions were received by
+  nobody;
+- if it parked again, the resume answers *that* park — an `approve` the human
+  gave for one call executes another.
+
+Superseded parks do not accumulate: the checkpoint only ever holds the latest
+one, and this middleware raises a single `interrupt()` per batch, so a thread
+has at most one pending approval. An id the human reviewed is either that one
+or gone.
+
+LangGraph also accepts a resume value keyed by interrupt id —
+`Command(resume={interrupt_id: value})` — and delivers it only to that
+interrupt; an id that is no longer pending answers nothing and leaves the newer
+park pending. `DeerFlowClient.resume()` therefore **requires** `interrupt_id`
+(carried by the `interrupt` event and `ToolApprovalRequired.interrupts`) and
+sends the decisions keyed by it, so an approval can never execute a different
+call. It also checks the snapshot first and raises `ValueError` when that id is
+not pending, which turns the remaining outcome — a resume that answers nothing —
+into an error. That check is advisory, not a fence: a run landing between it and
+the write still leaves the resume a no-op, but never a wrong execution. Pinned by
+`tests/test_client_tool_approval.py::TestResumeChecksThePark` and, against a real
+compiled graph, `tests/test_human_in_the_loop_middleware.py::TestResumeKeyedByInterruptId`.
+
+The Gateway forwards `command.resume` verbatim, so HTTP clients get the same
+guarantee by posting `{"command": {"resume": {"<interrupt_id>":
+{"decisions": [...]}}}}` instead of the bare `{"decisions": [...]}`. The bare
+form stays accepted and keeps the silent-mismatch risk. The Gateway does not yet
+refuse an ordinary run on a thread with a pending park, or report a resume whose
+id was superseded; both are follow-up work.
+
 ## Middleware placement
 
 `DeerFlowHumanInTheLoopMiddleware` subclasses LangChain's
@@ -230,8 +281,30 @@ registration order, so appending earlier means dispatching later: approval is
 appended ahead of every AI-only suppression guard and of
 `ClarificationMiddleware` precisely so it dispatches **after** the guards and
 **before** clarification. It is applied to the lead agent only; subagents are not
-gated. Pinned by `tests/test_hitl_middleware_order.py` (positions) and
+gated (see "Subagents are not gated" below). Pinned by
+`tests/test_hitl_middleware_order.py` (positions) and
 `tests/test_approval_suppression_order.py` (the behaviour those positions buy).
+
+### Subagents are not gated
+
+`interrupt_on` gates a tool on the **lead agent only**. Subagents are assembled
+by `build_subagent_runtime_middlewares`, which never adds this middleware, and
+compiled with `checkpointer=False`, so a subagent has nowhere to park even if it
+had the gate. A gated tool that a subagent can call therefore runs there without
+review — and since delegation is the model's choice, that is a route around the
+gate, not a corner case. With subagents enabled, both built-ins reach the tool
+most likely to be gated: `general-purpose` inherits every parent tool
+(`tools=None`), and `bash` allows `bash`, `ls`, `read_file`, `write_file` and
+`str_replace` explicitly.
+
+Gating subagents would need a resumable subagent checkpoint and a way to route
+its park back through the parent run's interrupt, which is follow-up work. Until
+then, `create_interrupt_middleware` logs a warning at agent assembly for each
+exposed subagent (after its allow/deny lists) that can reach a gated tool, once
+per subagent and tool set. If every call of a tool must be reviewed, disable
+subagents (`subagent_enabled=false`) or remove the tool from each subagent via
+its `tools` / `disallowed_tools`. Pinned by
+`tests/test_human_in_the_loop_middleware.py::TestCreateInterruptMiddleware`.
 
 Each end of that range is load-bearing for its own reason.
 

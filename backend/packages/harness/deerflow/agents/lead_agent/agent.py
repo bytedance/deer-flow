@@ -714,7 +714,7 @@ def build_middlewares(
     # Registered unconditionally; clients that cannot answer a park send
     # ``disable_tool_approval`` per run instead. Pinned by
     # tests/test_hitl_middleware_order.py and test_approval_suppression_order.py.
-    interrupt_middleware = create_interrupt_middleware(resolved_app_config, tools=tools)
+    interrupt_middleware = create_interrupt_middleware(resolved_app_config, tools=tools, subagent_enabled=bool(cfg.get("subagent_enabled", False)))
     if interrupt_middleware:
         middlewares.append(interrupt_middleware)
 

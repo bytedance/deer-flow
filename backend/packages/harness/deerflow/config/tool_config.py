@@ -51,7 +51,12 @@ class ToolConfig(BaseModel):
         ...,
         description="Variable name of the tool provider(e.g. deerflow.sandbox.tools:bash_tool)",
     )
-    interrupt_on: InterruptOnConfig | None = Field(default=None, description="Request human approval before this tool executes.")
+    interrupt_on: InterruptOnConfig | None = Field(
+        default=None,
+        description=(
+            "Request human approval before this tool executes. Applies to the lead agent only: a subagent that can call this tool runs it without review, so restrict the tool on subagents or disable them if every call must be approved."
+        ),
+    )
     model_config = ConfigDict(extra="allow")
 
     @model_validator(mode="after")

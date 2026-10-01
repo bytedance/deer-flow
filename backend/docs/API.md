@@ -216,6 +216,15 @@ projection under `interrupts`, keyed by task id, and `POST
 posting a `Command(resume={"decisions": [...]})` input. See
 [TOOL_APPROVAL.md](TOOL_APPROVAL.md).
 
+A parked run does not block new runs on its thread, so an ordinary run posted in
+between can replace the park. A bare `{"decisions": [...]}` resume then answers
+whatever is pending when it lands — possibly a different tool call. Key the
+resume by the interrupt id the human reviewed, `{"command": {"resume":
+{"<interrupt_id>": {"decisions": [...]}}}}`: LangGraph delivers it only to that
+interrupt, and a superseded id answers nothing instead of the newer request. The
+run still succeeds in that case, so re-read `GET /api/threads/{thread_id}`
+afterwards if you need to confirm the decision was consumed.
+
 The two blocking endpoints carry it as well. `interrupt()` exits the graph
 normally, so a park is indistinguishable from a completion at the checkpoint's
 `values` — a resume that parks again would otherwise return a mid-turn approval
