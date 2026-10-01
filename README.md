@@ -284,6 +284,7 @@ It is disabled by default; see the linked guide to enable it.
    ```
 
    - Codex CLI reads `~/.codex/auth.json`
+   - The Codex model provider returns completed responses without waiting for the SSE connection to close. Failed or incomplete responses report the provider's error or reason; partial output is not returned as a successful answer.
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
    - ACP agent entries are separate from model providers — if you configure `acp_agents.codex`, point it at a Codex ACP adapter such as `npx -y @zed-industries/codex-acp`
    - MiniMax Code speaks ACP directly. Install and authenticate it, then add it as an ACP agent:
