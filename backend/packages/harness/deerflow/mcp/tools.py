@@ -646,11 +646,7 @@ def _make_session_pool_tool(
         else:
             session = await session_request
 
-        domain_kwargs = (
-            {"domain": ownership_domain}
-            if ownership_domain != "deployment"
-            else {}
-        )
+        domain_kwargs = {"domain": ownership_domain} if ownership_domain != "deployment" else {}
 
         # Build common call_tool kwargs once — only add keys when needed so
         # existing call-sites that assert on exact arguments are not affected.
@@ -1044,11 +1040,7 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
                             tool_call_timeout=_timeout,
                             session_init_timeout=_init_timeout,
                             tool_name_prefix=tool_name_prefix,
-                            ownership_domain=(
-                                "personal"
-                                if personal_user_id is not None
-                                else "deployment"
-                            ),
+                            ownership_domain=("personal" if personal_user_id is not None else "deployment"),
                         )
                     )
                 else:

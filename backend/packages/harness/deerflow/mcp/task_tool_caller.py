@@ -200,13 +200,7 @@ class McpTaskToolCaller:
             )
             pool = get_session_pool()
             session_init_timeout = server_config.session_init_timeout
-            session_request = (
-                pool.get_session(server_name, scope_key, connection)
-                if connection_scope == "deployment"
-                else pool.get_session(
-                    server_name, scope_key, connection, domain=connection_scope
-                )
-            )
+            session_request = pool.get_session(server_name, scope_key, connection) if connection_scope == "deployment" else pool.get_session(server_name, scope_key, connection, domain=connection_scope)
             if session_init_timeout is not None:
                 try:
                     session = await asyncio.wait_for(
@@ -298,11 +292,7 @@ class McpTaskToolCaller:
                             "Ignoring MCP interceptor headers with unsupported type: %s",
                             type(request.headers).__name__,
                         )
-                domain_kwargs = (
-                    {"domain": connection_scope}
-                    if connection_scope != "deployment"
-                    else {}
-                )
+                domain_kwargs = {"domain": connection_scope} if connection_scope != "deployment" else {}
                 return await call_pooled_session_tool(
                     session,
                     pool,
