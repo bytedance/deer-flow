@@ -62,7 +62,7 @@ async def test_agent_persistent_writes_route_through_write_drain(_agent_env, mon
         assert isinstance(expected_errors, tuple)
         return func(*args, **kwargs)
 
-    monkeypatch.setattr(router, "_drained_write", drained)
+    monkeypatch.setattr(router, "run_drained_write", drained)
 
     await create_agent_endpoint(AgentCreateRequest(name="planner", model="agent-model"))
     await update_agent("planner", AgentUpdateRequest(description="later"))
@@ -140,7 +140,7 @@ async def test_agent_update_logs_lost_worker_failure_after_cancellation(_agent_e
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
 
-    failures = [record for record in caplog.records if record.name == router.__name__ and "Update agent failed" in record.message]
+    failures = [record for record in caplog.records if record.name == "app.gateway.persistent_writes" and "Update agent failed" in record.message]
     assert len(failures) == 1
     assert "OSError" in failures[0].message
     assert "worker-secret" not in caplog.text

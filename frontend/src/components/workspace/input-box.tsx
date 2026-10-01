@@ -35,6 +35,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
+import { flushSync } from "react-dom";
 import { toast } from "sonner";
 
 import {
@@ -101,6 +102,7 @@ import {
   buildReferenceMessageMetadata,
   type SidecarContext,
 } from "@/core/sidecar";
+import { parseSlashSkillReference } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
 import { DEFAULT_MAX_SUGGESTIONS } from "@/core/suggestions/api";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
@@ -156,15 +158,15 @@ import {
   filterSkillsForAgent,
   getGoalObjectiveCounter,
   getInputSubmitAction,
-  getLeadingSlashSkillQuery,
-  getMatchingSkillSuggestions,
+  getLeadingSlashCommandQuery,
+  getMatchingSlashCommands,
   type GoalCommand,
   isAbortError,
   isCurrentGoalRequest,
   isGoalObjectiveTooLong,
   MAX_GOAL_OBJECTIVE_CHARS,
   readGoalResponseError,
-  type SlashSuggestion,
+  type SlashCommandSuggestion,
 } from "./input-box-helpers";
 import {
   inlineReferences,
@@ -192,7 +194,6 @@ import {
   ModelPickerTrigger,
 } from "./model-picker-content";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
-import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
 
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 300;
@@ -586,11 +587,9 @@ export function InputBox({
     rewrittenText: string;
   } | null>(null);
   const [textareaFocused, setTextareaFocused] = useState(false);
-  const [skillSuggestionIndex, setSkillSuggestionIndex] = useState(0);
-  const [selectedSlashSkill, setSelectedSlashSkill] =
-    useState<SlashSuggestion | null>(null);
+  const [commandSuggestionIndex, setCommandSuggestionIndex] = useState(0);
   const [hydratedDraftKey, setHydratedDraftKey] = useState<string | null>(null);
-  const [dismissedSkillSuggestionValue, setDismissedSkillSuggestionValue] =
+  const [dismissedCommandSuggestionValue, setDismissedCommandSuggestionValue] =
     useState<string | null>(null);
   const lastGeneratedForAiIdRef = useRef<string | null>(null);
   const wasStreamingRef = useRef(false);
@@ -655,17 +654,15 @@ export function InputBox({
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
     null,
   );
-  const builtinSlashCommands = useMemo<SlashSuggestion[]>(
+  const builtinSlashCommands = useMemo<SlashCommandSuggestion[]>(
     () => [
       {
         name: "goal",
         description: t.inputBox.goalCommandDescription,
-        kind: "builtin",
       },
       {
         name: "compact",
         description: t.inputBox.compactCommandDescription,
-        kind: "builtin",
       },
     ],
     [t.inputBox.compactCommandDescription, t.inputBox.goalCommandDescription],
@@ -869,14 +866,22 @@ export function InputBox({
       agentSkillsLoading ? [] : filterSkillsForAgent(skills, agentSkillNames),
     [agentSkillNames, agentSkillsLoading, skills],
   );
+  const mentionSkills = useMemo(
+    () =>
+      agentScopedSkills.filter(
+        (skill) =>
+          parseSlashSkillReference(`/${skill.name}`)?.name === skill.name,
+      ),
+    [agentScopedSkills],
+  );
   const enabledSkillNames = useMemo(
     () =>
       new Set(
-        agentScopedSkills
+        mentionSkills
           .filter((skill) => skill.enabled)
           .map((skill) => skill.name),
       ),
-    [agentScopedSkills],
+    [mentionSkills],
   );
   const cancelDraftSaveTimer = useCallback(() => {
     if (draftSaveTimerRef.current === null) {
@@ -1000,7 +1005,6 @@ export function InputBox({
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
     setTextInput("");
-    setSelectedSlashSkill(null);
     setConversationReferences([]);
     setMentionQuery(null);
     setMentionButtonOpen(false);
@@ -1044,8 +1048,19 @@ export function InputBox({
     }
 
     const resolvedDraft = resolveComposerDraft(savedDraft, enabledSkillNames);
+    const restoredText =
+      resolvedDraft.skillName &&
+      !inlineReferences(resolvedDraft.text).some(
+        (ref) => ref.kind === "skill" && ref.id === resolvedDraft.skillName,
+      )
+        ? referenceToken(
+            "skill",
+            resolvedDraft.skillName,
+            resolvedDraft.skillName,
+          ) + (resolvedDraft.text ? ` ${resolvedDraft.text}` : "")
+        : resolvedDraft.text;
     setConversationReferences(savedDraft.conversationReferences ?? []);
-    const existingReferences = inlineReferences(resolvedDraft.text);
+    const existingReferences = inlineReferences(restoredText);
     const legacyReferences = (savedDraft.conversationReferences ?? []).filter(
       (ref) =>
         !existingReferences.some(
@@ -1058,21 +1073,7 @@ export function InputBox({
           (ref) =>
             referenceToken("conversation", ref.threadId, ref.title) + " ",
         )
-        .join("") + resolvedDraft.text,
-    );
-    const restoredSkill = resolvedDraft.skillName
-      ? agentScopedSkills.find(
-          (skill) => skill.enabled && skill.name === resolvedDraft.skillName,
-        )
-      : undefined;
-    setSelectedSlashSkill(
-      restoredSkill
-        ? {
-            name: restoredSkill.name,
-            description: restoredSkill.description,
-            kind: "skill",
-          }
-        : null,
+        .join("") + restoredText,
     );
     setHydratedDraftKey(draftKey);
   }, [
@@ -1094,8 +1095,7 @@ export function InputBox({
 
     const draft: ComposerDraft = {
       text: textInput.value ?? "",
-      skillName:
-        selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+      skillName: null,
     };
     const timer = scheduleDraftSave(draft, draftKey);
     return () => {
@@ -1107,13 +1107,7 @@ export function InputBox({
         draftSaveTimerRef.current = null;
       }
     };
-  }, [
-    draftKey,
-    hydratedDraftKey,
-    scheduleDraftSave,
-    selectedSlashSkill,
-    textInput.value,
-  ]);
+  }, [draftKey, hydratedDraftKey, scheduleDraftSave, textInput.value]);
 
   useEffect(() => {
     const goalRequestState = goalRequestStateRef.current;
@@ -1456,12 +1450,6 @@ export function InputBox({
             .map((ref) => ref.id),
         ),
       ];
-      if (
-        skillReferences.length &&
-        selectedSlashSkill?.kind === "skill" &&
-        !skillReferences.includes(selectedSlashSkill.name)
-      )
-        skillReferences.unshift(selectedSlashSkill.name);
       if (skillReferences.length > MAX_EXPLICIT_SKILLS) {
         toast.warning(t.inputBox.mentionMultipleSkills);
         return Promise.reject(new Error("Too many skill references."));
@@ -1469,8 +1457,7 @@ export function InputBox({
       pendingDraftSubmissionRef.current = {
         key: draftKey,
         text: textInput.value,
-        skillName:
-          selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+        skillName: null,
       };
       const additionalKwargs = {
         ...(skillReferences.length
@@ -1505,10 +1492,7 @@ export function InputBox({
             acceptedDraftRef.current = {
               key: draftKey,
               text: textInput.value,
-              skillName:
-                selectedSlashSkill?.kind === "skill"
-                  ? selectedSlashSkill.name
-                  : null,
+              skillName: null,
             };
             pendingDraftSubmissionRef.current = null;
             latestDraftRef.current = null;
@@ -1545,7 +1529,6 @@ export function InputBox({
     [
       context,
       textInput.value,
-      selectedSlashSkill,
       conversationReferences,
       draftKey,
       invalidateDraftSaveTimer,
@@ -1593,21 +1576,15 @@ export function InputBox({
       }
       abortVoiceInput();
       message = { ...message, text: readableReferences(message.text) };
-      const messageWithSlashSkill = selectedSlashSkill
-        ? {
-            ...message,
-            text: `/${selectedSlashSkill.name} ${message.text}`,
-          }
-        : message;
       const submitAction = getInputSubmitAction({
-        text: messageWithSlashSkill.text,
+        text: message.text,
         // Staged project-shelf attachments count exactly like uploaded
         // files: submitThreadMessage maps them into the outgoing message's
         // ``additional_kwargs.files``, so an attachment-only submit must not
         // read as empty, and /goal or /compact must not intercept while an
         // attach chip or explicit conversation reference is present.
         fileCount:
-          messageWithSlashSkill.files.length +
+          message.files.length +
           projectAttachments.length +
           conversationReferences.length +
           inlineRefs.length,
@@ -1689,10 +1666,7 @@ export function InputBox({
       if (submitAction.kind === "empty") {
         return;
       }
-      await submitThreadMessage(messageWithSlashSkill);
-      if (selectedSlashSkill) {
-        setSelectedSlashSkill(null);
-      }
+      await submitThreadMessage(message);
     },
     [
       abortVoiceInput,
@@ -1703,7 +1677,6 @@ export function InputBox({
       projectAttachments.length,
       conversationReferences.length,
       inlineRefs.length,
-      selectedSlashSkill,
       status,
       submitThreadMessage,
       t.inputBox.goalTooLong,
@@ -1763,47 +1736,27 @@ export function InputBox({
     setTimeout(() => requestFormSubmit(), 0);
   }, [pendingSuggestion, requestFormSubmit, textInput]);
 
-  const slashSkillQuery = useMemo(
-    () => getLeadingSlashSkillQuery(textInput.value ?? ""),
+  const slashCommandQuery = useMemo(
+    () => getLeadingSlashCommandQuery(textInput.value ?? ""),
     [textInput.value],
   );
   const goalObjectiveCounter = useMemo(
     () => getGoalObjectiveCounter(textInput.value ?? ""),
     [textInput.value],
   );
-  const skillSuggestions = useMemo(() => {
-    if (slashSkillQuery === null) {
-      return [];
-    }
-    const matches = getMatchingSkillSuggestions(
-      agentScopedSkills,
-      slashSkillQuery,
-      builtinSlashCommands,
-    );
-    // Builtin commands own the whole composer line, so they cannot be combined
-    // with a skill activation: `/goal` behind a selected skill would submit as
-    // chat text instead of running the command. Drop them from the result
-    // rather than withholding them from the helper, which needs the list to
-    // reserve their names — a skill named after a builtin is unusable for the
-    // mirrored reason, its submitted text runs the command, not the skill.
-    return selectedSlashSkill || hasInlineReferences
-      ? matches.filter(({ kind }) => kind === "skill")
-      : matches;
-  }, [
-    agentScopedSkills,
-    builtinSlashCommands,
-    hasInlineReferences,
-    selectedSlashSkill,
-    slashSkillQuery,
-  ]);
-  // A selected skill does not close the catalog: `/` reopens it so a skill can
-  // be found by browsing and swapped without first clearing the chip.
-  const showSkillSuggestions =
+  const commandSuggestions = useMemo(
+    () =>
+      slashCommandQuery === null || hasInlineReferences
+        ? []
+        : getMatchingSlashCommands(slashCommandQuery, builtinSlashCommands),
+    [builtinSlashCommands, hasInlineReferences, slashCommandQuery],
+  );
+  const showCommandSuggestions =
     !disabled &&
     textareaFocused &&
-    slashSkillQuery !== null &&
-    skillSuggestions.length > 0 &&
-    dismissedSkillSuggestionValue !== textInput.value;
+    slashCommandQuery !== null &&
+    commandSuggestions.length > 0 &&
+    dismissedCommandSuggestionValue !== textInput.value;
   const isComposerDisabled = disabled === true;
   const isMockThread = isMock === true;
   const composerLocked = isComposerDisabled || polishingInput || mentionBusy;
@@ -1886,11 +1839,9 @@ export function InputBox({
             : null;
       const selected =
         selectionId &&
-        (inlineReferences(originalText).some(
+        inlineReferences(originalText).some(
           (ref) => ref.kind === selection.kind && ref.id === selectionId,
-        ) ||
-          (selection.kind === "skill" &&
-            selectedSlashSkill?.name === selectionId));
+        );
       if (selected) {
         let next = mentionQuery
           ? originalText.slice(0, mentionQuery.start) +
@@ -1900,11 +1851,6 @@ export function InputBox({
           if (ref.kind === selection.kind && ref.id === selectionId)
             next = next.slice(0, ref.start) + next.slice(ref.end);
         }
-        if (
-          selection.kind === "skill" &&
-          selectedSlashSkill?.name === selectionId
-        )
-          setSelectedSlashSkill(null);
         if (selection.kind === "conversation")
           setConversationReferences((previous) =>
             previous.filter((ref) => ref.threadId !== selectionId),
@@ -2032,7 +1978,7 @@ export function InputBox({
         });
         writeComposerDraft(storage, nextKey, {
           text: nextText,
-          skillName: selectedSlashSkill?.name ?? null,
+          skillName: null,
           ...(conversationReferences.length ? { conversationReferences } : {}),
         });
         invalidateDraftSaveTimer();
@@ -2055,7 +2001,6 @@ export function InputBox({
       draftThreadId,
       invalidateDraftSaveTimer,
       onReferenceFileAttached,
-      selectedSlashSkill,
       user?.id,
       disabled,
       focusComposerAt,
@@ -2100,7 +2045,7 @@ export function InputBox({
     polishingInput ||
     (!inputPolishUndoAvailable &&
       (status === "streaming" ||
-        slashSkillQuery !== null ||
+        slashCommandQuery !== null ||
         !canPolishInput(textInput.value ?? "")));
   const speechRecognitionConstructor = useMemo(
     () =>
@@ -2290,55 +2235,47 @@ export function InputBox({
   }, [abortVoiceInput, threadId]);
 
   useEffect(() => {
-    setSkillSuggestionIndex(0);
-  }, [slashSkillQuery, skillSuggestions.length]);
+    setCommandSuggestionIndex(0);
+  }, [slashCommandQuery, commandSuggestions.length]);
 
-  const applySkillSuggestion = useCallback(
-    (suggestion: SlashSuggestion) => {
-      if (suggestion.kind === "skill") {
-        setSelectedSlashSkill(suggestion);
-        textInput.setInput("");
-        setDismissedSkillSuggestionValue(null);
-        requestAnimationFrame(() => {
-          focusContentEditableEnd(inlineSkillTextRef.current);
-        });
-        return;
-      }
-
+  const applyCommandSuggestion = useCallback(
+    (suggestion: SlashCommandSuggestion) => {
       const nextValue = `/${suggestion.name} `;
-      textInput.setInput(nextValue);
-      setDismissedSkillSuggestionValue(nextValue);
-      requestAnimationFrame(() => {
-        const textarea = textareaRef.current;
-        if (!textarea) {
-          return;
-        }
-        textarea.focus();
-        textarea.setSelectionRange(nextValue.length, nextValue.length);
+      // Commit the controlled text before moving the caret so React's selection
+      // restoration cannot put fast typing back inside the command name.
+      flushSync(() => {
+        textInput.setInput(nextValue);
+        setDismissedCommandSuggestionValue(nextValue);
       });
+      const editor = inlineSkillTextRef.current;
+      if (editor) {
+        focusReferenceAt(editor, nextValue.length);
+      } else {
+        focusComposerAt(nextValue.length);
+      }
     },
-    [textInput],
+    [focusComposerAt, textInput],
   );
 
-  const handleSkillSuggestionKeyDown = useCallback(
+  const handleCommandSuggestionKeyDown = useCallback(
     (event: KeyboardEvent<HTMLElement>) => {
-      if (!showSkillSuggestions) {
+      if (!showCommandSuggestions) {
         return;
       }
 
       if (event.key === "ArrowDown") {
         event.preventDefault();
-        setSkillSuggestionIndex(
-          (index) => (index + 1) % skillSuggestions.length,
+        setCommandSuggestionIndex(
+          (index) => (index + 1) % commandSuggestions.length,
         );
         return;
       }
 
       if (event.key === "ArrowUp") {
         event.preventDefault();
-        setSkillSuggestionIndex(
+        setCommandSuggestionIndex(
           (index) =>
-            (index - 1 + skillSuggestions.length) % skillSuggestions.length,
+            (index - 1 + commandSuggestions.length) % commandSuggestions.length,
         );
         return;
       }
@@ -2348,23 +2285,23 @@ export function InputBox({
           return;
         }
         event.preventDefault();
-        const selectedSkill = skillSuggestions[skillSuggestionIndex];
-        if (selectedSkill) {
-          applySkillSuggestion(selectedSkill);
+        const selectedCommand = commandSuggestions[commandSuggestionIndex];
+        if (selectedCommand) {
+          applyCommandSuggestion(selectedCommand);
         }
         return;
       }
 
       if (event.key === "Escape") {
         event.preventDefault();
-        setDismissedSkillSuggestionValue(textInput.value);
+        setDismissedCommandSuggestionValue(textInput.value);
       }
     },
     [
-      applySkillSuggestion,
-      showSkillSuggestions,
-      skillSuggestionIndex,
-      skillSuggestions,
+      applyCommandSuggestion,
+      showCommandSuggestions,
+      commandSuggestionIndex,
+      commandSuggestions,
       textInput.value,
     ],
   );
@@ -2484,7 +2421,6 @@ export function InputBox({
         event.metaKey ||
         event.shiftKey ||
         isIMEComposing(event) ||
-        selectedSlashSkill ||
         promptHistory.length === 0 ||
         (event.key !== "ArrowUp" && event.key !== "ArrowDown")
       ) {
@@ -2528,27 +2464,7 @@ export function InputBox({
       promptHistoryIndexRef.current = nextIndex;
       setPromptHistoryValue(promptHistory[nextIndex] ?? "");
     },
-    [promptHistory, selectedSlashSkill, setPromptHistoryValue, textInput.value],
-  );
-
-  const handleSelectedSlashSkillKeyDown = useCallback(
-    (event: KeyboardEvent<HTMLElement>) => {
-      if (
-        event.key !== "Backspace" ||
-        !selectedSlashSkill ||
-        textInput.value.length > 0 ||
-        isIMEComposing(event)
-      ) {
-        return;
-      }
-
-      event.preventDefault();
-      setSelectedSlashSkill(null);
-      requestAnimationFrame(() => {
-        textareaRef.current?.focus();
-      });
-    },
-    [selectedSlashSkill, textInput.value],
+    [promptHistory, setPromptHistoryValue, textInput.value],
   );
 
   const handlePromptTextareaKeyDown = useCallback(
@@ -2561,23 +2477,17 @@ export function InputBox({
       if (!isIMEComposing(event)) {
         if (showMentions) mentionPickerRef.current?.onKeyDown(event);
         if (event.defaultPrevented) return;
-        handleSkillSuggestionKeyDown(event);
+        handleCommandSuggestionKeyDown(event);
         if (event.defaultPrevented) {
           return;
         }
       }
-      handleSelectedSlashSkillKeyDown(event);
       if (event.defaultPrevented) {
         return;
       }
       handlePromptHistoryKeyDown(event);
     },
-    [
-      showMentions,
-      handlePromptHistoryKeyDown,
-      handleSelectedSlashSkillKeyDown,
-      handleSkillSuggestionKeyDown,
-    ],
+    [showMentions, handlePromptHistoryKeyDown, handleCommandSuggestionKeyDown],
   );
 
   const handlePromptTextareaChange = useCallback(
@@ -2597,15 +2507,13 @@ export function InputBox({
       promptHistoryDraftRef.current = "";
       scheduleDraftSave({
         text: event.currentTarget.value,
-        skillName:
-          selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+        skillName: null,
       });
     },
     [
       abortInputPolishRequest,
       abortVoiceInput,
       scheduleDraftSave,
-      selectedSlashSkill,
       updateMentionQuery,
       voiceListening,
     ],
@@ -2648,11 +2556,12 @@ export function InputBox({
       const caret = referenceCaret(element);
       textInput.setInput(nextText);
       updateMentionQuery(nextText, caret);
-      if (!refs.length && caret !== null) focusComposerAt(caret);
+      // The inline editor stays mounted after its last reference is removed.
+      // Keep its native caret instead of scheduling a stale position that can
+      // overwrite the caret set by a subsequently selected command.
       scheduleDraftSave({
         text: nextText,
-        skillName:
-          selectedSlashSkill?.kind === "skill" ? selectedSlashSkill.name : null,
+        skillName: null,
       });
     },
     [
@@ -2661,9 +2570,7 @@ export function InputBox({
       abortVoiceInput,
       abortInputPolishRequest,
       setProjectAttachments,
-      focusComposerAt,
       scheduleDraftSave,
-      selectedSlashSkill,
       textInput,
       updateMentionQuery,
       voiceListening,
@@ -2675,7 +2582,7 @@ export function InputBox({
     const element = inlineSkillTextRef.current;
     if (element && !inlineSkillComposingRef.current)
       renderReferenceEditor(element, textInput.value);
-  }, [hasInlineReferences, selectedSlashSkill, textInput.value]);
+  }, [hasInlineReferences, textInput.value]);
 
   const handleInlineSkillInput = useCallback(
     (event: FormEvent<HTMLSpanElement>) => {
@@ -2730,13 +2637,12 @@ export function InputBox({
       if (!isIMEComposing(event, inlineSkillComposingRef.current)) {
         if (showMentions) mentionPickerRef.current?.onKeyDown(event);
         if (event.defaultPrevented) return;
-        handleSkillSuggestionKeyDown(event);
+        handleCommandSuggestionKeyDown(event);
         if (event.defaultPrevented) {
           return;
         }
       }
 
-      handleSelectedSlashSkillKeyDown(event);
       if (event.defaultPrevented) {
         return;
       }
@@ -2762,26 +2668,16 @@ export function InputBox({
     [
       showMentions,
       handlePromptHistoryKeyDown,
-      handleSelectedSlashSkillKeyDown,
-      handleSkillSuggestionKeyDown,
+      handleCommandSuggestionKeyDown,
       updateInlineSkillTextInput,
     ],
   );
 
-  const clearSelectedSlashSkill = useCallback(() => {
-    if (mentionInFlight.current) return;
-    setSelectedSlashSkill(null);
-    requestAnimationFrame(() => {
-      textareaRef.current?.focus();
-    });
-  }, []);
-
   const showFollowups =
     !disabled &&
     !isWelcomeMode &&
-    !showSkillSuggestions &&
+    !showCommandSuggestions &&
     !showMentions &&
-    !selectedSlashSkill &&
     !followupsHidden &&
     // Never show stale follow-up chips while a turn is streaming: a message
     // sent before the previous response finished would otherwise leave the
@@ -2964,19 +2860,10 @@ export function InputBox({
             listId={mentionListId}
             query={mentionQuery?.query ?? ""}
             searchInput={mentionButtonOpen}
-            skills={agentScopedSkills.filter((skill) =>
-              getMatchingSkillSuggestions(
-                [skill],
-                "",
-                builtinSlashCommands,
-              ).some((item) => item.kind === "skill"),
-            )}
-            selectedSkills={[
-              ...inlineRefs
-                .filter((ref) => ref.kind === "skill")
-                .map((ref) => ref.id),
-              ...(selectedSlashSkill ? [selectedSlashSkill.name] : []),
-            ]}
+            skills={mentionSkills}
+            selectedSkills={inlineRefs
+              .filter((ref) => ref.kind === "skill")
+              .map((ref) => ref.id)}
             references={reconciledConversations.references}
             capability={conversationCapability}
             skillsLoading={skillsLoading || skillsFetching}
@@ -2995,15 +2882,15 @@ export function InputBox({
           />
         </div>
       )}
-      {showSkillSuggestions && !showMentions && (
+      {showCommandSuggestions && !showMentions && (
         <div className="absolute right-0 bottom-full left-0 z-40 mb-2 px-1">
           <div
-            aria-label="Skill suggestions"
+            aria-label="Command suggestions"
             className="bg-popover/95 text-popover-foreground border-border max-h-72 overflow-y-auto rounded-xl border p-1 shadow-lg backdrop-blur-sm"
             role="listbox"
           >
-            {skillSuggestions.map((suggestion, index) => {
-              const selected = index === skillSuggestionIndex;
+            {commandSuggestions.map((suggestion, index) => {
+              const selected = index === commandSuggestionIndex;
               return (
                 <button
                   aria-selected={selected}
@@ -3013,18 +2900,14 @@ export function InputBox({
                       ? "bg-accent text-accent-foreground"
                       : "text-popover-foreground hover:bg-accent/70 hover:text-accent-foreground",
                   )}
-                  key={`${suggestion.kind}:${suggestion.name}`}
-                  onClick={() => applySkillSuggestion(suggestion)}
+                  key={suggestion.name}
+                  onClick={() => applyCommandSuggestion(suggestion)}
                   onMouseDown={(event) => event.preventDefault()}
-                  onMouseEnter={() => setSkillSuggestionIndex(index)}
+                  onMouseEnter={() => setCommandSuggestionIndex(index)}
                   role="option"
                   type="button"
                 >
-                  {suggestion.kind === "builtin" ? (
-                    <TargetIcon className="text-muted-foreground size-4 shrink-0" />
-                  ) : (
-                    <SparklesIcon className="text-muted-foreground size-4 shrink-0" />
-                  )}
+                  <TargetIcon className="text-muted-foreground size-4 shrink-0" />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium">
                       /{suggestion.name}
@@ -3144,7 +3027,7 @@ export function InputBox({
           )}
         </PromptInputHeader>
         <div className="min-h-16 w-full min-w-0 px-3 py-3">
-          {hasInlineReferences || inlineEditorActive || selectedSlashSkill ? (
+          {hasInlineReferences || inlineEditorActive ? (
             <div
               className="max-h-48 min-h-6 w-full min-w-0 cursor-text overflow-y-auto text-base leading-7 break-words whitespace-pre-wrap md:text-sm"
               onClick={(event) => {
@@ -3153,15 +3036,6 @@ export function InputBox({
                 }
               }}
             >
-              {selectedSlashSkill && (
-                <SlashSkillChip
-                  name={selectedSlashSkill.name}
-                  className="mr-2 border-0 bg-transparent px-0 align-baseline font-sans text-base text-blue-600 shadow-none"
-                  disabled={composerLocked}
-                  onRemove={clearSelectedSlashSkill}
-                  removeLabel={t.inputBox.mentionRemoveSkill}
-                />
-              )}
               <span
                 aria-label={t.inputBox.placeholder}
                 aria-multiline="true"
@@ -3207,9 +3081,7 @@ export function InputBox({
                 role="textbox"
                 suppressContentEditableWarning
                 className={cn(
-                  selectedSlashSkill
-                    ? "inline min-h-6 outline-none"
-                    : "block min-h-6 outline-none",
+                  "block min-h-6 outline-none",
                   "before:text-muted-foreground before:pointer-events-none",
                   "data-[empty=true]:before:content-[attr(data-placeholder)]",
                   composerLocked && "cursor-not-allowed opacity-50",
@@ -3615,8 +3487,7 @@ export function InputBox({
 
       {isWelcomeMode &&
         searchParams.get("mode") !== "skill" &&
-        !selectedSlashSkill &&
-        !showSkillSuggestions &&
+        !showCommandSuggestions &&
         !showMentions && (
           <div className="flex items-center justify-center pt-2">
             <SuggestionList onSelectPlaceholder={onSelectPlaceholder} />

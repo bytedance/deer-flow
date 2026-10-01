@@ -10,6 +10,8 @@ import logging
 import re
 from pathlib import Path
 
+from deerflow.uploads.companions import resolve_companion
+
 logger = logging.getLogger(__name__)
 
 # Regex for bold structural headings produced by pymupdf4llm when it can't
@@ -175,8 +177,7 @@ def extract_outline(md_path: Path) -> list[dict]:
 def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
     """Return the document outline and fallback preview for *file_path*.
 
-    Looks for a sibling ``<stem>.md`` file produced by the upload conversion
-    pipeline.
+    Uses a server-owned conversion record for non-Markdown uploads.
 
     Returns:
         (outline, preview) where:
@@ -186,8 +187,8 @@ def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
           anchor when outline is empty, capped at 2000 characters across all lines.
           Empty when outline is non-empty (no fallback needed).
     """
-    md_path = file_path.with_suffix(".md")
-    if not md_path.is_file():
+    md_path = file_path if file_path.suffix.lower() == ".md" else resolve_companion(file_path)
+    if md_path is None or not md_path.is_file():
         return [], []
 
     outline = extract_outline(md_path)

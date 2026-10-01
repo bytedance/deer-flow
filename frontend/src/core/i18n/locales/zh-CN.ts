@@ -346,7 +346,6 @@ export const zhCN: Translations = {
     mentionMultipleSkills:
       "每条消息最多选择 16 个技能，再次选择已勾选技能可移除。",
     mentionNoProject: "在项目对话中可引用该项目的文档。",
-    mentionRemoveSkill: "移除技能",
     mentionUnavailable: "文件不可用",
     mentionClose: "关闭引用面板",
 

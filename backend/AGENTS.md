@@ -318,13 +318,13 @@ When using `make dev` from root, the frontend automatically connects through ngi
 
 ### Web Search Recency
 
-DDG, Brave, Tavily, SearXNG, and Sofya `web_search` share optional
-`time_range=day|week|month|year`; omission preserves request shape. DDG maps to
-`d|w|m|y`, Brave to `pd|pw|pm|py`, Tavily/SearXNG pass values unchanged, and
-Sofya passes them unchanged as `freshness`.
-For recency, DDGS 9.14.1 uses only enabled Brave, DuckDuckGo, and Yahoo engines
-that honor `timelimit`: `auto`/`all` resolves to this set, incompatible configured
-engines are removed, and an empty set falls back to it. Re-check on DDGS upgrades.
+Optional `web_search` `time_range=day|week|month|year` mappings:
+DDG → `d|w|m|y`; Brave → `pd|pw|pm|py`; Tavily/SearXNG → unchanged;
+Sofya → unchanged in `freshness`; Serper → `qdr:d|w|m|y` in `tbs`.
+Omission preserves request shape; Serper null also omits `tbs`. Image search is unchanged.
+DDGS 9.14.1 recency uses only enabled Brave/DuckDuckGo/Yahoo engines honoring
+`timelimit`: `auto`/`all` selects this set; drop incompatible engines and fall back
+to this set if empty. Re-check on DDGS upgrades.
 
 ### Tavily Fetch
 
@@ -338,6 +338,7 @@ Outlines use ATX syntax (1–6 hashes, space/tab separator, ≤3 leading spaces)
 - Rejects directories before copying to keep uploads all-or-nothing
 - One conversion worker per request when called from an active event loop
 - Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
+- Thread ownership: `upload-companions/`.
 - Duplicate filenames within one request get `_N` suffixes to prevent overwrites.
 - Gateway HTTP uploads stage `.upload-*.part` files, hidden from upload listings, agent context, and sandbox listings/searches. After size validation, publication is atomic; staged-name cleanup logs errors and leaves leftovers for startup sweep.
 - Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.

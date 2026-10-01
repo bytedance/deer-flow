@@ -253,6 +253,13 @@
   过期与重试状态，以及一个保留未过期绑定指令的“再次扫描”选项；
   凭据保存在后端，且只有微信渠道会重启。
   新的微信连接默认走扫码登录，手动输入 token 仍然可用。([#5582])
+- **scheduler:** 把定时任务的运行结果推送到任务所有者已绑定的 IM 身份：
+  完成钩子把结果写入持久化的 `notification_deliveries` outbox，
+  由 `NotificationDeliveryWorker` 负责投递。仅当 `channel_connections.enabled`
+  为 true 且渠道服务在运行时生效；手动触发和中断不推送，等待投递期间被解绑的
+  身份也不再推送。目前只有企业微信实现了主动推送 `send_notification`，
+  其它渠道在实现之前会在 outbox 中显式失败。
+  (issue #4254, [#4843], [#6135])
 
 #### 认证与防护
 
@@ -416,6 +423,13 @@
   `channel.trigger_typing()` 已在 discord.py 2.0 中移除（项目要求 `>=2.7.0`），而其循环吞掉了
   所有异常，因此每次都抛出 `AttributeError`，提示从未发送。现在改为 await 2.x 的
   `channel.typing()` 发送一次提示，失败时以 DEBUG 级别记录日志，而不是直接丢弃。([#6138])
+- **上传：** 文档转换时现在会记录原文件与 Markdown 的归属关系。
+  `list_uploaded_files` 只隐藏归属已验证的转换文件，文档大纲也只读取
+  记录中指定的 Markdown；用户自行上传的同名文件会正常显示，不会被
+  误用作其他文档的大纲。旧版本生成的转换文件没有归属记录，无法与
+  用户自行上传的 Markdown 安全地区分。升级后，它们会作为独立文件
+  出现在历史列表中，原文档也不再从同名文件推断大纲或预览。启用
+  自动转换后重新上传原文件，可以生成有归属记录的新转换文件。([#6101])
 - **智能体：** 计划模式下被重试的模型调用不再丢失 `TodoMiddleware`
   已为其排队的待办完成提醒。该中间件在 `wrap_model_call` 中取出提醒；由于
   `LLMErrorHandlingMiddleware` 包裹着它并通过再次调用自己的 handler 来重试，
@@ -5721,6 +5735,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#4839]: https://github.com/bytedance/deer-flow/pull/4839
 [#4840]: https://github.com/bytedance/deer-flow/pull/4840
 [#4842]: https://github.com/bytedance/deer-flow/pull/4842
+[#4843]: https://github.com/bytedance/deer-flow/pull/4843
 [#4844]: https://github.com/bytedance/deer-flow/pull/4844
 [#4846]: https://github.com/bytedance/deer-flow/pull/4846
 [#4848]: https://github.com/bytedance/deer-flow/pull/4848
@@ -6307,7 +6322,9 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6089]: https://github.com/bytedance/deer-flow/pull/6089
 [#6091]: https://github.com/bytedance/deer-flow/pull/6091
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
+[#6101]: https://github.com/bytedance/deer-flow/pull/6101
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
+[#6135]: https://github.com/bytedance/deer-flow/pull/6135
 [#6138]: https://github.com/bytedance/deer-flow/pull/6138

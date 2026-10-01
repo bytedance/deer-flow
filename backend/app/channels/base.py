@@ -30,6 +30,15 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+class ChannelUnavailable(Exception):
+    """Local connectivity failure: the channel cannot accept traffic right now.
+
+    Distinct from a platform rejection of a well-formed send. Delivery workers
+    park outbox rows with ``count_attempt=False`` on this error so a transport
+    outage cannot exhaust the retry budget.
+    """
+
+
 @dataclass(eq=False, slots=True)
 class _ThreadsafeSubmission:
     coroutine: Coroutine[Any, Any, Any]
@@ -100,6 +109,25 @@ class Channel(ABC):
         Default implementation returns False (no file upload support).
         """
         return False
+
+    async def send_notification(self, *, target: str, text_markdown: str) -> None:
+        """Push a proactive notification to an external identity (issue #4254).
+
+        Unlike ``send``, there is no inbound frame to reply to: *target* is a
+        platform identity (e.g. the ``external_account_id`` recorded by the
+        bind flow). Used by the notification delivery worker to deliver
+        scheduled-task outcomes. Channels without proactive push support keep
+        the default, which raises so the delivery outbox records a failure
+        instead of silently dropping the notification.
+
+        Connectivity preconditions should raise :class:`ChannelUnavailable`
+        (not a generic ``RuntimeError``) so the outbox can park the row without
+        consuming its retry budget. Platform rejections of a well-formed send
+        remain ordinary exceptions that count as attempts.
+        """
+        if not self.is_running:
+            raise ChannelUnavailable(f"channel '{self.name}' is not running")
+        raise NotImplementedError(f"channel '{self.name}' does not support proactive notifications")
 
     # -- helpers -----------------------------------------------------------
 
