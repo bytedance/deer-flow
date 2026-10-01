@@ -1,3 +1,4 @@
+import asyncio
 import ipaddress
 import json
 import logging
@@ -343,3 +344,48 @@ def test_validate_browser_url_rejects_private_and_non_http(monkeypatch):
     # A normal public URL passes (returns None = allowed).
     monkeypatch.setattr(browser_tools, "_resolve_host_addresses", lambda _host: [ipaddress.ip_address("93.184.215.14")])
     assert validate_browser_url("https://github.com/bytedance/deer-flow") is None
+
+
+def test_browser_stream_resolves_seed_and_navigate_urls_off_the_loop():
+    store = MagicMock()
+    store.check_access = AsyncMock(return_value=True)
+    store.get = AsyncMock(return_value={"thread_id": "thread-1", "user_id": "browser-user"})
+    app = _browser_ws_app(store)
+    session = MagicMock()
+    for method in ("current_url", "navigate", "start_screencast", "stop_screencast", "tabs", "dispatch_input"):
+        setattr(session, method, AsyncMock())
+    session.current_url.return_value = "about:blank"
+    session.tabs.return_value = []
+    manager = MagicMock()
+    manager.acquire_session.return_value.__enter__.return_value = session
+    resolved_on_loop: dict[str, bool] = {}
+
+    def resolve(host: str) -> list[ipaddress._BaseAddress]:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            resolved_on_loop[host] = False
+        else:
+            resolved_on_loop[host] = True
+        return [ipaddress.ip_address("127.0.0.1" if host == "internal.example" else "93.184.215.14")]
+
+    from deerflow.community.browser_automation import tools as browser_tools
+
+    with (
+        patch.object(browser_router, "_authenticate_ws", AsyncMock(return_value=_user())),
+        patch.object(browser_router, "_browser_tools_enabled", return_value=True),
+        patch("deerflow.config.get_app_config", return_value=SimpleNamespace(get_tool_config=lambda _name: None)),
+        patch("deerflow.community.browser_automation.get_browser_session_manager", return_value=manager),
+        patch.object(browser_tools, "_get_tool_config", return_value={}),
+        patch.object(browser_tools, "_resolve_host_addresses", side_effect=resolve),
+        TestClient(app) as client,
+        client.websocket_connect("/api/threads/thread-1/browser/stream?seed=https://seed.example/") as ws,
+    ):
+        ws.send_text(json.dumps({"type": "navigate", "url": "https://internal.example/"}))
+        while (payload := ws.receive_json())["type"] != "nav_rejected":
+            pass
+
+    assert payload["url"] == "https://internal.example/"
+    session.navigate.assert_awaited_once_with("https://seed.example/")
+    session.dispatch_input.assert_not_awaited()
+    assert resolved_on_loop == {"seed.example": False, "internal.example": False}

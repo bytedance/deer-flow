@@ -433,6 +433,17 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **community:** The SSRF URL guard no longer stalls the Gateway event loop
+  while it resolves a hostname. `validate_public_http_url` resolves with
+  blocking `socket.getaddrinfo`, and the crawl4ai and Browserless `web_fetch`,
+  `web_capture`, `browser_navigate`, the Gateway browser navigate route, and
+  the Live stream's navigate input and seed called it directly from async code,
+  so a slow DNS answer for a model- or user-chosen URL froze every other request
+  and stream for the length of the lookup. These callers now run the guard
+  through `asyncio.to_thread`; what it allows and rejects is unchanged. The
+  strict blocking-IO gate gains a `socket.getaddrinfo` rule, because
+  Blockbuster's defaults wrap socket methods but not the module-level resolver.
+
 - **agents:** A retried model call in plan mode no longer loses the todo
   completion reminder that `TodoMiddleware` had queued for it. The middleware
   drained the reminder inside `wrap_model_call`; because
