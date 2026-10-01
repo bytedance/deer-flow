@@ -330,11 +330,12 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         # Best-effort: on failure the file APIs still work via the home remap.
         try:
             result = remote.exec("sh", "-lc", _bootstrap_script(self._config["home_dir"]), timeout=_BOOTSTRAP_TIMEOUT)
-            if result.exit_code not in (0, None) or "BOOTSTRAP_OK" not in (result.stdout_text or ""):
+            if result.timed_out or result.exit_code not in (0, None) or "BOOTSTRAP_OK" not in (result.stdout_text or ""):
                 logger.warning(
-                    "Tenki bootstrap for %s exited code=%s stderr=%s",
+                    "Tenki bootstrap for %s exited code=%s timed_out=%s stderr=%s",
                     sandbox_id,
                     result.exit_code,
+                    result.timed_out,
                     (result.stderr_text or "").strip(),
                 )
         except Exception as e:
@@ -407,7 +408,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
 
         try:
             result = sandbox.execute_command("echo ok", timeout=10)
-            healthy = "ok" in result
+            healthy = result.strip() == "ok"
         except Exception as e:
             logger.warning("Tenki warm-pool sandbox %s health check error: %s", sandbox_id, e)
             healthy = False

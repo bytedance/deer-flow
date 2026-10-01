@@ -31,10 +31,11 @@ from deerflow.config.app_config import AppConfig
 
 
 class _FakeResult:
-    def __init__(self, exit_code: int = 0, stdout: bytes = b"", stderr: bytes = b"") -> None:
+    def __init__(self, exit_code: int = 0, stdout: bytes = b"", stderr: bytes = b"", timed_out: bool = False) -> None:
         self.exit_code = exit_code
         self.stdout = stdout
         self.stderr = stderr
+        self.timed_out = timed_out
 
     @property
     def stdout_text(self) -> str:
@@ -386,6 +387,26 @@ def test_execute_command_appends_exit_marker_when_failure_has_output() -> None:
 def test_execute_command_returns_error_as_text() -> None:
     box = TenkiSandbox("sb", _FakeSandbox(exec_error=RuntimeError("boom")))
     assert box.execute_command("echo hi") == "Error: boom"
+
+
+@pytest.mark.parametrize("exit_code", [0, 143])
+@pytest.mark.parametrize("stdout,stderr", [(b"partial output", b"diagnostic"), (b"", b"")])
+def test_execute_command_reports_timeout_and_preserves_output(monkeypatch, exit_code, stdout, stderr) -> None:
+    fake = _FakeSandbox()
+    monkeypatch.setattr(fake, "_run_script", lambda script: _FakeResult(exit_code=exit_code, stdout=stdout, stderr=stderr, timed_out=True))
+    invalidated = []
+    box = TenkiSandbox("sb", fake, on_terminal_failure=lambda *args: invalidated.append(args))
+
+    output = box.execute_command("sleep 10", timeout=1)
+
+    assert "Error: command timed out" in output
+    assert output.endswith("Exit Code: 124")
+    assert stdout.decode() in output
+    assert stderr.decode() in output
+    assert len(fake.exec_calls) == 1
+    assert fake.exec_calls[0]["timeout"] == 1
+    assert not invalidated
+    assert not box.is_closed
 
 
 def test_execute_command_closed_returns_error() -> None:
@@ -843,6 +864,40 @@ def test_bootstrap_is_non_interactive_and_time_bounded(monkeypatch):
     # timeout=0 (no timeout in some SDKs) would slip past an `is not None` check.
     assert bootstrap["timeout"] == _BOOTSTRAP_TIMEOUT
     provider.shutdown()
+
+
+def test_timed_out_bootstrap_warns_even_with_success_marker(monkeypatch, caplog):
+    class _TimedOutBootstrap(_FakeSandbox):
+        def _run_script(self, script: str) -> _FakeResult:
+            if "BOOTSTRAP_OK" in script:
+                return _FakeResult(stdout=b"BOOTSTRAP_OK\n", timed_out=True)
+            return super()._run_script(script)
+
+    provider = _install(monkeypatch, client=_FakeClient(sandbox_factory=_TimedOutBootstrap))
+    try:
+        with caplog.at_level("WARNING"):
+            sid = provider.acquire("thread-1", user_id="u1")
+        assert provider.get(sid) is not None
+        assert any("bootstrap" in r.message and "timed_out=True" in r.message for r in caplog.records)
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("timed_out,exit_code", [(True, 0), (False, 1)])
+def test_warm_pool_rejects_unsuccessful_probe_with_ok_output(monkeypatch, timed_out, exit_code):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    try:
+        sid = provider.acquire("thread-1", user_id="u1")
+        first = client.last_sandbox
+        provider.release(sid)
+        monkeypatch.setattr(first, "_run_script", lambda script: _FakeResult(stdout=b"ok\n", exit_code=exit_code, timed_out=timed_out))
+
+        assert provider.acquire("thread-1", user_id="u1") == sid
+        assert client.last_sandbox is not first
+        assert first.closed
+    finally:
+        provider.shutdown()
 
 
 def test_release_parks_in_warm_pool(monkeypatch):

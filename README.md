@@ -620,6 +620,10 @@ Remote directory listings report traversal failures (for example, unreadable
 directories) as incomplete results, even when no entries were returned. A
 missing start path is reported separately as “Directory not found.”
 
+The optional [Tenki cloud sandbox provider](backend/packages/harness/deerflow/community/tenki/README.md)
+uses Tenki SDK 1.4.0 or newer. Timed-out commands preserve partial output and
+report `Exit Code: 124`; unsuccessful health checks cannot reclaim a warm sandbox.
+
 #### MCP Server
 
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.

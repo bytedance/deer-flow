@@ -274,6 +274,9 @@ class TenkiSandbox(Sandbox):
             output = f"{stdout}\n{stderr}"
         else:
             output = stdout or stderr
+        if result.timed_out:
+            message = "Error: command timed out\nExit Code: 124"
+            return f"{output}\n{message}" if output else message
         if result.exit_code not in (0, None):
             # Mirror LocalSandbox: preserve a nonzero exit in the output text
             # even when the command produced output (see e2b_sandbox).

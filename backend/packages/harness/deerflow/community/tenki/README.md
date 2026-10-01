@@ -37,7 +37,7 @@ Install the optional SDK before selecting this provider:
 pip install "deerflow-harness[tenki]"
 ```
 
-The `tenki` package (which provides the `tenki_sandbox` module) is an optional
+The `tenki>=1.4.0` package (which provides the `tenki_sandbox` module) is an optional
 DeerFlow harness extra, not part of the default install. Get an API key from
 <https://tenki.cloud/docs/sandbox/sdk>.
 
@@ -67,6 +67,9 @@ API; directory and content search shell out and reuse `deerflow.sandbox.search`,
 mirroring `e2b_sandbox`:
 
 - `execute_command` — `sh -lc`, with per-call env and timeout.
+  Timed-out commands preserve partial output and report `Error: command timed out`
+  with `Exit Code: 124`, even if the SDK returned exit code zero. They are not
+  retried, and the sandbox remains available for subsequent commands.
 - `read_file` / `write_file` / `update_file` — native `fs.read_text` / `fs.mkdir` / `fs.write_stream` (binary-safe, streamed).
 - `download_file` — native `fs.read_stream`, restricted to the `/mnt/user-data` prefix; the 100 MB cap is enforced on bytes actually received, so a file growing mid-transfer cannot slip past it.
 - `list_dir` / `glob` / `grep` — `find` / `grep` with busybox-portable flags (the fs API is single-level and has no content search); results filtered/capped in Python and reported back under `/mnt/user-data`.
