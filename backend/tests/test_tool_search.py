@@ -23,6 +23,15 @@ class TestToolSearchConfig:
     def test_auto_promote_top_k_is_clamped(self):
         assert ToolSearchConfig(auto_promote_top_k=0).auto_promote_top_k == 1
         assert ToolSearchConfig(auto_promote_top_k=99).auto_promote_top_k == 5
+    def test_auto_promote_top_k_rejects_booleans(self):
+        import pytest
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="must be an integer, not a boolean"):
+            ToolSearchConfig(auto_promote_top_k=True)
+        with pytest.raises(ValidationError, match="must be an integer, not a boolean"):
+            ToolSearchConfig(auto_promote_top_k=False)
+
 
     def test_load_from_dict(self):
         loaded = load_tool_search_config_from_dict({"enabled": True, "auto_promote_top_k": 4})

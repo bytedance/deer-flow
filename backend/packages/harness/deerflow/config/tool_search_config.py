@@ -28,6 +28,13 @@ class ToolSearchConfig(BaseModel):
         description="Maximum number of deferred MCP tool schemas auto-promoted from routing metadata per model call",
     )
 
+    @field_validator("auto_promote_top_k", mode="before")
+    @classmethod
+    def _reject_boolean_auto_promote_top_k(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("auto_promote_top_k must be an integer, not a boolean")
+        return value
+
     @field_validator("auto_promote_top_k")
     @classmethod
     def _clamp_auto_promote_top_k(cls, value: int) -> int:
