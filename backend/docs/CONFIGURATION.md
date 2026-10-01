@@ -269,7 +269,7 @@ models:
           type: enabled
 ```
 
-**Gemini with thinking via OpenAI-compatible gateway**:
+#### Gemini with thinking via OpenAI-compatible gateway
 
 When routing Gemini through an OpenAI-compatible proxy (Vertex AI OpenAI compat endpoint, AI Studio, or third-party gateways) with thinking enabled, the API attaches a `thought_signature` to each tool-call object returned in the response.  Every subsequent request that replays those assistant messages **must** echo those signatures back on the tool-call entries or the API returns:
 
@@ -282,22 +282,24 @@ Standard `langchain_openai:ChatOpenAI` silently drops `thought_signature` when s
 
 ```yaml
 models:
-  - name: gemini-2.5-pro-thinking
-    display_name: Gemini 2.5 Pro (Thinking)
+  - name: gemini-3.1-pro-preview
+    display_name: Gemini 3.1 Pro (Thinking)
     use: deerflow.models.patched_openai:PatchedChatOpenAI
-    model: google/gemini-2.5-pro-preview   # model name as expected by your gateway
+    model: gemini-3.1-pro-preview
     api_key: $GEMINI_API_KEY
-    base_url: https://<your-openai-compat-gateway>/v1
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
     max_tokens: 16384
-    supports_thinking: true
     supports_vision: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
+    reasoning:
+      thinking: required
+      dialect: none
+      effort:
+        values: [minimal, low, medium, high]
 ```
 
-For Gemini accessed **without** thinking (e.g. via OpenRouter where thinking is not activated), the plain `langchain_openai:ChatOpenAI` with `supports_thinking: false` is sufficient and no patch is needed.
+This example targets Google's official endpoint. Its [OpenAI compatibility API](https://ai.google.dev/gemini-api/docs/openai#thinking) accepts `reasoning_effort`; `extra_body.thinking` becomes an unsupported top-level `thinking` field and causes HTTP 400. Gemini 3.1 Pro cannot disable thinking, so `thinking: required` keeps it enabled even when a caller requests otherwise, while `dialect: none` prevents a provider-specific thinking toggle. Omitting effort uses the model's default.
+
+If you copied the previous example, replace its `supports_thinking`, `when_thinking_enabled`, and `when_thinking_disabled` settings with the `reasoning` block above. Third-party gateways may require different model IDs and reasoning parameters; follow that gateway's documentation instead of reusing Google's profile unchanged.
 
 **MiMo with thinking via OpenAI-compatible API**:
 

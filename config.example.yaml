@@ -430,31 +430,30 @@ models:
   #   context_window: 1048576
   #   supports_vision: true
 
-  # Example: Gemini model via OpenAI-compatible gateway (with thinking support)
+  # Example: Gemini model via Google's official OpenAI-compatible endpoint
   # Use PatchedChatOpenAI so that tool-call thought_signature values on tool_calls
   # are preserved across multi-turn tool-call conversations — required by the
   # Gemini API when thinking is enabled. See:
   # https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures
-  # - name: gemini-2.5-pro-thinking
-  #   display_name: Gemini 2.5 Pro (Thinking)
+  # Google accepts reasoning_effort, not extra_body.thinking. Gemini 3.1 Pro
+  # cannot disable thinking; dialect: none avoids emitting a thinking toggle.
+  # https://ai.google.dev/gemini-api/docs/openai#thinking
+  # - name: gemini-3.1-pro-preview
+  #   display_name: Gemini 3.1 Pro (Thinking)
   #   use: deerflow.models.patched_openai:PatchedChatOpenAI
-  #   model: google/gemini-2.5-pro-preview   # model name as expected by your gateway
+  #   model: gemini-3.1-pro-preview
   #   api_key: $GEMINI_API_KEY
-  #   base_url: https://<your-openai-compat-gateway>/v1
+  #   base_url: https://generativelanguage.googleapis.com/v1beta/openai/
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 16384
   #   context_window: 1048576
-  #   supports_thinking: true
   #   supports_vision: true
-  #   when_thinking_enabled:
-  #     extra_body:
-  #       thinking:
-  #         type: enabled
-  #   when_thinking_disabled:
-  #     extra_body:
-  #       thinking:
-  #         type: disabled
+  #   reasoning:
+  #     thinking: required
+  #     dialect: none
+  #     effort:
+  #       values: [minimal, low, medium, high]
 
   # Example: Xiaomi MiMo model (with thinking support)
   # MiMo thinking mode returns reasoning_content and requires that field to be
