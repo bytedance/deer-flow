@@ -51,3 +51,21 @@ def test_web_search_falls_back_to_default_max_results_on_invalid_config(raw) -> 
 
     client.search.assert_called_once_with("documentation", max_results=5)
     assert json.loads(result) == []
+
+
+def test_web_search_forwards_valid_max_results_through_the_wiring() -> None:
+    client = MagicMock()
+    client.search = AsyncMock(return_value=[])
+
+    tool_config = MagicMock()
+    tool_config.model_extra = {"max_results": 3}
+
+    with (
+        patch("deerflow.community.searxng.tools.get_app_config") as mock_config,
+        patch("deerflow.community.searxng.tools._get_searxng_client", return_value=client),
+    ):
+        mock_config.return_value.get_tool_config.return_value = tool_config
+        result = asyncio.run(web_search_tool.ainvoke({"query": "documentation"}))
+
+    client.search.assert_called_once_with("documentation", max_results=3)
+    assert json.loads(result) == []
