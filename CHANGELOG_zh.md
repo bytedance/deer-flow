@@ -339,7 +339,7 @@
   只在致命错误时退出，这次 join 通常会等满 5 秒。期间 Gateway 上的所有运行、流和渠道
   都会停顿，`POST /api/channels/{name}/restart` 也不例外。现在这些清理都在工作线程中执行；
   Slack 的 close 会被 shield 并跟踪，因此被取消的关闭流程不会中断它，重试的 `stop()`
-  会等待同一个 close，而不会再关闭一次。
+  会等待同一个 close，而不会再关闭一次。([#6134])
 - **Gateway：** 含非 ASCII 字符的 CSRF token、GitHub webhook 签名、内部认证 token、
   OIDC `state` 或 provisioner `X-API-Key` 现在按常规返回 403/401，而不是 500。
   `hmac.compare_digest` 遇到含非 ASCII 字符的 `str` 参数会抛出 `TypeError`，而
@@ -5352,3 +5352,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
 [#6076]: https://github.com/bytedance/deer-flow/pull/6076
 [#6088]: https://github.com/bytedance/deer-flow/pull/6088
+[#6134]: https://github.com/bytedance/deer-flow/pull/6134

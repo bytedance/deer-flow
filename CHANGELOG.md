@@ -337,7 +337,7 @@ This release closes that milestone with **181 merged pull requests**.
   run, stream and channel on the Gateway stalled meanwhile, including on
   `POST /api/channels/{name}/restart`. The teardown now runs in a worker thread;
   Slack's close is shielded and tracked, so a cancelled shutdown leaves it
-  running and a retried `stop()` awaits it instead of closing twice.
+  running and a retried `stop()` awaits it instead of closing twice. ([#6134])
 - **gateway:** A non-ASCII CSRF token, GitHub webhook signature, internal auth
   token, OIDC `state`, or provisioner `X-API-Key` is now rejected with the
   usual 403/401 instead of a 500. `hmac.compare_digest` raises `TypeError` for
@@ -6315,4 +6315,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
 [#6076]: https://github.com/bytedance/deer-flow/pull/6076
 [#6088]: https://github.com/bytedance/deer-flow/pull/6088
+[#6134]: https://github.com/bytedance/deer-flow/pull/6134
 
