@@ -273,7 +273,7 @@ class McpTaskRepository:
         *,
         user_id: str,
         thread_incarnation: str | None,
-        limit: int = 50,
+        limit: int | None = 50,
         active_only: bool = False,
     ) -> list[dict[str, Any]]:
         stmt = select(McpTaskRow).where(
@@ -288,7 +288,9 @@ class McpTaskRepository:
         )
         if active_only:
             stmt = stmt.where(McpTaskRow.status.in_(_POLLABLE_STATUS_VALUES))
-        stmt = stmt.order_by(McpTaskRow.created_at.desc(), McpTaskRow.id.desc()).limit(limit)
+        stmt = stmt.order_by(McpTaskRow.created_at.desc(), McpTaskRow.id.desc())
+        if limit is not None:
+            stmt = stmt.limit(limit)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]

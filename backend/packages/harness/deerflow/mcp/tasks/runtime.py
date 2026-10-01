@@ -28,7 +28,7 @@ class McpTaskSubmitter(Protocol):
         thread_id: str,
         user_id: str,
         thread_incarnation: str | None,
-        limit: int = 50,
+        limit: int | None = 50,
         active_only: bool = False,
     ) -> list[dict[str, Any]]: ...
 

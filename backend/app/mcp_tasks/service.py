@@ -700,7 +700,7 @@ class McpTaskService:
         thread_id: str,
         user_id: str,
         thread_incarnation: str | None,
-        limit: int = 50,
+        limit: int | None = 50,
         active_only: bool = False,
     ) -> list[dict[str, Any]]:
         return await self._repository.list_by_thread(
@@ -736,11 +736,16 @@ class McpTaskService:
         thread_incarnation: str | None,
         task: str | None = None,
     ) -> dict[str, Any]:
+        # Target resolution must see every active task, not just the newest
+        # display page (issue #6119): a task beyond the page default could
+        # never be resolved by ID or by name, and a name shared with a task
+        # outside the page looked unique instead of ambiguous.
         active = await self.list_tasks(
             thread_id=thread_id,
             user_id=user_id,
             thread_incarnation=thread_incarnation,
             active_only=True,
+            limit=None,
         )
         if task:
             normalized = task.casefold().strip()
