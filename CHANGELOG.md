@@ -327,6 +327,16 @@ This release closes that milestone with **181 merged pull requests**.
 
 ### Fixed
 
+- **agents:** A retried model call in plan mode no longer loses the todo
+  completion reminder that `TodoMiddleware` had queued for it. The middleware
+  drained the reminder inside `wrap_model_call`; because
+  `LLMErrorHandlingMiddleware` wraps it and retries by calling its handler again,
+  the second attempt went out without the reminder while the run had already
+  spent one of its two reminders on it. `TodoMiddleware` now puts the drained
+  reminder back when the handler raises, without counting it again, so the retry
+  carries it and the cap still allows the second reminder. Successful calls are
+  unchanged, and a run whose reminder state was cleared meanwhile does not get
+  it back.
 - **gateway:** A non-ASCII CSRF token, GitHub webhook signature, internal auth
   token, OIDC `state`, or provisioner `X-API-Key` is now rejected with the
   usual 403/401 instead of a 500. `hmac.compare_digest` raises `TypeError` for
