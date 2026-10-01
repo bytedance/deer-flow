@@ -24,6 +24,7 @@ read-before-write middleware's own policy; both rewrite through the shared
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import posixpath
@@ -40,12 +41,16 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.skill_context import _tool_call_path, build_skill_entry_metadata_from_read
+from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGE_KEY, record_skill_usage
 from deerflow.agents.middlewares.tool_call_args import ToolCallOccurrence, pair_tool_call_results, rewrite_messages_tool_call_args
 from deerflow.agents.middlewares.tool_output_synopsis import render_tool_output_preview
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform
 from deerflow.community.ragflow.sources import budget_source_artifact
+from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.config.tool_output_config import ToolOutputConfig
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 if TYPE_CHECKING:
@@ -146,6 +151,15 @@ def _sanitize_tool_name(name: str) -> str:
     return safe or "unknown"
 
 
+def _sanitize_tool_call_id(tool_call_id: str) -> str:
+    """Make a tool call id safe to use inside a filename.
+
+    The id reaches us from the model/provider, so it gets the same treatment as
+    a tool name: no separators and no traversal components.
+    """
+    return _sanitize_tool_name(tool_call_id)
+
+
 def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
     """Build the on-disk filename for an externalized tool output.
 
@@ -154,8 +168,11 @@ def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
     """
     safe_name = _sanitize_tool_name(tool_name)
     ext = _EXT_MAP.get(tool_name, "txt")
-    short_id = uuid.uuid4().hex[:12]
-    return f"{safe_name}-{short_id}.{ext}"
+    # Derived from the call id so the host-disk and sandbox paths agree on one
+    # name for a given call, and so externalizing the same output twice is
+    # idempotent instead of leaving two files behind.
+    safe_id = _sanitize_tool_call_id(tool_call_id)
+    return f"{safe_name}-{safe_id}.{ext}"
 
 
 def _externalize(
@@ -181,10 +198,24 @@ def _externalize(
     if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
         return None
 
+    # Each writer owns a unique sibling temp file, so concurrent calls cannot
+    # truncate or clean up each other's pending output. Publish only after close
+    # (also required on Windows), keeping the final filename deterministic.
+    tmp_path = None
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
+        candidate_path = os.path.join(storage_dir, f".tool-output-{uuid.uuid4().hex}.tmp")
+        # Exclusive creation keeps per-writer ownership while honoring umask,
+        # unlike NamedTemporaryFile's fixed 0600 mode on mounted outputs.
+        with open(candidate_path, "x", encoding="utf-8") as f:
+            tmp_path = candidate_path
             f.write(content)
+        os.replace(tmp_path, filepath)
     except OSError:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         return None
 
     return f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}/{filename}"
@@ -218,14 +249,18 @@ def _externalize_to_sandbox(
         # raising, so we cannot rely on exception propagation here.
         sandbox.execute_command(f"mkdir -p {shlex.quote(virtual_dir)}")
         sandbox.write_file(virtual_path, content)
-        # Validate the file landed: execute_command may have silently failed
-        # to create the directory, and write_file backends differ. Refuse to
-        # hand the model an unreadable read_file path.
-        check = sandbox.execute_command(f"test -s {shlex.quote(virtual_path)} && echo OK || echo MISSING")
+        # Validate the file landed completely: execute_command may have silently
+        # failed to create the directory, or write_file may have truncated the
+        # content (disk full, backend pipe error). Refuse to hand the model an
+        # incomplete or unreadable read_file path.
+        expected_bytes = len(content.encode("utf-8"))
+        quoted_path = shlex.quote(virtual_path)
+        check = sandbox.execute_command(f'test -f {quoted_path} && test "$(wc -c < {quoted_path})" -eq {expected_bytes} && echo OK || echo MISSING')
         if not isinstance(check, str) or check.strip() != "OK":
             logger.warning(
-                "Sandbox externalize validation failed: path=%s, check=%r",
+                "Sandbox externalize validation failed: path=%s, expected_bytes=%d, check=%r",
                 virtual_path,
+                expected_bytes,
                 check,
             )
             return None
@@ -337,7 +372,9 @@ def _resolve_sandbox(request: ToolCallRequest) -> Sandbox | None:
     state = getattr(runtime, "state", None)
     if not isinstance(state, dict):
         return None
-    sandbox_state = state.get("sandbox")
+    from deerflow.sandbox.overwrite import unwrap_sandbox
+
+    sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
     if not isinstance(sandbox_state, dict):
         return None
     sandbox_id = sandbox_state.get("sandbox_id")
@@ -537,9 +574,11 @@ def _needs_budget(result: ToolMessage | Command, config: ToolOutputConfig) -> bo
         return _tool_message_over_budget(result, config)
     update = getattr(result, "update", None)
     if isinstance(update, dict):
-        for msg in update.get("messages", []):
-            if isinstance(msg, ToolMessage) and _tool_message_over_budget(msg, config):
-                return True
+        messages = update.get("messages", [])
+        if isinstance(messages, ToolMessage):
+            return _tool_message_over_budget(messages, config)
+        if isinstance(messages, (list, tuple)):
+            return any(isinstance(msg, ToolMessage) and _tool_message_over_budget(msg, config) for msg in messages)
     return False
 
 
@@ -558,7 +597,10 @@ def _patch_result(
         return result
 
     messages = update.get("messages")
-    if not isinstance(messages, list):
+    if isinstance(messages, ToolMessage):
+        patched = _patch_tool_message(messages, config, outputs_path, sandbox)
+        return result if patched is messages else dc_replace(result, update={**update, "messages": patched})
+    if not isinstance(messages, (list, tuple)):
         return result
 
     new_messages: list[Any] = []
@@ -575,7 +617,59 @@ def _patch_result(
     if not changed:
         return result
 
-    return dc_replace(result, update={**update, "messages": new_messages})
+    return dc_replace(result, update={**update, "messages": tuple(new_messages) if isinstance(messages, tuple) else new_messages})
+
+
+def _record_visible_skill_usage(
+    result: ToolMessage | Command,
+    request: ToolCallRequest,
+    *,
+    skill_read_tool_names: frozenset[str],
+    skills_root: str,
+) -> ToolMessage | Command:
+    """Register the snapshot after output budgeting has determined model-visible content."""
+    tool_call = request.tool_call
+    tool_name = str(tool_call.get("name") or "")
+    tool_call_id = str(tool_call.get("id") or "")
+    path = _tool_call_path(tool_call)
+    runtime = getattr(request, "runtime", None)
+
+    def record(message: ToolMessage) -> ToolMessage:
+        if SKILL_USAGE_KEY not in message.additional_kwargs:
+            return message
+        usage = message.additional_kwargs[SKILL_USAGE_KEY]
+        entry = build_skill_entry_metadata_from_read(path, message.content, skills_root=skills_root) if path is not None and isinstance(message.content, str) else None
+        if tool_name not in skill_read_tool_names or str(message.tool_call_id) != tool_call_id or not isinstance(usage, dict) or entry is None or usage.get("path") != entry["path"]:
+            kwargs = dict(message.additional_kwargs)
+            kwargs.pop(SKILL_USAGE_KEY, None)
+            return message.model_copy(update={"additional_kwargs": kwargs})
+        visible_hash = hashlib.sha256(message.content.encode("utf-8")).hexdigest()
+        if visible_hash != usage.get("content_hash"):
+            usage = {
+                **usage,
+                "content": message.content[:MAX_SKILL_SNAPSHOT_CHARS],
+                "content_hash": visible_hash,
+                "partial": True,
+            }
+            message = message.model_copy(update={"additional_kwargs": {**message.additional_kwargs, SKILL_USAGE_KEY: usage}})
+        record_skill_usage(runtime, usage)
+        return message
+
+    if isinstance(result, ToolMessage):
+        return record(result)
+    update = getattr(result, "update", None)
+    if not isinstance(update, dict):
+        return result
+    messages = update.get("messages")
+    if isinstance(messages, ToolMessage):
+        updated = record(messages)
+        return result if updated is messages else dc_replace(result, update={**update, "messages": updated})
+    if not isinstance(messages, (list, tuple)):
+        return result
+    updated = [record(message) if isinstance(message, ToolMessage) else message for message in messages]
+    if all(new is old for new, old in zip(updated, messages)):
+        return result
+    return dc_replace(result, update={**update, "messages": tuple(updated) if isinstance(messages, tuple) else updated})
 
 
 def _patch_model_messages(messages: list[Any], config: ToolOutputConfig) -> list[Any] | None:
@@ -724,19 +818,31 @@ def _normalized_path_arg(args: Mapping[str, Any]) -> str | None:
 class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
     """Enforce per-result budget on tool outputs via externalization or truncation."""
 
-    def __init__(self, config: ToolOutputConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: ToolOutputConfig | None = None,
+        *,
+        skill_read_tool_names: list[str] | None = None,
+        skills_root: str = DEFAULT_SKILLS_CONTAINER_PATH,
+    ) -> None:
         super().__init__()
         self._config = config if config is not None else _default_config()
+        self._skill_read_tool_names = frozenset(skill_read_tool_names if skill_read_tool_names is not None else DEFAULT_SKILL_FILE_READ_TOOL_NAMES)
+        self._skills_root = skills_root
 
     def release_policy_parameters(self) -> dict[str, object]:
-        return {"config": self._config.model_dump(mode="python")}
+        return {"config": self._config.model_dump(mode="python"), "skill_read_tool_names": sorted(self._skill_read_tool_names), "skills_root": self._skills_root}
 
     @classmethod
     def from_app_config(cls, app_config: Any) -> ToolOutputBudgetMiddleware:
         tool_output = getattr(app_config, "tool_output", None)
-        if isinstance(tool_output, ToolOutputConfig):
-            return cls(config=tool_output)
-        return cls()
+        summarization = getattr(app_config, "summarization", None)
+        skills = getattr(app_config, "skills", None)
+        return cls(
+            config=tool_output if isinstance(tool_output, ToolOutputConfig) else None,
+            skill_read_tool_names=getattr(summarization, "skill_file_read_tool_names", None),
+            skills_root=getattr(skills, "container_path", DEFAULT_SKILLS_CONTAINER_PATH),
+        )
 
     # -- tool call hooks ---------------------------------------------------
 
@@ -747,13 +853,11 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
         result = handler(request)
-        if not self._config.enabled:
-            return result
-        if not _needs_budget(result, self._config):
-            return result
-        outputs_path = _resolve_outputs_path(request)
-        sandbox = _resolve_sandbox(request)
-        return _patch_result(result, self._config, outputs_path, sandbox)
+        if self._config.enabled and _needs_budget(result, self._config):
+            outputs_path = _resolve_outputs_path(request)
+            sandbox = _resolve_sandbox(request)
+            result = _patch_result(result, self._config, outputs_path, sandbox)
+        return _record_visible_skill_usage(result, request, skill_read_tool_names=self._skill_read_tool_names, skills_root=self._skills_root)
 
     @override
     async def awrap_tool_call(
@@ -762,17 +866,14 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
         result = await handler(request)
-        if not self._config.enabled:
-            return result
-        if not _needs_budget(result, self._config):
-            return result
-        outputs_path = _resolve_outputs_path(request)
-        # _resolve_sandbox only touches runtime.state and the provider's
-        # in-memory sandbox registry, so it is safe to call on the event
-        # loop. The actual sandbox I/O (mkdir/write/test) happens inside
-        # _patch_result, which is offloaded to a worker thread below.
-        sandbox = _resolve_sandbox(request)
-        return await asyncio.to_thread(_patch_result, result, self._config, outputs_path, sandbox)
+        if self._config.enabled and _needs_budget(result, self._config):
+            outputs_path = _resolve_outputs_path(request)
+            # _resolve_sandbox only touches runtime.state and the provider's
+            # in-memory sandbox registry, so it is safe to call on the event
+            # loop. The actual sandbox I/O happens in the worker thread.
+            sandbox = _resolve_sandbox(request)
+            result = await asyncio.to_thread(_patch_result, result, self._config, outputs_path, sandbox)
+        return _record_visible_skill_usage(result, request, skill_read_tool_names=self._skill_read_tool_names, skills_root=self._skills_root)
 
     # -- model call hooks (historical context budgeting) -------------------
 

@@ -1,12 +1,18 @@
 import ipaddress
+import math
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
 SandboxNetworkMode = Literal["open", "isolated", "allowlist"]
 SandboxNetworkApproval = Literal["deny", "prompt"]
+
+# Redis converts relative PX values to absolute Unix-millisecond timestamps.
+# Reserving half the signed range for that timestamp keeps accepted TTLs usable
+# without making config validation depend on the current clock.
+_REDIS_MAX_SAFE_TTL_MILLISECONDS = (2**63 - 1) // 2
 
 
 class SandboxNetworkConfig(BaseModel):
@@ -30,6 +36,14 @@ class SandboxNetworkConfig(BaseModel):
         le=3600,
         description="Lifetime in seconds for the temporary approval choice.",
     )
+
+    @field_validator("temporary_grant_ttl", mode="before")
+    @classmethod
+    def _reject_boolean_temporary_grant_ttl(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be an integer, not a boolean")
+        return value
+
     proxy_image: str = Field(
         default="ghcr.io/bytedance/deer-flow-sandbox-network-proxy:latest",
         min_length=1,
@@ -106,10 +120,31 @@ class SandboxOwnershipConfig(BaseModel):
         allow_inf_nan=False,
         description="Lease TTL as a multiple of renewal_interval_seconds. At least 2, so a single missed renewal (slow host, brief Redis blip) cannot expire a live owner's lease. Default 4 tolerates three consecutive misses.",
     )
+
+    @field_validator("renewal_interval_seconds", "ttl_multiplier", mode="before")
+    @classmethod
+    def _reject_boolean_ownership_settings(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be a number, not a boolean")
+        return value
+
     key_prefix: str = Field(
         default="deerflow:sandbox:owner",
         description="Redis key prefix for ownership leases. Only applies to the redis ownership type.",
     )
+
+    @model_validator(mode="after")
+    def validate_lease_ttl(self) -> "SandboxOwnershipConfig":
+        lease_ttl_seconds = self.renewal_interval_seconds * self.ttl_multiplier
+        if not math.isfinite(lease_ttl_seconds):
+            raise ValueError("sandbox.ownership lease TTL must be finite")
+        if self.type == "redis":
+            lease_ttl_milliseconds = lease_ttl_seconds * 1000
+            if lease_ttl_milliseconds < 1:
+                raise ValueError("sandbox.ownership Redis lease TTL must be at least 1 millisecond")
+            if lease_ttl_milliseconds > _REDIS_MAX_SAFE_TTL_MILLISECONDS:
+                raise ValueError("sandbox.ownership Redis lease TTL must fit the signed 64-bit millisecond range with absolute-expiry headroom")
+        return self
 
 
 class VolumeMountConfig(BaseModel):
@@ -185,6 +220,8 @@ class SandboxConfig(BaseModel):
     )
     port: int | None = Field(
         default=None,
+        ge=1,
+        le=65535,
         description="Base port for sandbox containers",
     )
     replicas: int | None = Field(
@@ -212,11 +249,33 @@ class SandboxConfig(BaseModel):
     )
     idle_timeout: int | None = Field(
         default=None,
+        ge=0,
         description="Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.",
     )
+
+    @field_validator(
+        "port",
+        "replicas",
+        "acquire_timeout",
+        "burst_limit",
+        "idle_timeout",
+        "health_check_skip_seconds",
+        "bash_output_max_chars",
+        "read_file_output_max_chars",
+        "ls_output_max_chars",
+        "bash_command_timeout",
+        mode="before",
+    )
+    @classmethod
+    def _reject_boolean_numeric_settings(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be a number, not a boolean")
+        return value
+
     health_check_skip_seconds: float | None = Field(
         default=None,
         ge=0,
+        allow_inf_nan=False,
         description="BoxLite-only reclaim skip window in seconds for boxes recently released by this provider instance. Set to 0 to always validate before warm reuse.",
     )
     ownership: SandboxOwnershipConfig | None = Field(

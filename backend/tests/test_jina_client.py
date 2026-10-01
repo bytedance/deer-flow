@@ -53,6 +53,8 @@ async def test_crawl_follows_jina_api_redirect(jina_client, monkeypatch):
     assert result == "Fetched page"
     assert [request.url.path for request in requests] == ["/", "/reader"]
     assert all(request.method == "POST" for request in requests)
+    assert requests[0].content
+    assert requests[1].content == requests[0].content
 
 
 @pytest.mark.anyio

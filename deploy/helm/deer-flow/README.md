@@ -135,7 +135,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 47
+  config_version: 50
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -252,17 +252,21 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   (key `database-url`) and injected as `DATABASE_URL`; `config.yaml` references
   it as `$DATABASE_URL` in `database.postgres_url`. Schema is bootstrapped
   automatically on gateway startup (alembic `create_all` + `stamp head`).
-  For real HA, disable the bundled instance and point at a managed DB:
+  For real HA, disable the bundled instance and point at a managed DB with a
+  full DSN (the chart wraps it into the Secret) or with a Secret you manage
+  (key `database-url`):
   ```yaml
   postgresql:
     enabled: false
     external:
-      host: mydb.example.com   # or set databaseUrl / existingSecret
-      port: 5432
-      database: deerflow
-      username: deerflow
-      password: changeme
+      databaseUrl: postgresql://deerflow:changeme@mydb.example.com:5432/deerflow
+      # or: existingSecret: my-deerflow-db   # key `database-url`
   ```
+
+  URL-encode special characters in the DSN password (for example, `@` as
+  `%40`). The chart uses an external `databaseUrl` verbatim and does not
+  rewrite the DSN in a user-managed Secret.
+
 - **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 45s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s). The grace period MUST exceed the Gateway's graceful-shutdown work — channel stop (~5s) plus the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s) plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (channel stop + drain + buffer).
 - **Gateway replicas.** Postgres + the Redis stream bridge together make the
   gateway's *persisted* state (checkpointer + run/thread metadata) and *live
@@ -457,6 +461,44 @@ provisioner:
 On multi-node clusters, also switch `persistence.home.accessMode` to
 `ReadWriteMany` (this is orthogonal to the Service type - it governs whether a
 sandbox Pod can be scheduled on a node other than the gateway's).
+
+## Sandbox lark-cli runtime (optional)
+
+The Lark/Feishu `lark-cli` integration needs a `lark-cli` binary inside the
+sandbox. For remote/Kubernetes (provisioner) deployments the sandbox-side path
+comes from an optional runtime image instead of an install-time GitHub
+download. The chart exposes the same two knobs the Compose stack reads on the
+provisioner:
+
+```yaml
+provisioner:
+  # Pattern A - an init container copies the binaries into a shared emptyDir.
+  larkCliInitImage: deer-flow/lark-cli-init:v1.0.65
+  # Pattern B - a shim init container + broker sidecar owns the credentials, so
+  # the plaintext config/data dirs are never mounted into the sandbox.
+  # Supersedes larkCliInitImage when both are set.
+  larkCliBrokerImage: deer-flow/lark-cli-broker:v1.0.65
+```
+
+Both default to empty, which leaves the feature off (legacy behavior) and makes
+an in-sandbox `lark-cli` call fail with exit 127 (`command not found`). When
+set, they render `LARK_CLI_INIT_IMAGE` / `LARK_CLI_BROKER_IMAGE` on the
+provisioner Deployment - the names `docker/docker-compose.yaml` uses - and the
+variable is omitted entirely while empty. Point them at a tag that exists in a
+registry your nodes can pull from (mirror the registry prefix if you do not use
+Docker Hub). The images are built from `docker/lark-cli-init` and
+`docker/lark-cli-broker`; see those READMEs and the root README's Lark section
+for the build/publish flow and the credential model. Broker mode is the safer
+choice on a shared cluster: the app secret and OAuth tokens stay in the sidecar
+instead of the sandbox container.
+
+> An image here does not authenticate anyone by itself. The Gateway only asks
+the provisioner to attach the runtime once the Lark integration pack is
+installed for the user, so the sandbox gets the binary but the per-user
+credentials still follow the normal install/authorize flow. The Lark
+integration status reports `sandbox_runtime_mode` / `sandbox_runtime_ready` so
+the Settings UI surfaces a missing runtime instead of a later
+`command not found`.
 
 ## Lint / dry-run
 

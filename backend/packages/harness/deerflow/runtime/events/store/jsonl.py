@@ -61,6 +61,27 @@ class JsonlRunEventStore(RunEventStore):
             self._write_locks[thread_id] = lock
         return lock
 
+    @staticmethod
+    async def _await_owned_task[T](task: asyncio.Task[T]) -> T:
+        """Keep owned work attached until it settles, then propagate cancellation."""
+        cancellation: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
+            except Exception:
+                # Retrieve the failure below after the owned work has settled.
+                break
+        if cancellation is not None:
+            try:
+                task.result()
+            except Exception as exc:
+                raise cancellation from exc
+            raise cancellation
+        return task.result()
+
     async def _run_mutation[T](self, thread_id: str, operation: Callable[[], Coroutine[Any, Any, T]]) -> T:
         """Drain an admitted mutation before propagating caller cancellation.
 
@@ -71,29 +92,16 @@ class JsonlRunEventStore(RunEventStore):
         """
         async with self._get_write_lock(thread_id):
             task = asyncio.create_task(operation(), name=f"jsonl-mutation:{thread_id}")
-            cancellation: asyncio.CancelledError | None = None
-            while not task.done():
-                try:
-                    await asyncio.shield(task)
-                except asyncio.CancelledError as exc:
-                    if cancellation is None:
-                        cancellation = exc
-                except Exception:
-                    # Retrieve the failure below, after preserving any earlier
-                    # cancellation. The operation has already finished rollback.
-                    break
-            if cancellation is not None:
-                try:
-                    task.result()
-                except Exception as exc:
-                    raise cancellation from exc
-                raise cancellation
-            return task.result()
+            return await self._await_owned_task(task)
+
+    @staticmethod
+    def _is_safe_id(value: str) -> bool:
+        return bool(value) and _SAFE_ID_PATTERN.match(value) is not None
 
     @staticmethod
     def _validate_id(value: str, label: str) -> str:
         """Validate that an ID is safe for use in filesystem paths."""
-        if not value or not _SAFE_ID_PATTERN.match(value):
+        if not JsonlRunEventStore._is_safe_id(value):
             raise ValueError(f"Invalid {label}: must be alphanumeric/dash/underscore, got {value!r}")
         return value
 
@@ -104,6 +112,18 @@ class JsonlRunEventStore(RunEventStore):
     def _run_file(self, thread_id: str, run_id: str) -> Path:
         self._validate_id(run_id, "run_id")
         return self._thread_dir(thread_id) / f"{run_id}.jsonl"
+
+    def _existing_run_file(self, thread_id: str, run_id: str) -> Path | None:
+        """Return the run's file, or ``None`` when the run has none.
+
+        Writes reject a run ID that is unsafe as a filename, so no file can hold
+        one; reads and deletes treat it as an unknown run, matching the memory
+        and database stores, rather than raising on a caller-supplied ID.
+        """
+        if not self._is_safe_id(run_id):
+            return None
+        path = self._run_file(thread_id, run_id)
+        return path if path.exists() else None
 
     def _next_seq(self, thread_id: str) -> int:
         self._seq_counters[thread_id] = self._seq_counters.get(thread_id, 0) + 1
@@ -155,8 +175,8 @@ class JsonlRunEventStore(RunEventStore):
 
     def _read_run_events(self, thread_id: str, run_id: str) -> list[dict]:
         """Read events for a specific run file (blocking I/O)."""
-        path = self._run_file(thread_id, run_id)
-        if not path.exists():
+        path = self._existing_run_file(thread_id, run_id)
+        if path is None:
             return []
         events = []
         for line in path.read_text(encoding="utf-8").strip().split("\n"):
@@ -176,8 +196,8 @@ class JsonlRunEventStore(RunEventStore):
                 f.unlink()
 
     def _delete_run_file(self, thread_id: str, run_id: str) -> None:
-        path = self._run_file(thread_id, run_id)
-        if path.exists():
+        path = self._existing_run_file(thread_id, run_id)
+        if path is not None:
             path.unlink()
 
     async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None):
@@ -321,8 +341,7 @@ class JsonlRunEventStore(RunEventStore):
 
         if before_seq is not None:
             messages = [e for e in messages if e["seq"] < before_seq]
-            return messages[-limit:]
-        elif after_seq is not None:
+        if after_seq is not None:
             messages = [e for e in messages if e["seq"] > after_seq]
             return messages[:limit]
         else:
@@ -343,7 +362,11 @@ class JsonlRunEventStore(RunEventStore):
         # single-process writers. Without the write lock, reading run files one
         # by one can mix events from opposite sides of a concurrent append.
         async with self._get_write_lock(thread_id):
-            events = await asyncio.to_thread(self._read_thread_events, thread_id)
+            task = asyncio.create_task(
+                asyncio.to_thread(self._read_thread_events, thread_id),
+                name=f"jsonl-snapshot:{thread_id}",
+            )
+            events = await self._await_owned_task(task)
         result: dict[str, str] = {}
         for event in reversed(events):
             match = match_ai_message_run_id(event, pending)

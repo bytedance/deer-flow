@@ -448,9 +448,11 @@ SKILL.md Format:
 
 2. Gateway updates runtime state
    - PUT writes extensions_config.json and reloads configuration
-   - Both endpoints reset the MCP tools cache and persistent sessions
+   - Config mutations reset the handling worker; peer workers detect the config signature
+   - Cache reset writes a shared generation marker, then retires the handling worker
 
 3. MCP Manager reloads on next use
+   - Every worker sharing that config directory compares the reset generation before serving cached tools
    - get_cached_mcp_tools() lazily reinitializes MCP tools
    - Loads current server configurations and tool lists
 

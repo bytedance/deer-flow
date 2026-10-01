@@ -283,6 +283,27 @@ class CodexChatModel(BaseChatModel):
                             streamed_output_items[output_index] = output_item
                     elif event_type == "response.completed":
                         completed_response = data["response"]
+                        # A terminal event completes the request even if the server
+                        # keeps the connection open. Do not let a later read timeout
+                        # replace the completed output with a transport error.
+                        break
+                    elif event_type in ("response.failed", "response.incomplete", "error"):
+                        response = data.get("response") or {}
+                        if event_type == "error":
+                            details = data.get("error") or data
+                        elif not isinstance(response, dict):
+                            details = response
+                        elif event_type == "response.failed":
+                            details = response.get("error") or {}
+                        else:
+                            details = response.get("incomplete_details") or {}
+
+                        if not isinstance(details, dict):
+                            details = {"message": str(details)}
+                        code = details.get("code")
+                        reason = details.get("message") or details.get("reason") or "No details provided"
+                        code_suffix = f" ({code})" if code else ""
+                        raise RuntimeError(f"Codex API {event_type}{code_suffix}: {reason}")
 
         if not completed_response:
             raise RuntimeError("Codex API stream ended without response.completed event")

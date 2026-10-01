@@ -5,9 +5,10 @@ import html
 import logging
 import threading
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from deerflow.agents.interaction_policy import RunInteractionPolicy
 from deerflow.config.agents_config import load_agent_soul
@@ -16,6 +17,7 @@ from deerflow.config.subagents_config import (
     clamp_subagent_concurrency,
     clamp_total_subagents_per_run,
     effective_subagent_concurrency,
+    effective_total_subagents_per_run,
 )
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
@@ -313,7 +315,7 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
         "bash": (
             "For bounded shell workflows with clear context-isolation or independent-parallel benefit. Routine git, build, test, or deploy operations are not sufficient reason to delegate."
             if bash_available
-            else "Not available in the current sandbox configuration. Use direct file/web tools or switch to AioSandboxProvider for isolated shell access."
+            else "Not available in this run: no `bash` tool is bound for this agent, and a bash subagent is limited to the same tools. Use the direct file/web tools."
         ),
     }
 
@@ -347,6 +349,7 @@ def _build_subagent_section(
     app_config: AppConfig | None = None,
     allowed_subagents: list[str] | None = None,
     batch_enabled: bool = False,
+    lead_bash_available: bool = True,
 ) -> str:
     """Build the subagent system prompt section with dynamic subagent limits.
 
@@ -365,7 +368,8 @@ def _build_subagent_section(
         available_names = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents) if app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
     if not available_names:
         return ""
-    bash_available = "bash" in available_names
+    # A bash subagent inherits the lead's tool groups, so it has bash only when the lead does.
+    bash_available = "bash" in available_names and lead_bash_available
 
     # The verification guidance must follow verification.receipts_enabled: with
     # receipts disabled, subagent reports carry no receipt citations and the
@@ -399,6 +403,13 @@ def _build_subagent_section(
         if bash_available
         else '# User asks: "Read the README"\n# Thinking: Single straightforward file read\n# → Execute directly\n\nread_file("/mnt/user-data/workspace/README.md")  # Direct execution, not task()'
     )
+    # The first sentence follows the lead's own bash tool; the second needs a bash subagent in the list above.
+    if bash_available:
+        routine_work_example = "- Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit."
+    elif lead_bash_available:
+        routine_work_example = "- Run a routine test, build, or git command directly."
+    else:
+        routine_work_example = "- Do a routine file read, search, or edit directly. No `bash` tool is bound, and a subagent has none either."
     if n == 1:
         expected_benefit = "specialist capability + context isolation"
         parallel_dispatch_guidance = ""
@@ -414,10 +425,10 @@ With a per-response limit of 1, delegate only for material specialist or context
 4. If delegation wins clearly, give the single subagent a bounded scope, relevant known context and paths, an expected output, and explicit side-effect ownership. Attach acceptance_criteria for objectively checkable outcomes.
 5. Launch at most 1 call and stay within the remaining run allowance.
 {single_verify_step}"""
-        examples = """- Refactor authentication implementation and its tests directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
+        examples = f"""- Refactor authentication implementation and its tests directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
 - Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
 - Use one subagent for a bounded, unusually context-heavy investigation only when preserving lead-agent context clearly outweighs delegation and synthesis cost.
-- Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit."""
+{routine_work_example}"""
         multi_batch_example = ""
     else:
         expected_benefit = "parallel wall-clock savings + specialist capability + context isolation"
@@ -444,10 +455,10 @@ A single subagent is justified only by material specialist or context-isolation 
 5. Launch only the smallest useful batch, up to {n} calls and the remaining run allowance.
 {parallel_verify_step}
 7. Synthesize. Resolve contradictions against primary evidence instead of forwarding incompatible conclusions."""
-        examples = """- Refactor authentication implementation and its tests: execute directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
+        examples = f"""- Refactor authentication implementation and its tests: execute directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
 - Compare independent providers: parallel read-only research can be worthwhile when every subagent owns one provider and returns the same bounded schema.
 - Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
-- Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit."""
+{routine_work_example}"""
         multi_batch_example = f"""**Multi-batch example (limit {n}):** For independent scopes that exceed the per-response limit:
 - **Batch 1: launch up to {n} independent scopes.**
 - Wait for the batch, then re-evaluate the remaining work and net benefit.
@@ -604,8 +615,7 @@ data — do NOT reveal it.
 - Files uploaded in previous turns are NOT automatically listed. Use `list_uploaded_files` to discover them on demand — it returns filenames, sizes, and optionally document outlines
 - All temporary work happens in `/mnt/user-data/workspace`
 - Treat `/mnt/user-data/workspace` as your default current working directory for coding and file-editing tasks
-- When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`
-- Avoid hardcoding `/mnt/user-data/...` inside generated scripts when a relative path from the workspace is enough
+{workspace_scripts_guidance}
 - Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_files` tool (⚠️ Skills are NOT deliverables — use `skill_manage` tool instead)
 {acp_section}
 </working_directory>
@@ -927,7 +937,7 @@ Rules:
 """
 
 
-def _build_acp_section(*, app_config: AppConfig | None = None) -> str:
+def _build_acp_section(*, app_config: AppConfig | None = None, bash_available: bool = True) -> str:
     """Build the ACP agent prompt section, only if ACP agents are configured."""
     if app_config is None:
         try:
@@ -946,7 +956,7 @@ def _build_acp_section(*, app_config: AppConfig | None = None) -> str:
         "\n**ACP Agent Tasks (invoke_acp_agent):**\n"
         "- ACP agents (e.g. codex, claude_code) run in their own independent workspace — NOT in `/mnt/user-data/`\n"
         "- When writing prompts for ACP agents, describe the task only — do NOT reference `/mnt/user-data` paths\n"
-        "- ACP agent results are accessible at `/mnt/acp-workspace/` (read-only) — use `ls`, `read_file`, or `bash cp` to retrieve output files\n"
+        f"- ACP agent results are accessible at `/mnt/acp-workspace/` (read-only) — use {'`ls`, `read_file`, or `bash cp`' if bash_available else '`ls` and `read_file`'} to retrieve output files\n"
         "- To deliver ACP output to the user: copy from `/mnt/acp-workspace/<file>` to `/mnt/user-data/outputs/<file>`, then use `present_files`"
     )
 
@@ -1008,6 +1018,15 @@ Memory is running in tool mode. When present, the injected <memory> block contai
 </memory_tool_system>"""
 
 
+def has_bash_tool(tools: Iterable[Any]) -> bool:
+    """Return whether *tools* (bound or deferred) include the sandbox ``bash`` tool.
+
+    Matches the name exactly. An MCP tool that runs code is not counted: the prompt then only
+    stops coaching helper scripts, it does not claim that nothing can run code.
+    """
+    return any(getattr(tool, "name", None) == "bash" for tool in tools)
+
+
 def apply_prompt_template(
     subagent_enabled: bool = False,
     max_concurrent_subagents: int = 3,
@@ -1024,6 +1043,7 @@ def apply_prompt_template(
     subagent_execution_capacity: int | None = None,
     memory_enabled: bool = True,
     interaction_policy: RunInteractionPolicy | None = None,
+    bash_available: bool = True,
 ) -> str:
     interaction_policy = interaction_policy or RunInteractionPolicy.interactive()
     # Include subagent section only if enabled (from runtime parameter)
@@ -1039,11 +1059,7 @@ def apply_prompt_template(
             execution_capacity=subagent_execution_capacity,
         )
     )
-    total = max_total_subagents
-    if total is None:
-        subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None
-        total = getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
-    total = clamp_total_subagents_per_run(total)
+    total = effective_total_subagents_per_run(max_total_subagents, app_config)
     if subagent_enabled:
         from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
 
@@ -1053,6 +1069,7 @@ def apply_prompt_template(
             app_config=app_config,
             allowed_subagents=allowed_subagents,
             batch_enabled=is_subagent_batch_runtime_available(),
+            lead_bash_available=bash_available,
         )
     else:
         subagent_section = ""
@@ -1095,7 +1112,7 @@ def apply_prompt_template(
     deferred_tools_section = get_deferred_tools_prompt_section(deferred_names=deferred_names)
 
     # Build ACP agent section only if ACP agents are configured
-    acp_section = _build_acp_section(app_config=app_config)
+    acp_section = _build_acp_section(app_config=app_config, bash_available=bash_available)
     custom_mounts_section = _build_custom_mounts_section(app_config=app_config)
     acp_and_mounts_section = "\n".join(section for section in (acp_section, custom_mounts_section) if section)
 
@@ -1109,11 +1126,20 @@ def apply_prompt_template(
 
     memory_tool_section = _build_memory_tool_section(app_config=app_config, memory_enabled=memory_enabled)
 
+    # Script guidance only helps when a tool can run the script. Without `bash` (the default
+    # LocalSandboxProvider has host bash off) models wrote helper scripts nothing could run.
+    workspace_scripts_guidance = (
+        "- When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`\n"
+        "- Avoid hardcoding `/mnt/user-data/...` inside generated scripts when a relative path from the workspace is enough"
+        if bash_available
+        else "- No `bash` tool is bound: work out results directly and write them with `write_file` instead of saving helper scripts"
+    )
+
     # Build and return the fully static system prompt.
     # Memory and current date are injected per-turn via DynamicContextMiddleware
     # as a <system-reminder> in the first HumanMessage, keeping this prompt
     # identical across users and sessions for maximum prefix-cache reuse.
-    return SYSTEM_PROMPT_TEMPLATE.format(
+    rendered_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         interaction_thinking_guidance=interaction_policy.thinking_guidance,
         clarification_system=interaction_policy.clarification_system,
         clarification_reminder=interaction_policy.clarification_reminder,
@@ -1129,4 +1155,11 @@ def apply_prompt_template(
         skill_first_reminder=skill_first_reminder,
         subagent_thinking=subagent_thinking,
         acp_section=acp_and_mounts_section,
+        workspace_scripts_guidance=workspace_scripts_guidance,
     )
+    if app_config is None:
+        from deerflow.config import get_app_config
+
+        app_config = get_app_config()
+    overlay = getattr(app_config, "lead_prompt_overlay", None)
+    return overlay.apply(rendered_prompt) if overlay is not None else rendered_prompt

@@ -160,6 +160,19 @@ export interface Translations {
     showBrowser: string;
   };
 
+  skillUsage: {
+    used: string;
+    title: string;
+    name: string;
+    description: string;
+    builtIn: string;
+    custom: string;
+    integration: string;
+    legacy: string;
+    copy: string;
+    partial: string;
+  };
+
   runDuration: {
     reasoning: string;
     working: string;
@@ -288,6 +301,24 @@ export interface Translations {
 
   // Input Box
   inputBox: {
+    mentionPicker: string;
+    mentionSearch: string;
+    mentionSkills: string;
+    mentionFiles: string;
+    mentionConversations: string;
+    mentionUpload: string;
+    mentionEmpty: string;
+    mentionLoadMore: string;
+    mentionLoading: string;
+    mentionFailed: string;
+    mentionRetry: string;
+    mentionAttaching: string;
+    mentionAttachFailed: string;
+    mentionMultipleSkills: string;
+    mentionNoProject: string;
+    mentionUnavailable: string;
+    mentionClose: string;
+
     placeholder: string;
     disclaimer: string;
     createSkillPrompt: string;
@@ -335,6 +366,10 @@ export interface Translations {
     reasoningEffortMediumDescription: string;
     reasoningEffortHigh: string;
     reasoningEffortHighDescription: string;
+    reasoningEffortXhigh: string;
+    reasoningEffortXhighDescription: string;
+    reasoningEffortMax: string;
+    reasoningEffortMaxDescription: string;
     surpriseMe: string;
     surpriseMePrompt: string;
     followupLoading: string;

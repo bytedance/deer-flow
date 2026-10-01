@@ -184,10 +184,24 @@ export const enUS: Translations = {
     showBrowser: "Open browser panel",
   },
 
+  skillUsage: {
+    used: "Skills used",
+    title: "Skills",
+    name: "Name",
+    description: "Description",
+    builtIn: "Built-in",
+    custom: "Custom",
+    integration: "Integration",
+    legacy: "Legacy",
+    copy: "Copy skill snapshot",
+    partial:
+      "This is a partial snapshot of the skill instructions loaded during this run.",
+  },
+
   runDuration: {
     reasoning: "Reasoning",
     working: "Working…",
-    completedIn: (duration) => `Completed in ${duration}`,
+    completedIn: (duration) => `Took ${duration}`,
     description:
       "Total task time, including model reasoning, tool calls, and waiting.",
     lessThanSecond: "<1s",
@@ -333,6 +347,25 @@ export const enUS: Translations = {
 
   // Input Box
   inputBox: {
+    mentionPicker: "Add a reference",
+    mentionSearch: "Search skills, project files and conversations",
+    mentionSkills: "Skills",
+    mentionFiles: "Project files",
+    mentionConversations: "Conversations",
+    mentionUpload: "Upload a file",
+    mentionEmpty: "No matching references in loaded results",
+    mentionLoadMore: "Load more",
+    mentionLoading: "Loading references…",
+    mentionFailed: "Could not load references. Try again.",
+    mentionRetry: "Retry",
+    mentionAttaching: "Adding file…",
+    mentionAttachFailed: "Could not add this file. Try again.",
+    mentionMultipleSkills:
+      "Select up to 16 skills per message; select a checked skill again to remove it.",
+    mentionNoProject: "Open a project chat to reference its documents.",
+    mentionUnavailable: "File unavailable",
+    mentionClose: "Close references",
+
     placeholder: "How can I assist you today?",
     disclaimer: "DeerFlow is AI and can make mistakes",
     createSkillPrompt:
@@ -394,6 +427,11 @@ export const enUS: Translations = {
     reasoningEffortHigh: "High",
     reasoningEffortHighDescription:
       "Full-dimensional Logic Deduction + Multi-path Verification + Backward Check",
+    reasoningEffortXhigh: "Extra High",
+    reasoningEffortXhighDescription:
+      "Extended deduction beyond High; slowest, most thorough",
+    reasoningEffortMax: "Max",
+    reasoningEffortMaxDescription: "The provider's deepest reasoning budget",
     surpriseMe: "Surprise",
     surpriseMePrompt: "Surprise me",
     followupLoading: "Generating follow-up questions...",

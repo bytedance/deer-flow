@@ -120,6 +120,14 @@ LLM-powered persistent context retention across conversations:
 
 Jina AI web fetch follows HTTP redirects from its API endpoint, including 307/308 redirects, which retain the POST method and body.
 
+### Run Event Storage
+
+For direct `RunEventStore.list_messages` callers, `after_seq` and `before_seq`
+bound an exclusive message window. With both cursors, reads return the first
+`limit` messages inside that window in ascending sequence order across memory,
+JSONL, and database backends. Keep `before_seq` fixed and advance `after_seq`
+to the last returned sequence to page forward through a bounded history range.
+
 ### Gateway API
 
 FastAPI application providing REST endpoints for frontend integration:
@@ -140,6 +148,12 @@ FastAPI application providing REST endpoints for frontend integration:
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |
 | `DELETE /api/threads/{id}` | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
+
+Converted-upload ownership records live in each thread's `upload-companions/`
+directory, outside the sandbox-mounted `user-data/` tree. Older conversions
+without a record remain separate Markdown uploads and no longer provide an
+inferred outline for their source document; see [file upload storage and upgrade
+behavior](docs/FILE_UPLOAD.md#支持的文档格式).
 
 ### IM Channels
 

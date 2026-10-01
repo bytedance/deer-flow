@@ -165,6 +165,78 @@ async def test_cancellation_while_waiting_for_lock_never_starts_write(tmp_path):
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("cancellations", [1, 3])
+async def test_cancelled_snapshot_keeps_thread_lock_until_read_finishes(tmp_path, monkeypatch, cancellations):
+    store = JsonlRunEventStore(tmp_path)
+    await store.put(**_event())
+    paused = _PausedIO(store._read_thread_events)
+    monkeypatch.setattr(store, "_read_thread_events", paused)
+    lookup = asyncio.create_task(store.find_latest_ai_message_run_ids("t1", {"missing"}))
+    writer = None
+    try:
+        await asyncio.wait_for(paused.entered.wait(), 5)
+        for index in range(cancellations):
+            lookup.cancel(f"cancel-{index}")
+            await _checkpoint()
+        writer = asyncio.create_task(store.put(**_event("r2", "later")))
+        await _checkpoint()
+        assert not lookup.done()
+        assert not writer.done()
+        assert not store._run_file("t1", "r2").exists(), "writer entered before the snapshot read settled"
+        paused.release.set()
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await lookup
+        assert caught.value.args == ("cancel-0",)
+        assert (await writer)["seq"] == 2
+        assert "t1" not in store._write_locks
+    finally:
+        paused.release.set()
+        await asyncio.gather(lookup, *([writer] if writer is not None else []), return_exceptions=True)
+        await asyncio.wait_for(paused.finished.wait(), 5)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_snapshot_read_failure_preserves_error_precedence_and_releases_lock(tmp_path, monkeypatch, cancel):
+    store = JsonlRunEventStore(tmp_path)
+    await store.put(**_event())
+
+    def fail_read(_thread_id):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    paused = _PausedIO(fail_read)
+    monkeypatch.setattr(store, "_read_thread_events", paused)
+    lookup = asyncio.create_task(store.find_latest_ai_message_run_ids("t1", {"missing"}))
+    writer = None
+    try:
+        await asyncio.wait_for(paused.entered.wait(), 5)
+        if cancel:
+            lookup.cancel("snapshot-cancelled")
+            await _checkpoint()
+        writer = asyncio.create_task(store.put(**_event("r2", "later")))
+        await _checkpoint()
+        assert not writer.done()
+        assert not store._run_file("t1", "r2").exists(), "writer entered before the snapshot read settled"
+
+        paused.release.set()
+        if cancel:
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await lookup
+            assert caught.value.args == ("snapshot-cancelled",)
+            assert isinstance(caught.value.__cause__, UnicodeDecodeError)
+        else:
+            with pytest.raises(UnicodeDecodeError):
+                await lookup
+
+        assert (await writer)["seq"] == 2
+        assert "t1" not in store._write_locks
+    finally:
+        paused.release.set()
+        await asyncio.gather(lookup, *([writer] if writer is not None else []), return_exceptions=True)
+        await asyncio.wait_for(paused.finished.wait(), 5)
+
+
+@pytest.mark.anyio
 async def test_cancelled_idempotent_write_is_visible_to_retry_and_other_threads_progress(tmp_path, monkeypatch):
     store = JsonlRunEventStore(tmp_path)
     write = store._write_record

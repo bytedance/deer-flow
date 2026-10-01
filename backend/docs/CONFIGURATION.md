@@ -2,6 +2,54 @@
 
 This guide explains how to configure DeerFlow for your environment.
 
+## Prompt overlays
+
+Operators can add instructions around existing system prompts in `config.yaml`.
+Empty or omitted extensions preserve the original prompt exactly. The built-in
+instructions remain present; extensions do not change tool authorization,
+memory admission gates, or runtime limits.
+
+```yaml
+lead_prompt_overlay:
+  prepend: "Use our organization's terminology in reports."
+  append: "Conclude with decisions and unresolved questions."
+subagents:
+  agents:
+    general-purpose:
+      prompt_overlay:
+        append: "Include evidence for research claims."
+    bash:
+      prompt_overlay:
+        prepend: "Prefer reproducible, non-interactive commands."
+memory:
+  backend_config:
+    prompt_prepend: "Prefer concise summaries of lasting preferences."
+    prompt_append: "Preserve explicit corrections without redundant wording."
+```
+
+Merge these into existing sections rather than duplicating YAML keys. Extensions
+are joined with two newlines around the assembled system text. They are literal:
+`{conversation}` and JSON braces are not interpolated. The configuration loader's
+existing `$ENV_VAR` resolution still applies to values beginning with `$`.
+Use YAML block scalars for multiline instructions.
+
+These are trusted operator instructions, never request/body context or per-user
+agent data. Lead extensions apply to the assembled default or custom lead agent;
+its SOUL, skills and runtime guidance remain intact. Subagent extensions also
+support configured custom subagents and never mutate the shared built-in
+registry. Explicit application snapshots remain isolated; subsequent assemblies
+use new settings, while already-built graphs retain their prompt.
+
+DeerMem's current `memory_update` chat prompt handles both summary updates and
+fact extraction; the historical `FACT_EXTRACTION_PROMPT` constant is not a
+separate live extraction call. Its extensions wrap the first system message
+after template rendering, leaving memory and conversation data in their original
+human message. They also work with `prompts_dir` templates, which must include
+a system message when overlays are used. Restart the memory backend/Gateway after
+changing its configuration. Other memory backends do not consume these
+DeerMem-specific fields. Existing external memory templates remain the mechanism
+for complete template replacement; this feature adds no editing endpoint or UI.
+
 ## Model request admission
 
 For request-per-minute limits, opt into pacing on each relevant `models[]`
@@ -14,6 +62,10 @@ request_admission:
   max_wait_seconds: 300
   max_queue_size: 256
 ```
+
+Like every other field, these accept `$VAR` environment references; an integer
+field such as `requests_per_minute: $RPM` validates when the variable holds a
+decimal integer.
 
 Calls wait in a bounded FIFO before dispatch. At 60 RPM, admissions are spaced
 at least one second apart, even after idle periods. The first call can proceed
@@ -57,7 +109,7 @@ Run `make config-upgrade` to merge new fields into your config.
 ```
 
 - **Missing `config_version`** in your config is treated as version 0.
-- Run `make config-upgrade` to auto-merge missing fields (your existing values are preserved, a `.bak` backup is created).
+- Run `make config-upgrade` to auto-merge missing fields (your existing values are preserved, a `.bak` backup is created). It upgrades the file the Gateway loads, resolved as in [Configuration Priority](#configuration-priority).
 - When changing the config schema, bump `config_version` in `config.example.yaml`.
 
 ## Configuration Sections
@@ -468,6 +520,7 @@ Notes:
 - Create/update accept `once`, `cron`, and `interval`. Interval uses `schedule_spec.every_seconds` (UTC `now + N`, no missed-beat catch-up). N is at least `min_once_delay_seconds` (default 60) and at most 30 days.
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
+- With `channel_connections.enabled: true`, the scheduler enqueues IM outcome notifications for the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them. Only runs that finish as success or failed notify: manual triggers and interrupts stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, restart recovery). Channel/transport outages park rows without consuming the retry budget, for up to about a day; platform rejections exhaust ~15 minutes of counted retries then settle `failed`. The worker re-checks the binding right before sending: a target the owner has disconnected since enqueue is dropped as `failed`, never pushed. Only WeCom currently implements proactive `send_notification`.
 
 ### Agent Storage
 
@@ -522,9 +575,15 @@ empty or omitted `include_domains`. These filters compose with `max_results`
 and the model's optional `time_range`. The model-visible arguments remain `query`
 and `time_range`; the filters do not apply to `web_fetch` or other search providers.
 
+Serper `web_search` also accepts the optional model argument
+`time_range: "day" | "week" | "month" | "year"`. For example,
+`{"query": "Python releases", "time_range": "week"}` sends `tbs: "qdr:w"`
+to Serper. Omitting `time_range` or passing `null` keeps the existing unrestricted
+search request. This option does not change Serper `image_search`.
+
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya)
-- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya)
+- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
 - `ls` - List directory contents
@@ -855,7 +914,6 @@ If the configured `host_path` is not visible to the gateway process, DeerFlow lo
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
   port: 8080
-  auto_start: true
   container_prefix: deer-flow-sandbox
 
   # Optional: Additional mounts
@@ -1156,6 +1214,7 @@ models:
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
+- `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
 - `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path

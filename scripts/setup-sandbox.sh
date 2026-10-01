@@ -31,9 +31,15 @@ fi
 
 echo ""
 
+APPLE_PULL_SUCCEEDED=0
 if command -v container >/dev/null 2>&1 && [ "$(uname)" = "Darwin" ]; then
     echo "Detected Apple Container on macOS, pulling image..."
-    container image pull "$IMAGE" || echo "⚠ Apple Container pull failed, will try Docker"
+    if container image pull "$IMAGE"; then
+        APPLE_PULL_SUCCEEDED=1
+        echo "✓ Sandbox image pulled successfully using Apple Container"
+    else
+        echo "⚠ Apple Container pull failed, will try Docker"
+    fi
 fi
 
 if command -v docker >/dev/null 2>&1; then
@@ -45,7 +51,7 @@ if command -v docker >/dev/null 2>&1; then
         echo ""
         echo "⚠ Failed to pull sandbox image (this is OK for local sandbox mode)"
     fi
-else
+elif [ "$APPLE_PULL_SUCCEEDED" -eq 0 ]; then
     echo "✗ Neither Docker nor Apple Container is available"
     echo "  Please install Docker: https://docs.docker.com/get-docker/"
     exit 1

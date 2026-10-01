@@ -1,0 +1,37 @@
+"""Text markers shared by read_file and its display-only consumers."""
+
+READ_FILE_EMPTY = "(empty)"
+READ_FILE_START_LINE_EXCEEDS = "(start_line exceeds file length)"
+READ_FILE_INVALID_START_LINE = "(start_line must be >= 1)"
+READ_FILE_INVALID_END_LINE = "(end_line must be >= 1)"
+READ_FILE_INVALID_RANGE = "(invalid line range: start_line must be <= end_line)"
+# Backward-compat alias — callers that imported READ_FILE_EMPTY_RANGE by name continue to work.
+READ_FILE_EMPTY_RANGE = READ_FILE_INVALID_RANGE
+READ_FILE_NO_CONTENT_RESULTS = frozenset(
+    {
+        READ_FILE_EMPTY,
+        READ_FILE_START_LINE_EXCEEDS,
+        READ_FILE_INVALID_START_LINE,
+        READ_FILE_INVALID_END_LINE,
+        READ_FILE_INVALID_RANGE,
+    }
+)
+READ_FILE_TRUNCATION_PREFIX = "... [truncated:"
+
+
+def count_file_lines(content: str) -> int:
+    """Count file lines as LocalSandbox and read_file's truncation marker see them.
+
+    Uses ``count("\\n") + (1 if not endswith("\\n") else 0)`` — matching Python's
+    text-mode line iteration used by ``LocalSandbox.read_file`` and the formula in
+    ``_truncate_read_file_output``.  This ensures the line count shown in the gate
+    block message agrees with the ``start_line``/``end_line`` values the model can
+    pass back to ``read_file``.
+
+    Unlike ``splitlines()``, this function does not treat ``\\f``, ``\\v``, ``\\x85``,
+    ``\\u2028``, or ``\\u2029`` as line separators — consistent with LocalSandbox's
+    text-mode iteration where those characters are just regular content.
+    """
+    if not content:
+        return 0
+    return content.count("\n") + (1 if not content.endswith("\n") else 0)

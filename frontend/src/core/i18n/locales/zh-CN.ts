@@ -178,10 +178,23 @@ export const zhCN: Translations = {
     showBrowser: "打开浏览器面板",
   },
 
+  skillUsage: {
+    used: "使用的技能",
+    title: "技能",
+    name: "名称",
+    description: "描述",
+    builtIn: "内置",
+    custom: "自定义",
+    integration: "集成",
+    legacy: "旧版",
+    copy: "复制技能快照",
+    partial: "此快照仅包含本次运行加载的部分技能内容。",
+  },
+
   runDuration: {
     reasoning: "思考过程",
     working: "执行中…",
-    completedIn: (duration) => `本次任务耗时 ${duration}`,
+    completedIn: (duration) => `用时 ${duration}`,
     description: "任务总耗时，包括模型推理、工具调用和等待时间。",
     lessThanSecond: "不足 1 秒",
     hours: (value) => `${value} 小时`,
@@ -317,6 +330,25 @@ export const zhCN: Translations = {
 
   // Input Box
   inputBox: {
+    mentionPicker: "添加引用",
+    mentionSearch: "搜索技能、项目文件和对话",
+    mentionSkills: "技能",
+    mentionFiles: "项目文件",
+    mentionConversations: "对话",
+    mentionUpload: "上传文件",
+    mentionEmpty: "已加载的内容中没有匹配的引用",
+    mentionLoadMore: "加载更多",
+    mentionLoading: "正在加载引用…",
+    mentionFailed: "引用加载失败，请重试。",
+    mentionRetry: "重试",
+    mentionAttaching: "正在添加文件…",
+    mentionAttachFailed: "文件添加失败，请重试。",
+    mentionMultipleSkills:
+      "每条消息最多选择 16 个技能，再次选择已勾选技能可移除。",
+    mentionNoProject: "在项目对话中可引用该项目的文档。",
+    mentionUnavailable: "文件不可用",
+    mentionClose: "关闭引用面板",
+
     placeholder: "今天我能为你做些什么？",
     disclaimer: "内容由AI生成，重要信息请务必核查",
     createSkillPrompt:
@@ -369,6 +401,10 @@ export const zhCN: Translations = {
     reasoningEffortMediumDescription: "多层逻辑分析 + 基础验证",
     reasoningEffortHigh: "高",
     reasoningEffortHighDescription: "全维度逻辑推演 + 多路径验证 + 反推校验",
+    reasoningEffortXhigh: "极高",
+    reasoningEffortXhighDescription: "在“高”之上继续推演，最慢但最充分",
+    reasoningEffortMax: "最大",
+    reasoningEffortMaxDescription: "使用提供商允许的最大推理预算",
     surpriseMe: "小惊喜",
     surpriseMePrompt: "给我一个小惊喜吧",
     followupLoading: "正在生成可能的后续问题...",
