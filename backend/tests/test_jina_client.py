@@ -1,5 +1,6 @@
 """Tests for JinaClient async crawl method."""
 
+import json
 import logging
 from unittest.mock import MagicMock
 
@@ -39,6 +40,7 @@ async def test_crawl_follows_jina_api_redirect(jina_client, monkeypatch):
     requests = []
 
     def handle(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.read()) == {"url": "https://example.com"}
         requests.append(request)
         if request.url.path == "/":
             return httpx.Response(307, headers={"Location": "https://r.jina.ai/reader"})
@@ -53,8 +55,6 @@ async def test_crawl_follows_jina_api_redirect(jina_client, monkeypatch):
     assert result == "Fetched page"
     assert [request.url.path for request in requests] == ["/", "/reader"]
     assert all(request.method == "POST" for request in requests)
-    assert requests[0].content
-    assert requests[1].content == requests[0].content
 
 
 @pytest.mark.anyio
@@ -63,6 +63,7 @@ async def test_crawl_strips_api_key_on_cross_host_redirect(jina_client, monkeypa
     requests: list[httpx.Request] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.read()) == {"url": "https://example.com"}
         requests.append(request)
         if request.url.host == "r.jina.ai":
             return httpx.Response(307, headers={"Location": "https://redirect.example/final"})
