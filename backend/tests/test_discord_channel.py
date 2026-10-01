@@ -115,6 +115,34 @@ async def test_discord_stop_does_not_clobber_store_before_load(tmp_path) -> None
     assert json.loads(store_path.read_text()) == {"chan-9": "thread-9"}
 
 
+@pytest.mark.asyncio
+async def test_discord_stop_joins_client_thread_off_the_event_loop() -> None:
+    """stop() must not join the client thread on the shared Gateway loop.
+
+    The thread usually exits right after the cross-loop client close, but a
+    timed-out close or a slow ``_run_client()`` drain keeps it alive for up to
+    the 10s join timeout, and the Gateway loop must keep running meanwhile.
+    """
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    release = threading.Event()
+    # Bounded so a join run on the event loop fails the assertion below
+    # instead of hanging the test.
+    client_thread = threading.Thread(target=release.wait, args=(2,), daemon=True)
+    client_thread.start()
+    channel._discord_loop = None
+    channel._client = None
+    channel._thread = client_thread
+    channel._cancel_ephemeral_tasks = AsyncMock()
+
+    stop_task = asyncio.create_task(channel.stop())
+    await asyncio.sleep(0.05)
+    assert not stop_task.done()
+
+    release.set()
+    await stop_task
+    assert channel._thread is None
+
+
 def _make_discord_message(text: str):
     return SimpleNamespace(
         id=111,

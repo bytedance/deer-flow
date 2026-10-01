@@ -443,6 +443,19 @@ This release closes that milestone with **301 merged pull requests**.
   carries it and the cap still allows the second reminder. Successful calls are
   unchanged, and a run whose reminder state was cleared meanwhile does not get
   it back. ([#6132])
+- **channels:** Stopping or restarting the Slack, Feishu, DingTalk or Discord
+  channel no longer freezes the Gateway event loop. `SlackChannel.stop()` called
+  `SocketModeClient.close()` inline, which joins the SDK's message-processor
+  thread (about 0.7s every time) and waits for in-flight event listeners, whose
+  blocking Slack Web API calls can run up to the client timeout; Feishu and
+  DingTalk joined their SDK threads inline with a 5s timeout, and because those
+  threads only exit on a fatal error the join normally waited the full 5s;
+  Discord joined its client thread inline with a 10s timeout, which a timed-out
+  client close or a slow drain could use up. Every run, stream and channel on
+  the Gateway stalled meanwhile, including on
+  `POST /api/channels/{name}/restart`. The teardown now runs in a worker thread;
+  Slack's close is shielded and tracked, so a cancelled shutdown leaves it
+  running and a retried `stop()` awaits it instead of closing twice. ([#6134])
 - **middleware:** `_externalize_to_sandbox` now validates the full byte count
   of externalized tool outputs instead of only testing non-emptiness with
   `test -s`. When a remote sandbox write truncated the file part-way (e.g. disk
@@ -7500,4 +7513,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
+[#6134]: https://github.com/bytedance/deer-flow/pull/6134
 
