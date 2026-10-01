@@ -409,8 +409,9 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         # are returned with status="success" by LangChain even though the model received
         # no real file content. Stamping a hash in that case would open the write gate
         # for files the model has never actually read — the root cause of issue #6019.
-        # READ_FILE_EMPTY is excluded: a full read of a genuinely empty file IS a real
-        # read and should stamp so the gate can later be satisfied.
+        # READ_FILE_EMPTY is a successful read of an empty file or a valid range
+        # containing only blank lines. Like any successful ranged read, it stamps
+        # the current full-file hash and can satisfy the gate.
         tool_content = message.content if isinstance(message.content, str) else ""
         if tool_content.strip() in READ_FILE_NO_CONTENT_RESULTS - {READ_FILE_EMPTY}:
             logger.debug(

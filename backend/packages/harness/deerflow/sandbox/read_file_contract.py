@@ -7,8 +7,6 @@ READ_FILE_INVALID_END_LINE = "(end_line must be >= 1)"
 READ_FILE_INVALID_RANGE = "(invalid line range: start_line must be <= end_line)"
 # Backward-compat alias — callers that imported READ_FILE_EMPTY_RANGE by name continue to work.
 READ_FILE_EMPTY_RANGE = READ_FILE_INVALID_RANGE
-# _LEGACY_READ_FILE_EMPTY_RANGE removed — unreachable after the #6019 contract update;
-# no live code path produces the old string any longer.
 READ_FILE_NO_CONTENT_RESULTS = frozenset(
     {
         READ_FILE_EMPTY,

@@ -903,7 +903,7 @@ def test_gate_block_on_numeric_line_count_is_recoverable(line_count):
 
 
 class TestStampingGateBugFix:
-    """In-band no-content results from read_file must not stamp a read mark (issue #6019)."""
+    """In-band errors from read_file must not stamp a read mark (issue #6019)."""
 
     PATH = "/mnt/user-data/outputs/report.md"
 
@@ -950,6 +950,62 @@ class TestStampingGateBugFix:
         result = mw.wrap_tool_call(write_req, handler)
         handler.assert_not_called()
         assert result.status == "error"
+
+    @pytest.mark.parametrize(
+        "content,line_range",
+        [
+            pytest.param("a\n\nb\n", {"start_line": 2, "end_line": 2}, id="both_bounds"),
+            pytest.param("a\n\n", {"start_line": 2}, id="start_only"),
+            pytest.param("\nb\n", {"end_line": 1}, id="end_only"),
+        ],
+    )
+    def test_blank_line_range_stamps_full_hash_and_allows_write(self, tmp_path, monkeypatch, content, line_range):
+        """Valid blank ranges satisfy the gate like other successful ranged reads."""
+        from types import SimpleNamespace
+
+        from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_KEY, ReadBeforeWriteMiddleware
+        from deerflow.sandbox import tools as sandbox_tools
+        from deerflow.sandbox.local.local_sandbox import LocalSandbox
+        from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY
+
+        outputs = tmp_path / "outputs"
+        outputs.mkdir()
+        (outputs / "report.md").write_text(content, encoding="utf-8")
+        runtime = SimpleNamespace(
+            state={"sandbox": {"sandbox_id": "local:t-test"}, "thread_data": {"outputs_path": str(outputs)}},
+            context={"thread_id": "t-test"},
+        )
+        monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda runtime: LocalSandbox("t-test"))
+        monkeypatch.setattr(sandbox_tools, "ensure_thread_directories_exist", lambda runtime: None)
+        mw = ReadBeforeWriteMiddleware()
+        read_req = ToolCallRequest(
+            tool_call={"name": "read_file", "args": {"path": self.PATH, **line_range}, "id": "read-blank"},
+            tool=None,
+            state=runtime.state,
+            runtime=runtime,
+        )
+
+        def read_handler(request):
+            return ToolMessage(
+                content=sandbox_tools.read_file_tool.func(runtime=request.runtime, **request.tool_call["args"]),
+                tool_call_id=request.tool_call["id"],
+                name="read_file",
+            )
+
+        read_res = mw.wrap_tool_call(read_req, read_handler)
+        assert read_res.content == READ_FILE_EMPTY
+        assert read_res.additional_kwargs[READ_MARK_KEY] == {"path": self.PATH, "hash": _sha(content)}
+
+        write_req = ToolCallRequest(
+            tool_call={"name": "write_file", "args": {"path": self.PATH, "content": "updated"}, "id": "write-after-blank"},
+            tool=None,
+            state={**runtime.state, "messages": [read_res]},
+            runtime=runtime,
+        )
+        handler = MagicMock(return_value=ToolMessage(content="OK", tool_call_id="write-after-blank", name="write_file"))
+        result = mw.wrap_tool_call(write_req, handler)
+        handler.assert_called_once_with(write_req)
+        assert result.status == "success"
 
     def test_empty_file_read_still_stamps_mark(self):
         """READ_FILE_EMPTY (genuine empty-file read) must still stamp a mark."""
