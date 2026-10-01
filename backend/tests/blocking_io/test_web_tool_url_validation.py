@@ -83,3 +83,34 @@ async def test_browser_navigate_and_capture_resolves_off_loop(tmp_path) -> None:
         await browser_tools.navigate_and_capture(thread_id="thread-1", url=_UNRESOLVED_LOOPBACK_URL, outputs_path=tmp_path)
 
     manager.acquire_session.assert_not_called()
+
+
+async def test_browser_request_guard_resolves_off_loop() -> None:
+    # The context route guard screens every redirect hop and subresource on the
+    # shared Playwright loop, which also pumps Live frames for every session.
+    from deerflow.community.browser_automation.session import BrowserSession
+
+    captured = {}
+
+    class _FakeContext:
+        async def route(self, _pattern, handler):
+            captured["handler"] = handler
+
+    class _FakeRoute:
+        request = SimpleNamespace(url=_UNRESOLVED_LOOPBACK_URL)
+        aborted_with = None
+
+        async def abort(self, error_code):
+            self.aborted_with = error_code
+
+        async def continue_(self):
+            raise AssertionError("a loopback request must not continue")
+
+    session = BrowserSession(MagicMock(), headless=True, timeout_ms=1000, viewport={"width": 1000, "height": 500}, url_guard=browser_tools.validate_browser_url)
+    session._context = _FakeContext()
+    route = _FakeRoute()
+    with patch.object(browser_tools, "_get_tool_config", return_value={}):
+        await session._install_request_guard()
+        await captured["handler"](route)
+
+    assert route.aborted_with == "blockedbyclient"

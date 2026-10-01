@@ -466,7 +466,10 @@ This release closes that milestone with **301 merged pull requests**.
   `web_capture`, `browser_navigate`, the Gateway browser navigate route, and
   the Live stream's navigate input and seed called it directly from async code,
   so a slow DNS answer for a model- or user-chosen URL froze every other request
-  and stream for the length of the lookup. These callers now run the guard
+  and stream for the length of the lookup. The Playwright request guard, which
+  screens every redirect hop and subresource, did the same on the shared browser
+  loop and stalled Live frames and input for every browser session. These
+  callers now run the guard
   through `asyncio.to_thread`; what it allows and rejects is unchanged. The
   strict blocking-IO gate gains a `socket.getaddrinfo` rule, because
   Blockbuster's defaults wrap socket methods but not the module-level resolver.

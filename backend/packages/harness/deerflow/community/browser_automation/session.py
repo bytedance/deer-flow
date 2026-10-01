@@ -461,7 +461,8 @@ class BrowserSession:
             url = ""
             with contextlib.suppress(Exception):
                 url = route.request.url
-            if url.startswith(("http://", "https://")) and guard(url) is not None:
+            # The guard resolves hostnames; keep that off the shared browser loop.
+            if url.startswith(("http://", "https://")) and await asyncio.to_thread(guard, url) is not None:
                 logger.warning("browser request blocked by SSRF guard: %s", redact_browser_url(url))
                 with contextlib.suppress(Exception):
                     await route.abort("blockedbyclient")

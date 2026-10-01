@@ -51,6 +51,11 @@ def validate_public_http_url(
 
     A hostname URL is resolved synchronously; from a coroutine, call this via
     ``asyncio.to_thread`` so a slow DNS answer cannot stall the event loop.
+
+    The check runs at validation time only. A caller that connects later
+    resolves the name again, so a rebinding DNS server can still hand that
+    connect a private address unless the connection is pinned to the vetted
+    IPs, as ``deerflow.mcp.personal_network`` does.
     """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:

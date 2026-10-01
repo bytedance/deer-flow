@@ -424,7 +424,8 @@
   crawl4ai 与 Browserless 的 `web_fetch`、`web_capture`、`browser_navigate`、
   Gateway 浏览器导航路由以及 Live 流的导航输入和 seed 都在异步代码中直接调用它，
   因此模型或用户选择的 URL 一旦遇到缓慢的 DNS 响应，整个查询期间其他请求和流都会停滞。
-  这些调用方现在通过 `asyncio.to_thread` 运行校验，放行与拒绝的结果不变。
+  逐个检查重定向和子资源的 Playwright 请求守卫也在共享的浏览器事件循环上同步解析，
+  会让所有浏览器会话的 Live 画面与输入一同停滞。这些调用方现在通过 `asyncio.to_thread` 运行校验，放行与拒绝的结果不变。
   严格的阻塞 IO 检测新增 `socket.getaddrinfo` 规则，因为 Blockbuster
   默认只包装 socket 方法，不包装模块级解析函数。([#6140])
 - **上传：** 文档转换时现在会记录原文件与 Markdown 的归属关系。
