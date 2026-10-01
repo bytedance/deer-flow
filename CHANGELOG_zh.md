@@ -419,7 +419,7 @@
   因此模型或用户选择的 URL 一旦遇到缓慢的 DNS 响应，整个查询期间其他请求和流都会停滞。
   这些调用方现在通过 `asyncio.to_thread` 运行校验，放行与拒绝的结果不变。
   严格的阻塞 IO 检测新增 `socket.getaddrinfo` 规则，因为 Blockbuster
-  默认只包装 socket 方法，不包装模块级解析函数。
+  默认只包装 socket 方法，不包装模块级解析函数。([#6140])
 
 - **智能体：** 计划模式下被重试的模型调用不再丢失 `TodoMiddleware`
   已为其排队的待办完成提醒。该中间件在 `wrap_model_call` 中取出提醒；由于
@@ -6315,3 +6315,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
+[#6140]: https://github.com/bytedance/deer-flow/pull/6140

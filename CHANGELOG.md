@@ -443,6 +443,7 @@ This release closes that milestone with **301 merged pull requests**.
   through `asyncio.to_thread`; what it allows and rejects is unchanged. The
   strict blocking-IO gate gains a `socket.getaddrinfo` rule, because
   Blockbuster's defaults wrap socket methods but not the module-level resolver.
+  ([#6140])
 
 - **agents:** A retried model call in plan mode no longer loses the todo
   completion reminder that `TodoMiddleware` had queued for it. The middleware
@@ -7525,4 +7526,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
+[#6140]: https://github.com/bytedance/deer-flow/pull/6140
 
