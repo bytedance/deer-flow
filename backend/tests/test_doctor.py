@@ -617,6 +617,36 @@ class TestCheckWebFetch:
         assert result.status == "ok"
         assert "Jina AI" in result.detail
 
+    def test_crawl4ai_without_network_isolation_confirmation_warns(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.crawl4ai.tools:web_fetch_tool\n    base_url: http://localhost:11235\n")
+
+        result = doctor.check_web_fetch(cfg)
+
+        assert result.status == "warn"
+        assert "network isolation" in result.detail
+        assert "network_isolation_confirmed: true" in (result.fix or "")
+        assert "backend/docs/CONFIGURATION.md" in (result.fix or "")
+
+    def test_crawl4ai_with_network_isolation_confirmation_ok(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.crawl4ai.tools:web_fetch_tool\n    base_url: http://localhost:11235\n    network_isolation_confirmed: true\n")
+
+        result = doctor.check_web_fetch(cfg)
+
+        assert result.status == "ok"
+        assert "Crawl4AI" in result.detail
+
+    def test_browserless_without_network_isolation_confirmation_warns(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.browserless.tools:web_fetch_tool\n    base_url: http://localhost:3032\n")
+
+        result = doctor.check_web_fetch(cfg)
+
+        assert result.status == "warn"
+        assert "Browserless" in result.detail
+        assert "network_isolation_confirmed: true" in (result.fix or "")
+
     def test_firecrawl_without_key_warns(self, tmp_path, monkeypatch):
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
         cfg = tmp_path / "config.yaml"
@@ -669,10 +699,22 @@ class TestCheckWebFetch:
 
 
 class TestCheckWebCapture:
-    def test_browserless_self_host_without_token_ok(self, tmp_path, monkeypatch):
+    def test_browserless_self_host_without_isolation_confirmation_warns(self, tmp_path, monkeypatch):
         monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: http://localhost:3032\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "warn"
+        assert "network isolation" in result.detail
+        assert "network_isolation_confirmed: true" in (result.fix or "")
+        assert "backend/docs/CONFIGURATION.md" in (result.fix or "")
+
+    def test_browserless_self_host_with_isolation_confirmation_ok(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: http://localhost:3032\n    network_isolation_confirmed: true\n")
 
         result = doctor.check_web_capture(cfg)
 

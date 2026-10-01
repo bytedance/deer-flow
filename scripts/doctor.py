@@ -590,6 +590,31 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             base_url = str(tool.get("base_url") or "http://localhost:3032").lower()
             return "browserless.io" not in base_url
 
+        def _enabled(value: object) -> bool:
+            if isinstance(value, bool):
+                return value
+            return isinstance(value, str) and value.strip().lower() in {"1", "true", "yes", "on"}
+
+        def _unconfirmed_delegated_backend(tool: dict) -> str | None:
+            use = str(tool.get("use") or "")
+            if _enabled(tool.get("allow_private_addresses")) or _enabled(tool.get("network_isolation_confirmed")):
+                return None
+            if "crawl4ai" in use:
+                return "Crawl4AI"
+            if "browserless" in use and _browserless_self_hosted(tool):
+                return "Browserless"
+            return None
+
+        for tool in tool_entries:
+            provider = _unconfirmed_delegated_backend(tool)
+            if provider:
+                return CheckResult(
+                    label,
+                    "warn",
+                    f"{provider} self-hosted backend has no confirmed network isolation",
+                    fix="Isolate the backend's egress, then set network_isolation_confirmed: true; see backend/docs/CONFIGURATION.md",
+                )
+
         for tool in tool_entries:
             use = tool.get("use", "")
             for provider, detail in free_providers.get(tool_name, {}).items():

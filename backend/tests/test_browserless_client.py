@@ -332,6 +332,23 @@ class TestBrowserlessTools:
         mock_get_client.assert_not_called()
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
+    async def test_web_capture_rejects_unisolated_private_browser_backend(self, mock_get_client):
+        """web_capture rejects an unisolated private Browserless service before client use."""
+        runtime = SimpleNamespace(state={"thread_data": {}})
+        with patch(
+            "deerflow.community.browserless.tools._get_tool_config",
+            return_value={"base_url": "http://127.0.0.1:3032"},
+        ):
+            result = await tools.web_capture_tool.coroutine(
+                runtime=runtime,
+                url="https://example.com/article",
+                tool_call_id="tool-1",
+            )
+
+        assert "network_isolation_confirmed" in result.update["messages"][0].content
+        mock_get_client.assert_not_called()
+
+    @patch("deerflow.community.browserless.tools._get_browserless_client")
     async def test_web_fetch_allows_isolated_private_browser_backend(self, mock_get_client):
         mock_client = MagicMock()
         mock_client.fetch_html_with_status = AsyncMock(
