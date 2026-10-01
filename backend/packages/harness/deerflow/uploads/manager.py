@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.host_paths import windows_incompatible_segment
 from deerflow.utils.thread_id import validate_thread_id
 
 
@@ -75,6 +76,9 @@ def normalize_filename(filename: str) -> str:
         raise ValueError(f"Filename too long: {len(safe)} chars")
     if is_upload_staging_file(safe):
         raise ValueError(f"Filename uses reserved upload staging pattern: {filename!r}")
+    reason = windows_incompatible_segment(safe)
+    if reason:
+        raise ValueError(f"Filename is not portable to Windows: {filename!r} ({reason})")
     return safe
 
 

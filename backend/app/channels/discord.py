@@ -264,7 +264,10 @@ class DiscordChannel(Channel):
                     logger.exception("[Discord] error while closing client")
 
         if self._thread:
-            self._thread.join(timeout=10)
+            # The client thread normally exits right after the close above, but
+            # a timed-out close or a slow ``_run_client()`` drain can keep it
+            # alive for the whole join timeout; keep that wait off the loop.
+            await asyncio.to_thread(self._thread.join, timeout=10)
             self._thread = None
 
         # _run_client() normally drains these tasks in its finally block.  If

@@ -319,6 +319,22 @@ make down   # 停止并移除容器
 
 5. **访问地址**：http://localhost:2026
 
+#### 启动模式
+
+DeerFlow 将 Agent 运行时内嵌在 Gateway API 中运行。开发模式支持热更新；生产模式使用预构建的前端。
+
+| | **本地前台** | **本地守护进程** | **Docker 开发** | **Docker 生产** |
+|---|---|---|---|---|
+| **开发模式** | `./scripts/serve.sh --dev`<br/>`make dev` | `./scripts/serve.sh --dev --daemon`<br/>`make dev-daemon` | `./scripts/docker.sh start`<br/>`make docker-start` | — |
+| **生产模式** | `./scripts/serve.sh --prod`<br/>`make start` | `./scripts/serve.sh --prod --daemon`<br/>`make start-daemon` | — | `./scripts/deploy.sh`<br/>`make up` |
+
+| 操作 | 本地 | Docker 开发 | Docker 生产 |
+|---|---|---|---|
+| **停止** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
+| **重启** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
+
+`make start` 与 `make start-daemon` 每次运行都会用 `next build` 重新构建前端。如需复用上一次的构建结果，可传入 `SKIP_FRONTEND_BUILD=1`（或在直接调用 `./scripts/serve.sh --prod` 时附加 `--skip-frontend-build`）。该选项为可选行为：当 `frontend/.next` 中没有已完成的构建时会快速失败。
+
 #### LangGraph Studio（可选）
 
 默认的 `make dev` 拓扑使用 DeerFlow 内嵌于 Gateway 的运行时，无需 LangGraph Studio。

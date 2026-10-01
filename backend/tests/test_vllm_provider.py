@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+import pytest
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
 from deerflow.models.vllm_provider import VllmChatModel
 
@@ -74,6 +75,40 @@ def test_vllm_provider_restores_reasoning_in_request_payload():
     assert assistant_message["role"] == "assistant"
     assert assistant_message["reasoning"] == "Need to inspect the workspace first."
     assert assistant_message["tool_calls"][0]["function"]["name"] == "bash"
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        pytest.param({"reasoning_content": "legacy"}, "legacy", id="legacy-only"),
+        pytest.param({"reasoning": None, "reasoning_content": "legacy"}, "legacy", id="null-canonical"),
+        pytest.param({"reasoning": "new", "reasoning_content": "legacy"}, "new", id="both-fields"),
+        pytest.param({"reasoning": "", "reasoning_content": "legacy"}, "", id="empty-canonical"),
+        pytest.param({"reasoning_content": ""}, "", id="empty-legacy"),
+        pytest.param({}, None, id="no-reasoning"),
+    ],
+)
+def test_vllm_provider_restores_reasoning_field_precedence_in_request_payload(fields, expected):
+    model = _make_model()
+    payload = model._get_request_payload(
+        [
+            HumanMessage(content="Inspect the workspace."),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "bash", "args": {"cmd": "pwd"}, "id": "tool-1", "type": "tool_call"}],
+                additional_kwargs=fields,
+            ),
+            ToolMessage(content="/workspace", tool_call_id="tool-1"),
+        ]
+    )
+
+    assistant_message = payload["messages"][1]
+    if expected is None:
+        assert "reasoning" not in assistant_message
+    else:
+        assert assistant_message["reasoning"] == expected
+    assert assistant_message["tool_calls"][0]["function"]["name"] == "bash"
+    assert payload["messages"][2]["tool_call_id"] == "tool-1"
 
 
 def test_vllm_provider_normalizes_legacy_thinking_kwarg_to_enable_thinking():
@@ -507,3 +542,112 @@ def test_vllm_provider_evicts_only_idle_streams_above_soft_capacity(monkeypatch)
         "chatcmpl-2",
         "chatcmpl-3",
     ]
+
+
+def test_vllm_provider_falls_back_to_reasoning_content_in_chat_result():
+    model = _make_model()
+    result = model._create_chat_result(
+        {
+            "model": "Qwen/QwQ-32B",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "42",
+                        "reasoning_content": "I compared the two numbers directly.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
+
+    message = result.generations[0].message
+    assert message.additional_kwargs["reasoning"] == "I compared the two numbers directly."
+    assert message.additional_kwargs["reasoning_content"] == "I compared the two numbers directly."
+
+    payload = model._get_request_payload([HumanMessage(content="Compare the numbers."), message, HumanMessage(content="Continue.")])
+    assert payload["messages"][1]["reasoning"] == "I compared the two numbers directly."
+
+
+def test_vllm_provider_falls_back_to_reasoning_content_in_streaming_chunks():
+    model = _make_model()
+    chunk = model._convert_chunk_to_generation_chunk(
+        {
+            "model": "Qwen/QwQ-32B",
+            "choices": [
+                {
+                    "delta": {
+                        "role": "assistant",
+                        "reasoning_content": "First, call the weather tool.",
+                        "content": "Calling tool...",
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        AIMessageChunk,
+        {},
+    )
+
+    assert chunk is not None
+    assert chunk.message.additional_kwargs["reasoning"] == "First, call the weather tool."
+    assert chunk.message.additional_kwargs["reasoning_content"] == "First, call the weather tool."
+    assert chunk.message.content == "Calling tool..."
+
+    payload = model._get_request_payload([HumanMessage(content="Check the weather."), chunk.message, HumanMessage(content="Continue.")])
+    assert payload["messages"][1]["reasoning"] == "First, call the weather tool."
+
+
+def test_vllm_provider_prefers_reasoning_over_reasoning_content_in_chat_result():
+    """A payload carrying both fields keeps `reasoning` (#6047)."""
+    model = _make_model()
+    result = model._create_chat_result(
+        {
+            "model": "Qwen/QwQ-32B",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "42",
+                        "reasoning": "new",
+                        "reasoning_content": "legacy",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
+
+    message = result.generations[0].message
+    assert message.additional_kwargs["reasoning"] == "new"
+    assert message.additional_kwargs["reasoning_content"] == "new"
+
+
+def test_vllm_provider_prefers_reasoning_over_reasoning_content_in_streaming_chunks():
+    """Streaming deltas resolve both fields the same way (#6047)."""
+    model = _make_model()
+    chunk = model._convert_chunk_to_generation_chunk(
+        {
+            "model": "Qwen/QwQ-32B",
+            "choices": [
+                {
+                    "delta": {
+                        "role": "assistant",
+                        "reasoning": "new",
+                        "reasoning_content": "legacy",
+                        "content": "Calling tool...",
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        AIMessageChunk,
+        {},
+    )
+
+    assert chunk is not None
+    assert chunk.message.additional_kwargs["reasoning"] == "new"
+    assert chunk.message.additional_kwargs["reasoning_content"] == "new"

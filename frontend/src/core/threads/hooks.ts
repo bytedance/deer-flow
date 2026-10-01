@@ -663,16 +663,74 @@ export function reconcileThreadHistoryRows(
     rowsBySeq.set(row.seq, row);
   }
 
-  const reconciled = dedupeRunMessagesByIdentity(
-    [...rowsBySeq.values()].sort((left, right) => left.seq - right.seq),
+  const sortedRows = [...rowsBySeq.values()].sort(
+    (left, right) => left.seq - right.seq,
   );
+  const reconciled = dedupeRunMessagesByIdentity(sortedRows);
+  // Deduping collapses a re-persisted identity to its newest copy, but per
+  // the backend `get_message_seqs` earliest-seq-wins rule the message keeps
+  // the position it first occupied (see buildVisibleHistoryMessages).
+  // Re-anchor the surviving row to the earliest seq the identity held in
+  // this window, otherwise a re-persisted update pushes the message towards
+  // the tail. Prefer visible rows so a hidden control copy cannot move its
+  // visible twin; hidden rows provide a fallback only when no visible copy exists.
+  const earliestSeqByRunIdentity = new Map<string, number>();
+  const earliestVisibleSeqByRunIdentity = new Map<string, number>();
+  for (const row of sortedRows) {
+    const identity = messageIdentity(row.content);
+    if (!identity || !isValidMessageSeq(row.seq)) {
+      continue;
+    }
+    const key = `${row.run_id}:${identity}`;
+    const known = earliestSeqByRunIdentity.get(key);
+    if (known === undefined || row.seq < known) {
+      earliestSeqByRunIdentity.set(key, row.seq);
+    }
+    if (!isHiddenFromUIMessage(row.content)) {
+      const knownVisible = earliestVisibleSeqByRunIdentity.get(key);
+      if (knownVisible === undefined || row.seq < knownVisible) {
+        earliestVisibleSeqByRunIdentity.set(key, row.seq);
+      }
+    }
+  }
+  const anchored = reconciled.map((row) => {
+    const identity = messageIdentity(row.content);
+    if (!identity) {
+      return row;
+    }
+    const key = `${row.run_id}:${identity}`;
+    const earliestSeq =
+      earliestVisibleSeqByRunIdentity.get(key) ??
+      earliestSeqByRunIdentity.get(key);
+    if (earliestSeq === undefined || row.seq === earliestSeq) {
+      return row;
+    }
+    return { ...row, seq: earliestSeq };
+  });
+  // Re-anchoring can change row order. Sort before comparing with the retained
+  // snapshot so unchanged reconciliations can still reuse the previous array.
+  anchored.sort((left, right) => left.seq - right.seq);
   if (
-    reconciled.length === previousRows.length &&
-    reconciled.every((row, index) => row === previousRows[index])
+    anchored.length === previousRows.length &&
+    anchored.every((row, index) => {
+      const previous = previousRows[index];
+      if (!previous) {
+        return false;
+      }
+      // Re-anchoring rebuilds the row object on every pass; treat a row whose
+      // run_id, seq and content reference all match as unchanged so the
+      // retained-history state can stay referentially stable.
+      return (
+        row === previous ||
+        (row.run_id === previous.run_id &&
+          row.seq === previous.seq &&
+          row.content === previous.content)
+      );
+    })
   ) {
     return previousRows;
   }
-  return reconciled;
+  return anchored;
 }
 
 // mergeMessages now lives in ./message-order (pure, unit-testable ordering

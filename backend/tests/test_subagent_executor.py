@@ -321,7 +321,7 @@ class TestAgentConstruction:
         app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")])
         model = object()
         middlewares = [object()]
-        agent = object()
+        agent = SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={}))
         captured: dict[str, dict] = {}
 
         def fake_get_app_config():
@@ -419,7 +419,7 @@ class TestAgentConstruction:
         middlewares = [_AfterModel(), _AfterModel()]
 
         monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
-        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
         monkeypatch.setitem(
             sys.modules,
             "deerflow.agents.middlewares.tool_error_handling_middleware",
@@ -468,7 +468,7 @@ class TestAgentConstruction:
                 return None
 
         monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
-        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
         monkeypatch.setitem(
             sys.modules,
             "deerflow.agents.middlewares.tool_error_handling_middleware",
@@ -1361,7 +1361,7 @@ class TestAgentConstruction:
             return [object()]
 
         monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
-        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
         monkeypatch.setitem(
             sys.modules,
             "deerflow.agents.middlewares.tool_error_handling_middleware",
