@@ -29,6 +29,7 @@ import logging
 import os
 import posixpath
 import shlex
+import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any, override
@@ -197,20 +198,21 @@ def _externalize(
     if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
         return None
 
-    # Publish through a sibling temp file: a write that fails part-way (disk
-    # full, interrupted request) used to leave a truncated file under the final
-    # name even though this function reported failure, so the outputs directory
-    # accumulated half-written files that nothing references.
-    tmp_path = f"{filepath}.tmp"
+    # Each writer owns a unique sibling temp file, so concurrent calls cannot
+    # truncate or clean up each other's pending output. Publish only after close
+    # (also required on Windows), keeping the final filename deterministic.
+    tmp_path = None
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=storage_dir, prefix=".tool-output-", suffix=".tmp", delete=False) as f:
+            tmp_path = f.name
             f.write(content)
         os.replace(tmp_path, filepath)
     except OSError:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         return None
 
     return f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}/{filename}"
