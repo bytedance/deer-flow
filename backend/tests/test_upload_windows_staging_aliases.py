@@ -96,11 +96,13 @@ def test_native_windows_alias_rejection_preserves_existing_file(tmp_path, filena
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows cannot store literal trailing dots or spaces")
-def test_posix_legacy_alias_files_remain_visible_and_are_not_swept(tmp_path):
+@pytest.mark.parametrize("filename", ALIASES)
+def test_posix_legacy_alias_files_remain_visible_and_are_not_swept(tmp_path, filename):
+    # Each alias gets its own directory so case variants cannot collide on macOS.
     uploads_dir = tmp_path / "threads" / "thread-alias" / "user-data" / "uploads"
     uploads_dir.mkdir(parents=True)
-    for filename in ALIASES:
-        (uploads_dir / filename).write_bytes(b"legacy user document")
+    legacy_file = uploads_dir / filename
+    legacy_file.write_bytes(b"legacy user document")
     assert cleanup_stale_upload_staging_files(tmp_path) == 0
-    assert sorted(item["filename"] for item in list_files_in_dir(uploads_dir)["files"]) == sorted(ALIASES)
-    assert all((uploads_dir / filename).read_bytes() == b"legacy user document" for filename in ALIASES)
+    assert [item["filename"] for item in list_files_in_dir(uploads_dir)["files"]] == [filename]
+    assert legacy_file.read_bytes() == b"legacy user document"
