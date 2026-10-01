@@ -341,8 +341,7 @@ class JsonlRunEventStore(RunEventStore):
 
         if before_seq is not None:
             messages = [e for e in messages if e["seq"] < before_seq]
-            return messages[-limit:]
-        elif after_seq is not None:
+        if after_seq is not None:
             messages = [e for e in messages if e["seq"] > after_seq]
             return messages[:limit]
         else:

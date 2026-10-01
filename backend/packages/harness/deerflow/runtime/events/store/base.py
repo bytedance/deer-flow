@@ -116,6 +116,9 @@ class RunEventStore(abc.ABC):
         - after_seq: return the first ``limit`` records with seq > after_seq (ascending)
         - neither: return the latest ``limit`` records (ascending)
 
+        When both cursors are supplied, return the first ``limit`` records in
+        the exclusive window ``after_seq < seq < before_seq`` (ascending).
+
         ``user_id`` may be passed explicitly by request-independent callers;
         user-scoped backends must apply it according to their isolation model.
         """
