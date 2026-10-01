@@ -306,8 +306,11 @@ def test_headless_print_run_auto_approves(headless_session, capsys):
     assert cli._run_print(LaunchPlan(mode="print", message="hi")) == 0
     capsys.readouterr()
 
-    assert headless_session.client.chat_calls
-    assert headless_session.client.chat_calls[0][DISABLE_TOOL_APPROVAL_KEY] is True
+    # ``--print`` consumes ``stream()`` directly to see error fallbacks, so the
+    # downgrade has to ride that call; ``chat()`` is no longer on this path.
+    assert headless_session.client.stream_calls
+    assert headless_session.client.stream_calls[0][DISABLE_TOOL_APPROVAL_KEY] is True
+    assert headless_session.client.chat_calls == []
 
 
 def test_headless_json_run_auto_approves(headless_session, capsys):

@@ -78,16 +78,16 @@ because the documented `chat(message)` default generates the ID inside
 validates an ID the caller supplied, so resolving early changes nothing else.
 
 Raising rather than returning keeps the `-> str` contract intact: a park is not a
-completed turn, so there is no correct string to return for one. The single
-production caller (`tui/cli.py::_run_print`) already sends
-`disable_tool_approval`, so it cannot reach this branch; callers that want to
-handle a park inline use `stream()`, which surfaces the event directly. Pinned by
+completed turn, so there is no correct string to return for one. No production
+code calls `chat()` today; callers that want to handle a park inline use
+`stream()`, which surfaces the event directly. Pinned by
 `tests/test_client_tool_approval.py::TestChatDoesNotSwallowAPark`.
 
-That opt-out has to stay, not lean on the headless boundary that now wraps both
-one-shots: the boundary turns any exception into `Error: <text>` and exit 1, so a
-park would be reported as a failed run rather than the unanswerable request it
-is. Pinned by `tests/test_tool_approval_client_downgrade.py`.
+The headless one-shots (`tui/cli.py::_run_print` / `_run_json`) consume
+`stream()` directly, so they see the `interrupt` event rather than an exception
+— and with nothing able to answer it, `--print` would print the turn's partial
+text (usually empty) and exit 0 as if the run had finished. Both therefore send
+`disable_tool_approval`. Pinned by `tests/test_tool_approval_client_downgrade.py`.
 
 ### A waited run that re-parks is not a completion
 

@@ -12,6 +12,7 @@ import contextlib
 import json
 import os
 import pathlib
+import re
 import tempfile
 from types import SimpleNamespace
 
@@ -1270,9 +1271,10 @@ class TestConfigVersion:
 class _FakeSandbox:
     """In-memory stand-in for a Sandbox. Records calls and supports failure injection."""
 
-    def __init__(self, *, write_ok: bool = True, check_result: str = "OK") -> None:
+    def __init__(self, *, write_ok: bool = True, check_result: str | None = None) -> None:
         self.commands: list[str] = []
         self.writes: list[tuple[str, str]] = []
+        self.files: dict[str, str] = {}
         self._write_ok = write_ok
         self._check_result = check_result
 
@@ -1284,14 +1286,28 @@ class _FakeSandbox:
     ) -> str:
         del env, timeout
         self.commands.append(command)
-        if command.startswith("test -s"):
+        if self._check_result is not None:
             return self._check_result
+        # Simulate shell execution of:
+        # test -f <path> && test "$(wc -c < <path>)" -eq <expected> && echo OK || echo MISSING
+        match = re.search(r'test -f (\S+) && test "\$\(wc -c < \S+\)" -eq (\d+)', command)
+        if match:
+            path, expected_bytes = match.group(1), int(match.group(2))
+            if path in self.files:
+                actual_bytes = len(self.files[path].encode("utf-8"))
+                if actual_bytes == expected_bytes:
+                    return "OK"
+            return "MISSING"
         return ""
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         if not self._write_ok:
             raise RuntimeError("simulated write failure")
         self.writes.append((path, content))
+        if append and path in self.files:
+            self.files[path] += content
+        else:
+            self.files[path] = content
 
 
 class _FakeProvider:
@@ -1323,7 +1339,8 @@ class TestExternalizeToSandbox:
         assert result.startswith("/mnt/user-data/outputs/.tool-results/bash-")
         assert result.endswith(".log")
         assert any(c.startswith("mkdir -p ") for c in sb.commands)
-        assert any(c.startswith("test -s ") for c in sb.commands)
+        assert any("wc -c" in c for c in sb.commands)
+        assert any("-eq 100" in c for c in sb.commands)
         assert sb.writes and sb.writes[0][0] == result
         assert sb.writes[0][1] == "x" * 100
 
@@ -1354,6 +1371,31 @@ class TestExternalizeToSandbox:
             sandbox=_FakeSandbox(check_result="MISSING"),
         )
         assert result is None
+
+    def test_returns_none_when_byte_size_is_mismatched(self):
+        """A truncated write (fewer bytes than expected) fails validation and returns None."""
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        class _TruncatingSandbox(_FakeSandbox):
+            def write_file(self, path: str, content: str, append: bool = False) -> None:
+                # Simulate a truncated write (e.g. disk full / broken pipe) where only half lands
+                super().write_file(path, content[: len(content) // 2], append=append)
+
+        sb = _TruncatingSandbox()
+        result = _externalize_to_sandbox(
+            "x" * 100,
+            tool_name="bash",
+            tool_call_id="tc-3-truncated",
+            storage_subdir=".tool-results",
+            sandbox=sb,
+        )
+        assert result is None
+        assert any("-eq 100" in c for c in sb.commands)
+        # Confirm the file was actually written with half size, triggering the real byte mismatch
+        assert sb.writes and len(sb.writes[0][1]) == 50
+        assert any(len(content) == 50 for content in sb.files.values())
 
     def test_rejects_unsafe_storage_subdir(self):
         from deerflow.agents.middlewares.tool_output_budget_middleware import (
@@ -1514,6 +1556,21 @@ class TestResolveSandbox:
             lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
         )
         req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "sb-1"}}))
+        assert mod._resolve_sandbox(req) is sb
+
+    def test_returns_sandbox_from_provider_when_overwrite_wrapped(self, monkeypatch):
+        from langgraph.types import Overwrite
+
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
+        )
+        # Fork-restored state delivers sandbox wrapped in Overwrite
+        req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": Overwrite({"sandbox_id": "sb-fork"})}))
         assert mod._resolve_sandbox(req) is sb
 
     def test_returns_none_on_provider_exception(self, monkeypatch):

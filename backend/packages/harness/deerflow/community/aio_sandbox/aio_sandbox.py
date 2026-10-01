@@ -399,6 +399,8 @@ class AioSandbox(Sandbox):
         timeout: float,
     ) -> tuple[str, int | None, str | None]:
         kwargs = {
+            # /v1/shell is a persistent PTY. Keep its command and terminal stdin
+            # intact; the broker shim already treats a TTY as non-payload input.
             "command": command,
             "no_change_timeout": self._effective_no_change_timeout(timeout),
             "hard_timeout": timeout,
@@ -916,7 +918,14 @@ class AioSandbox(Sandbox):
                 try:
                     session_id = self._create_bash_session(self._client)
                     result = self._client.bash.exec(
-                        command=command,
+                        # /v1/bash keeps a subprocess stdin pipe open for writes.
+                        # This fresh, released session is non-interactive, so close
+                        # its default input before running the original script.
+                        # Explicit pipes/heredocs/files still override fd0. A plain
+                        # prefix keeps top-level parsing (aliases/extglob) and never
+                        # appends a delimiter that a trailing backslash can consume.
+                        # Do not apply exec to the persistent PTY transport above.
+                        command=f"exec < /dev/null\n{command}",
                         session_id=session_id,
                         env=env,
                         hard_timeout=timeout,

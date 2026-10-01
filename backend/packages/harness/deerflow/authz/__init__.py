@@ -1,7 +1,7 @@
 """Pluggable fine-grained authorization (resource-level RBAC and beyond)."""
 
 from deerflow.authz.adapter import GuardrailAuthorizationAdapter
-from deerflow.authz.enforcement import filter_tools_by_authorization
+from deerflow.authz.enforcement import filter_resources_by_authorization, filter_tools_by_authorization
 from deerflow.authz.plugin_authz import (
     PluginAuthorizationError,
     aenforce_plugin_action,
@@ -23,6 +23,7 @@ from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzR
 from deerflow.authz.rbac import RbacAuthorizationProvider
 from deerflow.authz.runtime import resolve_authorization_provider
 from deerflow.authz.sandbox_authz import authorize_sandbox_execution
+from deerflow.authz.skill_filter import filter_available_skills_by_authorization
 from deerflow.authz.tool_filter import apply_tool_authorization
 
 __all__ = [
@@ -45,6 +46,8 @@ __all__ = [
     "build_principal_from_context",
     "enforce_plugin_action",
     "enforce_plugin_management",
+    "filter_available_skills_by_authorization",
+    "filter_resources_by_authorization",
     "filter_tools_by_authorization",
     "normalize_authz_attributes",
     "plugin_action_target",

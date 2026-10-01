@@ -108,7 +108,7 @@ class DiscordChannel(Channel):
         try:
             import discord
         except ImportError:
-            logger.error("discord.py is not installed. Install it with: uv add discord.py")
+            logger.error("discord.py is not installed. The Discord channel needs the 'discord' extra: run `cd backend && uv sync --extra discord`.")
             return
 
         if not self._bot_token:
@@ -264,7 +264,10 @@ class DiscordChannel(Channel):
                     logger.exception("[Discord] error while closing client")
 
         if self._thread:
-            self._thread.join(timeout=10)
+            # The client thread normally exits right after the close above, but
+            # a timed-out close or a slow ``_run_client()`` drain can keep it
+            # alive for the whole join timeout; keep that wait off the loop.
+            await asyncio.to_thread(self._thread.join, timeout=10)
             self._thread = None
 
         # _run_client() normally drains these tasks in its finally block.  If
@@ -876,8 +879,12 @@ class DiscordChannel(Channel):
             split_at = remaining.rfind("\n", 0, _DISCORD_MAX_MESSAGE_LEN)
             if split_at <= 0:
                 split_at = _DISCORD_MAX_MESSAGE_LEN
+            else:
+                # Keep the delimiter on this chunk's tail so consecutive
+                # Discord messages reconstruct the original text exactly.
+                split_at += 1
             chunks.append(remaining[:split_at])
-            remaining = remaining[split_at:].lstrip("\n")
+            remaining = remaining[split_at:]
 
         if remaining:
             chunks.append(remaining)

@@ -109,9 +109,7 @@ describe("InputBox skill suggestion IME handling", () => {
     // IME composition; the catalog must not claim it.
     fireEvent.keyDown(textarea, { key: "Enter", keyCode: 229 });
 
-    expect(
-      screen.queryByRole("button", { name: "Remove /research" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove skill" })).toBeNull();
     expect(textarea.value).toBe("/res");
   });
 
@@ -124,9 +122,7 @@ describe("InputBox skill suggestion IME handling", () => {
     fireEvent.compositionEnd(textarea);
     fireEvent.keyDown(textarea, { key: "Enter", keyCode: 13 });
 
-    expect(
-      screen.queryByRole("button", { name: "Remove /research" }),
-    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove skill" })).toBeNull();
     expect(textarea.value).toBe("/res");
   });
 
@@ -141,9 +137,7 @@ describe("InputBox skill suggestion IME handling", () => {
 
     fireEvent.keyDown(textarea, { key: "Enter", keyCode: 13 });
 
-    expect(
-      screen.getByRole("button", { name: "Remove /research" }),
-    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove skill" })).toBeTruthy();
   });
 
   it("still selects the highlighted skill on a plain Enter", () => {
@@ -152,8 +146,6 @@ describe("InputBox skill suggestion IME handling", () => {
 
     fireEvent.keyDown(textarea, { key: "Enter" });
 
-    expect(
-      screen.getByRole("button", { name: "Remove /research" }),
-    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove skill" })).toBeTruthy();
   });
 });

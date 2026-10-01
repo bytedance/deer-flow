@@ -1,6 +1,7 @@
 import asyncio
 import json
 import tempfile
+import threading
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -163,6 +164,30 @@ def test_feishu_is_not_running_when_ws_thread_exits():
     channel._thread.is_alive.return_value = False
 
     assert channel.is_running is False
+
+
+def test_feishu_stop_joins_ws_thread_off_the_event_loop():
+    async def go():
+        channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+        release = threading.Event()
+        # lark's ws client never returns from start(), so the join in stop()
+        # waits out its timeout; this thread blocks the same way, bounded so a
+        # join run on the event loop fails the assertion below instead of
+        # hanging the test.
+        ws_thread = threading.Thread(target=release.wait, args=(2,), daemon=True)
+        ws_thread.start()
+        channel._thread = ws_thread
+        channel._running = True
+
+        stop_task = asyncio.create_task(channel.stop())
+        await asyncio.sleep(0.05)
+        assert not stop_task.done()
+
+        release.set()
+        await stop_task
+        assert channel._thread is None
+
+    asyncio.run(go())
 
 
 def test_feishu_event_handler_ignores_non_content_message_events():

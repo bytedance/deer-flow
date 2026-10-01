@@ -640,6 +640,25 @@ class TestMem0ManagerManage:
         mgr, _fake = _manager()
         assert mgr.get_memory() == {"facts": []}
 
+    def test_mixed_case_agent_identity_matches_write_read_and_clear(self) -> None:
+        """Management must keep the exact agent_id used by existing writes."""
+        mgr, fake = _manager()
+        agent_name = "Research-Agent"
+        mgr.add(
+            "thread-1",
+            [HumanMessage(content="I prefer concise reports"), AIMessage(content="Noted.")],
+            user_id="u1",
+            agent_name=agent_name,
+        )
+        fake.list_results = [{"id": "m1", "memory": "prefers concise reports"}]
+
+        assert mgr.get_memory(user_id="u1", agent_name=agent_name)["facts"][0]["id"] == "m1"
+        assert mgr.clear_memory(user_id="u1", agent_name=agent_name) == {"facts": []}
+
+        assert fake.added[0]["agent_id"] == agent_name
+        assert fake.list_calls[0]["filters"] == {"AND": [{"user_id": "u1"}, {"agent_id": agent_name}]}
+        assert fake.deleted == [{"user_id": "u1", "agent_id": agent_name, "run_id": None}]
+
     def test_clear_memory_deletes_bucket_and_returns_empty(self) -> None:
         mgr, fake = _manager()
         assert mgr.clear_memory(user_id="u1", agent_name="lead_agent") == {"facts": []}

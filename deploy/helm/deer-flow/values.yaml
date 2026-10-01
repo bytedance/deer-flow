@@ -111,6 +111,20 @@ provisioner:
   nodeHost: ""
   # -- Sandbox container port (must match the sandboxImage's listening port).
   sandboxPort: 8080
+  # -- Optional lark-cli init image (Pattern A). Empty (default) leaves the
+  #    sandbox without a lark-cli runtime, so an in-sandbox `lark-cli` call
+  #    fails with "command not found". When set (e.g.
+  #    `deer-flow/lark-cli-init:v1.0.65`), sandbox Pods requesting the runtime
+  #    get an init container + shared emptyDir instead of a hostPath/PVC mount.
+  #    Mirrors compose's `LARK_CLI_INIT_IMAGE`. See `docker/lark-cli-init/`.
+  larkCliInitImage: ""
+  # -- Optional lark-cli broker image (Pattern B, issue #4338). When set, the
+  #    sandbox gets a shim + a `lark-cli-broker` sidecar that holds the
+  #    credentials, so the plaintext config/data dirs are never mounted into
+  #    the sandbox. Supersedes `larkCliInitImage` when both are set. Empty
+  #    (default) ⇒ broker off. Mirrors compose's `LARK_CLI_BROKER_IMAGE`.
+  #    See `docker/lark-cli-broker/`.
+  larkCliBrokerImage: ""
 
 # -- PostgreSQL database. Bundled mode (default) deploys a single-instance
 #    postgres StatefulSet; set `enabled: false` to use an external managed DB.

@@ -802,9 +802,11 @@ placeholders.
 
 #### Reset MCP Tools Cache
 
-Clear cached MCP tools and persistent MCP sessions process-wide. This affects
-all threads and users in the current Gateway process. Tools are loaded again
-from configured MCP servers on the next agent run or tool lookup.
+Publish a shared cache generation, then clear cached MCP tools and persistent
+MCP sessions in the handling process. Every Gateway worker sharing the writable
+extensions-config directory observes that generation and reloads tools on its
+next agent run or tool lookup. This also refreshes remote `tools/list` changes
+that did not modify `extensions_config.json`.
 
 ```http
 POST /api/mcp/cache/reset
@@ -816,9 +818,15 @@ Requires an authenticated admin session.
 ```json
 {
   "success": true,
-  "message": "MCP tools cache reset. Tools will reload on next use."
+  "scope": "shared_config",
+  "message": "MCP tools cache reset published through the shared config directory. Tools will reload on next use."
 }
 ```
+
+`shared_config` means every worker mounting that same directory observes the
+generation; it does not claim a deployment-wide broadcast when replicas use
+independent filesystems. When no extensions-config path can be resolved, the
+request still resets the current worker and returns `"scope": "process"`.
 
 ### Skills
 

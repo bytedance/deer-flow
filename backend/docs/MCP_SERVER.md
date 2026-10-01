@@ -74,7 +74,12 @@ authentication fails and DeerFlow skips that MCP server, so no OpenViking tools
 appear. Changing only the environment variable does not invalidate DeerFlow's
 already-populated, file-signature-based MCP tool cache; after setting or fixing
 the key, restart DeerFlow, modify and re-save the extensions config, or call the
-MCP cache-reset endpoint at `POST /api/mcp/cache/reset`.
+MCP cache-reset endpoint at `POST /api/mcp/cache/reset`. In a multi-worker
+deployment whose workers share the writable extensions-config directory, that
+endpoint publishes a shared generation so every worker refreshes before its
+next MCP lookup. The response reports `scope: shared_config` to identify that
+transport (it reaches only workers mounting that directory), or `scope: process`
+if no config path can be resolved.
 
 OpenViking owns the tool schemas and behavior. DeerFlow performs the standard
 MCP initialization and discovery flow, prefixes the discovered names with
