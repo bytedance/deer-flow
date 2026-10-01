@@ -72,7 +72,7 @@ packages = ["demo_extension"]
     )
 
 
-def _write_host_project(root: Path) -> None:
+def _write_host_project(root: Path, *, no_index: bool = False) -> None:
     backend = root / "backend"
     backend.mkdir()
     (backend / "pyproject.toml").write_text(
@@ -91,6 +91,10 @@ default-groups = ["extensions"]
 """,
         encoding="utf-8",
     )
+    if no_index:
+        # Use uv's supported project setting; UV_NO_INDEX is not recognized.
+        with (backend / "pyproject.toml").open("a", encoding="utf-8") as project:
+            project.write("no-index = true\n")
     (root / "config.yaml").write_text("config_version: 1\n", encoding="utf-8")
 
 
@@ -800,10 +804,9 @@ def test_install_rejects_a_pypi_requirement_resolved_from_an_external_local_whee
     root = tmp_path / "deer-flow"
     wheels = tmp_path / "wheels"
     root.mkdir()
-    _write_host_project(root)
+    _write_host_project(root, no_index=True)
     _write_demo_wheel(wheels)
     monkeypatch.setenv("UV_FIND_LINKS", str(wheels))
-    monkeypatch.setenv("UV_NO_INDEX", "1")
     pyproject_path = root / "backend" / "pyproject.toml"
     config_path = root / "config.yaml"
     before = (pyproject_path.read_bytes(), config_path.read_bytes())
@@ -823,12 +826,11 @@ def test_install_rejects_a_local_wheel_directory_ignored_by_the_docker_context(
 ) -> None:
     root = tmp_path / "deer-flow"
     root.mkdir()
-    _write_host_project(root)
+    _write_host_project(root, no_index=True)
     wheels = root / "backend" / relative_wheels
     wheels.parent.mkdir(parents=True, exist_ok=True)
     _write_demo_wheel(wheels)
     monkeypatch.setenv("UV_FIND_LINKS", str(wheels))
-    monkeypatch.setenv("UV_NO_INDEX", "1")
     pyproject_path = root / "backend" / "pyproject.toml"
     config_path = root / "config.yaml"
     before = (pyproject_path.read_bytes(), config_path.read_bytes())
@@ -846,13 +848,12 @@ def test_install_rejects_a_relative_find_links_wheelhouse_outside_the_build_cont
 ) -> None:
     root = tmp_path / "deer-flow"
     root.mkdir()
-    _write_host_project(root)
+    _write_host_project(root, no_index=True)
     _write_demo_wheel(root / "backend" / "wheelhouse")
     # uv resolves a relative UV_FIND_LINKS against its working directory (the
     # backend project), so the lock records a relative registry that only
     # exists on this host.
     monkeypatch.setenv("UV_FIND_LINKS", "wheelhouse")
-    monkeypatch.setenv("UV_NO_INDEX", "1")
     pyproject_path = root / "backend" / "pyproject.toml"
     config_path = root / "config.yaml"
     before = (pyproject_path.read_bytes(), config_path.read_bytes())

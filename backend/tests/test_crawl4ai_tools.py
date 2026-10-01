@@ -9,6 +9,16 @@ import pytest
 from deerflow.community.crawl4ai.crawl4ai_client import Crawl4AiClient
 
 
+@pytest.fixture
+def public_dns():
+    """Keep mocked tool calls offline while exercising the real URL safety check."""
+    with patch(
+        "deerflow.community.url_safety.resolve_host_addresses",
+        return_value=[ipaddress.ip_address("93.184.216.34")],
+    ):
+        yield
+
+
 class AsyncMock(MagicMock):
     """Mock that supports async call."""
 
@@ -164,6 +174,7 @@ class TestCrawl4AiTools:
     """Tests for the Crawl4AI tool functions."""
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
     async def test_web_fetch_tool_success(self, mock_build):
         from deerflow.community.crawl4ai import tools
 
@@ -178,6 +189,7 @@ class TestCrawl4AiTools:
         assert "Error:" not in result
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
     async def test_web_fetch_tool_truncates_to_4096(self, mock_build):
         from deerflow.community.crawl4ai import tools
 
@@ -191,6 +203,7 @@ class TestCrawl4AiTools:
         assert len(result) == 4096
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
     async def test_web_fetch_tool_error_passthrough(self, mock_build):
         from deerflow.community.crawl4ai import tools
 
@@ -202,8 +215,10 @@ class TestCrawl4AiTools:
             result = await tools.web_fetch_tool.ainvoke("https://example.com")
 
         assert result.startswith("Error:")
+        mock_client.fetch_markdown.assert_called_once()
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
     async def test_web_fetch_tool_exception(self, mock_build):
         from deerflow.community.crawl4ai import tools
 
@@ -215,6 +230,7 @@ class TestCrawl4AiTools:
             result = await tools.web_fetch_tool.ainvoke("https://example.com")
 
         assert result.startswith("Error:")
+        mock_client.fetch_markdown.assert_called_once()
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
     async def test_web_fetch_tool_rejects_metadata_ip(self, mock_build):
@@ -255,6 +271,7 @@ class TestCrawl4AiTools:
         mock_client.fetch_markdown.assert_called_once()
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
     async def test_web_fetch_tool_reads_config_once(self, mock_build):
         """Config is read exactly once per invocation (no split read on hot-reload)."""
         from deerflow.community.crawl4ai import tools
@@ -269,6 +286,7 @@ class TestCrawl4AiTools:
         mock_cfg.assert_called_once_with("web_fetch")
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
     async def test_web_fetch_tool_passes_configured_filter(self, mock_build):
         from deerflow.community.crawl4ai import tools
 
@@ -283,6 +301,7 @@ class TestCrawl4AiTools:
         assert mock_client.fetch_markdown.call_args.kwargs.get("filter_mode") == "raw"
 
     @patch("deerflow.community.crawl4ai.tools._build_client")
+    @pytest.mark.usefixtures("public_dns")
     async def test_web_fetch_tool_invalid_filter_falls_back_to_fit(self, mock_build):
         from deerflow.community.crawl4ai import tools
 
