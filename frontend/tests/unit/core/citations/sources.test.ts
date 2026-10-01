@@ -403,6 +403,24 @@ describe("extractCitationSources", () => {
     ]);
   });
 
+  it("closes a list-nested fence at the item's content column", () => {
+    // The same rule one container deeper: `- ```md` opens the fence at the list
+    // item's content column, `  - ``` ` stays literal content, and the bare
+    // `  ``` ` at that column closes it. Verified against remark-parse, not by
+    // eye.
+    const markdown = [
+      "- ```md",
+      "  - ```",
+      "  [citation:Fake](https://example.com/fake)",
+      "  ```",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
   it("does not open a backtick fence whose info string holds a backtick", () => {
     // ` ```md `x` ` is paragraph text, so the citation below it is a link the
     // reader can reach and must not be masked away.
