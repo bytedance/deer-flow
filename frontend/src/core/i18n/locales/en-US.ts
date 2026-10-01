@@ -363,7 +363,6 @@ export const enUS: Translations = {
     mentionMultipleSkills:
       "Select up to 16 skills per message; select a checked skill again to remove it.",
     mentionNoProject: "Open a project chat to reference its documents.",
-    mentionRemoveSkill: "Remove skill",
     mentionUnavailable: "File unavailable",
     mentionClose: "Close references",
 

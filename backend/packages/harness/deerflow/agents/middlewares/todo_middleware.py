@@ -118,6 +118,20 @@ class TodoMiddleware(TodoListMiddleware):
 
     state_schema = ThreadState
 
+    @property
+    def _todo_capability_enabled(self) -> bool:
+        """False when authorization Layer 1 narrowed away this build's ``write_todos``.
+
+        An empty narrowed ``tools`` disables the middleware's todo behavior for
+        the build: no system-prompt injection, no context-loss or completion
+        reminders, no ``jump_to: model`` — the model cannot call a tool that is
+        not bound, so demanding updates wastes model rounds against an
+        unreachable tool. Keyed off instance state so the state-preserving
+        copy chain carries the degradation automatically and the caller-owned
+        instance is never touched.
+        """
+        return bool(getattr(self, "tools", None))
+
     def release_policy_parameters(self) -> dict[str, object]:
         from deerflow_extension_api import canonical_hash
 
@@ -135,6 +149,10 @@ class TodoMiddleware(TodoListMiddleware):
         runtime: Runtime,
     ) -> dict[str, Any] | None:
         """Inject a todo-list reminder when write_todos has left the context window."""
+        if not self._todo_capability_enabled:
+            # write_todos was denied for this build; context-loss detection only
+            # exists to protect todo state the model cannot update anyway.
+            return None
         todos: list[Todo] = state.get("todos") or []  # type: ignore[assignment]
         if not todos:
             return None
@@ -310,6 +328,11 @@ class TodoMiddleware(TodoListMiddleware):
         A retry cap of ``_MAX_COMPLETION_REMINDERS`` (default 2) prevents
         infinite loops when the agent cannot make further progress.
         """
+        if not self._todo_capability_enabled:
+            # write_todos was denied for this build: no completion reminders and
+            # no jump_to — the model cannot update todos through an unbound tool.
+            return None
+
         # 1. Preserve base class logic (parallel write_todos detection).
         base_result = super().after_model(state, runtime)
         if base_result is not None:
@@ -381,6 +404,10 @@ class TodoMiddleware(TodoListMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
+        if not self._todo_capability_enabled:
+            # write_todos was denied for this build: no system-prompt injection
+            # and no completion reminders for a tool the model cannot call.
+            return handler(request)
         # The base class appends the `write_todos` system prompt to the request;
         # without calling it the model is never told about the todo list feature.
         # Augment with pending completion reminders on the request that already
@@ -398,6 +425,10 @@ class TodoMiddleware(TodoListMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
+        if not self._todo_capability_enabled:
+            # See wrap_model_call: capability denied — pass the request through.
+            return await handler(request)
+
         # See wrap_model_call: preserve the base class system-prompt injection.
         reminders = self._drain_completion_reminders(request.runtime)
 

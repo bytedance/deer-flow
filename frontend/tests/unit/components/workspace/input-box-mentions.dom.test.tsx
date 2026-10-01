@@ -38,6 +38,16 @@ rs.mock("@/core/models/hooks", () => ({
   }),
 }));
 
+const skillCatalog = [
+  {
+    name: "research",
+    description: "Research a topic",
+    category: "general",
+    license: "MIT",
+    enabled: true,
+    editable: false,
+  },
+];
 const skillsQuery = {
   isLoading: false,
   error: null as Error | null,
@@ -45,16 +55,7 @@ const skillsQuery = {
 };
 rs.mock("@/core/skills/hooks", () => ({
   useSkills: () => ({
-    skills: [
-      {
-        name: "research",
-        description: "Research a topic",
-        category: "general",
-        license: "MIT",
-        enabled: true,
-        editable: false,
-      },
-    ],
+    skills: skillCatalog,
     ...skillsQuery,
   }),
 }));
@@ -167,6 +168,7 @@ rs.mock("@/core/threads/hooks", () => ({
 }));
 
 beforeEach(() => {
+  skillCatalog.splice(1);
   capability.enabled = true;
   capability.maxReferences = 3;
   capability.isLoading = false;
@@ -218,6 +220,49 @@ function enterMention(
 }
 
 describe("unified composer mentions", () => {
+  it("offers only backend-accepted skill names while allowing compact in the mention picker", () => {
+    const rejectedNames = ["a--b", "a_b", "Research", "a-", "goal", "status"];
+    for (const name of [...rejectedNames, "compact"]) {
+      skillCatalog.push({
+        ...skillCatalog[0]!,
+        name,
+        description: "Test skill",
+      });
+    }
+    const { container } = renderComposer("accepted-mention-names");
+    enterMention(container, "@");
+    expect(
+      screen.getByRole("option", { name: "compact Test skill" }),
+    ).toBeTruthy();
+    for (const name of rejectedNames) {
+      expect(
+        screen.queryByRole("option", { name: `${name} Test skill` }),
+      ).toBeNull();
+    }
+  });
+
+  it("offers only builtin commands after a leading slash", () => {
+    const { container } = renderComposer("builtin-slash-menu");
+    enterMention(container, "/");
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+    expect(screen.getByRole("option", { name: /^\/goal / })).toBeTruthy();
+    expect(screen.getByRole("option", { name: /^\/compact / })).toBeTruthy();
+  });
+
+  it("keeps a legacy skill query as text without selecting a skill", async () => {
+    const submit = rs.fn();
+    const { container } = renderComposer("literal-slash-skill", submit);
+    const input = enterMention(container, "/res");
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(submit.mock.calls[0]![0].text).toBe("/res");
+    expect(
+      submit.mock.calls[0]![1].additionalKwargs?.skill_references,
+    ).toBeUndefined();
+    expect(screen.queryByTestId("inline-skill-reference")).toBeNull();
+  });
+
   it("keeps a skill inline in the middle and sends its explicit activation metadata", async () => {
     const submit = rs.fn();
     const { container } = renderComposer("skill-mention", submit);
@@ -522,7 +567,7 @@ describe("reference review regressions", () => {
     expect(option.id).not.toBe("");
     expect(input.getAttribute("aria-activedescendant")).toBe(option.id);
   });
-  it("locks legacy skill removal until attachment migration settles", async () => {
+  it("locks a migrated inline skill until attachment migration settles", async () => {
     let finish!: (value: unknown) => void;
     attach.mockReturnValueOnce(
       new Promise((resolve) => {
@@ -536,14 +581,14 @@ describe("reference review regressions", () => {
       onReferenceFileAttached: materialized,
     });
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Remove skill" })).toBeTruthy(),
+      expect(screen.getByTestId("inline-skill-reference")).toBeTruthy(),
     );
     fireEvent.click(screen.getByTestId("mention-button"));
     fireEvent.click(screen.getByRole("option", { name: "report.pdf" }));
     await waitFor(() => expect(attach).toHaveBeenCalled());
-    const remove = screen.getByRole("button", { name: "Remove skill" });
-    expect(remove.hasAttribute("disabled")).toBe(true);
-    fireEvent.click(remove);
+    expect(screen.getByRole("textbox").getAttribute("contenteditable")).toBe(
+      "false",
+    );
     finish({
       filename: "report.pdf",
       size_bytes: 10,
@@ -551,7 +596,7 @@ describe("reference review regressions", () => {
       artifact_url: "/artifact",
     });
     await waitFor(() => expect(materialized).toHaveBeenCalledTimes(1));
-    expect(container.textContent).toContain("@research");
+    expect(container.textContent).toContain("✦research");
   });
 });
 
