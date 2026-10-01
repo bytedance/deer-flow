@@ -321,7 +321,7 @@ test.describe("Chat workspace", () => {
     await textarea.fill("/dat");
     await textarea.press("Enter");
 
-    await expect(page.getByText("/data-analysis")).toBeVisible();
+    await expect(page.getByText("@data-analysis")).toBeVisible();
     const skillInput = page.getByRole("textbox", {
       name: /how can i assist you/i,
     });
@@ -334,7 +334,7 @@ test.describe("Chat workspace", () => {
 
     await page.reload();
 
-    await expect(page.getByText("/data-analysis")).toBeVisible();
+    await expect(page.getByText("@data-analysis")).toBeVisible();
     await expect(
       page.getByRole("textbox", {
         name: /how can i assist you/i,
@@ -451,6 +451,22 @@ test.describe("Chat workspace", () => {
     await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
       timeout: 10_000,
     });
+
+    // A new user edit must still save, even when it repeats the accepted text.
+    await page
+      .getByPlaceholder(/how can i assist you/i)
+      .fill("Send this immediately");
+    await expect
+      .poll(() =>
+        page.evaluate(() => Object.values(window.sessionStorage).join("\n")),
+      )
+      .toContain("Send this immediately");
+    await page.getByPlaceholder(/how can i assist you/i).fill("");
+    await expect
+      .poll(() =>
+        page.evaluate(() => Object.values(window.sessionStorage).join("\n")),
+      )
+      .not.toContain("Send this immediately");
 
     await page.reload();
     await expect(page.getByPlaceholder(/how can i assist you/i)).toHaveValue(
@@ -650,7 +666,7 @@ test.describe("Chat workspace", () => {
 
     await textarea.press("Enter");
 
-    await expect(page.getByText("/data-analysis")).toBeVisible();
+    await expect(page.getByText("@data-analysis")).toBeVisible();
     const skillInput = page.getByRole("textbox", {
       name: /how can i assist you/i,
     });
@@ -688,7 +704,7 @@ test.describe("Chat workspace", () => {
       page.getByRole("option", { name: /data-analysis/i }),
     ).toBeVisible();
     await textarea.press("Enter");
-    await expect(page.getByText("/data-analysis")).toBeVisible();
+    await expect(page.getByText("@data-analysis")).toBeVisible();
 
     const skillInput = page.getByRole("textbox", {
       name: /how can i assist you/i,
@@ -712,8 +728,8 @@ test.describe("Chat workspace", () => {
 
     await skillInput.press("Enter");
 
-    await expect(page.getByText("/frontend-design")).toBeVisible();
-    await expect(page.getByText("/data-analysis")).toBeHidden();
+    await expect(page.getByText("@frontend-design")).toBeVisible();
+    await expect(page.getByText("@data-analysis")).toBeHidden();
 
     await skillInput.pressSequentially("polish the composer");
     await skillInput.press("Enter");
@@ -778,7 +794,7 @@ test.describe("Chat workspace", () => {
       page.getByRole("option", { name: /data-analysis/i }),
     ).toBeVisible();
     await textarea.press("Enter");
-    await expect(page.getByText("/data-analysis")).toBeVisible();
+    await expect(page.getByText("@data-analysis")).toBeVisible();
 
     const skillInput = page.getByRole("textbox", {
       name: /how can i assist you/i,
@@ -934,7 +950,7 @@ test.describe("Chat workspace", () => {
     await textarea.press("ArrowDown");
     await textarea.press("Enter");
 
-    await expect(page.getByText("/frontend-design")).toBeVisible();
+    await expect(page.getByText("@frontend-design")).toBeVisible();
     await expect(
       page.getByRole("textbox", { name: /how can i assist you/i }),
     ).toBeVisible();

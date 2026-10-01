@@ -19,31 +19,22 @@ stay `in_progress`. Never infer status from reply text.
 
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares` appends lead-only entries. Optional entries require their config/runtime condition.
 
-**Message provenance.** At injection/rewrite, always stamp `additional_kwargs`
-via `deerflow_extension_api.provenance.provenance_kwargs()`:
-`deerflow_content_kind`, `deerflow_producer_kind`, optional
-`deerflow_producer_entity_id`. All are server-owned inbound metadata; stamp even
-without observers, since downstream cannot recover producers. Producers:
-DynamicContext (reminder/memory), DurableContext (contract/data),
+**Message provenance.** Stamp injected/rewritten messages with
+`provenance_kwargs()` from `deerflow_extension_api.provenance`: server-owned
+`deerflow_content_kind`, `deerflow_producer_kind`, and optional entity ID, even
+without observers. Producers: DynamicContext, DurableContext,
 SystemMessageCoalescing, ViewImage, SkillActivation. Summarization/Title use
-`SystemOperationKind.SUMMARIZATION`/`.TITLE` model-call attribution; summaries
-enter via DurableContext's stamped `durable_context_data`, not separate
-messages. Memory only queues extraction; recall uses DynamicContext's
-`dynamic_context_memory` stamp.
+`SystemOperationKind.SUMMARIZATION`/`.TITLE`; summaries enter via DurableContext's
+`durable_context_data`, memory recall via DynamicContext's
+`dynamic_context_memory`. Memory only queues extraction.
 
-**Middleware self-description.** Behaviour-configurable middleware implements
-`release_policy_parameters() -> dict[str, object]` (duck-typed
-`deerflow_extension_api.release.ReleasePolicyProvider`, no base class).
-Use JSON-serialisable values and `canonical_hash` for long text, not prompt
-copies. `collect_release_policies()` gathers stack declarations; update them
-alongside every behaviour-affecting field.
-Summarization declares enabled `task_continuity` retention settings (otherwise
-`None`). DurableContext declares its normalized skills root, sorted read-tool
-names and continuity switch, so each capture/injection policy affects assembly
-identity without depending on private-field probing.
-Continuity history readers share shape validation, including the capture failure
-path and DurableContext rendering, so malformed persisted metadata cannot abort
-ordinary compaction or a model call.
+**Self-description.** Configurable middleware exposes JSON-serialisable
+`release_policy_parameters()` (`ReleasePolicyProvider`, duck typed). Update
+`collect_release_policies()` declarations with behavior; use `canonical_hash`
+for long text. Summarization declares enabled task-continuity retention or None;
+DurableContext declares normalized skills root, sorted read tools and continuity
+switch. History readers, including capture failures, validate persisted metadata
+so malformed values cannot abort compaction/model calls.
 
 **Removing tool calls.** Use `clone_ai_message_with_tool_calls`, not a bare
 `tool_calls` update: adapters resend stale `content` tool-call blocks, which
@@ -131,3 +122,9 @@ Before changing a later authorization phase, read the [authorization RFC](../../
 37. **ModelLengthFinishReasonMiddleware** - Match stamps `stop_reason=model_length_capped` and ends tool loop. Suppresses calls, appends notice even with partial text, and stamps `model_length_termination` so downstream guards stand down. Preserves content blocks.
 38. **SafetyFinishReasonMiddleware** - *(optional, if `safety_finish_reason.enabled`)* Suppresses tool execution when the provider safety-terminated the response (e.g. `finish_reason=content_filter`); registered after terminal-response/custom/configured middlewares so LangChain's reverse-order `after_model` dispatch runs it first
 39. **ClarificationMiddleware** - Intercepts `ask_clarification`, writes a readable `ToolMessage.content` fallback plus a structured `ToolMessage.artifact.human_input` payload, and interrupts via `Command(goto=END)` (must be last). `after_model` drops same-turn sibling tool calls so they cannot run before the user answers; a malformed `ask_clarification` parked on `invalid_tool_calls` is the same stop signal. `disable_clarification` runs keep the siblings. Payloads are versioned — legacy `free_text`/`choice_with_other` stay `version: 1`; the v2 `form` mode (from `fields`) is `version: 2` so older frontends reject it and fall back to plain text. Field normalization is deterministic and lives in the middleware (it short-circuits before tool execution, so tool-arg typing gives no runtime validation), and it is atomic: any structurally broken entry — non-dict, bad/duplicate name, a name colliding with a JS `Object.prototype` member (`__proto__`/`constructor`), or exceeding the caps (16 fields / 24 options per field / 200 chars per text / `MAX_FORM_SERIALIZED_BYTES` = 16KB UTF-8, the per-item caps alone admitting forms whose IM text fallback overruns channel limits) — degrades the whole form to the legacy option/free-text modes, so a card never renders "complete" while missing a field. Benign issues degrade locally (unknown types — incl. unhashable JSON like `type: []`, which must not raise from the membership probe — and option-less selects become `text`); options are trimmed/deduped with blanks dropped (form- and top-level) since the frontend rejects blank labels. XML-to-dict option payloads are recursively flattened from dict/list containers in source order, scalar leaves kept, residual XML tags stripped before that trimming. Checkboxes are booleans defaulting to "no"; `required` on one means consent semantics. The response protocol is unchanged (v1 `text`/`option`): form cards submit a text summary as `response_kind: "text"`, so journal persistence needs no new allowlist entries. `RunJournal` reconciles visible, unpersisted `ToolMessage`s for current-run lead-agent calls at the next lead-agent `on_chat_model_start` after consumption, or at successful root `on_chain_end`. This preserves any middleware short-circuit, including blocked writes, across later model errors and checkpoint compaction (#4666). `_remember_current_run_tool_calls` excludes subagents; their results stay in `subagent.step`. Human Input Card replies are `hide_from_ui` `HumanMessage`s with `additional_kwargs.human_input_response`; `RunJournal` persists only allowlisted hidden sources (currently `ask_clarification`) as `llm.human.input`.
+
+Inline `skill_references` accepts 1–16 names; empty lists retain slash/plain flow.
+Resolve the whole batch through user storage, enabled state and agent allowlist
+before activation; reject any invalid entry. Keep bodies in escaped HumanMessage
+context with task text once. Authenticated paths feed secrets/tool policy; record usage per skill.
+Legacy slash syntax is unchanged.
