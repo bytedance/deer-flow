@@ -74,7 +74,7 @@ def _save_with_failure_logging(body: SaveModelRequest):
 @router.put("")
 async def save_model(request: Request, body: SaveModelRequest):
     await require_admin_user(request, detail=_ADMIN)
-    return await run_drained_write("Save managed model", _save_with_failure_logging, (), body)
+    return await run_drained_write("Save managed model", _save_with_failure_logging, (HTTPException,), body)
 
 
 def _probe_config(body: SaveModelRequest):

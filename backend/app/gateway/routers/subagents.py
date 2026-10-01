@@ -181,7 +181,7 @@ async def create_managed_subagent(request: Request, body: ManagedSubagentCreateR
         raise HTTPException(status_code=409, detail=f"Subagent name '{definition.name}' is reserved by a built-in or config.yaml definition.")
     store = get_managed_subagent_store(app_config)
     try:
-        await run_drained_write("Create managed subagent", store.create, (), definition)
+        await run_drained_write("Create managed subagent", store.create, (ManagedSubagentExistsError,), definition)
     except ManagedSubagentExistsError:
         raise HTTPException(status_code=409, detail=f"Managed subagent '{definition.name}' already exists")
     return SubagentResponse(
@@ -212,7 +212,7 @@ async def update_managed_subagent(name: str, request: Request, body: ManagedSuba
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
     _validate_model(updated.model, app_config)
     try:
-        await run_drained_write("Update managed subagent", store.update, (), updated)
+        await run_drained_write("Update managed subagent", store.update, (FileNotFoundError,), updated)
     except FileNotFoundError:
         # The definition may be deleted by another administrator after the
         # read above. Preserve the endpoint's not-found contract instead of
