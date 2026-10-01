@@ -20,7 +20,7 @@ from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
 from deerflow.mcp.personal_access import require_personal_mcp_access
-from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
+from deerflow.mcp.session_pool import MCPPoolDomain, MCPSessionPool, call_pooled_session_tool, get_session_pool
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, load_user_mcp_config_if_changed
 from deerflow.mcp_scope import mcp_session_scope_key
 from deerflow.runtime.user_context import reset_current_user, set_current_user
@@ -171,7 +171,7 @@ class McpTaskToolCaller:
         thread_id: str,
         thread_incarnation: str | None,
         request_scoped_headers: bool,
-        connection_scope: Literal["deployment", "personal"],
+        connection_scope: MCPPoolDomain,
     ) -> Any:
         is_background_call = not request_scoped_headers
         interceptors = self._interceptors if is_background_call else self._submit_interceptors
@@ -271,7 +271,7 @@ class McpTaskToolCaller:
         session_init_timeout_seconds: float | None,
         persistent_session: bool,
         interceptors: list[Any],
-        connection_scope: Literal["deployment", "personal"],
+        connection_scope: MCPPoolDomain,
     ) -> Any:
         from langchain_mcp_adapters.interceptors import MCPToolCallRequest
         from langchain_mcp_adapters.sessions import create_session
