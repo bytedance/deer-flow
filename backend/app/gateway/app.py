@@ -413,7 +413,7 @@ def _scheduled_task_notification_repos(startup_config: AppConfig):
     return ChannelConnectionRepository(session_factory), NotificationDeliveryRepository(session_factory)
 
 
-async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_config: AppConfig, notification_repo) -> None:
+async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_config: AppConfig, notification_repo, connection_repo) -> None:
     """Start the delivery side of the scheduled-run outbox, or switch its enqueue side off.
 
     The scheduler only enqueues; this worker polls due rows and pushes them through
@@ -450,6 +450,11 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
             delivery_repo=notification_repo,
             resolve_channel=channel_service.get_channel,
             resolve_run_summary=resolve_run_summary,
+            # Delivery can run up to a day after enqueue; the worker re-checks
+            # that the target is still one of the owner's connected identities.
+            # Both repositories come from the same session factory, so the
+            # connection repository is present whenever the outbox one is.
+            resolve_connections=connection_repo.list_connections,
             poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
         )
         await worker.start()
@@ -676,7 +681,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # It starts here rather than next to the scheduler: the scheduler starts
         # before the channel service, and delivery needs that service running.
         try:
-            await _start_scheduled_task_notification_delivery(app, startup_config, scheduled_notification_repo)
+            await _start_scheduled_task_notification_delivery(app, startup_config, scheduled_notification_repo, notification_connection_repo)
         except Exception:
             logger.exception("Failed to start scheduled-task IM notification delivery")
 

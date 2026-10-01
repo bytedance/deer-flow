@@ -823,6 +823,7 @@ async def _run_lifespan_with_notification_worker(*, channel_service_available: b
 
     worker_stop.side_effect = record_worker_stop
     stop_channel_service.side_effect = record_channel_stop
+    worker_factory = MagicMock(return_value=worker_instance)
 
     with (
         patch("app.gateway.app.get_app_config", return_value=startup_config),
@@ -836,11 +837,12 @@ async def _run_lifespan_with_notification_worker(*, channel_service_available: b
         patch("app.channels.service.stop_channel_service", stop_channel_service),
         patch("deerflow.persistence.engine.get_session_factory", return_value=session_factory),
         patch("app.scheduler.ScheduledTaskService", return_value=scheduled_service),
-        patch("app.scheduler.notification_delivery.NotificationDeliveryWorker", return_value=worker_instance),
+        patch("app.scheduler.notification_delivery.NotificationDeliveryWorker", worker_factory),
         patch("deerflow.persistence.run.RunRepository"),
     ):
         async with lifespan(app):
             worker_on_app = getattr(app.state, "notification_delivery_worker", None)
+        worker_instance.factory_kwargs = worker_factory.call_args.kwargs if worker_factory.call_args else None
         return worker_start, worker_stop, stop_channel_service, worker_on_app, shutdown_events, scheduled_service
 
 
@@ -861,6 +863,11 @@ def test_lifespan_starts_notification_worker_when_enqueue_and_channel_are_wired(
 
     worker_start.assert_awaited_once()
     assert worker_on_app is not None
+    # The worker re-checks the target's connection at delivery time, so it
+    # must be handed the connection repository's lookup, not left unwired.
+    resolve_connections = worker_on_app.factory_kwargs["resolve_connections"]
+    assert resolve_connections is not None
+    assert getattr(resolve_connections, "__name__", None) == "list_connections"
     scheduled_service.detach_notification_outbox.assert_not_called()
     worker_stop.assert_awaited_once()
     stop_channel_service.assert_awaited_once()

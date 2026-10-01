@@ -41,6 +41,9 @@ _CHANNEL_PARK_MAX_AGE = timedelta(days=2)
 # 96 × 15min ≈ 24h of parking at the flat backoff interval.
 _CHANNEL_PARK_MAX_ATTEMPTS = 96
 
+# Rows in these states are finished; later status writes are ignored.
+_TERMINAL_DELIVERY_STATUSES = frozenset({"sent", "failed"})
+
 
 class NotificationDeliveryRepository:
     """Persistence facade for the notification delivery outbox."""
@@ -201,13 +204,26 @@ class NotificationDeliveryRepository:
             row = await session.get(NotificationDeliveryRow, delivery_id)
             if row is None:
                 raise LookupError(f"notification delivery {delivery_id} not found")
+            if row.status in _TERMINAL_DELIVERY_STATUSES:
+                # A late write after the row was already finalized (a crash
+                # handler racing a terminal mark_failed, or a stale claimant)
+                # must not reopen or relabel it.
+                logger.info("notification delivery %s is already %s; ignoring late mark_sent", delivery_id, row.status)
+                return self._to_dict(row)
             row.status = "sent"
             row.sent_at = datetime.now(UTC)
             await session.commit()
             await session.refresh(row)
             return self._to_dict(row)
 
-    async def mark_failed(self, delivery_id: str, *, error: str | None = None, count_attempt: bool = True) -> dict[str, Any]:
+    async def mark_failed(
+        self,
+        delivery_id: str,
+        *,
+        error: str | None = None,
+        count_attempt: bool = True,
+        terminal: bool = False,
+    ) -> dict[str, Any]:
         """Record a failed attempt; reschedule with backoff while retries
         remain, otherwise finalize the row as ``failed``.
 
@@ -217,13 +233,27 @@ class NotificationDeliveryRepository:
         delivery's fault and must not be able to exhaust its retries. Parking
         is capped by row age and ``parked_attempts`` so permanently absent
         channels eventually settle to ``failed``.
+
+        With ``terminal=True`` the row is finalized as ``failed`` at once,
+        whatever its remaining budget. Used when the delivery can never
+        become valid again, such as a target the owner has since
+        disconnected: neither waiting nor retrying would make sending it
+        right.
         """
         async with self.session_factory() as session:
             row = await session.get(NotificationDeliveryRow, delivery_id)
             if row is None:
                 raise LookupError(f"notification delivery {delivery_id} not found")
+            if row.status in _TERMINAL_DELIVERY_STATUSES:
+                # Terminal states are sticky: a counted or parked mark_failed
+                # arriving after a terminal one must not flip the row back to
+                # pending and send it later after all.
+                logger.info("notification delivery %s is already %s; ignoring late mark_failed", delivery_id, row.status)
+                return self._to_dict(row)
             row.last_error = error
-            if not count_attempt:
+            if terminal:
+                row.status = "failed"
+            elif not count_attempt:
                 now = datetime.now(UTC)
                 created_at = row.created_at
                 if created_at.tzinfo is None:

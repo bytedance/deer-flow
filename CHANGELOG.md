@@ -180,7 +180,7 @@ This release closes that milestone with **181 merged pull requests**.
   IM identities via a durable `notification_deliveries` outbox and
   `NotificationDeliveryWorker`. Activates only when `channel_connections.enabled`
   is true and a channel service is running; manual triggers and interrupts stay
-  silent. WeCom implements proactive `send_notification`; other providers fail
+  silent, and a target disconnected while its delivery waited is dropped. WeCom implements proactive `send_notification`; other providers fail
   visibly in the outbox until they grow a push path. (issue #4254, [#4843], [#6135])
 
 #### Auth & guardrails

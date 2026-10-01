@@ -227,6 +227,40 @@ class TestNotificationDeliveryRepository:
         assert retry_at > before
 
     @pytest.mark.anyio
+    async def test_mark_failed_terminal_finalises_at_once_whatever_the_budget(self, repo):
+        # Used when the delivery can never become valid again (the owner
+        # disconnected the target): no backoff, no parking, budget untouched.
+        delivery = await repo.enqueue(**_enqueue_kwargs())
+
+        updated = await repo.mark_failed(delivery["id"], error="target is no longer connected", terminal=True)
+
+        assert updated["status"] == "failed"
+        assert updated["attempts"] == 0
+        assert updated["parked_attempts"] == 0
+        assert updated["last_error"] == "target is no longer connected"
+        assert await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(days=2), limit=10) == []
+
+    @pytest.mark.anyio
+    async def test_terminal_states_are_sticky(self, repo):
+        # A late write from a crash handler or a stale claimant must neither
+        # reopen a finished row nor relabel it.
+        dropped = await repo.enqueue(**_enqueue_kwargs())
+        await repo.mark_failed(dropped["id"], error="target is no longer connected", terminal=True)
+        after_late_failure = await repo.mark_failed(dropped["id"], error="delivery crashed before completion")
+        after_late_sent = await repo.mark_sent(dropped["id"])
+        assert after_late_failure["status"] == "failed"
+        assert after_late_sent["status"] == "failed"
+        assert after_late_sent["last_error"] == "target is no longer connected"
+        assert after_late_sent["attempts"] == 0
+
+        sent = await repo.enqueue(**_enqueue_kwargs(target="other-target"))
+        await repo.mark_sent(sent["id"])
+        after_late_failure = await repo.mark_failed(sent["id"], error="late failure", count_attempt=False)
+        assert after_late_failure["status"] == "sent"
+        assert after_late_failure["last_error"] is None
+        assert await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(days=2), limit=10) == []
+
+    @pytest.mark.anyio
     async def test_mark_failed_exhausts_retries(self, repo):
         delivery = await repo.enqueue(**_enqueue_kwargs())
 

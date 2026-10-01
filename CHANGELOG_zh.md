@@ -176,8 +176,9 @@
 - **scheduler:** 把定时任务的运行结果推送到任务所有者已绑定的 IM 身份：
   完成钩子把结果写入持久化的 `notification_deliveries` outbox，
   由 `NotificationDeliveryWorker` 负责投递。仅当 `channel_connections.enabled`
-  为 true 且渠道服务在运行时生效；手动触发和中断不推送。目前只有企业微信实现了
-  主动推送 `send_notification`，其它渠道在实现之前会在 outbox 中显式失败。
+  为 true 且渠道服务在运行时生效；手动触发和中断不推送，等待投递期间被解绑的
+  身份也不再推送。目前只有企业微信实现了主动推送 `send_notification`，
+  其它渠道在实现之前会在 outbox 中显式失败。
   (issue #4254, [#4843], [#6135])
 
 #### 认证与防护

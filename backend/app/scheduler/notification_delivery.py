@@ -32,6 +32,12 @@ ChannelResolver = Callable[[str], Any]
 # async callables are both accepted; failures fall back to the skeleton text.
 SummaryResolver = Callable[[str, str | None], Any]
 
+# Lists an owner's channel connections (``ChannelConnectionRepository
+# .list_connections``), each a dict with ``provider``, ``external_account_id``
+# and ``status``. Sync or async callables are both accepted. The worker uses
+# it to confirm, at send time, that the delivery's target is still bound.
+ConnectionResolver = Callable[[str], Any]
+
 _ERROR_TEXT_LIMIT = 500
 _SUMMARY_TEXT_LIMIT = 1000
 
@@ -116,12 +122,14 @@ class NotificationDeliveryWorker:
         poll_interval_seconds: int = 5,
         batch_size: int = 10,
         resolve_run_summary: SummaryResolver | None = None,
+        resolve_connections: ConnectionResolver | None = None,
         stale_sending_timeout_seconds: int = _STALE_SENDING_TIMEOUT_SECONDS,
         stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
     ) -> None:
         self._delivery_repo = delivery_repo
         self._resolve_channel = resolve_channel
         self._resolve_run_summary = resolve_run_summary
+        self._resolve_connections = resolve_connections
         self._poll_interval_seconds = poll_interval_seconds
         self._batch_size = batch_size
         self._stale_sending_timeout_seconds = stale_sending_timeout_seconds
@@ -208,9 +216,74 @@ class NotificationDeliveryWorker:
             return summary
         return None
 
+    async def _target_still_connected(self, delivery: dict[str, Any]) -> bool | None:
+        """Return whether the delivery's ``(provider, target)`` is still a
+        ``connected`` identity of its owner, or None when that could not be
+        determined (no resolver wired, or the lookup failed).
+
+        The outbox row was written while the identity was connected, but
+        delivery can run up to a day later (counted retries, then parking),
+        and ``disconnect_connection`` only flips the connection row. The
+        lookup is scoped to the row's own ``owner_user_id`` so it cannot
+        match another owner's binding of the same external account.
+        """
+        if self._resolve_connections is None:
+            return None
+        owner_user_id = delivery.get("owner_user_id")
+        provider = delivery.get("provider")
+        target = delivery.get("target")
+        if not owner_user_id or not provider or not target:
+            return None
+        try:
+            connections = self._resolve_connections(owner_user_id)
+            if inspect.isawaitable(connections):
+                connections = await connections
+        except Exception:
+            logger.warning("Failed to check channel connections for delivery %s; parking it", delivery.get("id"), exc_info=True)
+            return None
+        if connections is None:
+            connections = []
+        if not isinstance(connections, (list, tuple)):
+            # An unexpected shape is a lookup problem, not evidence that the
+            # binding is gone: iterating a dict or a str would "find" nothing
+            # and drop the row for good.
+            logger.warning("Channel connection lookup for delivery %s returned %s, not a list; parking it", delivery.get("id"), type(connections).__name__)
+            return None
+        for connection in connections:
+            if not isinstance(connection, dict):
+                continue
+            # The resolver is called with the row's owner; a row that names a
+            # different owner is skipped as well, so a resolver that is not
+            # owner-scoped still cannot make another user's binding count.
+            row_owner = connection.get("owner_user_id")
+            if row_owner is not None and row_owner != owner_user_id:
+                continue
+            if connection.get("provider") == provider and connection.get("external_account_id") == target and connection.get("status") == "connected":
+                return True
+        return False
+
     async def _deliver(self, delivery: dict[str, Any]) -> None:
         delivery_id = delivery["id"]
         provider = delivery.get("provider") or ""
+        if self._resolve_connections is not None:
+            # Re-check the binding at delivery time, before anything else: a
+            # target the owner has disconnected since enqueue must never
+            # receive the push, however long the row waited, and it must not
+            # sit in parking for a day either when the channel is also down
+            # (disconnecting a provider revokes its connections and stops its
+            # channel together). A lookup failure parks instead, so a
+            # transient store error neither drops nor sends the row.
+            still_connected = await self._target_still_connected(delivery)
+            if still_connected is False:
+                await self._delivery_repo.mark_failed(
+                    delivery_id,
+                    error=f"target is no longer a connected {provider} identity of its owner",
+                    terminal=True,
+                )
+                return
+            if still_connected is None:
+                await self._delivery_repo.mark_failed(delivery_id, error="could not verify the target's channel connection", count_attempt=False)
+                return
         # Re-check channel liveness at delivery time, not enqueue time: the
         # channel may have been disabled or disconnected after the outbox row
         # was written, and the row stays retryable for when it comes back.

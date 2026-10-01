@@ -21,6 +21,23 @@ from app.channels.message_bus import (
 
 logger = logging.getLogger(__name__)
 
+# Exceptions that mean the transport failed, not the message. ``websockets``
+# is the SDK's socket layer and forwards its close exception unchanged
+# through ``send_message``; it is not an OSError subclass.
+_TRANSPORT_EXCEPTIONS: tuple[type[BaseException], ...] = (ConnectionError, TimeoutError, OSError)
+try:
+    from websockets.exceptions import ConnectionClosed as _WsConnectionClosed
+except Exception:  # pragma: no cover - absent only when the SDK itself is missing
+    pass
+else:
+    _TRANSPORT_EXCEPTIONS = (*_TRANSPORT_EXCEPTIONS, _WsConnectionClosed)
+
+# The SDK surfaces a platform rejection of a sent frame (non-zero ``errcode``
+# in the ACK) as ``RuntimeError`` with this prefix, from the same call that
+# raises ``RuntimeError`` for a closed socket. The prefix is what tells a
+# verdict about the message apart from a transport failure.
+_WECOM_ACK_REJECTION_PREFIX = "Reply ack error"
+
 
 def _file_md5(path: str) -> str:
     md5_hasher = hashlib.md5()
@@ -300,7 +317,9 @@ class WeComChannel(Channel):
 
         Transport / not-connected failures raise :class:`ChannelUnavailable`
         so the outbox parks without consuming retries. Platform ``errcode``
-        rejections stay as ``RuntimeError`` and count against the budget.
+        rejections stay as ``RuntimeError`` and count against the budget;
+        the SDK reports them as ``RuntimeError("Reply ack error: ...")``
+        from ``send_message`` itself, so they are told apart by that prefix.
         """
         if not self._running or not self._ws_client:
             raise ChannelUnavailable("WeCom channel is not connected")
@@ -329,9 +348,22 @@ class WeComChannel(Channel):
                 ack = await _send_once()
         except ChannelUnavailable:
             raise
-        except (ConnectionError, TimeoutError, OSError) as exc:
-            # Dead/flapping transport: not the delivery's fault. Park the
-            # outbox row until the SDK reconnects instead of burning retries.
+        except RuntimeError as exc:
+            if str(exc).startswith(_WECOM_ACK_REJECTION_PREFIX):
+                # The platform answered and said no (bad chatid, user out of
+                # range, ...). The socket is fine; this counts like any other
+                # deterministic rejection.
+                raise
+            # Everything else the SDK raises as RuntimeError is transport-side:
+            # a socket that is not open, a connection dropped while an ACK was
+            # pending. Park the outbox row until the SDK reconnects instead of
+            # charging the delivery a counted attempt per poll for a fault
+            # that is not its own.
+            self._ws_transport_up = False
+            raise ChannelUnavailable(f"WeCom transport unavailable: {exc}") from exc
+        except _TRANSPORT_EXCEPTIONS as exc:
+            # Dead/flapping transport, including the socket layer's own close
+            # exception, which the SDK forwards unchanged. Same treatment.
             self._ws_transport_up = False
             raise ChannelUnavailable(f"WeCom transport unavailable: {exc}") from exc
         errcode = None
