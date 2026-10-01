@@ -580,26 +580,33 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
         scan = await scan_skill_content(body.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
-        prev_content = storage.read_custom_skill(skill_name)
 
         async def _persist_edit() -> None:
-            # The write and its history entry must settle together, and the
-            # prompt cache must not stay stale behind them: a cancelled caller
-            # drains the whole mutation tail instead of cutting it mid-sequence.
-            await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, body.content)
-            await asyncio.to_thread(
-                storage.append_history,
-                skill_name,
-                {
-                    "action": "human_edit",
-                    "author": "human",
-                    "thread_id": None,
-                    "file_path": SKILL_MD_FILE,
-                    "prev_content": prev_content,
-                    "new_content": body.content,
-                    "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
-                },
-            )
+            def _write_and_record() -> None:
+                # The write and its history entry must settle together, and the
+                # prompt cache must not stay stale behind them: a cancelled caller
+                # drains the whole mutation tail instead of cutting it mid-sequence.
+                # prev_content is read here, immediately before the write, so the
+                # history entry records what this mutation actually overwrites even
+                # when a concurrent edit lands during the scan phase above; a read
+                # taken earlier would silently drop that concurrent revision from
+                # the history chain, making it unreachable by rollback.
+                prev_content = storage.read_custom_skill(skill_name)
+                storage.write_custom_skill(skill_name, SKILL_MD_FILE, body.content)
+                storage.append_history(
+                    skill_name,
+                    {
+                        "action": "human_edit",
+                        "author": "human",
+                        "thread_id": None,
+                        "file_path": SKILL_MD_FILE,
+                        "prev_content": prev_content,
+                        "new_content": body.content,
+                        "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
+                    },
+                )
+
+            await asyncio.to_thread(_write_and_record)
             await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
 
         await await_drained(_drain_skill_mutation("edit", _persist_edit))
@@ -711,27 +718,47 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
             skill_file = storage.get_custom_skill_file(skill_name)
             return skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
 
-        current_content = await asyncio.to_thread(_read_current_content)
-        history_entry = {
-            "action": "rollback",
-            "author": "human",
-            "thread_id": None,
-            "file_path": SKILL_MD_FILE,
-            "prev_content": current_content,
-            "new_content": target_content,
-            "rollback_from_ts": record.get("ts"),
-            "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
-        }
         if scan.decision == "block":
-            await asyncio.to_thread(storage.append_history, skill_name, history_entry)
+            # The blocked path overwrites nothing, so the entry is purely
+            # informational and an early read is safe here.
+            blocked_entry = {
+                "action": "rollback",
+                "author": "human",
+                "thread_id": None,
+                "file_path": SKILL_MD_FILE,
+                "prev_content": await asyncio.to_thread(_read_current_content),
+                "new_content": target_content,
+                "rollback_from_ts": record.get("ts"),
+                "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
+            }
+            await asyncio.to_thread(storage.append_history, skill_name, blocked_entry)
             raise HTTPException(status_code=400, detail=f"Rollback blocked by security scanner: {scan.reason}")
 
         async def _persist_rollback() -> None:
-            # The restore write and its history entry must settle together, and
-            # the prompt cache must reflect the restored content, before a
-            # cancelled caller unwinds.
-            await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, target_content)
-            await asyncio.to_thread(storage.append_history, skill_name, history_entry)
+            def _restore_and_record() -> None:
+                # The restore write and its history entry must settle together, and
+                # the prompt cache must reflect the restored content, before a
+                # cancelled caller unwinds. The replaced content is read here,
+                # immediately before the write, so the history entry records what
+                # this rollback actually overwrites even when a concurrent edit
+                # lands between the scan phase and this tail.
+                current_content = _read_current_content()
+                storage.write_custom_skill(skill_name, SKILL_MD_FILE, target_content)
+                storage.append_history(
+                    skill_name,
+                    {
+                        "action": "rollback",
+                        "author": "human",
+                        "thread_id": None,
+                        "file_path": SKILL_MD_FILE,
+                        "prev_content": current_content,
+                        "new_content": target_content,
+                        "rollback_from_ts": record.get("ts"),
+                        "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
+                    },
+                )
+
+            await asyncio.to_thread(_restore_and_record)
             await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
 
         await await_drained(_drain_skill_mutation("rollback", _persist_rollback))
