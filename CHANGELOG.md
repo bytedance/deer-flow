@@ -471,7 +471,15 @@ This release closes that milestone with **301 merged pull requests**.
   strict blocking-IO gate gains a `socket.getaddrinfo` rule, because
   Blockbuster's defaults wrap socket methods but not the module-level resolver.
   ([#6140])
-
+- **uploads:** Converted Markdown ownership is now recorded when a document is
+  converted. `list_uploaded_files` hides only verified conversion outputs, and
+  document outlines use only the recorded companion; a user-uploaded Markdown
+  file with the same stem stays visible and cannot become another document's
+  outline. Existing conversions have no ownership record and cannot be safely
+  distinguished from user-authored Markdown. After upgrading, those Markdown
+  files appear separately in historical listings and their source documents
+  have no inferred outline or preview. Re-uploading the source creates a new
+  verified conversion when automatic conversion is enabled. ([#6101])
 - **agents:** A retried model call in plan mode no longer loses the todo
   completion reminder that `TodoMiddleware` had queued for it. The middleware
   drained the reminder inside `wrap_model_call`; because
@@ -7551,6 +7559,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6089]: https://github.com/bytedance/deer-flow/pull/6089
 [#6091]: https://github.com/bytedance/deer-flow/pull/6091
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
+[#6101]: https://github.com/bytedance/deer-flow/pull/6101
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134

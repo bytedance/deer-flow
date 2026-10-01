@@ -1734,6 +1734,7 @@ class DeerFlowClient:
                 or its filename is unsafe or reserved for upload staging.
         """
         validate_thread_id(thread_id)
+        from deerflow.uploads.companions import invalidate_overwritten_upload, register_companion
         from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
         # Validate all files upfront to avoid partial uploads.
@@ -1779,6 +1780,7 @@ class DeerFlowClient:
                     logger.warning("Skipping upload with unsafe destination: %s", dest_name)
                     skipped_files.append(dest_name)
                     continue
+                invalidate_overwritten_upload(dest)
 
                 info: dict[str, Any] = {
                     "filename": dest_name,
@@ -1827,6 +1829,7 @@ class DeerFlowClient:
                         md_path = None
 
                     if md_path is not None:
+                        register_companion(dest, md_path)
                         info["markdown_file"] = md_path.name
                         info["markdown_path"] = str(uploads_dir / md_path.name)
                         info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
