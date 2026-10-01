@@ -122,7 +122,9 @@ async def call_pooled_session_tool(
             cleanup_call = (
                 pool.close_session_if_current(server_name, scope_key, session)
                 if domain == "deployment"
-                else pool.close_session_if_current(server_name, scope_key, session, domain=domain)
+                else pool.close_session_if_current(
+                    server_name, scope_key, session, domain=domain
+                )
             )
             cleanup = asyncio.create_task(cleanup_call)
             if await _finish_session_cleanup(cleanup, server_name):
@@ -177,7 +179,11 @@ class MCPSessionPool:
     # Session owner task
     # ------------------------------------------------------------------
 
-    def _discard_owner(self, key: tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain], owner: asyncio.Task[Any]) -> None:
+    def _discard_owner(
+        self,
+        key: tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
+        owner: asyncio.Task[Any],
+    ) -> None:
         """Retire only this owner, including after asyncio.run shuts its loop down."""
         with self._lock:
             entry = self._entries.get(key)
@@ -670,9 +676,17 @@ class MCPSessionPool:
     ) -> None:
         """Close this ownership domain's session for a server/scope across loops."""
         with self._lock:
-            keys = [k for k in self._entries if k[:2] == (server_name, scope_key) and k[3] == domain]
+            keys = [
+                k
+                for k in self._entries
+                if k[:2] == (server_name, scope_key) and k[3] == domain
+            ]
             entries = [self._entries.pop(k) for k in keys]
-            keys = [k for k in self._inflight if k[:2] == (server_name, scope_key) and k[3] == domain]
+            keys = [
+                k
+                for k in self._inflight
+                if k[:2] == (server_name, scope_key) and k[3] == domain
+            ]
             inflight = [self._inflight.pop(k) for k in keys]
         await self._close_owners(entries, inflight)
 
@@ -686,7 +700,16 @@ class MCPSessionPool:
     ) -> bool:
         """Close *session* only if it is current in the requested ownership domain."""
         with self._lock:
-            key = next((k for k, entry in self._entries.items() if k[:2] == (server_name, scope_key) and k[3] == domain and entry[0] is session), None)
+            key = next(
+                (
+                    k
+                    for k, entry in self._entries.items()
+                    if k[:2] == (server_name, scope_key)
+                    and k[3] == domain
+                    and entry[0] is session
+                ),
+                None,
+            )
             if key is None:
                 return False
             entry = self._entries.pop(key)
@@ -694,12 +717,22 @@ class MCPSessionPool:
         await self._shutdown_entry(loop, task, close_evt)
         return True
 
-    async def close_server(self, server_name: str, *, domain: MCPPoolDomain = "deployment") -> None:
+    async def close_server(
+        self, server_name: str, *, domain: MCPPoolDomain = "deployment"
+    ) -> None:
         """Close one ownership domain's sessions for a given server."""
         with self._lock:
-            keys = [k for k in self._entries if k[0] == server_name and k[3] == domain]
+            keys = [
+                k
+                for k in self._entries
+                if k[0] == server_name and k[3] == domain
+            ]
             entries = [(self._entries.pop(k)) for k in keys]
-            inflight_keys = [k for k in self._inflight if k[0] == server_name and k[3] == domain]
+            inflight_keys = [
+                k
+                for k in self._inflight
+                if k[0] == server_name and k[3] == domain
+            ]
             inflight = [self._inflight.pop(k) for k in inflight_keys]
         await self._close_owners(entries, inflight)
 

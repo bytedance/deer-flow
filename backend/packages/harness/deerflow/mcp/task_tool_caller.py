@@ -20,7 +20,12 @@ from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
 from deerflow.mcp.personal_access import require_personal_mcp_access
-from deerflow.mcp.session_pool import MCPPoolDomain, MCPSessionPool, call_pooled_session_tool, get_session_pool
+from deerflow.mcp.session_pool import (
+    MCPPoolDomain,
+    MCPSessionPool,
+    call_pooled_session_tool,
+    get_session_pool,
+)
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, load_user_mcp_config_if_changed
 from deerflow.mcp_scope import mcp_session_scope_key
 from deerflow.runtime.user_context import reset_current_user, set_current_user
@@ -198,7 +203,9 @@ class McpTaskToolCaller:
             session_request = (
                 pool.get_session(server_name, scope_key, connection)
                 if connection_scope == "deployment"
-                else pool.get_session(server_name, scope_key, connection, domain=connection_scope)
+                else pool.get_session(
+                    server_name, scope_key, connection, domain=connection_scope
+                )
             )
             if session_init_timeout is not None:
                 try:
@@ -291,7 +298,11 @@ class McpTaskToolCaller:
                             "Ignoring MCP interceptor headers with unsupported type: %s",
                             type(request.headers).__name__,
                         )
-                domain_kwargs = {"domain": connection_scope} if connection_scope != "deployment" else {}
+                domain_kwargs = (
+                    {"domain": connection_scope}
+                    if connection_scope != "deployment"
+                    else {}
+                )
                 return await call_pooled_session_tool(
                     session,
                     pool,

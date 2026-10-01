@@ -22,7 +22,11 @@ from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
-from deerflow.mcp.session_pool import MCPPoolDomain, call_pooled_session_tool, get_session_pool
+from deerflow.mcp.session_pool import (
+    MCPPoolDomain,
+    call_pooled_session_tool,
+    get_session_pool,
+)
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
@@ -611,7 +615,12 @@ def _make_session_pool_tool(
         session_request = (
             pool.get_session(server_name, scope_key, session_connection)
             if ownership_domain == "deployment"
-            else pool.get_session(server_name, scope_key, session_connection, domain=ownership_domain)
+            else pool.get_session(
+                server_name,
+                scope_key,
+                session_connection,
+                domain=ownership_domain,
+            )
         )
         if session_init_timeout is not None:
             # Cancellation here is safe: MCPSessionPool.get_session owns the
@@ -637,7 +646,11 @@ def _make_session_pool_tool(
         else:
             session = await session_request
 
-        domain_kwargs = {"domain": ownership_domain} if ownership_domain != "deployment" else {}
+        domain_kwargs = (
+            {"domain": ownership_domain}
+            if ownership_domain != "deployment"
+            else {}
+        )
 
         # Build common call_tool kwargs once — only add keys when needed so
         # existing call-sites that assert on exact arguments are not affected.
@@ -1031,7 +1044,11 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
                             tool_call_timeout=_timeout,
                             session_init_timeout=_init_timeout,
                             tool_name_prefix=tool_name_prefix,
-                            ownership_domain="personal" if personal_user_id is not None else "deployment",
+                            ownership_domain=(
+                                "personal"
+                                if personal_user_id is not None
+                                else "deployment"
+                            ),
                         )
                     )
                 else:
