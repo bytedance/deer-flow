@@ -139,6 +139,12 @@ FastAPI application providing REST endpoints for frontend integration:
 | `DELETE /api/threads/{id}` | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
 
+Converted-upload ownership records live in each thread's `upload-companions/`
+directory, outside the sandbox-mounted `user-data/` tree. Older conversions
+without a record remain separate Markdown uploads and no longer provide an
+inferred outline for their source document; see [file upload storage and upgrade
+behavior](docs/FILE_UPLOAD.md#支持的文档格式).
+
 ### IM Channels
 
 The IM bridge supports Feishu, Slack, and Telegram. Slack and Telegram still use the final `runs.wait()` response path, while Feishu now streams through `runs.stream(["messages-tuple", "values"])`, serializes rapid same-thread turns inside the channel manager, and updates a single in-thread card per source message in place.
