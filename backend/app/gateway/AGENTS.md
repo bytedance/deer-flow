@@ -24,7 +24,9 @@ service `stop()` remains bounded by its 30-second `asyncio.timeout`, so include
 that bound in pod grace-period budgeting.
 
 Managed-model saves drain on cancellation. Log worker failures before
-`await_drained` consumes them; omit exception text.
+`await_drained` consumes them; omit exception text. Persistent router
+writes go through `app.gateway.persistent_writes.run_drained_write` —
+reuse that helper instead of forking another per-router drain wrapper.
 
 Gateway lifespan closes the MCP session pool after `langgraph_runtime` exits:
 its run drain and extension-service teardown can still make MCP calls during
