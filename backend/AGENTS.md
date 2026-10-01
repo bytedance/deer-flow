@@ -268,14 +268,9 @@ PYTHONPATH=. uv run pytest tests/test_<feature>.py -v
 Keep live tests opt-in via `DEER_FLOW_RUN_LIVE_TESTS=1`; guard POSIX-only
 markers with `os.name` for Windows collection.
 
-Jina logging tests use dummy keys (`tests/test_jina_client.py`).
-Jina/Browserless/InfoQuest resolve URLs without rebuilding HTML. Browserless and
-Crawl4AI are delegated navigators: private/self-hosted backends fail closed
-unless their tool config explicitly sets `network_isolation_confirmed: true`
-after egress isolation, or `allow_private_addresses: true` for intentional
-internal access. A Gateway-only URL preflight is not a redirect or DNS-rebinding
-boundary.
-InfoQuest connect/read timeout is 30s, separate from crawl timeouts (`tests/test_infoquest_http_timeout.py`).
+Web providers: Jina uses dummy test keys; Jina/Browserless/InfoQuest preserve
+resolved URLs; InfoQuest timeout is 30s. Delegated-backend isolation:
+`docs/CONFIGURATION.md`.
 
 ### Running the Full Application
 

@@ -163,6 +163,15 @@ class TestCrawl4AiClient:
 class TestCrawl4AiTools:
     """Tests for the Crawl4AI tool functions."""
 
+    @pytest.fixture(autouse=True)
+    def _resolve_example_com(self):
+        """Keep tool tests offline while preserving URL-safety validation."""
+        with patch(
+            "deerflow.community.url_safety.resolve_host_addresses",
+            return_value=[ipaddress.ip_address("93.184.216.34")],
+        ):
+            yield
+
     @patch("deerflow.community.crawl4ai.tools._build_client")
     async def test_web_fetch_tool_rejects_unisolated_private_fetch_backend(self, mock_build):
         """A private Crawl4AI service can follow redirects after our URL preflight."""
