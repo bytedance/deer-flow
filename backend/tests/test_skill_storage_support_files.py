@@ -11,6 +11,7 @@ member raised ``UnicodeDecodeError`` and was never removed, and a support
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -93,3 +94,41 @@ def test_read_text_or_none_only_masks_undecodable_content(tmp_path: Path):
     """``None`` means "not text", never "could not read": IO errors still propagate."""
     with pytest.raises(FileNotFoundError):
         read_text_or_none(tmp_path / "missing.md")
+
+
+def _windows_extended(path: Path) -> str:
+    return (chr(92) * 2) + "?" + chr(92) + str(path)
+
+
+def _write_literal(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        fd = os.open(_windows_extended(path), os.O_CREAT | os.O_WRONLY | getattr(os, "O_BINARY", 0))
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+    else:
+        path.write_bytes(data)
+
+
+def test_remove_preexisting_nonportable_support_file(storage, skill_dir):
+    """Deletion of a stored non-portable name succeeds; creating one still fails."""
+    target = skill_dir / "scripts" / "AUX.py"
+    _write_literal(target, b"print('aux')\n")
+    with pytest.raises(ValueError, match="not portable to Windows"):
+        storage.ensure_safe_support_path("demo-skill", "scripts/AUX.py")
+
+    previous = storage.remove_custom_skill_file("demo-skill", "scripts/AUX.py")
+
+    assert previous == "print('aux')\n"
+    assert not target.exists()
+
+    if os.name != "nt":
+        dotted = skill_dir / "assets" / "logo.png."
+        _write_literal(dotted, b"dot")
+        with pytest.raises(ValueError, match="not portable to Windows"):
+            storage.ensure_safe_support_path("demo-skill", "assets/logo.png.")
+        removed = storage.remove_custom_skill_file("demo-skill", "assets/logo.png.")
+        assert removed == "dot"
+        assert not dotted.exists()

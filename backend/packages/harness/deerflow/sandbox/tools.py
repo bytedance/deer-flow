@@ -901,16 +901,85 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     return result
 
 
+def _windows_incompatible_path_reason(path: str) -> str | None:
+    """Return why *path* is not portable, or None when every segment is fine."""
+    normalised = path.replace("\\", "/")
+    for segment in normalised.split("/"):
+        reason = windows_incompatible_segment(segment)
+        if reason:
+            return reason
+    return None
+
+
+def _host_path_exists(candidate: str) -> bool:
+    """Return True when *candidate* is already on the host filesystem.
+
+    ``pathlib`` and the Win32 ANSI APIs strip a trailing space or dot, so a
+    file created with those characters is checked again with the Windows
+    extended-length path prefix. Virtual ``/mnt/...`` paths are not rewritten.
+    """
+    try:
+        if os.path.lexists(candidate):
+            return True
+    except OSError:
+        pass
+    if os.name != "nt":
+        return False
+    normalized = candidate.replace("/", "\\")
+    if len(normalized) < 3 or normalized[1] != ":" or normalized[2] != "\\":
+        return False
+    if normalized.startswith("\\\\?\\"):
+        return False
+    try:
+        return os.path.lexists("\\\\?\\" + normalized)
+    except OSError:
+        return False
+
+
+def _stored_host_path_exists(path: str, thread_data: ThreadDataState | None) -> bool:
+    """Return True when *path* already names a host file or directory.
+
+    ``/mnt/user-data`` paths are resolved through *thread_data*. The literal
+    path is also checked so a name that exists inside the sandbox mount is
+    recognized. A missing mapping does not count as stored.
+    """
+    candidates: list[str] = []
+    if path == VIRTUAL_PATH_PREFIX or path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
+        if thread_data is not None:
+            try:
+                resolved = replace_virtual_path(path, thread_data)
+            except Exception:
+                resolved = None
+            if resolved and resolved != path:
+                candidates.append(resolved)
+        candidates.append(path)
+    else:
+        candidates.append(path)
+    return any(_host_path_exists(candidate) for candidate in candidates)
+
+
+def _reject_unstored_windows_incompatible_path(path: str, thread_data: ThreadDataState | None) -> None:
+    """Reject a non-portable path unless that exact path is already stored."""
+    reason = _windows_incompatible_path_reason(path)
+    if reason is None:
+        return
+    if _stored_host_path_exists(path, thread_data):
+        return
+    raise PermissionError(f"Access denied: {reason}")
+
+
 def _reject_path_traversal(path: str) -> None:
-    """Reject paths that contain '..' segments to prevent directory traversal."""
+    """Reject paths that contain '..' segments to prevent directory traversal.
+
+    Windows reserved names and trailing dots or spaces are intentionally not
+    checked here. Portability is enforced when a path is created, not on every
+    read of a name the host already stored.
+    """
     # Normalise to forward slashes, then check for '..' segments.
     normalised = path.replace("\\", "/")
     for segment in normalised.split("/"):
         if segment == "..":
             raise PermissionError("Access denied: path traversal detected")
-        reason = windows_incompatible_segment(segment)
-        if reason:
-            raise PermissionError(f"Access denied: {reason}")
 
 
 def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, read_only: bool = False) -> None:
@@ -940,6 +1009,10 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
         raise SandboxRuntimeError("Thread data not available for local sandbox")
 
     _reject_path_traversal(path)
+    # Creating a non-portable name is rejected. Reading, and editing a file
+    # that is already stored under that name, is not.
+    if not read_only:
+        _reject_unstored_windows_incompatible_path(path, thread_data)
 
     # Skills paths — read-only access only
     if _is_skills_path(path):
@@ -1120,29 +1193,41 @@ def _is_shell_assignment(token: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))
 
 
-def _is_allowed_local_bash_absolute_path(path: str, allowed_paths: list[str], *, allow_system_paths: bool) -> bool:
+def _reject_allowed_bash_path(path: str, thread_data: ThreadDataState | None) -> None:
+    """Traversal always; portability only when the host path is not stored yet."""
+    _reject_path_traversal(path)
+    _reject_unstored_windows_incompatible_path(path, thread_data)
+
+
+def _is_allowed_local_bash_absolute_path(
+    path: str,
+    allowed_paths: list[str],
+    *,
+    allow_system_paths: bool,
+    thread_data: ThreadDataState | None,
+) -> bool:
     # Check for MCP filesystem server allowed paths
     if any(path.startswith(allowed_path) or path == allowed_path.rstrip("/") for allowed_path in allowed_paths):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     if path == VIRTUAL_PATH_PREFIX or path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     # Allow skills container path (resolved by tools.py before passing to sandbox)
     if _is_skills_path(path):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     # Allow ACP workspace path (path-traversal check only)
     if _is_acp_workspace_path(path):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     # Allow custom mount container paths
     if _is_custom_mount_path(path):
-        _reject_path_traversal(path)
+        _reject_allowed_bash_path(path, thread_data)
         return True
 
     if allow_system_paths and any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in _LOCAL_BASH_SYSTEM_PATH_PREFIXES):
@@ -1173,7 +1258,7 @@ def _next_cd_target(tokens: list[str], start_index: int) -> tuple[str | None, in
     return None, index
 
 
-def _validate_local_bash_cwd_target(command_name: str, target: str | None, allowed_paths: list[str]) -> None:
+def _validate_local_bash_cwd_target(command_name: str, target: str | None, allowed_paths: list[str], thread_data: ThreadDataState | None) -> None:
     if target is None or target == "-":
         raise PermissionError(f"Unsafe working directory change in command: {command_name}. Use paths under {VIRTUAL_PATH_PREFIX}")
     if target.startswith(("$", "`")):
@@ -1182,7 +1267,7 @@ def _validate_local_bash_cwd_target(command_name: str, target: str | None, allow
         raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
     if target.startswith("/"):
         _reject_path_traversal(target)
-        if not _is_allowed_local_bash_absolute_path(target, allowed_paths, allow_system_paths=False):
+        if not _is_allowed_local_bash_absolute_path(target, allowed_paths, allow_system_paths=False, thread_data=thread_data):
             raise PermissionError(f"Unsafe working directory change in command: {command_name} {target}. Use paths under {VIRTUAL_PATH_PREFIX}")
 
 
@@ -1203,12 +1288,10 @@ def _validate_local_bash_root_path_args(command_name: str, tokens: list[str], st
         index += 1
 
 
-def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) -> None:
+def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str], tokens: list[str], thread_data: ThreadDataState | None) -> None:
     """Conservatively reject relative path escapes missed by absolute-path scanning."""
     if re.search(r"\$\([^)]*\b(?:cd|pushd)\b", command):
         raise PermissionError(f"Unsafe working directory change in command substitution. Use paths under {VIRTUAL_PATH_PREFIX}")
-
-    tokens = _split_shell_tokens(command)
 
     for token in tokens:
         if _is_shell_command_separator(token) or _is_shell_redirection_operator(token):
@@ -1248,7 +1331,7 @@ def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) ->
             wrapped_name = tokens[index + 1].rsplit("/", 1)[-1]
             if wrapped_name in _LOCAL_BASH_CWD_COMMANDS:
                 target, next_index = _next_cd_target(tokens, index + 2)
-                _validate_local_bash_cwd_target(wrapped_name, target, allowed_paths)
+                _validate_local_bash_cwd_target(wrapped_name, target, allowed_paths, thread_data)
                 index = next_index
                 continue
             _validate_local_bash_root_path_args(wrapped_name, tokens, index + 2)
@@ -1259,7 +1342,7 @@ def _validate_local_bash_shell_tokens(command: str, allowed_paths: list[str]) ->
             continue
 
         target, next_index = _next_cd_target(tokens, index + 1)
-        _validate_local_bash_cwd_target(command_name, target, allowed_paths)
+        _validate_local_bash_cwd_target(command_name, target, allowed_paths, thread_data)
         index = next_index
 
 
@@ -1331,6 +1414,8 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     A small allowlist of common system path prefixes is kept for executable
     and device references (e.g. /bin/sh, /dev/null). Quoted shell words are
     validated whole, so a space inside quotes is not treated as a new segment.
+    A windows-incompatible segment still rejects a path that is not already
+    stored on the host; an existing host file may be read or renamed.
     """
     if thread_data is None:
         raise SandboxRuntimeError("Thread data not available for local sandbox")
@@ -1342,8 +1427,9 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
-    _validate_local_bash_shell_tokens(command, allowed_paths)
-    path_token_occurrences = _absolute_path_token_occurrences(command, _split_shell_tokens(command))
+    tokens = _split_shell_tokens(command)
+    _validate_local_bash_shell_tokens(command, allowed_paths, tokens, thread_data)
+    path_token_occurrences = _absolute_path_token_occurrences(command, tokens)
     url_spans = _non_file_url_spans(command)
 
     for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
@@ -1355,7 +1441,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
         candidate = _shell_absolute_path_candidate(command, path_token_occurrences, match)
         if candidate is None:
             continue
-        if _is_allowed_local_bash_absolute_path(candidate, allowed_paths, allow_system_paths=True):
+        if _is_allowed_local_bash_absolute_path(candidate, allowed_paths, allow_system_paths=True, thread_data=thread_data):
             continue
 
         unsafe_paths.append(candidate)

@@ -10,13 +10,14 @@ _WINDOWS_RESERVED_NAMES = frozenset(
 
 
 def windows_incompatible_segment(segment: str) -> str | None:
-    """Return a reason when *segment* is unsafe as a host path component.
+    """Return a reason when *segment* is unsafe to create as a host path component.
 
     Reserved device names and trailing dots or spaces are rejected on every
-    platform. Uploads, custom-skill support files, and local-sandbox paths are
-    stored or mapped on the host, including Windows, where those names alias
-    devices or are silently stripped. The same check also rejects them inside
-    Linux sandbox virtual paths.
+    platform when a name is created: uploads, new custom-skill support files,
+    and sandbox writes of a path that is not already stored. Reads, deletes of
+    an existing support file, and access to a path that already exists on the
+    host do not use this check. Those names alias devices or are silently
+    stripped on Windows.
 
     ``.`` and ``..`` are ignored here; callers already reject traversal.
     Do not reject colons, quotes, or control characters here.
