@@ -1758,6 +1758,13 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
+Host-externalized tool outputs use the Gateway's normal file-creation umask.
+Mounted sandboxes running under another UID need read access through the shared
+storage permissions. An unclean shutdown can leave `.tool-output-*.tmp` files in
+`tool_output.storage_subdir` (default `.tool-results`) under thread outputs.
+Remove leftovers during thread-data maintenance with all Gateway writers stopped,
+or when deleting the corresponding inactive thread's data.
+
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for
 `acquire_timeout`, then fails the agent turn. DeerFlow does not retry the turn
 automatically. Clients can use the structured error to schedule a retry.

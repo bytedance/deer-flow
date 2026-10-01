@@ -1,8 +1,13 @@
 """A failed externalization must not leave a half-written output behind."""
 
+import json
+import os
 import pathlib
+import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 
@@ -30,12 +35,12 @@ class _FailsAfterHalfTheWrite:
 
 
 def test_failed_write_leaves_no_file_behind(tmp_path, monkeypatch):
-    real_temporary_file = mw.tempfile.NamedTemporaryFile
+    real_open = open
 
-    def failing_temporary_file(*args, **kwargs):
-        return _FailsAfterHalfTheWrite(real_temporary_file(*args, **kwargs))
+    def failing_open(*args, **kwargs):
+        return _FailsAfterHalfTheWrite(real_open(*args, **kwargs))
 
-    monkeypatch.setattr(mw.tempfile, "NamedTemporaryFile", failing_temporary_file)
+    monkeypatch.setattr(mw, "open", failing_open, raising=False)
 
     result = mw._externalize(
         "X" * 100,
@@ -108,9 +113,53 @@ def test_temporary_file_creation_failure_preserves_existing_output(tmp_path, mon
     def fail_to_create(*args, **kwargs):
         raise OSError("Cannot create temporary file")
 
-    monkeypatch.setattr(mw.tempfile, "NamedTemporaryFile", fail_to_create)
+    monkeypatch.setattr(mw, "open", fail_to_create, raising=False)
     result = mw._externalize("New output", tool_name="bash", tool_call_id="call_1", outputs_path=str(tmp_path), storage_subdir="sub")
 
     assert result is None
     assert list(storage_dir.iterdir()) == [published]
+    assert published.read_text(encoding="utf-8") == "Previous complete output"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not available on Windows")
+@pytest.mark.parametrize("mask", [0o022, 0o002, 0o077], ids=["other-readable", "group-writable", "private"])
+def test_published_output_respects_umask(tmp_path, mask):
+    # Set umask only in a child; it is process-global and must not race other tests.
+    script = """
+import json
+import os
+import pathlib
+import stat
+import sys
+from deerflow.agents.middlewares import tool_output_budget_middleware as mw
+
+os.umask(int(sys.argv[2]))
+kwargs = dict(tool_name="bash", tool_call_id="mode", outputs_path=sys.argv[1], storage_subdir="sub")
+assert mw._externalize("First complete output", **kwargs) is not None
+published = pathlib.Path(sys.argv[1]) / "sub/bash-mode.log"
+initial_mode = stat.S_IMODE(published.stat().st_mode)
+os.chmod(published, 0o600)
+assert mw._externalize("Second complete output", **kwargs) is not None
+print(json.dumps({"modes": [initial_mode, stat.S_IMODE(published.stat().st_mode)], "content": published.read_text(encoding="utf-8")}))
+"""
+    completed = subprocess.run([sys.executable, "-c", script, str(tmp_path), str(mask)], capture_output=True, text=True, timeout=30, check=True)
+    observed = json.loads(completed.stdout)
+    assert observed["content"] == "Second complete output"
+    assert observed["modes"] == [0o666 & ~mask] * 2
+
+
+def test_exclusive_creation_collision_preserves_other_writers_temp(tmp_path, monkeypatch):
+    storage_dir = tmp_path / "sub"
+    storage_dir.mkdir()
+    owned_by_other_writer = storage_dir / ".tool-output-collision.tmp"
+    owned_by_other_writer.write_text("Other writer's pending output", encoding="utf-8")
+    published = storage_dir / "bash-call_1.log"
+    published.write_text("Previous complete output", encoding="utf-8")
+    monkeypatch.setattr(mw, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex="collision")), raising=False)
+
+    result = mw._externalize("New output", tool_name="bash", tool_call_id="call_1", outputs_path=str(tmp_path), storage_subdir="sub")
+
+    assert result is None
+    assert set(storage_dir.iterdir()) == {owned_by_other_writer, published}
+    assert owned_by_other_writer.read_text(encoding="utf-8") == "Other writer's pending output"
     assert published.read_text(encoding="utf-8") == "Previous complete output"

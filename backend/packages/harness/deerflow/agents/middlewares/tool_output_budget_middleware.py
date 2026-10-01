@@ -29,7 +29,7 @@ import logging
 import os
 import posixpath
 import shlex
-import tempfile
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any, override
@@ -203,8 +203,11 @@ def _externalize(
     # (also required on Windows), keeping the final filename deterministic.
     tmp_path = None
     try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=storage_dir, prefix=".tool-output-", suffix=".tmp", delete=False) as f:
-            tmp_path = f.name
+        candidate_path = os.path.join(storage_dir, f".tool-output-{uuid.uuid4().hex}.tmp")
+        # Exclusive creation keeps per-writer ownership while honoring umask,
+        # unlike NamedTemporaryFile's fixed 0600 mode on mounted outputs.
+        with open(candidate_path, "x", encoding="utf-8") as f:
+            tmp_path = candidate_path
             f.write(content)
         os.replace(tmp_path, filepath)
     except OSError:
