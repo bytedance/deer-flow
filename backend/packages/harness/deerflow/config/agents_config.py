@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from deerflow.config.paths import get_paths
+from deerflow.config.subagents_config import MAX_CONCURRENT_SUBAGENT_CALLS, MIN_CONCURRENT_SUBAGENT_CALLS
 from deerflow.knowledge_scope import KnowledgeScope
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -238,6 +239,14 @@ class AgentConfig(BaseModel):
     # Per-agent reasoning-effort default for models that support it. None = do
     # not override (a request-supplied reasoning_effort still wins over this).
     reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # Per-agent subagent defaults. None leaves the runtime defaults unchanged;
+    # explicit request values still take precedence over these fields.
+    subagent_enabled: bool | None = None
+    max_concurrent_subagents: int | None = Field(
+        default=None,
+        ge=MIN_CONCURRENT_SUBAGENT_CALLS,
+        le=MAX_CONCURRENT_SUBAGENT_CALLS,
+    )
     # Disable every memory path for stateless execution-oriented agents while
     # preserving the global memory configuration for all other agents.
     memory_enabled: bool = True

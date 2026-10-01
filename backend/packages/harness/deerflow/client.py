@@ -33,7 +33,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.lead_agent.agent import _authorize_model_name, build_middlewares
+from deerflow.agents.lead_agent.agent import _authorize_model_name, _inject_resolved_runtime_option, _resolve_runtime_option, build_middlewares
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, get_enabled_skills_for_config, has_bash_tool
 from deerflow.agents.middlewares.tool_declarations import layer_one_outcome, narrow_declared_tools, verify_declared_tool_view
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
@@ -213,7 +213,7 @@ class DeerFlowClient:
         *,
         model_name: str | None = None,
         thinking_enabled: bool = True,
-        subagent_enabled: bool = False,
+        subagent_enabled: bool | None = None,
         plan_mode: bool = False,
         agent_name: str | None = None,
         available_skills: set[str] | None = None,
@@ -231,7 +231,9 @@ class DeerFlowClient:
                 Without a checkpointer, each call is stateless.
             model_name: Override the default model name from config.
             thinking_enabled: Enable model's extended thinking.
-            subagent_enabled: Enable subagent delegation.
+            subagent_enabled: Enable or disable subagent delegation. When None,
+                a custom agent's configured default is used before falling back
+                to the runtime default.
             plan_mode: Enable TodoList middleware for plan mode.
             agent_name: Name of the agent to use.
             available_skills: Optional set of skill names to make available. If None (default), all scanned skills are available.
@@ -319,8 +321,13 @@ class DeerFlowClient:
             "model_name": overrides.get("model_name", self._model_name),
             "thinking_enabled": overrides.get("thinking_enabled", self._thinking_enabled),
             "is_plan_mode": overrides.get("plan_mode", self._plan_mode),
-            "subagent_enabled": overrides.get("subagent_enabled", self._subagent_enabled),
         }
+        subagent_enabled = overrides.get("subagent_enabled", self._subagent_enabled)
+        if subagent_enabled is not None:
+            configurable["subagent_enabled"] = subagent_enabled
+        max_concurrent_subagents = overrides.get("max_concurrent_subagents")
+        if max_concurrent_subagents is not None:
+            configurable["max_concurrent_subagents"] = max_concurrent_subagents
         return RunnableConfig(
             configurable=configurable,
             recursion_limit=overrides.get("recursion_limit", 100),
@@ -356,8 +363,43 @@ class DeerFlowClient:
                 self._loaded_agent_config = agent_config
         memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
         mcp_plugins = getattr(agent_config, "mcp_plugins", None)
+        allowed_subagents = getattr(agent_config, "allowed_subagents", None)
+        agent_subagent_enabled = getattr(agent_config, "subagent_enabled", None)
+        agent_max_concurrent_subagents = getattr(agent_config, "max_concurrent_subagents", None)
+
+        subagent_enabled = bool(_resolve_runtime_option(cfg, "subagent_enabled", agent_subagent_enabled, False))
+        subagent_enabled = bool(subagent_enabled and allowed_subagents != [])
+
+        from deerflow.config.subagents_config import effective_subagent_concurrency
+
+        # Lightweight integrations and older tests may construct a client via
+        # ``__new__`` and inject only ``_app_config``. Production clients keep
+        # the startup snapshot set by ``__init__``; the fallback preserves the
+        # pre-snapshot construction contract without consulting global state.
+        subagent_execution_capacity = getattr(
+            self,
+            "_subagent_execution_capacity",
+            int(getattr(getattr(self._app_config, "subagent_runtime", None), "max_running", 3)),
+        )
+        requested_max_concurrent = _resolve_runtime_option(
+            cfg,
+            "max_concurrent_subagents",
+            agent_max_concurrent_subagents,
+            None,
+        )
+        max_concurrent_subagents = effective_subagent_concurrency(
+            requested_max_concurrent,
+            self._app_config,
+            execution_capacity=subagent_execution_capacity,
+        )
+        cfg["subagent_enabled"] = subagent_enabled
+        cfg["max_concurrent_subagents"] = max_concurrent_subagents
+        _inject_resolved_runtime_option(config, "subagent_enabled", subagent_enabled)
+        _inject_resolved_runtime_option(config, "max_concurrent_subagents", max_concurrent_subagents)
         # Delegation reads this run's metadata, including when the graph is cached.
-        config.setdefault("metadata", {})["mcp_plugins"] = mcp_plugins
+        metadata = config.setdefault("metadata", {})
+        metadata["mcp_plugins"] = mcp_plugins
+        metadata["allowed_subagents"] = list(allowed_subagents) if allowed_subagents is not None else None
 
         authorization_identity = None
         if self._app_config.authorization.enabled:
@@ -384,6 +426,7 @@ class DeerFlowClient:
             self._agent_name,
             memory_enabled,
             frozenset(mcp_plugins) if mcp_plugins is not None else None,
+            tuple(allowed_subagents) if allowed_subagents is not None else None,
             frozenset(self._available_skills) if self._available_skills is not None else None,
             self._checkpoint_channel_mode,
             self._checkpoint_snapshot_frequency,
@@ -554,6 +597,7 @@ class DeerFlowClient:
                 mcp_routing_hints_section=mcp_routing_hints_section,
                 user_id=effective_user_id,
                 skill_names=skill_setup.skill_names or None,
+                allowed_subagents=allowed_subagents,
                 subagent_execution_capacity=subagent_execution_capacity,
                 memory_enabled=memory_enabled,
                 bash_available=has_bash_tool(authorized_tools),
@@ -987,7 +1031,8 @@ class DeerFlowClient:
             message: User message text.
             thread_id: Thread ID for conversation context. Auto-generated if None.
             **kwargs: Override client defaults (model_name, thinking_enabled,
-                plan_mode, subagent_enabled, recursion_limit). Trusted embedded
+                plan_mode, subagent_enabled, max_concurrent_subagents,
+                recursion_limit). Trusted embedded
                 callers may also provide user_id, user_role, oauth_provider,
                 oauth_id, channel_user_id, is_internal, and authz_attributes.
 
@@ -1059,6 +1104,14 @@ class DeerFlowClient:
         context["user_id"] = effective_user_id
         self._ensure_agent(config, context=context)
         configurable = config.get("configurable") or {}
+        # ``_ensure_agent`` resolves request > custom-agent > runtime defaults
+        # into ``config``. LangGraph receives ``context`` as a separate object,
+        # though, and ToolRuntime reads that object rather than RunnableConfig.
+        # Mirror the resolved values into the live invocation context so tools
+        # observe the same policy as prompt/tool/middleware assembly.
+        for key in ("subagent_enabled", "max_concurrent_subagents"):
+            if key in configurable:
+                context[key] = configurable[key]
         effective_model_name = getattr(self, "_effective_model_name", None)
         inject_langfuse_metadata(
             config,
