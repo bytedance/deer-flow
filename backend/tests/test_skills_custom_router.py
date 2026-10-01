@@ -1764,3 +1764,130 @@ async def test_install_skill_archive_drains_install_and_cache_refresh_across_can
 
     assert _user_custom_dir(tmp_path, "default").joinpath("install-skill").exists()
     assert refresh_calls == [("refresh", "default")]
+
+
+def test_custom_skill_update_records_content_actually_overwritten(monkeypatch, tmp_path):
+    """A concurrent edit landing during the scan phase must become the history
+    entry's prev_content, so it stays reachable by a later rollback.
+
+    Regression for the read-before-persist race: prev_content used to be read
+    before the security scans, so a revision written to SKILL.md between that
+    read and the drained write tail was silently dropped from the history
+    chain while still being overwritten on disk.
+    """
+    skills_root = tmp_path / "skills"
+    from deerflow.config.paths import Paths
+
+    user_custom = _user_custom_dir(tmp_path, "default")
+    custom_dir = user_custom / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    initial_content = _skill_content("demo-skill")
+    concurrent_content = _skill_content("demo-skill", "Concurrent edit")
+    (custom_dir / "SKILL.md").write_text(initial_content, encoding="utf-8")
+
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+    async def _concurrent_edit_during_scan(*args, **kwargs):
+        # Simulate another writer (human PUT or agent tool) landing while this
+        # request sits between its pre-read and its persisted write.
+        (custom_dir / "SKILL.md").write_text(concurrent_content, encoding="utf-8")
+        from deerflow.skills.security_scanner import ScanResult
+
+        return ScanResult(decision="allow", reason="ok")
+
+    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", _concurrent_edit_during_scan)
+
+    async def _refresh(user_id: str):
+        return None
+
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr("app.gateway.routers.skills.get_effective_user_id", lambda: "default")
+
+    app = _make_test_app(config)
+    edited_content = _skill_content("demo-skill", "Edited skill")
+
+    with TestClient(app) as client:
+        update_response = client.put(
+            "/api/skills/custom/demo-skill",
+            json={"content": edited_content},
+        )
+        assert update_response.status_code == 200
+        assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == edited_content
+
+        history_response = client.get("/api/skills/custom/demo-skill/history")
+        assert history_response.status_code == 200
+        last_entry = history_response.json()["history"][-1]
+        assert last_entry["action"] == "human_edit"
+        # The entry must record the concurrent revision that was actually
+        # overwritten, not the stale pre-scan snapshot.
+        assert last_entry["prev_content"] == concurrent_content
+        assert last_entry["new_content"] == edited_content
+
+
+def test_custom_skill_rollback_records_content_actually_overwritten(monkeypatch, tmp_path):
+    """Same contract as the edit path, for rollback: a concurrent revision
+    landing between the scan phase and the restore write must be recorded as
+    the rollback entry's prev_content instead of being lost from history."""
+    skills_root = tmp_path / "skills"
+    from deerflow.config.paths import Paths
+
+    user_custom = _user_custom_dir(tmp_path, "default")
+    custom_dir = user_custom / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    original_content = _skill_content("demo-skill")
+    current_content = _skill_content("demo-skill", "Current skill")
+    concurrent_content = _skill_content("demo-skill", "Concurrent edit")
+    (custom_dir / "SKILL.md").write_text(current_content, encoding="utf-8")
+
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+    # Write history file directly: one prior human_edit to roll back from.
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
+    history_file = storage.get_skill_history_file("demo-skill")
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    history_file.write_text(
+        '{"action":"human_edit","prev_content":' + json.dumps(original_content) + ',"new_content":' + json.dumps(current_content) + "}\n",
+        encoding="utf-8",
+    )
+
+    async def _concurrent_edit_during_scan(*args, **kwargs):
+        (custom_dir / "SKILL.md").write_text(concurrent_content, encoding="utf-8")
+        from deerflow.skills.security_scanner import ScanResult
+
+        return ScanResult(decision="allow", reason="ok")
+
+    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", _concurrent_edit_during_scan)
+
+    async def _refresh(user_id: str):
+        return None
+
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr("app.gateway.routers.skills.get_effective_user_id", lambda: "default")
+
+    app = _make_test_app(config)
+
+    with TestClient(app) as client:
+        rollback_response = client.post("/api/skills/custom/demo-skill/rollback", json={"history_index": -1})
+        assert rollback_response.status_code == 200
+        assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == original_content
+
+        history_response = client.get("/api/skills/custom/demo-skill/history")
+        assert history_response.status_code == 200
+        last_entry = history_response.json()["history"][-1]
+        assert last_entry["action"] == "rollback"
+        # The entry must record the concurrent revision that the restore
+        # actually overwrote, keeping it reachable by a later rollback.
+        assert last_entry["prev_content"] == concurrent_content
+        assert last_entry["new_content"] == original_content
