@@ -181,7 +181,7 @@ This release closes that milestone with **181 merged pull requests**.
   `NotificationDeliveryWorker`. Activates only when `channel_connections.enabled`
   is true and a channel service is running; manual triggers and interrupts stay
   silent. WeCom implements proactive `send_notification`; other providers fail
-  visibly in the outbox until they grow a push path. (issue #4254, [#4843])
+  visibly in the outbox until they grow a push path. (issue #4254, [#4843], [#6135])
 
 #### Auth & guardrails
 
@@ -6320,4 +6320,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6076]: https://github.com/bytedance/deer-flow/pull/6076
 [#6088]: https://github.com/bytedance/deer-flow/pull/6088
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
+[#6135]: https://github.com/bytedance/deer-flow/pull/6135
 

@@ -178,7 +178,7 @@
   由 `NotificationDeliveryWorker` 负责投递。仅当 `channel_connections.enabled`
   为 true 且渠道服务在运行时生效；手动触发和中断不推送。目前只有企业微信实现了
   主动推送 `send_notification`，其它渠道在实现之前会在 outbox 中显式失败。
-  (issue #4254, [#4843])
+  (issue #4254, [#4843], [#6135])
 
 #### 认证与防护
 
@@ -5357,3 +5357,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6076]: https://github.com/bytedance/deer-flow/pull/6076
 [#6088]: https://github.com/bytedance/deer-flow/pull/6088
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
+[#6135]: https://github.com/bytedance/deer-flow/pull/6135
