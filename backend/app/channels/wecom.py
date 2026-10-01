@@ -311,20 +311,23 @@ class WeComChannel(Channel):
     async def send_notification(self, *, target: str, text_markdown: str) -> None:
         """Proactively push markdown to a bound WeCom identity (issue #4254).
 
-        Goes through ``WSClient.send_message`` (no inbound frame required);
-        the platform ACK's ``errcode`` is checked so the delivery outbox can
-        retry on rejection instead of treating an ACK-less call as success.
+        Goes through ``WSClient.send_message`` (no inbound frame required)
+        and waits for the platform ACK, so an ACK-less call is never treated
+        as success.
 
         Transport / not-connected failures raise :class:`ChannelUnavailable`
-        so the outbox parks without consuming retries. Platform ``errcode``
-        rejections stay as ``RuntimeError`` and count against the budget;
-        the SDK reports them as ``RuntimeError("Reply ack error: ...")``
-        from ``send_message`` itself, so they are told apart by that prefix.
+        so the outbox parks without consuming retries. Platform rejections
+        count against the budget: the SDK reports a non-zero ``errcode`` as
+        ``RuntimeError("Reply ack error: ...")`` from ``send_message`` itself,
+        so they are told apart from its transport ``RuntimeError`` by that
+        prefix. The ``errcode`` check on a returned ACK dict below is kept as
+        a guard for an SDK that returns the frame instead of raising.
         """
         if not self._running or not self._ws_client:
             raise ChannelUnavailable("WeCom channel is not connected")
-        # The SDK raises a plain RuntimeError when its socket is closed, so ask
-        # it first: a disconnect must park the row, not spend the retry budget.
+        # Ask the SDK first when it already knows the socket is closed: that
+        # fails fast and skips the retry/sleep storm. The except branch below
+        # still parks a closed socket the SDK only discovers during the send.
         if getattr(self._ws_client, "is_connected", True) is False:
             self._ws_transport_up = False
             raise ChannelUnavailable("WeCom websocket is not connected")
@@ -351,8 +354,10 @@ class WeComChannel(Channel):
         except RuntimeError as exc:
             if str(exc).startswith(_WECOM_ACK_REJECTION_PREFIX):
                 # The platform answered and said no (bad chatid, user out of
-                # range, ...). The socket is fine; this counts like any other
-                # deterministic rejection.
+                # range, ...). The frame went out and the ACK came back on
+                # this socket, so the transport is up; the rejection itself
+                # counts like any other deterministic failure.
+                self._ws_transport_up = True
                 raise
             # Everything else the SDK raises as RuntimeError is transport-side:
             # a socket that is not open, a connection dropped while an ACK was

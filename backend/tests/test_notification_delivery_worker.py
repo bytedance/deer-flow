@@ -24,6 +24,7 @@ class FakeDeliveryRepo:
         self.claims = []
         self.sent = []
         self.failed = []
+        self.terminal_failures = []
         self.resets = []
         self.events = []
 
@@ -43,7 +44,6 @@ class FakeDeliveryRepo:
 
     async def mark_failed(self, delivery_id, *, error=None, count_attempt=True, terminal=False):
         self.failed.append((delivery_id, error, count_attempt))
-        self.terminal_failures = getattr(self, "terminal_failures", [])
         if terminal:
             self.terminal_failures.append((delivery_id, error))
 
@@ -265,6 +265,7 @@ async def test_run_once_sends_when_target_is_still_connected():
     assert seen == ["user-1"]
     assert repo.sent == ["delivery-1"]
     assert repo.failed == []
+    assert repo.terminal_failures == []
 
 
 @pytest.mark.asyncio
@@ -321,7 +322,7 @@ async def test_run_once_parks_when_connection_lookup_returns_an_unexpected_shape
     delivery_id, error, count_attempt = repo.failed[0]
     assert "could not verify" in error
     assert count_attempt is False
-    assert getattr(repo, "terminal_failures", []) == []
+    assert repo.terminal_failures == []
 
 
 @pytest.mark.asyncio
@@ -358,7 +359,7 @@ async def test_run_once_parks_when_connection_lookup_fails():
     assert delivery_id == "delivery-1"
     assert "could not verify" in error
     assert count_attempt is False
-    assert getattr(repo, "terminal_failures", []) == []
+    assert repo.terminal_failures == []
 
 
 @pytest.mark.asyncio
@@ -735,8 +736,41 @@ async def test_wecom_send_notification_counts_the_sdk_ack_rejection():
     with pytest.raises(RuntimeError, match="errcode=60111"):
         await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
 
-    # A platform verdict says nothing about the transport.
-    assert channel._ws_transport_up is False
+    # The ACK came back on this socket, so the transport is known to be up.
+    assert channel._ws_transport_up is True
+
+
+@pytest.mark.asyncio
+async def test_wecom_send_notification_rejection_prefix_survives_the_retry_branch(monkeypatch):
+    # With the transport believed up, the send runs under _send_with_retry; the
+    # prefix check relies on the helper re-raising the SDK's own exception
+    # object rather than wrapping it.
+    import app.channels.base as base_module
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(base_module.asyncio, "sleep", no_sleep)
+
+    class RejectingWsClient:
+        is_connected = True
+
+        def __init__(self):
+            self.calls = 0
+
+        async def send_message(self, chatid, body):
+            self.calls += 1
+            raise RuntimeError("Reply ack error: errcode=60111, errmsg=invalid userid")
+
+    ws_client = RejectingWsClient()
+    channel = _wecom_channel(ws_client)
+    assert channel._ws_transport_up is True
+
+    with pytest.raises(RuntimeError, match="^Reply ack error: errcode=60111"):
+        await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+    assert ws_client.calls == 3
+    assert channel._ws_transport_up is True
 
 
 @pytest.mark.asyncio
@@ -770,3 +804,27 @@ async def test_wecom_send_notification_propagates_deterministic_errors():
 
     with pytest.raises(ValueError, match="invalid target"):
         await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+
+@pytest.mark.asyncio
+async def test_binding_check_reads_the_real_connection_repository_shape(tmp_path):
+    # The worker matches on the dict keys the real repository emits; a key
+    # rename there would otherwise fail every delivery silently.
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'conn.db'}", sqlite_dir=str(tmp_path))
+    try:
+        conn_repo = ChannelConnectionRepository(get_session_factory())
+        bound = await conn_repo.upsert_connection(owner_user_id="user-1", provider="wecom", external_account_id="GaoZhiChao")
+        repo = FakeDeliveryRepo([_delivery_row()])
+        worker = _make_worker(repo, FakeChannel(), resolve_connections=conn_repo.list_connections)
+
+        assert await worker._target_still_connected(_delivery_row()) is True
+        # Another owner's row never counts for this delivery.
+        assert await worker._target_still_connected({**_delivery_row(), "owner_user_id": "user-2"}) is False
+
+        assert await conn_repo.disconnect_connection(connection_id=bound["id"], owner_user_id="user-1") is True
+        assert await worker._target_still_connected(_delivery_row()) is False
+    finally:
+        await close_engine()
