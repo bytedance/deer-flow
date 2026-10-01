@@ -118,6 +118,42 @@ def test_terminal_failure_keeps_diagnostics_and_closes_without_retry(model, serv
     assert not stream.read_past_events
 
 
+@pytest.mark.parametrize("details", ["rate limited", ["rate limited"], 429])
+@pytest.mark.parametrize(
+    ("event_type", "detail_key"),
+    [("error", "error"), ("response.failed", "error"), ("response.incomplete", "incomplete_details")],
+)
+def test_terminal_failure_preserves_nonobject_details(model, serve_events, monkeypatch, event_type, detail_key, details):
+    event = {"type": event_type}
+    if event_type == "error":
+        event[detail_key] = details
+    else:
+        event["response"] = {detail_key: details}
+    stream, requests = serve_events([event], tail_error=httpx.ReadTimeout("Connection stayed open after failure"))
+    monkeypatch.setattr(provider.time, "sleep", lambda _: pytest.fail("SSE terminal errors must not trigger an HTTP retry"))
+
+    with pytest.raises(RuntimeError) as caught:
+        model.invoke([HumanMessage(content="Hello")])
+
+    assert str(caught.value) == f"Codex API {event_type}: {details}"
+    assert len(requests) == 1
+    assert stream.closed
+    assert not stream.read_past_events
+
+
+@pytest.mark.parametrize("event_type", ["response.failed", "response.incomplete"])
+def test_terminal_failure_preserves_nonobject_response(model, serve_events, event_type):
+    stream, requests = serve_events([{"type": event_type, "response": "rate limited"}])
+
+    with pytest.raises(RuntimeError) as caught:
+        model.invoke([HumanMessage(content="Hello")])
+
+    assert str(caught.value) == f"Codex API {event_type}: rate limited"
+    assert len(requests) == 1
+    assert stream.closed
+    assert not stream.read_past_events
+
+
 @pytest.mark.parametrize(
     "event",
     [

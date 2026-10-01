@@ -64,7 +64,9 @@ the same policy first so run metadata reports the effective values. Design note:
 retain the output-item recovery path for empty completed output. Terminal
 `response.failed`, `response.incomplete`, and `error` events raise with their
 error code/message or incomplete reason, closing the response and client without
-returning partial output. SSE failures do not enter the HTTP-status retry loop.
+returning partial output. Non-object error details or response containers are
+reported as text instead of raising `AttributeError`. SSE failures do not enter
+the HTTP-status retry loop.
 Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
 
 ### Claude Code Credentials (`packages/harness/deerflow/models/credential_loader.py`)

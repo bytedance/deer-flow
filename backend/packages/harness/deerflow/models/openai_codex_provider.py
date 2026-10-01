@@ -291,11 +291,15 @@ class CodexChatModel(BaseChatModel):
                         response = data.get("response") or {}
                         if event_type == "error":
                             details = data.get("error") or data
+                        elif not isinstance(response, dict):
+                            details = response
                         elif event_type == "response.failed":
                             details = response.get("error") or {}
                         else:
                             details = response.get("incomplete_details") or {}
 
+                        if not isinstance(details, dict):
+                            details = {"message": str(details)}
                         code = details.get("code")
                         reason = details.get("message") or details.get("reason") or "No details provided"
                         code_suffix = f" ({code})" if code else ""
