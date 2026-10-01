@@ -1,6 +1,6 @@
 ### Gateway API (`app/gateway/`)
 
-`routers/image_generation.py`: admin-only profiles and redacted off-loop probes.
+`routers/image_generation.py`: admin profiles, redacted off-loop probes.
 
 Reject external run/state writes with `sandbox`, `thread_data`, `viewed_images`, or `goal_outcome`.
 
