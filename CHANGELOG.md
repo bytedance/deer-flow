@@ -467,7 +467,7 @@ This release closes that milestone with **301 merged pull requests**.
   per-tool-frequency, and per-tool override fields similarly collapsed their
   limits to one. All integer threshold fields now fail configuration loading
   with a field-specific error while valid integers and numeric strings retain
-  their existing behavior.
+  their existing behavior.([#6017])
 - **uploads:** Converted Markdown ownership is now recorded when a document is
   converted. `list_uploaded_files` hides only verified conversion outputs, and
   document outlines use only the recorded companion; a user-uploaded Markdown
