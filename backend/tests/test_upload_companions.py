@@ -49,7 +49,7 @@ def test_same_size_sandbox_rewrite_rejects_stale_outline(converted_upload):
 
 
 @pytest.mark.parametrize("timestamp", ["st_mtime_ns", "st_ctime_ns"])
-def test_each_source_timestamp_invalidates_companion(converted_upload, monkeypatch, timestamp):
+def test_each_source_timestamp_invalidates_companion(converted_upload, monkeypatch, timestamp, caplog):
     original, _ = converted_upload
     real_stat = Path.stat
     before = original.stat()
@@ -65,10 +65,12 @@ def test_each_source_timestamp_invalidates_companion(converted_upload, monkeypat
     # Model mtime-only updates (e.g. Windows creation-time ctime) and ctime-only
     # updates (e.g. POSIX writes followed by restoring the old mtime).
     monkeypatch.setattr(Path, "stat", changed_stat)
-    assert resolve_companion(original) is None
+    with caplog.at_level("DEBUG", logger="deerflow.uploads.companions"):
+        assert resolve_companion(original) is None
+    assert "source identity or version timestamps do not match" in caplog.text
 
 
-def test_legacy_source_record_requires_reregistration(converted_upload):
+def test_legacy_source_record_requires_reregistration(converted_upload, caplog):
     original, markdown = converted_upload
     record = next((original.parent.parent.parent / "upload-companions").glob("*.json"))
     data = json.loads(record.read_text(encoding="utf-8"))
@@ -76,7 +78,9 @@ def test_legacy_source_record_requires_reregistration(converted_upload):
     record.write_text(json.dumps(data), encoding="utf-8")
     legacy = record.read_bytes()
 
-    assert resolve_companion(original) is None
+    with caplog.at_level("DEBUG", logger="deerflow.uploads.companions"):
+        assert resolve_companion(original) is None
+    assert "legacy source identity lacks version timestamps" in caplog.text
     assert extract_outline_for_file(original) == ([], [])
     assert record.read_bytes() == legacy  # Do not bless stale content on read.
 
