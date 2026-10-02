@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@rstest/core";
 
 import { parseDelimitedPreview } from "@/core/artifacts/delimited-preview";
+import { DELIMITED_INPUT_LIMIT } from "@/core/artifacts/delimited-preview-types";
 const parse = (
   content: string,
   truncated = false,
@@ -59,6 +60,65 @@ describe("delimited preview parser", () => {
     expect(() => parse('a\n"unfinished')).toThrow();
     expect(() => parse('a\n"bad"x\n', true)).toThrow();
     expect(() => parse('a\n"bad"x\n')).toThrow();
+  });
+  it.each(["," as const, "\t" as const])(
+    "discards a terminal record when CRLF is split after a quoted field (%j)",
+    (delimiter) => {
+      for (const field of ['"a"', '""', '"say ""hi"""', '"multi\r\nline"']) {
+        const complete = `ID${delimiter}Note\r\n001${delimiter}complete\r\n`;
+        expect(
+          parse(`${complete}002${delimiter}${field}\r`, true, delimiter),
+        ).toEqual({
+          rows: [
+            ["ID", "Note"],
+            ["001", "complete"],
+          ],
+          columnCount: 2,
+          limited: true,
+          unevenRows: false,
+        });
+        expect(
+          parse(`${complete}002${delimiter}${field}\r\n`, true, delimiter).rows,
+        ).toHaveLength(3);
+      }
+    },
+  );
+  it.each(["," as const, "\t" as const])(
+    "handles a CRLF split at the actual sample limit (%j)",
+    (delimiter) => {
+      const start = `ID${delimiter}Note\r\n001${delimiter}complete\r\n002${delimiter}"`;
+      const prefix =
+        start + "x".repeat(DELIMITED_INPUT_LIMIT - start.length - 2) + '"\r';
+      const full = `${prefix}\n003${delimiter}later\r\n`;
+      expect(prefix).toHaveLength(DELIMITED_INPUT_LIMIT);
+      expect(parse(full, false, delimiter).rows).toHaveLength(4);
+      expect(
+        parse(full.slice(0, DELIMITED_INPUT_LIMIT), true, delimiter).rows,
+      ).toEqual([
+        ["ID", "Note"],
+        ["001", "complete"],
+      ]);
+    },
+  );
+  it.each([false, true])(
+    "does not hide malformed quotes before a terminal CR (truncated=%j)",
+    (truncated) => {
+      expect(() => parse('ID,Note\r\n001,"bad"x\r', truncated)).toThrow();
+      expect(() => parse('ID,Note\r\n001,"bad"x\r\n', truncated)).toThrow();
+    },
+  );
+  it("preserves complete CR-only records and quoted carriage returns", () => {
+    expect(parse('ID,Note\r001,"complete"\r', true).rows).toEqual([
+      ["ID", "Note"],
+      ["001", "complete"],
+    ]);
+    expect(parse('ID,Note\r\n001,"embedded\rvalue"\r\n', true).rows).toEqual([
+      ["ID", "Note"],
+      ["001", "embedded\rvalue"],
+    ]);
+  });
+  it("does not normalize a complete file with a mismatched terminal CR", () => {
+    expect(() => parse('ID,Note\r\n001,"complete"\r')).toThrow();
   });
   it.each(["," as const, "\t" as const])(
     "ignores embedded CRs in an incomplete quoted field for delimiter %j",

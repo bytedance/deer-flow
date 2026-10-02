@@ -39,7 +39,15 @@ export function parseDelimitedPreview({
   truncated,
 }: DelimitedPreviewInput): DelimitedPreviewResult {
   // Papa strips BOM too; strip here so cursor and length use the same coordinates.
-  const input = content.startsWith("\uFEFF") ? content.slice(1) : content;
+  let input = content.startsWith("\uFEFF") ? content.slice(1) : content;
+  // Papa's auto-detection can count CRs inside an unfinished quoted field.
+  const newline = detectRecordNewline(input, delimiter);
+  // A range may end halfway through CRLF. Without the LF, Papa treats the CR
+  // after a closing quote as malformed syntax. Keep the terminal record
+  // incomplete so the normal prefix handling below discards it.
+  if (truncated && newline === "\r\n" && input.endsWith("\r")) {
+    input = input.slice(0, -1);
+  }
   const result: DelimitedPreviewResult = {
     rows: [],
     columnCount: 0,
@@ -50,8 +58,7 @@ export function parseDelimitedPreview({
   let firstWidth: number | undefined;
   Papa.parse<string[]>(input, {
     delimiter,
-    // Papa's auto-detection can count CRs inside an unfinished quoted field.
-    newline: detectRecordNewline(input, delimiter),
+    newline,
     header: false,
     dynamicTyping: false,
     skipEmptyLines: false,
