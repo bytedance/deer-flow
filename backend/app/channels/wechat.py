@@ -27,6 +27,7 @@ from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -777,6 +778,10 @@ class WechatChannel(Channel):
             params["verify_code"] = verify_code
         return await self._request_public_get_json("/ilink/bot/get_qrcode_status", params=params, timeout=timeout)
 
+    async def _save_auth_state_drained(self, **kwargs: Any) -> dict[str, Any]:
+        """Persist QR auth state before propagating caller cancellation."""
+        return await await_drained(asyncio.to_thread(self._save_auth_state, **kwargs))
+
     async def _bind_via_qrcode(self) -> dict[str, Any]:
         qrcode_data = await self.request_login_qrcode()
         qrcode = str(qrcode_data.get("qrcode") or "").strip()
@@ -788,8 +793,7 @@ class WechatChannel(Channel):
         if qrcode_img_content:
             logger.warning("[WeChat] qrcode_img_content=%s", qrcode_img_content)
 
-        await asyncio.to_thread(
-            self._save_auth_state,
+        await self._save_auth_state_drained(
             status="pending",
             qrcode=qrcode,
             qrcode_img_content=qrcode_img_content or None,
@@ -808,8 +812,7 @@ class WechatChannel(Channel):
                 if ilink_bot_id:
                     self._ilink_bot_id = ilink_bot_id
 
-                return await asyncio.to_thread(
-                    self._save_auth_state,
+                return await self._save_auth_state_drained(
                     status="confirmed",
                     bot_token=token,
                     ilink_bot_id=self._ilink_bot_id,
@@ -818,8 +821,7 @@ class WechatChannel(Channel):
                 )
 
             if status in {"expired", "canceled", "cancelled", "invalid", "failed"}:
-                await asyncio.to_thread(
-                    self._save_auth_state,
+                await self._save_auth_state_drained(
                     status=status,
                     qrcode=qrcode,
                     qrcode_img_content=qrcode_img_content or None,
@@ -828,8 +830,7 @@ class WechatChannel(Channel):
 
             await asyncio.sleep(max(self._qrcode_poll_interval, 0.1))
 
-        await asyncio.to_thread(
-            self._save_auth_state,
+        await self._save_auth_state_drained(
             status="timeout",
             qrcode=qrcode,
             qrcode_img_content=qrcode_img_content or None,
