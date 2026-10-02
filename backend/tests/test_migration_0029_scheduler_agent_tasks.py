@@ -23,16 +23,18 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
 REVISION = "0029_scheduler_agent_tasks"
+CURRENT_HEAD = "0030_notification_claim_tokens"
 PREVIOUS = "0028_parked_attempts"
 TASK_FIELDS = {"origin_thread_id", "goal_objective", "max_runs", "end_at", "standing_notes"}
 OCCURRENCE_FIELDS = {"goal_objective", "goal_verdict", "stop_requested_run_id"}
 pytestmark = pytest.mark.asyncio
 
 
-async def test_0029_owns_single_chain_head():
+async def test_0029_remains_in_the_single_migration_chain():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [REVISION]
+    assert script.get_heads() == [CURRENT_HEAD]
     assert script.get_revision(REVISION).down_revision == PREVIOUS
+    assert script.get_revision(CURRENT_HEAD).down_revision == REVISION
     assert len(REVISION) <= 32
 
 
