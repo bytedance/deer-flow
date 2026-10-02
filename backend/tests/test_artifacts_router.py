@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import os
 import stat
 import threading
 import zipfile
@@ -614,6 +615,147 @@ def test_get_artifact_inline_text_returns_sha256_etag(tmp_path, monkeypatch) -> 
     assert response.status_code == 200
     expected = hashlib.sha256(payload).hexdigest()
     assert response.headers.get("etag") == f'"{expected}"'
+
+
+def _replace_preserving_artifact_mtime(path: Path, content: bytes) -> None:
+    before = path.stat()
+    staged = path.with_name("replacement.part")
+    staged.write_bytes(content)
+    os.utime(staged, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(staged, path)
+    after = path.stat()
+    assert after.st_size == before.st_size
+    assert after.st_mtime_ns == before.st_mtime_ns
+    assert after.st_ino != before.st_ino
+
+
+@pytest.mark.parametrize(
+    ("filename", "query", "request_headers", "disposition", "expected_status"),
+    [
+        ("note.txt", "", {}, "inline", 200),
+        ("note.txt", "", {"Range": "bytes=0-2"}, "inline", 206),
+        ("note.txt", "?download=true", {}, "attachment", 200),
+        ("page.html", "", {}, "attachment", 200),
+    ],
+)
+def test_artifact_etag_tracks_external_atomic_replacement(tmp_path, monkeypatch, filename, query, request_headers, disposition, expected_status) -> None:
+    artifact_path = tmp_path / filename
+    old, new = b"old report", b"new report"
+    artifact_path.write_bytes(old)
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = f"/api/threads/thread-1/artifacts/mnt/user-data/outputs/{filename}{query}"
+
+    with TestClient(app) as client:
+        first = client.get(url)
+        assert first.content == old
+        assert first.headers["etag"] == f'"{hashlib.sha256(old).hexdigest()}"'
+        _replace_preserving_artifact_mtime(artifact_path, new)
+        second = client.get(url, headers=request_headers)
+
+    assert second.status_code == expected_status
+    assert second.content == (new[:3] if request_headers else new)
+    assert second.headers["etag"] == f'"{hashlib.sha256(new).hexdigest()}"'
+    assert second.headers["content-disposition"].startswith(f"{disposition};")
+    if request_headers:
+        assert second.headers["content-range"] == f"bytes 0-2/{len(new)}"
+
+
+def test_refreshed_artifact_etag_can_be_used_to_save(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"old report")
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    _patch_artifact_update_dependencies(monkeypatch, artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = "/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt"
+
+    with TestClient(app) as client:
+        previous = client.get(url)
+        _replace_preserving_artifact_mtime(artifact_path, b"new report")
+        refreshed = client.get(url)
+        rejected = client.put(url, json={"content": "user edit", "expected_sha256": previous.headers["etag"].strip('"')})
+        saved = client.put(url, json={"content": "user edit", "expected_sha256": refreshed.headers["etag"].strip('"')})
+
+    assert rejected.status_code == 412
+    assert saved.status_code == 200
+    assert artifact_path.read_bytes() == b"user edit"
+    assert saved.json()["sha256"] == hashlib.sha256(b"user edit").hexdigest()
+
+
+def test_replaced_artifact_rejects_previous_if_range_validator(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"old report")
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = "/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt"
+
+    with TestClient(app) as client:
+        first = client.get(url)
+        _replace_preserving_artifact_mtime(artifact_path, b"new report")
+        response = client.get(url, headers={"Range": "bytes=0-2", "If-Range": first.headers["etag"]})
+
+    assert response.status_code == 200
+    assert response.content == b"new report"
+    assert "content-range" not in response.headers
+    assert response.headers["etag"] == f'"{hashlib.sha256(b"new report").hexdigest()}"'
+
+
+@pytest.mark.parametrize("changed_field", ["st_dev", "st_ino", "st_ctime_ns"])
+def test_artifact_digest_invalidates_when_file_identity_changes(tmp_path, monkeypatch, changed_field) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"old report")
+    actual_stat = artifact_path.stat()
+    metadata = {field: getattr(actual_stat, field) for field in ("st_dev", "st_ino", "st_ctime_ns", "st_mtime_ns", "st_size")}
+    original_stat = Path.stat
+
+    def controlled_stat(path, *args, **kwargs):
+        return SimpleNamespace(**metadata) if path == artifact_path else original_stat(path, *args, **kwargs)
+
+    # Control the metadata rather than depending on filesystem clock resolution
+    # or treating Windows creation time as a POSIX change time.
+    monkeypatch.setattr(Path, "stat", controlled_stat)
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    assert artifacts_router._sha256_of_file(artifact_path) == hashlib.sha256(b"old report").hexdigest()
+    artifact_path.write_bytes(b"new report")
+    metadata[changed_field] += 1
+    assert artifacts_router._sha256_of_file(artifact_path) == hashlib.sha256(b"new report").hexdigest()
+
+
+def test_unchanged_artifact_digest_is_reused_without_rereading(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"unchanged report")
+    expected = hashlib.sha256(b"unchanged report").hexdigest()
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    assert artifacts_router._sha256_of_file(artifact_path) == expected
+
+    def unexpected_open(*_args, **_kwargs):
+        pytest.fail("An unchanged artifact must not be rehashed for each preview")
+
+    monkeypatch.setattr(artifacts_router, "open", unexpected_open, raising=False)
+    assert artifacts_router._sha256_of_file(artifact_path) == expected
+
+
+def test_artifact_digest_cache_separates_paths_with_matching_metadata(tmp_path, monkeypatch) -> None:
+    paths = [tmp_path / "first.txt", tmp_path / "second.txt"]
+    contents = [b"old report", b"new report"]
+    for path, content in zip(paths, contents, strict=True):
+        path.write_bytes(content)
+    metadata = SimpleNamespace(st_dev=1, st_ino=2, st_ctime_ns=3, st_mtime_ns=4, st_size=10)
+    original_stat = Path.stat
+
+    def controlled_stat(path, *args, **kwargs):
+        return metadata if path in paths else original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", controlled_stat)
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    for path, content in zip(paths, contents, strict=True):
+        assert artifacts_router._sha256_of_file(path) == hashlib.sha256(content).hexdigest()
 
 
 def test_get_skill_archive_preview_supports_bounded_range_requests(tmp_path, monkeypatch) -> None:

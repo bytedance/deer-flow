@@ -341,17 +341,27 @@ def _sha256_of_file(path: Path) -> str:
     (e.g. http://<lan-ip>:<port>) and otherwise breaks artifact preview +
     inline editing (see issue #4864).
 
-    The digest is cached by (path, mtime_ns, size) so the many small ``Range``
+    The digest is cached by path and file identity/change metadata so small ``Range``
     requests a browser issues while scrubbing/paginating a preview do not each
     re-hash a potentially huge artifact from scratch (raised in PR review).
     """
     stat = path.stat()
-    return _sha256_of_file_cached(str(path), stat.st_mtime_ns, stat.st_size)
+    # Sandbox syncs and other writers can atomically replace a same-size file
+    # while preserving its mtime. Identity separates those generations; ctime
+    # also invalidates in-place writes where the filesystem exposes change time.
+    return _sha256_of_file_cached(
+        str(path),
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_ctime_ns,
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
 
 
 @functools.lru_cache(maxsize=256)
-def _sha256_of_file_cached(path: str, mtime_ns: int, size: int) -> str:
-    """Cached SHA-256 of *path*; the size/mtime args invalidate stale entries."""
+def _sha256_of_file_cached(path: str, device: int, inode: int, ctime_ns: int, mtime_ns: int, size: int) -> str:
+    """Cached SHA-256 of *path*; metadata arguments separate file generations."""
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):

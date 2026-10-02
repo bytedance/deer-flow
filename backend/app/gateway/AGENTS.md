@@ -1,5 +1,12 @@
 ### Gateway API (`app/gateway/`)
 
+Artifact SHA-256 cache keys include path, device, inode, ctime_ns, mtime_ns and
+size. External sandbox syncs may atomically replace an output while preserving
+mtime and size; identity must invalidate that generation without calling the
+Gateway edit helper. ctime adds in-place invalidation on filesystems exposing
+change time (Windows creation time is not equivalent). Keep unchanged-file
+cache reuse, the editable-size hash guard, and worker-thread hashing.
+
 Reject external run/state writes with `sandbox`, `thread_data`, or `viewed_images`.
 
 Studio retains sanitized creation metadata.
