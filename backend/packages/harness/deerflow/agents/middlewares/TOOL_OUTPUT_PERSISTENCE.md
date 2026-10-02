@@ -12,6 +12,13 @@ creation succeeds: a collision or creation failure must not remove another
 writer's pending file. An observed `OSError` cleans only this invocation's temp
 and leaves previously published content intact.
 
+When blob storage is enabled, blob publication follows host publication. If the
+blob write fails, that message uses the safety-limited inline fallback and does
+not advertise the host path. It also must not unlink the deterministic final
+path: a concurrent publisher may already have replaced it and durably
+checkpointed that content. Remove published files only as part of inactive
+thread-data maintenance.
+
 ## Unclean shutdown
 
 SIGKILL, OOM termination, and host failure bypass exception cleanup and can leave
