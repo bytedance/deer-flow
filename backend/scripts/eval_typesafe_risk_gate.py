@@ -67,7 +67,15 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from deerflow.guardrails.provider import GuardrailRequest
-from deerflow.guardrails.typesafe import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL, TypeSafeGuardrailError, TypeSafeGuardrailProvider
+from deerflow.guardrails.typesafe import (
+    DEFAULT_API_KEY_ENV,
+    DEFAULT_BASE_URL,
+    DEFAULT_CRITERIA_FALSE,
+    DEFAULT_CRITERIA_TRUE,
+    DEFAULT_INSTRUCTIONS,
+    TypeSafeGuardrailError,
+    TypeSafeGuardrailProvider,
+)
 
 NETWORK = "network"
 CACHE_HIT = "cache_hit"
@@ -178,6 +186,24 @@ def _provider(args: argparse.Namespace, *, cache_enabled: bool) -> TypeSafeGuard
         retry_backoff=args.retry_backoff,
         cache_size=256 if cache_enabled else 0,
     )
+
+
+def _effective_policy(args: argparse.Namespace) -> dict[str, str]:
+    """The question text the run actually evaluated, overrides or built-in defaults.
+
+    Without this the report cannot distinguish a custom-rubric run from a
+    default-policy one, so its verdict could not be reproduced. getattr for the
+    same reason as ``_provider``: hand-built namespaces may lack the attributes.
+    """
+    overrides = {
+        "instructions": getattr(args, "instructions", None),
+        "criteria_true": getattr(args, "criteria_true", None),
+        "criteria_false": getattr(args, "criteria_false", None),
+    }
+    defaults = {"instructions": DEFAULT_INSTRUCTIONS, "criteria_true": DEFAULT_CRITERIA_TRUE, "criteria_false": DEFAULT_CRITERIA_FALSE}
+    # ``defaulted_text`` falls back only on None; blank override text is a
+    # provider construction error, never the default policy.
+    return {key: value if value is not None else defaults[key] for key, value in overrides.items()}
 
 
 async def _run_case(provider: TypeSafeGuardrailProvider, case: dict[str, Any]) -> Outcome:
@@ -469,6 +495,7 @@ def main() -> int:
         "threshold": args.threshold,
         "tools": args.tools,
         "allowed_tools": args.allowed_tools,
+        "policy": _effective_policy(args),
         "fail_open": args.fail_open,
         "max_state_chars": args.max_state_chars,
         "timeout": args.timeout,

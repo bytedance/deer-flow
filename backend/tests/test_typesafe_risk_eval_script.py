@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from deerflow.guardrails.provider import GuardrailDecision, GuardrailReason
-from deerflow.guardrails.typesafe import TypeSafeGuardrailError
+from deerflow.guardrails.typesafe import DEFAULT_CRITERIA_FALSE, DEFAULT_CRITERIA_TRUE, DEFAULT_INSTRUCTIONS, TypeSafeGuardrailError
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "eval_typesafe_risk_gate.py"
 
@@ -310,6 +310,39 @@ def test_main_exit_code_carries_the_gate_verdict(monkeypatch, capsys, tmp_path, 
     assert gates["risky_misses_zero"] is (not allow_risky), "the gate result must be the one the exit code reports"
     assert ("GATE risky_misses_zero: FAIL" in printed) is allow_risky
     assert ("Evaluation gates FAILED: risky_misses_zero" in printed) is allow_risky
+
+
+def test_main_report_records_prompt_overrides_in_the_policy(monkeypatch, tmp_path):
+    """A custom-rubric run changes the evaluated policy; the report must say so,
+    or its verdict cannot be reproduced or told apart from a default-policy run."""
+    _, report = _run_main(
+        monkeypatch,
+        tmp_path,
+        cases=[_SAFE_CASE],
+        main_script=[_decision(allow=True, cached=False)],
+        args={"instructions": "custom instructions", "criteria_true": "custom risky rubric"},
+    )
+
+    assert report["policy"] == {
+        "instructions": "custom instructions",
+        "criteria_true": "custom risky rubric",
+        "criteria_false": DEFAULT_CRITERIA_FALSE,
+    }
+
+
+def test_main_report_records_the_default_policy_without_overrides(monkeypatch, tmp_path):
+    _, report = _run_main(
+        monkeypatch,
+        tmp_path,
+        cases=[_SAFE_CASE],
+        main_script=[_decision(allow=True, cached=False)],
+    )
+
+    assert report["policy"] == {
+        "instructions": DEFAULT_INSTRUCTIONS,
+        "criteria_true": DEFAULT_CRITERIA_TRUE,
+        "criteria_false": DEFAULT_CRITERIA_FALSE,
+    }
 
 
 def test_main_fails_when_the_tool_scope_leaves_no_risky_case(monkeypatch, capsys, tmp_path):
