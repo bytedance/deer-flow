@@ -884,18 +884,105 @@ def test_timed_out_bootstrap_warns_even_with_success_marker(monkeypatch, caplog)
 
 
 @pytest.mark.parametrize("timed_out,exit_code", [(True, 0), (False, 1)])
-def test_warm_pool_rejects_unsuccessful_probe_with_ok_output(monkeypatch, timed_out, exit_code):
+def test_warm_pool_rejects_unsuccessful_probe_with_ok_output(monkeypatch, caplog, timed_out, exit_code):
     client = _FakeClient()
     provider = _install(monkeypatch, client=client)
     try:
         sid = provider.acquire("thread-1", user_id="u1")
         first = client.last_sandbox
         provider.release(sid)
-        monkeypatch.setattr(first, "_run_script", lambda script: _FakeResult(stdout=b"ok\n", exit_code=exit_code, timed_out=timed_out))
+        monkeypatch.setattr(
+            first,
+            "_run_script",
+            lambda script: _FakeResult(stdout=b"ok\n", exit_code=exit_code, timed_out=timed_out),
+        )
 
-        assert provider.acquire("thread-1", user_id="u1") == sid
+        with caplog.at_level(logging.WARNING):
+            assert provider.acquire("thread-1", user_id="u1") == sid
         assert client.last_sandbox is not first
         assert first.closed
+        failure = next(record.message for record in caplog.records if "health check failed" in record.message)
+        assert sid in failure
+        assert "ok\n" in failure
+        assert f"Exit Code: {124 if timed_out else exit_code}" in failure
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize(
+    "stdout,stderr",
+    [
+        (b"ok\n", b"sh: warning: setlocale: LC_ALL: cannot change locale\n"),
+        (b"profile loaded\nok\n", b""),
+        (
+            b"profile loaded\nok\n",
+            b"sh: warning: setlocale: LC_ALL: cannot change locale\n",
+        ),
+    ],
+)
+def test_warm_pool_reclaims_healthy_probe_with_shell_noise(monkeypatch, caplog, stdout, stderr):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    try:
+        sid = provider.acquire("thread-1", user_id="u1")
+        first = client.last_sandbox
+        provider.release(sid)
+        monkeypatch.setattr(
+            first,
+            "_run_script",
+            lambda script: _FakeResult(stdout=stdout, stderr=stderr),
+        )
+        calls_before = len(first.exec_calls)
+
+        with caplog.at_level(logging.WARNING):
+            assert provider.acquire("thread-1", user_id="u1") == sid
+        assert client.create_count == 1
+        assert client.last_sandbox is first
+        assert not first.closed
+        assert len(first.exec_calls) == calls_before + 1
+        assert first.exec_calls[-1]["argv"] == ("sh", "-lc", "echo ok")
+        assert first.exec_calls[-1]["timeout"] == 10
+        assert not any("health check" in record.message for record in caplog.records)
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("stdout", [b"not ok\n", b"ok-ish\n", b""])
+def test_warm_pool_logs_probe_without_exact_success_line(monkeypatch, caplog, stdout):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    try:
+        sid = provider.acquire("thread-1", user_id="u1")
+        first = client.last_sandbox
+        provider.release(sid)
+        monkeypatch.setattr(first, "_run_script", lambda script: _FakeResult(stdout=stdout))
+
+        with caplog.at_level(logging.WARNING):
+            assert provider.acquire("thread-1", user_id="u1") == sid
+        assert client.create_count == 2
+        assert client.last_sandbox is not first
+        assert first.closed
+        output = stdout.decode() if stdout else "(no output)"
+        assert any(f"Tenki warm-pool sandbox {sid} health check failed: {output}" == record.message for record in caplog.records)
+    finally:
+        provider.shutdown()
+
+
+def test_warm_pool_rejects_probe_error_containing_success_line(monkeypatch, caplog):
+    client = _FakeClient()
+    provider = _install(monkeypatch, client=client)
+    try:
+        sid = provider.acquire("thread-1", user_id="u1")
+        first = client.last_sandbox
+        provider.release(sid)
+        first.exec_error = RuntimeError("probe transport failed\nok")
+
+        with caplog.at_level(logging.WARNING):
+            assert provider.acquire("thread-1", user_id="u1") == sid
+        assert client.create_count == 2
+        assert client.last_sandbox is not first
+        assert first.closed
+        assert any(f"Tenki warm-pool sandbox {sid} health check failed: Error: probe transport failed\nok" == record.message for record in caplog.records)
     finally:
         provider.shutdown()
 

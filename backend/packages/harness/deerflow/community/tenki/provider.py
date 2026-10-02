@@ -408,7 +408,12 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
 
         try:
             result = sandbox.execute_command("echo ok", timeout=10)
-            healthy = result.strip() == "ok"
+            # Login-shell profiles can add stdout/stderr around the probe marker.
+            # Keep rejecting adapter failure diagnostics even if "ok" was printed.
+            lines = result.splitlines()
+            healthy = "ok" in lines and not any(line.startswith(("Error:", "Exit Code:")) for line in lines)
+            if not healthy:
+                logger.warning("Tenki warm-pool sandbox %s health check failed: %s", sandbox_id, result)
         except Exception as e:
             logger.warning("Tenki warm-pool sandbox %s health check error: %s", sandbox_id, e)
             healthy = False

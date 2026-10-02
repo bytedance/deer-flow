@@ -623,6 +623,8 @@ missing start path is reported separately as “Directory not found.”
 The optional [Tenki cloud sandbox provider](backend/packages/harness/deerflow/community/tenki/README.md)
 uses Tenki SDK 1.4.0 or newer. Timed-out commands preserve partial output and
 report `Exit Code: 124`; unsuccessful health checks cannot reclaim a warm sandbox.
+Health probes tolerate login-shell output around the `ok` line, and failures log
+the sandbox ID and probe output before replacing the sandbox.
 
 #### MCP Server
 

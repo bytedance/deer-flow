@@ -86,6 +86,11 @@ sandboxes. `sandbox.idle_timeout` controls how long released warm sandboxes stay
 running; `0` disables idle reaping. Active sandboxes are never evicted to satisfy
 the cap.
 
+The warm-pool health probe accepts an exact `ok` line alongside login-shell
+profile output or stderr warnings. Timeout, nonzero-exit, and command-error
+diagnostics still prevent reuse. Failed probes log the sandbox ID and returned
+output before the unhealthy microVM is terminated and replaced.
+
 ## Scope: stable features only
 
 Only the stable Tenki surface is used — sandbox create/terminate plus
