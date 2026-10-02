@@ -290,8 +290,12 @@ Both honor the backend base and prefixes; transport and cache semantics are docu
 Conversation action factories, shapes and availability callbacks are guarded per plugin;
 only validated value snapshots reach the toolbar/sidebar render paths.
 `PluginNavigation` and the dynamic workspace extension route consume page declarations;
-Capability Center details only show metadata and status. Conversation action slots augment
-normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
+Capability Center defaults to the repository examples in `core/extensions/catalog.ts`,
+merged by explicit namespace with runtime descriptors. Catalog-only entries are discovery
+metadata, never module-loader inputs or proof of installation. Backend-only examples may
+have no plugin descriptor; keep their runtime status unasserted. Details link to package
+installation instructions. Keep the catalog aligned with `examples/deerflow-extension-*`.
+Conversation action slots augment normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
 Plugin views use mount/dispose and abort signals; Shadow DOM is CSS isolation, not a sandbox.
 Descriptors are user-keyed page snapshots, refreshed manually. Backend calls bind the plugin's
 namespace, action allowlist and expected viewer identity. See `docs/full-stack-plugins.md`.
