@@ -242,7 +242,7 @@ async def navigate_and_capture(*, thread_id: str | None, url: str, outputs_path:
     Returns ``{"screenshot": virtual_path|None, "url": str, "title": str}``.
     Raises :class:`ValueError` when the URL fails SSRF validation.
     """
-    url_error = _validate_url("browser_navigate", url)
+    url_error = await asyncio.to_thread(_validate_url, "browser_navigate", url)
     if url_error:
         raise ValueError(url_error)
     cfg = _get_tool_config("browser_navigate")
@@ -290,7 +290,7 @@ async def browser_navigate_tool(runtime: Runtime, url: str, tool_call_id: Annota
         url: The http(s) URL to open.
     """
     try:
-        url_error = _validate_url("browser_navigate", url)
+        url_error = await asyncio.to_thread(_validate_url, "browser_navigate", url)
         if url_error:
             return _tool_message(url_error, tool_call_id)
         with _resolve_session(runtime, "browser_navigate") as session:

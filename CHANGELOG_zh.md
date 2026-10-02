@@ -424,6 +424,15 @@
   所有异常，因此每次都抛出 `AttributeError`，提示从未发送。现在改为 await 2.x 的
   `channel.typing()` 发送一次提示。每个输入提示循环的首次失败以 WARNING 级别记录（缺少权限或持续限流
   在默认日志级别下即可见），之后的失败以 DEBUG 级别记录，而不是直接丢弃。([#6138])
+- **社区工具：** SSRF URL 校验在解析主机名时不再阻塞 Gateway 事件循环。
+  `validate_public_http_url` 通过阻塞的 `socket.getaddrinfo` 解析主机名，而
+  crawl4ai 与 Browserless 的 `web_fetch`、`web_capture`、`browser_navigate`、
+  Gateway 浏览器导航路由以及 Live 流的导航输入和 seed 都在异步代码中直接调用它，
+  因此模型或用户选择的 URL 一旦遇到缓慢的 DNS 响应，整个查询期间其他请求和流都会停滞。
+  逐个检查重定向和子资源的 Playwright 请求守卫也在共享的浏览器事件循环上同步解析，
+  会让所有浏览器会话的 Live 画面与输入一同停滞。这些调用方现在通过 `asyncio.to_thread` 运行校验，放行与拒绝的结果不变。
+  严格的阻塞 IO 检测新增 `socket.getaddrinfo` 规则，因为 Blockbuster
+  默认只包装 socket 方法，不包装模块级解析函数。([#6140])
 - **智能体：** 循环检测的整数阈值现在会拒绝 YAML 布尔值，而不是把
   `true` 静默转换为 `1`。此前若配置 `warn_threshold: true` 和
   `hard_limit: true`，第一组工具调用就会达到硬上限并强制终止智能体；
@@ -6335,3 +6344,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135
 [#6138]: https://github.com/bytedance/deer-flow/pull/6138
+[#6140]: https://github.com/bytedance/deer-flow/pull/6140
