@@ -142,3 +142,21 @@ def test_assembly_keeps_ordinary_and_unaffected_plugin_tools_on_collision(instal
     duplicate_snapshot = replace(loaded, plugins=loaded.plugins + loaded.plugins)
     with pytest.raises(ValueError, match="collision"):
         assembly.get_available_tools(app_config=config, extensions=duplicate_snapshot, include_mcp=False, include_upload_tool=False)
+
+
+@pytest.mark.asyncio
+async def test_model_tool_receives_run_control_from_host_runtime(installed):
+    from deerflow_extension_api import AGENT_RUNS_CONTEXT_KEY
+
+    loaded, _, calls = installed
+    (tool,) = build_plugin_tools(loaded)
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", ToolNode([tool]))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    handle = object()
+    await graph.compile().ainvoke(
+        {"messages": [AIMessage(content="", tool_calls=[{"id": "call", "name": tool.name, "args": {"query": "hello"}}])]},
+        context={"user_id": "alice", "thread_id": "thread", AGENT_RUNS_CONTEXT_KEY: handle},
+    )
+    assert calls[0].agent_runs is handle

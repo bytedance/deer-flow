@@ -33,6 +33,7 @@ from datetime import datetime
 from functools import lru_cache
 from typing import Any, Final, Literal, cast
 
+from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
@@ -218,6 +219,7 @@ def _release_run_scoped_references(
         "__run_journal",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         CONVERSATION_READER_CONTEXT_KEY,
+        AGENT_RUNS_CONTEXT_KEY,
     }
     try:
         from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
@@ -242,6 +244,7 @@ def _release_run_scoped_references(
         if isinstance(configurable, dict):
             configurable.pop("__pregel_runtime", None)
             configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
+            configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
         context = runnable_config.get("context")
         if isinstance(context, dict):
             for key in internal_context_keys:
@@ -538,6 +541,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
             CONVERSATION_READER_CONTEXT_KEY,
+            AGENT_RUNS_CONTEXT_KEY,
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             "is_subagent",
@@ -564,6 +568,7 @@ def _build_runtime_context(
     task_store: Any | None = None,
     extensions: Any | None = None,
     conversation_reader: Any | None = None,
+    agent_runs: Any | None = None,
     *,
     thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
 ) -> dict[str, Any]:
@@ -589,6 +594,8 @@ def _build_runtime_context(
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
+    if agent_runs is not None:
+        runtime_ctx[AGENT_RUNS_CONTEXT_KEY] = agent_runs
     if conversation_reader is not None:
         runtime_ctx[CONVERSATION_READER_CONTEXT_KEY] = conversation_reader
     if task_store is not None:
@@ -650,6 +657,7 @@ class RunContext:
     on_run_completed: Any | None = field(default=None)
     # The host binds this capability to one run's authenticated reader and references.
     conversation_reader: Any | None = field(default=None)
+    agent_runs: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -658,6 +666,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
         configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
+        configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
@@ -1148,6 +1157,7 @@ async def run_agent(
             task_store,
             extensions,
             ctx.conversation_reader,
+            ctx.agent_runs,
             thread_incarnation=thread_incarnation,
         )
         # Bind every checkpoint produced by this run to the effective agent

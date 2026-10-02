@@ -3,7 +3,12 @@
 A deployment-installed Python extension can register a `PluginContribution` with
 optional browser code, authenticated backend actions and model tools. This extends
 the existing `install(registry, config)` workflow. MCP and Skills keep their existing
-APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.4).
+APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.5).
+
+Backend actions and model tools may use the optional host-bound
+`context.agent_runs` capability to create, continue, inspect, resume, and cancel
+full Agent runs. See [Agent run control](../backend/docs/extension-agent-runs.md)
+for authorization, service-held handle lifetime, and handoff examples.
 
 The browser contribution API is experimental. `BrowserModule(code=...)` remains the
 self-contained transport; `BrowserAssets(root=...)` adds manifest-listed resources

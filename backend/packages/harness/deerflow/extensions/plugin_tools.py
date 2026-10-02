@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from types import MappingProxyType
 
+from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from deerflow_extension_api.auth import ExtensionPrincipal
 from deerflow_extension_api.plugins import ToolContext
 from jsonschema import Draft202012Validator
@@ -75,6 +76,7 @@ def _build_tool(source, plugin, declaration):
                 ExtensionPrincipal(resolve_runtime_user_id(runtime)),
                 MappingProxyType(settings),
                 context.get("thread_id"),
+                agent_runs=context.get(AGENT_RUNS_CONTEXT_KEY),
             )
             async with asyncio.timeout(30):
                 result = await declaration.handler(MappingProxyType(payload), tool_context)
