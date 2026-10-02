@@ -520,6 +520,9 @@ export function InputBox({
   const projectReferenceCache = useRef(
     new Map<string, (typeof projectAttachments)[number]>(),
   );
+  const conversationReferenceCache = useRef(
+    new Map<string, ConversationReference>(),
+  );
   useLayoutEffect(() => {
     projectReferenceCache.current.clear();
     setInlineEditorActive(false);
@@ -533,6 +536,10 @@ export function InputBox({
         );
     }
   }, [projectAttachments]);
+  useLayoutEffect(() => {
+    for (const reference of conversationReferences)
+      conversationReferenceCache.current.set(reference.threadId, reference);
+  }, [conversationReferences]);
   const inlineCompositionEndedAt = useRef(-Infinity);
   const goalRequestStateRef = useRef(createGoalRequestState());
   const compactRequestStateRef = useRef(createGoalRequestState());
@@ -1006,6 +1013,7 @@ export function InputBox({
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
     setTextInput("");
+    conversationReferenceCache.current.clear();
     setConversationReferences([]);
     setMentionQuery(null);
     setMentionButtonOpen(false);
@@ -2531,15 +2539,17 @@ export function InputBox({
       promptHistoryDraftRef.current = "";
       const nextText = readReferenceEditor(element);
       const refs = inlineReferences(nextText);
-      setConversationReferences(
-        (previous) =>
-          reconcileConversationReferences(
-            nextText,
-            previous,
-            conversationCapability,
-            threadId,
-          ).references,
-      );
+      setConversationReferences((previous) => {
+        const known = new Map(conversationReferenceCache.current);
+        for (const reference of previous)
+          known.set(reference.threadId, reference);
+        return reconcileConversationReferences(
+          nextText,
+          [...known.values()],
+          conversationCapability,
+          threadId,
+        ).references;
+      });
       setProjectAttachments((previous) => {
         const ids = new Set(
           refs.filter((ref) => ref.kind === "file").map((ref) => ref.id),

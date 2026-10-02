@@ -14,6 +14,7 @@ test.beforeEach(async ({ page }) => {
       {
         thread_id: MOCK_THREAD_ID,
         title: "Writer brief",
+        agent_name: "writer",
         updated_at: "2026-09-01T00:00:00Z",
       },
     ],
@@ -37,6 +38,30 @@ test.beforeEach(async ({ page }) => {
       },
     }),
   );
+});
+test("native undo retains the custom agent of a conversation reference", async ({
+  page,
+}) => {
+  await page.goto("/workspace/chats/new");
+  const input = composer(page);
+  await input.fill("@Writer");
+  await page.getByRole("option", { name: "Writer brief" }).click();
+  await input.press("End");
+  await input.press("Backspace");
+  await input.press("Backspace");
+  await expect(page.getByTestId("conversation-reference-chip")).toBeHidden();
+  await input.press("ControlOrMeta+z");
+  await expect(page.getByTestId("conversation-reference-chip")).toBeVisible();
+  await input.press("End");
+  await input.pressSequentially(" summarize");
+  const request = nextRun(page);
+  await input.press("Enter");
+  expect(
+    (await request).postDataJSON().input.messages.at(-1).additional_kwargs
+      .conversation_references,
+  ).toEqual([
+    { thread_id: MOCK_THREAD_ID, title: "Writer brief", agent_name: "writer" },
+  ]);
 });
 test("completed references do not reopen the mention search on caret navigation", async ({
   page,
