@@ -141,6 +141,11 @@ def extract_outline(md_path: Path) -> list[dict]:
                         fence_length = len(marker)
                         continue
 
+                # Root-level indented code starts at four columns, including
+                # a tab after up to three spaces. Do not strip it into a heading.
+                if line.startswith("    ") or line[:4].lstrip(" ").startswith("\t"):
+                    continue
+
                 stripped = line.strip()
                 if not stripped:
                     continue

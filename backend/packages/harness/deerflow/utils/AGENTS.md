@@ -25,6 +25,12 @@ optional leading UTF-8 BOM cannot hide a first-line heading or code fence, or
 occupy a preview line. Preserve physical line numbers, embedded U+FEFF
 characters, and the original file bytes.
 
+All outline heading styles skip root-level indented code (four leading spaces
+or a tab after up to three spaces), including PDF-style single and split bold
+headings. Keep legitimate bold headings with up to three spaces and the shared
+conversion-companion path working. Regression coverage lives in
+`tests/test_file_outline_indented_bold.py`.
+
 ### Active Content MIME Types
 
 `text_detection.py::_is_active_content_mime_type` is the shared download-safety
