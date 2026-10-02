@@ -113,6 +113,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--tools", default="", help="comma-separated probe scope; default probes every tool in the case set")
     parser.add_argument("--allowed-tools", default="", help="comma-separated permission list; tools outside it are refused locally; default enforces no list")
     parser.add_argument("--max-state-chars", type=int, default=4000)
+    parser.add_argument("--instructions", default=None, help="override the question instructions; default is the provider's built-in text")
+    parser.add_argument("--criteria-true", default=None, help="override the 'risky' rubric text; default is the provider's built-in text")
+    parser.add_argument("--criteria-false", default=None, help="override the 'safe' rubric text; default is the provider's built-in text")
     parser.add_argument("--timeout", type=float, default=5.0)
     parser.add_argument("--deadline-seconds", type=float, default=10.0)
     parser.add_argument("--max-attempts", type=int, default=2)
@@ -147,11 +150,25 @@ def _split_names(value: str) -> list[str] | None:
 
 
 def _provider(args: argparse.Namespace, *, cache_enabled: bool) -> TypeSafeGuardrailProvider:
+    # getattr: tests and embedding tools build the namespace by hand and may
+    # not carry the criteria attributes.
+    criteria_true = getattr(args, "criteria_true", None)
+    criteria_false = getattr(args, "criteria_false", None)
+    instructions = getattr(args, "instructions", None)
+    criteria: dict[object, object] | None = None
+    if criteria_true is not None or criteria_false is not None:
+        criteria = {}
+        if criteria_true is not None:
+            criteria[True] = criteria_true
+        if criteria_false is not None:
+            criteria[False] = criteria_false
     return TypeSafeGuardrailProvider(
         api_key_env=args.api_key_env,
         base_url=args.base_url,
         model=args.model,
         threshold=args.threshold,
+        instructions=instructions,
+        criteria=criteria,
         tools=_split_names(args.tools),
         allowed_tools=_split_names(args.allowed_tools),
         max_state_chars=args.max_state_chars,
