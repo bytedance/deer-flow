@@ -11,7 +11,11 @@ _BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal"}
 
 
 def resolve_host_addresses(hostname: str) -> list[ipaddress._BaseAddress]:
-    """Resolve a hostname to all IP addresses for SSRF screening."""
+    """Resolve a hostname to all IP addresses for SSRF screening.
+
+    Blocking: this is a synchronous DNS lookup, so async callers must run it
+    (or :func:`validate_public_http_url`) via ``asyncio.to_thread``.
+    """
     addresses: list[ipaddress._BaseAddress] = []
     try:
         infos = socket.getaddrinfo(hostname, None)
@@ -44,6 +48,14 @@ def validate_public_http_url(
     ``None`` when the caller may proceed.  The check is intentionally conservative
     for self-hosted fetch/render services because those services run inside the
     deployment network and can otherwise reach cloud metadata or private hosts.
+
+    A hostname URL is resolved synchronously; from a coroutine, call this via
+    ``asyncio.to_thread`` so a slow DNS answer cannot stall the event loop.
+
+    The check runs at validation time only. A caller that connects later
+    resolves the name again, so a rebinding DNS server can still hand that
+    connect a private address unless the connection is pinned to the vetted
+    IPs, as ``deerflow.mcp.personal_network`` does.
     """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:

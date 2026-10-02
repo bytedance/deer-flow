@@ -140,3 +140,28 @@ def test_stream_update_clips_without_measuring_the_whole_reply(monkeypatch):
     assert display.endswith("…")
     # Bounded by the limit twice (measure against it, then clip one unit shorter), not by 200,000 characters.
     assert measured <= 2 * (TELEGRAM_MAX_MESSAGE_LENGTH + 1)
+
+
+def _rich_channel():
+    ch, bot = _channel_with_bot()
+    ch.config["rich_messages"] = True
+    return ch, bot
+
+
+def test_rich_send_is_refused_when_the_reply_crosses_the_utf16_rich_limit():
+    """The rich-message cap is measured in code units too, so an emoji-heavy reply cannot pass a code-point check."""
+    ch, _ = _rich_channel()
+    # Half the limit in emoji plus a bold construct: under the cap by code points, over it by code units.
+    text = EMOJI * (telegram.TELEGRAM_MAX_RICH_MESSAGE_LENGTH // 2) + "**x**"
+
+    assert len(text) < telegram.TELEGRAM_MAX_RICH_MESSAGE_LENGTH
+    assert utf16_units(text) > telegram.TELEGRAM_MAX_RICH_MESSAGE_LENGTH
+    assert ch._can_send_rich(text) is False
+
+
+def test_rich_send_is_still_offered_inside_the_utf16_rich_limit():
+    ch, _ = _rich_channel()
+    text = EMOJI * 10 + "**x**"
+
+    assert utf16_units(text) == 25
+    assert ch._can_send_rich(text) is True

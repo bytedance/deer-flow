@@ -8,6 +8,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture
+def public_dns():
+    """Keep mocked tool calls offline while exercising the real URL safety check."""
+    with patch(
+        "deerflow.community.url_safety.resolve_host_addresses",
+        return_value=[ipaddress.ip_address("93.184.216.34")],
+    ):
+        yield
+
+
 class TestWebSearchTool:
     @patch.dict("os.environ", {}, clear=True)
     @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
@@ -72,6 +82,7 @@ class TestWebFetchTool:
     @patch.dict("os.environ", {}, clear=True)
     @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
     @patch("deerflow.community.fastcrw.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
     def test_fetch_uses_web_fetch_config(self, mock_get_app_config, mock_fastcrw_cls):
         fetch_config = MagicMock()
         fetch_config.model_extra = {"api_key": "fastcrw-fetch-key", "base_url": "http://localhost:3000"}
@@ -103,6 +114,7 @@ class TestWebFetchTool:
     @patch.dict("os.environ", {}, clear=True)
     @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
     @patch("deerflow.community.fastcrw.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
     def test_fetch_returns_error_when_no_content(self, mock_get_app_config, mock_fastcrw_cls):
         mock_get_app_config.return_value.get_tool_config.return_value = None
 
@@ -118,6 +130,7 @@ class TestWebFetchTool:
     @patch.dict("os.environ", {}, clear=True)
     @patch("deerflow.community.fastcrw.tools.FirecrawlApp")
     @patch("deerflow.community.fastcrw.tools.get_app_config")
+    @pytest.mark.usefixtures("public_dns")
     def test_fetch_returns_error_string_on_exception(self, mock_get_app_config, mock_fastcrw_cls):
         mock_get_app_config.return_value.get_tool_config.return_value = None
         mock_fastcrw_cls.return_value.scrape.side_effect = RuntimeError("scrape failed")
