@@ -84,6 +84,14 @@ contribution contract live in
 [the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md); the user manual
 is `frontend/src/content/{en,zh}/harness/extensions/`.
 
+**Extension-first evaluation** — before implementing a feature by editing core code,
+evaluate whether it can ship as a packaged extension through the contribution points
+above. Stay in core for bug fixes and for changes to the agent loop, memory, context
+compaction, or authentication. If existing hooks cannot express the feature, add a
+generic hook to the extension contract plus an extension that uses it — do not
+hard-code business logic into core. Working examples:
+`examples/deerflow-extension-{example,bookmarks}`.
+
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
 servers + skills). Both real files are gitignored and may be edited at runtime via the
@@ -91,27 +99,22 @@ Gateway API. Config schema and resolution order are documented in
 [backend/AGENTS.md](backend/AGENTS.md).
 
 Skill quality review note:
-- `skills/public/skill-reviewer/` is the built-in read-only skill quality reviewer.
-  It uses the harness-layer `review_skill_package` tool and contracts in
-  `contracts/skill_review/`. Model-visible review data is compact and
-  tag-neutralized; full raw payloads stay in tool artifacts. See
-  [backend/AGENTS.md](backend/AGENTS.md) for the non-activation, SkillScan, and
-  `skill-creator` ownership boundaries.
-- CI waivers live in `.github/skill-review-waivers.v1.json` and are enforced by
-  `scripts/review_changed_public_skills.py`. Pull requests may validate waiver
-  edits from their head revision, but only the manifest from the trusted base
-  revision can suppress that run. Entries match one error finding exactly,
-  include the reviewed file's SHA-256 and an expiry date, remain visible in CI
-  output, and can never waive blocker findings. An entry may also preapprove
-  future full-file SHA-256 values, effective only once the manifest change lands
-  in the trusted base — so relying on a waiver takes two merges: the manifest
-  first, the skill change after, then promote the consumed hash to `file_sha256`
-  in a follow-up cleanup.
+- `skills/public/skill-reviewer/` is the built-in read-only reviewer (harness tool
+  `review_skill_package`, contracts in `contracts/skill_review/`). Model-visible review
+  data is tag-neutralized; raw payloads stay in tool artifacts. See
+  [backend/AGENTS.md](backend/AGENTS.md) for the ownership boundaries.
+- CI waivers live in `.github/skill-review-waivers.v1.json`, enforced by
+  `scripts/review_changed_public_skills.py`. Only the manifest from the trusted base
+  revision can suppress a run, and blocker findings can never be waived.
 
 Scheduled-task note:
-- The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
-- Scheduled background runs are intentionally non-interactive: the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. That key, `disable_clarification`, and `github_token` are honored only for internally-authenticated callers; client-supplied copies are dropped from both `body.context` and `body.config`.
-- Busy scheduled occurrences are persisted as `queued`; `launching` is a short lease-fenced claim, `running` remains the normal Gateway run lifecycle, and `scheduler.queue_timeout_seconds` bounds the durable wait. Do not reintroduce skip-on-overlap or count waiting rows against `max_concurrent_runs`.
+- The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a
+  background scheduler gated by `config.yaml -> scheduler.enabled`.
+- Scheduled runs are non-interactive: `ask_clarification` is excluded. `non_interactive`,
+  `disable_clarification`, and `github_token` are honored only for internally-authenticated
+  callers; client-supplied copies are dropped.
+- Busy occurrences persist as `queued`; `scheduler.queue_timeout_seconds` bounds the wait.
+  Do not reintroduce skip-on-overlap.
 
 ## Commands: Root vs. Module
 
@@ -218,18 +221,6 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 
 These apply repo-wide; module guides own the module-specific detail.
 
-- **Extension-first evaluation** — before implementing a feature by editing core code,
-  evaluate whether it can ship as a packaged extension instead. The public contract
-  (`backend/packages/extension-api/`) lets an extension contribute middleware,
-  task-lifecycle and model/context observers, Gateway services, FastAPI routers, and
-  full-stack plugins (model tools + browser pages). Route to an extension when the
-  capability is self-contained and expressible through those contribution points; stay
-  in core for bug fixes and for changes to the agent loop, memory, context compaction,
-  or authentication. If the existing hooks cannot express the feature, the right
-  contribution is a new generic hook in `extension-api` plus an extension that uses
-  it — not business logic hard-coded into core. Contract details:
-  [the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md);
-  working examples: `examples/deerflow-extension-{example,bookmarks}`.
 - **Documentation update policy** — keep docs in sync with code: update `README.md` for
   user-facing changes and the relevant `AGENTS.md` for development/architecture changes in
   the same change set.

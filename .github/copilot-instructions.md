@@ -217,7 +217,7 @@ model/context observers, Gateway services, FastAPI routers, and full-stack plugi
 - If existing hooks cannot express the feature, extend `extension-api` with a generic
   hook and build the feature as an extension — do not hard-code business logic into core.
 
-Authoritative details: `AGENTS.md` ("Cross-Cutting Conventions") and
+Authoritative details: `AGENTS.md` (the extensions paragraph in "Repository Map") and
 `backend/packages/harness/deerflow/extensions/AGENTS.md`; examples in `examples/`.
 
 ## 10) Instruction Priority
