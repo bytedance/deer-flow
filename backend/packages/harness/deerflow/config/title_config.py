@@ -1,6 +1,6 @@
 """Configuration for automatic thread title generation."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 
 class TitleConfig(BaseModel):
@@ -30,6 +30,15 @@ class TitleConfig(BaseModel):
         default=("Generate a concise title (max {max_words} words) for this conversation.\nUser: {user_msg}\nAssistant: {assistant_msg}\n\nReturn ONLY the title, no quotes, no explanation."),
         description="Prompt template for LLM title generation when model_name is set",
     )
+
+    @field_validator("max_words", "max_chars", mode="before")
+    @classmethod
+    def _reject_boolean_limits(cls, value: object, info: ValidationInfo) -> object:
+        # YAML `true`/`false` next to neighbouring boolean knobs must not coerce
+        # into integers (Pydantic would turn `true` into 1 before ge/le runs).
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must be an integer, not a boolean")
+        return value
 
 
 # Global configuration instance
