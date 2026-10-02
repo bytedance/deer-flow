@@ -11,7 +11,10 @@ import type { ComponentProps, ReactNode } from "react";
 
 import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
 import { InputBox } from "@/components/workspace/input-box";
-import { referenceToken } from "@/components/workspace/mentions/inline-references";
+import {
+  focusReferenceAt,
+  referenceToken,
+} from "@/components/workspace/mentions/inline-references";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { DEFAULT_LOCALE } from "@/core/i18n";
@@ -220,6 +223,42 @@ function enterMention(
 }
 
 describe("unified composer mentions", () => {
+  for (const props of [
+    { ctrlKey: true },
+    { altKey: true },
+    { metaKey: true },
+    { shiftKey: true },
+    { keyCode: 229 },
+  ]) {
+    it(`leaves reference selection to modified/composing deletion: ${JSON.stringify(props)}`, async () => {
+      const token = referenceToken("skill", "research", "research");
+      const id = `reference-delete-${JSON.stringify(props)}`;
+      saveDraft(id, token);
+      renderComposer(id);
+      await waitFor(() =>
+        expect(screen.getByTestId("inline-skill-reference")).toBeTruthy(),
+      );
+      const editor = screen.getByRole("textbox");
+      focusReferenceAt(editor, token.length);
+      fireEvent.keyDown(editor, { key: "Backspace", ...props });
+      expect(window.getSelection()?.isCollapsed).toBe(true);
+      expect(screen.getByTestId("inline-skill-reference")).toBeTruthy();
+    });
+  }
+
+  it("does not select a reference for deletion while the composer is locked", async () => {
+    const token = referenceToken("skill", "research", "research");
+    saveDraft("locked-delete", token);
+    renderComposer("locked-delete", rs.fn(), rs.fn(), { disabled: true });
+    await waitFor(() =>
+      expect(screen.getByTestId("inline-skill-reference")).toBeTruthy(),
+    );
+    const editor = screen.getByRole("textbox");
+    focusReferenceAt(editor, token.length);
+    fireEvent.keyDown(editor, { key: "Backspace" });
+    expect(window.getSelection()?.isCollapsed).toBe(true);
+    expect(screen.getByTestId("inline-skill-reference")).toBeTruthy();
+  });
   it("offers only backend-accepted skill names while allowing compact in the mention picker", () => {
     const rejectedNames = ["a--b", "a_b", "Research", "a-", "goal", "status"];
     for (const name of [...rejectedNames, "compact"]) {

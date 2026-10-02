@@ -179,6 +179,7 @@ import {
   referenceCaret,
   focusReferenceAt,
   renderReferenceEditor,
+  selectReferenceForDeletion,
 } from "./mentions/inline-references";
 import {
   MentionPicker,
@@ -2635,6 +2636,16 @@ export function InputBox({
       // over Enter-to-submit. Skip it mid-composition, where Enter belongs to
       // the IME candidate rather than the list.
       if (!isIMEComposing(event, inlineSkillComposingRef.current)) {
+        if (
+          !composerLocked &&
+          !event.altKey &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.shiftKey &&
+          (event.key === "Backspace" || event.key === "Delete") &&
+          selectReferenceForDeletion(event.currentTarget, event.key)
+        )
+          return;
         if (showMentions) mentionPickerRef.current?.onKeyDown(event);
         if (event.defaultPrevented) return;
         handleCommandSuggestionKeyDown(event);
@@ -2666,6 +2677,7 @@ export function InputBox({
       event.currentTarget.closest("form")?.requestSubmit();
     },
     [
+      composerLocked,
       showMentions,
       handlePromptHistoryKeyDown,
       handleCommandSuggestionKeyDown,

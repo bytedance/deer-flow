@@ -38,6 +38,117 @@ test.beforeEach(async ({ page }) => {
     }),
   );
 });
+test("completed references do not reopen the mention search on caret navigation", async ({
+  page,
+}) => {
+  await page.goto("/workspace/chats/new");
+  const input = composer(page);
+  await input.fill("@res");
+  await page.getByRole("option", { name: "research Research a topic" }).click();
+  await input.press("End");
+  await input.press("Backspace"); // Remove the separator, leaving only the object.
+  await expect(input).toHaveText("✦research");
+  await expect(page.getByTestId("mention-picker")).toBeHidden();
+  await input.press("Home");
+  await input.press("End");
+  await expect(page.getByTestId("mention-picker")).toBeHidden();
+  await input.pressSequentially(" @wri");
+  await expect(
+    page.getByRole("option", { name: "writing Write a report" }),
+  ).toBeVisible();
+});
+
+for (const key of ["Backspace", "Delete"] as const) {
+  test(`${key} removes a lone reference and native undo restores its activation`, async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+    const input = composer(page);
+    await input.fill("@res");
+    await page
+      .getByRole("option", { name: "research Research a topic" })
+      .click();
+    await input.press("End");
+    await input.press("Backspace");
+    await input.press("Escape");
+    await input.press(key === "Backspace" ? "End" : "Home");
+    await input.press(key);
+    await expect(page.getByTestId("inline-skill-reference")).toBeHidden();
+    await expect(input).toHaveText("");
+    await input.press("ControlOrMeta+z");
+    await expect(page.getByTestId("inline-skill-reference")).toBeVisible();
+    await input.press("End");
+    await input.pressSequentially(" summarize");
+    const request = nextRun(page);
+    await input.press("Enter");
+    expect(
+      (await request).postDataJSON().input.messages.at(-1).additional_kwargs
+        .skill_references,
+    ).toEqual(["research"]);
+  });
+}
+
+test("deleting an object in the middle preserves both sides and normal text editing", async ({
+  page,
+}) => {
+  await page.goto("/workspace/chats/new");
+  const input = composer(page);
+  await input.fill("Before @res after");
+  await input.press("Home");
+  for (let i = 0; i < 11; i++) await input.press("ArrowRight");
+  await page.getByRole("option", { name: "research Research a topic" }).click();
+  await expect(input).toHaveText("Before ✦research  after");
+  await input.press("Home");
+  for (let i = 0; i < 7; i++) await input.press("ArrowRight");
+  await input.press("Delete");
+  await expect(input).toHaveText("Before   after");
+  await expect(page.getByTestId("inline-skill-reference")).toBeHidden();
+  await input.press("End");
+  await input.press("Backspace");
+  await expect(input).toHaveText("Before   afte");
+});
+
+for (const [query, option, chip, kwargs] of [
+  [
+    "res",
+    "research Research a topic",
+    "inline-skill-reference",
+    "skill_references",
+  ],
+  ["report", "report.pdf", "project-attachment-chip", "files"],
+  [
+    "Writer",
+    "Writer brief",
+    "conversation-reference-chip",
+    "conversation_references",
+  ],
+] as const) {
+  test(`deleting a ${chip} preserves neighboring text and clears submitted context`, async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new?project=proj-1");
+    const input = composer(page);
+    await input.fill(`Before @${query}`);
+    await page.getByRole("option", { name: option, exact: true }).click();
+    await expect(page.getByTestId(chip)).toBeVisible();
+    await input.press("End");
+    await input.press("Backspace");
+    await input.press("Escape");
+    await input.press("End");
+    await input.press("Backspace");
+    await expect(page.getByTestId(chip)).toBeHidden();
+    await expect(input).toHaveText("Before ");
+    await input.pressSequentially("after");
+    const request = nextRun(page);
+    await input.press("Enter");
+    const body = (await request).postDataJSON();
+    const message = body.input.messages.at(-1);
+    expect(JSON.stringify(message.content)).toContain("Before after");
+    expect(message.additional_kwargs?.[kwargs] ?? []).toEqual([]);
+    if (kwargs === "conversation_references")
+      expect(body.context.conversation_references ?? []).toEqual([]);
+  });
+}
 test("mid-draft skill selection preserves both text and caret and submits the activation", async ({
   page,
 }) => {
