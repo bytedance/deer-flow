@@ -199,9 +199,9 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 ### Logs
 
 - Docker stack: `make docker-logs` (or `docker compose -f docker/... logs -f <svc>`).
-- Local `make dev`: each service logs to its own terminal pane. Frontend dev-server
-  errors surface in the browser console at `localhost:3000`; backend tracebacks appear
-  in the Gateway terminal.
+- Local `make dev`: Gateway and frontend output goes to
+  `logs/gateway.log` and `logs/frontend.log` in the repository root.
+  Run `tail -f logs/gateway.log logs/frontend.log` there to follow both.
 
 ## Where to Go Next
 
