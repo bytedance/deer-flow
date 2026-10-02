@@ -647,7 +647,8 @@ tools:
 
 `web_capture` writes screenshots to the current thread's `/mnt/user-data/outputs`
 directory and presents the image path through the standard artifact mechanism. By
-default it refuses URLs that resolve to private, loopback, link-local, or
+default it refuses URLs that resolve to private, loopback, link-local,
+shared (`100.64.0.0/10`, used by CGNAT and Tailscale), other non-global, or
 cloud-metadata addresses; set `allow_private_addresses: true` only when you
 intentionally point the tool at an internal target.
 

@@ -31,8 +31,15 @@ def resolve_host_addresses(hostname: str) -> list[ipaddress._BaseAddress]:
 
 
 def is_blocked_address(address: ipaddress._BaseAddress) -> bool:
-    """Return True for addresses web tools should not reach by default."""
-    return address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast or address.is_unspecified
+    """Return True for addresses web tools should not reach by default.
+
+    ``not is_global`` catches special-purpose ranges the individual flags miss,
+    notably the 100.64.0.0/10 shared address space (CGNAT, Tailscale, and
+    Alibaba Cloud's ``100.100.100.200`` instance metadata endpoint). The flags
+    stay because some non-public forms still report ``is_global``, such as the
+    NAT64 spelling of a metadata address (``64:ff9b::a9fe:a9fe``).
+    """
+    return not address.is_global or address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast or address.is_unspecified
 
 
 def validate_public_http_url(

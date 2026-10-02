@@ -460,6 +460,17 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **community:** The shared SSRF guard now refuses every non-global address,
+  including the `100.64.0.0/10` shared address space that its flag checks let
+  through. That range holds CGNAT and Tailscale hosts and Alibaba Cloud's
+  `100.100.100.200` instance metadata endpoint, so `web_fetch` (crawl4ai,
+  Browserless, fastcrw), `web_capture`, the agentic browser, and personal MCP
+  connections could reach them, including through the IPv4-mapped
+  `::ffff:100.100.100.200` form a DNS answer can carry. The existing flag
+  checks stay, because some non-public forms such as the NAT64 spelling of a
+  metadata address still report as global. Operators who intentionally fetch
+  tailnet or CGNAT hosts with these tools must now set
+  `allow_private_addresses: true`.
 - **channels:** The Discord typing indicator is now actually sent while the
   agent works on a reply. `_start_typing()` called `channel.trigger_typing()`, which
   discord.py removed in 2.0 (the project requires `>=2.7.0`), and its loop

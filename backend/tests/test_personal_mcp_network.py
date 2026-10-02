@@ -93,7 +93,7 @@ async def test_personal_transport_does_not_share_tls_across_hostnames(monkeypatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.1", "169.254.169.254", "::1"])
+@pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.1", "169.254.169.254", "100.100.100.200", "::1"])
 async def test_personal_transport_blocks_private_addresses_before_connect(monkeypatch, address):
     real_resolve = socket.getaddrinfo
     monkeypatch.setattr(socket, "getaddrinfo", lambda host, port, *args, **kwargs: real_resolve(address, port, *args, **kwargs))

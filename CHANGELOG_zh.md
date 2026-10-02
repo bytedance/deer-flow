@@ -419,6 +419,13 @@
 
 ### 修复
 
+- **社区工具：** 共享 SSRF 校验现在拒绝所有非全局地址，包括原先的标志位检查放行的
+  `100.64.0.0/10` 共享地址段。该地址段包含 CGNAT 与 Tailscale 主机以及阿里云
+  `100.100.100.200` 实例元数据端点，因此 `web_fetch`（crawl4ai、Browserless、
+  fastcrw）、`web_capture`、智能浏览器和个人 MCP 连接此前都能访问它们，包括 DNS
+  应答可以携带的 IPv4 映射形式 `::ffff:100.100.100.200`。原有的标志位检查仍然保留，
+  因为部分非公网形式（例如元数据地址的 NAT64 写法）依然被判定为全局地址。有意通过这些
+  工具访问 tailnet 或 CGNAT 主机的运维人员现在需要设置 `allow_private_addresses: true`。
 - **渠道：** Discord 现在会在智能体生成回复期间真正显示"正在输入"提示。`_start_typing()` 调用的
   `channel.trigger_typing()` 已在 discord.py 2.0 中移除（项目要求 `>=2.7.0`），而其循环吞掉了
   所有异常，因此每次都抛出 `AttributeError`，提示从未发送。现在改为 await 2.x 的

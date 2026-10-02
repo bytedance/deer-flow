@@ -232,12 +232,13 @@ class TestCrawl4AiTools:
         assert result.startswith("Error:")
         mock_client.fetch_markdown.assert_called_once()
 
+    @pytest.mark.parametrize("metadata_url", ["http://169.254.169.254/latest/meta-data/", "http://100.100.100.200/latest/meta-data/"])
     @patch("deerflow.community.crawl4ai.tools._build_client")
-    async def test_web_fetch_tool_rejects_metadata_ip(self, mock_build):
+    async def test_web_fetch_tool_rejects_metadata_ip(self, mock_build, metadata_url):
         from deerflow.community.crawl4ai import tools
 
         with patch("deerflow.community.crawl4ai.tools._get_tool_config", return_value=None):
-            result = await tools.web_fetch_tool.ainvoke("http://169.254.169.254/latest/meta-data/")
+            result = await tools.web_fetch_tool.ainvoke(metadata_url)
 
         assert "private, loopback, or metadata" in result
         mock_build.assert_not_called()
