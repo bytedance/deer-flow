@@ -27,8 +27,9 @@ versioned ref beside the virtual path, and restores the file atomically under
 the current thread outputs before a model can follow that path. The ref's kind,
 content type, digest, size, storage subdirectory, and confined virtual path are
 validated before a store read or host write. A configured-store write failure
-or output above the 64 MiB producer cap falls back inline; non-mounted sandbox
-externalization remains outside this host-blob flow.
+or output above the 64 MiB producer cap falls back inline, capped at 30,000
+characters or a lower configured fallback; non-mounted sandbox externalization
+remains outside this host-blob flow.
 
 **Layout** (local_fs, the default)::
 

@@ -20,6 +20,17 @@ test("keeps the document icon for an unknown extension", () => {
   expect(getFileIcon("data.unknown").type).toBe(FileTextIcon);
 });
 
+test.each(["constructor", "data.constructor", "__proto__", "data.__proto__"])(
+  "does not classify inherited map properties as languages for %s",
+  (filename) => {
+    expect(checkCodeFile(`/mnt/user-data/outputs/${filename}`)).toEqual({
+      isCodeFile: false,
+      language: null,
+    });
+    expect(getFileIcon(filename).type).toBe(FileTextIcon);
+  },
+);
+
 // `extensionMap` maps a file extension to a language name. Both halves of that
 // direction matter: `checkCodeFile` tests extension membership, and the language
 // is what the editor and previewers receive.

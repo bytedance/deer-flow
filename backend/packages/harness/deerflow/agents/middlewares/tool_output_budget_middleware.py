@@ -30,6 +30,7 @@ import os
 import posixpath
 import shlex
 import tempfile
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any, NamedTuple, override
@@ -75,6 +76,9 @@ _TOOL_OUTPUT_CONTENT_TYPE = "text/plain; charset=utf-8"
 # Matches the default local_fs backend object limit. A producer must not create
 # a reference that another default-configured Gateway cannot read.
 _MAX_TOOL_OUTPUT_BLOB_BYTES = 64 * 1024 * 1024
+# A configured shared store must never fail back to an unbounded model payload,
+# even when the operator disabled the ordinary disk-unavailable fallback.
+_DURABLE_FAILURE_FALLBACK_MAX_CHARS = 30_000
 
 
 class _BudgetedContent(NamedTuple):
@@ -216,20 +220,24 @@ def _externalize(
     if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
         return None
 
-    # Publish through a sibling temp file: a write that fails part-way (disk
-    # full, interrupted request) used to leave a truncated file under the final
-    # name even though this function reported failure, so the outputs directory
-    # accumulated half-written files that nothing references.
-    tmp_path = f"{filepath}.tmp"
+    # Each writer owns a unique sibling temp file, so concurrent calls cannot
+    # truncate or clean up each other's pending output. Publish only after close
+    # (also required on Windows), keeping the final filename deterministic.
+    tmp_path = None
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
+        candidate_path = os.path.join(storage_dir, f".tool-output-{uuid.uuid4().hex}.tmp")
+        # Exclusive creation keeps per-writer ownership while honoring umask,
+        # unlike NamedTemporaryFile's fixed 0600 mode on mounted outputs.
+        with open(candidate_path, "x", encoding="utf-8") as f:
+            tmp_path = candidate_path
             f.write(content)
         os.replace(tmp_path, filepath)
     except OSError:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         return None
 
     return f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}/{filename}"
@@ -271,23 +279,6 @@ def _host_path_for_externalized_output(
     if os.path.dirname(candidate) != storage_root:
         return None
     return candidate
-
-
-def _remove_externalized_file(virtual_path: str, *, outputs_path: str, storage_subdir: str) -> None:
-    """Best-effort cleanup when a configured blob write cannot be published."""
-    filepath = _host_path_for_externalized_output(
-        virtual_path,
-        outputs_path=outputs_path,
-        storage_subdir=storage_subdir,
-    )
-    if filepath is None:
-        return
-    try:
-        os.unlink(filepath)
-    except FileNotFoundError:
-        pass
-    except OSError:
-        logger.warning("Failed to clean up non-durable externalized tool output", exc_info=True)
 
 
 def _externalize_to_sandbox(
@@ -495,6 +486,7 @@ def _budget_content(
         virtual_path: str | None = None
         blob_metadata: dict[str, Any] | None = None
         host_outputs_path: str | None = None
+        durable_fallback_required = False
         # Decide persistence target based on what's available, without touching
         # the sandbox provider unless a sandbox was actually resolved for this
         # call. This keeps the legacy host-disk path provider-free, so callers
@@ -530,6 +522,7 @@ def _budget_content(
             blob_store = get_blob_store_if_enabled()
             blob_bytes = content.encode("utf-8") if blob_store is not None else None
             if blob_bytes is not None and len(blob_bytes) > _MAX_TOOL_OUTPUT_BLOB_BYTES:
+                durable_fallback_required = True
                 logger.warning(
                     "Tool output is too large for durable blob externalization: %d bytes > %d",
                     len(blob_bytes),
@@ -552,16 +545,15 @@ def _budget_content(
                             thread_id=thread_id,
                         )
                     except BlobStoreError:
+                        durable_fallback_required = True
                         logger.warning(
                             "Failed to persist externalized %s output in shared blob storage",
                             tool_name,
                             exc_info=True,
                         )
-                        _remove_externalized_file(
-                            virtual_path,
-                            outputs_path=host_outputs_path,
-                            storage_subdir=config.storage_subdir,
-                        )
+                        # A concurrent publisher may already have replaced the
+                        # deterministic host path. Do not unlink a file that
+                        # may belong to another successful blob checkpoint.
                         virtual_path = None
                     else:
                         blob_metadata = {
@@ -590,18 +582,26 @@ def _budget_content(
                 blob_metadata,
             )
 
-    if config.fallback_max_chars > 0 and len(content) > config.fallback_max_chars:
+        if durable_fallback_required:
+            configured_limit = config.fallback_max_chars if config.fallback_max_chars > 0 else _DURABLE_FAILURE_FALLBACK_MAX_CHARS
+            fallback_max_chars = min(configured_limit, _DURABLE_FAILURE_FALLBACK_MAX_CHARS)
+        else:
+            fallback_max_chars = config.fallback_max_chars
+    else:
+        fallback_max_chars = config.fallback_max_chars
+
+    if fallback_max_chars > 0 and len(content) > fallback_max_chars:
         logger.warning(
             "Fallback-truncating %s output: %d chars → %d max",
             tool_name,
             len(content),
-            config.fallback_max_chars,
+            fallback_max_chars,
         )
         return _BudgetedContent(
             _build_fallback(
                 content,
                 tool_name=tool_name,
-                max_chars=config.fallback_max_chars,
+                max_chars=fallback_max_chars,
                 head_chars=config.fallback_head_chars,
                 tail_chars=config.fallback_tail_chars,
             ),
@@ -661,7 +661,7 @@ def _patch_tool_message(
     new_kwargs.pop(TOOL_OUTPUT_BLOB_KEY, None)
     if budgeted is not None and budgeted.blob_metadata is not None:
         new_kwargs[TOOL_OUTPUT_BLOB_KEY] = budgeted.blob_metadata
-    if citation_result is not None and budgeted is not None and budgeted[1] == "externalized":
+    if citation_result is not None and budgeted is not None and budgeted.transform_kind == "externalized":
         append_tool_transform(new_kwargs, "externalized", by="ToolOutputBudgetMiddleware")
     append_tool_transform(new_kwargs, transform_kind, by="ToolOutputBudgetMiddleware")
     update["additional_kwargs"] = new_kwargs
@@ -919,10 +919,13 @@ def _restore_tool_output_blobs(messages: list[Any], *, outputs_path: str) -> Non
 
         local_mismatch = False
         try:
-            with open(filepath, "rb") as handle:
-                if ref.matches(handle.read()):
-                    continue
+            if os.stat(filepath).st_size != ref.size:
                 local_mismatch = True
+            else:
+                with open(filepath, "rb") as handle:
+                    if ref.matches(handle.read()):
+                        continue
+                    local_mismatch = True
         except FileNotFoundError:
             pass
         except OSError:

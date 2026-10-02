@@ -23,8 +23,8 @@ is drained across host cancellation before later runtime resources unwind; each
 service `stop()` remains bounded by its 30-second `asyncio.timeout`, so include
 that bound in pod grace-period budgeting.
 
-Managed-model saves drain on cancellation. Log worker failures before
-`await_drained` consumes them; omit exception text.
+Agents, subagents and managed-models routers drain persistent writes
+through `app.gateway.persistent_writes.run_drained_write`.
 
 Gateway lifespan closes the MCP session pool after `langgraph_runtime` exits:
 its run drain and extension-service teardown can still make MCP calls during
@@ -155,12 +155,6 @@ store via `threads.py::_optional_run_event_store` (a feed-less deployment
 still reads threads), and `services.py::normalize_input` strips the
 server-owned key from client input (#4380). Mechanism and identity rule:
 `packages/harness/deerflow/runtime/AGENTS.md`.
-
-`ToolOutputBudgetMiddleware` stamps `deerflow_tool_output_blob` only after a
-host-externalized result is durably written to shared blob storage. Treat this
-as a server-owned filesystem capability: `services.py` strips caller-supplied
-copies at both run-input and direct state-write boundaries before checkpoint
-state can reach the middleware's pre-model restoration path.
 
 **Workspace change review**: `packages/harness/deerflow/workspace_changes/`
 captures a pre-run and post-run snapshot of the thread-owned `workspace` and

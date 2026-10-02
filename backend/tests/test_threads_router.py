@@ -34,6 +34,8 @@ from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.uploads.companions import companion_names, register_companion, resolve_companion
+from deerflow.utils.file_outline import extract_outline_for_file
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
@@ -3896,6 +3898,13 @@ def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:
     source_uploads.mkdir(parents=True, exist_ok=True)
     (source_outputs / "result.txt").write_text("answer", encoding="utf-8")
     (source_uploads / ".upload-stale.part").write_text("partial", encoding="utf-8")
+    original = source_uploads / "report.pdf"
+    markdown = source_uploads / "report.md"
+    original.write_bytes(b"%PDF")
+    markdown.write_text("# Converted report\n", encoding="utf-8")
+    register_companion(original, markdown)
+    (source_uploads / "unrelated.pdf").write_bytes(b"%PDF")
+    (source_uploads / "unrelated.md").write_text("# User notes\n", encoding="utf-8")
 
     human = HumanMessage(id="human-file", content="Make a file")
     ai = AIMessage(id="ai-file", content="Done")
@@ -3928,6 +3937,11 @@ def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:
     assert target_user_data.exists()
     assert (target_user_data / "outputs" / "result.txt").read_text(encoding="utf-8") == "answer"
     assert not (target_user_data / "uploads" / ".upload-stale.part").exists()
+    branch_original = target_user_data / "uploads" / "report.pdf"
+    assert resolve_companion(branch_original) == target_user_data / "uploads" / "report.md"
+    assert extract_outline_for_file(branch_original)[0] == [{"title": "Converted report", "line": 1}]
+    assert companion_names(target_user_data / "uploads") == {"report.md"}
+    assert resolve_companion(target_user_data / "uploads" / "unrelated.pdf") is None
     assert source_user_data.exists()
 
 

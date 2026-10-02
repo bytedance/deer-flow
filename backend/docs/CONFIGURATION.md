@@ -575,8 +575,14 @@ empty or omitted `include_domains`. These filters compose with `max_results`
 and the model's optional `time_range`. The model-visible arguments remain `query`
 and `time_range`; the filters do not apply to `web_fetch` or other search providers.
 
+Serper `web_search` also accepts the optional model argument
+`time_range: "day" | "week" | "month" | "year"`. For example,
+`{"query": "Python releases", "time_range": "week"}` sends `tbs: "qdr:w"`
+to Serper. Omitting `time_range` or passing `null` keeps the existing unrestricted
+search request. This option does not change Serper `image_search`.
+
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya)
 - `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
