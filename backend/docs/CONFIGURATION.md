@@ -575,6 +575,41 @@ empty or omitted `include_domains`. These filters compose with `max_results`
 and the model's optional `time_range`. The model-visible arguments remain `query`
 and `time_range`; the filters do not apply to `web_fetch` or other search providers.
 
+#### Jina fetch retries
+
+Jina's `web_fetch` keeps one attempt by default. Configure retries on its existing
+`tools` entry; model-facing arguments remain unchanged:
+
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.jina_ai.tools:web_fetch_tool
+    timeout: 10
+    max_retries: 2              # Additional attempts; default 0 (disabled)
+    retry_budget_seconds: 30   # Total request + backoff budget; default 30
+```
+
+`max_retries` must be a non-negative integer and `retry_budget_seconds` a finite,
+positive number (YAML numbers, not strings or booleans). Invalid values return an
+`Error:` without sending a request. The budget applies only when retries are enabled,
+starts before HTTP client creation, and covers all attempts and waits. Each HTTP
+request timeout is capped by the remaining budget; the outer deadline also bounds
+responses that keep delivering data. The existing `timeout` remains Jina's
+`X-Timeout` header and the per-request HTTP timeout limit.
+
+Only HTTP 502/503/504 and HTTPX connection-establishment errors (`ConnectError`,
+`ConnectTimeout`) are retried. Authentication/client errors, 429, other statuses,
+empty successful responses, read/write timeouts and arbitrary exceptions are not
+retried. `Retry-After` is not interpreted. Backoff ceilings start at 0.5 seconds,
+double to 1 and 2 seconds, then stay at 4 seconds. Each asynchronous wait caps its
+ceiling by the remaining budget and independently samples a uniform factor from
+0.5 to 1.0, reducing synchronized retries without increasing the wait cap.
+Cancellation propagates during requests and waits. This stops local work; it
+cannot cancel work already started by Jina. Enabling retries can send up to `1 + max_retries` upstream requests
+and incur additional cost. Successful content and final `Error:` results retain
+the existing contract.
+
 Serper `web_search` also accepts the optional model argument
 `time_range: "day" | "week" | "month" | "year"`. For example,
 `{"query": "Python releases", "time_range": "week"}` sends `tbs: "qdr:w"`

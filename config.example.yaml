@@ -1164,6 +1164,9 @@ tools:
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool
     timeout: 10
+    # Opt-in retries may increase upstream requests and cost.
+    # max_retries: 0
+    # retry_budget_seconds: 30
     # Optional proxy for restricted networks / Docker / WSL.
     # Use host.docker.internal instead of 127.0.0.1 when the proxy runs on the host.
     # proxy: $HTTPS_PROXY

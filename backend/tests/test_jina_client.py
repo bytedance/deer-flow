@@ -35,7 +35,8 @@ async def test_crawl_success(jina_client, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_crawl_follows_jina_api_redirect(jina_client, monkeypatch):
+@pytest.mark.parametrize("max_retries", [0, 1])
+async def test_crawl_follows_jina_api_redirect(jina_client, monkeypatch, max_retries):
     """A redirected Jina API endpoint should still return fetched content."""
     requests = []
 
@@ -50,7 +51,7 @@ async def test_crawl_follows_jina_api_redirect(jina_client, monkeypatch):
     transport = httpx.MockTransport(handle)
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=transport, **kwargs))
 
-    result = await jina_client.crawl("https://example.com")
+    result = await jina_client.crawl("https://example.com", max_retries=max_retries)
 
     assert result == "Fetched page"
     assert [request.url.path for request in requests] == ["/", "/reader"]
@@ -58,7 +59,8 @@ async def test_crawl_follows_jina_api_redirect(jina_client, monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_crawl_strips_api_key_on_cross_host_redirect(jina_client, monkeypatch):
+@pytest.mark.parametrize("max_retries", [0, 1])
+async def test_crawl_strips_api_key_on_cross_host_redirect(jina_client, monkeypatch, max_retries):
     """A redirected host must not receive the Jina bearer credential."""
     requests: list[httpx.Request] = []
 
@@ -74,7 +76,7 @@ async def test_crawl_strips_api_key_on_cross_host_redirect(jina_client, monkeypa
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=transport, **kwargs))
     monkeypatch.setenv("JINA_API_KEY", "test-key")
 
-    result = await jina_client.crawl("https://example.com")
+    result = await jina_client.crawl("https://example.com", max_retries=max_retries)
 
     assert result == "Fetched page"
     assert [request.url.host for request in requests] == ["r.jina.ai", "redirect.example"]

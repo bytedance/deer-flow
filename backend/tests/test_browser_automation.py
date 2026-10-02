@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import ipaddress
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,6 +27,17 @@ from deerflow.community.browser_automation.session import (
     PageSnapshot,
     SnapshotElement,
 )
+
+
+@pytest.fixture
+def public_dns():
+    """Keep mocked tool calls offline while exercising the real URL safety check."""
+    with patch(
+        "deerflow.community.browser_automation.tools._resolve_host_addresses",
+        return_value=[ipaddress.ip_address("93.184.216.34")],
+    ):
+        yield
+
 
 PlaywrightTimeoutError = type(
     "TimeoutError",
@@ -70,6 +82,7 @@ class TestBrowserTools:
         manager.get_session.return_value = session
         return patch.object(tools, "get_browser_session_manager", return_value=manager), manager
 
+    @pytest.mark.usefixtures("public_dns")
     async def test_navigate_returns_snapshot(self):
         session = MagicMock()
         session.navigate = AsyncMock(return_value=_snapshot())
@@ -86,6 +99,7 @@ class TestBrowserTools:
         session.navigate.assert_awaited_once_with("https://example.com")
         manager.get_session.assert_called_once()
 
+    @pytest.mark.usefixtures("public_dns")
     async def test_navigate_emits_screenshot_artifact_and_browser_view(self, tmp_path):
         outputs = tmp_path / "outputs"
         outputs.mkdir()
@@ -113,6 +127,7 @@ class TestBrowserTools:
         assert meta["url"] == "https://example.com/"
         assert meta["title"] == "Example"
 
+    @pytest.mark.usefixtures("public_dns")
     async def test_navigate_screenshot_failure_does_not_break_action(self, tmp_path):
         outputs = tmp_path / "outputs"
         outputs.mkdir()
