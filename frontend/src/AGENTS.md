@@ -215,7 +215,10 @@ MCP hooks and the editor default to personal scope. Mutation-option builders req
 
 Plugin mention providers extend the existing composer picker via
 `core/extensions/use-mentions.ts`. Keep provider queries bounded and fenced by
-viewer, thread, query, and installed snapshot. Inline plugin references serialize
-into human-message `additional_kwargs.extension_mentions`; these IDs and labels
+viewer, thread, query, and installed snapshot.
+Settled results may remain visible during query/retry refreshes only within the
+same viewer, thread, locale and installed snapshot; stale responses stay fenced.
+Inline plugin references serialize into human-message
+`additional_kwargs.extension_mentions`; these IDs and labels
 are untrusted input, never a routing or permission grant. Built-in mentions must
 remain usable when a provider fails or times out.

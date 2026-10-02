@@ -19,14 +19,16 @@ export function useExtensionMentions(query: string, threadId: string) {
       userId: user?.id,
       locale,
       threadId,
-      query,
       entries: extensions.data,
-      attempt,
     }),
-    [user?.id, locale, threadId, query, extensions.data, attempt],
+    [user?.id, locale, threadId, extensions.data],
+  );
+  const request = useMemo(
+    () => ({ scope, query, attempt }),
+    [scope, query, attempt],
   );
   const [state, setState] = useState<{
-    scope: typeof scope;
+    request: typeof request;
     result: Awaited<ReturnType<typeof searchExtensionMentions>>;
   }>();
   useEffect(() => {
@@ -36,7 +38,7 @@ export function useExtensionMentions(query: string, threadId: string) {
         (scope.entries ?? []).filter(
           (entry) => entry.viewer_id === scope.userId,
         ),
-        scope.query,
+        request.query,
         {
           locale: scope.locale,
           threadId: scope.threadId,
@@ -44,7 +46,7 @@ export function useExtensionMentions(query: string, threadId: string) {
         },
       )
         .then((result) => {
-          if (!abort.signal.aborted) setState({ scope, result });
+          if (!abort.signal.aborted) setState({ request, result });
         })
         .catch(() => {
           /* Unmount, account, thread, or query change. */
@@ -54,12 +56,14 @@ export function useExtensionMentions(query: string, threadId: string) {
       clearTimeout(timer);
       abort.abort();
     };
-  }, [scope]);
+  }, [scope, request]);
+  // Keep settled suggestions during query/retry refreshes, but never across
+  // viewer, thread, locale or installed-snapshot changes.
+  const result = state?.request.scope === scope ? state.result : undefined;
   return {
-    ...(state?.scope === scope ? state.result : empty),
-    failed:
-      extensions.isError || (state?.scope === scope && state.result.failed),
-    loading: extensions.isPending || state?.scope !== scope,
+    ...(result ?? empty),
+    failed: extensions.isError || result?.failed === true,
+    loading: extensions.isPending || result === undefined,
     retry: () => {
       void extensions.refetch();
       retry((value) => value + 1);

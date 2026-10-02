@@ -331,7 +331,7 @@ export const zhCN: Translations = {
   // Input Box
   inputBox: {
     mentionPicker: "添加引用",
-    mentionSearch: "搜索技能、项目文件和对话",
+    mentionSearch: "搜索技能、项目文件、对话和插件",
     mentionSkills: "技能",
     mentionFiles: "项目文件",
     mentionExtensions: "插件",

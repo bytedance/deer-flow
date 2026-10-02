@@ -151,11 +151,19 @@ export function renderReferenceEditor(root: HTMLElement, text: string) {
         ? "text-blue-600 dark:text-blue-400"
         : ref.kind === "file"
           ? "text-rose-600 dark:text-rose-400"
-          : "text-violet-600 dark:text-violet-400");
+          : ref.kind === "extension"
+            ? "text-teal-600 dark:text-teal-400"
+            : "text-violet-600 dark:text-violet-400");
     const icon = document.createElement("span");
     icon.setAttribute("aria-hidden", "true");
     icon.textContent =
-      ref.kind === "skill" ? "✦" : ref.kind === "file" ? "▤" : "◉";
+      ref.kind === "skill"
+        ? "✦"
+        : ref.kind === "file"
+          ? "▤"
+          : ref.kind === "extension"
+            ? "◈"
+            : "◉";
     token.append(icon, document.createTextNode(ref.label));
     token.setAttribute("aria-label", `@${ref.label}`);
     fragment.append(token);

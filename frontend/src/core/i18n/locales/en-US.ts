@@ -348,7 +348,7 @@ export const enUS: Translations = {
   // Input Box
   inputBox: {
     mentionPicker: "Add a reference",
-    mentionSearch: "Search skills, project files and conversations",
+    mentionSearch: "Search skills, project files, conversations and plugins",
     mentionSkills: "Skills",
     mentionFiles: "Project files",
     mentionExtensions: "Plugins",

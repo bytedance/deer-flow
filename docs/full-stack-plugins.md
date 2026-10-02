@@ -408,9 +408,13 @@ of `{ id, label, description? }`; the host supplies the namespace and provider I
 The context includes `locale`, `settings`, `threadId`, an `AbortSignal`, and the
 same viewer-bound `callBackend` service used by page surfaces. Observe the signal
 when doing asynchronous work. A provider must return a promise; the host debounces
-queries by 150 ms, stops waiting after three seconds, and discards results after
-query, thread, viewer, or installed snapshot changes. A failed provider does not
-remove other providers or built-in candidates. Retrying is available in the picker.
+queries by 150 ms, truncates queries to 256 characters before calling `search`,
+stops waiting after three seconds, and discards late responses after query,
+thread, viewer, locale, or installed snapshot changes. Settled candidates remain
+visible while a new query is in flight within the same viewer/thread/locale and
+installed snapshot; changing any of those clears them immediately. A failed
+provider does not remove other providers or built-in candidates. Retrying is
+available in the picker.
 Cancellation ends host waiting; trusted JavaScript cannot be forcibly terminated.
 
 Each module may register eight providers, with unique lowercase slug IDs and

@@ -22,6 +22,8 @@ test("plugin candidates coexist with skills, survive draft reload and submit str
   ] };`;
   const entry = `/api/plugins/modules/team/${createHash("sha256").update(source).digest("hex")}.mjs`;
   let enabled = true;
+  let holdSearch = false;
+  let releaseSearch: (() => void) | undefined;
   const searches: unknown[] = [];
   await page.route("**/api/plugins**", async (route) => {
     const url = new URL(route.request().url());
@@ -56,6 +58,11 @@ test("plugin candidates coexist with skills, survive draft reload and submit str
       expect(route.request().headers()["x-deerflow-plugin-viewer"]).toBe(
         "default",
       );
+      if (holdSearch) {
+        await new Promise<void>((resolve) => {
+          releaseSearch = resolve;
+        });
+      }
       return route.fulfill({
         headers,
         json: [{ id: "alice", label: "Alice" }],
@@ -72,6 +79,25 @@ test("plugin candidates coexist with skills, survive draft reload and submit str
   await expect(
     page.getByRole("option", { name: "Alice Team members" }),
   ).toBeVisible();
+  await expect(page.getByRole("listbox")).toHaveAttribute("aria-busy", "false");
+  holdSearch = true;
+  const refresh = page.waitForRequest((request) =>
+    request.url().includes("/actions/search"),
+  );
+  await input.press("a");
+  await refresh;
+  try {
+    await expect(
+      page.getByRole("option", { name: "Alice Team members" }),
+    ).toBeVisible();
+    await expect(page.getByRole("listbox")).toHaveAttribute(
+      "aria-busy",
+      "false",
+    );
+  } finally {
+    holdSearch = false;
+    releaseSearch?.();
+  }
   await page.screenshot({
     path: testInfo.outputPath("extension-mentions.png"),
   });
@@ -79,6 +105,7 @@ test("plugin candidates coexist with skills, survive draft reload and submit str
   await expect(page.getByTestId("extension-mention-chip")).toContainText(
     "Alice",
   );
+  await expect(page.getByTestId("extension-mention-chip")).toContainText("◈");
   await expect.poll(() => searches.length).toBeGreaterThan(0);
   await page.reload();
   await expect(page.getByTestId("extension-mention-chip")).toContainText(
