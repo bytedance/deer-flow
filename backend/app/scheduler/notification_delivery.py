@@ -172,10 +172,12 @@ class NotificationDeliveryWorker:
                 # One poisoned row must not abort the loop and strand the
                 # rest of the claimed batch in "sending". Best-effort
                 # mark_failed; if even that raises, the stale reset above
-                # reclaims the row on a later poll.
+                # reclaims the row on a later poll. The completion is fenced
+                # with the claim token (issue #6200) so it can never land on
+                # a row another worker has reclaimed meanwhile.
                 logger.exception("Notification delivery %s crashed; isolating from the rest of the batch", row.get("id"))
                 try:
-                    await self._delivery_repo.mark_failed(row["id"], error="delivery crashed before completion")
+                    await self._delivery_repo.mark_failed(row["id"], error="delivery crashed before completion", claim_token=row.get("claim_token"))
                 except Exception:
                     logger.warning("Could not mark crashed delivery %s as failed; stale reset will recover it", row.get("id"), exc_info=True)
 
@@ -264,6 +266,11 @@ class NotificationDeliveryWorker:
 
     async def _deliver(self, delivery: dict[str, Any]) -> None:
         delivery_id = delivery["id"]
+        # Fencing token minted at claim time (issue #6200): every completion
+        # write below carries it, so a claimant that stalled past the
+        # stale-sending timeout cannot modify a delivery another worker has
+        # reclaimed meanwhile.
+        claim_token = delivery.get("claim_token")
         provider = delivery.get("provider") or ""
         if self._resolve_connections is not None:
             # Re-check the binding at delivery time, before anything else: a
@@ -279,10 +286,11 @@ class NotificationDeliveryWorker:
                     delivery_id,
                     error=f"target is no longer a connected {provider} identity of its owner",
                     terminal=True,
+                    claim_token=claim_token,
                 )
                 return
             if still_connected is None:
-                await self._delivery_repo.mark_failed(delivery_id, error="could not verify the target's channel connection", count_attempt=False)
+                await self._delivery_repo.mark_failed(delivery_id, error="could not verify the target's channel connection", count_attempt=False, claim_token=claim_token)
                 return
         # Re-check channel liveness at delivery time, not enqueue time: the
         # channel may have been disabled or disconnected after the outbox row
@@ -294,7 +302,7 @@ class NotificationDeliveryWorker:
             # Channel outage is not the delivery's fault: park the row
             # without consuming its retry budget so it survives an
             # hours-long outage and delivers once the channel returns.
-            await self._delivery_repo.mark_failed(delivery_id, error=f"channel '{provider}' is not running", count_attempt=False)
+            await self._delivery_repo.mark_failed(delivery_id, error=f"channel '{provider}' is not running", count_attempt=False, claim_token=claim_token)
             return
         enriched = delivery
         if delivery.get("event") == "run_completed":
@@ -310,12 +318,12 @@ class NotificationDeliveryWorker:
                 text_markdown=render_notification_text(enriched),
             )
         except ChannelUnavailable as exc:
-            await self._delivery_repo.mark_failed(delivery_id, error=str(exc), count_attempt=False)
+            await self._delivery_repo.mark_failed(delivery_id, error=str(exc), count_attempt=False, claim_token=claim_token)
             return
         except Exception as exc:
-            await self._delivery_repo.mark_failed(delivery_id, error=str(exc))
+            await self._delivery_repo.mark_failed(delivery_id, error=str(exc), claim_token=claim_token)
             return
-        await self._delivery_repo.mark_sent(delivery_id)
+        await self._delivery_repo.mark_sent(delivery_id, claim_token=claim_token)
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():

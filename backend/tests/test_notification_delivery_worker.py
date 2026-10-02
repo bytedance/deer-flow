@@ -27,6 +27,8 @@ class FakeDeliveryRepo:
         self.terminal_failures = []
         self.resets = []
         self.events = []
+        # Claim tokens the worker handed to each completion write.
+        self.completion_tokens = []
 
     async def reset_stale_sending_rows(self, *, now, timeout):
         self.resets.append((now, timeout))
@@ -39,11 +41,13 @@ class FakeDeliveryRepo:
         self.events.append("claim")
         return claimed
 
-    async def mark_sent(self, delivery_id):
+    async def mark_sent(self, delivery_id, *, claim_token=None):
         self.sent.append(delivery_id)
+        self.completion_tokens.append(claim_token)
 
-    async def mark_failed(self, delivery_id, *, error=None, count_attempt=True, terminal=False):
+    async def mark_failed(self, delivery_id, *, error=None, count_attempt=True, terminal=False, claim_token=None):
         self.failed.append((delivery_id, error, count_attempt))
+        self.completion_tokens.append(claim_token)
         if terminal:
             self.terminal_failures.append((delivery_id, error))
 
@@ -70,8 +74,9 @@ def _delivery_row(
     provider="wecom",
     target="GaoZhiChao",
     payload=None,
+    claim_token=None,
 ):
-    return {
+    row = {
         "id": delivery_id,
         "task_id": "task-1",
         "task_run_id": "task-run-1",
@@ -83,6 +88,9 @@ def _delivery_row(
         "status": "sending",
         "payload": payload if payload is not None else {"run_status": "success", "error": None, "task_id": "task-1"},
     }
+    if claim_token is not None:
+        row["claim_token"] = claim_token
+    return row
 
 
 def _make_worker(repo, channel=None, resolve_run_summary=None, resolve_connections=None):
@@ -394,6 +402,57 @@ async def test_run_once_marks_failed_when_send_raises():
     assert "platform rejected" in error
     # A real send error does count against the retry budget.
     assert count_attempt is True
+
+
+# ---------------------------------------------------------------------------
+# Claim fencing (issue #6200): completions carry the token minted at claim
+# time so a stale worker's late write cannot modify a delivery that another
+# worker has reclaimed meanwhile.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_once_sent_completion_carries_the_claim_token():
+    repo = FakeDeliveryRepo([_delivery_row(claim_token="claim-token-1")])
+    worker = _make_worker(repo, FakeChannel())
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == ["delivery-1"]
+    assert repo.completion_tokens == ["claim-token-1"]
+
+
+@pytest.mark.asyncio
+async def test_run_once_failed_completion_carries_the_claim_token():
+    repo = FakeDeliveryRepo([_delivery_row(claim_token="claim-token-1")])
+    worker = _make_worker(repo, FakeChannel(fail=True))
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == []
+    assert len(repo.failed) == 1
+    assert repo.completion_tokens == ["claim-token-1"]
+
+
+@pytest.mark.asyncio
+async def test_run_once_crash_isolation_carries_the_claim_token():
+    # _deliver itself explodes (the channel resolver raises), so the loop's
+    # best-effort crash handler performs the completion write -- fenced too.
+    repo = FakeDeliveryRepo([_delivery_row(claim_token="claim-token-1")])
+
+    def exploding_resolver(_provider):
+        raise RuntimeError("resolver exploded")
+
+    worker = NotificationDeliveryWorker(
+        delivery_repo=repo,
+        resolve_channel=exploding_resolver,
+        poll_interval_seconds=5,
+    )
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.failed == [("delivery-1", "delivery crashed before completion", True)]
+    assert repo.completion_tokens == ["claim-token-1"]
 
 
 @pytest.mark.asyncio
