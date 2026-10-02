@@ -38,6 +38,21 @@ def test_unsupported_host_and_credentials_fail_closed(host):
     assert control.bind(request) is None
 
 
+def test_unstamped_requests_receive_no_delegated_capability(host):
+    control, request, _ = host
+    assert control.bind(SimpleNamespace(state=SimpleNamespace())) is None
+    assert control.bind(SimpleNamespace(state=SimpleNamespace(user=request.state.user, auth_source="internal"))) is None
+    request.state.auth = SimpleNamespace(is_authenticated=False)
+    assert control.bind(request) is None
+
+
+def test_binding_rejects_inconsistent_authenticated_identity(host):
+    control, request, _ = host
+    request.state.user = User(email="other@example.com")
+    with pytest.raises(PermissionError):
+        control.bind(request)
+
+
 @pytest.mark.asyncio
 async def test_handle_rechecks_user_and_shutdown_before_dispatch(host, monkeypatch):
     control, request, load_user = host
@@ -172,6 +187,95 @@ async def test_real_run_lifecycle_and_automatic_followup(runtime):
     assert [message["content"] for message in snapshot["values"]["messages"]] == ["first", "answer:first", "next", "answer:next"]
     stored = await state.thread_store.get(thread_a, user_id=str(request.state.user.id))
     assert stored["user_id"] == str(request.state.user.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("launcher", ["scheduled", "mcp"])
+async def test_internal_launchers_work_with_installed_host_without_delegation(runtime, launcher, monkeypatch):
+    from app.gateway.services import launch_mcp_task_notification_run, launch_scheduled_thread_run
+
+    runs, state, request, _, handles = runtime
+    monkeypatch.setattr("app.gateway.services.get_local_provider", lambda: SimpleNamespace(get_user=AsyncMock(return_value=request.state.user)))
+    thread = await runs.create_thread(thread_id="internal-launch")
+    kwargs = dict(app=request.app, thread_id=thread, assistant_id="lead_agent", owner_user_id=str(request.state.user.id))
+    if launcher == "scheduled":
+        result = await launch_scheduled_thread_run(**kwargs, prompt="scheduled", metadata={"scheduled_task_run_id": "occurrence-1"})
+    else:
+        result = await launch_mcp_task_notification_run(**kwargs, task_id="task-1", dispatch_version=1, dispatch_attempt=1, event={"status": "completed"})
+    assert (await runs.wait(thread_id=thread, run_id=result["run_id"], timeout=5)).status == "success"
+    assert handles == [None]
+    assert (await state.thread_store.get(thread, user_id=str(request.state.user.id)))["user_id"] == str(request.state.user.id)
+
+
+@pytest.mark.asyncio
+async def test_plugin_actions_isolate_same_local_idempotency_key(runtime):
+    import json
+
+    from deerflow_extension_api.agent_runs import AGENT_RUNS_RESOLVER_KEY
+    from deerflow_extension_api.auth import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
+    from deerflow_extension_api.plugins import BackendAction, PluginContribution
+
+    from app.gateway.routers.plugins import invoke_plugin_action
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    runs, state, request, _, _ = runtime
+    thread = await runs.create_thread(thread_id="plugin-keys")
+
+    async def start(payload, context):
+        run = await context.agent_runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "same input"}]}, idempotency_key=payload["key"])
+        return {"run_id": run.run_id}
+
+    registry = ExtensionRegistry()
+    for namespace in ("community.first", "community.second"):
+        with registry.attributed_to(namespace):
+            registry.plugin(PluginContribution(namespace=namespace, title=namespace, enabled=True, backend=(BackendAction("start", start),)))
+    state.extensions = registry.build()
+    setattr(state, AGENT_RUNS_RESOLVER_KEY, state.agent_runs_host.bind)
+    setattr(state, EXTENSION_PRINCIPAL_RESOLVER_KEY, lambda _: ExtensionPrincipal(str(request.state.user.id)))
+
+    async def invoke(namespace):
+        async def receive():
+            return {"type": "http.request", "body": json.dumps({"key": "shared:operation"}).encode(), "more_body": False}
+
+        admitted = Request({"type": "http", "app": request.app, "headers": [], "state": {"user": request.state.user, "auth": request.state.auth, "auth_source": "session"}}, receive)
+        return await invoke_plugin_action(admitted, namespace, "start")
+
+    first = await invoke("community.first")
+    await runs.wait(thread_id=thread, run_id=first["run_id"], timeout=5)
+    second = await invoke("community.second")
+    assert second["run_id"] != first["run_id"]
+    await runs.wait(thread_id=thread, run_id=second["run_id"], timeout=5)
+    assert (await invoke("community.first"))["run_id"] == first["run_id"]
+
+
+@pytest.mark.asyncio
+async def test_plugin_scoping_preserves_key_validation_and_authorization(host):
+    control, request, load_user = host
+    scoped = control.bind(request).for_plugin("community.test")
+    assert scoped.for_plugin("community.test") is scoped
+    with pytest.raises(AgentRunError):
+        scoped.for_plugin("community.other")
+    for key in ("", " ", "x" * 201, 1):
+        with pytest.raises(AgentRunError) as invalid:
+            await scoped.start(thread_id="thread", input={}, idempotency_key=key)
+        assert invalid.value.status_code == 422
+    load_user.return_value = None
+    with pytest.raises(AgentRunError) as revoked:
+        await scoped.get(thread_id="thread", run_id="run")
+    assert revoked.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_wait_uses_capped_backoff_and_returns_terminal_status(host, monkeypatch):
+    from deerflow_extension_api.agent_runs import AgentRun
+
+    control, request, _ = host
+    runs = control.bind(request)
+    runs.get = AsyncMock(side_effect=[AgentRun("thread", "run", "running")] * 6 + [AgentRun("thread", "run", "interrupted")])
+    sleep = AsyncMock()
+    monkeypatch.setattr("app.gateway.extension_agent_runs.asyncio.sleep", sleep)
+    assert (await runs.wait(thread_id="thread", run_id="run")).status == "interrupted"
+    assert [call.args[0] for call in sleep.await_args_list] == [0.25, 0.5, 1, 2, 4, 4]
 
 
 @pytest.mark.asyncio

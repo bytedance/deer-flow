@@ -137,7 +137,8 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
         raise HTTPException(422, "Plugin action requires a JSON object.") from exc
     try:
         async with asyncio.timeout(30):
-            return await action.handler(MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings), agent_runs=resolve_agent_runs(request)))
+            runs = resolve_agent_runs(request)
+            return await action.handler(MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings), agent_runs=runs.for_plugin(namespace) if runs is not None else None))
     except AgentRunError as exc:
         raise HTTPException(exc.status_code, str(exc)) from exc
     except TimeoutError as exc:

@@ -51,7 +51,9 @@ class GatewayAgentRunsHost:
     def bind(self, request: Request):
         user = getattr(request.state, "user", None)
         auth = getattr(request.state, "auth", None)
-        if user is None or auth is None or not auth.is_authenticated or str(auth.user.id) != str(user.id):
+        if user is None or auth is None or not auth.is_authenticated:
+            return None
+        if str(auth.user.id) != str(user.id):
             raise PermissionError("Agent run control requires an authenticated user")
         source = getattr(request.state, "auth_source", None)
         # PAT revocation and internal-owner delegation need separate durable
@@ -62,12 +64,22 @@ class GatewayAgentRunsHost:
 
 
 class _BoundAgentRuns:
-    def __init__(self, host, user_id: str, token_version: int, source: str, permissions: frozenset[str]):
+    def __init__(self, host, user_id: str, token_version: int, source: str, permissions: frozenset[str], plugin_namespace: str | None = None):
         self._host = host
         self._user_id = user_id
         self._token_version = token_version
         self._source = source
         self._permissions = permissions
+        self._plugin_namespace = plugin_namespace
+
+    def for_plugin(self, namespace: str):
+        if not isinstance(namespace, str) or not namespace or len(namespace) > 96 or ":" in namespace:
+            raise AgentRunError(422, "Invalid plugin namespace")
+        if self._plugin_namespace is not None:
+            if namespace != self._plugin_namespace:
+                raise AgentRunError(422, "Agent run handle is already bound to a plugin")
+            return self
+        return _BoundAgentRuns(self._host, self._user_id, self._token_version, self._source, self._permissions, namespace)
 
     @asynccontextmanager
     async def _request(self, permission: str, thread_id: str | None = None):
@@ -128,7 +140,7 @@ class _BoundAgentRuns:
         async with self._request("runs:create", thread_id) as request:
             assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=True)
             body = RunCreateRequest(assistant_id=assistant_id, input=run_input, command=command, context=run_context, on_disconnect="continue")
-            response = await create_run(thread_id, body, request, idempotency_key=f"extension:{idempotency_key}" if idempotency_key is not None else None)
+            response = await create_run(thread_id, body, request, idempotency_key=f"extension:{self._plugin_namespace or ''}:{idempotency_key}" if idempotency_key is not None else None)
             return _view(response)
 
     async def start(self, *, thread_id, input, context=None, idempotency_key=None) -> AgentRun:
@@ -161,8 +173,10 @@ class _BoundAgentRuns:
         if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= 3600:
             raise AgentRunError(422, "Wait timeout must be between 0 and 3600 seconds")
         async with asyncio.timeout(timeout):
+            delay = 0.25
             while True:
                 run = await self.get(thread_id=thread_id, run_id=run_id)
                 if run.status not in ("pending", "running"):
                     return run
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 4)

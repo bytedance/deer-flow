@@ -429,3 +429,6 @@ revocation and ordinary route admission in `app/gateway/extension_agent_runs.py`
 Never replace this with `ModelInvoker`, raw global RunManager access, or a
 caller-supplied user ID. Service-held handles are process-local, permission-capped
 and revoked before host shutdown; PAT/internal grants remain unsupported.
+Unstamped internal launches receive no handle and must still start normally.
+Action/tool dispatch scopes handles to each registered plugin namespace for
+idempotency isolation; request-resolved handles use `for_plugin` explicitly.

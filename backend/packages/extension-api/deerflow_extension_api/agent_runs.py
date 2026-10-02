@@ -35,6 +35,15 @@ class AgentRuns(Protocol):
     it is not a credential to serialize or reuse after host shutdown/restart.
     """
 
+    def for_plugin(self, namespace: str) -> AgentRuns:
+        """Partition idempotency keys without widening this user's permissions.
+
+        Action/tool dispatch scopes handles to the registered plugin namespace.
+        Contributed routes scope request-resolved handles explicitly. A scoped
+        handle cannot be rebound to a different plugin.
+        """
+        ...
+
     async def create_thread(self, *, assistant_id: str = "lead_agent", thread_id: str | None = None, metadata: Mapping[str, Any] | None = None) -> str:
         """Create an owned thread, or return the caller's existing thread ID."""
         ...
@@ -42,8 +51,8 @@ class AgentRuns(Protocol):
     async def start(self, *, thread_id: str, input: Mapping[str, Any], context: Mapping[str, Any] | None = None, idempotency_key: str | None = None) -> AgentRun:
         """Start or continue the thread's Agent with ordinary run admission.
 
-        Use a plugin-namespaced idempotency key when retrying an uncertain
-        admission. An active run conflicts; start never implicitly cancels it.
+        Scoped handles namespace local idempotency keys automatically. An active
+        run conflicts; start never implicitly cancels it.
         """
         ...
 
@@ -78,8 +87,8 @@ class AgentRuns(Protocol):
 def resolve_agent_runs(request: object) -> AgentRuns | None:
     """Resolve from host-authenticated request state, never a supplied user ID.
 
-    Unsupported hosts or credential types return None. Authentication failures
-    raise PermissionError. No global service or ambient user fallback exists.
+    Unsupported hosts, credentials or unstamped requests return None. Inconsistent
+    authenticated identities raise PermissionError. No ambient user fallback exists.
     """
     state = getattr(getattr(request, "app", None), "state", None)
     resolver = getattr(state, AGENT_RUNS_RESOLVER_KEY, None)

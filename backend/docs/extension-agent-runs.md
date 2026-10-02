@@ -64,13 +64,19 @@ does not acquire it automatically.
   checkpoints. A remote worker may acknowledge before cancellation completes;
   use `wait`/`get` to observe the final status.
 
-All arguments are keyword-only. Input and context are detached JSON objects,
-limited to 256 KiB each. Idempotency keys are 1–200 characters and must include the
-plugin's own namespace; Gateway additionally scopes them to the user and thread.
+Run operations use keyword-only arguments. Input and context are detached JSON objects,
+limited to 256 KiB each. Idempotency keys are 1–200 characters. Action/tool handles
+automatically scope keys to the registered plugin namespace; contributed routes
+use `require_agent_runs(request).for_plugin("example.team")` for the same isolation.
+A scoped handle cannot be rebound to another plugin. Gateway additionally scopes
+keys to the user and thread. Callers may use colons in their local keys.
 Reusing a key with different input is a conflict under existing admission rules.
 `AgentRunError.status_code` exposes normal HTTP-equivalent rejection categories,
 including denied permissions, missing resources, conflicts, and invalid input.
 Unified backend actions preserve these statuses in their HTTP response.
+
+`wait` polls immediately, then backs off from 0.25 seconds to a four-second cap.
+The caller's timeout bounds the entire wait, including authorization and polling.
 
 A completed graph invocation can have run status `success` while paused at a
 LangGraph interrupt. This matches existing Gateway semantics: inspect the returned
