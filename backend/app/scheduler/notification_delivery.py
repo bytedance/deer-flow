@@ -175,7 +175,7 @@ class NotificationDeliveryWorker:
                 # reclaims the row on a later poll.
                 logger.exception("Notification delivery %s crashed; isolating from the rest of the batch", row.get("id"))
                 try:
-                    await self._delivery_repo.mark_failed(row["id"], error="delivery crashed before completion")
+                    await self._delivery_repo.mark_failed(row["id"], claim_token=row.get("claim_token"), error="delivery crashed before completion")
                 except Exception:
                     logger.warning("Could not mark crashed delivery %s as failed; stale reset will recover it", row.get("id"), exc_info=True)
 
@@ -277,12 +277,13 @@ class NotificationDeliveryWorker:
             if still_connected is False:
                 await self._delivery_repo.mark_failed(
                     delivery_id,
+                    claim_token=delivery.get("claim_token"),
                     error=f"target is no longer a connected {provider} identity of its owner",
                     terminal=True,
                 )
                 return
             if still_connected is None:
-                await self._delivery_repo.mark_failed(delivery_id, error="could not verify the target's channel connection", count_attempt=False)
+                await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error="could not verify the target's channel connection", count_attempt=False)
                 return
         # Re-check channel liveness at delivery time, not enqueue time: the
         # channel may have been disabled or disconnected after the outbox row
@@ -294,7 +295,7 @@ class NotificationDeliveryWorker:
             # Channel outage is not the delivery's fault: park the row
             # without consuming its retry budget so it survives an
             # hours-long outage and delivers once the channel returns.
-            await self._delivery_repo.mark_failed(delivery_id, error=f"channel '{provider}' is not running", count_attempt=False)
+            await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error=f"channel '{provider}' is not running", count_attempt=False)
             return
         enriched = delivery
         if delivery.get("event") == "run_completed":
@@ -310,12 +311,12 @@ class NotificationDeliveryWorker:
                 text_markdown=render_notification_text(enriched),
             )
         except ChannelUnavailable as exc:
-            await self._delivery_repo.mark_failed(delivery_id, error=str(exc), count_attempt=False)
+            await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error=str(exc), count_attempt=False)
             return
         except Exception as exc:
-            await self._delivery_repo.mark_failed(delivery_id, error=str(exc))
+            await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error=str(exc))
             return
-        await self._delivery_repo.mark_sent(delivery_id)
+        await self._delivery_repo.mark_sent(delivery_id, claim_token=delivery.get("claim_token"))
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
