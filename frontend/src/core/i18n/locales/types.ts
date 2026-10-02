@@ -301,6 +301,24 @@ export interface Translations {
 
   // Input Box
   inputBox: {
+    mentionPicker: string;
+    mentionSearch: string;
+    mentionSkills: string;
+    mentionFiles: string;
+    mentionConversations: string;
+    mentionUpload: string;
+    mentionEmpty: string;
+    mentionLoadMore: string;
+    mentionLoading: string;
+    mentionFailed: string;
+    mentionRetry: string;
+    mentionAttaching: string;
+    mentionAttachFailed: string;
+    mentionMultipleSkills: string;
+    mentionNoProject: string;
+    mentionUnavailable: string;
+    mentionClose: string;
+
     placeholder: string;
     disclaimer: string;
     createSkillPrompt: string;

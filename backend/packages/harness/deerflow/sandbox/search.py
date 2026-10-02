@@ -90,13 +90,32 @@ def should_ignore_path(path: str) -> bool:
     return any(should_ignore_name(segment) for segment in path.replace("\\", "/").split("/") if segment)
 
 
+def _match_segments(pattern_parts: tuple[str, ...], path_parts: tuple[str, ...]) -> bool:
+    # Positions in ``path_parts`` reachable after consuming each pattern part;
+    # ``**`` spans zero or more whole segments, any other part exactly one.
+    reachable = {0}
+    for part in pattern_parts:
+        if part == "**":
+            reachable = set(range(min(reachable), len(path_parts) + 1))
+        else:
+            reachable = {i + 1 for i in reachable if i < len(path_parts) and fnmatch.fnmatchcase(path_parts[i], part)}
+        if not reachable:
+            return False
+    return len(path_parts) in reachable
+
+
 def path_matches(pattern: str, rel_path: str) -> bool:
-    path = PurePosixPath(rel_path)
-    if path.match(pattern):
-        return True
-    if pattern.startswith("**/"):
-        return path.match(pattern[3:])
-    return False
+    """Match ``rel_path`` (relative to the search root) against a glob pattern.
+
+    A pattern without ``/`` matches the basename at any depth (``*.py``). Any
+    other pattern is anchored at the search root, and ``**`` matches zero or
+    more directories (``src/**/*.py`` includes ``src/top.py``).
+    ``PurePosixPath.match`` is not used for these: it matches from the right
+    and treats ``**`` as a single-segment ``*``.
+    """
+    if "/" not in pattern:
+        return PurePosixPath(rel_path).match(pattern)
+    return _match_segments(PurePosixPath(pattern).parts, PurePosixPath(rel_path).parts)
 
 
 def truncate_line(line: str, max_chars: int = DEFAULT_LINE_SUMMARY_LENGTH) -> str:

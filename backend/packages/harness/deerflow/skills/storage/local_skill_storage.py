@@ -6,7 +6,6 @@ import asyncio
 import errno
 import json
 import logging
-import os
 import shutil
 import tempfile
 from collections.abc import Iterable
@@ -16,7 +15,7 @@ from pathlib import Path
 from deerflow.config.runtime_paths import resolve_path
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
-from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
+from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage, walk_skill_directories
 from deerflow.skills.types import SkillCategory
 
 logger = logging.getLogger(__name__)
@@ -79,7 +78,7 @@ class LocalSkillStorage(SkillStorage):
             category_path = self._host_root / category.value
             if not category_path.exists() or not category_path.is_dir():
                 continue
-            for current_root, dir_names, file_names in os.walk(category_path, followlinks=True):
+            for current_root, dir_names, file_names in walk_skill_directories(category_path):
                 dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
                 if SKILL_MD_FILE not in file_names:
                     continue

@@ -44,6 +44,19 @@ class TestTitleConfig:
         with pytest.raises(ValueError):
             TitleConfig(max_chars=201)
 
+    @pytest.mark.parametrize("field_name", ["max_words", "max_chars"])
+    @pytest.mark.parametrize("bad_value", [True, False])
+    def test_config_rejects_boolean_limits(self, field_name: str, bad_value: bool):
+        """YAML booleans must fail loudly instead of coercing into integers."""
+        with pytest.raises(ValueError, match="must be an integer, not a boolean"):
+            TitleConfig(**{field_name: bad_value})
+
+    def test_config_still_accepts_numeric_strings(self):
+        """Numeric strings remain valid after the boolean guard."""
+        config = TitleConfig(max_words="8", max_chars="80")
+        assert config.max_words == 8
+        assert config.max_chars == 80
+
     def test_get_set_config(self):
         """Test global config getter and setter."""
         original_config = get_title_config()

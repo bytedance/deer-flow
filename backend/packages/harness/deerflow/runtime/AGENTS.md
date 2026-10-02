@@ -26,6 +26,13 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Message sequence placement:** Keep backend and frontend message identity rules aligned. Details: `backend/docs/runtime-guidance-details.md`.
 
+**Thread message cursors:** `list_messages` applies both exclusive bounds before `limit`, paging forward whenever `after_seq` is supplied.
+
+**Human-input capture** (`runtime/journal.py`): track capture separately from
+the optional display summary. Image-only input has no text but must still stop
+the batch scan and later model calls from appending another human-input event.
+`tests/test_run_journal.py` covers callback and full/delta graph paths.
+
 **LLM response callback coalescing** (`runtime/journal.py`): a provider may fire
 `on_llm_end` twice for one LangChain run id, first without usage (or with all token
 counts zero) and immediately again with usage populated. The first callback's generation
@@ -48,7 +55,7 @@ from `on_llm_end` before inspecting the response or touching any run state.
 **Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
 answers for paginated history. See `docs/skill-usage-ui.md`.
 
-**Run delivery receipts:** Journal artifact evidence and terminal status must finalize in order. Details: `backend/docs/runtime-guidance-details.md`.
+**Run delivery receipts:** Journal artifact evidence and terminal status must finalize before a satisfied goal is cleared. Goal cleanup uses a durable checkpoint-write reservation; delivery failure retains the goal without another continuation. Details: `backend/docs/runtime-guidance-details.md`.
 
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
@@ -85,6 +92,8 @@ run reads, and sequence recovery split on physical newlines. Do not use
 part of the record. Preserve existing UTF-8 files and the writer format.
 `tests/test_jsonl_event_store_unicode.py` covers Unicode values, reopening,
 idempotent writes, LF/CRLF, blank lines, and malformed records.
+Reads and deletes treat a run ID writes reject as an unknown run (routes pass
+URL IDs through); writes still raise.
 
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error

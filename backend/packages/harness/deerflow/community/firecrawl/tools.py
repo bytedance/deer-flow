@@ -1,12 +1,40 @@
+import inspect
 import json
+import logging
 
-from firecrawl import FirecrawlApp
+from firecrawl import AsyncFirecrawlApp
 from langchain.tools import tool
 
 from deerflow.config import get_app_config
 
+logger = logging.getLogger(__name__)
 
-def _get_firecrawl_client(tool_name: str = "web_search") -> FirecrawlApp:
+
+async def _aclose_firecrawl_client(client: AsyncFirecrawlApp) -> None:
+    """Best-effort close of the pooled async HTTP client a per-call app constructed.
+
+    ``AsyncFirecrawlApp`` eagerly builds an ``httpx.AsyncClient``-backed pool in
+    its constructor and exposes no public teardown, so reach it through the
+    delegating v2 client. The declared dependency range (``firecrawl-py>=1.15.0``)
+    includes versions without that attribute, and teardown runs from a
+    ``finally`` — absence or failure here must never mask the tool's own result.
+    """
+    pooled = getattr(getattr(client, "_v2_client", None), "async_http_client", None)
+    if pooled is None:
+        return
+    try:
+        close = getattr(pooled, "close", None)
+        if not callable(close):
+            logger.warning("Firecrawl async HTTP pool has no close method")
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        logger.warning("Failed to close the Firecrawl async HTTP pool", exc_info=True)
+
+
+def _get_firecrawl_client(tool_name: str = "web_search") -> AsyncFirecrawlApp:
     config = get_app_config().get_tool_config(tool_name)
     api_key = None
     api_url = None
@@ -18,16 +46,17 @@ def _get_firecrawl_client(tool_name: str = "web_search") -> FirecrawlApp:
     kwargs = {"api_key": api_key}
     if api_url:
         kwargs["api_url"] = api_url
-    return FirecrawlApp(**kwargs)  # type: ignore[arg-type]
+    return AsyncFirecrawlApp(**kwargs)  # type: ignore[arg-type]
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str) -> str:
+async def web_search_tool(query: str) -> str:
     """Search the web.
 
     Args:
         query: The query to search for.
     """
+    client: AsyncFirecrawlApp | None = None
     try:
         config = get_app_config().get_tool_config("web_search")
         max_results = 5
@@ -35,7 +64,7 @@ def web_search_tool(query: str) -> str:
             max_results = config.model_extra.get("max_results", max_results)
 
         client = _get_firecrawl_client("web_search")
-        result = client.search(query, limit=max_results)
+        result = await client.search(query, limit=max_results)
 
         # result.web contains list of SearchResultWeb objects
         web_results = result.web or []
@@ -51,10 +80,13 @@ def web_search_tool(query: str) -> str:
         return json_results
     except Exception as e:
         return f"Error: {str(e)}"
+    finally:
+        if client is not None:
+            await _aclose_firecrawl_client(client)
 
 
 @tool("web_fetch", parse_docstring=True)
-def web_fetch_tool(url: str) -> str:
+async def web_fetch_tool(url: str) -> str:
     """Fetch the contents of a web page at a given URL.
     Only fetch EXACT URLs that have been provided directly by the user or have been returned in results from the web_search and web_fetch tools.
     This tool can NOT access content that requires authentication, such as private Google Docs or pages behind login walls.
@@ -64,9 +96,10 @@ def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
+    client: AsyncFirecrawlApp | None = None
     try:
         client = _get_firecrawl_client("web_fetch")
-        result = client.scrape(url, formats=["markdown"])
+        result = await client.scrape(url, formats=["markdown"])
 
         markdown_content = result.markdown or ""
         metadata = result.metadata
@@ -76,5 +109,8 @@ def web_fetch_tool(url: str) -> str:
             return "Error: No content found"
     except Exception as e:
         return f"Error: {str(e)}"
+    finally:
+        if client is not None:
+            await _aclose_firecrawl_client(client)
 
     return f"# {title}\n\n{markdown_content[:4096]}"

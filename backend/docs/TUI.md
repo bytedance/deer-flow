@@ -26,8 +26,8 @@ Launch modes:
 | `deerflow chat` | Same TUI conversation surface |
 | `deerflow --continue` | Resume the most recent thread |
 | `deerflow --resume THREAD` | Resume a thread by id |
-| `deerflow --print "question"` | Headless one-shot answer to stdout |
-| `deerflow --json "question"` | Headless newline-delimited `StreamEvent`s |
+| `deerflow --print "question"` | Headless one-shot answer to stdout; on failure a concise stderr line and exit 1 |
+| `deerflow --json "question"` | Headless newline-delimited `StreamEvent`s; on failure one terminal `{"type": "error"}` record and exit 1 |
 | `deerflow --recursion-limit 250 --print "question"` | Set the headless agent-loop super-step limit |
 | `echo "q" \| deerflow --print` | Read the message from stdin |
 | `DEER_FLOW_TUI=1 deerflow` | Force the TUI via environment |
@@ -35,6 +35,13 @@ Launch modes:
 
 If no TTY is available and no headless flag is given, `deerflow` prints guidance
 instead of hanging.
+
+Provider failures (for example an expired credential) usually do not raise: the
+LLM error middleware turns them into a final AI message flagged
+`deerflow_error_fallback`. Headless runs treat that as a failure too — `--print`
+still writes the fallback text to stdout, then prints
+`Error: LLM request failed (error_type=…, error_reason=…)` to stderr; `--json`
+appends the same terminal `{"type": "error"}` record. Both exit `1`.
 
 Transparent rendering is opt-in; the solid DeerFlow palette remains the default.
 The transparent mode uses Textual's `ansi_default` background for the main

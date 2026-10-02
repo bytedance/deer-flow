@@ -908,3 +908,53 @@ def test_get_memory_config_falls_back_on_broken_config(tmp_path, monkeypatch):
         assert get_memory_config().enabled is False
     finally:
         _reset_config_singletons()
+
+
+# The two judging modes as an operator writes them. `mode: off` is spelled the way
+# config.example.yaml ships it and the way a rollback types it.
+_MODES_CONFIG = """\
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+models:
+  - name: first-model
+    use: langchain_openai:ChatOpenAI
+    model: gpt-test
+memory:
+  prescreen:
+    mode: {prescreen}
+    use: deerflow.agents.memory.prescreen.typesafe:TypeSafeMemoryPrescreen
+  signal_classification:
+    mode: {classification}
+    use: deerflow.agents.memory.signals.typesafe:TypeSafeSignalClassifier
+"""
+
+
+def test_an_unquoted_off_mode_loads_and_rolls_back(tmp_path, monkeypatch):
+    """`mode: off` is a YAML boolean, and both judging modes must still read it as off.
+
+    YAML 1.1 parses an unquoted ``off`` as ``False``. Rejecting it would fail the
+    config *reload* that returns a deployment to off -- the failed load leaves the
+    previous judge (and its judging requests) running -- so the documented spelling
+    has to resolve to the ``off`` mode, not raise.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    def write_modes(prescreen: str, classification: str) -> None:
+        config_path.write_text(_MODES_CONFIG.format(prescreen=prescreen, classification=classification), encoding="utf-8")
+
+    try:
+        write_modes("enforce", "hints")
+        enforcing = AppConfig.from_file(str(config_path))
+        assert enforcing.memory.prescreen.mode == "enforce"
+        assert enforcing.memory.signal_classification.mode == "hints"
+
+        write_modes("off", "off")
+        rolled_back = AppConfig.from_file(str(config_path))
+
+        assert rolled_back.memory.prescreen.mode == "off"
+        assert rolled_back.memory.signal_classification.mode == "off"
+    finally:
+        _reset_config_singletons()

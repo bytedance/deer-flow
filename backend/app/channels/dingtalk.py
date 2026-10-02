@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import stat
 import threading
 import time
 from pathlib import Path
@@ -21,7 +22,13 @@ from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-from deerflow.uploads.manager import UnsafeUploadPathError, claim_unique_filename, normalize_filename, write_upload_file_no_symlink
+from deerflow.uploads.manager import (
+    UnsafeUploadPathError,
+    apply_upload_sandbox_permits,
+    claim_unique_filename,
+    normalize_filename,
+    write_upload_file_no_symlink,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +228,9 @@ class DingTalkChannel(Channel):
         self._card_repliers.clear()
         self._card_track_ids.clear()
         if self._thread:
-            self._thread.join(timeout=5)
+            # The SDK thread only returns on a fatal error, so this join
+            # normally waits out its full timeout; keep it off the event loop.
+            await asyncio.to_thread(self._thread.join, timeout=5)
             self._thread = None
         logger.info("DingTalk channel stopped")
 
@@ -678,6 +687,10 @@ class DingTalkChannel(Channel):
 
         try:
             resolved_target = await asyncio.to_thread(_persist)
+            # Root-written uploads are 0o600, which the non-root sandbox cannot
+            # read on a bind-mounted thread dir; grant group/other read like the
+            # channel manager's inbound-file path and the HTTP upload route.
+            await asyncio.to_thread(apply_upload_sandbox_permits, resolved_target, stat.S_IRGRP | stat.S_IROTH)
         except (OSError, UnsafeUploadPathError):
             logger.exception("[DingTalk] failed to persist downloaded file: %s", safe_filename)
             return ""

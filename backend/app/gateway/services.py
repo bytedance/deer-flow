@@ -43,6 +43,7 @@ from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONT
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
 from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY
+from deerflow.agents.middlewares.tool_output_budget_middleware import TOOL_OUTPUT_BLOB_KEY
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
@@ -97,10 +98,18 @@ from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.assembly_io import run_assembly
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
+
+
+class BusyThreadConflict(HTTPException):
+    """A retryable run-manager admission conflict exposed as HTTP 409."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(status_code=409, detail=detail)
 
 
 @asynccontextmanager
@@ -139,6 +148,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
             TOOL_RECEIPT_KEY,
             TOOL_RECEIPT_LEDGER_KEY,
+            TOOL_OUTPUT_BLOB_KEY,
             TOOL_TRANSFORMS_KEY,
             SKILL_USAGE_KEY,
             SKILL_USAGES_KEY,
@@ -2124,7 +2134,7 @@ async def start_run(
                     )
                     raise
         except ConflictError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            raise BusyThreadConflict(str(exc)) from exc
         except UnsupportedStrategyError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
 
@@ -2285,9 +2295,9 @@ async def launch_mcp_task_notification_run(
                 require_existing_thread=True,
             )
     except HTTPException as exc:
-        if exc.status_code == 409:
+        if isinstance(exc, BusyThreadConflict):
             raise ConflictError(str(exc.detail)) from exc
-        if exc.status_code == 404:
+        if exc.status_code in {400, 401, 403, 404, 409, 422, 501}:
             raise PermanentNotificationError(str(exc.detail)) from exc
         raise
     return {"run_id": record.run_id, "thread_id": record.thread_id}
@@ -2344,9 +2354,12 @@ async def sse_consumer(
         return
 
     gap_emitted = False
+    terminal_emitted = False
+    disconnect_observed = False
     try:
         async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
             if await request.is_disconnected():
+                disconnect_observed = True
                 break
 
             if isinstance(entry, StreamGap):
@@ -2366,26 +2379,36 @@ async def sse_consumer(
 
             if entry is HEARTBEAT_SENTINEL:
                 if await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
+                    terminal_emitted = True
                     yield format_sse("end", None)
                     return
                 yield ": heartbeat\n\n"
                 continue
 
             if entry is END_SENTINEL:
+                terminal_emitted = True
                 yield format_sse("end", None, event_id=entry.id or None)
                 return
 
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
+        if not disconnect_observed:
+            raise RuntimeError("stream bridge subscription ended before a terminal event")
+    except (GeneratorExit, asyncio.CancelledError):
+        # Starlette closes the response generator or cancels its request task
+        # when the creator connection disappears. Ordinary bridge exceptions
+        # must not be mistaken for that client-owned lifecycle signal.
+        disconnect_observed = True
+        raise
     finally:
         # store_only records are cross-worker observation handles. An explicit
         # cancel-then-stream action has already persisted its request before
         # subscribing; a plain join disconnect must not invent a new
         # cancellation request. Only apply on_disconnect to locally-owned runs,
         # and only on the creator's own stream — never on an observer join.
-        if apply_on_disconnect and not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
+        if disconnect_observed and apply_on_disconnect and not gap_emitted and not terminal_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
-                await run_mgr.cancel(record.run_id)
+                await await_drained(run_mgr.cancel(record.run_id))
 
 
 async def wait_for_run_completion(
@@ -2422,8 +2445,13 @@ async def wait_for_run_completion(
         disconnected.  Callers must skip checkpoint serialization on
         ``False`` so a partial checkpoint is not returned as a normal
         response.
+
+    Raises:
+        RuntimeError: The bridge subscription ended without a terminal event.
+        Other bridge failures propagate unchanged.
     """
     completed = False
+    disconnect_observed = False
     if await _terminal_record_stream_missing(bridge, record):
         return True
 
@@ -2449,11 +2477,17 @@ async def wait_for_run_completion(
                     completed = True
                     return True
                 if await request.is_disconnected():
+                    disconnect_observed = True
                     return False
                 # Heartbeats and regular events: keep waiting for END_SENTINEL.
             if not gap_seen:
-                return completed
+                raise RuntimeError("stream bridge subscription ended before a terminal event")
+    except asyncio.CancelledError:
+        # Request-task cancellation is the non-streaming equivalent of
+        # Starlette closing an SSE response generator.
+        disconnect_observed = True
+        raise
     finally:
-        if not completed and record.status in (RunStatus.pending, RunStatus.running):
+        if disconnect_observed and not completed and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
-                await run_mgr.cancel(record.run_id)
+                await await_drained(run_mgr.cancel(record.run_id))

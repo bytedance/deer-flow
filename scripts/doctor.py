@@ -273,6 +273,64 @@ def check_nginx() -> CheckResult:
     )
 
 
+# Environment variables that choose which config file the Gateway loads.
+CONFIG_LOCATION_ENV_VARS = ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT")
+
+
+def _unquoted_dotenv_keys(env_path: Path) -> set[str]:
+    """Return the ``.env`` keys whose value is written without quotes."""
+    from dotenv.parser import parse_stream
+
+    with open(env_path, encoding="utf-8") as stream:
+        return {binding.key for binding in parse_stream(stream) if binding.key and binding.original.string.split("=", 1)[-1].lstrip()[:1] not in ("'", '"')}
+
+
+def resolve_config_path() -> tuple[Path, CheckResult | None]:
+    """Locate the config.yaml the Gateway would read.
+
+    Delegates to the harness resolver (``DEER_FLOW_CONFIG_PATH``, then
+    ``config.yaml`` under ``DEER_FLOW_PROJECT_ROOT``, then the legacy
+    backend/repository-root locations) so doctor checks the same file the
+    Gateway loads. When an environment override would stop the Gateway from
+    starting, returns the path it names (which does not exist) and a failed
+    ``config.yaml found`` result carrying the Gateway's error.
+    """
+    config_env = os.environ.get("DEER_FLOW_CONFIG_PATH")
+    default_path = Path(os.environ.get("DEER_FLOW_PROJECT_ROOT") or ".") / "config.yaml"
+    try:
+        from deerflow.config.app_config import AppConfig
+    except Exception as exc:
+        # Keep diagnosing a broken backend environment instead of crashing
+        # (any import-time failure, as in check_config_loadable); the
+        # YAML-only checks still run against the most likely path.
+        return Path(config_env) if config_env else default_path, CheckResult(
+            "config.yaml found",
+            "fail",
+            f"cannot import the DeerFlow harness to resolve it ({type(exc).__name__}: {exc})",
+            fix="Run 'make install'",
+        )
+
+    try:
+        return AppConfig.resolve_config_path(), None
+    except FileNotFoundError as exc:
+        if not config_env:
+            # Nothing at the default locations: a plain missing config.
+            return default_path, None
+        return Path(config_env), CheckResult(
+            "config.yaml found",
+            "fail",
+            str(exc),
+            fix="Point DEER_FLOW_CONFIG_PATH at an existing config.yaml, or unset it",
+        )
+    except ValueError as exc:
+        return Path(os.environ["DEER_FLOW_PROJECT_ROOT"]) / "config.yaml", CheckResult(
+            "config.yaml found",
+            "fail",
+            str(exc),
+            fix="Point DEER_FLOW_PROJECT_ROOT at the DeerFlow checkout, or unset it",
+        )
+
+
 def check_config_exists(config_path: Path) -> CheckResult:
     if config_path.exists():
         return CheckResult("config.yaml found", "ok")
@@ -552,6 +610,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "firecrawl": "FIRECRAWL_API_KEY",
                 "fastcrw": "CRW_API_KEY",
                 "sofya": "SOFYA_API_KEY",
+                "unbrowse": "UNBROWSE_API_KEY",
             },
             "image_search": {
                 "brave": "BRAVE_SEARCH_API_KEY",
@@ -759,17 +818,30 @@ def check_env_file(project_root: Path) -> CheckResult:
 
 def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
-    config_path = project_root / "config.yaml"
 
     # Load .env early so key checks work
     try:
-        from dotenv import load_dotenv
+        from dotenv import dotenv_values, load_dotenv
 
         env_path = project_root / ".env"
         if env_path.exists():
             load_dotenv(env_path, override=False)
+            # `make dev` (scripts/serve.sh) sources .env over the shell, so
+            # for the variables that choose the config file, .env wins.
+            unquoted = _unquoted_dotenv_keys(env_path)
+            for name, value in dotenv_values(env_path).items():
+                if name in CONFIG_LOCATION_ENV_VARS and value is not None:
+                    # `source` expands an unquoted leading `~`, not a quoted one.
+                    os.environ[name] = os.path.expanduser(value) if name in unquoted else value
     except ImportError:
         pass
+
+    # serve.sh then replaces an unset or empty runtime root with the
+    # checkout, so config resolution and the loadable check see what the
+    # Gateway sees.
+    if not os.environ.get("DEER_FLOW_PROJECT_ROOT"):
+        os.environ["DEER_FLOW_PROJECT_ROOT"] = str(project_root)
+    config_path, config_failure = resolve_config_path()
 
     print()
     print(bold("DeerFlow Health Check"))
@@ -791,7 +863,7 @@ def main() -> int:
     cfg_checks: list[CheckResult] = [
         check_env_file(project_root),
         check_frontend_env(project_root),
-        check_config_exists(config_path),
+        config_failure or check_config_exists(config_path),
         check_config_version(config_path, project_root),
         check_config_loadable(config_path),
         check_models_configured(config_path),

@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,12 @@ logger = logging.getLogger(__name__)
 _SERPER_SEARCH_ENDPOINT = "https://google.serper.dev/search"
 _SERPER_IMAGES_ENDPOINT = "https://google.serper.dev/images"
 _SERPER_MAX_RESULTS = 10
+_SERPER_TBS_BY_TIME_RANGE: dict[SearchTimeRange, str] = {
+    "day": "qdr:d",
+    "week": "qdr:w",
+    "month": "qdr:m",
+    "year": "qdr:y",
+}
 _api_key_warned: set[str] = set()
 
 
@@ -40,7 +47,7 @@ def _coerce_max_results(value: object, default: int = 5, max_allowed: int = _SER
     """Coerce config/parameter input into a bounded positive result count."""
     try:
         count = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     if count <= 0:
         return default
@@ -174,7 +181,7 @@ def _safe_public_url(value: object) -> str:
     return url if ip.is_global else ""
 
 
-def _serper_post(endpoint: str, api_key: str, query: str, max_results: int) -> tuple[dict | None, str | None]:
+def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, time_range: SearchTimeRange | None = None) -> tuple[dict | None, str | None]:
     """Send a POST request to a Serper endpoint.
 
     ``query`` is expected to already be normalized via :func:`_clean_query`.
@@ -188,6 +195,8 @@ def _serper_post(endpoint: str, api_key: str, query: str, max_results: int) -> t
         "Content-Type": "application/json",
     }
     payload = {"q": query, "num": max_results}
+    if time_range is not None:
+        payload["tbs"] = _SERPER_TBS_BY_TIME_RANGE[time_range]
 
     try:
         with httpx.Client(timeout=30) as client:
@@ -211,12 +220,13 @@ def _serper_post(endpoint: str, api_key: str, query: str, max_results: int) -> t
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str, max_results: int = 5) -> str:
+def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRange | None = None) -> str:
     """Search the web for information using Google Search via Serper.
 
     Args:
         query: Search keywords describing what you want to find. Be specific for better results.
         max_results: Maximum number of search results to return. Default is 5, capped at 10.
+        time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
     config = get_app_config().get_tool_config("web_search")
     if config is not None and "max_results" in config.model_extra:
@@ -228,7 +238,7 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
     if not api_key:
         return _missing_key_error(query, "web_search")
 
-    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, query, max_results)
+    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, query, max_results, time_range=time_range)
     if error_json is not None:
         return error_json
 

@@ -3,12 +3,14 @@
 import asyncio
 import logging
 import re
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
+from app.gateway.persistent_writes import run_drained_write
 from deerflow.agents.memory.manager import get_memory_manager
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import (
@@ -28,6 +30,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
+
 
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
@@ -107,7 +110,7 @@ def _validate_agent_name(name: str) -> None:
     Raises:
         HTTPException: 422 if the name is invalid.
     """
-    if not AGENT_NAME_PATTERN.match(name):
+    if not AGENT_NAME_PATTERN.fullmatch(name):
         raise HTTPException(
             status_code=422,
             detail=f"Invalid agent name '{name}'. Must match ^[A-Za-z0-9-]+$ (letters, digits, and hyphens only).",
@@ -375,7 +378,7 @@ async def create_agent_endpoint(body: AgentCreateRequest, request: Request) -> A
         return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
 
     try:
-        return await asyncio.to_thread(_create_agent)
+        return await run_drained_write("Create agent", _create_agent, (AgentExistsError,))
     except AgentExistsError:
         raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
     except Exception as e:
@@ -500,7 +503,7 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
             def _update_agent() -> None:
                 get_agent_store().update(name, updated, body.soul, user_id=user_id)
 
-            await asyncio.to_thread(_update_agent)
+            await run_drained_write("Update agent", _update_agent)
 
         logger.info(f"Updated agent '{name}'")
 
@@ -548,12 +551,19 @@ async def get_user_profile(request: Request) -> UserProfileResponse:
         UserProfileResponse with content=None if USER.md does not exist yet.
     """
     _require_agents_api_enabled()
+    user_id = get_effective_user_id()
+
+    # Path resolution (``get_paths()`` lazily builds absolute paths) and the
+    # stat/read are filesystem work; keep them off the event loop like every
+    # other handler in this router.
+    def _read_profile() -> str | None:
+        user_md_path = get_paths().user_md_file(user_id)
+        if not user_md_path.exists():
+            return None
+        return user_md_path.read_text(encoding="utf-8").strip()
 
     try:
-        user_md_path = get_paths().user_md_file(get_effective_user_id())
-        if not user_md_path.exists():
-            return UserProfileResponse(content=None)
-        raw = user_md_path.read_text(encoding="utf-8").strip()
+        raw = await asyncio.to_thread(_read_profile)
         return UserProfileResponse(content=raw or None)
     except Exception as e:
         logger.error(f"Failed to read user profile: {e}", exc_info=True)
@@ -583,12 +593,16 @@ async def update_user_profile(body: UserProfileUpdateRequest, request: Request) 
         UserProfileResponse with the saved content.
     """
     _require_agents_api_enabled()
+    user_id = get_effective_user_id()
 
-    try:
-        paths = get_paths()
-        user_md_path = paths.user_md_file(get_effective_user_id())
+    def _write_profile() -> Path:
+        user_md_path = get_paths().user_md_file(user_id)
         user_md_path.parent.mkdir(parents=True, exist_ok=True)
         user_md_path.write_text(body.content, encoding="utf-8")
+        return user_md_path
+
+    try:
+        user_md_path = await run_drained_write("Update user profile", _write_profile)
         logger.info(f"Updated USER.md at {user_md_path}")
         return UserProfileResponse(content=body.content or None)
     except Exception as e:
@@ -621,7 +635,7 @@ async def delete_agent(name: str, request: Request) -> None:
     try:
         # Off the event loop: resolve store + cancel → delete → cancel-on-success
         # (get_agent_store / memory manager do blocking config and FS I/O).
-        outcome = await asyncio.to_thread(_delete_agent_with_memory_cancel, name, user_id)
+        outcome = await run_drained_write("Delete agent", _delete_agent_with_memory_cancel, (), name, user_id)
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")

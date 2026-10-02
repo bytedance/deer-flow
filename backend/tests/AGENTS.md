@@ -6,6 +6,13 @@ The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
 `ast`, checking both `encoding` and `errors`; module-wide literal counts can
 hide unpinned calls behind unrelated settings.
 
+## Router auth fixtures
+
+For owner-scoped route assertions, pass a stable `user_factory` and
+`bind_current_user=True` to `make_authed_test_app`. The default stub stamps
+request state but leaves the ambient user context unchanged; the opt-in binding
+uses the stub user during the request and restores the previous context after it.
+
 ## Lark CLI blocking-I/O fixtures
 
 `blocking_io/test_integrations_router.py` uses a real local CLI stub: a `.cmd`

@@ -13,6 +13,7 @@ The provider itself handles:
 import asyncio
 import atexit
 import contextlib
+import contextvars
 import errno
 import hashlib
 import logging
@@ -23,6 +24,8 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any
 
 try:
@@ -117,6 +120,42 @@ class SandboxIdentityCollisionError(RuntimeError):
         self.sandbox_id = sandbox_id
 
 
+async def _run_started_acquire_worker[T](
+    executor,
+    func: Callable[..., T],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> T:
+    """Cancel queued acquire work, but drain a worker once it has started."""
+    loop = asyncio.get_running_loop()
+    done = asyncio.Event()
+    context = contextvars.copy_context()
+    call = partial(func, *args, **kwargs)
+    worker = executor.submit(context.run, call)
+    worker.add_done_callback(lambda _future: loop.call_soon_threadsafe(done.set))
+    wrapped = asyncio.wrap_future(worker, loop=loop)
+    try:
+        return await wrapped
+    except asyncio.CancelledError as cancellation:
+        # Awaiting wrapped already asks the concurrent future to cancel. If it
+        # was still queued, preserve the old to_thread behavior: it never runs.
+        if worker.cancelled() or worker.cancel():
+            raise
+        # Once running, the worker cannot be stopped safely. Keep same-scope
+        # serializer ownership until it settles, absorbing repeated cancellation.
+        while not worker.done():
+            try:
+                await asyncio.shield(done.wait())
+            except asyncio.CancelledError:
+                continue
+        try:
+            worker.result()
+        except Exception:
+            logger.warning("Cancelled AIO acquire worker failed while draining", exc_info=True)
+        raise cancellation
+
+
 def _lock_file_exclusive(lock_file) -> None:
     if fcntl is not None:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
@@ -205,6 +244,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._sandbox_infos: dict[str, SandboxInfo] = {}  # sandbox_id -> SandboxInfo (for destroy)
         self._thread_sandboxes: dict[tuple[str, str], str] = {}  # (user_id, thread_id) -> sandbox_id
         self._acquire_serializer: AcquireSerializer[tuple[str, str]] = AcquireSerializer(thread_name_prefix="aio-sandbox-lock-wait")
+        # Lock waiters can block every serializer worker on one hot key. Work
+        # performed *after* a key is held must therefore use a separate pool:
+        # submitting it behind those waiters makes the holder wait for workers
+        # that are themselves waiting for the holder to release the key.
+        self._acquire_worker_executor = ThreadPoolExecutor(thread_name_prefix="aio-sandbox-owned-worker")
         self._last_activity: dict[str, float] = {}  # sandbox_id -> last activity timestamp
         # Warm pool: released sandboxes whose containers are still running.
         # Maps sandbox_id -> (SandboxInfo, release_timestamp).
@@ -2130,7 +2174,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     async def _acquire_internal_async(self, thread_id: str | None, *, user_id: str) -> str:
         """Async counterpart to ``_acquire_internal``."""
         await asyncio.to_thread(self._ensure_skills_projection, user_id)
-        cached_id = await asyncio.to_thread(self._reuse_in_process_sandbox, thread_id, user_id=user_id)
+        cached_id = await _run_started_acquire_worker(
+            self._acquire_worker_executor,
+            self._reuse_in_process_sandbox,
+            thread_id,
+            user_id=user_id,
+        )
         if cached_id is not None:
             return cached_id
 
@@ -2142,7 +2191,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._assert_active_identity_available_locked(sandbox_id, key)
 
         # ── Layer 1.5: Warm pool (container still running, no cold-start) ──
-        reclaimed_id = await asyncio.to_thread(self._reclaim_warm_pool_sandbox, thread_id, sandbox_id, user_id=user_id)
+        reclaimed_id = await _run_started_acquire_worker(
+            self._acquire_worker_executor,
+            self._reclaim_warm_pool_sandbox,
+            thread_id,
+            sandbox_id,
+            user_id=user_id,
+        )
         if reclaimed_id is not None:
             return reclaimed_id
 
@@ -2598,6 +2653,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def reset(self) -> None:
         """Release process-local acquire workers when this instance is detached."""
         self._acquire_serializer.close()
+        self._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
 
     def shutdown(self) -> None:
         """Shutdown all sandboxes. Thread-safe and idempotent."""
@@ -2638,3 +2694,4 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             logger.warning(f"Error closing sandbox ownership store during shutdown: {e}")
 
         self._acquire_serializer.close()
+        self._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)

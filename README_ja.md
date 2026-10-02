@@ -582,7 +582,7 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 /goal clear        # クリアする
 ```
 
-各Gateway駆動のrunの後に、DeerFlowはnon-thinkingな評価モデルを使って、可視の会話をアクティブなゴールと照らし合わせます。評価モデルは型付きblocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait`、`goal_not_met_yet`）と可視の証拠を返さなければなりません。DeerFlowがhidden continuationを注入するのは、直近のassistantターンが耐久性のあるチェックポイントに保存され、blockerが`goal_not_met_yet`であり、評価中にスレッドが変化せず、no-progressブレーカーが発火していない場合のみです。安全上限はデフォルトで8回のhidden continuationで、同一の非進行評価が繰り返されると2回で停止します。`/goal clear`と、ユーザーが手書きした新規入力はすべて、キュー内のcontinuationより優先されます。ゴールが満たされると、DeerFlowは自動的にクリアし、更新されたスレッドステートを公開します。
+各Gateway駆動のrunの後に、DeerFlowはnon-thinkingな評価モデルを使って、可視の会話（アシスタントのツール呼び出しと短縮されたツール結果を含む）をアクティブなゴールと照らし合わせます。ツール呼び出しが成功しただけではゴールは達成されず、アシスタントが欠けている情報や曖昧な情報を推測する必要があった場合、評価モデルは`needs_user_input`を返します。評価モデルは型付きblocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait`、`goal_not_met_yet`）と可視の証拠を返さなければなりません。DeerFlowがhidden continuationを注入するのは、直近のassistantターンが耐久性のあるチェックポイントに保存され、blockerが`goal_not_met_yet`であり、評価中にスレッドが変化せず、no-progressブレーカーが発火していない場合のみです。安全上限はデフォルトで8回のhidden continuationで、同一の非進行評価が繰り返されると2回で停止します。`/goal clear`と、ユーザーが手書きした新規入力はすべて、キュー内のcontinuationより優先されます。ゴールが満たされると、DeerFlowは自動的にクリアし、更新されたスレッドステートを公開します。
 
 Web UIは入力欄の上にアクティブなゴールを表示します。同じコマンドはTUIとサポート対象のIMチャネルからも利用できます。Web UIとサポート対象のIMチャネルでは、`/goal <完了条件>`を設定するとその条件をタスクとしてrunを開始します。ステータス確認やクリアのコマンドはゴールステートの管理のみを行います。
 

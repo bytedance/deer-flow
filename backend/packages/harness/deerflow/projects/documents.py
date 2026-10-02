@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import Paths
+from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.text_detection import is_text_file_by_content
@@ -67,6 +68,8 @@ def validate_shelf_filename(name: str) -> str:
         raise ValueError(f"Filename is unsafe: {name!r}")
     if len(candidate.encode("utf-8")) > _MAX_FILENAME_BYTES:
         raise ValueError(f"Filename exceeds {_MAX_FILENAME_BYTES} UTF-8 bytes")
+    if is_upload_staging_file(candidate):
+        raise ValueError(f"Filename uses reserved upload staging pattern: {name!r}")
     return candidate
 
 

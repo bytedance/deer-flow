@@ -285,6 +285,35 @@ def test_detect_from_config_ignores_commented_buzz_block(tmp_path):
     assert detect.detect_from_config(cfg) == []
 
 
+def test_detect_from_config_discord_via_channels_enabled(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "channels:\n  discord:\n    enabled: true\n    bot_token: $DISCORD_BOT_TOKEN\n",
+    )
+    assert detect.detect_from_config(cfg) == ["discord"]
+
+
+def test_detect_from_config_discord_disabled_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("channels:\n  discord:\n    enabled: false\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ignores_commented_discord_block(tmp_path):
+    """Mirrors the commented example block shipped in config.example.yaml."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "# channels:\n#   discord:\n#     enabled: false\n#     bot_token: $DISCORD_BOT_TOKEN\ndatabase:\n  backend: sqlite\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_combines_discord_with_postgres(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: postgres\nchannels:\n  discord:\n    enabled: true\n")
+    assert detect.detect_from_config(cfg) == ["discord", "postgres"]
+
+
 def test_detect_from_config_memory_stream_bridge_returns_no_extras(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("stream_bridge:\n  type: memory\n  queue_maxsize: 256\n")

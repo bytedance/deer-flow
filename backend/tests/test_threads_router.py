@@ -16,6 +16,7 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.types import Overwrite
 
 from app.gateway import services as gateway_services
+from app.gateway.auth.models import User
 from app.gateway.routers import thread_runs, threads
 from deerflow.config.paths import Paths
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
@@ -33,6 +34,8 @@ from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.uploads.companions import companion_names, register_companion, resolve_companion
+from deerflow.utils.file_outline import extract_outline_for_file
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
@@ -413,15 +416,14 @@ def test_delete_thread_data_rejects_invalid_thread_id(tmp_path):
 
 
 def test_delete_thread_route_cleans_thread_directory(tmp_path):
-    from deerflow.runtime.user_context import get_effective_user_id
-
     paths = Paths(tmp_path)
-    user_id = get_effective_user_id()
+    owner = User(email="thread-owner@example.com", password_hash="x")
+    user_id = str(owner.id)
     thread_dir = paths.thread_dir("thread-route", user_id=user_id)
     paths.sandbox_work_dir("thread-route", user_id=user_id).mkdir(parents=True, exist_ok=True)
     (paths.sandbox_work_dir("thread-route", user_id=user_id) / "notes.txt").write_text("hello", encoding="utf-8")
 
-    app = make_authed_test_app()
+    app = make_authed_test_app(user_factory=lambda: owner, bind_current_user=True)
     app.state.run_manager = _ThreadTestRunManager()
     app.include_router(threads.router)
 
@@ -456,6 +458,59 @@ def test_delete_thread_route_closes_browser_session(tmp_path):
 
     assert response.status_code == 200
     manager.close_session.assert_awaited_once_with("thread-browser")
+
+
+def test_delete_thread_route_closes_mcp_sessions(tmp_path):
+    """Deleting a thread tears down its persistent MCP sessions so a later
+    caller who reuses the id gets fresh MCP server state instead of a retained
+    session (and its leaked owner task plus subprocess) — the same invariant the
+    browser-session cleanup above guards (#5188)."""
+    paths = Paths(tmp_path)
+    owner = User(email="mcp-owner@example.com", password_hash="x")
+
+    app = make_authed_test_app(user_factory=lambda: owner, bind_current_user=True)
+    app.state.run_manager = _ThreadTestRunManager()
+    app.include_router(threads.router)
+
+    pool = SimpleNamespace(close_thread_scope=AsyncMock(return_value=None))
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-mcp")
+
+    assert response.status_code == 200
+    pool.close_thread_scope.assert_awaited_once_with(
+        user_id=str(owner.id),
+        thread_id="thread-mcp",
+    )
+
+
+def test_delete_thread_route_isolates_failing_mcp_cleanup(tmp_path):
+    """A failing MCP teardown must stay best-effort like every other cleanup step.
+
+    The delete has already removed the thread's filesystem data, checkpoints and
+    metadata by the time MCP sessions are closed, so an exception here must not
+    turn a successful deletion into a 500.
+    """
+    paths = Paths(tmp_path)
+
+    app = make_authed_test_app()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.include_router(threads.router)
+
+    pool = SimpleNamespace(close_thread_scope=AsyncMock(side_effect=RuntimeError("simulated MCP teardown failure")))
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool),
+    ):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-mcp-fail")
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "message": "Deleted local thread data for thread-mcp-fail"}
+    pool.close_thread_scope.assert_awaited_once()
 
 
 def _persistence_cleanup_app(tmp_path, *, run_store, event_store, feedback_repo):
@@ -3843,6 +3898,13 @@ def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:
     source_uploads.mkdir(parents=True, exist_ok=True)
     (source_outputs / "result.txt").write_text("answer", encoding="utf-8")
     (source_uploads / ".upload-stale.part").write_text("partial", encoding="utf-8")
+    original = source_uploads / "report.pdf"
+    markdown = source_uploads / "report.md"
+    original.write_bytes(b"%PDF")
+    markdown.write_text("# Converted report\n", encoding="utf-8")
+    register_companion(original, markdown)
+    (source_uploads / "unrelated.pdf").write_bytes(b"%PDF")
+    (source_uploads / "unrelated.md").write_text("# User notes\n", encoding="utf-8")
 
     human = HumanMessage(id="human-file", content="Make a file")
     ai = AIMessage(id="ai-file", content="Done")
@@ -3875,6 +3937,11 @@ def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:
     assert target_user_data.exists()
     assert (target_user_data / "outputs" / "result.txt").read_text(encoding="utf-8") == "answer"
     assert not (target_user_data / "uploads" / ".upload-stale.part").exists()
+    branch_original = target_user_data / "uploads" / "report.pdf"
+    assert resolve_companion(branch_original) == target_user_data / "uploads" / "report.md"
+    assert extract_outline_for_file(branch_original)[0] == [{"title": "Converted report", "line": 1}]
+    assert companion_names(target_user_data / "uploads") == {"report.md"}
+    assert resolve_companion(target_user_data / "uploads" / "unrelated.pdf") is None
     assert source_user_data.exists()
 
 
