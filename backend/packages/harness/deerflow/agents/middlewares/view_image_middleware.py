@@ -168,6 +168,46 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             return None
 
     @classmethod
+    def _read_blob_image_as_data_url(
+        cls,
+        blob_ref_data: Mapping[str, object] | None,
+        mime_type: str,
+        expected_size: int,
+        expected_sha256: str | None,
+    ) -> str | None:
+        """Resolve a trusted checkpoint blob ref, rejecting metadata drift."""
+        if blob_ref_data is None or expected_sha256 is None:
+            return None
+
+        from deerflow.storage import BlobRef, BlobStoreError, get_blob_store_if_enabled
+
+        try:
+            ref = BlobRef.model_validate(dict(blob_ref_data))
+        except (TypeError, ValueError):
+            return None
+        if ref.kind != "viewed-image" or ref.sha256 != expected_sha256 or ref.size != expected_size or ref.content_type != mime_type:
+            return None
+
+        store = get_blob_store_if_enabled()
+        if store is None:
+            return None
+        try:
+            image_bytes = store.get_bytes(ref)
+        except BlobStoreError:
+            logger.warning(
+                "Failed to resolve viewed image blob %s",
+                ref.sha256[:12],
+                exc_info=True,
+            )
+            return None
+        return cls._encode_image_bytes(
+            image_bytes,
+            mime_type,
+            expected_size,
+            expected_sha256,
+        )
+
+    @classmethod
     def _read_image_as_data_url(
         cls,
         state: ViewImageMiddlewareState,
@@ -177,6 +217,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         expected_size: int,
         expected_sha256: str | None,
         source_sandbox_id: str | None,
+        blob_ref_data: Mapping[str, object] | None = None,
         *,
         allow_host_copy: bool = False,
     ) -> str | None:
@@ -190,6 +231,15 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         fallback. When no live sandbox exists, the historical host compatibility
         path remains available (digest-checked when present).
         """
+        blob_data_url = cls._read_blob_image_as_data_url(
+            blob_ref_data,
+            mime_type,
+            expected_size,
+            expected_sha256,
+        )
+        if blob_data_url is not None:
+            return blob_data_url
+
         from deerflow.sandbox.overwrite import unwrap_sandbox
         from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
@@ -293,6 +343,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             expected_size = image_data.get("size", 0)
             expected_sha256 = image_data.get("sha256")
             source_sandbox_id = image_data.get("source_sandbox_id")
+            blob_ref = image_data.get("blob_ref")
 
             # Add text description
             content_blocks.append({"type": "text", "text": f"\n- **{image_path}** ({mime_type})"})
@@ -306,6 +357,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 expected_size,
                 expected_sha256 if isinstance(expected_sha256, str) else None,
                 source_sandbox_id if isinstance(source_sandbox_id, str) else None,
+                blob_ref if isinstance(blob_ref, Mapping) else None,
                 allow_host_copy=host_path_allowed(image_path, actual_path) if host_path_allowed is not None else False,
             )
             if data_url:
