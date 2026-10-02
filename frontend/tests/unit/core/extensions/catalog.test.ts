@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { expect, test } from "@rstest/core";
@@ -29,6 +29,24 @@ test("catalog covers every bundled extension package even without runtime regist
   const entries = extensionDirectory([], enUS.extensions.catalog);
   expect(entries).toHaveLength(packages.length);
   expect(entries.every((entry) => entry.loaded === undefined)).toBe(true);
+});
+
+test("catalog merge namespaces match the corresponding bundled plugin declarations", () => {
+  for (const entry of extensionCatalog) {
+    const directory = resolve(process.cwd(), "../examples", entry.package);
+    const namespaces = readdirSync(directory, { recursive: true })
+      .filter((path) => typeof path === "string" && path.endsWith(".py"))
+      .flatMap((path) =>
+        [
+          ...readFileSync(resolve(directory, String(path)), "utf8").matchAll(
+            /\bnamespace\s*=\s*["']([^"']+)["']/g,
+          ),
+        ].map((match) => match[1]),
+      );
+    expect(namespaces, entry.package).toEqual(
+      entry.namespace === null ? [] : [entry.namespace],
+    );
+  }
 });
 
 test("merges by namespace without duplicating catalog entries or guessing backend-only status", () => {
