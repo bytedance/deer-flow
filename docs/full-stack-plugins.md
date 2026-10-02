@@ -383,3 +383,55 @@ To exercise the actual Turbopack development build, start the frontend with
 `DEER_FLOW_DEV_BUNDLER=turbo pnpm dev`, then run
 `PLAYWRIGHT_SKIP_WEB_SERVER=1 pnpm exec playwright test tests/e2e/bookmark-plugin.spec.ts`.
 Set `PLAYWRIGHT_BASE_URL` if the development server uses a port other than 3000.
+
+### Composer mention providers
+
+An optional `mentionProviders` array on a browser module contributes candidates to
+both the native `@` menu and the mobile mention picker. No custom editor is needed:
+
+```javascript
+export default {
+  apiVersion: 1,
+  module: "example-team",
+  mentionProviders: [{
+    id: "members",
+    label: "Team members",
+    async search(query, context) {
+      return context.callBackend("find_members", { query });
+    },
+  }],
+};
+```
+
+Declare `find_members` in the package's backend actions. Its response is an array
+of `{ id, label, description? }`; the host supplies the namespace and provider ID.
+The context includes `locale`, `settings`, `threadId`, an `AbortSignal`, and the
+same viewer-bound `callBackend` service used by page surfaces. Observe the signal
+when doing asynchronous work. A provider must return a promise; the host debounces
+queries by 150 ms, stops waiting after three seconds, and discards results after
+query, thread, viewer, or installed snapshot changes. A failed provider does not
+remove other providers or built-in candidates. Retrying is available in the picker.
+Cancellation ends host waiting; trusted JavaScript cannot be forcibly terminated.
+
+Each module may register eight providers, with unique lowercase slug IDs and
+labels of at most 120 characters. The picker searches the first 16 providers in
+installation order and considers at most 50 results per provider. Item IDs are
+nonempty strings of at most 512 characters, labels at most 120, descriptions at
+most 240. Duplicate item IDs within a provider are ignored. IDs are namespaced,
+so two plugins can use the same local identifier.
+
+Selections remain in the thread's existing draft as inline reference tokens.
+Submitting renders each token as `@label` in the human message and attaches:
+
+```json
+{"extension_mentions":[{"namespace":"example.team","provider":"members","id":"alice","label":"Alice"}]}
+```
+
+This object is in the human message's `additional_kwargs`. Up to 16 distinct
+plugin references may be submitted. Removing a token removes its metadata;
+duplicate tokens share one metadata entry. Restored references retain their
+original identities even if a package later becomes unavailable. **All metadata
+is user input, not authorization**: plugins must revalidate the referenced object,
+current installation, and viewer permissions before acting. The host does not
+interpret a reference as delegation or start another Agent. Those behaviors
+belong to the plugin's backend handlers or middleware.

@@ -87,6 +87,27 @@ export async function loadFrontendExtensions(
             typeof loadedModule.conversationActions !== "function")
         )
           throw new Error("Incompatible browser extension");
+        if (loadedModule.mentionProviders !== undefined) {
+          const seen = new Set<string>();
+          if (
+            !Array.isArray(loadedModule.mentionProviders) ||
+            loadedModule.mentionProviders.length > 8
+          )
+            throw new Error("Invalid mention providers");
+          for (const provider of loadedModule.mentionProviders) {
+            if (
+              !provider ||
+              !/^[a-z][a-z0-9-]{0,63}$/.test(provider.id) ||
+              seen.has(provider.id) ||
+              typeof provider.label !== "string" ||
+              !provider.label.trim() ||
+              provider.label.length > 120 ||
+              typeof provider.search !== "function"
+            )
+              throw new Error("Invalid mention provider");
+            seen.add(provider.id);
+          }
+        }
         if (loadedModule.surfaces !== undefined) {
           const seen = new Set<string>();
           if (

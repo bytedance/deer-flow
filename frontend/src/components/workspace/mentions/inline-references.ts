@@ -1,16 +1,21 @@
 import type { ConversationReference } from "@/core/conversation-references";
+import {
+  extensionMentionId,
+  parseExtensionMention,
+} from "@/core/extensions/mentions";
 
 export const MAX_EXPLICIT_SKILLS = 16;
 
 export type InlineReference = {
-  kind: "skill" | "file" | "conversation";
+  kind: "skill" | "file" | "conversation" | "extension";
   id: string;
   label: string;
   start: number;
   end: number;
 };
 
-const pattern = /@\[([^\]]*)\]\(ref:(skill|file|conversation):([^)]*)\)/g;
+const pattern =
+  /@\[([^\]]*)\]\(ref:(skill|file|conversation|extension):([^)]*)\)/g;
 
 export function referenceToken(
   kind: InlineReference["kind"],
@@ -137,7 +142,9 @@ export function renderReferenceEditor(root: HTMLElement, text: string) {
         ? "project-attachment-chip"
         : ref.kind === "conversation"
           ? "conversation-reference-chip"
-          : "inline-skill-reference";
+          : ref.kind === "extension"
+            ? "extension-mention-chip"
+            : "inline-skill-reference";
     token.className =
       "inline-flex items-baseline gap-1 align-baseline font-medium select-all " +
       (ref.kind === "skill"
@@ -207,4 +214,20 @@ export function reconcileConversationReferences(
       text = text.slice(0, ref.start) + `@${ref.label}` + text.slice(ref.end);
   }
   return { text, references: [...references.values()] };
+}
+
+/** Only references still present in the draft are submitted. */
+export function extensionMentionMetadata(text: string) {
+  const references = new Map<
+    string,
+    NonNullable<ReturnType<typeof parseExtensionMention>>
+  >();
+  for (const ref of inlineReferences(text)) {
+    if (ref.kind !== "extension") continue;
+    const mention = parseExtensionMention(ref.id, ref.label);
+    if (mention) references.set(extensionMentionId(mention), mention);
+  }
+  return references.size
+    ? { extension_mentions: [...references.values()] }
+    : {};
 }

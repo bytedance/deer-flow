@@ -351,6 +351,8 @@ export const enUS: Translations = {
     mentionSearch: "Search skills, project files and conversations",
     mentionSkills: "Skills",
     mentionFiles: "Project files",
+    mentionExtensions: "Plugins",
+    mentionExtensionsLimit: "Select up to 16 plugin references.",
     mentionConversations: "Conversations",
     mentionUpload: "Upload a file",
     mentionEmpty: "No matching references in loaded results",

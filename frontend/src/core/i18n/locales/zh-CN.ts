@@ -334,6 +334,8 @@ export const zhCN: Translations = {
     mentionSearch: "搜索技能、项目文件和对话",
     mentionSkills: "技能",
     mentionFiles: "项目文件",
+    mentionExtensions: "插件",
+    mentionExtensionsLimit: "最多选择 16 个插件引用。",
     mentionConversations: "对话",
     mentionUpload: "上传文件",
     mentionEmpty: "已加载的内容中没有匹配的引用",

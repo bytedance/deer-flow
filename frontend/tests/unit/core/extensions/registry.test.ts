@@ -191,3 +191,33 @@ test("discovery preserves transport negotiation through parsing and isolates new
   expect(loaded[1]?.error).toBeTruthy();
   expect(assetImporter).toHaveBeenCalledTimes(1);
 });
+
+test("validates optional mention providers independently for each installed module", async () => {
+  const assets = {
+    ...entry,
+    transport: "assets-v1",
+    entry: `/api/plugins/${entry.namespace}/assets/${"b".repeat(64)}/index.mjs`,
+  };
+  const provider = { id: "people", label: "People", search: async () => [] };
+  for (const mentionProviders of [
+    null,
+    [provider, provider],
+    [{ ...provider, search: null }],
+    [{ ...provider, id: "../bad" }],
+    Array(9).fill(provider),
+  ]) {
+    const importer = rs
+      .fn()
+      .mockResolvedValueOnce({ default: { ...extension, mentionProviders } })
+      .mockResolvedValueOnce({
+        default: { ...extension, mentionProviders: [provider] },
+      });
+    const loaded = await loadFrontendExtensions(
+      [assets, assets],
+      rs.fn(),
+      importer,
+    );
+    expect(loaded[0]?.error).toBeTruthy();
+    expect(loaded[1]?.extension?.mentionProviders).toEqual([provider]);
+  }
+});
