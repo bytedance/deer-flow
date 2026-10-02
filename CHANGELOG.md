@@ -470,7 +470,7 @@ This release closes that milestone with **301 merged pull requests**.
   the same `allow_private_addresses` policy and connects to exactly the vetted
   addresses. Loopback traffic goes through the proxy too. CDP-attached Chrome is
   unchanged, and delegated fetch services (crawl4ai, Browserless, fastcrw)
-  still resolve on their own side, which the Gateway cannot pin.
+  still resolve on their own side, which the Gateway cannot pin. ([#6201])
 - **channels:** The Discord typing indicator is now actually sent while the
   agent works on a reply. `_start_typing()` called `channel.trigger_typing()`, which
   discord.py removed in 2.0 (the project requires `>=2.7.0`), and its loop
@@ -7596,4 +7596,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135
 [#6138]: https://github.com/bytedance/deer-flow/pull/6138
 [#6140]: https://github.com/bytedance/deer-flow/pull/6140
+[#6201]: https://github.com/bytedance/deer-flow/pull/6201
 

@@ -425,7 +425,7 @@
   内网地址。现在每个启动的浏览器只通过一个按会话创建的本地回环 SOCKS5 代理建立连接：
   Chromium 把主机名交给代理，代理按相同的 `allow_private_addresses` 策略只解析一次，
   并且只连接筛查通过的地址。回环流量同样经过代理。通过 CDP 连接的 Chrome 不受影响；
-  委托抓取服务（crawl4ai、Browserless、fastcrw）仍在其自身一侧解析，Gateway 无法固定。
+  委托抓取服务（crawl4ai、Browserless、fastcrw）仍在其自身一侧解析，Gateway 无法固定。([#6201])
 - **渠道：** Discord 现在会在智能体生成回复期间真正显示"正在输入"提示。`_start_typing()` 调用的
   `channel.trigger_typing()` 已在 discord.py 2.0 中移除（项目要求 `>=2.7.0`），而其循环吞掉了
   所有异常，因此每次都抛出 `AttributeError`，提示从未发送。现在改为 await 2.x 的
@@ -6352,3 +6352,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135
 [#6138]: https://github.com/bytedance/deer-flow/pull/6138
 [#6140]: https://github.com/bytedance/deer-flow/pull/6140
+[#6201]: https://github.com/bytedance/deer-flow/pull/6201
