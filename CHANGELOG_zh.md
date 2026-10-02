@@ -419,6 +419,13 @@
 
 ### 修复
 
+- **浏览器：** 智能浏览器不会再因为 SSRF 检查之后发生变化的 DNS 应答而被引向
+  内网或云元数据主机。导航检查和逐请求守卫会解析主机名进行筛查，但 Chromium
+  建立连接时会再次解析，因此重绑定 DNS 服务器可以对检查返回公网地址、对连接返回
+  内网地址。现在每个启动的浏览器只通过一个按会话创建的本地回环 SOCKS5 代理建立连接：
+  Chromium 把主机名交给代理，代理按相同的 `allow_private_addresses` 策略只解析一次，
+  并且只连接筛查通过的地址。回环流量同样经过代理。通过 CDP 连接的 Chrome 不受影响；
+  委托抓取服务（crawl4ai、Browserless、fastcrw）仍在其自身一侧解析，Gateway 无法固定。
 - **渠道：** Discord 现在会在智能体生成回复期间真正显示"正在输入"提示。`_start_typing()` 调用的
   `channel.trigger_typing()` 已在 discord.py 2.0 中移除（项目要求 `>=2.7.0`），而其循环吞掉了
   所有异常，因此每次都抛出 `AttributeError`，提示从未发送。现在改为 await 2.x 的

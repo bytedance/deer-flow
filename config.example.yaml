@@ -1111,7 +1111,8 @@ tools:
   #   timeout_ms: 30000                # Per-action navigation/interaction timeout
   #   viewport_width: 1280
   #   viewport_height: 720
-  #   # allow_private_addresses: false # SSRF guard: keep false in production
+  #   # allow_private_addresses: false # SSRF guard: keep false in production. Also applies to the
+  #   #                                # pinned egress proxy every launched browser connects through.
   #   # cdp_url: http://127.0.0.1:9222 # Attach to YOUR running Chrome (Codex-style)
   #   # allow_unguarded_cdp: false      # REQUIRED true with cdp_url: attaching to an
   #   #                                # existing Chrome prevents DeerFlow from

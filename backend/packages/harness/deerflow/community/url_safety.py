@@ -35,6 +35,42 @@ def is_blocked_address(address: ipaddress._BaseAddress) -> bool:
     return address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast or address.is_unspecified
 
 
+def resolve_public_addresses(
+    hostname: str,
+    *,
+    action: str = "connect to",
+    resolver: Callable[[str], list[ipaddress._BaseAddress]] | None = None,
+) -> list[ipaddress._BaseAddress]:
+    """Resolve *hostname* once and return the addresses a connection may use.
+
+    Raises ``ValueError`` carrying the same ``"Error: ..."`` message
+    :func:`validate_public_http_url` returns when the host must be refused. A
+    caller that connects to exactly these addresses, instead of resolving the
+    name again at connect time, closes the DNS-rebinding window a check-only
+    screen leaves open. Blocking like :func:`resolve_host_addresses`.
+    """
+    normalized_host = hostname.strip().rstrip(".").lower()
+    if normalized_host in _BLOCKED_HOSTNAMES:
+        raise ValueError(f"Error: Refusing to {action} a private or loopback address")
+
+    try:
+        literal_ip = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        literal_ip = None
+
+    if literal_ip is not None:
+        candidates = [literal_ip]
+    else:
+        resolve = resolver or resolve_host_addresses
+        candidates = resolve(hostname)
+        if not candidates:
+            raise ValueError("Error: URL host could not be resolved")
+
+    if any(is_blocked_address(addr) for addr in candidates):
+        raise ValueError(f"Error: Refusing to {action} a private, loopback, or metadata address")
+    return candidates
+
+
 def validate_public_http_url(
     url: str,
     *,
@@ -55,7 +91,10 @@ def validate_public_http_url(
     The check runs at validation time only. A caller that connects later
     resolves the name again, so a rebinding DNS server can still hand that
     connect a private address unless the connection is pinned to the vetted
-    IPs, as ``deerflow.mcp.personal_network`` does.
+    IPs (:func:`resolve_public_addresses`), as ``deerflow.mcp.personal_network``
+    and the browser egress proxy do. Delegated fetch services (crawl4ai,
+    Browserless, fastcrw) resolve on their own side and cannot be pinned from
+    here.
     """
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -68,23 +107,8 @@ def validate_public_http_url(
     if not hostname:
         return "Error: URL host could not be parsed"
 
-    normalized_host = hostname.strip().rstrip(".").lower()
-    if normalized_host in _BLOCKED_HOSTNAMES:
-        return f"Error: Refusing to {action} a private or loopback address"
-
     try:
-        literal_ip = ipaddress.ip_address(normalized_host)
-    except ValueError:
-        literal_ip = None
-
-    if literal_ip is not None:
-        candidates = [literal_ip]
-    else:
-        resolve = resolver or resolve_host_addresses
-        candidates = resolve(hostname)
-        if not candidates:
-            return "Error: URL host could not be resolved"
-
-    if any(is_blocked_address(addr) for addr in candidates):
-        return f"Error: Refusing to {action} a private, loopback, or metadata address"
+        resolve_public_addresses(hostname, action=action, resolver=resolver)
+    except ValueError as exc:
+        return str(exc)
     return None
