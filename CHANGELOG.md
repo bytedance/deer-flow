@@ -474,6 +474,14 @@ This release closes that milestone with **301 merged pull requests**.
   strict blocking-IO gate gains a `socket.getaddrinfo` rule, because
   Blockbuster's defaults wrap socket methods but not the module-level resolver.
   ([#6140])
+- **agents:** Loop-detection integer thresholds now reject YAML booleans instead
+  of coercing `true` to `1`. A configuration such as `warn_threshold: true`
+  and `hard_limit: true` previously made the first tool-call set meet the hard
+  limit and forced the agent to stop; booleans on the tracking-window,
+  per-tool-frequency, and per-tool override fields similarly collapsed their
+  limits to one. All integer threshold fields now fail configuration loading
+  with a field-specific error while valid integers and numeric strings retain
+  their existing behavior.([#6017])
 - **uploads:** Converted Markdown ownership is now recorded when a document is
   converted. `list_uploaded_files` hides only verified conversion outputs, and
   document outlines use only the recorded companion; a user-uploaded Markdown
