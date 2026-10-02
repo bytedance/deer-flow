@@ -218,6 +218,10 @@ function fenceTail(line: string, match: RegExpExecArray): string {
 
 type OpenFence = { quoteDepth: number; column: number };
 
+// How far a top-level line has to be indented to be an indented code block
+// rather than a paragraph. One tab already reaches it.
+const INDENTED_CODE_COLUMNS = 4;
+
 function maskFencedCodeBlocks(markdown: string): string {
   // Blank a fenced block from its opener to its matching closer — or, while the
   // message is still streaming, to end of input when the fence is unclosed.
@@ -236,17 +240,42 @@ function maskFencedCodeBlocks(markdown: string): string {
   let fence: OpenFence | null = null;
   let items: number[] = [];
   let itemsQuoteDepth = 0;
+  // Leaving a block quote is not the same as reaching free text: a line four
+  // columns in, with no `>` on it, starts an indented code block at the top
+  // level, so its citations stay code and must stay blanked. Blank lines inside
+  // such a run need nothing — they carry no text to hide.
+  let indentedRun = false;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
     const position = linePosition(line);
     const opener = FENCE_LINE_RE.exec(line);
+    if (indentedRun) {
+      if (
+        position.quoteDepth === 0 &&
+        (position.body === "" || position.indent >= INDENTED_CODE_COLUMNS)
+      ) {
+        if (position.body !== "") {
+          lines[i] = maskKeepingNewlines(line);
+        }
+        continue;
+      }
+      indentedRun = false;
+    }
     if (openMarker) {
       const escaped =
         position.quoteDepth < fence!.quoteDepth ||
         (position.body !== "" && position.indent < fence!.column);
       if (escaped) {
+        const leftTheQuote = fence!.quoteDepth > 0 && position.quoteDepth === 0;
         openMarker = null;
         fence = null;
+        indentedRun =
+          leftTheQuote &&
+          position.body !== "" &&
+          position.indent >= INDENTED_CODE_COLUMNS;
+        if (indentedRun) {
+          lines[i] = maskKeepingNewlines(line);
+        }
       } else {
         lines[i] = maskKeepingNewlines(line);
         // A closer is only a closer when nothing but whitespace follows the

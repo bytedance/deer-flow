@@ -229,6 +229,105 @@ describe("extractCitationSources", () => {
     ]);
   });
 
+  it("masks a dedented citation that lands in an indented code block", () => {
+    // Losing the `>` closes the block quote and the fence inside it, but the
+    // escaping line is not free: four columns of indentation at the top level
+    // is an indented code block, so Fake still renders as code. Verified
+    // against remark-parse, whose tree is quote>code, code, quote>code, paragraph.
+    const markdown = [
+      "> ```md",
+      "    [citation:Fake](https://example.com/fake)",
+      "> ```",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("counts a tab-indented escaping line as the same four-column run", () => {
+    // A tab reaches the next tab stop, so `\t` is four columns and `\t\t` eight;
+    // both are indented code, and the marker padding on the opener is irrelevant.
+    const markdown = [
+      ">\t```md",
+      "\t[citation:Fake](https://example.com/fake)",
+      ">\t```",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("keeps an indented run across a blank line inside it", () => {
+    const markdown = [
+      "> ```md",
+      "    [citation:Fake1](https://example.com/fake1)",
+      "",
+      "    [citation:Fake2](https://example.com/fake2)",
+      "> ```",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("ends the indented run at a dedent so that citation renders again", () => {
+    // Two columns is inside the item-less paragraph the run gives way to, so the
+    // second citation is a rendered link while the four-column one above stays
+    // code.
+    const markdown = [
+      "> ```md",
+      "    [citation:Code](https://example.com/code)",
+      "  [citation:Para](https://example.com/para)",
+      "> ```",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/para",
+      "https://example.com/real",
+    ]);
+  });
+
+  it("resumes normal scanning once an indented run meets a quoted line", () => {
+    // The run ends at `> [citation:Quoted]`, which is quote content again, and
+    // the `> ``` ` below it opens the fence that the final line escapes.
+    const markdown = [
+      "> ```md",
+      "    [citation:Fake](https://example.com/fake)",
+      "> [citation:Quoted](https://example.com/quoted)",
+      "> ```",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/quoted",
+      "https://example.com/real",
+    ]);
+  });
+
+  it("does not mask an escaping citation three columns in", () => {
+    // Three columns is not enough to start an indented code block, so the line
+    // is a top-level paragraph and its citation is a real rendered link. This
+    // pins the threshold against the four-column case above.
+    const markdown = [
+      "> ```md",
+      "   [citation:Fake](https://example.com/fake)",
+      "> ```",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/fake",
+      "https://example.com/real",
+    ]);
+  });
+
   it("does not open a fence from a backtick run in the middle of a line", () => {
     const markdown = [
       "Run ```md please",
