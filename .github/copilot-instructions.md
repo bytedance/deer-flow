@@ -202,7 +202,25 @@ Important root entries:
 - `config.example.yaml`
 - `extensions_config.example.json`
 
-## 9) Instruction Priority
+## 9) Extension-First Feature Evaluation
+
+Before implementing a feature by editing core code, evaluate whether it can ship as a
+packaged extension instead (non-invasive contribution). The public extension contract
+(`backend/packages/extension-api/`) supports: middleware, task-lifecycle and
+model/context observers, Gateway services, FastAPI routers, and full-stack plugins
+(model tools + browser pages).
+
+- Use an extension when the capability is self-contained and expressible through those
+  contribution points.
+- Stay in core for bug fixes and for changes to the agent loop, memory, context
+  compaction, or authentication.
+- If existing hooks cannot express the feature, extend `extension-api` with a generic
+  hook and build the feature as an extension — do not hard-code business logic into core.
+
+Authoritative details: `AGENTS.md` ("Cross-Cutting Conventions") and
+`backend/packages/harness/deerflow/extensions/AGENTS.md`; examples in `examples/`.
+
+## 10) Instruction Priority
 
 Trust this onboarding guide first.
 

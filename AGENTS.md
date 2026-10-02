@@ -218,6 +218,18 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 
 These apply repo-wide; module guides own the module-specific detail.
 
+- **Extension-first evaluation** — before implementing a feature by editing core code,
+  evaluate whether it can ship as a packaged extension instead. The public contract
+  (`backend/packages/extension-api/`) lets an extension contribute middleware,
+  task-lifecycle and model/context observers, Gateway services, FastAPI routers, and
+  full-stack plugins (model tools + browser pages). Route to an extension when the
+  capability is self-contained and expressible through those contribution points; stay
+  in core for bug fixes and for changes to the agent loop, memory, context compaction,
+  or authentication. If the existing hooks cannot express the feature, the right
+  contribution is a new generic hook in `extension-api` plus an extension that uses
+  it — not business logic hard-coded into core. Contract details:
+  [the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md);
+  working examples: `examples/deerflow-extension-{example,bookmarks}`.
 - **Documentation update policy** — keep docs in sync with code: update `README.md` for
   user-facing changes and the relevant `AGENTS.md` for development/architecture changes in
   the same change set.
