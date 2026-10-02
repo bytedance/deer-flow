@@ -15,6 +15,10 @@ Only Markdown destinations decode once; relative images match decoded names
 against raw artifact paths before encoding.
 File-type detection uses the basename so extensionless `Dockerfile` and
 `Makefile` artifacts remain recognizable under nested or dotted directories.
+HTML preview base detection uses an inert template to distinguish real tags from
+comments, script text, and nested template contents, without rewriting the source.
+Its browser-DOM tests live in `tests/unit/core/artifacts/preview-base.dom.test.ts`;
+the other preview helpers retain the node test environment.
 Language-map membership checks only own properties; inherited names such as
 `constructor` and `__proto__` must keep the unknown-file download fallback.
 

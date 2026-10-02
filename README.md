@@ -1847,6 +1847,8 @@ Files presented through `present_files` remain part of the thread's artifact sta
 
 CSV and TSV artifacts open as tables in the artifact panel and in a separate window. The preview preserves text values (including leading zeros), supports an optional header row, and pages through up to 200 rows and 50 columns from the initial sample. Long or multiline cells can be opened and copied in full. Switch to source to inspect or edit the file; downloads and separate windows use the saved version.
 
+HTML artifact previews resolve relative assets from the artifact directory unless the document contains a real `<base>` element. Base-tag examples in comments or script text do not change that resolution.
+
 Text artifacts are streamed with HTTP byte-range support. The Web UI initially
 loads at most 1 MiB, shows the preview size when a file is larger, and waits for
 an explicit **Load full file** action before fetching the remainder or mounting

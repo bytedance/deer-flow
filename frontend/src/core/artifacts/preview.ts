@@ -175,7 +175,14 @@ export function appendHtmlPreviewBaseHref(
   url?: string,
   currentHref = globalThis.location?.href ?? "http://localhost/",
 ) {
-  if (!url || /<base\s/i.exec(content)) {
+  if (!url) {
+    return content;
+  }
+
+  // Template contents are inert: parse tags without running scripts or loading assets.
+  const template = document.createElement("template");
+  template.innerHTML = content;
+  if (template.content.querySelector("base")) {
     return content;
   }
 
