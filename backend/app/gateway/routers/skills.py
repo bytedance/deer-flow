@@ -837,10 +837,10 @@ def _write_extensions_skill_state(
     description="Update a skill's enabled status by modifying the extensions_config.json file.",
 )
 async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Request, config: AppConfig = Depends(get_config)) -> SkillResponse:
-    # Enabling/disabling a skill writes the shared extensions_config.json and
-    # refreshes the system prompt for every tenant, so it is a global mutation
-    # (there is no per-user skill state). Guard it as admin-only like the other
-    # global config writes, matching the MCP router.
+    # Keep skill toggles admin-only, including user-scoped custom/legacy skills.
+    # Public state uses shared extensions_config.json; custom/legacy state uses
+    # per-user storage when available, falling back to shared config otherwise.
+    # Cache invalidation follows the skill category in _persist_state below.
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
