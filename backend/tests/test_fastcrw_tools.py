@@ -2,7 +2,10 @@
 
 import ipaddress
 import json
+import logging
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 class TestWebSearchTool:
@@ -175,3 +178,41 @@ class TestWebFetchTool:
             "http://10.0.0.5/dashboard",
             formats=["markdown"],
         )
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected_limit", "warns"),
+    [
+        pytest.param(True, 5, True, id="bool"),
+        pytest.param(0, 5, True, id="zero"),
+        pytest.param(-3, 5, True, id="negative"),
+        pytest.param(3.5, 5, True, id="fractional"),
+        pytest.param("many", 5, True, id="non-numeric-string"),
+        pytest.param("8", 8, False, id="integer-string"),
+        pytest.param(7, 7, False, id="plain-int"),
+        pytest.param(None, 5, False, id="omitted"),
+    ],
+)
+@patch.dict("os.environ", {}, clear=True)
+@patch("deerflow.community.fastcrw.tools.FirecrawlApp")
+@patch("deerflow.community.fastcrw.tools.get_app_config")
+def test_search_normalizes_max_results_before_calling_the_client(mock_get_app_config, mock_fastcrw_cls, caplog, configured, expected_limit, warns):
+    search_config = MagicMock()
+    extra: dict[str, object] = {"api_key": "fastcrw-search-key"}
+    if configured is not None:
+        extra["max_results"] = configured
+    search_config.model_extra = extra
+    mock_get_app_config.return_value.get_tool_config.return_value = search_config
+
+    mock_result = MagicMock()
+    mock_result.web = []
+    mock_fastcrw_cls.return_value.search.return_value = mock_result
+
+    from deerflow.community.fastcrw.tools import web_search_tool
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.community.fastcrw.tools"):
+        result = web_search_tool.invoke({"query": "q"})
+
+    assert result == "[]"
+    mock_fastcrw_cls.return_value.search.assert_called_once_with("q", limit=expected_limit)
+    assert ("Invalid fastCRW max_results" in caplog.text) is warns
