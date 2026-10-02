@@ -158,3 +158,31 @@ class TestTrimTokensToSummarizeGuard:
     def test_rejects_non_positive_and_boolean(self, bad: int | bool) -> None:
         with pytest.raises(ValidationError):
             SummarizationConfig(**{"trim_tokens_to_summarize": bad})
+
+
+class TestAppConfigBoolRejection:
+    """Same failure mode as #6017, on the settings it was not applied to."""
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "max_concurrent_calls",
+            "retry_max_attempts",
+            "retry_base_delay_ms",
+            "retry_cap_delay_ms",
+            "burst_retry_base_delay_ms",
+        ],
+    )
+    def test_llm_call_integers_reject_booleans(self, field: str) -> None:
+        from deerflow.config.app_config import LlmCallConfig
+
+        with pytest.raises(ValidationError):
+            LlmCallConfig(**{field: True})
+
+    def test_llm_call_integers_still_accept_numbers(self) -> None:
+        from deerflow.config.app_config import LlmCallConfig
+
+        config = LlmCallConfig(max_concurrent_calls=8, retry_max_attempts=3)
+
+        assert config.max_concurrent_calls == 8
+        assert config.retry_max_attempts == 3
