@@ -29,7 +29,6 @@ import logging
 import os
 import posixpath
 import shlex
-import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any, override
