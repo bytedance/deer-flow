@@ -26,10 +26,11 @@ def _app_config(**overrides: object) -> AppConfig:
     return AppConfig(sandbox=SandboxConfig(use="local"), **overrides)
 
 
+@pytest.mark.parametrize("value", [True, False])
 @pytest.mark.parametrize("field", LLM_CALL_INT_FIELDS)
-def test_llm_call_config_rejects_boolean_integers(field: str) -> None:
+def test_llm_call_config_rejects_boolean_integers(field: str, value: bool) -> None:
     with pytest.raises(ValidationError, match="must be an integer, not a boolean"):
-        LlmCallConfig(**{field: True})
+        LlmCallConfig(**{field: value})
 
 
 def test_llm_call_config_keeps_numeric_inputs() -> None:
@@ -38,10 +39,11 @@ def test_llm_call_config_keeps_numeric_inputs() -> None:
     assert config.retry_max_attempts == 3
 
 
+@pytest.mark.parametrize("value", [True, False])
 @pytest.mark.parametrize("field", ["recursion_limit", "max_recursion_limit"])
-def test_recursion_limits_reject_booleans(field: str) -> None:
+def test_recursion_limits_reject_booleans(field: str, value: bool) -> None:
     with pytest.raises(ValidationError, match="must be an integer, not a boolean"):
-        _app_config(**{field: True})
+        _app_config(**{field: value})
 
 
 def test_recursion_limits_keep_numeric_inputs() -> None:
