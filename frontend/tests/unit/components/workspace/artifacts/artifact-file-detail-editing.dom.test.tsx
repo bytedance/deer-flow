@@ -159,6 +159,45 @@ afterEach(() => {
 });
 
 describe("ArtifactFileDetail complete editing baseline", () => {
+  it.each([
+    ["truncated preview", { content: prefix, truncated: true }],
+    ["failed refetch", { error: new Error("Artifact refetch failed") }],
+    ["loading", { content: undefined, isLoading: true }],
+  ])(
+    "keeps an exit available during %s without losing the draft",
+    (_name, state) => {
+      loadFull();
+      const { rerender } = renderDetail();
+      fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+      fireEvent.change(source(), { target: { value: "my retained draft" } });
+
+      Object.assign(mocks.artifactContent, state);
+      rerender(detail());
+      const exit = screen.getByRole<HTMLButtonElement>("button", {
+        name: "Exit editing",
+      });
+      expect(exit.disabled).toBe(false);
+      expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Discard changes" }),
+      ).toBeNull();
+      fireEvent.click(exit);
+      expect(screen.queryByRole("button", { name: "Exit editing" })).toBeNull();
+
+      Object.assign(mocks.artifactContent, {
+        error: undefined,
+        isLoading: false,
+      });
+      loadFull();
+      rerender(detail());
+      expect(source().readOnly).toBe(true);
+      fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+      expect(source().value).toBe("my retained draft");
+      expect(save().disabled).toBe(false);
+      expect(mockedFetch).not.toHaveBeenCalled();
+    },
+  );
+
   it("does not offer editing for a truncated preview with a full-file ETag", () => {
     renderDetail();
 

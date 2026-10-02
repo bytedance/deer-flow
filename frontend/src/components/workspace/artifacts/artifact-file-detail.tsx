@@ -535,13 +535,19 @@ export function ArtifactFileDetail({
                   }
                   onClick={() => void handleSave()}
                 />
-                <ArtifactAction
-                  icon={PencilOffIcon}
-                  label={t.artifactEditing.exit}
-                  tooltip={t.artifactEditing.exit}
-                  disabled={isSaving}
-                  onClick={() => setEditingPath(null)}
-                />
+              </>
+            )}
+            {isEditing && (
+              <ArtifactAction
+                icon={PencilOffIcon}
+                label={t.artifactEditing.exit}
+                tooltip={t.artifactEditing.exit}
+                disabled={isSaving}
+                onClick={() => setEditingPath(null)}
+              />
+            )}
+            {canEdit && isEditing && (
+              <>
                 <ArtifactAction
                   icon={RotateCcwIcon}
                   label={t.artifactEditing.discard}
