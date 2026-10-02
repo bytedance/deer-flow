@@ -67,6 +67,9 @@ def _args(**overrides) -> argparse.Namespace:
         "tools": "",
         "allowed_tools": "",
         "max_state_chars": 4000,
+        "instructions": None,
+        "criteria_true": None,
+        "criteria_false": None,
         "timeout": 5.0,
         "deadline_seconds": 10.0,
         "max_attempts": 2,
@@ -149,6 +152,23 @@ def test_tool_and_allowed_tools_lists_ignore_surrounding_whitespace(monkeypatch)
     declared = provider.release_policy_parameters()
     assert declared["tools"] == ["bash", "write_file"]
     assert declared["allowed_tools"] == ["bash", "read_file"]
+
+
+def test_prompt_override_flags_reach_the_provider(monkeypatch):
+    """The report's ``policy`` is built from the same flags as the provider; without
+    a passthrough check the report could record an override the provider never got."""
+    from deerflow_extension_api import canonical_hash
+
+    monkeypatch.setenv("TYPESAFE_TEST_KEY", "key")
+    provider = eval_script._provider(_args(api_key_env="TYPESAFE_TEST_KEY", instructions="custom", criteria_true="ct", criteria_false="cf"), cache_enabled=False)
+
+    declared = provider.release_policy_parameters()
+    assert declared["instructions_hash"] == canonical_hash("custom")
+    assert declared["criteria"] == {"true": "ct", "false": "cf"}
+
+    # The fallback is None-only: an unset criteria_false keeps the built-in text.
+    partial = eval_script._provider(_args(api_key_env="TYPESAFE_TEST_KEY", criteria_true="ct"), cache_enabled=False)
+    assert partial.release_policy_parameters()["criteria"] == {"true": "ct", "false": DEFAULT_CRITERIA_FALSE}
 
 
 def test_failed_warming_leaves_the_next_call_a_network_evaluation(monkeypatch):
@@ -312,7 +332,7 @@ def test_main_exit_code_carries_the_gate_verdict(monkeypatch, capsys, tmp_path, 
     assert ("Evaluation gates FAILED: risky_misses_zero" in printed) is allow_risky
 
 
-def test_main_report_records_prompt_overrides_in_the_policy(monkeypatch, tmp_path):
+def test_main_report_records_prompt_overrides_in_the_policy(monkeypatch, capsys, tmp_path):
     """A custom-rubric run changes the evaluated policy; the report must say so,
     or its verdict cannot be reproduced or told apart from a default-policy run."""
     _, report = _run_main(
@@ -328,9 +348,10 @@ def test_main_report_records_prompt_overrides_in_the_policy(monkeypatch, tmp_pat
         "criteria_true": "custom risky rubric",
         "criteria_false": DEFAULT_CRITERIA_FALSE,
     }
+    assert "policy=custom" in capsys.readouterr().out
 
 
-def test_main_report_records_the_default_policy_without_overrides(monkeypatch, tmp_path):
+def test_main_report_records_the_default_policy_without_overrides(monkeypatch, capsys, tmp_path):
     _, report = _run_main(
         monkeypatch,
         tmp_path,
@@ -343,6 +364,7 @@ def test_main_report_records_the_default_policy_without_overrides(monkeypatch, t
         "criteria_true": DEFAULT_CRITERIA_TRUE,
         "criteria_false": DEFAULT_CRITERIA_FALSE,
     }
+    assert "policy=default" in capsys.readouterr().out
 
 
 def test_main_fails_when_the_tool_scope_leaves_no_risky_case(monkeypatch, capsys, tmp_path):
