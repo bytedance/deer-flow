@@ -281,6 +281,11 @@ class TestPerCallClientTeardown:
         assert result == "[]"
 
 
+# `None` is itself a configured value (`max_results:` with nothing after it in YAML), so an absent key
+# needs its own sentinel — otherwise the key-present case is never built and never tested.
+_OMITTED = object()
+
+
 @pytest.mark.parametrize(
     ("configured", "expected_limit", "warns"),
     [
@@ -291,7 +296,8 @@ class TestPerCallClientTeardown:
         pytest.param("many", 5, True, id="non-numeric-string"),
         pytest.param("8", 8, False, id="integer-string"),
         pytest.param(7, 7, False, id="plain-int"),
-        pytest.param(None, 5, False, id="omitted"),
+        pytest.param(None, 5, True, id="explicit-null"),
+        pytest.param(_OMITTED, 5, False, id="omitted"),
     ],
 )
 @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
@@ -300,7 +306,7 @@ class TestPerCallClientTeardown:
 async def test_search_normalizes_max_results_before_calling_the_client(mock_get_app_config, mock_firecrawl_cls, caplog, configured, expected_limit, warns):
     search_config = MagicMock()
     extra: dict[str, object] = {"api_key": "firecrawl-search-key"}
-    if configured is not None:
+    if configured is not _OMITTED:
         extra["max_results"] = configured
     search_config.model_extra = extra
     mock_get_app_config.return_value.get_tool_config.return_value = search_config
