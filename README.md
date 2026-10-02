@@ -961,6 +961,12 @@ events identify newly promoted deferred-tool names and whether routing metadata 
 `tool_search` selected them, without copying the search query, routing keywords,
 schemas, arguments, results, or catalog hash into the promotion event itself.
 
+The offline [progress-detection benchmark](backend/scripts/benchmark/progress_scoring/README.md)
+compares loop detection, tool progress, and the experimental #2805 candidate on
+source-pinned synthetic traces. Its report separates policy coverage and
+protocol overhead from the model-scoring evidence still needed for adoption;
+it makes no runtime changes.
+
 #### LangSmith Tracing
 
 DeerFlow has built-in [LangSmith](https://smith.langchain.com) integration for observability. When enabled, all LLM calls, agent runs, and tool executions are traced and visible in the LangSmith dashboard.

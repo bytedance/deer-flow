@@ -1,0 +1,328 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "score_origin": "hand_authored",
+  "cases": [
+    {
+      "id": "identical_calls",
+      "scenario": "identical_calls",
+      "stalled": true,
+      "steps": 8,
+      "goal": "Find evidence answering the target question.",
+      "tools": [
+        "web_search"
+      ],
+      "args": {
+        "query": "synthetic-query-{step}"
+      },
+      "vary_args": false,
+      "result": "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima",
+      "evaluation": {
+        "task_progress": 0,
+        "tool_usefulness": 0,
+        "progress_type": "none",
+        "evidence": [],
+        "should_change_strategy": true
+      },
+      "meta": {
+        "status": "success",
+        "error_type": null,
+        "recoverable_by_model": true,
+        "recommended_next_action": "continue",
+        "source": "tool_return"
+      }
+    },
+    {
+      "id": "varied_no_results",
+      "scenario": "failed_varied_calls",
+      "stalled": true,
+      "steps": 8,
+      "goal": "Find evidence answering the target question.",
+      "tools": [
+        "web_search"
+      ],
+      "args": {
+        "query": "synthetic-query-{step}"
+      },
+      "vary_args": true,
+      "result": "No results found",
+      "evaluation": {
+        "task_progress": 0,
+        "tool_usefulness": 0,
+        "progress_type": "none",
+        "evidence": [],
+        "should_change_strategy": true
+      },
+      "meta": {
+        "status": "error",
+        "error_type": "no_results",
+        "recoverable_by_model": true,
+        "recommended_next_action": "rewrite_query",
+        "source": "content_analysis"
+      }
+    },
+    {
+      "id": "cross_tool_identical",
+      "scenario": "cross_tool_identical",
+      "stalled": true,
+      "steps": 8,
+      "goal": "Find evidence answering the target question.",
+      "tools": [
+        "lookup_alpha",
+        "lookup_bravo",
+        "lookup_charlie",
+        "lookup_delta",
+        "lookup_echo",
+        "lookup_foxtrot",
+        "lookup_golf",
+        "lookup_hotel"
+      ],
+      "args": {
+        "query": "synthetic-query-{step}"
+      },
+      "vary_args": true,
+      "result": "No task-relevant evidence.",
+      "evaluation": {
+        "task_progress": 0,
+        "tool_usefulness": 0,
+        "progress_type": "none",
+        "evidence": [],
+        "should_change_strategy": true
+      },
+      "meta": {
+        "status": "success",
+        "error_type": null,
+        "recoverable_by_model": true,
+        "recommended_next_action": "continue",
+        "source": "tool_return"
+      }
+    },
+    {
+      "id": "distinct_stagnation",
+      "scenario": "distinct_stagnation",
+      "stalled": true,
+      "steps": 8,
+      "goal": "Find evidence answering the target question.",
+      "tools": [
+        "web_search"
+      ],
+      "args": {
+        "query": "synthetic-query-{step}"
+      },
+      "vary_args": true,
+      "result": "Unrelated result resource-{step}",
+      "evaluation": {
+        "task_progress": 0,
+        "tool_usefulness": 3,
+        "progress_type": "none",
+        "evidence": [],
+        "should_change_strategy": true
+      },
+      "meta": {
+        "status": "success",
+        "error_type": null,
+        "recoverable_by_model": true,
+        "recommended_next_action": "continue",
+        "source": "tool_return"
+      }
+    },
+    {
+      "id": "same_call_distinct_stagnation",
+      "scenario": "distinct_stagnation",
+      "stalled": true,
+      "steps": 8,
+      "goal": "Find evidence answering the target question.",
+      "tools": [
+        "web_search"
+      ],
+      "args": {
+        "query": "synthetic-query-{step}"
+      },
+      "vary_args": false,
+      "result": "Unrelated observation resource-{step}",
+      "evaluation": {
+        "task_progress": 0,
+        "tool_usefulness": 3,
+        "progress_type": "none",
+        "evidence": [],
+        "should_change_strategy": true
+      },
+      "meta": {
+        "status": "success",
+        "error_type": null,
+        "recoverable_by_model": true,
+        "recommended_next_action": "continue",
+        "source": "tool_return"
+      }
+    },
+    {
+      "id": "long_bash_artifacts",
+      "scenario": "legitimate_long",
+      "stalled": false,
+      "steps": 60,
+      "goal": "Verify all 60 independent sample artifacts.",
+      "tools": [
+        "bash"
+      ],
+      "args": {
+        "command": "verify sample-{step}"
+      },
+      "vary_args": true,
+      "result": "Artifact sample-{step} verified",
+      "evaluation": {
+        "task_progress": 3,
+        "tool_usefulness": 3,
+        "progress_type": "verification",
+        "evidence": [],
+        "should_change_strategy": false
+      },
+      "meta": {
+        "status": "success",
+        "error_type": null,
+        "recoverable_by_model": true,
+        "recommended_next_action": "continue",
+        "source": "tool_return"
+      }
+    },
+    {
+      "id": "long_mcp_resources",
+      "scenario": "legitimate_long",
+      "stalled": false,
+      "steps": 60,
+      "goal": "Check all 60 distinct resources.",
+      "tools": [
+        "mcp_get_resource"
+      ],
+      "args": {
+        "resource_id": "resource-{step}"
+      },
+      "vary_args": true,
+      "result": "Resource resource-{step} checked",
+      "evaluation": {
+        "task_progress": 3,
+        "tool_usefulness": 3,
+        "progress_type": "verification",
+        "evidence": [],
+        "should_change_strategy": false
+      },
+      "meta": {
+        "status": "success",
+        "error_type": null,
+        "recoverable_by_model": true,
+        "recommended_next_action": "continue",
+        "source": "tool_return"
+      }
+    },
+    {
+      "id": "hypothesis_elimination",
+      "scenario": "legitimate_long",
+      "stalled": false,
+      "steps": 8,
+      "goal": "Eliminate independent hypotheses before selecting a cause.",
+      "tools": [
+        "bash"
+      ],
+      "args": {
+        "command": "test hypothesis-{step}"
+      },
+      "vary_args": true,
+      "result": "Hypothesis-{step} ruled out",
+      "evaluation": {
+        "task_progress": 2,
+        "tool_usefulness": 0,
+        "progress_type": "verification",
+        "evidence": [],
+        "should_change_strategy": false
+      },
+      "meta": {
+        "status": "success",
+        "error_type": null,
+        "recoverable_by_model": true,
+        "recommended_next_action": "continue",
+        "source": "tool_return"
+      }
+    },
+    {
+      "id": "optimistic_scores",
+      "scenario": "identical_calls",
+      "stalled": true,
+      "steps": 8,
+      "goal": "Find evidence answering the target question.",
+      "tools": [
+        "web_search"
+      ],
+      "args": {
+        "query": "synthetic-query-{step}"
+      },
+      "vary_args": false,
+      "result": "No task-relevant evidence.",
+      "evaluation": {
+        "task_progress": 3,
+        "tool_usefulness": 3,
+        "progress_type": "verification",
+        "evidence": [],
+        "should_change_strategy": false
+      },
+      "meta": {
+        "status": "success",
+        "error_type": null,
+        "recoverable_by_model": true,
+        "recommended_next_action": "continue",
+        "source": "tool_return"
+      }
+    },
+    {
+      "id": "missing_evaluations",
+      "scenario": "identical_calls",
+      "stalled": true,
+      "steps": 8,
+      "goal": "Find evidence answering the target question.",
+      "tools": [
+        "web_search"
+      ],
+      "args": {
+        "query": "synthetic-query-{step}"
+      },
+      "vary_args": false,
+      "result": "No task-relevant evidence.",
+      "evaluation": null,
+      "meta": {
+        "status": "success",
+        "error_type": null,
+        "recoverable_by_model": true,
+        "recommended_next_action": "continue",
+        "source": "tool_return"
+      }
+    },
+    {
+      "id": "one_noisy_result",
+      "scenario": "identical_calls",
+      "stalled": true,
+      "steps": 8,
+      "goal": "Find evidence answering the target question.",
+      "tools": [
+        "web_search"
+      ],
+      "args": {
+        "query": "synthetic-query-{step}"
+      },
+      "vary_args": false,
+      "result": "No task-relevant evidence.",
+      "evaluation": {
+        "task_progress": 0,
+        "tool_usefulness": 0,
+        "progress_type": "none",
+        "evidence": [],
+        "should_change_strategy": true
+      },
+      "meta": {
+        "status": "success",
+        "error_type": null,
+        "recoverable_by_model": true,
+        "recommended_next_action": "continue",
+        "source": "tool_return"
+      },
+      "noisy_step": 2
+    }
+  ]
+}
