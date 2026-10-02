@@ -470,7 +470,7 @@ This release closes that milestone with **301 merged pull requests**.
   checks stay, because some non-public forms such as the NAT64 spelling of a
   metadata address still report as global. Operators who intentionally fetch
   tailnet or CGNAT hosts with these tools must now set
-  `allow_private_addresses: true`.
+  `allow_private_addresses: true`. ([#6202])
 - **channels:** The Discord typing indicator is now actually sent while the
   agent works on a reply. `_start_typing()` called `channel.trigger_typing()`, which
   discord.py removed in 2.0 (the project requires `>=2.7.0`), and its loop
@@ -7596,4 +7596,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135
 [#6138]: https://github.com/bytedance/deer-flow/pull/6138
 [#6140]: https://github.com/bytedance/deer-flow/pull/6140
+[#6202]: https://github.com/bytedance/deer-flow/pull/6202
 
