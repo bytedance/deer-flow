@@ -700,7 +700,7 @@ DeerFlow can also expose user-owned IM channel connections in the workspace UI. 
 | Feishu / Lark | WebSocket | Moderate |
 | WeChat | Tencent iLink (long-polling) | Moderate |
 | WeCom | WebSocket | Moderate |
-| QQ | WebSocket (text-only C2C and group @mentions) | Moderate |
+| QQ | WebSocket (text-only C2C and group @mentions; four/five passive replies per source) | Moderate |
 | DingTalk | Stream Push (WebSocket) | Moderate |
 | Buzz | Nostr relay (WebSocket, NIP-42) | Moderate |
 

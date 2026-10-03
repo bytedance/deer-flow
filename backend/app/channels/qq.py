@@ -30,7 +30,9 @@ API_URL = "https://api.sgroup.qq.com"
 GROUP_AND_C2C_EVENT = 1 << 25
 # Conservative adapter budget, not a claim about the platform's maximum.
 MAX_TEXT_BYTES = 4000
-MAX_REPLIES = 5
+C2C_MAX_REPLIES = 4
+GROUP_MAX_REPLIES = 5
+TIMESTAMP_WARNING_INTERVAL = 60.0
 MAX_CACHED_MESSAGES = 2048
 INBOUND_BUFFER_SIZE = 64
 START_TIMEOUT = 30.0
@@ -46,7 +48,9 @@ def validate_gateway_url(url: str) -> str:
     try:
         parsed = urlsplit(url)
         host = parsed.hostname or ""
-        valid = parsed.scheme == "wss" and (host == "sgroup.qq.com" or host.endswith(".sgroup.qq.com")) and parsed.port in (None, 443) and parsed.username is None and parsed.password is None and not parsed.fragment
+        valid = (
+            parsed.scheme == "wss" and (host == "api.bot.qq.com" or host == "sgroup.qq.com" or host.endswith(".sgroup.qq.com")) and parsed.port in (None, 443) and parsed.username is None and parsed.password is None and not parsed.fragment
+        )
     except (TypeError, ValueError):
         valid = False
     if not valid:
@@ -64,6 +68,7 @@ class _GatewayConnect(connect):
 class _ReplyContext:
     path: str
     expires_at: float
+    max_replies: int
     sequence: int = 0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -89,6 +94,7 @@ class QQChannel(Channel):
         self._sequence: int | None = None
         self._bot_id = ""
         self._replies: OrderedDict[tuple[str, str], _ReplyContext] = OrderedDict()
+        self._next_timestamp_warning_at = 0.0
 
     @property
     def is_running(self) -> bool:
@@ -141,6 +147,7 @@ class QQChannel(Channel):
         self._token_expires_at = 0.0
         self._events = asyncio.Queue(maxsize=INBOUND_BUFFER_SIZE)
         self._replies.clear()
+        self._next_timestamp_warning_at = 0.0
 
     async def _get_access_token(self) -> str:
         async with self._token_lock:
@@ -371,10 +378,14 @@ class QQChannel(Channel):
             try:
                 created = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
                 if created.tzinfo is None:
-                    return
+                    raise ValueError
                 window -= max(0, time.time() - created.timestamp())
             except (TypeError, ValueError, AttributeError, OverflowError):
-                return
+                # The window is advisory; QQ enforces expiry server-side.
+                # Unknown timestamp formats must not silently disable intake.
+                if now >= self._next_timestamp_warning_at:
+                    logger.warning("[qq] message timestamp invalid or missing timezone; using full passive reply window")
+                    self._next_timestamp_warning_at = now + TIMESTAMP_WARNING_INTERVAL
         if window <= 0:
             return
         code = self._pending_connect_code(text)
@@ -389,8 +400,13 @@ class QQChannel(Channel):
             _ReplyContext(
                 f"/v2/{'groups' if group else 'users'}/{quote(target, safe='')}/messages",
                 now + window,
+                GROUP_MAX_REPLIES if group else C2C_MAX_REPLIES,
             ),
         )
+        if len(self._replies) > MAX_CACHED_MESSAGES:
+            expired = [key for key, context in self._replies.items() if context.expires_at <= now]
+            for expired_key in expired:
+                del self._replies[expired_key]
         while len(self._replies) > MAX_CACHED_MESSAGES:
             self._replies.popitem(last=False)
         if code:
@@ -447,7 +463,7 @@ class QQChannel(Channel):
         if context is None:
             raise QQAPIError("QQ requires an unexpired source message for a passive reply")
         async with context.lock:
-            remaining = MAX_REPLIES - context.sequence
+            remaining = context.max_replies - context.sequence
             if remaining <= 0:
                 raise QQAPIError("QQ passive reply quota exhausted")
             raw = msg.text.encode("utf-8")

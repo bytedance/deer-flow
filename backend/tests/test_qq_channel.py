@@ -215,27 +215,30 @@ async def test_401_refresh_reuses_reply_sequence(channel):
 
 
 @pytest.mark.asyncio
-async def test_send_splits_utf8_and_preserves_passive_reply_budget(channel, monkeypatch):
+@pytest.mark.parametrize(("kind", "quota"), [("c2c", 4), ("group", 5)])
+async def test_send_splits_utf8_and_preserves_passive_reply_budget(channel, monkeypatch, kind, quota):
     monkeypatch.setattr(qq, "MAX_TEXT_BYTES", 100)
     calls = []
 
     async def send_api(method, path, **kwargs):
+        assert kwargs["json"]["msg_seq"] <= quota
         calls.append((path, kwargs["json"]))
         return {"id": "reply"}
 
     channel._api_request = send_api
-    await channel._handle_inbound(event("group"))
+    await channel._handle_inbound(event(kind))
     await channel.send(
         OutboundMessage(
             channel_name="qq",
-            chat_id="group:group1",
+            chat_id="group:group1" if kind == "group" else "c2c:alice",
             thread_id="thread",
             thread_ts="message1",
             text="中文🙂" * 300,
         )
     )
-    assert 1 <= len(calls) <= 5
-    assert all(path == "/v2/groups/group1/messages" for path, _ in calls)
+    assert len(calls) == quota
+    expected_path = "/v2/groups/group1/messages" if kind == "group" else "/v2/users/alice/messages"
+    assert all(path == expected_path for path, _ in calls)
     assert all(len(payload["content"].encode("utf-8")) <= 100 for _, payload in calls)
     assert [payload["msg_seq"] for _, payload in calls] == list(range(1, len(calls) + 1))
     assert all(payload["msg_id"] == "message1" for _, payload in calls)
@@ -305,6 +308,12 @@ async def test_api_failure_never_exposes_provider_body(channel, caplog):
         "ws://api.sgroup.qq.com/ws",
         "wss://qq.com.attacker.invalid/ws",
         "wss://user:pass@api.sgroup.qq.com/ws",
+        "wss://api.bot.qq.com.attacker.invalid/websocket/",
+        "wss://attacker.bot.qq.com/websocket/",
+        "ws://api.bot.qq.com/websocket/",
+        "wss://api.bot.qq.com:444/websocket/",
+        "wss://user:pass@api.bot.qq.com/websocket/",
+        "wss://api.bot.qq.com/websocket/#fragment",
     ],
 )
 def test_untrusted_gateway_rejected(gateway):
@@ -317,6 +326,51 @@ def test_valid_gateway_accepted():
 
 
 @pytest.mark.asyncio
+async def test_official_gateway_discovery_reaches_connection(channel):
+    channel._api_request = AsyncMock(return_value={"url": "wss://api.bot.qq.com/websocket/"})
+
+    async def connection(url):
+        channel._running = False
+
+    channel._run_connection = AsyncMock(side_effect=connection)
+    channel._running = True
+    await asyncio.wait_for(channel._listen(), timeout=0.1)
+    channel._run_connection.assert_awaited_once_with("wss://api.bot.qq.com/websocket/")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timestamp", ["sensitive-invalid-timestamp", "2026-10-03T10:00:00", 123, {}])
+async def test_unknown_timestamp_uses_full_reply_window(channel, timestamp, monkeypatch, caplog):
+    monkeypatch.setattr(qq.time, "monotonic", lambda: 1000)
+    incoming = event(text="sensitive-message-content")
+    incoming["d"]["timestamp"] = timestamp
+    await channel._handle_inbound(incoming)
+    assert channel.bus.get_inbound_nowait().text == "sensitive-message-content"
+    assert channel._replies[("c2c:alice", "message1")].expires_at == 4600
+    assert "using full passive reply window" in caplog.text
+    assert "sensitive" not in caplog.text
+    await channel._handle_inbound(incoming)
+    assert caplog.text.count("using full passive reply window") == 1
+
+
+@pytest.mark.asyncio
+async def test_reply_cache_evicts_expired_context_before_active_turn(channel, monkeypatch):
+    monkeypatch.setattr(qq, "MAX_CACHED_MESSAGES", 2)
+    await channel._handle_inbound(event(message_id="active"))
+    active = channel._replies[("c2c:alice", "active")]
+    active.sequence = 1
+    await channel._handle_inbound(event(message_id="expired"))
+    channel._replies[("c2c:alice", "expired")].expires_at = 0
+    await channel._handle_inbound(event(message_id="new"))
+    assert list(channel._replies) == [("c2c:alice", "active"), ("c2c:alice", "new")]
+    await channel._handle_inbound(event(message_id="active"))
+    assert channel._replies[("c2c:alice", "active")] is active
+    assert active.sequence == 1
+    await channel._handle_inbound(event(message_id="newest"))
+    assert list(channel._replies) == [("c2c:alice", "new"), ("c2c:alice", "newest")]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("text", "expected_type"), [("/help", "command"), ("/new", "command"), ("/agent list", "command"), ("/goal implement a feature", "command"), ("/custom-skill", "chat")])
 async def test_known_commands_use_shared_dispatch(channel, text, expected_type):
     await channel._handle_inbound(event(text=text))
@@ -324,19 +378,20 @@ async def test_known_commands_use_shared_dispatch(channel, text, expected_type):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_replies_share_one_source_quota(channel):
+@pytest.mark.parametrize(("kind", "quota"), [("c2c", 4), ("group", 5)])
+async def test_concurrent_replies_share_one_source_quota(channel, kind, quota):
     channel._api_request = AsyncMock(return_value={"id": "reply"})
-    await channel._handle_inbound(event())
+    await channel._handle_inbound(event(kind))
     msg = OutboundMessage(
         channel_name="qq",
-        chat_id="c2c:alice",
+        chat_id="group:group1" if kind == "group" else "c2c:alice",
         thread_id="thread",
         thread_ts="message1",
         text="reply",
     )
     results = await asyncio.gather(*(channel.send(msg) for _ in range(8)), return_exceptions=True)
-    assert sum(isinstance(result, qq.QQAPIError) for result in results) == 3
-    assert [call.kwargs["json"]["msg_seq"] for call in channel._api_request.await_args_list] == [1, 2, 3, 4, 5]
+    assert sum(isinstance(result, qq.QQAPIError) for result in results) == 8 - quota
+    assert [call.kwargs["json"]["msg_seq"] for call in channel._api_request.await_args_list] == list(range(1, quota + 1))
 
 
 @pytest.mark.asyncio

@@ -94,14 +94,19 @@ Keep socket reads/heartbeats independent of the bounded inbound worker. Start
 waits for READY; stop drains owned tasks and closes the HTTP client. SSL/client
 initialization runs off the event loop. Do not log provider bodies, message
 content, credentials, or raw transport exceptions. Gateway discovery is
-restricted to QQ's secure gateway hosts and redirects are rejected.
+restricted to `api.bot.qq.com` and the `sgroup.qq.com` family over TLS port 443;
+credentials in URLs and redirects are rejected.
 
 Outbound `thread_ts` is the source QQ message ID, not the DeerFlow conversation
-key. Preserve passive-reply expiry and the five-reply quota across concurrent
-sends. Ignore progress updates, serialize each source's replies, and reuse the
+key. Preserve passive-reply expiry and each source's quota (four C2C replies,
+five group replies) across concurrent sends. Ignore progress updates,
+serialize each source's replies, and reuse the
 same `msg_seq` only for a definite authentication retry. An ambiguous network
 failure spends its sequence and is not automatically resent. Reply and dedupe
-caches are bounded and process-local; run one active worker per bot.
+caches are bounded and process-local; evict expired reply contexts before
+active ones. Unparsable or timezone-naive timestamps use a full advisory reply
+window with a content-free, rate-limited warning; QQ enforces expiry server-side.
+Run one active worker per bot.
 
 Regression coverage: `test_qq_channel.py`, `test_qq_lifecycle.py`,
 `test_qq_binding.py`, QQ cases in `test_channel_connections_router.py`,

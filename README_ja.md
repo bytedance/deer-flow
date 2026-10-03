@@ -282,7 +282,7 @@ HTTP/SSE MCPサーバーでは、OAuthトークンフロー（`client_credential
 
 DeerFlowはメッセージングアプリからのタスク受信をサポートしています。チャネルは設定時に自動的に開始されます。いずれもパブリックIPは不要です。
 
-DeerFlowはワークスペースUIでユーザー所有のIMチャネル接続を公開することもできます。`channel_connections`を有効にすると、ログイン済みユーザーはサイドバー / Settings > ChannelsからTelegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat、WeComをバインドできます。これは既存の`channels.*`送信トランスポートを再利用するため、パブリックIPやプロバイダーのコールバックURLは不要です。受信したIMメッセージは接続したDeerFlowユーザーアカウントの下で実行されます。セットアップとセキュリティ上の注意は[IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)をご覧ください。
+DeerFlowはワークスペースUIでユーザー所有のIMチャネル接続を公開することもできます。`channel_connections`を有効にすると、ログイン済みユーザーはサイドバー / Settings > ChannelsからTelegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat、WeCom、QQ、Buzzをバインドできます。これは既存の`channels.*`送信トランスポートを再利用するため、パブリックIPやプロバイダーのコールバックURLは不要です。受信したIMメッセージは接続したDeerFlowユーザーアカウントの下で実行されます。セットアップとセキュリティ上の注意は[IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)をご覧ください。
 
 | チャネル | トランスポート | 難易度 |
 |---------|-----------|------------|
@@ -292,6 +292,8 @@ DeerFlowはワークスペースUIでユーザー所有のIMチャネル接続�
 | WeChat | Tencent iLink（ロングポーリング） | 中程度 |
 | WeCom | WebSocket | 中程度 |
 | DingTalk | Stream Push（WebSocket） | 中程度 |
+| QQ | WebSocket（テキストのみ：個別チャットとグループ @） | 中程度 |
+| Buzz | Nostr relay（WebSocket、NIP-42） | 中程度 |
 
 **`config.yaml`での設定：**
 

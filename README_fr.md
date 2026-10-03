@@ -295,7 +295,7 @@ Voir le [Guide MCP Server](backend/docs/MCP_SERVER.md) pour les instructions dé
 
 DeerFlow peut recevoir des tâches depuis des applications de messagerie. Les canaux démarrent automatiquement une fois configurés — aucune IP publique n'est requise.
 
-DeerFlow peut aussi exposer des connexions de canaux IM appartenant à l'utilisateur dans l'UI du workspace. Quand `channel_connections` est activé, les utilisateurs connectés peuvent lier Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat ou WeCom depuis la barre latérale / Settings > Channels. Cela réutilise les transports sortants `channels.*` existants, donc aucune IP publique ni URL de callback provider n'est requise. Les messages IM entrants s'exécutent ensuite sous le compte utilisateur DeerFlow connecté. Voir [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) pour la configuration et les notes de sécurité.
+DeerFlow peut aussi exposer des connexions de canaux IM appartenant à l'utilisateur dans l'UI du workspace. Quand `channel_connections` est activé, les utilisateurs connectés peuvent lier Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ ou Buzz depuis la barre latérale / Settings > Channels. Cela réutilise les transports sortants `channels.*` existants, donc aucune IP publique ni URL de callback provider n'est requise. Les messages IM entrants s'exécutent ensuite sous le compte utilisateur DeerFlow connecté. Voir [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) pour la configuration et les notes de sécurité.
 
 | Canal | Transport | Difficulté |
 |---------|-----------|------------|
@@ -305,6 +305,8 @@ DeerFlow peut aussi exposer des connexions de canaux IM appartenant à l'utilisa
 | WeChat | Tencent iLink (long-polling) | Modérée |
 | WeCom | WebSocket | Modérée |
 | DingTalk | Stream Push (WebSocket) | Modérée |
+| QQ | WebSocket (texte : messages privés et mentions de groupe) | Modérée |
+| Buzz | Relais Nostr (WebSocket, NIP-42) | Modérée |
 
 **Configuration dans `config.yaml` :**
 
