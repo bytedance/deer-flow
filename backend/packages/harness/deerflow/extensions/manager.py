@@ -96,6 +96,26 @@ class ConfiguredExtension:
     required: bool
 
 
+def _write_bytes_atomically(path: Path, content: bytes) -> None:
+    """Publish *content* at *path* so an interrupted restore cannot truncate it.
+
+    ``Path.write_bytes`` opens with ``O_TRUNC``, so a rollback that dies midway
+    leaves pyproject.toml / uv.lock / config.yaml half written — the failed
+    install would then take the checkout with it. The rest of the codebase
+    already publishes through a temporary file plus ``os.replace``.
+    """
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
 @dataclass(frozen=True)
 class _FileSnapshot:
     path: Path
@@ -109,7 +129,7 @@ class _FileSnapshot:
         if self.content is None:
             self.path.unlink(missing_ok=True)
         else:
-            self.path.write_bytes(self.content)
+            _write_bytes_atomically(self.path, self.content)
 
 
 def _read_optional_bytes(path: Path) -> bytes | None:
