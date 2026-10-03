@@ -1707,6 +1707,8 @@ The lead agent can spawn sub-agents on the fly — each with its own scoped cont
 
 Cancelled or timed-out background sub-agent executions retain provider-reported token usage from completed model calls, including responses received before their next progress update. Final usage delivery to the parent run does not count earlier progress snapshots twice.
 
+Synchronous custom authorization filters for sub-agent skills and tools run on a worker thread while the provider is constructed on the sub-agent event loop. Requested cancellation is reported to task lifecycle extensions as `aborted`; execution timeout remains `failed`.
+
 For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
 
 To request JSON syntax validation, explicitly set a `task` or `batch_task` item's

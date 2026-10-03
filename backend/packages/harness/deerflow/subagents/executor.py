@@ -1313,7 +1313,10 @@ class SubagentExecutor:
         from deerflow.authz.skill_filter import filter_available_skills_by_authorization
 
         resolved_app_config = self.app_config or get_app_config()
-        allowed = filter_available_skills_by_authorization(
+        # Resolve on the subagent loop so the provider retains any loop-affine
+        # state; asyncio.to_thread carries the current owner ContextVars over.
+        allowed = await asyncio.to_thread(
+            filter_available_skills_by_authorization,
             allowed,
             context=self._skill_authz_context(),
             app_config=resolved_app_config,
@@ -1415,11 +1418,25 @@ class SubagentExecutor:
         if skill_setup.describe_skill_tool is not None:
             authorization_candidates.append(skill_setup.describe_skill_tool)
         configured_tool_ids = {id(tool) for tool in self._base_tools}
-        authorized_tools, self._authz_provider = apply_tool_authorization(
-            authorization_candidates,
-            context=authz_context,
-            app_config=resolved_app_config,
-        )
+        if resolved_app_config.authorization.enabled is True:
+            # Keep provider construction on the loop for loop-affine runtimes,
+            # and offload only the synchronous Layer 1 resource filter.
+            from deerflow.authz.runtime import resolve_authorization_provider
+
+            authorization_provider = resolve_authorization_provider(resolved_app_config.authorization)
+            authorized_tools, self._authz_provider = await asyncio.to_thread(
+                apply_tool_authorization,
+                authorization_candidates,
+                context=authz_context,
+                app_config=resolved_app_config,
+                authorization_provider=authorization_provider,
+            )
+        else:
+            authorized_tools, self._authz_provider = apply_tool_authorization(
+                authorization_candidates,
+                context=authz_context,
+                app_config=resolved_app_config,
+            )
         # The declaration pass in ``_create_agent`` reuses this run's provider,
         # context, and verdicts — one principal and one verdict set per run.
         self._authz_context = authz_context
@@ -1901,6 +1918,17 @@ class SubagentExecutor:
                     tool_receipts=terminal_receipts(prefer_citing_turn=True),
                 )
 
+        except asyncio.CancelledError:
+            # request_cancel_background_task sets this before cancelling the Future; wait_for
+            # timeout cancellation does not set it until this coroutine unwinds.
+            if result.cancel_event.is_set():
+                result.try_set_terminal(
+                    SubagentStatus.CANCELLED,
+                    error="Cancelled by user",
+                    token_usage_records=collector.snapshot_records() if collector is not None else None,
+                    tool_receipts=terminal_receipts(),
+                )
+            raise
         except GraphRecursionError:
             # ``recursion_limit`` on run_config is ``self.config.max_turns``
             # scaled into super-steps (set above), so hitting it means the

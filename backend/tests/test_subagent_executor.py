@@ -21,7 +21,7 @@ import logging
 import sys
 import threading
 import time
-from contextvars import Context
+from contextvars import Context, ContextVar
 from datetime import datetime
 from importlib.metadata import version as package_version
 from pathlib import Path
@@ -192,6 +192,61 @@ def _async_create_agent_double(agent):
         return agent
 
     return _create
+
+
+_AUTHZ_FILTER_CONTEXT = ContextVar("subagent_authz_filter_context", default=None)
+_AUTHZ_FILTER_PROBE = None
+
+
+class _ExecutorAuthzFilterProbeProvider:
+    """Observe the production subagent filter call boundary in a test."""
+
+    name = "executor-authz-filter-probe"
+
+    def __init__(self):
+        probe = _AUTHZ_FILTER_PROBE
+        if probe is not None:
+            probe["constructor_threads"].append(threading.get_ident())
+
+    def authorize(self, _request):
+        from deerflow.authz.provider import AuthzDecision
+
+        return AuthzDecision(allow=True)
+
+    async def aauthorize(self, _request):
+        from deerflow.authz.provider import AuthzDecision
+
+        return AuthzDecision(allow=True)
+
+    def filter_resources(self, principal, resource_type, candidates):
+        probe = _AUTHZ_FILTER_PROBE
+        if probe is None:
+            raise AssertionError("authorization filter probe was not initialized")
+
+        loop_tick = threading.Event()
+        probe["loop"].call_soon_threadsafe(loop_tick.set)
+        loop_responsive = loop_tick.wait(timeout=1)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = False
+        else:
+            running_loop = True
+
+        probe["observations"].append(
+            {
+                "resource_type": resource_type,
+                "provider_id": id(self),
+                "thread_id": threading.get_ident(),
+                "loop_thread_id": probe["loop_thread_id"],
+                "running_loop": running_loop,
+                "loop_responsive": loop_responsive,
+                "context": _AUTHZ_FILTER_CONTEXT.get(),
+                "user_id": principal.user_id,
+                "role": principal.role,
+            }
+        )
+        return list(candidates)
 
 
 # Helper classes that wrap real classes for testing
@@ -1380,6 +1435,116 @@ class TestAgentConstruction:
         assert "tool_search" not in [t.name for t in final_tools]
         assert deferred_setup.deferred_names == frozenset()
         assert "<available-deferred-tools>" not in state["messages"][0].content
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_offloads_sync_authorization_filters_in_isolated_loop(
+        self,
+        classes,
+        monkeypatch,
+    ):
+        from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
+
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        storage_module = sys.modules["deerflow.skills.storage"]
+        skill = _skill("visible-skill", None)
+        storage = SimpleNamespace(load_skills=lambda *, enabled_only: [skill])
+        monkeypatch.setattr(
+            storage_module,
+            "get_or_new_user_skill_storage",
+            lambda *_args, **_kwargs: storage,
+        )
+        module_alias = "_subagent_executor_authz_probe"
+        monkeypatch.setitem(sys.modules, module_alias, sys.modules[__name__])
+        app_config = SimpleNamespace(
+            authorization=AuthorizationConfig(
+                enabled=True,
+                provider=AuthorizationProviderConfig(
+                    use=f"{module_alias}:_ExecutorAuthzFilterProbeProvider",
+                ),
+            ),
+            models=[SimpleNamespace(name="test-model")],
+            tool_search=SimpleNamespace(enabled=False),
+            skills=SimpleNamespace(deferred_discovery=True, container_path="/mnt/skills"),
+        )
+        executor = classes["SubagentExecutor"](
+            config=classes["SubagentConfig"](
+                name="authz-filter-test",
+                description="test",
+                system_prompt="test",
+                max_turns=5,
+                timeout_seconds=30,
+            ),
+            tools=[NamedTool("visible-tool")],
+            app_config=app_config,
+            user_id="owner-17",
+            user_role="operator",
+            thread_id="authz-thread",
+            extensions=SimpleNamespace(needs_task_store=False, has_task_lifecycle=False),
+        )
+        probe = {
+            "constructor_threads": [],
+            "observations": [],
+            "loop": None,
+            "loop_thread_id": None,
+        }
+        global _AUTHZ_FILTER_PROBE
+        previous_probe = _AUTHZ_FILTER_PROBE
+        _AUTHZ_FILTER_PROBE = probe
+        context_token = _AUTHZ_FILTER_CONTEXT.set("owner-context")
+        terminal = threading.Event()
+        original_try_set_terminal = classes["SubagentResult"].try_set_terminal
+
+        def signal_terminal(holder, *args, **kwargs):
+            changed = original_try_set_terminal(holder, *args, **kwargs)
+            if changed:
+                terminal.set()
+            return changed
+
+        monkeypatch.setattr(classes["SubagentResult"], "try_set_terminal", signal_terminal)
+
+        original_build = executor._build_initial_state
+
+        async def capture_shared_loop(task):
+            probe["loop"] = asyncio.get_running_loop()
+            probe["loop_thread_id"] = threading.get_ident()
+            return await original_build(task)
+
+        monkeypatch.setattr(executor, "_build_initial_state", capture_shared_loop)
+
+        class Agent:
+            async def astream(self, *_args, **_kwargs):
+                yield {"messages": [classes["AIMessage"](content="done")]}
+
+        async def create_agent(*_args, **_kwargs):
+            return Agent()
+
+        monkeypatch.setattr(executor, "_create_agent", create_agent)
+        execution_id = None
+        try:
+            execution_id = executor.execute_async("assemble")
+            assert await asyncio.to_thread(terminal.wait, 10), "subagent did not finish"
+            result = executor_module.get_background_task_result(execution_id)
+
+            assert result.status is classes["SubagentStatus"].COMPLETED
+            assert {call["resource_type"] for call in probe["observations"]} == {"skill", "tool"}
+            assert all(
+                call["thread_id"] != call["loop_thread_id"] and not call["running_loop"] and call["loop_responsive"] and call["context"] == "owner-context" and call["user_id"] == "owner-17" and call["role"] == "operator"
+                for call in probe["observations"]
+            ), probe["observations"]
+            skill_filter_call = next(call for call in probe["observations"] if call["resource_type"] == "skill")
+            tool_filter_call = next(call for call in probe["observations"] if call["resource_type"] == "tool")
+            assert skill_filter_call["provider_id"] == id(executor._resolve_skill_authorization().provider)
+            assert tool_filter_call["provider_id"] == id(executor._authz_provider)
+            assert probe["constructor_threads"] == [probe["loop_thread_id"], probe["loop_thread_id"]]
+        finally:
+            if execution_id is not None:
+                result = executor_module.get_background_task_result(execution_id)
+                if result is not None and not result.status.is_terminal:
+                    executor_module.request_cancel_background_task(execution_id)
+                    await asyncio.to_thread(terminal.wait, 5)
+                executor_module.cleanup_background_task(execution_id)
+            _AUTHZ_FILTER_CONTEXT.reset(context_token)
+            _AUTHZ_FILTER_PROBE = previous_probe
 
     @pytest.mark.anyio
     async def test_build_initial_state_applies_authorization_before_deferral(
@@ -3574,6 +3739,122 @@ class TestCooperativeCancellation:
         assert result.error == "Cancelled by user"
         assert result.completed_at is not None
         assert call_count == 0  # astream was never entered
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("scenario", ["user_cancel", "timeout"])
+    async def test_execute_async_notifies_abort_only_for_user_cancel_after_stream_close(
+        self,
+        classes,
+        monkeypatch,
+        msg,
+        scenario,
+    ):
+        from deerflow_extension_api import TaskOutcome
+
+        from deerflow.extensions.notify import reset_extension_notify_loop, set_extension_notify_loop
+        from deerflow.extensions.registry import ExtensionRegistry
+
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        reset_extension_notify_loop()
+        set_extension_notify_loop(asyncio.get_running_loop())
+        stream_started = threading.Event()
+        stream_closed = threading.Event()
+        stop_notified = threading.Event()
+        terminal = threading.Event()
+        observed = []
+
+        class Recorder:
+            async def on_task_start(self, _app_store, _task_store, _info):
+                return None
+
+            async def on_task_stop(self, _app_store, _task_store, info, outcome):
+                result = executor_module.get_background_task_result(info.task_id)
+                observed.append(
+                    (
+                        outcome,
+                        result.status if result is not None else None,
+                        stream_closed.is_set(),
+                    )
+                )
+                stop_notified.set()
+
+        registry = ExtensionRegistry()
+        recorder = Recorder()
+        with registry.attributed_to("test:install"):
+            registry.task_lifecycle(recorder)
+        extensions = registry.build()
+
+        timeout_seconds = 0.2 if scenario == "timeout" else 30
+        executor = classes["SubagentExecutor"](
+            config=classes["SubagentConfig"](
+                name="cancel-outcome-test",
+                description="test",
+                system_prompt="test",
+                max_turns=5,
+                timeout_seconds=timeout_seconds,
+            ),
+            tools=[],
+            thread_id="cancel-thread",
+            run_id="parent-run",
+            extensions=extensions,
+        )
+        monkeypatch.setattr(
+            executor,
+            "_build_initial_state",
+            AsyncMock(return_value=({"messages": [msg.human("task")]}, [], None)),
+        )
+
+        class BlockingAgent:
+            async def astream(self, *_args, **_kwargs):
+                try:
+                    stream_started.set()
+                    await asyncio.Event().wait()
+                    yield {"messages": []}
+                finally:
+                    stream_closed.set()
+
+        monkeypatch.setattr(
+            executor,
+            "_create_agent",
+            AsyncMock(return_value=BlockingAgent()),
+        )
+        original_try_set_terminal = classes["SubagentResult"].try_set_terminal
+
+        def signal_terminal(holder, *args, **kwargs):
+            changed = original_try_set_terminal(holder, *args, **kwargs)
+            if changed:
+                terminal.set()
+            return changed
+
+        monkeypatch.setattr(classes["SubagentResult"], "try_set_terminal", signal_terminal)
+        execution_id = executor.execute_async("wait for stream")
+        try:
+            assert await asyncio.to_thread(stream_started.wait, 5), "subagent stream did not start"
+            if scenario == "user_cancel":
+                executor_module.request_cancel_background_task(execution_id)
+
+            assert await asyncio.to_thread(stop_notified.wait, 5), "extension stop hook did not run"
+            assert await asyncio.to_thread(terminal.wait, 5), "subagent did not reach a terminal state"
+            result = executor_module.get_background_task_result(execution_id)
+
+            expected_outcome = TaskOutcome.ABORTED if scenario == "user_cancel" else TaskOutcome.FAILED
+            expected_status = classes["SubagentStatus"].CANCELLED if scenario == "user_cancel" else classes["SubagentStatus"].TIMED_OUT
+            assert result.status is expected_status
+            assert observed == [
+                (
+                    expected_outcome,
+                    classes["SubagentStatus"].CANCELLED if scenario == "user_cancel" else classes["SubagentStatus"].RUNNING,
+                    True,
+                )
+            ]
+        finally:
+            result = executor_module.get_background_task_result(execution_id)
+            if result is not None and not result.status.is_terminal:
+                executor_module.request_cancel_background_task(execution_id)
+                await asyncio.to_thread(stop_notified.wait, 5)
+                await asyncio.to_thread(terminal.wait, 5)
+            executor_module.cleanup_background_task(execution_id)
+            reset_extension_notify_loop()
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("close_fails", [False, True])
