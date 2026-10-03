@@ -987,11 +987,12 @@ async def test_bound_pubkey_unmentioned_reply_follows_a_thread_the_manager_mappe
     assert await manager._lookup_thread_id(captured[1]) == "thread-1"
 
 
-def test_bound_pubkey_thread_follow_ignores_a_json_mapping_the_manager_would_not_read():
+def test_bound_pubkey_thread_follow_ignores_a_json_mapping_the_manager_would_not_read(caplog):
     """The gate resolves the mapping exactly as ``ChannelManager._lookup_thread_id``
     does: for a bound author that is the repository alone. A legacy JSON-store row for
     the same topic (e.g. written before the pubkey was bound) is not this connection's
-    thread, so it must not relax ``require_mention``."""
+    thread, so it must not relax ``require_mention``. The drop is logged at DEBUG with
+    the bind state, so "the bot stopped following my replies" stays triageable."""
 
     class JsonStoreWithMapping:
         def get_thread_id(self, channel_name, chat_id, topic_id=None):
@@ -1002,8 +1003,10 @@ def test_bound_pubkey_thread_follow_ignores_a_json_mapping_the_manager_would_not
     ch._transport = FakeTransport()
 
     _dispatch(ch, _event(sk=SK_OWNER, content="/connect tok-bind", mentions=()))
-    _dispatch(ch, _event(sk=SK_OWNER, content="follow-up", mentions=(), reply_to="aa" * 32))
+    with caplog.at_level(logging.DEBUG, logger="app.channels.buzz"):
+        _dispatch(ch, _event(sk=SK_OWNER, content="follow-up", mentions=(), reply_to="aa" * 32))
     assert captured == []
+    assert f"dropped unmentioned chat event in channel <unnamed> ({CHANNEL}): thread={'aa' * 32} not engaged (bound=True)" in caplog.text
 
 
 # -- FINAL REVIEW FINDING 3 (Important): oversize streaming re-posted the tail ------

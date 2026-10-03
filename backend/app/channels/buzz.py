@@ -1332,6 +1332,11 @@ class BuzzChannel(Channel):
         if not mentioned and not allowed_without_mention:
             engaged_thread = bool(thread_root and await lookup_thread_id(inbound, repo=self._connection_repo, store=self.config.get("channel_store")))
             if not engaged_thread:
+                # Logged like the allowlist drop above: "the bot stopped following my
+                # replies" must be triageable as require_mention working vs a lost
+                # bind or a missing thread mapping.
+                channel_name = self._channel_meta.get(channel_id, {}).get("name") or "<unnamed>"
+                logger.debug("[buzz] dropped unmentioned chat event in channel %s (%s): thread=%s not engaged (bound=%s)", channel_name, channel_id, thread_root, bool(inbound.connection_id))
                 return
 
         self._last_requester[(channel_id, thread_root)] = author
