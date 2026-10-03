@@ -1921,8 +1921,12 @@ If the sample cuts a CRLF line ending in half, the preview keeps the earlier com
 Text artifacts are streamed with HTTP byte-range support. The Web UI initially
 loads at most 1 MiB, shows the preview size when a file is larger, and waits for
 an explicit **Load full file** action before fetching the remainder or mounting
-the full code editor. Active HTML, XHTML, and SVG artifacts remain forced
-downloads at the Gateway boundary.
+the full code editor. Editing becomes available once the complete file has loaded;
+unsaved-change detection uses the full content, including when reverting edits
+or deleting the portion beyond the initial preview. If a reload fails or returns
+only a preview, users can still exit editing while retaining their unsaved draft.
+Active HTML, XHTML, and SVG artifacts remain forced downloads at the Gateway
+boundary.
 
 Artifact previews and downloads preserve literal percent sequences in file names:
 `report%20final.md` and `report final.md` remain distinct files. Markdown links
