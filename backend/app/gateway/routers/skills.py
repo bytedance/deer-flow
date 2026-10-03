@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import tempfile
+import threading
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from pathlib import Path
 from typing import Any, BinaryIO, Literal
@@ -141,6 +142,18 @@ class CustomSkillHistoryResponse(BaseModel):
 
 class SkillRollbackRequest(BaseModel):
     history_index: int = Field(default=-1, description="History entry index to restore from, defaulting to the latest change.")
+
+
+# Custom-skill mutations (edit, delete, rollback) each span three steps —
+# read the content being replaced, write the new content, append the history
+# entry. Those steps must not interleave between two requests: a request that
+# reads its predecessor, loses the CPU, and writes later silently overwrites
+# the winner's revision while recording the stale predecessor in history,
+# making the overwritten revision unreachable by rollback. Running each
+# mutation's steps inside one worker-thread function does not make them a
+# critical section — two requests can both be inside their own workers — so
+# the cooperating mutation paths share this lock around the whole sequence.
+_custom_skill_mutation_lock = threading.Lock()
 
 
 def _skill_to_response(skill: Skill) -> SkillResponse:
@@ -580,26 +593,34 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
         scan = await scan_skill_content(body.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
-        prev_content = storage.read_custom_skill(skill_name)
 
         async def _persist_edit() -> None:
-            # The write and its history entry must settle together, and the
-            # prompt cache must not stay stale behind them: a cancelled caller
-            # drains the whole mutation tail instead of cutting it mid-sequence.
-            await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, body.content)
-            await asyncio.to_thread(
-                storage.append_history,
-                skill_name,
-                {
-                    "action": "human_edit",
-                    "author": "human",
-                    "thread_id": None,
-                    "file_path": SKILL_MD_FILE,
-                    "prev_content": prev_content,
-                    "new_content": body.content,
-                    "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
-                },
-            )
+            def _write_and_record() -> None:
+                # The write and its history entry must settle together, and the
+                # prompt cache must not stay stale behind them: a cancelled caller
+                # drains the whole mutation tail instead of cutting it mid-sequence.
+                # The read → write → append sequence runs under the shared mutation
+                # lock so a concurrent edit cannot land between the predecessor read
+                # and the write: prev_content must record what this mutation
+                # actually overwrites, or the overwritten revision silently drops
+                # out of the history chain and becomes unreachable by rollback.
+                with _custom_skill_mutation_lock:
+                    prev_content = storage.read_custom_skill(skill_name)
+                    storage.write_custom_skill(skill_name, SKILL_MD_FILE, body.content)
+                    storage.append_history(
+                        skill_name,
+                        {
+                            "action": "human_edit",
+                            "author": "human",
+                            "thread_id": None,
+                            "file_path": SKILL_MD_FILE,
+                            "prev_content": prev_content,
+                            "new_content": body.content,
+                            "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
+                        },
+                    )
+
+            await asyncio.to_thread(_write_and_record)
             await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
 
         await await_drained(_drain_skill_mutation("edit", _persist_edit))
@@ -625,20 +646,25 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
         async def _persist_delete() -> None:
             # Same cancellation contract as the edit and rollback tails: the
             # deletion and its history record settle before a cancelled caller
-            # unwinds, and the prompt cache reflects the removal.
-            await asyncio.to_thread(
-                storage.delete_custom_skill,
-                skill_name,
-                history_meta={
-                    "action": "human_delete",
-                    "author": "human",
-                    "thread_id": None,
-                    "file_path": SKILL_MD_FILE,
-                    "prev_content": None,
-                    "new_content": None,
-                    "scanner": {"decision": "allow", "reason": "Deletion requested."},
-                },
-            )
+            # unwinds, and the prompt cache reflects the removal. The deletion
+            # joins the shared mutation lock so it cannot interleave with a
+            # concurrent edit or rollback's read → write → append sequence.
+            def _delete_and_record() -> None:
+                with _custom_skill_mutation_lock:
+                    storage.delete_custom_skill(
+                        skill_name,
+                        history_meta={
+                            "action": "human_delete",
+                            "author": "human",
+                            "thread_id": None,
+                            "file_path": SKILL_MD_FILE,
+                            "prev_content": None,
+                            "new_content": None,
+                            "scanner": {"decision": "allow", "reason": "Deletion requested."},
+                        },
+                    )
+
+            await asyncio.to_thread(_delete_and_record)
             await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
 
         await await_drained(_drain_skill_mutation("delete", _persist_delete))
@@ -711,27 +737,49 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
             skill_file = storage.get_custom_skill_file(skill_name)
             return skill_file.read_text(encoding="utf-8") if skill_file.exists() else None
 
-        current_content = await asyncio.to_thread(_read_current_content)
-        history_entry = {
-            "action": "rollback",
-            "author": "human",
-            "thread_id": None,
-            "file_path": SKILL_MD_FILE,
-            "prev_content": current_content,
-            "new_content": target_content,
-            "rollback_from_ts": record.get("ts"),
-            "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
-        }
         if scan.decision == "block":
-            await asyncio.to_thread(storage.append_history, skill_name, history_entry)
+            # The blocked path overwrites nothing, so the entry is purely
+            # informational and an early read is safe here.
+            blocked_entry = {
+                "action": "rollback",
+                "author": "human",
+                "thread_id": None,
+                "file_path": SKILL_MD_FILE,
+                "prev_content": await asyncio.to_thread(_read_current_content),
+                "new_content": target_content,
+                "rollback_from_ts": record.get("ts"),
+                "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
+            }
+            await asyncio.to_thread(storage.append_history, skill_name, blocked_entry)
             raise HTTPException(status_code=400, detail=f"Rollback blocked by security scanner: {scan.reason}")
 
         async def _persist_rollback() -> None:
-            # The restore write and its history entry must settle together, and
-            # the prompt cache must reflect the restored content, before a
-            # cancelled caller unwinds.
-            await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, target_content)
-            await asyncio.to_thread(storage.append_history, skill_name, history_entry)
+            def _restore_and_record() -> None:
+                # The restore write and its history entry must settle together, and
+                # the prompt cache must reflect the restored content, before a
+                # cancelled caller unwinds. The read → write → append sequence runs
+                # under the shared mutation lock (same contract as the edit path):
+                # the recorded prev_content must be what this rollback actually
+                # overwrites, which requires that no concurrent mutation can land
+                # between the predecessor read and the write.
+                with _custom_skill_mutation_lock:
+                    current_content = _read_current_content()
+                    storage.write_custom_skill(skill_name, SKILL_MD_FILE, target_content)
+                    storage.append_history(
+                        skill_name,
+                        {
+                            "action": "rollback",
+                            "author": "human",
+                            "thread_id": None,
+                            "file_path": SKILL_MD_FILE,
+                            "prev_content": current_content,
+                            "new_content": target_content,
+                            "rollback_from_ts": record.get("ts"),
+                            "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
+                        },
+                    )
+
+            await asyncio.to_thread(_restore_and_record)
             await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
 
         await await_drained(_drain_skill_mutation("rollback", _persist_rollback))
