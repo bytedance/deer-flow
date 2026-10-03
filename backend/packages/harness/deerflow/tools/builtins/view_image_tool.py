@@ -93,7 +93,8 @@ def _read_verified_host_copy(
         size = path.stat().st_size
         if size != expected_size or size > _MAX_IMAGE_BYTES:
             return None
-        data = path.read_bytes()
+        with path.open("rb") as f:
+            data = f.read(size + 1)
     except OSError:
         return None
     if len(data) != size:
@@ -247,7 +248,7 @@ def _view_image_authorized(runtime: Runtime, image_path: str, tool_call_id: str)
 
         try:
             with open(actual_path, "rb") as f:
-                image_data = f.read()
+                image_data = f.read(image_size + 1)
         except Exception as e:
             return Command(
                 update={"messages": [ToolMessage(f"Error reading image file: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},

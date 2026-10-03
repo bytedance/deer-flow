@@ -1,5 +1,11 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+Host image reads in `view_image`, synchronized-copy recovery, and
+`ViewImageMiddleware` read at most the size verified by stat plus one byte.
+Keep the extra byte and post-read length/hash checks: growth after stat must be
+rejected without an unbounded allocation. Remote downloads retain their provider
+contracts. Regressions live in `tests/test_view_image_bounded_reads.py`.
+
 `task` and `batch_task` opt into JSON checks with `file:<path> json-valid`.
 See [subagents/AGENTS.md](../subagents/AGENTS.md) for read limits and UNVERIFIED semantics.
 
