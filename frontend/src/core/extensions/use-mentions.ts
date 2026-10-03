@@ -23,6 +23,12 @@ export function useExtensionMentions(query: string, threadId: string) {
     }),
     [user?.id, locale, threadId, extensions.data],
   );
+  const hasProviders = (scope.entries ?? []).some(
+    (entry) =>
+      entry.viewer_id === scope.userId &&
+      entry.settings.enabled === true &&
+      (entry.extension?.mentionProviders?.length ?? 0) > 0,
+  );
   const request = useMemo(
     () => ({ scope, query, attempt }),
     [scope, query, attempt],
@@ -32,6 +38,7 @@ export function useExtensionMentions(query: string, threadId: string) {
     result: Awaited<ReturnType<typeof searchExtensionMentions>>;
   }>();
   useEffect(() => {
+    if (!hasProviders) return;
     const abort = new AbortController();
     const timer = setTimeout(() => {
       void searchExtensionMentions(
@@ -56,10 +63,14 @@ export function useExtensionMentions(query: string, threadId: string) {
       clearTimeout(timer);
       abort.abort();
     };
-  }, [scope, request]);
+  }, [scope, request, hasProviders]);
   // Keep settled suggestions during query/retry refreshes, but never across
   // viewer, thread, locale or installed-snapshot changes.
-  const result = state?.request.scope === scope ? state.result : undefined;
+  const result = !hasProviders
+    ? empty
+    : state?.request.scope === scope
+      ? state.result
+      : undefined;
   return {
     ...(result ?? empty),
     failed: extensions.isError || result?.failed === true,

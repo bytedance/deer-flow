@@ -97,6 +97,7 @@ export async function loadFrontendExtensions(
           for (const provider of loadedModule.mentionProviders) {
             if (
               !provider ||
+              typeof provider.id !== "string" ||
               !/^[a-z][a-z0-9-]{0,63}$/.test(provider.id) ||
               seen.has(provider.id) ||
               typeof provider.label !== "string" ||
@@ -118,6 +119,7 @@ export async function loadFrontendExtensions(
           for (const surface of loadedModule.surfaces) {
             if (
               !surface ||
+              typeof surface.id !== "string" ||
               !/^[a-z][a-z0-9-]{0,63}$/.test(surface.id) ||
               seen.has(surface.id) ||
               surface.slot !== "page" ||

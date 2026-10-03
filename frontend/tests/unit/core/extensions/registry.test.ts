@@ -221,3 +221,70 @@ test("validates optional mention providers independently for each installed modu
     expect(loaded[1]?.extension?.mentionProviders).toEqual([provider]);
   }
 });
+
+for (const field of ["mentionProviders", "surfaces"] as const) {
+  for (const [name, id] of [
+    ["omitted", undefined],
+    ["null", null],
+    ["boolean", true],
+    ["array", ["people"]],
+    ["object", { toString: () => "people" }],
+  ] as const) {
+    test(`rejects ${name} ${field} identifiers without coercing them`, async () => {
+      const assets = {
+        ...entry,
+        transport: "assets-v1" as const,
+        entry: `/api/plugins/${entry.namespace}/assets/${"b".repeat(64)}/index.mjs`,
+      };
+      const declaration =
+        field === "mentionProviders"
+          ? { label: "People", search: async () => [] }
+          : { slot: "page", title: "People", mount: () => undefined };
+      const invalid = { ...declaration, ...(id === undefined ? {} : { id }) };
+      const importer = rs
+        .fn()
+        .mockResolvedValueOnce({
+          default: { ...extension, [field]: [invalid] },
+        })
+        .mockResolvedValueOnce({
+          default: {
+            ...extension,
+            [field]: [{ ...declaration, id: "people" }],
+          },
+        });
+      const loaded = await loadFrontendExtensions(
+        [assets, assets],
+        rs.fn(),
+        importer,
+      );
+      expect(loaded[0]?.error).toBeTruthy();
+      expect(loaded[0]?.extension).toBeUndefined();
+      expect(loaded[1]?.extension?.[field]?.[0]?.id).toBe("people");
+    });
+  }
+
+  test(`accepts literal null and undefined slug strings for ${field}`, async () => {
+    const assets = {
+      ...entry,
+      transport: "assets-v1" as const,
+      entry: `/api/plugins/${entry.namespace}/assets/${"b".repeat(64)}/index.mjs`,
+    };
+    const declarations = ["null", "undefined"].map((id) =>
+      field === "mentionProviders"
+        ? { id, label: "People", search: async () => [] }
+        : { id, slot: "page", title: "People", mount: () => undefined },
+    );
+    const loaded = await loadFrontendExtensions(
+      [assets],
+      rs.fn(),
+      async () => ({
+        default: { ...extension, [field]: declarations },
+      }),
+    );
+    expect(loaded[0]?.error).toBeUndefined();
+    expect(loaded[0]?.extension?.[field]?.map((value) => value.id)).toEqual([
+      "null",
+      "undefined",
+    ]);
+  });
+}

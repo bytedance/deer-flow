@@ -216,6 +216,9 @@ MCP hooks and the editor default to personal scope. Mutation-option builders req
 Plugin mention providers extend the existing composer picker via
 `core/extensions/use-mentions.ts`. Keep provider queries bounded and fenced by
 viewer, thread, query, and installed snapshot.
+Provider and page-surface IDs must be strings before slug validation; JavaScript
+coercion is not validation. A settled snapshot with no enabled, viewer-visible
+mention providers returns an empty result immediately without a search timer.
 Settled results may remain visible during query/retry refreshes only within the
 same viewer, thread, locale and installed snapshot; stale responses stay fenced.
 Inline plugin references serialize into human-message
