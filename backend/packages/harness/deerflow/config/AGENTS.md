@@ -28,7 +28,8 @@ raise, and API create/update validation remains strict.
 
 Setup: Copy root `config.example.yaml` to `config.yaml`. Startup callers use
 `deerflow.env.load_selected_env_file()` for optional `DEER_FLOW_ENV_FILE` (cwd-relative,
-strict readable file, process env wins); otherwise retain their original `load_dotenv()`.
+strict readable file, process env wins). Reject a disabling `PYTHON_DOTENV_DISABLED`
+when selection is explicit; otherwise retain the original `load_dotenv()`.
 Keep this helper free of config imports so auth/debug cannot preload defaults.
 
 **Config Versioning**: `config.example.yaml` has a `config_version` field. On startup, `AppConfig.from_file()` compares user version vs example version and emits a warning if outdated. Missing `config_version` = version 0. Run `make config-upgrade` to auto-merge missing fields. When changing the config schema, bump `config_version` in `config.example.yaml`.
@@ -41,6 +42,13 @@ RAGFlow `knowledge_search` tool; LightRAG and other knowledge providers keep
 their tool-local settings unchanged.
 
 Top-level `recursion_limit` and `max_recursion_limit` are hot-reloaded per Gateway run. The former supplies the default when a request omits or provides an invalid value; the latter caps both configured and client-provided budgets.
+
+`tool_output` character/count limits and every `tool_overrides` value share
+non-negative integer validation. Reject booleans before Pydantic coercion;
+preserve numeric strings from environment substitution and explicit zero.
+Zero per-tool overrides disable externalization only; a positive global
+fallback budget still truncates oversized output. Regression tests exercise
+YAML loading and both middleware tool-call paths in `test_tool_output_config_limits.py`.
 
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale. The loader reads the file once through `file_signature.read_config_with_signature` and parses those same bytes, so the recorded signature always describes the parsed content: a write that races the load can only cause one extra reload, never a cache that holds one revision under another revision's signature (which the comparison could never detect).
 

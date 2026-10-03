@@ -99,6 +99,31 @@ export function referenceCaret(root: HTMLElement): number | null {
   return readReferenceEditor(before.cloneContents()).length;
 }
 
+/** Select the adjacent object so native deletion also retains browser undo. */
+export function selectReferenceForDeletion(
+  root: HTMLElement,
+  key: "Backspace" | "Delete",
+): boolean {
+  const caret = referenceCaret(root);
+  if (caret === null) return false;
+  for (const token of root.querySelectorAll<HTMLElement>("[data-reference]")) {
+    const before = document.createRange();
+    before.selectNodeContents(root);
+    before.setEndBefore(token);
+    const start = readReferenceEditor(before.cloneContents()).length;
+    const boundary =
+      key === "Backspace" ? start + token.dataset.reference!.length : start;
+    if (caret !== boundary) continue;
+    const range = document.createRange();
+    range.selectNode(token);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    return true;
+  }
+  return false;
+}
+
 export function focusReferenceAt(root: HTMLElement, offset: number) {
   root.focus();
   const range = document.createRange();

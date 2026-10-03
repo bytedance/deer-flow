@@ -460,6 +460,24 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **channels:** Discord now runs its channel-connection database work on the
+  Gateway event loop. discord.py delivers messages on a private loop in the
+  client thread, and the Discord adapter awaited the connection repository there
+  even though its SQLAlchemy engine and pool belong to the Gateway loop. With
+  `channel_connections.enabled` on PostgreSQL, the first Discord message after
+  the Gateway had used the pool failed with `got Future … attached to a
+  different loop` and was dropped. With SQLite, a burst that exhausted the pool
+  failed with `Queue … is bound to a different event loop`, and the wait queue
+  stayed bound to the Discord loop, so the Gateway's own queries then failed the
+  same way. The identity lookup now runs together with the intake commit, and
+  `/connect` binding runs separately, both on the Gateway loop through
+  `_submit_threadsafe_coroutine` like Telegram, Feishu, and DingTalk. Bind
+  replies go back through the Discord loop, and `stop()` now drains that work
+  before tearing the client down. The typing indicator still registers before
+  the hand-off, and a failed lookup skips the ack reaction and stops the
+  indicator unless another message to the same target still relies on it, so a
+  dropped message never shows the bot as working. ([#6214])
+
 - **community:** The shared SSRF guard now refuses every non-global address,
   including the `100.64.0.0/10` shared address space that its flag checks let
   through. That range holds CGNAT and Tailscale hosts and Alibaba Cloud's
@@ -513,6 +531,14 @@ This release closes that milestone with **301 merged pull requests**.
   limits to one. All integer threshold fields now fail configuration loading
   with a field-specific error while valid integers and numeric strings retain
   their existing behavior.([#6017])
+- **agents:** App-config integer settings now reject YAML booleans instead of
+  coercing `true` to `1`. A configuration such as `recursion_limit: true`
+  previously made every Gateway run that does not supply its own limit hit the
+  LangGraph recursion ceiling at the first super-step, and booleans on the
+  `llm_call` integers (`retry_max_attempts`, `max_concurrent_calls`, the two
+  backoff delays) collapsed retries and the concurrency cap to one. All seven
+  integer fields now fail configuration loading with a field-specific error
+  while valid integers and numeric strings retain their existing behavior.([#6171])
 - **uploads:** Converted Markdown ownership is now recorded when a document is
   converted. `list_uploaded_files` hides only verified conversion outputs, and
   document outlines use only the recorded companion; a user-uploaded Markdown
@@ -1722,6 +1748,16 @@ This release closes that milestone with **301 merged pull requests**.
   `uv-lock-check` hook. The script now refreshes the lock with `uv lock` and exits
   before editing anything when `uv` is missing, instead of leaving a half-bumped
   working tree behind. Only the root package's version line moves. ([#5859])
+- **sandbox:** Stop `glob` and `grep` from returning nothing when the search
+  root — or one of its ancestors — matches an ignore pattern such as `build`,
+  `dist`, `logs`, `node_modules`, `coverage` or `target`. The remote sandboxes
+  applied `should_ignore_path` to the absolute path, which tests every segment,
+  so one ignored name anywhere up the tree hid the whole result and the agent
+  was told "no matches" for a directory `ls` had just listed. Ignore patterns
+  are now applied to the path relative to the search root, as `list_dir` already
+  did: an ignored name still hides its own descendants, but searching an
+  ignored root — or a path below an ignored ancestor — returns its contents.
+  ([#5667])
 
 - **sandbox:** The temporary sandbox lease acquired by the HTTP upload route is
   now released. In remote/provisioner deployments,
@@ -2741,6 +2777,18 @@ This release closes that milestone with **301 merged pull requests**.
   fail-closed/fail-open policy. A denied `read_file` of a `SKILL.md` is
   stamped `skill_context_denied`, so durable context, skill allowed-tools,
   and autonomous secret bindings never activate the denied skill. ([#4541])
+
+- **lark:** The opt-in Lark broker subcommand denylist
+  (`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`) can no longer be bypassed by an
+  option value passed as its own token. Matching dropped only `-`-prefixed
+  tokens and compared the rest from the start, so the `work` in `--profile work
+  config show` became the leading positional and a `config show` rule never
+  matched — real `lark-cli` 1.0.65 still runs `config show` there. The broker
+  cannot know which options take a value, so a rule now matches when its tokens
+  appear in order among the non-flag tokens — which also catches values placed
+  between them (`config --profile work show`), a case a contiguous match would
+  still miss. Argument values that spell a denied path in order are refused too
+  (fail-closed). ([#6212])
 
 ### Documentation
 
@@ -7406,6 +7454,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5662]: https://github.com/bytedance/deer-flow/pull/5662
 [#5663]: https://github.com/bytedance/deer-flow/pull/5663
 [#5664]: https://github.com/bytedance/deer-flow/pull/5664
+[#5667]: https://github.com/bytedance/deer-flow/pull/5667
 [#5669]: https://github.com/bytedance/deer-flow/pull/5669
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
 [#5676]: https://github.com/bytedance/deer-flow/pull/5676
@@ -7608,6 +7657,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135
 [#6138]: https://github.com/bytedance/deer-flow/pull/6138
 [#6140]: https://github.com/bytedance/deer-flow/pull/6140
+[#6171]: https://github.com/bytedance/deer-flow/pull/6171
 [#6201]: https://github.com/bytedance/deer-flow/pull/6201
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
-
+[#6214]: https://github.com/bytedance/deer-flow/pull/6214
+[#6212]: https://github.com/bytedance/deer-flow/pull/6212

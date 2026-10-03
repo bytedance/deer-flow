@@ -17,6 +17,9 @@ def load_selected_env_file() -> bool:
     selected = os.environ.get("DEER_FLOW_ENV_FILE")
     if selected is None:
         return False
+    # Match python-dotenv's switch without silently ignoring explicit selection.
+    if os.environ.get("PYTHON_DOTENV_DISABLED", "").casefold() in {"1", "true", "t", "yes", "y"}:
+        raise ValueError("DEER_FLOW_ENV_FILE cannot be used while PYTHON_DOTENV_DISABLED disables dotenv loading. Unset PYTHON_DOTENV_DISABLED or DEER_FLOW_ENV_FILE.")
 
     try:
         path = Path(selected)

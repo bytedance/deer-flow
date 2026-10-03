@@ -43,10 +43,10 @@ class InputHistory:
             self._cursor -= 1
         return self._entries[self._cursor]
 
-    def down(self) -> str:
-        """Move one entry newer. Past the newest entry, restores the draft."""
+    def down(self) -> str | None:
+        """Move newer or restore the draft; return None when not navigating."""
         if self._cursor is None:
-            return self._draft
+            return None
         if self._cursor < len(self._entries) - 1:
             self._cursor += 1
             return self._entries[self._cursor]

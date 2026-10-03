@@ -99,3 +99,50 @@ def test_empty_selected_file_does_not_load_defaults(tmp_path):
     result = run_startup(tmp_path, selector=selected)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == [None, None]
+
+
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+@pytest.mark.parametrize("disabled", ["1", "TRUE", "t", "YeS", "Y"])
+def test_explicit_selection_rejects_disabled_dotenv(tmp_path, entrypoint, disabled):
+    selected = tmp_path / "stage.env"
+    selected.write_text("ENV_FILE_TEST_VALUE=do-not-print-this\n", encoding="utf-8")
+    result = run_startup(tmp_path, entrypoint, selected, {"PYTHON_DOTENV_DISABLED": disabled})
+    assert result.returncode != 0
+    assert "DEER_FLOW_ENV_FILE" in result.stderr
+    assert "PYTHON_DOTENV_DISABLED" in result.stderr
+    assert "do-not-print-this" not in result.stderr
+    assert "unselected" not in result.stdout
+
+
+@pytest.mark.parametrize("disabled", ["0", "false", "no", "", " true "])
+def test_non_disabling_values_allow_explicit_selection(tmp_path, disabled):
+    selected = tmp_path / "stage.env"
+    selected.write_text("ENV_FILE_TEST_VALUE=selected\n", encoding="utf-8")
+    result = run_startup(tmp_path, selector=selected, extra_env={"PYTHON_DOTENV_DISABLED": disabled})
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == ["selected", None]
+
+
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+def test_disabled_dotenv_without_selector_keeps_default_behavior(tmp_path, entrypoint):
+    result = run_startup(tmp_path, entrypoint, extra_env={"PYTHON_DOTENV_DISABLED": "1"})
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [None, None]
+
+
+def test_empty_selected_file_still_rejects_disabled_dotenv(tmp_path):
+    selected = tmp_path / "empty.env"
+    selected.touch()
+    result = run_startup(tmp_path, selector=selected, extra_env={"PYTHON_DOTENV_DISABLED": "true"})
+    assert result.returncode != 0
+    assert "PYTHON_DOTENV_DISABLED" in result.stderr
+
+
+def test_auth_secret_warning_mentions_selected_env_file(tmp_path):
+    selected = tmp_path / "stage.env"
+    selected.write_text("ENV_FILE_TEST_VALUE=selected\n", encoding="utf-8")
+    prelude = "import app.gateway.auth.config as auth_config; auth_config._load_or_create_secret = lambda: 'test-generated-secret'"
+    result = run_startup(tmp_path, "auth", selected, {"AUTH_JWT_SECRET": ""}, prelude)
+    assert result.returncode == 0, result.stderr
+    assert "DEER_FLOW_ENV_FILE" in result.stderr
+    assert ".env by default" in result.stderr

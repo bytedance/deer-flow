@@ -7,7 +7,7 @@ from typing import Any, Literal, Self
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationInfo, field_validator, model_validator
 
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agent_storage_config import AgentStorageConfig
@@ -74,6 +74,13 @@ CONFIG_FILE_DATABASE_DEFAULTS = {
     "backend": "sqlite",
     "sqlite_dir": ".deer-flow/data",
 }
+
+
+def _reject_boolean_int(value: object, info: ValidationInfo) -> object:
+    """Reject YAML `true`/`false` before Pydantic coerces them to `1`/`0`."""
+    if isinstance(value, bool):
+        raise ValueError(f"{info.field_name} must be an integer, not a boolean")
+    return value
 
 
 class CircuitBreakerConfig(BaseModel):
@@ -153,6 +160,18 @@ class LlmCallConfig(BaseModel):
             "Ignored when the provider sends Retry-After (honored verbatim)."
         ),
     )
+
+    @field_validator(
+        "max_concurrent_calls",
+        "retry_max_attempts",
+        "retry_base_delay_ms",
+        "retry_cap_delay_ms",
+        "burst_retry_base_delay_ms",
+        mode="before",
+    )
+    @classmethod
+    def _reject_boolean_llm_call_settings(cls, value: object, info: ValidationInfo) -> object:
+        return _reject_boolean_int(value, info)
 
 
 class LoggingEnhanceConfig(BaseModel):
@@ -252,6 +271,12 @@ class AppConfig(BaseModel):
         ge=1,
         description="Hard server-side ceiling for configured defaults and client-supplied run recursion_limit values. Values above this are clamped; prevents runaway LangGraph super-steps (LLM cost / DoS).",
     )
+
+    @field_validator("recursion_limit", "max_recursion_limit", mode="before")
+    @classmethod
+    def _reject_boolean_recursion_limits(cls, value: object, info: ValidationInfo) -> object:
+        return _reject_boolean_int(value, info)
+
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
     sandbox: SandboxConfig = Field(
         description=format_field_description(

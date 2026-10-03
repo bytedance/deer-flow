@@ -1274,7 +1274,10 @@ Existing process variables, including empty values, take precedence. An unset
 selector keeps the existing default lookup; a set but empty selector, missing
 file, directory or unreadable file raises an actionable startup error without
 printing file contents. An empty **file** is valid and loads no defaults.
-Restart the backend after changing the selector or file contents.
+Explicit selection also raises when `PYTHON_DOTENV_DISABLED` is `1`, `true`,
+`t`, `yes` or `y` (case-insensitive), even for an empty file. Unset either option
+to resolve the conflict. Without a selector, python-dotenv's normal disable
+behavior is unchanged. Restart after changing the selector or file contents.
 
 `DEER_FLOW_CONFIG_PATH` continues to select YAML independently. For example,
 from `backend/`:

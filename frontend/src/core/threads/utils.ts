@@ -116,6 +116,7 @@ const CHANNEL_PROVIDER_LABELS: Record<string, string> = {
   dingtalk: "DingTalk",
   discord: "Discord",
   feishu: "Feishu",
+  qq: "QQ",
   slack: "Slack",
   telegram: "Telegram",
   wechat: "WeChat",
