@@ -329,6 +329,9 @@ class E2BSandboxProvider(SandboxProvider):
         self._transitioning_slots = 0
         self._capacity_cond = threading.Condition(self._lock)
         self._shutdown_called = False
+        # Keep admission fenced if shutdown has to retry after a bounded
+        # maintenance-thread join times out.
+        self._shutdown_cleanup_pending = False
         self._owned_sandbox_ids: set[str] = set()
         self._acquire_inflight: set[str] = set()
         self._orphan_first_seen: dict[str, float] = {}
@@ -2904,13 +2907,32 @@ class E2BSandboxProvider(SandboxProvider):
 
     def shutdown(self) -> None:
         with self._lock:
-            if self._shutdown_called:
+            if self._shutdown_called and not self._shutdown_cleanup_pending:
                 return
             self._shutdown_called = True
+            self._shutdown_cleanup_pending = False
+
         self._maintenance_stop.set()
-        for thread in (self._lease_thread, self._reconcile_thread):
-            if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=max(5.0, float(self._config["reconciliation_max_seconds"]) + 1.0))
+        join_timeout = max(5.0, float(self._config["reconciliation_max_seconds"]) + 1.0)
+        live_threads: list[str] = []
+        for name, thread in (
+            ("lease renewal", self._lease_thread),
+            ("reconciliation", self._reconcile_thread),
+        ):
+            if thread is None or thread is threading.current_thread():
+                continue
+            thread.join(timeout=join_timeout)
+            if thread.is_alive():
+                live_threads.append(name)
+
+        if live_threads:
+            with self._lock:
+                self._shutdown_cleanup_pending = True
+            raise RuntimeError(
+                "E2B maintenance thread shutdown timed out: "
+                + ", ".join(live_threads)
+            )
+
         with self._lock:
             active = list(self._sandboxes.items())
             warm_ids = list(self._warm_pool.keys() | self._eviction_tombstones | self._remote_ops_in_progress)

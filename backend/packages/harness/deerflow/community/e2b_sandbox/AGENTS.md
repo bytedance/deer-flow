@@ -26,3 +26,9 @@ Release only needs the VM lock while leaving active state; do not hold it
 during output sync, which must not prevent ownership heartbeats.
 Track that release in `_remote_ops_in_progress` until it completes so
 reconciliation cannot probe or re-adopt a VM between active and warm states.
+
+Shutdown owns both maintenance workers as well as sandbox registries. After
+signalling the lease-renewal and reconciliation threads, a bounded join is only
+a wait budget: verify each worker actually exited before clearing registries or
+tearing down resources. If either worker is still alive, keep admission fenced
+and preserve all tracked state so a later `shutdown()` can retry cleanup.
