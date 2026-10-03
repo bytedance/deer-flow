@@ -67,7 +67,9 @@ same database; it cannot dispatch through its actions or middleware.
 8. After restarting Gateway, choose **Manage → Reconnect** in an active team.
    Persisted jobs retain their inputs and idempotency keys; active runs are
    reconciled instead of blindly restarted. Reconnection also recreates a missing
-   member thread with its recorded Agent binding. Existing threads stay unchanged.
+   member thread with its recorded Agent binding. If creation was interrupted,
+   the team becomes ready only after all member threads are ensured successfully.
+   Existing threads stay unchanged.
 
 A new authenticated native mention can also reconnect its team. Existing queued
 jobs then continue under that caller's current delegated capability.
@@ -85,8 +87,8 @@ own teams. Sharing a host conversation does **not** share its team's private dat
 - Different member conversations can run concurrently; admissions are bounded to
   eight active plugin jobs. Each conversation is serialized, including result
   receipts. A busy host conversation stays queued without cancelling its run.
-- Each owner can have 20 teams. A team accepts at most 100 job entries at request
-  admission (result receipts have reserved space beyond that); a handoff chain
+- Each owner can have 20 teams. A team accepts at most 100 requests, with separate
+  space for up to 100 result receipts (200 total job entries); a handoff chain
   accepts at most 12 requests. Start a new user request for another chain, or a
   new team when the team's capacity is exhausted. Agent-to-Agent loops therefore
   cannot grow without a bound.
@@ -123,8 +125,9 @@ uv run ruff format --check ../examples/deerflow-extension-agent-teams
 
 The tests load the real extension and exercise owner isolation, directed requests,
 real ToolNode dispatch, mention middleware in the Lead middleware pipeline,
-serialization, interrupts, cancellation, restart/reconnect, ambiguous admission,
-and lifecycle locking. Host-run transport is controlled for deterministic tests.
+serialization, interrupts, cancellation, restart/reconnect (including incomplete
+creation), request capacity independent of receipts, ambiguous admission, and
+lifecycle locking. Host-run transport is controlled for deterministic tests.
 
 For a browser check, install the repo's frontend dependencies, then start the
 loopback-only fixture from `backend/`:
@@ -142,9 +145,11 @@ node examples/deerflow-extension-agent-teams/verify_browser.mjs
 This drives packaged UI assets, real plugin routes, SQLite and graph checkpoints,
 with a synthetic identity and deterministic model. It verifies team creation,
 insecure HTTP without `crypto.randomUUID`, Shadow DOM, catalog failure/retry,
-search and selection, keyboard mentions, task/result pairing, peer receipts,
+search and selection, unique bounded member labels after truncation, keyboard
+mentions, task/result pairing, peer receipts,
 automatic conditional updates, draft/detail preservation, owner isolation,
-conversation navigation, mobile/dark layouts, reopening, deletion and disposal.
+conversation navigation, mobile/dark layouts, delete-action contrast in both
+themes, reopening, deletion and disposal.
 The agent catalog and identity are synthetic; the peer fixture calls the real
 plugin handler through the public ToolContext contract. It does not claim production
 authentication or live-model coverage. Set `TEAM_PREVIEW_URL` for another port and

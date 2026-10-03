@@ -503,3 +503,124 @@ async def test_activity_reads_legacy_jobs_and_bounds_projection(plugin):
     for limit in (0, 201, True, "20"):
         with pytest.raises(ValueError):
             await actions["get"]({"team_id": team["id"], "limit": limit}, context(runs))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("created_threads", [1, 2])
+async def test_reconnect_recovers_incomplete_creation_only_after_all_threads_exist(plugin, monkeypatch, created_threads):
+    from deerflow_extension_agent_teams.service import Teams
+
+    _, actions, service = plugin
+    runs = Runs()
+    ensure = runs.create_thread
+    calls = []
+
+    async def interrupted(**kwargs):
+        result = await ensure(**kwargs)
+        calls.append(result)
+        if len(calls) == created_threads:
+            raise TimeoutError("creation interrupted")
+        return result
+
+    monkeypatch.setattr(runs, "create_thread", interrupted)
+    with pytest.raises(TimeoutError):
+        await create(actions, runs)
+    team = (await service.db("list", "alice"))[0]
+    assert not team["ready"]
+    original_ids = [m["thread_id"] for m in team["members"]]
+    replacement = Teams(service.store.path)
+    replacement.available = True
+    calls.clear()
+    with pytest.raises(TimeoutError):
+        await replacement.connect({"team_id": team["id"]}, context(runs))
+    assert not (await replacement.db("get", "alice", team["id"]))["ready"]
+    assert not replacement.handles
+    monkeypatch.setattr(runs, "create_thread", ensure)
+    await replacement.connect({"team_id": team["id"]}, context(runs))
+    await replacement.connect({"team_id": team["id"]}, context(runs))
+    recovered = await replacement.get({"team_id": team["id"]}, context(runs))
+    assert recovered["ready"] and recovered["connected"]
+    assert [m["thread_id"] for m in recovered["members"]] == original_ids
+    assert set(runs.threads) == set(original_ids)
+    sent = await replacement.send({"team_id": team["id"], "member_id": team["members"][0]["id"], "text": "Recovered task", "request_id": "recovered"}, context(runs))
+    await replacement.tick()
+    runs.finish(sent["id"])
+    await replacement.tick()
+    assert (await replacement.get({"team_id": team["id"]}, context(runs)))["jobs"][0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_and_delete_leave_no_orphaned_handle(plugin, monkeypatch):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    service.handles.clear()
+    ensure = runs.create_thread
+    deletion = None
+    attempted = asyncio.Event()
+    db = service.db
+
+    async def delete():
+        attempted.set()
+        return await actions["delete"]({"team_id": team["id"]}, context(runs))
+
+    async def immediate_delete_db(method, *args):
+        # Once admitted, finish the competing deletion in one event-loop turn;
+        # executor timing must not let an unlocked reconnect escape this test.
+        if asyncio.current_task() is deletion:
+            return getattr(service.store, method)(*args)
+        return await db(method, *args)
+
+    async def delete_during_reconnect(**kwargs):
+        nonlocal deletion
+        if deletion is None:
+            deletion = asyncio.create_task(delete())
+            await attempted.wait()
+        return await ensure(**kwargs)
+
+    monkeypatch.setattr(service, "db", immediate_delete_db)
+    monkeypatch.setattr(runs, "create_thread", delete_during_reconnect)
+    await actions["connect"]({"team_id": team["id"]}, context(runs))
+    await deletion
+    assert not service.handles
+    assert (await actions["list"]({}, context(runs)))["teams"] == []
+    await service.tick()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_as_admitted", [True, False])
+async def test_request_capacity_reserves_all_receipts_and_keeps_retries_idempotent(plugin, finish_as_admitted):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    sender, recipient = team["members"]
+    caller = context(runs, thread=sender["thread_id"])
+    payload = {"team_id": team["id"], "member_id": recipient["id"], "text": "Check", "request_id": "0"}
+
+    async def complete(job_id):
+        stored = await service.db("get", "alice", team["id"])
+        job = next(j for j in stored["jobs"] if j["id"] == job_id)
+        await service.finish("alice", stored, job, "completed", "Result")
+        # Duplicate terminal observations cannot allocate a second receipt.
+        await service.finish("alice", stored, job, "completed", "Result")
+        stored = await service.db("get", "alice", team["id"])
+        receipt = next(j for j in stored["jobs"] if j.get("parent_id") == job_id)
+        await service.finish("alice", stored, receipt, "completed", "Delivered")
+
+    ids = []
+    for index in range(100):
+        sent = await actions["send"]({**payload, "request_id": str(index)}, caller)
+        ids.append(sent["id"])
+        if finish_as_admitted:
+            await complete(sent["id"])
+    if not finish_as_admitted:
+        for job_id in ids:
+            await complete(job_id)
+    view = await actions["get"]({"team_id": team["id"], "limit": 200}, context(runs))
+    assert view["total_jobs"] == len(view["jobs"]) == 200
+    assert sum(j["kind"] == "request" for j in view["jobs"]) == 100
+    assert sum(j["kind"] == "receipt" for j in view["jobs"]) == 100
+    assert (await actions["send"](payload, caller))["id"] == ids[0]
+    with pytest.raises(ValueError, match="limit"):
+        await actions["send"]({**payload, "request_id": "101"}, caller)
+    assert (await actions["get"]({"team_id": team["id"]}, context(runs)))["total_jobs"] == 200

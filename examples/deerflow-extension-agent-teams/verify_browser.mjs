@@ -193,6 +193,46 @@ try {
       path: process.env.TEAM_SCREENSHOT.replace(".png", "-dark.png"),
       fullPage: true,
     });
+  // Theme tokens must keep the small delete action readable in both themes.
+  await page.getByText("Manage", { exact: true }).click();
+  for (const dark of [false, true]) {
+    await page.evaluate(
+      (dark) => document.documentElement.classList.toggle("dark", dark),
+      dark,
+    );
+    const contrast = await page
+      .getByRole("button", { name: "Delete finished team", exact: true })
+      .evaluate((button) => {
+        const canvas = document.createElement("canvas");
+        canvas.width = canvas.height = 1;
+        const ctx = canvas.getContext("2d");
+        function luminance(color) {
+          ctx.clearRect(0, 0, 1, 1);
+          ctx.fillStyle = color;
+          ctx.fillRect(0, 0, 1, 1);
+          return [...ctx.getImageData(0, 0, 1, 1).data]
+            .slice(0, 3)
+            .map((v) => v / 255)
+            .map((v) =>
+              v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4,
+            )
+            .reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
+        }
+        const foreground = luminance(getComputedStyle(button).color);
+        const background = luminance(
+          getComputedStyle(button.parentElement).backgroundColor,
+        );
+        return (
+          (Math.max(foreground, background) + 0.05) /
+          (Math.min(foreground, background) + 0.05)
+        );
+      });
+    assert.ok(
+      contrast >= 4.5,
+      `Delete contrast in ${dark ? "dark" : "light"} theme: ${contrast}`,
+    );
+  }
+  await page.getByText("Manage", { exact: true }).click();
   // Multiple recipients create one job each. Polling failures preserve the composer.
   await page
     .getByRole("button", { name: "Remove recipient Research", exact: true })
@@ -242,6 +282,69 @@ try {
   await expect(
     page.getByRole("button", { name: "Create team", exact: true }),
   ).toBeVisible();
+  // Exercise the submitted names through real create validation, including
+  // collisions with naturally suffixed titles and the UTF-8 byte ceiling.
+  const nameCases = [
+    ["X".repeat(80) + "A", "X".repeat(80) + "B", "X".repeat(76) + " (2)"],
+    ["Research", "Research", "Research (2)"],
+    ["Research ", "Research", " Research"],
+    ["研".repeat(80), "研".repeat(79) + "究", "😀".repeat(50)],
+  ];
+  for (const [index, titles] of nameCases.entries()) {
+    await page.route(
+      "**/api/agents",
+      (route) =>
+        route.fulfill({
+          json: {
+            agents: titles.map((display_name, i) => ({
+              name: ["researcher", "reviewer", "writer"][i],
+              display_name,
+              description: "Name boundary regression",
+            })),
+          },
+        }),
+      { times: 1 },
+    );
+    await page.getByRole("button", { name: "+ New team", exact: true }).click();
+    await expect(page.getByRole("checkbox")).toHaveCount(3);
+    for (const checkbox of await page.getByRole("checkbox").all())
+      await checkbox.check();
+    const title = `Name boundaries ${index}`;
+    await page.getByLabel("Team name", { exact: true }).fill(title);
+    await page
+      .getByLabel("Shared goal", { exact: true })
+      .fill("Check member names");
+    const created = page.waitForResponse((r) =>
+      r.url().endsWith("/actions/create"),
+    );
+    await page
+      .getByRole("button", { name: "Create team", exact: true })
+      .click();
+    const response = await created;
+    assert.equal(response.status(), 200, await response.text());
+    const result = await response.json();
+    const names = result.members.map((m) => m.name);
+    assert.equal(new Set(names).size, 3);
+    assert.ok(
+      names.every(
+        (name) =>
+          name === name.trim() &&
+          name.length <= 80 &&
+          new TextEncoder().encode(name).length <= 160,
+      ),
+    );
+    await expect(
+      page.getByRole("heading", { name: title, exact: true }),
+    ).toBeVisible();
+    await page.getByText("Manage", { exact: true }).click();
+    page.once("dialog", (dialog) => dialog.accept());
+    await page
+      .getByRole("button", { name: "Delete finished team", exact: true })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Create team", exact: true }),
+    ).toBeVisible();
+  }
   await page.evaluate(() => window.teamView.dispose());
   assert.equal(await page.locator(".agent-teams").count(), 0);
   const finalCount = requests;

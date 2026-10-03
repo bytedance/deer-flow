@@ -363,7 +363,7 @@ textarea {
   font-size: 12px;
 }
 .danger {
-  color: #bd5545;
+  color: var(--destructive, #bd5545);
 }
 .workspace-body {
   display: grid;

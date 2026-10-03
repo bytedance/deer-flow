@@ -132,12 +132,13 @@ def create_app(directory):
     async def preview():
         return """<!doctype html><html lang="en"><meta charset="utf-8"><title>Agent teams preview</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{font:14px system-ui;background:#faf9f3;color:#252722;margin:0}
+<style>:root{--destructive:oklch(0.577 0.245 27.325)}
+body{font:14px system-ui;background:#faf9f3;color:#252722;margin:0}
 nav{height:56px;border-bottom:1px solid #e5e5de;padding:0 32px;display:flex;align-items:center;color:#777a72;font-size:12px}
 main{max-width:1152px;margin:auto;padding:32px 40px;box-sizing:border-box}
 h1{font-size:24px;font-weight:600;margin:0 0 24px}
 @media(max-width:720px){main{padding:24px 20px}}
-html.dark{--card:#24251f;--foreground:#eeeee8;--muted-foreground:#a2a49a;--border:#414239;--muted:#303128;--primary:#dbe4d6;--primary-foreground:#242d22}
+html.dark{--card:#24251f;--foreground:#eeeee8;--muted-foreground:#a2a49a;--border:#414239;--muted:#303128;--primary:#dbe4d6;--primary-foreground:#242d22;--destructive:oklch(0.704 0.191 22.216)}
 html.dark body{background:#1c1d18;color:#eeeee8}</style>
 <nav>Workspace　/　Agent teams</nav><main><h1>Agent teams</h1><div id="root"></div></main>
 <script type="module">

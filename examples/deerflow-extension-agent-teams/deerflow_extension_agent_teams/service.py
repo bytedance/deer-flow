@@ -176,12 +176,14 @@ class Teams:
 
     async def connect(self, payload, context):
         fields(payload, "team_id")
-        team = await self.db("get", context.principal.user_id, text(payload, "team_id", 64))
-        if context.agent_runs is None:
-            raise ValueError("Agent control unavailable")
-        for member in team["members"]:
-            await context.agent_runs.create_thread(assistant_id=member["agent"], thread_id=member["thread_id"], metadata={})
-        self.bind(context, team["id"])
+        async with self.lock:
+            team = await self.db("get", context.principal.user_id, text(payload, "team_id", 64))
+            if context.agent_runs is None:
+                raise ValueError("Agent control unavailable")
+            for member in team["members"]:
+                await context.agent_runs.create_thread(assistant_id=member["agent"], thread_id=member["thread_id"], metadata={})
+            self.bind(context, team["id"])
+            await self.db("change", context.principal.user_id, team["id"], lambda t: t.update(ready=True))
         return {"connected": True}
 
     async def search(self, payload, context):
@@ -206,7 +208,7 @@ class Teams:
                 raise ValueError("Request ID already used for another request")
             return {"id": job_id, "status": existing["status"]}
         root = parent["root"] if parent else job_id
-        if len(team["jobs"]) >= LIMIT or sum(j["root"] == root and j["kind"] == "request" for j in team["jobs"]) >= 12:
+        if sum(j["kind"] == "request" for j in team["jobs"]) >= LIMIT or sum(j["root"] == root and j["kind"] == "request" for j in team["jobs"]) >= 12:
             raise ValueError("Team or handoff limit reached; create a new team or start a new request")
         job = {"id": job_id, "root": root, "member_id": member_id, "thread_id": member["thread_id"], "source": source, "text": content, "kind": kind, "status": "queued", "run_id": None, "input": None, "error": None, "resume": None}
         job.update(parent_id=parent["id"] if parent else None, created_at=datetime.now(UTC).isoformat())

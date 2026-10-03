@@ -13,6 +13,17 @@ function requestId() {
   ).join("");
 }
 
+function memberName(title, suffix = "") {
+  let name = "";
+  const encoder = new TextEncoder();
+  for (const character of title.trim()) {
+    const candidate = name + character + suffix;
+    if (candidate.length > 80 || encoder.encode(candidate).length > 160) break;
+    name += character;
+  }
+  return name.trimEnd() + suffix;
+}
+
 function mount(root, context) {
   const t = (en, cn) => (zh(context) ? cn : en);
   const controller = new AbortController();
@@ -247,14 +258,16 @@ function mount(root, context) {
       async () => {
         if (!loaded || chosen.size < 2 || !form.reportValidity()) return;
         const picked = [...chosen.values()];
-        const members = picked.map((agent, index) => ({
-          name: picked.some(
-            (other) => other.name !== agent.name && other.title === agent.title,
-          )
-            ? `${agent.title.slice(0, 70)} (${index + 1})`
-            : agent.title.slice(0, 80),
-          agent: agent.name,
-        }));
+        const usedNames = new Set();
+        const members = picked.map((agent) => {
+          const title = agent.title.trim() || agent.name;
+          let name = memberName(title);
+          for (let number = 2; usedNames.has(name); number++) {
+            name = memberName(title, ` (${number})`);
+          }
+          usedNames.add(name);
+          return { name, agent: agent.name };
+        });
         const payload = {
           name: name.value.trim(),
           goal: goal.value.trim(),
