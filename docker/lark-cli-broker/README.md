@@ -129,7 +129,7 @@ paths still refer to the sidecar's filesystem, not the sandbox's.
 The broker removes the credential *files* from the sandbox, but the full
 `lark-cli` command surface stays reachable, so any subcommand that prints/exports
 tokens could still exfiltrate them. Set `DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`
-on the sidecar to a comma-separated list of command prefixes the broker should
+on the sidecar to a comma-separated list of command paths the broker should
 refuse, e.g. `DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS="config show, auth token"`.
 Denied calls return exit `126` with a `subcommand ... is disabled` message and
 never spawn the binary. The broker does not know which options take a value, so
