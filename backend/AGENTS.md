@@ -370,7 +370,7 @@ Automatic conversation summarization when approaching token limits:
   manual state updates). Its short-lived `checkpoint_write` thread operation
   shares the durable active-thread uniqueness constraint with run admission,
   preventing either worker-local or cross-worker checkpoint-write races.
-- Each summarizer call emits a `middleware:summarize` journal event (`MIDDLEWARE_SUMMARIZE_TAG`; `action="summary_result"`, `changes.noop` true when the output is byte-identical to the prior `summary_text`) and bumps `summary_noop_count` / `summary_call_count` on the middleware. This is observation only; the summarizer call is never skipped. Per-call LLM telemetry lives on `RunJournal` (see the runtime guide).
+- Each summarizer call emits a `middleware:summarize` journal event (`MIDDLEWARE_SUMMARIZE_TAG`; `action="summary_result"`, `changes.noop` true when the output is byte-identical to the prior `summary_text`) and bumps `summary_noop_count` / `summary_call_count` on the middleware. The call is skipped only when the exact rendered summarizer prompt (plus candidate models) previously produced output byte-identical to the current `summary_text` (P1): the existing summary is reused through the normal compaction path and the event carries `changes.llm_call_skipped=true`. Any cache failure falls back to the LLM call. Per-call LLM telemetry lives on `RunJournal` (see the runtime guide).
 
 See [docs/summarization.md](docs/summarization.md) for details.
 
