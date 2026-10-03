@@ -1322,6 +1322,23 @@ reuse the search entry's key, so search can use a different provider. If you
 previously configured a shared Tavily key only under `web_search`, also set it
 under `web_fetch` or use `TAVILY_API_KEY` for both.
 
+For news-focused research, select **Webz.io News Search** in `make setup`, or
+replace the `web_search` tool's `use` with
+`deerflow.community.webz.tools:web_search_tool` and set `WEBZ_API_KEY`.
+An explicit tool `api_key` takes precedence over the environment variable.
+An explicit call's `max_results` overrides the configured default; omission
+uses configuration or 5 (clamped to 1–100). Invalid configured counts, including
+booleans and fractional numbers, fall back to 5. Results include the matching
+passage, title, URL, publication date, and source metadata. `returned_results`
+counts the returned page, not all matching news articles. Malformed entries are
+skipped with a warning while valid entries are retained; invalid responses or
+pages with no valid entries return an error. Empty result lists remain valid. The tool accepts
+language, country, source-domain, sentiment, category, and publication-date
+filters. Its `time_range` maps to a UTC lower date bound of 1, 7, 30, or 365
+days; an explicit `published_from` overrides that bound. Webz searches recent
+news rather than the general web: date filters cannot extend the provider's
+[documented 30-day coverage](https://docs.webz.io/docs/webz/news-search-api-response-format).
+
 #### Exporting Custom Skills
 
 Administrators can export their own custom skills from **Capability Center → Skills → My skills → View details → Export**. Review the file list and declared environment requirements, then choose **Download .skill**. The archive contains the currently saved skill, including supporting files and empty directories; disabled skills can also be exported. If the skill changes after preview, refresh the file list before downloading. Import the archive on another DeerFlow instance with **Install .skill**; existing-name conflicts and normal installation security checks still apply.

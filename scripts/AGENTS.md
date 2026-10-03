@@ -1,5 +1,17 @@
 ## Service Startup Contracts
 
+The setup wizard offers Webz.io as a news-only `web_search` provider using
+`deerflow.community.webz.tools:web_search_tool` and `WEBZ_API_KEY`. Keep its
+entry aligned with the credential check in `doctor.py` and the example config.
+The adapter uses async HTTPS requests, offloads lazy config loading, and maps
+`source` to provider `domain`; explicit `published_from` overrides recency.
+Explicit `max_results` overrides the wizard's configured default; omission or
+null uses configuration or 5. Reject boolean/fractional configured counts before
+clamping to 1–100. `returned_results` is the normalized page size, not a match total.
+Skip malformed page entries with index-only warnings; retain valid neighbors.
+Reject malformed envelopes and nonempty pages with no valid entries, logging
+no provider payloads or credentials. Contract tests live in `backend/tests/test_webz_tools.py`.
+
 Optional browser dependency detection reads the top-level `tools:` sequence
 without requiring `name` to be its first mapping key. Both indented and
 indentless lists are supported; nested option names and block-scalar text

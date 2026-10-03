@@ -674,6 +674,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         env_var="GROUNDROUTE_API_KEY",
         extra_config={"max_results": 5},
     ),
+    SearchProvider(
+        name="webz",
+        display_name="Webz.io News Search",
+        description="Recent news search (not general web search), API key required",
+        use="deerflow.community.webz.tools:web_search_tool",
+        env_var="WEBZ_API_KEY",
+        extra_config={"max_results": 5},
+    ),
 ]
 
 WEB_FETCH_PROVIDERS: list[WebProvider] = [
