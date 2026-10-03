@@ -1982,24 +1982,33 @@ export function useThreadStream({
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
 
-  const scheduleActiveRunRejoinRetry = useCallback(() => {
-    const rejoin = activeRunRejoinRef.current;
-    if (!rejoin.inFlight || !rejoin.threadId || !rejoin.runId) {
-      return;
-    }
+  const scheduleActiveRunRejoinRetry = useCallback(
+    (run: Pick<Run, "thread_id" | "run_id"> | undefined) => {
+      const rejoin = activeRunRejoinRef.current;
+      if (
+        !rejoin.inFlight ||
+        !rejoin.threadId ||
+        !rejoin.runId ||
+        run?.thread_id !== rejoin.threadId ||
+        run?.run_id !== rejoin.runId
+      ) {
+        return;
+      }
 
-    rejoin.inFlight = false;
-    clearReconnectRun(rejoin.threadId, rejoin.runId);
-    const retryDelay = ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS[rejoin.attempts - 1];
-    if (retryDelay === undefined) {
-      return;
-    }
+      rejoin.inFlight = false;
+      clearReconnectRun(rejoin.threadId, rejoin.runId);
+      const retryDelay = ACTIVE_RUN_REJOIN_RETRY_DELAYS_MS[rejoin.attempts - 1];
+      if (retryDelay === undefined) {
+        return;
+      }
 
-    rejoin.retryTimer = setTimeout(() => {
-      rejoin.retryTimer = null;
-      setActiveRunRejoinRetry((current) => current + 1);
-    }, retryDelay);
-  }, []);
+      rejoin.retryTimer = setTimeout(() => {
+        rejoin.retryTimer = null;
+        setActiveRunRejoinRetry((current) => current + 1);
+      }, retryDelay);
+    },
+    [],
+  );
 
   const settleActiveRunRejoin = useCallback(() => {
     const rejoin = activeRunRejoinRef.current;
@@ -2188,8 +2197,8 @@ export function useThreadStream({
         }
       }
     },
-    onError(error) {
-      scheduleActiveRunRejoinRetry();
+    onError(error, run) {
+      scheduleActiveRunRejoinRetry(run);
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);
