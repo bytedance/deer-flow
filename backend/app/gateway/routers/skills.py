@@ -834,13 +834,14 @@ def _write_extensions_skill_state(
     "/skills/{skill_name}",
     response_model=SkillResponse,
     summary="Update Skill",
-    description="Update a skill's enabled status by modifying the extensions_config.json file.",
+    description=("Update a skill's enabled status (admin only). Public skills persist to the shared extensions_config.json; custom/legacy skills persist to per-user storage when available, otherwise to the shared configuration."),
 )
 async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Request, config: AppConfig = Depends(get_config)) -> SkillResponse:
     # Keep skill toggles admin-only, including user-scoped custom/legacy skills.
     # Public state uses shared extensions_config.json; custom/legacy state uses
     # per-user storage when available, falling back to shared config otherwise.
-    # Cache invalidation follows the skill category in _persist_state below.
+    # Public toggles clear all users' caches; custom/legacy refresh only the caller,
+    # even in the shared-config fallback (other users' cached state may be stale).
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
@@ -889,8 +890,9 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
 
             # PUBLIC skill enabled state lives in the global extensions_config.json
             # and affects every user, so the prompt cache for ALL users must be
-            # invalidated. CUSTOM/LEGACY skill state is per-user so only that
-            # user's cache needs to be dropped. The state write and its cache
+            # invalidated. CUSTOM/LEGACY drops only the caller's cache, including the
+            # non-user-scoped fallback above, where other users' entries may stay stale.
+            # The state write and its cache
             # invalidation settle as one drained unit: a cancelled caller must
             # not leave the prompt cache serving the previous enablement.
             if skill.category == SkillCategory.PUBLIC:
