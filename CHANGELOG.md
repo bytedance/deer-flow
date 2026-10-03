@@ -460,6 +460,19 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **channels:** Buzz now follows a thread without a fresh mention for authors
+  bound with `/connect`. With `channel_connections.enabled`, the manager maps a
+  bound author's threads only in the connection repository, but Buzz's
+  thread-follow gate read only the JSON channel store, so every unmentioned
+  reply in a thread the bot was already answering was silently dropped. Buzz
+  now resolves the connection before the mention gate and looks the thread up
+  through the same helper as the manager (`lookup_thread_id`), so a bound
+  author's engaged thread is the one the manager will reuse, and a legacy JSON
+  mapping no longer counts for that author. The manager's slash-skill whitelist
+  check had its own copy of the same read and is fixed with it: a bound user
+  with no thread yet was checked against the agent of a legacy JSON thread for
+  the same chat and could be told an enabled skill was not available. ([#6232])
+
 - **channels:** Discord now runs its channel-connection database work on the
   Gateway event loop. discord.py delivers messages on a private loop in the
   client thread, and the Discord adapter awaited the connection repository there
@@ -7662,3 +7675,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
 [#6214]: https://github.com/bytedance/deer-flow/pull/6214
 [#6212]: https://github.com/bytedance/deer-flow/pull/6212
+[#6232]: https://github.com/bytedance/deer-flow/pull/6232

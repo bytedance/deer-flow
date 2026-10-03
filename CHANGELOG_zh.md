@@ -419,6 +419,15 @@
 
 ### 修复
 
+- **渠道：** 通过 `/connect` 绑定的 Buzz 作者在已参与的话题中回复时，无需再次提及
+  机器人。开启 `channel_connections.enabled` 后，管理器只在连接仓库中记录已绑定作者
+  的话题映射，而 Buzz 的话题跟随判断只读取 JSON 渠道存储，导致机器人正在回复的话题
+  中所有未提及的回复都被静默丢弃。现在 Buzz 会在提及判断之前解析连接，并通过与管理器
+  相同的辅助函数（`lookup_thread_id`）查找话题，因此已绑定作者的已参与话题就是管理器
+  将复用的话题，旧的 JSON 映射也不再对该作者生效。管理器的斜杠技能白名单检查中有同一读取逻辑
+  的副本，也一并修复：尚无话题的已绑定用户此前会按同一会话旧 JSON 话题的智能体进行检查，
+  可能被告知已启用的技能不可用。([#6232])
+
 - **渠道：** Discord 的渠道连接数据库操作现在在 Gateway 事件循环上执行。
   discord.py 在客户端线程的私有事件循环上投递消息，而 Discord 适配器此前就在该
   循环上 await 连接仓库，但仓库的 SQLAlchemy 引擎与连接池属于 Gateway 循环。在
@@ -6401,3 +6410,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
 [#6212]: https://github.com/bytedance/deer-flow/pull/6212
 [#6214]: https://github.com/bytedance/deer-flow/pull/6214
+[#6232]: https://github.com/bytedance/deer-flow/pull/6232
