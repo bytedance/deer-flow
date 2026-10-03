@@ -491,6 +491,9 @@ class DeerFlowTUI(App):
         self.push_screen(SelectScreen("Select model", options), on_choice)
 
     def _open_thread_switcher(self) -> None:
+        if self._streaming:
+            self._dispatch_still_working()
+            return
         try:
             threads = self.session.recent_threads(limit=20)
         except Exception:  # noqa: BLE001
@@ -514,13 +517,24 @@ class DeerFlowTUI(App):
 
     def _resume_thread(self, ref: str) -> None:
         """/resume [id-or-title]: switch to a thread, or open the picker if blank."""
+        if self._streaming:
+            self._dispatch_still_working()
+            return
         ref = ref.strip()
         if not ref:
             self._open_thread_switcher()
             return
-        self._switch_to_thread(self.session.resolve_ref(ref))
+        try:
+            thread_id = self.session.resolve_ref(ref)
+        except ValueError as exc:
+            self._dispatch(SystemMessage(str(exc), tone="error"))
+            return
+        self._switch_to_thread(thread_id)
 
     def _switch_to_thread(self, thread_id: str) -> None:
+        if self._streaming:
+            self._dispatch_still_working()
+            return
         self._conv_thread_id = thread_id
         self.state = initial_state()
         self._dispatch(SystemMessage(f"Resumed thread {thread_id[:8]}."))
