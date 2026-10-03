@@ -180,6 +180,41 @@ class TestFixMessages:
         assert result[0].content.count("</tool_response>") == 1
         assert "&lt;/tool_response&gt;" in result[0].content
 
+    def test_tool_message_json_block_unserializable_degrades_to_str(self):
+        # A set raises TypeError in json.dumps; the payload must degrade to
+        # str() instead of failing the whole request normalization.
+        msg = ToolMessage(
+            content=[{"type": "json", "json": {"s": {1, 2}}}],
+            tool_call_id="call_unserializable",
+        )
+        result = _fix_messages([msg])
+        assert isinstance(result[0], HumanMessage)
+        assert "'s': {1, 2}" in result[0].content
+
+    def test_tool_message_json_block_circular_reference_degrades_to_str(self):
+        # json.dumps raises ValueError ("Circular reference detected") for a
+        # self-referencing payload; same str() degrade as the TypeError path.
+        payload = {}
+        payload["self"] = payload
+        msg = ToolMessage(
+            content=[{"type": "json", "json": payload}],
+            tool_call_id="call_circular",
+        )
+        result = _fix_messages([msg])
+        assert isinstance(result[0], HumanMessage)
+        assert "'self':" in result[0].content
+
+    def test_json_block_without_json_key_is_dropped(self):
+        # A bare {"type": "json"} carried no payload before this change and
+        # must keep being dropped rather than emit a literal "null".
+        msg = ToolMessage(
+            content=[{"type": "text", "text": "kept"}, {"type": "json"}],
+            tool_call_id="call_no_json_key",
+        )
+        result = _fix_messages([msg])
+        assert "kept" in result[0].content
+        assert "null" not in result[0].content
+
     def test_tool_message_escapes_tool_response_breakout(self):
         # Tool output is untrusted (read_file on an untrusted file, bash output, or an
         # MCP tool the ToolResultSanitizationMiddleware allowlist doesn't cover). A literal
