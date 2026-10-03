@@ -473,7 +473,9 @@ This release closes that milestone with **301 merged pull requests**.
   `/connect` binding runs separately, both on the Gateway loop through
   `_submit_threadsafe_coroutine` like Telegram, Feishu, and DingTalk. Bind
   replies go back through the Discord loop, and `stop()` now drains that work
-  before tearing the client down. ([#6214])
+  before tearing the client down. The typing indicator still registers before
+  the hand-off, and a failed lookup stops it and skips the ack reaction, so a
+  dropped message never shows the bot as working. ([#6214])
 
 - **community:** The shared SSRF guard now refuses every non-global address,
   including the `100.64.0.0/10` shared address space that its flag checks let

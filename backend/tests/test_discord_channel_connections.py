@@ -253,10 +253,13 @@ async def test_discord_stop_cancels_pending_identity_lookup_and_releases_intake(
     discord_loop, thread = _start_discord_loop()
     try:
         channel = _discord_channel_on_loops(bus, _BlockingRepo(), discord_loop)
-        await _on_discord_loop(channel._on_message(_discord_message("hello")), discord_loop)
+        # _on_message waits on the hand-off, so it stays pending with the lookup.
+        on_message = asyncio.run_coroutine_threadsafe(channel._on_message(_discord_message("hello")), discord_loop)
         await asyncio.wait_for(lookup_started.wait(), timeout=5)
 
         await channel._close_and_drain_threadsafe_futures()
+        # The drain settles the hand-off, so the Discord-side handler finishes too.
+        await asyncio.wait_for(asyncio.wrap_future(on_message), timeout=5)
     finally:
         _stop_discord_loop(discord_loop, thread)
 
@@ -285,6 +288,169 @@ async def test_discord_unscheduled_bind_is_handled_but_leaves_code_unconsumed(re
     assert handled is True
     assert bus.inbound_queue.qsize() == 0
     assert await repo.consume_oauth_state(provider="discord", state=state) is not None
+
+
+class _FailingIdentityRepo:
+    async def find_connection_by_external_identity(self, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+
+def _channel_with_real_typing(bus: MessageBus, repo, discord_loop: asyncio.AbstractEventLoop, reactions: list[int]) -> DiscordChannel:
+    channel = _discord_channel_on_loops(bus, repo, discord_loop)
+    del channel._start_typing  # exercise the real typing loop
+
+    async def _record_reaction(message) -> None:
+        reactions.append(message.id)
+
+    channel._add_reaction = _record_reaction
+    return channel
+
+
+def _typing_message(text: str = "hello"):
+    message = _discord_message(text)
+
+    async def _typing() -> None:
+        return None
+
+    message.channel.typing = _typing
+    return message
+
+
+@pytest.mark.anyio
+async def test_discord_failed_identity_lookup_stops_typing_and_skips_ack():
+    # A raising lookup drops the message, so nothing may keep reporting that
+    # the bot is working on it: no typing loop left behind, no ack reaction.
+    reactions: list[int] = []
+    bus = MessageBus(inbound_queue_maxsize=1)
+    discord_loop, thread = _start_discord_loop()
+    try:
+        channel = _channel_with_real_typing(bus, _FailingIdentityRepo(), discord_loop, reactions)
+        await _on_discord_loop(channel._on_message(_typing_message()), discord_loop)
+        await _on_discord_loop(asyncio.sleep(0), discord_loop)
+        typing_targets = list(channel._typing_tasks)
+    finally:
+        _stop_discord_loop(discord_loop, thread)
+
+    assert typing_targets == []
+    assert reactions == []
+    assert bus.inbound_queue.qsize() == 0
+    await bus.publish_inbound(InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="capacity was released"))
+    assert bus.inbound_queue.qsize() == 1
+
+
+@pytest.mark.anyio
+async def test_discord_failed_identity_lookup_keeps_another_messages_typing():
+    reactions: list[int] = []
+    bus = MessageBus()
+    discord_loop, thread = _start_discord_loop()
+    try:
+        channel = _channel_with_real_typing(bus, _FailingIdentityRepo(), discord_loop, reactions)
+
+        async def _register_in_flight_typing() -> asyncio.Task:
+            # An earlier message to the same target already shows typing.
+            await channel._start_typing(_typing_message().channel, "456")
+            return channel._typing_tasks["456"]
+
+        in_flight = await _on_discord_loop(_register_in_flight_typing(), discord_loop)
+        await _on_discord_loop(channel._on_message(_typing_message()), discord_loop)
+        still_registered = channel._typing_tasks.get("456") is in_flight
+        await _on_discord_loop(channel._cancel_typing_tasks(), discord_loop)
+    finally:
+        _stop_discord_loop(discord_loop, thread)
+
+    assert still_registered
+
+
+@pytest.mark.anyio
+async def test_discord_committed_message_keeps_typing_and_acks(repo):
+    await repo.upsert_connection(owner_user_id="alice", provider="discord", external_account_id="987", status="connected")
+    reactions: list[int] = []
+    bus = MessageBus()
+    discord_loop, thread = _start_discord_loop()
+    try:
+        channel = _channel_with_real_typing(bus, repo, discord_loop, reactions)
+        await _on_discord_loop(channel._on_message(_typing_message()), discord_loop)
+        await _on_discord_loop(asyncio.sleep(0), discord_loop)
+        typing_targets = list(channel._typing_tasks)
+        await _on_discord_loop(channel._cancel_typing_tasks(), discord_loop)
+        inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
+        bus.inbound_task_done()
+    finally:
+        _stop_discord_loop(discord_loop, thread)
+
+    assert inbound.owner_user_id == "alice"
+    assert typing_targets == ["456"]
+    assert reactions == [111]
+
+
+@pytest.mark.anyio
+async def test_discord_reply_stopping_typing_during_handoff_leaves_no_indicator():
+    # A reply can stop typing while the hand-off is still settling. Typing is
+    # registered before the hand-off, so that stop wins; starting it after the
+    # hand-off resolved would leave an indicator nothing ever stops.
+    reactions: list[int] = []
+    bus = MessageBus()
+    discord_loop, thread = _start_discord_loop()
+    try:
+        channel = None
+
+        class _ReplyDuringLookupRepo:
+            async def find_connection_by_external_identity(self, **_kwargs):
+                asyncio.run_coroutine_threadsafe(channel._stop_typing("456"), discord_loop)
+                return None
+
+        channel = _channel_with_real_typing(bus, _ReplyDuringLookupRepo(), discord_loop, reactions)
+        await _on_discord_loop(channel._on_message(_typing_message()), discord_loop)
+        await _on_discord_loop(asyncio.sleep(0), discord_loop)
+        typing_targets = list(channel._typing_tasks)
+        await _on_discord_loop(channel._cancel_typing_tasks(), discord_loop)
+        await asyncio.wait_for(bus.get_inbound(), timeout=5)
+        bus.inbound_task_done()
+    finally:
+        _stop_discord_loop(discord_loop, thread)
+
+    assert typing_targets == []
+    assert reactions == [111]
+
+
+@pytest.mark.anyio
+async def test_discord_cancelled_handler_leaves_the_shared_handoff_to_settle():
+    # discord.py may cancel a handler mid-wait. That must not cancel the shared
+    # completion future, or the submission finalizer fails to settle it and the
+    # already-running commit is reported as an error on the Gateway loop.
+    main_loop = asyncio.get_running_loop()
+    lookup_started = asyncio.Event()
+    release = asyncio.Event()
+    loop_errors: list[dict] = []
+
+    class _GatedRepo:
+        async def find_connection_by_external_identity(self, **_kwargs):
+            lookup_started.set()
+            await release.wait()
+            return None
+
+    previous_handler = main_loop.get_exception_handler()
+    main_loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    bus = MessageBus()
+    discord_loop, thread = _start_discord_loop()
+    try:
+        channel = _discord_channel_on_loops(bus, _GatedRepo(), discord_loop)
+        on_message = asyncio.run_coroutine_threadsafe(channel._on_message(_discord_message("hello")), discord_loop)
+        await asyncio.wait_for(lookup_started.wait(), timeout=5)
+        on_message.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.wrap_future(on_message), timeout=5)
+
+        release.set()
+        inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
+        bus.inbound_task_done()
+        await asyncio.sleep(0)
+    finally:
+        main_loop.set_exception_handler(previous_handler)
+        _stop_discord_loop(discord_loop, thread)
+
+    assert inbound.text == "hello"
+    assert loop_errors == []
 
 
 def _fake_discord_module() -> SimpleNamespace:

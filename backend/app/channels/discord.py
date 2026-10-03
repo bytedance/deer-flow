@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import threading
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -360,13 +361,17 @@ class DiscordChannel(Channel):
             logger.exception("[Discord] failed to upload file: %s", attachment.filename)
             return False
 
-    async def _start_typing(self, channel, chat_id: str, thread_ts: str | None = None) -> None:
-        """Starts a loop to send periodic typing indicators."""
+    async def _start_typing(self, channel, chat_id: str, thread_ts: str | None = None) -> asyncio.Task[None] | None:
+        """Starts a loop to send periodic typing indicators.
+
+        Returns the loop's task when this call started it, ``None`` when the
+        channel is stopping or the target already shows typing.
+        """
         if not self._running:
-            return
+            return None
         target_id = thread_ts or chat_id
         if target_id in self._typing_tasks:
-            return  # Already typing for this target
+            return None  # Already typing for this target
 
         async def _typing_loop():
             # The loop's first failure logs at WARNING, so an indicator that
@@ -388,6 +393,7 @@ class DiscordChannel(Channel):
 
         task = asyncio.create_task(_typing_loop())
         self._typing_tasks[target_id] = task
+        return task
 
     async def _cancel_typing_tasks(self) -> None:
         """Cancel and await every typing task on their owning event loop."""
@@ -587,13 +593,11 @@ class DiscordChannel(Channel):
                         },
                     )
                     inbound.topic_id = thread_id
-                    if not self._publish_reserved(inbound, reservation, guild_id=str(guild.id) if guild else None):
+                    handoff = self._publish_reserved(inbound, reservation, guild_id=str(guild.id) if guild else None)
+                    if handoff is None:
                         return
                     reservation_transferred = True
-                    # Start typing indicator in the thread
-                    if typing_target:
-                        await self._start_typing(typing_target, chat_id, thread_id)
-                    self._schedule_ack_reaction(message)
+                    await self._acknowledge_after_handoff(message, handoff, typing_target=typing_target, chat_id=chat_id, thread_id=thread_id)
                     return
 
                 # Thread not tracked (orphaned) — create new thread and handle below
@@ -696,19 +700,16 @@ class DiscordChannel(Channel):
             )
             inbound.topic_id = thread_id
 
-            if not self._publish_reserved(inbound, reservation, guild_id=str(guild.id) if guild else None):
+            handoff = self._publish_reserved(inbound, reservation, guild_id=str(guild.id) if guild else None)
+            if handoff is None:
                 return
             reservation_transferred = True
-
-            # Start typing/reaction only after bounded admission succeeds.
-            if typing_target:
-                await self._start_typing(typing_target, chat_id, thread_id)
-            self._schedule_ack_reaction(message)
+            await self._acknowledge_after_handoff(message, handoff, typing_target=typing_target, chat_id=chat_id, thread_id=thread_id)
         finally:
             if not reservation_transferred:
                 reservation.release()
 
-    def _publish_reserved(self, inbound: InboundMessage, reservation: InboundReservation, *, guild_id: str | None) -> bool:
+    def _publish_reserved(self, inbound: InboundMessage, reservation: InboundReservation, *, guild_id: str | None) -> Future[bool] | None:
         """Transfer an already-reserved message to the Gateway loop.
 
         Called from discord.py's private event-loop thread. The connection
@@ -717,17 +718,55 @@ class DiscordChannel(Channel):
         them from the Discord loop fails under asyncpg ("attached to a
         different loop") and binds the pool's wait queue to the wrong loop
         under aiosqlite, breaking the Gateway's own queries.
+
+        Returns the hand-off's completion future (``True`` once committed), or
+        ``None`` when the Gateway loop refused it.
         """
-        scheduled = self._submit_threadsafe_coroutine(
+        handoff = self._submit_threadsafe_coroutine_future(
             self._commit_reserved_inbound_with_identity(inbound, reservation, guild_id=guild_id),
             self._main_loop,
             name="commit_reserved_inbound",
             msg_id=inbound.metadata.get("message_id"),
             reservation=reservation,
         )
-        if not scheduled:
+        if handoff is None:
             logger.info("[Discord] main loop stopped before reserved inbound could be scheduled")
-        return scheduled
+        return handoff
+
+    async def _acknowledge_after_handoff(
+        self,
+        message,
+        handoff: Future[bool],
+        *,
+        typing_target,
+        chat_id: str,
+        thread_id: str | None,
+    ) -> None:
+        """Show progress for a handed-off message, undoing it if the hand-off fails.
+
+        Typing starts before the hand-off resolves, as it did before the
+        identity lookup moved to the Gateway loop: ``_start_typing`` registers
+        without yielding, so a fast reply's ``_stop_typing`` cannot run first
+        and leave an indicator behind. The ack reaction waits for the commit.
+        If identity resolution or the commit fails, or ``stop()`` drains the
+        hand-off, the message was dropped: stop the indicator this message
+        started (never one another in-flight message owns) and skip the ack.
+        """
+        typing_task = await self._start_typing(typing_target, chat_id, thread_id) if typing_target else None
+        try:
+            committed = await asyncio.shield(asyncio.wrap_future(handoff))
+        except asyncio.CancelledError:
+            if not handoff.cancelled():
+                raise
+            committed = False  # drained by stop()
+        except Exception:
+            committed = False  # the submission finalizer already logged it
+        if committed:
+            self._schedule_ack_reaction(message)
+            return
+        target_id = thread_id or chat_id
+        if typing_task is not None and self._typing_tasks.get(target_id) is typing_task:
+            await self._stop_typing(chat_id, thread_id)
 
     async def _commit_reserved_inbound_with_identity(
         self,
