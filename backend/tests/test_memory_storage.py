@@ -191,17 +191,26 @@ class TestFileMemoryStorage:
         memory2 = storage.reload()
         assert memory2["user"]["workContext"]["summary"] == "updated"
 
-    def test_reload_does_not_pin_a_document_older_than_its_signature(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("storage_class", [FileMemoryStorage, MarkdownMemoryStorage])
+    @pytest.mark.parametrize("agent_name", [None, "test-agent"])
+    def test_reload_does_not_pin_a_document_older_than_its_signature(self, tmp_path, storage_class, agent_name):
         """A write committed while reload() reads must not be hidden from later loads."""
-        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
-        storage = FileMemoryStorage(DeerMemConfig())
+        storage = storage_class(DeerMemConfig(storage_path=str(tmp_path)))
 
-        def summary_doc(summary: str) -> dict:
+        def memory_with(text: str) -> dict:
             memory = create_empty_memory()
-            memory["user"]["workContext"]["summary"] = summary
+            if agent_name is None:
+                memory["user"]["workContext"]["summary"] = text
+            else:
+                memory["facts"] = [{"id": "fact_1", "content": text, "category": "context", "confidence": 0.9}]
             return memory
 
-        assert storage.save(summary_doc("old"))
+        def text_of(memory: dict) -> str:
+            if agent_name is None:
+                return memory["user"]["workContext"]["summary"]
+            return memory["facts"][0]["content"]
+
+        assert storage.save(memory_with("old"), agent_name, user_id="alice")
         read_document = storage._read_document
         raced = False
 
@@ -212,15 +221,14 @@ class TestFileMemoryStorage:
                 raced = True
                 # A background updater commits after reload() has read the
                 # document but before it caches the result.
-                assert storage.save(summary_doc("new"))
+                assert storage.save(memory_with("new"), agent_name, user_id="alice")
             return document
 
-        monkeypatch.setattr(storage, "_read_document", read_then_concurrent_write)
-        storage.reload()
-        monkeypatch.setattr(storage, "_read_document", read_document)
+        with patch.object(storage, "_read_document", side_effect=read_then_concurrent_write):
+            storage.reload(agent_name, user_id="alice")
 
         assert raced
-        assert storage.load()["user"]["workContext"]["summary"] == "new"
+        assert text_of(storage.load(agent_name, user_id="alice")) == "new"
 
 
 class TestCreateStorage:
