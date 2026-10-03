@@ -104,6 +104,9 @@ class ScheduledTaskRunRepository:
         task: ScheduledTaskRow | None,
         row: ScheduledTaskRunRow,
         candidate: RunRow,
+        *,
+        run_status: str,
+        run_error: str | None,
     ) -> None:
         """Repair the parent update if launch committed before bookkeeping."""
         if task is None:
@@ -127,21 +130,21 @@ class ScheduledTaskRunRepository:
         task.lease_expires_at = None
         task.updated_at = datetime.now(UTC)
         if task.schedule_type == "once":
-            if candidate.status == "success":
+            if run_status == "success":
                 task.status = "completed"
                 task.last_error = None
-            elif candidate.status in {"error", "timeout"}:
+            elif run_status in {"error", "timeout"}:
                 task.status = "failed"
-                task.last_error = candidate.error
-            elif candidate.status == "interrupted":
+                task.last_error = run_error
+            elif run_status == "interrupted":
                 task.status = "cancelled"
-                task.last_error = candidate.error
+                task.last_error = run_error
             else:
                 task.status = "running"
                 task.last_error = None
         elif not (row.trigger == "manual" and task.status == "paused"):
             task.status = "enabled"
-            task.last_error = candidate.error if candidate.status in {"error", "timeout", "interrupted"} else None
+            task.last_error = run_error if run_status in {"error", "timeout", "interrupted"} else None
 
     async def create(
         self,
@@ -602,7 +605,7 @@ class ScheduledTaskRunRepository:
                     row.status = "queued"
                 else:
                     self._associate_scheduled_run(row, candidate)
-                    self._associate_task_with_run(task, row, candidate)
+                    self._associate_task_with_run(task, row, candidate, run_status=candidate.status, run_error=candidate.error)
                     if candidate.status in {"pending", "running"}:
                         row.status = "running"
                         row.error = None
@@ -732,7 +735,7 @@ class ScheduledTaskRunRepository:
                 else:
                     if candidate is not None:
                         self._associate_scheduled_run(row, candidate)
-                        self._associate_task_with_run(task, row, candidate)
+                        self._associate_task_with_run(task, row, candidate, run_status=candidate.status, run_error=candidate.error)
                     if candidate is not None and candidate.status == "success":
                         row.status = "success"
                         row.error = None
@@ -774,7 +777,7 @@ class ScheduledTaskRunRepository:
             )
             row_keys = list(result.all())
             stale = 0
-            associations: list[tuple[ScheduledTaskRow | None, ScheduledTaskRunRow, RunRow]] = []
+            associations: list[tuple[ScheduledTaskRow | None, ScheduledTaskRunRow, RunRow, str, str | None]] = []
             for row_id, task_id in row_keys:
                 # Keep the same task -> scheduled-run lock order used by
                 # pause/delete. Reversing these two locks lets a user action
@@ -788,29 +791,17 @@ class ScheduledTaskRunRepository:
                 if row is None or row.status not in EXECUTING_RUN_STATUSES:
                     continue
                 candidate = await self._find_underlying_run(session, row, task)
+                candidate_status = candidate.status if candidate is not None else None
+                candidate_error = candidate.error if candidate is not None else None
                 if candidate is not None:
                     self._associate_scheduled_run(row, candidate)
                     # Defer parent writes until all run takeovers have finished.
                     # Flushing a parent mutation before claim_for_takeover()
                     # would hold SQLite's writer lock across the nested short
                     # transaction used by that durable-run CAS.
-                    associations.append((task, row, candidate))
-                if candidate is not None and candidate.status not in {"pending", "running"}:
-                    row.lease_owner = None
-                    row.lease_expires_at = None
-                    if candidate.status == "success":
-                        row.status = "success"
-                        row.error = None
-                    elif candidate.status in {"error", "timeout"}:
-                        row.status = "failed"
-                        row.error = candidate.error
-                    else:
-                        row.status = "interrupted"
-                        row.error = candidate.error or error
-                    row.finished_at = now
-                    stale += 1
-                    continue
-                if candidate is not None and candidate.status in {"pending", "running"}:
+                    association_index = len(associations)
+                    associations.append((task, row, candidate, candidate_status, candidate_error))
+                if candidate is not None and candidate_status in {"pending", "running"}:
                     if _lease_is_alive(candidate.lease_expires_at, now=now, grace_seconds=lease_grace_seconds):
                         # A peer can observe the committed durable run before
                         # the launcher writes its scheduled-run bookkeeping.
@@ -834,8 +825,28 @@ class ScheduledTaskRunRepository:
                     )
                     if not claimed:
                         refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
-                        if refreshed is not None and refreshed.get("status") in {"pending", "running"}:
-                            continue
+                        if refreshed is not None:
+                            candidate_status = refreshed.get("status")
+                            candidate_error = refreshed.get("error")
+                            associations[association_index] = (task, row, candidate, candidate_status, candidate_error)
+                            # The owner may have completed after our active-row read.
+                            if candidate_status in {"pending", "running"}:
+                                continue
+                if candidate is not None and candidate_status not in {"pending", "running"}:
+                    row.lease_owner = None
+                    row.lease_expires_at = None
+                    if candidate_status == "success":
+                        row.status = "success"
+                        row.error = None
+                    elif candidate_status in {"error", "timeout"}:
+                        row.status = "failed"
+                        row.error = candidate_error
+                    else:
+                        row.status = "interrupted"
+                        row.error = candidate_error or error
+                    row.finished_at = now
+                    stale += 1
+                    continue
                 if row.status == "launching" and row.run_id is None:
                     if _lease_is_alive(row.lease_expires_at, now=now, grace_seconds=0):
                         continue
@@ -850,8 +861,9 @@ class ScheduledTaskRunRepository:
                 row.lease_owner = None
                 row.lease_expires_at = None
                 stale += 1
-            for task, row, candidate in associations:
-                self._associate_task_with_run(task, row, candidate)
+            for task, row, candidate, run_status, run_error in associations:
+                association_error = row.error if run_status == "interrupted" else run_error
+                self._associate_task_with_run(task, row, candidate, run_status=run_status, run_error=association_error)
             await session.commit()
             return stale
 

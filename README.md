@@ -2291,6 +2291,8 @@ Scheduled runs use `scheduler.recursion_limit` in `config.yaml` (default `1000`,
 
 The background scheduler is single-instance by default. For a multi-pod deployment, set `scheduler.multi_instance: true` and use shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; startup and periodic recovery then preserve live peer runs, atomically return expired launch claims to the queue, take over only expired run leases, and fence stale launch writes. `max_concurrent_runs` is a shared global cap across Pods for `launching`/`running` occurrences; waiting `queued` rows do not consume it. Without those settings, enable the scheduler on exactly one Gateway pod. These scheduler fields are startup-only; restart all Gateway Pods together when changing them.
 
+On recovery, the owner's terminal outcome is projected to the scheduled occurrence and once-task parent; if the interrupted run has no recorded error, the parent retains the occurrence's fallback error.
+
 ### Preview cron occurrences through the API
 
 Authenticated clients with `threads:read` can call `POST /api/scheduled-tasks/preview-cron` before creating a task:

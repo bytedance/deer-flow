@@ -45,6 +45,71 @@ async def test_scheduled_task_repository_create_and_list(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_mark_stale_active_runs_projects_existing_terminal_once_run(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = RunRepository(sf)
+        task_run_repo = ScheduledTaskRunRepository(sf, run_repository=run_repo)
+        now = datetime.now(UTC)
+        task_id = "task-terminal-sweep"
+        occurrence_id = "task-run-terminal-sweep"
+        run_id = "run-terminal-sweep"
+
+        await task_repo.create(
+            task_id=task_id,
+            user_id="user-1",
+            thread_id=None,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="terminal sweep",
+            prompt="p",
+            schedule_type="once",
+            schedule_spec={"run_at": now.isoformat()},
+            timezone="UTC",
+            next_run_at=now,
+        )
+        await task_repo.update(task_id, user_id="user-1", updates={"status": "running"})
+        await task_run_repo.create(
+            run_record_id=occurrence_id,
+            task_id=task_id,
+            thread_id="thread-terminal-sweep",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="running",
+        )
+        await task_run_repo.update_status(occurrence_id, status="running", run_id=run_id)
+        await run_repo.put(
+            run_id,
+            thread_id="thread-terminal-sweep",
+            user_id="user-1",
+            status="success",
+            metadata={"scheduled_task_id": task_id, "scheduled_task_run_id": occurrence_id},
+            created_at=now.isoformat(),
+        )
+
+        assert await task_run_repo.mark_stale_active_runs(error="gateway restarted") == 1
+
+        occurrence = (await task_run_repo.list_by_task(task_id))[0]
+        durable_run = await run_repo.get(run_id, user_id=None)
+        parent = await task_repo.get(task_id, user_id="user-1")
+        assert durable_run is not None
+        assert parent is not None
+        assert occurrence["status"] == "success"
+        assert occurrence["error"] is None
+        assert durable_run["status"] == "success"
+        assert parent["status"] == "completed"
+        assert parent["last_error"] is None
+        assert parent["last_run_id"] == run_id
+        assert parent["last_thread_id"] == "thread-terminal-sweep"
+        assert parent["last_run_at"] is not None
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
 async def test_mutable_update_rechecks_active_occurrence_at_commit_boundary(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
@@ -1103,6 +1168,129 @@ async def test_reconcile_ignores_stale_parent_last_run_before_metadata_fallback(
 
         assert await task_run_repo.reconcile_active_runs(error="lease expired", now=now) == 0
         assert (await task_run_repo.list_by_task("task-stale-parent-link"))[0]["status"] == "queued"
+    finally:
+        await close_engine()
+
+
+@pytest.mark.parametrize(
+    ("run_status", "expected_status", "expected_count", "run_error"),
+    (
+        pytest.param("success", "success", 1, None, id="owner-terminal-success"),
+        pytest.param("error", "failed", 1, "synthetic error", id="owner-terminal-error"),
+        pytest.param("timeout", "failed", 1, "synthetic timeout", id="owner-terminal-timeout"),
+        pytest.param("interrupted", "interrupted", 1, None, id="owner-terminal-interrupted-no-error"),
+        pytest.param("interrupted", "interrupted", 1, "owner interrupted", id="owner-terminal-interrupted-with-error"),
+        pytest.param("running", "running", 0, None, id="renewal-only"),
+        pytest.param("takeover", "interrupted", 1, None, id="takeover-wins"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_reconcile_uses_latest_run_state_and_preserves_takeover_outcome(tmp_path, run_status, expected_status, expected_count, run_error):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = RunRepository(sf)
+        task_run_repo = ScheduledTaskRunRepository(sf, run_repository=run_repo)
+        now = datetime.now(UTC)
+        task_id = "task-terminal-race"
+        occurrence_id = "task-run-terminal-race"
+        run_id = "run-terminal-race"
+        expected_run_status = "error" if run_status == "takeover" else run_status
+        expected_durable_error = "lease expired" if run_status == "takeover" else run_error
+        expected_occurrence_error = expected_durable_error or ("lease expired" if expected_status == "interrupted" else None)
+
+        await task_repo.create(
+            task_id=task_id,
+            user_id="user-1",
+            thread_id=None,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="terminal race",
+            prompt="p",
+            schedule_type="once",
+            schedule_spec={"run_at": now.isoformat()},
+            timezone="UTC",
+            next_run_at=now,
+        )
+        await task_repo.update(task_id, user_id="user-1", updates={"status": "running"})
+        await task_run_repo.create(
+            run_record_id=occurrence_id,
+            task_id=task_id,
+            thread_id="thread-terminal-race",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="running",
+        )
+        await task_run_repo.update_status(occurrence_id, status="running", run_id=run_id)
+        await run_repo.put(
+            run_id,
+            thread_id="thread-terminal-race",
+            user_id="user-1",
+            status="running",
+            metadata={"scheduled_task_id": task_id, "scheduled_task_run_id": occurrence_id},
+            owner_worker_id="worker-a",
+            lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
+        )
+
+        original_claim = run_repo.claim_for_takeover
+
+        async def renew_owner_before_takeover(candidate_run_id, **kwargs):
+            if run_status == "takeover":
+                assert await original_claim(candidate_run_id, **kwargs) is True
+                return True
+            renewal = await run_repo.renew_lease(
+                candidate_run_id,
+                owner_worker_id="worker-a",
+                lease_expires_at=(now + timedelta(seconds=60)).isoformat(),
+            )
+            assert renewal.renewed
+            if run_status != "running":
+                finalized = await run_repo.finalize_if_not_cancelled(
+                    candidate_run_id,
+                    status=run_status,
+                    error=run_error,
+                )
+                assert finalized.finalized
+            assert await original_claim(candidate_run_id, **kwargs) is False
+            return False
+
+        run_repo.claim_for_takeover = renew_owner_before_takeover
+        assert await task_run_repo.reconcile_active_runs(error="lease expired", now=now) == expected_count
+
+        occurrence = (await task_run_repo.list_by_task(task_id))[0]
+        durable_run = await run_repo.get(run_id, user_id=None)
+        assert durable_run is not None
+        assert occurrence["status"] == expected_status
+        assert occurrence["error"] == expected_occurrence_error
+        assert durable_run["status"] == expected_run_status
+        assert durable_run["error"] == expected_durable_error
+
+        parent = await task_repo.get(task_id, user_id="user-1")
+        assert parent is not None
+        if run_status == "interrupted":
+            assert parent["status"] == "cancelled"
+            assert parent["last_error"] == expected_occurrence_error
+
+        repaired = await task_repo.reconcile_stuck_once_tasks(error="lease expired", now=now)
+        assert repaired == (1 if run_status == "takeover" else 0)
+        parent = await task_repo.get(task_id, user_id="user-1")
+        assert parent is not None
+        expected_parent_status = {
+            "success": "completed",
+            "error": "failed",
+            "timeout": "failed",
+            "interrupted": "cancelled",
+            "running": "running",
+            "takeover": "cancelled",
+        }[run_status]
+        assert parent["status"] == expected_parent_status
+        assert parent["last_error"] == expected_occurrence_error
+        assert parent["last_run_id"] == run_id
+        assert parent["last_thread_id"] == "thread-terminal-race"
+        assert parent["last_run_at"] is not None
+        assert parent["run_count"] == 1
     finally:
         await close_engine()
 
