@@ -552,6 +552,16 @@ This release closes that milestone with **301 merged pull requests**.
   backoff delays) collapsed retries and the concurrency cap to one. All seven
   integer fields now fail configuration loading with a field-specific error
   while valid integers and numeric strings retain their existing behavior.([#6171])
+- **agents:** Subagent and ACP invocation backstops now reject YAML booleans
+  instead of coercing `true` to `1`. A configuration such as
+  `subagents.timeout_seconds: true` previously made every subagent run hit the
+  executor's `future.result(timeout=...)` bound after one second, and
+  `max_turns: true` collapsed the LangGraph recursion budget to a single
+  super-step; the per-agent overrides, custom agents, the per-run delegation
+  cap, and the ACP agent timeout (which mirrors `subagents.timeout_seconds`)
+  all shared the hole. All eight integer fields now fail configuration loading
+  with a field-specific error while `None` inherit-defaults, valid integers,
+  and numeric strings retain their existing behavior.([#6242])
 - **uploads:** Converted Markdown ownership is now recorded when a document is
   converted. `list_uploaded_files` hides only verified conversion outputs, and
   document outlines use only the recorded companion; a user-uploaded Markdown
@@ -7687,3 +7697,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6229]: https://github.com/bytedance/deer-flow/pull/6229
 [#6230]: https://github.com/bytedance/deer-flow/pull/6230
 [#6238]: https://github.com/bytedance/deer-flow/pull/6238
+[#6242]: https://github.com/bytedance/deer-flow/pull/6242
