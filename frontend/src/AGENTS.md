@@ -15,6 +15,11 @@ Only Markdown destinations decode once; relative images match decoded names
 against raw artifact paths before encoding.
 File-type detection uses the basename so extensionless `Dockerfile` and
 `Makefile` artifacts remain recognizable under nested or dotted directories.
+HTML preview base detection skips DOM construction without case-insensitive `base`
+text; otherwise an inert template distinguishes real tags from comments, scripts
+and nested templates without rewriting source. Tests: `preview-base.dom.test.ts`
+(happy-dom); textarea/title RCDATA needs real-browser checks due to parser gaps.
+Other preview helpers retain the node test environment.
 Language-map membership checks only own properties; inherited names such as
 `constructor` and `__proto__` must keep the unknown-file download fallback.
 
