@@ -2420,6 +2420,9 @@ At the last composer row, `Down` leaves an unsent draft untouched unless you are
 browsing input history; after recalling history, it moves forward to restore your
 saved draft.
 
+At the first composer row, `Up` also leaves the draft, cursor, and undo history
+untouched when no input history is available.
+
 See [backend/docs/TUI.md](backend/docs/TUI.md) for the full guide.
 
 ## Documentation
