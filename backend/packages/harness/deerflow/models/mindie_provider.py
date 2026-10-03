@@ -10,6 +10,68 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 
+_MAX_TOOL_RESULT_CHARS = 30_000
+_MEDIA_BLOCK_TYPES = frozenset({"file", "image", "image_url", "resource", "blob"})
+_BINARY_CONTENT_KEYS = frozenset({"base64", "blob", "data"})
+
+
+def _compact_media_block(block: dict) -> dict:
+    """Keep media metadata while removing inline binary payloads."""
+    compact: dict = {}
+    omitted = False
+    for key, value in block.items():
+        if key in _BINARY_CONTENT_KEYS:
+            omitted = True
+            continue
+        if key == "image_url":
+            if isinstance(value, dict):
+                image_url = dict(value)
+                url = image_url.get("url")
+                if isinstance(url, str) and url.startswith("data:"):
+                    image_url["url"] = "[inline image data omitted]"
+                    omitted = True
+                compact[key] = image_url
+                continue
+            if isinstance(value, str) and value.startswith("data:"):
+                compact[key] = "[inline image data omitted]"
+                omitted = True
+                continue
+        compact[key] = value
+    if omitted:
+        compact["content_omitted"] = "binary media payload omitted"
+    return compact
+
+
+def _truncate_tool_result(text: str) -> str:
+    """Bound the serialized tool result before it becomes model input."""
+    if len(text) <= _MAX_TOOL_RESULT_CHARS:
+        return text
+    marker = f"\n[... tool response truncated at {_MAX_TOOL_RESULT_CHARS} chars ...]"
+    return text[: _MAX_TOOL_RESULT_CHARS - len(marker)] + marker
+
+
+def _tool_result_to_text(content: object) -> str:
+    """Flatten a tool result without exposing unbounded binary content."""
+    if isinstance(content, str):
+        return _truncate_tool_result(content)
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text", "")
+                parts.append(text if isinstance(text, str) else json.dumps(text, ensure_ascii=False, default=str))
+            else:
+                serializable = block
+                if isinstance(block, dict) and block.get("type") in _MEDIA_BLOCK_TYPES:
+                    serializable = _compact_media_block(block)
+                parts.append(json.dumps(serializable, ensure_ascii=False, default=str))
+        return _truncate_tool_result("".join(parts))
+    if content is None:
+        return ""
+    return _truncate_tool_result(json.dumps(content, ensure_ascii=False, default=str))
+
 
 def _fix_messages(messages: list) -> list:
     """Sanitize incoming messages for MindIE compatibility.
@@ -21,6 +83,15 @@ def _fix_messages(messages: list) -> list:
     """
     fixed = []
     for msg in messages:
+        # Tool results may use structured blocks (for example a JSON result).
+        # Preserve those blocks before the generic text-only flattening below;
+        # dropping them makes the next model turn see an empty tool response.
+        if isinstance(msg, ToolMessage):
+            tool_result_text = _tool_result_to_text(msg.content)
+            tool_result_text = f"<tool_response>\n{html.escape(tool_result_text, quote=False)}\n</tool_response>"
+            fixed.append(HumanMessage(content=tool_result_text))
+            continue
+
         # Flatten content if it's a list of blocks
         if isinstance(msg.content, list):
             parts = []
@@ -41,17 +112,6 @@ def _fix_messages(messages: list) -> list:
                 xml_parts.append(f"<tool_call> <function={html.escape(str(tool['name']), quote=False)}> {args_xml} </function> </tool_call>")
             full_text = f"{text}\n" + "\n".join(xml_parts) if text else "\n".join(xml_parts)
             fixed.append(AIMessage(content=full_text.strip() or " "))
-            continue
-
-        # Wrap tool execution results in XML tags and convert to HumanMessage.
-        # Escape the tool output so a result containing a literal "</tool_response>"
-        # (e.g. from read_file on an untrusted file, bash output, or an MCP tool the
-        # ToolResultSanitizationMiddleware allowlist does not cover) cannot close the
-        # framing early and inject trailing text into the turn — matching the escaping
-        # already applied to tool-call names/args above.
-        if isinstance(msg, ToolMessage):
-            tool_result_text = f"<tool_response>\n{html.escape(text, quote=False)}\n</tool_response>"
-            fixed.append(HumanMessage(content=tool_result_text))
             continue
 
         # Fallback to prevent completely empty message content

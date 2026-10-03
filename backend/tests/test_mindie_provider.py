@@ -10,9 +10,11 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 
 # ── Import the module under test ──────────────────────────────────────────────
 from deerflow.models.mindie_provider import (
+    _MAX_TOOL_RESULT_CHARS,
     MindIEChatModel,
     _fix_messages,
     _parse_xml_tool_call_to_dict,
+    _tool_result_to_text,
 )
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -152,6 +154,41 @@ class TestFixMessages:
         result = _fix_messages([msg])
         assert isinstance(result[0], HumanMessage)
         assert "result" in result[0].content
+
+    def test_tool_message_preserves_structured_content_blocks(self):
+        """Structured tool results must remain visible to the next model turn."""
+        msg = ToolMessage(
+            content=[{"type": "json", "json": {"temperature": 21, "unit": "C"}}],
+            tool_call_id="call_structured",
+        )
+
+        result = _fix_messages([msg])
+
+        assert isinstance(result[0], HumanMessage)
+        assert '"temperature": 21' in result[0].content
+        assert '"unit": "C"' in result[0].content
+
+    @pytest.mark.parametrize("block_type, payload_key", [("image", "base64"), ("file", "base64"), ("image_url", "image_url")])
+    def test_tool_message_omits_unbounded_media_payloads(self, block_type, payload_key):
+        payload = "A" * (_MAX_TOOL_RESULT_CHARS * 2)
+        if payload_key == "image_url":
+            block = {"type": block_type, payload_key: {"url": f"data:image/png;base64,{payload}"}}
+        else:
+            block = {"type": block_type, payload_key: payload, "mime_type": "image/png"}
+
+        serialized = _tool_result_to_text([block])
+
+        assert len(serialized) <= _MAX_TOOL_RESULT_CHARS
+        assert payload not in serialized
+        assert "omitted" in serialized
+
+    def test_tool_message_caps_large_structured_payload(self):
+        block = {"type": "json", "json": {"content": "x" * (_MAX_TOOL_RESULT_CHARS * 2)}}
+
+        serialized = _tool_result_to_text([block])
+
+        assert len(serialized) <= _MAX_TOOL_RESULT_CHARS
+        assert "tool response truncated" in serialized
 
     def test_tool_message_escapes_tool_response_breakout(self):
         # Tool output is untrusted (read_file on an untrusted file, bash output, or an
