@@ -525,6 +525,97 @@ describe("extractCitationSources", () => {
     ]);
   });
 
+  it("lets a citation after a list-nested quote escape its fence", () => {
+    // `- > ```md` opens the quote behind a list marker, so the line has no
+    // leading `>` for a line-start pattern to find even though the fence really
+    // is quoted. The dedented citation below sits two columns past the item's
+    // content column, which is a paragraph rather than an indented code block.
+    const markdown = [
+      "- > ```md",
+      "    [citation:Fake](https://example.com/fake)",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/fake",
+      "https://example.com/real",
+    ]);
+  });
+
+  it("ends a list-nested quote fence at its first unquoted line", () => {
+    const markdown = [
+      "- > ```md",
+      "    [citation:One](https://example.com/one)",
+      "     [citation:Two](https://example.com/two)",
+      "\t[citation:Three](https://example.com/three)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/one",
+      "https://example.com/two",
+      "https://example.com/three",
+    ]);
+  });
+
+  it("escapes a quote fence nested behind a star marker", () => {
+    const markdown = [
+      "* > ```md",
+      "  [citation:Fake](https://example.com/fake)",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/fake",
+      "https://example.com/real",
+    ]);
+  });
+
+  it("escapes a quote fence nested behind an ordered marker", () => {
+    // `1. ` gives the item a content column of three, so four columns of
+    // indentation is one column of content rather than an indented code block.
+    const markdown = [
+      "1. > ```md",
+      "    [citation:Fake](https://example.com/fake)",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/fake",
+      "https://example.com/real",
+    ]);
+  });
+
+  it("keeps a list-nested quote open for a line that carries its marker", () => {
+    // The mirror of the cases above: `>` on the second line means the quote did
+    // not end, so nothing about the escape path applies here.
+    const markdown = [
+      "- >> ```md",
+      ">> [citation:Fake](https://example.com/fake)",
+      "> [citation:Mid](https://example.com/mid)",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/fake",
+      "https://example.com/mid",
+      "https://example.com/real",
+    ]);
+  });
+
+  it("ends a list-nested fence at a closer that is itself inside the quote", () => {
+    const markdown = [
+      "- > ```md",
+      "> [citation:Fake](https://example.com/fake)",
+      "> ```",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/fake",
+      "https://example.com/real",
+    ]);
+  });
+
   it("gives a quoted closer its full three-column budget", () => {
     // The one optional space after `>` belongs to the block quote marker, not to
     // the fence, so `>` plus four spaces indents the closer by three columns and

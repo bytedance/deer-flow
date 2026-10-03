@@ -373,6 +373,12 @@ function maskFencedCodeBlocks(markdown: string): string {
     // there cannot open a fence and everything after it keeps rendering.
     const openerMarker = opener?.[2];
     const containerColumn = items[items.length - 1] ?? 0;
+    // `BLOCKQUOTE_PREFIX_RE` only matches from the start of a line, so a quote
+    // opened behind a list marker - `- > ```md` - reads as depth zero even
+    // though its fence really is quoted. The opener's own prefix is the truth
+    // there: each `>` in it is a container the fence sits inside, and a line
+    // that drops all of them has left the quote rather than reached free text.
+    const prefixQuoteDepth = (opener?.[1] ?? "").split(">").length - 1;
     // A backtick fence's info string cannot hold a backtick, so ` ```md `x` `
     // is paragraph text with an inline span rather than an opener; opening a
     // fence there would blank a citation the reader can actually click. Tilde
@@ -389,9 +395,15 @@ function maskFencedCodeBlocks(markdown: string): string {
     ) {
       openMarker = openerMarker;
       fence = {
-        quoteDepth: position.quoteDepth,
+        quoteDepth: Math.max(prefixQuoteDepth, position.quoteDepth),
         column: containerColumn,
       };
+      if (prefixQuoteDepth > position.quoteDepth) {
+        // The list items holding that quote are invisible to `quoteDepth`, so
+        // park their stack here: when the fence ends on an unquoted line the
+        // escape below has nothing else to measure its four columns against.
+        outerItems = [...items];
+      }
       lines[i] = maskKeepingNewlines(line);
     }
   }
