@@ -16,8 +16,86 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
 
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
-from deerflow.runtime.journal import RunJournal
+from deerflow.runtime.journal import JournalWriteDisposition, RunJournal
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+# ---------------------------------------------------------------------------
+# Terminal producer inventory (Task A0)
+#
+# Every path that can append a run event to a ``RunJournal`` and must therefore
+# be covered by the producer seal (Task A4):
+#
+#  * owner-loop callbacks: ``RunJournal._put`` from the LangChain callback
+#    surface (``on_chain_*`` / ``on_llm_*`` / ``on_tool_*``).
+#  * ``RunJournal.record_middleware`` from a foreign thread: it hops onto the
+#    owner loop with ``owner_loop.call_soon_threadsafe(self._put, ...)``.
+#  * task-tool subagent middleware proxy (``task_tool.py``):
+#    ``_ParentLoopMiddlewareRecorderProxy.record_middleware`` schedules
+#    ``_record_middleware_on_parent_loop``; its ``aclose()`` fences late appends.
+#  * task-tool subagent usage reports (``task_tool.py``): ``_report_usage_records``
+#    scheduled on the parent loop calls
+#    ``RunJournal.record_external_llm_usage_records``, which mutates accumulators
+#    and can schedule a progress-flush task.
+#  * journal-side progress snapshots: ``RunJournal._schedule_progress_flush``
+#    spawns a reporter task; the reporter does not append journal events.
+#
+# A new append path must be added here (with a regression test) before it can be
+# considered sealed by the terminal drain.
+# ---------------------------------------------------------------------------
+
+
+class GatedRunEventStore(MemoryRunEventStore):
+    """Memory store that gates every ``put_batch`` for deterministic interleavings.
+
+    ``calls`` records the event types of each attempted batch so a test can
+    assert an ambiguous write was attempted exactly once; ``persisted`` records
+    the batches that actually committed. ``started`` / ``release`` are per-batch
+    ``asyncio.Event``s used to force a specific ordering, and ``failures``
+    injects the exception a given batch raises (an ordinary ``Exception`` means
+    UNKNOWN; ``RunEventWriteNotCommittedError`` proves non-commit).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[list[str]] = []
+        self.persisted: list[list[str]] = []
+        self.started: dict[int, asyncio.Event] = {}
+        self.release: dict[int, asyncio.Event] = {}
+        self.failures: dict[int, BaseException] = {}
+        self.commit_then_fail: dict[int, BaseException] = {}
+        self.auto_release = False
+
+    def gate(self, index: int) -> tuple[asyncio.Event, asyncio.Event]:
+        started = self.started.setdefault(index, asyncio.Event())
+        release = self.release.setdefault(index, asyncio.Event())
+        return started, release
+
+    def fail_with(self, index: int, error: BaseException) -> None:
+        self.failures[index] = error
+
+    def release_all(self) -> None:
+        """Release every gate, now and for any batch attempted later."""
+        self.auto_release = True
+        for event in self.release.values():
+            event.set()
+
+    async def put_batch(self, events):
+        index = len(self.calls)
+        self.calls.append([event["event_type"] for event in events])
+        started, release = self.gate(index)
+        started.set()
+        if not self.auto_release:
+            await release.wait()
+        error = self.failures.get(index)
+        if error is not None:
+            raise error
+        self.persisted.append([event["event_type"] for event in events])
+        results = await super().put_batch(events)
+        late_error = self.commit_then_fail.get(index)
+        if late_error is not None:
+            # The batch is durable; only the acknowledgement was lost.
+            raise late_error
+        return results
 
 
 def test_run_journal_is_marked_as_loop_bound():
@@ -170,6 +248,113 @@ async def test_cross_thread_append_during_explicit_flush_is_not_flushed_concurre
 
 
 @pytest.mark.anyio
+async def test_cancelled_final_close_persists_cross_thread_event_accepted_before_barrier(caplog):
+    """A cross-thread producer accepted before its barrier survives the final close.
+
+    Characterization at this BASE: the parent-loop callback is accepted and
+    executed (the middleware event B is buffered) while a threshold batch A is
+    still in flight, and the producer then publishes its ``aclose()`` barrier.
+    Cancelling the final ``close(flush=True)`` caller must not abandon the owned
+    drain: A settles, then B is written, and only then does the caller observe
+    the cancellation. A producer offer made after the barrier is dropped without
+    another durable write and the barrier logs the drop.
+    """
+    from deerflow.tools.builtins.task_tool import _ParentLoopMiddlewareRecorderProxy
+
+    class BlockingStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.attempts: list[list[str]] = []
+            self.active_writes = 0
+            self.max_active_writes = 0
+
+        async def put_batch(self, batch):
+            self.attempts.append([event["event_type"] for event in batch])
+            self.active_writes += 1
+            self.max_active_writes = max(self.max_active_writes, self.active_writes)
+            try:
+                if len(self.attempts) == 1:
+                    self.started.set()
+                    await self.release.wait()
+                return await super().put_batch(batch)
+            finally:
+                self.active_writes -= 1
+
+    store = BlockingStore()
+    journal = RunJournal("r-cross-close", "t-cross-close", store, flush_threshold=20)
+    proxy = _ParentLoopMiddlewareRecorderProxy(journal, asyncio.get_running_loop())
+
+    for index in range(20):
+        journal._put(event_type=f"test.step.{index}", category="steps", content={"index": index})
+    await asyncio.wait_for(store.started.wait(), timeout=1)
+    assert store.attempts == [[f"test.step.{index}" for index in range(20)]]
+
+    # A foreign-thread producer forwards onto the journal owner loop; the
+    # callback is accepted and executed while A is still in flight, so B is
+    # buffered rather than written concurrently.
+    await asyncio.to_thread(
+        proxy.record_middleware,
+        tag="tool_progress",
+        name="ToolProgressMiddleware",
+        hook="wrap_tool_call",
+        action="warn",
+        changes={"to_phase": "warned"},
+    )
+    loop = asyncio.get_running_loop()
+    accept_deadline = loop.time() + 2
+    while not journal._buffer and loop.time() < accept_deadline:
+        await asyncio.sleep(0)
+    assert [event["event_type"] for event in journal._buffer] == ["middleware:tool_progress"]
+
+    # The producer barrier publishes that every accepted callback is ahead of it.
+    await proxy.aclose()
+
+    close_task = asyncio.create_task(journal.close())
+    try:
+        await asyncio.sleep(0)  # let the close caller own its drain before interrupting
+        close_task.cancel()
+        await asyncio.sleep(0)  # deliver the cancellation into the settled drain
+        assert not close_task.done()
+        store.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+
+        # A then B, each exactly once and in order, before the journal detached.
+        assert store.attempts == [
+            [f"test.step.{index}" for index in range(20)],
+            ["middleware:tool_progress"],
+        ]
+        assert store.max_active_writes == 1
+        assert journal._buffer == []
+        assert journal._closed is True
+        assert journal._store is None
+
+        # After-close control: the barrier rejects a late producer offer without
+        # a new ``put_batch``, and records the drop.
+        attempts_before = list(store.attempts)
+        with caplog.at_level("DEBUG", logger="deerflow.tools.builtins.task_tool"):
+            await asyncio.to_thread(
+                proxy.record_middleware,
+                tag="tool_progress",
+                name="ToolProgressMiddleware",
+                hook="wrap_tool_call",
+                action="warn",
+                changes={},
+            )
+            await asyncio.sleep(0)
+        assert store.attempts == attempts_before
+        assert "Dropping subagent middleware event after parent loop shutdown" in caplog.text
+    finally:
+        store.release.set()
+        await asyncio.gather(close_task, return_exceptions=True)
+        pending = tuple(getattr(journal, "_pending_flush_tasks", ()))
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+
+@pytest.mark.anyio
 async def test_close_flushes_and_detaches_runtime_dependencies():
     class ProgressReporter:
         async def __call__(self, snapshot):
@@ -220,7 +405,9 @@ async def test_closed_on_llm_end_returns_before_touching_response_or_state():
 
 
 @pytest.mark.anyio
-async def test_close_preserves_buffer_and_dependencies_when_flush_fails():
+async def test_close_preserves_failed_batch_and_dependencies_when_flush_fails():
+    """An UNKNOWN write failure keeps the store attached and the batch quarantined."""
+
     class FailOnceRunEventStore(MemoryRunEventStore):
         def __init__(self) -> None:
             super().__init__()
@@ -228,9 +415,7 @@ async def test_close_preserves_buffer_and_dependencies_when_flush_fails():
 
         async def put_batch(self, events):
             self.put_batch_calls += 1
-            if self.put_batch_calls == 1:
-                raise RuntimeError("transient store failure")
-            return await super().put_batch(events)
+            raise RuntimeError("transient store failure")
 
     store = FailOnceRunEventStore()
     journal = RunJournal("r-close-retry", "t-close-retry", store, flush_threshold=100)
@@ -241,19 +426,22 @@ async def test_close_preserves_buffer_and_dependencies_when_flush_fails():
 
     assert journal._closed is False
     assert journal._store is store
-    assert len(journal._buffer) == 1
-
-    await journal.close()
-
-    assert journal._closed is True
-    assert journal._store is None
+    # The batch is held by the quarantine, not re-armed for an automatic replay.
     assert journal._buffer == []
-    events = await store.list_events("t-close-retry", "r-close-retry")
-    assert [event["event_type"] for event in events] == ["middleware:test"]
+    assert journal._quarantine is not None
+    assert journal._quarantine.disposition is JournalWriteDisposition.UNKNOWN
+    assert [event["event_type"] for event in journal._quarantine.batch] == ["middleware:test"]
+
+    # A later close must not replay a batch whose outcome is UNKNOWN.
+    with pytest.raises(RuntimeError, match="transient store failure"):
+        await journal.close()
+    assert store.put_batch_calls == 1
+    assert journal._closed is False
+    assert journal._store is store
 
 
 @pytest.mark.anyio
-async def test_close_retries_pending_no_usage_response_without_duplication():
+async def test_close_quarantines_pending_no_usage_response_without_duplication():
     class FailOnceRunEventStore(MemoryRunEventStore):
         def __init__(self) -> None:
             super().__init__()
@@ -261,9 +449,7 @@ async def test_close_retries_pending_no_usage_response_without_duplication():
 
         async def put_batch(self, events):
             self.put_batch_calls += 1
-            if self.put_batch_calls == 1:
-                raise RuntimeError("transient store failure")
-            return await super().put_batch(events)
+            raise RuntimeError("transient store failure")
 
     async def progress_reporter(snapshot):
         del snapshot
@@ -294,29 +480,25 @@ async def test_close_retries_pending_no_usage_response_without_duplication():
     assert journal._store is store
     assert journal._progress_reporter is progress_reporter
     assert journal._pending_llm_response is None
-    assert [event["event_type"] for event in journal._buffer] == [
+    assert journal._buffer == []
+    assert [event["event_type"] for event in journal._quarantine.batch] == [
         "middleware:before",
         "llm.ai.response",
     ]
     assert journal.get_completion_data()["message_count"] == 1
     assert journal.get_completion_data()["last_ai_message"] == "Canonical without usage"
 
-    await journal.close()
-
+    # The UNKNOWN batch is never replayed, so the response cannot be duplicated.
+    with pytest.raises(RuntimeError, match="transient store failure"):
+        await journal.close()
+    assert store.put_batch_calls == 1
     events = await store.list_events("t-close-pending-retry", "r-close-pending-retry")
-    assert [event["event_type"] for event in events] == [
-        "middleware:before",
-        "llm.ai.response",
-    ]
-    responses = [event for event in events if event["event_type"] == "llm.ai.response"]
-    assert len(responses) == 1
-    assert responses[0]["content"]["content"] == "Canonical without usage"
-    assert responses[0]["content"]["usage_metadata"] is None
-    assert responses[0]["metadata"]["usage"] == {}
+    assert events == []
     assert journal.get_completion_data()["message_count"] == 1
-    assert journal._closed is True
-    assert journal._store is None
-    assert journal._progress_reporter is None
+    # The journal stays attached to its store so the fenced retry window is explicit.
+    assert journal._closed is False
+    assert journal._store is store
+    assert journal._progress_reporter is progress_reporter
 
 
 @pytest.mark.anyio
@@ -370,6 +552,810 @@ async def test_close_without_flush_detaches_when_cancellation_interrupts_pending
     assert journal._store is None
     assert journal._buffer == []
     assert journal._pending_flush_tasks == set()
+
+
+@pytest.mark.anyio
+async def test_close_without_flush_retains_cleanup_when_cancelled_again():
+    """A lost-lease close must cancel/retain progress before its first cancellable wait.
+
+    The threshold wrapper is cancelled by ``close(flush=False)`` but suppresses
+    that cancellation and keeps running, and an independent best-effort progress
+    snapshot is in flight. Cancelling the close caller a second time must not
+    skip the progress cancel/retain -- which therefore has to happen before the
+    first await that can propagate the caller's cancellation -- and must not
+    abandon the still-running wrapper without supervision.
+    """
+    import deerflow.runtime.journal as journal_module
+
+    store = MemoryRunEventStore()
+    reporter_cancellations = 0
+    reporter_started = asyncio.Event()
+    reporter_release = asyncio.Event()
+
+    async def stubborn_reporter(_snapshot):
+        nonlocal reporter_cancellations
+        reporter_started.set()
+        while True:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                reporter_cancellations += 1
+                if reporter_release.is_set():
+                    raise
+
+    journal = RunJournal(
+        "r-close-repeat-cancel",
+        "t-close-repeat-cancel",
+        store,
+        flush_threshold=100,
+        progress_reporter=stubborn_reporter,
+        progress_flush_interval=0,
+    )
+
+    wrapper_cancellations = 0
+    wrapper_first_cancel = asyncio.Event()
+    wrapper_release = asyncio.Event()
+
+    async def stubborn_pending_flush() -> None:
+        nonlocal wrapper_cancellations
+        while True:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                wrapper_cancellations += 1
+                if wrapper_cancellations == 1:
+                    wrapper_first_cancel.set()
+                if wrapper_release.is_set():
+                    raise
+
+    pending_flush = asyncio.create_task(stubborn_pending_flush())
+    journal._pending_flush_tasks.add(pending_flush)
+    journal._schedule_progress_flush()
+    await asyncio.wait_for(reporter_started.wait(), timeout=1)
+    reporter_task = journal._pending_progress_task
+    assert reporter_task is not None
+
+    close_task = asyncio.create_task(journal.close(flush=False))
+    try:
+        await asyncio.wait_for(wrapper_first_cancel.wait(), timeout=1)
+        close_task.cancel()
+        # Let the caller's cancellation reach ``close``; the wrapper keeps
+        # suppressing its own cancellation and stays running.
+        await asyncio.sleep(0)
+
+        assert journal._closed is True
+        assert journal._store is None
+        assert reporter_cancellations >= 1
+        assert reporter_task in journal_module._cancelling_progress_tasks
+        assert pending_flush in journal_module._retained_cleanup_tasks
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+    finally:
+        wrapper_release.set()
+        reporter_release.set()
+        if not close_task.done():
+            close_task.cancel()
+        if not pending_flush.done():
+            pending_flush.cancel()
+        if not reporter_task.done():
+            reporter_task.cancel()
+        await asyncio.gather(close_task, pending_flush, reporter_task, return_exceptions=True)
+        await asyncio.sleep(0)
+        # Global supervision discards a settled wrapper instead of leaking it.
+        assert pending_flush not in getattr(journal_module, "_retained_cleanup_tasks", set())
+
+
+@pytest.mark.anyio
+async def test_close_without_flush_fences_threshold_wrapper_before_first_execution():
+    """Losing the lease must not let an already-scheduled wrapper write."""
+
+    class TrackingRunEventStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.put_batch_calls = 0
+
+        async def put_batch(self, events):
+            self.put_batch_calls += 1
+            return await super().put_batch(events)
+
+    store = TrackingRunEventStore()
+    journal = RunJournal("r-fence-pre-start", "t-fence-pre-start", store, flush_threshold=1)
+    journal._put(event_type="fenced.threshold", category="trace", content="buffered")
+    # The threshold wrapper is scheduled but has not run yet: the event loop has
+    # not advanced since ``_put``.
+    assert len(journal._pending_flush_tasks) == 1
+    assert journal._buffer == []
+
+    await journal.close(flush=False)
+    await asyncio.sleep(0)
+
+    assert store.put_batch_calls == 0
+    assert journal._closed is True
+    assert journal._buffer == []
+    assert journal._pending_flush_tasks == set()
+    assert await store.list_events("t-fence-pre-start", "r-fence-pre-start") == []
+
+
+@pytest.mark.anyio
+async def test_close_without_flush_retires_late_detached_write_failure(monkeypatch):
+    """A late detached-write failure must not repopulate a lost-lease journal."""
+    import deerflow.runtime.journal as journal_module
+
+    monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    class FailingStore:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.fail = asyncio.Event()
+            self.attempts: list[list[str]] = []
+
+        async def put_batch(self, batch):
+            self.attempts.append([event["event_type"] for event in batch])
+            self.started.set()
+            await self.fail.wait()
+            raise RuntimeError("run event store lost its lease")
+
+    store = FailingStore()
+    journal = RunJournal("r-late-detached", "t-late-detached", store, flush_threshold=100)
+    journal._put(event_type="late.detached", category="trace", content="first")
+
+    flush_task = asyncio.create_task(journal.flush())
+    try:
+        await asyncio.wait_for(store.started.wait(), timeout=0.2)
+        assert (await asyncio.wait_for(flush_task, timeout=0.2)) is False
+        assert len(journal._detached_write_tasks) == 1
+
+        await journal.close(flush=False)
+        assert journal._closed is True
+        assert journal._buffer == []
+
+        detached = tuple(journal._detached_write_tasks)
+        store.fail.set()
+        await asyncio.gather(*detached, return_exceptions=True)
+        await asyncio.sleep(0)
+
+        assert store.attempts == [["late.detached"]]
+        assert journal._detached_write_tasks == {}
+        # The batch cannot be retried against a store this journal no longer
+        # owns, so the late failure retires it instead of rebuffering it.
+        assert journal._buffer == []
+        assert journal.feed_generation == 0
+    finally:
+        store.fail.set()
+        await asyncio.gather(flush_task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_close_without_flush_retires_late_threshold_wrapper_outcome():
+    """Both late-outcome resolvers must honour ``_closed`` before rebuffering."""
+    import deerflow.runtime.journal as journal_module
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-late-threshold", "t-late-threshold", store, flush_threshold=100)
+    journal._put(event_type="late.threshold", category="trace", content="buffered")
+    batch = list(journal._buffer)
+    journal._flush_sync()
+    assert journal._buffer == []
+    assert len(journal._pending_flush_tasks) == 1
+
+    await journal.close(flush=False)
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+
+    # A wrapper that never started reaches its terminal outcome after the lease
+    # was lost. Its batch has no store left to retry against, so the late
+    # ``_on_flush_done`` outcome must retire it rather than repopulate a closed
+    # journal's buffer.
+    late_unstarted = asyncio.create_task(asyncio.sleep(0))
+    late_unstarted.cancel()
+    await asyncio.gather(late_unstarted, return_exceptions=True)
+    assert late_unstarted.cancelled() is True
+    journal._on_flush_done(late_unstarted, detached=journal_module._DetachedFlush(batch))
+    assert journal._buffer == []
+
+    # An already-started wrapper likewise leaves the fenced journal empty.
+    late_started = asyncio.create_task(asyncio.sleep(0))
+    late_started.cancel()
+    await asyncio.gather(late_started, return_exceptions=True)
+    journal._on_flush_done(late_started, detached=journal_module._DetachedFlush(batch, started=True))
+    assert journal._buffer == []
+    assert journal._pending_flush_tasks == set()
+
+
+@pytest.mark.anyio
+async def test_close_without_flush_does_not_repopulate_from_inflight_wrapper_cancellation():
+    """An in-flight threshold wrapper must not repopulate a lost-lease journal.
+
+    The wrapper is already inside ``put_batch`` when ``close(flush=False)``
+    cancels it; ``wait_for_task_until`` swallows that cancellation, so the write
+    stays owned. A second cancellation of the close caller makes ``close``
+    re-raise and detach while that write is still in flight. When the write then
+    fails, the cancellation-drain path must retire its batch instead of returning
+    it to a journal that no longer has a store.
+    """
+
+    class FailingStore:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.fail = asyncio.Event()
+            self.attempts: list[list[str]] = []
+
+        async def put_batch(self, batch):
+            self.attempts.append([event["event_type"] for event in batch])
+            self.started.set()
+            await self.fail.wait()
+            raise RuntimeError("run event store lost its lease")
+
+    store = FailingStore()
+    journal = RunJournal("r-inflight-wrapper", "t-inflight-wrapper", store, flush_threshold=1)
+    journal._put(event_type="inflight.wrapper", category="trace", content="first")
+    wrapper = next(iter(journal._pending_flush_tasks))
+    await asyncio.wait_for(store.started.wait(), timeout=0.2)
+
+    close_task = asyncio.create_task(journal.close(flush=False))
+    try:
+        for _ in range(10):
+            if wrapper.cancelling() > 0:
+                break
+            await asyncio.sleep(0)
+        assert wrapper.cancelling() > 0
+        assert not wrapper.done()
+
+        close_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+
+        assert journal._closed is True
+        assert journal._store is None
+        assert journal._buffer == []
+
+        # The in-flight write settles after the lease was lost.
+        store.fail.set()
+        await asyncio.gather(wrapper, return_exceptions=True)
+        await asyncio.sleep(0)
+
+        assert store.attempts == [["inflight.wrapper"]]
+        assert journal._closed is True
+        assert journal._store is None
+        assert journal._active_write_tasks == {}
+        assert journal._buffer == []
+    finally:
+        store.fail.set()
+        if not close_task.done():
+            close_task.cancel()
+        if not wrapper.done():
+            wrapper.cancel()
+        await asyncio.gather(close_task, wrapper, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_close_with_flush_detaches_before_reraising_cancellation(monkeypatch):
+    """Cancellation while ``close(flush=True)`` drains a detached write must still detach.
+
+    Reproduces the reviewer's scenario: an earlier bounded ``flush()`` left one
+    ambiguous durable write detached, a best-effort progress snapshot is in
+    flight, and the caller cancels while ``close`` drains that detached write.
+    ``close`` must cancel/retain the progress snapshot and detach runtime
+    dependencies before re-raising, while still observing the detached write's
+    eventual outcome.
+
+    It also pins the A->B ordering case: an event buffered *after* the detached
+    write must still be persisted, in order, by the same close drain. The close
+    drain owns the whole settle-and-buffer sequence, so B must never be lost
+    just because the caller's cancellation arrived while A was still in flight.
+    """
+    import deerflow.runtime.journal as journal_module
+
+    monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    class HangingStore:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.attempts: list[list[str]] = []
+
+        async def put_batch(self, batch):
+            self.attempts.append([event["event_type"] for event in batch])
+            self.started.set()
+            await self.release.wait()
+            return list(batch)
+
+    progress_started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release_progress = asyncio.Event()
+
+    async def stubborn_reporter(_snapshot):
+        progress_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_progress.wait()
+            raise
+
+    store = HangingStore()
+    journal = RunJournal(
+        "r-close-detach",
+        "t-close-detach",
+        store,
+        flush_threshold=100,
+        progress_reporter=stubborn_reporter,
+        progress_flush_interval=0,
+    )
+    journal._put(event_type="before.detach", category="trace", content="first")
+
+    flush_task = asyncio.create_task(journal.flush())
+    flush_task_added = False
+    progress_task = None
+    try:
+        await asyncio.wait_for(store.started.wait(), timeout=0.2)
+        flush_task_added = True
+        assert (await asyncio.wait_for(flush_task, timeout=0.2)) is False
+        assert len(journal._detached_write_tasks) == 1
+
+        journal._schedule_progress_flush()
+        await asyncio.wait_for(progress_started.wait(), timeout=0.2)
+        progress_task = journal._pending_progress_task
+        assert progress_task is not None
+
+        # A second event is buffered after the bounded flush detached the first.
+        # The close drain owns both batches and must persist them in order.
+        journal._put(event_type="after.detach", category="trace", content="second")
+        assert [event["event_type"] for event in journal._buffer] == ["after.detach"]
+
+        close_task = asyncio.create_task(journal.close())
+        # Let ``close`` reach the detached-write drain, then interrupt it there.
+        await asyncio.sleep(0.02)
+        close_task.cancel()
+        await asyncio.sleep(0)  # deliver the cancellation into the settled drain
+        # The settled drain owns the detached write: ``close`` keeps waiting for it
+        # instead of abandoning it, and re-raises only after that write settled.
+        assert not close_task.done()
+        assert len(journal._detached_write_tasks) == 1
+        feed_before = journal.feed_generation
+        store.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+
+        # Both batches persisted exactly once, in order; B was not dropped.
+        assert store.attempts == [["before.detach"], ["after.detach"]]
+        assert journal._buffer == []
+        assert journal.feed_generation == feed_before + 2
+
+        # Detach ran even though the caller cancellation was re-raised.
+        assert journal._closed is True
+        assert journal._store is None
+        assert journal._progress_reporter is None
+        assert journal._pending_progress_task is None
+
+        # The best-effort snapshot was cancelled and globally retained until settle.
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.2)
+        assert progress_task in journal_module._cancelling_progress_tasks
+
+        # The ambiguous durable write was supervised to its outcome before detach.
+        assert journal._detached_write_tasks == {}
+    finally:
+        store.release.set()
+        if flush_task_added:
+            await asyncio.gather(flush_task, return_exceptions=True)
+        if progress_task is not None and not progress_task.done():
+            progress_task.cancel()
+        release_progress.set()
+        if progress_task is not None:
+            await asyncio.gather(progress_task, return_exceptions=True)
+        detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+        if detached:
+            await asyncio.gather(*detached, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_close_with_flush_persists_buffer_when_cancelled_during_progress_wait(monkeypatch):
+    """Cancelling the close caller during progress quiescence must not drop B.
+
+    Nothing is durable yet: one event is buffered and a best-effort progress
+    snapshot is stuck, so ``close(flush=True)`` reaches ``_quiesce_progress``
+    with no predecessor write. Cancelling the close caller there must not clear
+    the never-written B: the owned close runs the progress wait to its bounded
+    deadline, persists B, detaches, and only then re-raises the caller's
+    cancellation. The stuck reporter is cancelled and globally retained until it
+    settles on its own.
+    """
+    import deerflow.runtime.journal as journal_module
+
+    monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    store = MemoryRunEventStore()
+    progress_started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release_progress = asyncio.Event()
+    quiesce_entered = asyncio.Event()
+
+    async def stubborn_reporter(_snapshot):
+        progress_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_progress.wait()
+            raise
+
+    journal = RunJournal(
+        "r-close-progress",
+        "t-close-progress",
+        store,
+        flush_threshold=100,
+        progress_reporter=stubborn_reporter,
+        progress_flush_interval=0,
+    )
+    journal._put(event_type="B", category="trace", content="buffered")
+
+    original_quiesce = journal._quiesce_progress
+
+    async def observed_quiesce() -> None:
+        quiesce_entered.set()
+        await original_quiesce()
+
+    journal._quiesce_progress = observed_quiesce
+
+    journal._schedule_progress_flush()
+    await asyncio.wait_for(progress_started.wait(), timeout=0.2)
+    progress_task = journal._pending_progress_task
+    assert progress_task is not None
+
+    close_task = asyncio.create_task(journal.close())
+    try:
+        # Deterministic barrier: the owned close is inside the progress wait, and
+        # nothing has been written yet, so B is still only buffered.
+        await asyncio.wait_for(quiesce_entered.wait(), timeout=0.2)
+        await asyncio.sleep(0)
+        assert await store.list_events("t-close-progress", "r-close-progress") == []
+        assert [event["event_type"] for event in journal._buffer] == ["B"]
+
+        close_task.cancel()
+        await asyncio.sleep(0)
+        # The owned close owns the drain: it keeps waiting for B instead of
+        # abandoning the buffered event to the caller's cancellation.
+        assert not close_task.done()
+
+        # ``asyncio.wait`` (not ``wait_for``) so a regression that leaves the
+        # owned close waiting forever fails here instead of hanging the suite.
+        done, _ = await asyncio.wait({close_task}, timeout=0.5)
+        assert close_task in done, "the owned close must finish once its bounded progress deadline expires"
+        with pytest.raises(asyncio.CancelledError):
+            await close_task
+
+        # B is durable and the detach already ran when the cancellation surfaces.
+        events = await store.list_events("t-close-progress", "r-close-progress")
+        assert [event["event_type"] for event in events] == ["B"]
+        assert journal._buffer == []
+        assert journal._closed is True
+        assert journal._store is None
+        assert journal._progress_reporter is None
+        assert journal._pending_progress_task is None
+
+        # The best-effort snapshot was cancelled and retained, never awaited to
+        # completion once its bounded deadline expired.
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.2)
+        assert progress_task in journal_module._cancelling_progress_tasks
+    finally:
+        # Release the reporter first so a regression that awaits it still settles.
+        release_progress.set()
+        if not progress_task.done():
+            progress_task.cancel()
+        await asyncio.gather(progress_task, return_exceptions=True)
+        if not close_task.done():
+            close_task.cancel()
+        await asyncio.gather(close_task, return_exceptions=True)
+
+    assert progress_task not in journal_module._cancelling_progress_tasks
+
+
+@pytest.mark.anyio
+async def test_close_with_flush_bounds_stubborn_progress_and_keeps_buffer(monkeypatch):
+    """A reporter that swallows cancellation must not deadlock the final close.
+
+    The reporter catches the cancellation and waits for another event, so it is
+    still pending when the bounded progress deadline expires. ``close()`` must
+    stop waiting there, persist the buffered event, detach, and leave the
+    reporter in the global retain set until it settles on its own.
+    """
+    import deerflow.runtime.journal as journal_module
+
+    monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    store = MemoryRunEventStore()
+    progress_started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release_progress = asyncio.Event()
+
+    async def stubborn_reporter(_snapshot):
+        progress_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_progress.wait()
+            raise
+
+    journal = RunJournal(
+        "r-close-stubborn",
+        "t-close-stubborn",
+        store,
+        flush_threshold=100,
+        progress_reporter=stubborn_reporter,
+        progress_flush_interval=0,
+    )
+    journal._put(event_type="B", category="trace", content="buffered")
+    journal._schedule_progress_flush()
+    await asyncio.wait_for(progress_started.wait(), timeout=0.2)
+    progress_task = journal._pending_progress_task
+    assert progress_task is not None
+
+    close_task = asyncio.create_task(journal.close())
+    try:
+        # ``asyncio.wait`` (not ``wait_for``) so an unbounded progress wait fails
+        # here instead of deadlocking the suite.
+        done, _ = await asyncio.wait({close_task}, timeout=0.5)
+        assert close_task in done, "close() must stop waiting at the bounded progress deadline"
+        await close_task
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.2)
+
+        events = await store.list_events("t-close-stubborn", "r-close-stubborn")
+        assert [event["event_type"] for event in events] == ["B"]
+        assert journal._buffer == []
+        assert journal._closed is True
+        assert journal._store is None
+        assert journal._progress_reporter is None
+        assert journal._pending_progress_task is None
+        # The reporter never settled, so it stays supervised globally.
+        assert progress_task in journal_module._cancelling_progress_tasks
+    finally:
+        # Release the reporter first so a regression that awaits it still settles.
+        release_progress.set()
+        if not progress_task.done():
+            progress_task.cancel()
+        await asyncio.gather(progress_task, return_exceptions=True)
+        if not close_task.done():
+            close_task.cancel()
+        await asyncio.gather(close_task, return_exceptions=True)
+
+    assert progress_task not in journal_module._cancelling_progress_tasks
+
+
+@pytest.mark.anyio
+async def test_close_with_flush_failure_keeps_progress_reporting_attached():
+    """A failed close must not detach the progress reporter either.
+
+    The definite failure keeps the store and the buffer attached for a retry;
+    progress reporting has to survive that retry window too, so the reporter
+    stays attached and still receives snapshots afterwards.
+    """
+
+    class FailingStore:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def put_batch(self, batch):
+            self.attempts += 1
+            raise RuntimeError("durable write failed")
+
+    snapshots: list[dict] = []
+
+    async def reporter(snapshot):
+        snapshots.append(snapshot)
+
+    store = FailingStore()
+    journal = RunJournal(
+        "r-close-failure-progress",
+        "t-close-failure-progress",
+        store,
+        flush_threshold=100,
+        progress_reporter=reporter,
+        progress_flush_interval=0,
+    )
+    journal._put(event_type="A", category="trace", content="first")
+
+    with pytest.raises(RuntimeError, match="durable write failed"):
+        await asyncio.wait_for(journal.close(), timeout=0.5)
+
+    assert journal._closed is False
+    assert journal._store is store
+    assert journal._progress_reporter is reporter
+    assert journal._buffer == []
+    assert [event["event_type"] for event in journal._quarantine.batch] == ["A"]
+    assert getattr(journal, "_close_owner_task", None) is None
+    assert store.attempts == 1
+
+    # Progress reporting is still live for the retry window.
+    journal._schedule_progress_flush()
+    progress_task = journal._pending_progress_task
+    assert progress_task is not None
+    await asyncio.wait_for(progress_task, timeout=0.2)
+    assert len(snapshots) == 1
+
+
+@pytest.mark.anyio
+async def test_close_flush_reports_definite_failure_under_cancellation():
+    """A definite write failure survives caller cancellation instead of detaching.
+
+    The store blocks its first ``put_batch`` and then fails. Cancelling the close
+    caller while it is blocked must not turn the failed write into a successful
+    cancellation detach: the failure is reported, store and buffer stay attached
+    for a later retry, and the suppressed cancellation is balanced (``uncancel``
+    applies only to the cancellation actually received while joining).
+    """
+
+    class FailingOnceStore:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.fail_next = True
+            self.attempts: list[list[str]] = []
+
+        async def put_batch(self, batch):
+            self.attempts.append([event["event_type"] for event in batch])
+            if self.fail_next:
+                self.fail_next = False
+                self.started.set()
+                await self.release.wait()
+                raise RuntimeError("durable write failed")
+            return list(batch)
+
+    store = FailingOnceStore()
+    journal = RunJournal("r-close-failure", "t-close-failure", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="first")
+
+    observed: list[BaseException] = []
+    cancelling_after: list[int] = []
+
+    async def close_caller() -> None:
+        try:
+            await journal.close()
+        except BaseException as error:  # noqa: BLE001 - the test observes the outcome
+            observed.append(error)
+        cancelling_after.append(asyncio.current_task().cancelling())
+
+    close_task = asyncio.create_task(close_caller())
+    await asyncio.wait_for(store.started.wait(), timeout=0.2)
+    close_task.cancel()
+    await asyncio.sleep(0)
+    assert not close_task.done()
+    store.release.set()
+    await asyncio.wait_for(close_task, timeout=0.2)
+
+    # The definite failure is what the caller observes, not the cancellation.
+    assert len(observed) == 1
+    assert isinstance(observed[0], RuntimeError)
+    assert str(observed[0]) == "durable write failed"
+    # The received cancellation was suppressed, so its count was uncancelled.
+    assert cancelling_after == [0]
+
+    # Store and the quarantined batch stay attached for a fenced retry.
+    assert journal._closed is False
+    assert journal._store is store
+    assert journal._buffer == []
+    assert [event["event_type"] for event in journal._quarantine.batch] == ["A"]
+    assert getattr(journal, "_close_owner_task", None) is None
+
+    # A later explicit close must not replay the UNKNOWN batch.
+    with pytest.raises(RuntimeError, match="durable write failed"):
+        await asyncio.wait_for(journal.close(), timeout=0.2)
+    assert journal._closed is False
+    assert journal._store is store
+    assert store.attempts == [["A"]]
+
+
+@pytest.mark.anyio
+async def test_close_flush_double_cancellation_and_concurrent_join(monkeypatch):
+    """Two cancels plus a concurrent close share one drain owner and keep order.
+
+    Caller 1 is cancelled twice while the drain waits for A; caller 2 joins the
+    same close without being cancelled. Exactly one close owner must run, A and
+    B must persist once each in order, caller 1 must observe ``CancelledError``
+    and caller 2 must return normally.
+    """
+    import deerflow.runtime.journal as journal_module
+
+    class HangingStore:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+            self.attempts: list[list[str]] = []
+
+        async def put_batch(self, batch):
+            self.attempts.append([event["event_type"] for event in batch])
+            self.started.set()
+            await self.release.wait()
+            return list(batch)
+
+    store = HangingStore()
+    journal = RunJournal("r-close-shared", "t-close-shared", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="first")
+
+    drain_starts = 0
+    original_owned_drain = journal._flush_until_settled_owned
+
+    async def counting_owned_drain(**kwargs):
+        nonlocal drain_starts
+        drain_starts += 1
+        return await original_owned_drain(**kwargs)
+
+    journal._flush_until_settled_owned = counting_owned_drain
+
+    joins: list[asyncio.Task] = []
+    both_joined = asyncio.Event()
+    original_await_owned = journal_module._await_owned_task
+
+    async def tracked_await_owned(task):
+        joins.append(task)
+        if len(joins) >= 2:
+            both_joined.set()
+        return await original_await_owned(task)
+
+    monkeypatch.setattr(journal_module, "_await_owned_task", tracked_await_owned)
+
+    caller1 = asyncio.create_task(journal.close())
+    await asyncio.wait_for(store.started.wait(), timeout=0.2)
+    caller1.cancel()
+    caller1.cancel()
+    await asyncio.sleep(0)
+    assert not caller1.done()
+    assert caller1.cancelling() == 2
+
+    caller2 = asyncio.create_task(journal.close())
+    await asyncio.wait_for(both_joined.wait(), timeout=0.2)
+
+    # Both callers must share exactly one close drain owner.
+    assert drain_starts == 1
+    owner_task = journal._close_owner_task
+    assert owner_task is not None
+    assert joins == [owner_task, owner_task]
+
+    # B arrives while both callers are joined to the same owner.
+    journal._put(event_type="B", category="trace", content="second")
+    store.release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await caller1
+    # R1: the plain re-raise path leaves the received cancellation count alone.
+    assert caller1.cancelling() == 2
+    await asyncio.wait_for(caller2, timeout=0.2)
+
+    assert store.attempts == [["A"], ["B"]]
+    assert drain_starts == 1
+    assert journal._buffer == []
+    assert journal._closed is True
+    assert journal._store is None
+
+
+@pytest.mark.anyio
+async def test_close_flush_store_self_cancellation_is_a_definite_failure():
+    """A store cancelling its own write is a definite failure, not caller cancellation."""
+
+    class SelfCancellingStore:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        async def put_batch(self, batch):
+            self.attempts += 1
+            raise asyncio.CancelledError("store cancelled its own write")
+
+    store = SelfCancellingStore()
+    journal = RunJournal("r-store-cancel", "t-store-cancel", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="first")
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await journal.close()
+
+    assert "cancelled its own write" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, asyncio.CancelledError)
+    # The ambiguous batch is quarantined, not re-armed for retry.
+    assert journal._closed is False
+    assert journal._store is store
+    assert journal._buffer == []
+    assert [event["event_type"] for event in journal._quarantine.batch] == ["A"]
+    assert store.attempts == 1
 
 
 @pytest.fixture
@@ -964,6 +1950,809 @@ class TestCustomEvents:
 
 class TestBufferFlush:
     @pytest.mark.anyio
+    async def test_flush_propagates_cancellation_requested_before_entry(self, journal_setup):
+        journal, store = journal_setup
+
+        async def cancel_before_flush():
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            journal.record_delivery()
+            current_task.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await journal.flush()
+
+        await asyncio.create_task(cancel_before_flush())
+
+        events = await store.list_events("t1", "r1")
+        assert [event["event_type"] for event in events] == ["run.delivery"]
+
+    @pytest.mark.anyio
+    async def test_flush_propagates_cancellation_while_write_pending(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.5, raising=False)
+
+        class HangingMemoryStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+                self.cancelled = False
+
+            async def put_batch(self, batch):
+                self.calls += 1
+                self.started.set()
+                try:
+                    await self.finish.wait()
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+                return await super().put_batch(batch)
+
+        store = HangingMemoryStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal.record_delivery()
+        flush_task = asyncio.create_task(journal.flush())
+
+        try:
+            await store.started.wait()
+            await asyncio.sleep(0)  # flush is now inside the bounded write wait
+            flush_task.cancel()
+            await asyncio.sleep(0)  # deliver the cancellation into that wait
+            assert not flush_task.done()
+            store.finish.set()
+
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(flush_task, timeout=0.2)
+        finally:
+            store.finish.set()
+            await asyncio.gather(flush_task, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+        assert store.calls == 1
+        assert store.cancelled is False
+        events = await store.list_events("t1", "r1")
+        assert [event["event_type"] for event in events] == ["run.delivery"]
+
+    @pytest.mark.anyio
+    async def test_flush_does_not_allow_successor_write_before_predecessor_settles(self):
+        class HangingStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+
+            async def put_batch(self, batch):
+                self.calls += 1
+                self.started.set()
+                await self.finish.wait()
+                return await super().put_batch(batch)
+
+        store = HangingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+        first_flush = asyncio.create_task(journal.flush())
+        try:
+            await store.started.wait()  # explicit flush write is running
+            journal._put(event_type="second", category="trace", content="second")
+            journal._flush_sync()  # threshold path must observe the in-flight write
+            await asyncio.sleep(0)
+            # The successor must stay buffered instead of overtaking the write.
+            assert [event["event_type"] for event in journal._buffer] == ["second"]
+            assert journal._pending_flush_tasks == set()
+            assert store.calls == 1
+            store.finish.set()
+            await asyncio.wait_for(first_flush, timeout=0.2)
+        finally:
+            store.finish.set()
+            await asyncio.gather(first_flush, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_threshold_flush_never_overlaps_blocked_explicit_write(self):
+        """Only one ``put_batch`` may be active while A is blocked.
+
+        Characterization at this BASE: the explicit flush owns A; the successor
+        event B added after A starts must stay buffered, and the threshold path
+        must not start a second concurrent write.
+        """
+
+        class BlockingStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.attempts: list[list[str]] = []
+                self.active_writes = 0
+                self.max_active_writes = 0
+
+            async def put_batch(self, batch):
+                self.attempts.append([event["event_type"] for event in batch])
+                self.active_writes += 1
+                self.max_active_writes = max(self.max_active_writes, self.active_writes)
+                try:
+                    if len(self.attempts) == 1:
+                        self.started.set()
+                        await self.release.wait()
+                    return await super().put_batch(batch)
+                finally:
+                    self.active_writes -= 1
+
+        store = BlockingStore()
+        journal = RunJournal("r-threshold-a", "t-threshold-a", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="first")
+        first_flush = asyncio.create_task(journal.flush())
+        try:
+            await asyncio.wait_for(store.started.wait(), timeout=0.2)
+            journal._put(event_type="B", category="trace", content="second")
+            journal._flush_sync()  # threshold path must observe the in-flight write
+            await asyncio.sleep(0)
+            assert store.max_active_writes == 1
+            assert store.attempts == [["A"]]
+            assert [event["event_type"] for event in journal._buffer] == ["B"]
+            store.release.set()
+            await asyncio.wait_for(first_flush, timeout=0.2)
+            # B was never written concurrently: it is written only after A
+            # settles, by the same explicit flush, so A precedes B.
+            assert store.max_active_writes == 1
+            assert store.attempts == [["A"], ["B"]]
+            assert store.max_active_writes == 1
+            assert journal._buffer == []
+            events = await store.list_events("t-threshold-a", "r-threshold-a")
+            assert [event["event_type"] for event in events] == ["A", "B"]
+        finally:
+            store.release.set()
+            await asyncio.gather(first_flush, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_failed_blocked_write_quarantines_before_successor_exactly_once(self):
+        """A failed A blocks its successor B and is never replayed.
+
+        The explicit flush owns A; B is buffered after A starts and never written
+        concurrently. When A fails with an UNKNOWN outcome, A is quarantined and
+        B stays buffered: the failed batch is neither replayed nor overtaken.
+        """
+
+        class FailOneBlockingStore(MemoryRunEventStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.attempts: list[list[str]] = []
+
+            async def put_batch(self, batch):
+                self.attempts.append([event["event_type"] for event in batch])
+                if len(self.attempts) == 1:
+                    self.started.set()
+                    await self.release.wait()
+                    raise RuntimeError("write failed")
+                return await super().put_batch(batch)
+
+        store = FailOneBlockingStore()
+        journal = RunJournal("r-threshold-fail", "t-threshold-fail", store, flush_threshold=100)
+        journal._put(event_type="A", category="trace", content="first")
+        first_flush = asyncio.create_task(journal.flush())
+        try:
+            await asyncio.wait_for(store.started.wait(), timeout=0.2)
+            journal._put(event_type="B", category="trace", content="second")
+            journal._flush_sync()
+            await asyncio.sleep(0)
+            assert store.attempts == [["A"]]
+            assert [event["event_type"] for event in journal._buffer] == ["B"]
+            store.release.set()
+            with pytest.raises(RuntimeError):
+                await asyncio.wait_for(first_flush, timeout=0.2)
+            # A is quarantined, so neither it nor its successor is written again.
+            assert [event["event_type"] for event in journal._buffer] == ["B"]
+            assert [event["event_type"] for event in journal._quarantine.batch] == ["A"]
+            assert store.attempts == [["A"]]
+            with pytest.raises(RuntimeError):
+                await journal.flush()
+            assert store.attempts == [["A"]]
+            events = await store.list_events("t-threshold-fail", "r-threshold-fail")
+            assert events == []
+        finally:
+            store.release.set()
+            await asyncio.gather(first_flush, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_flush_reports_unsettled_predecessor(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+        class HangingStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+
+            async def put_batch(self, batch):
+                self.calls += 1
+                self.started.set()
+                await self.finish.wait()
+                return await super().put_batch(batch)
+
+        store = HangingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+        flush_task = asyncio.create_task(journal.flush())
+        try:
+            await store.started.wait()
+            result = await asyncio.wait_for(flush_task, timeout=0.2)
+            assert result is False
+            assert len(journal._detached_write_tasks) == 1
+        finally:
+            store.finish.set()
+            await asyncio.gather(flush_task, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_flush_propagates_cancellation_while_waiting_existing_flush(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.5, raising=False)
+
+        class HangingStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+
+            async def put_batch(self, batch):
+                self.calls += 1
+                self.started.set()
+                await self.finish.wait()
+                return await super().put_batch(batch)
+
+        store = HangingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=1)
+        journal.record_delivery()  # threshold flush starts a wrapper predecessor
+        await store.started.wait()
+
+        async def cancel_then_flush():
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            current_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await journal.flush()
+
+        try:
+            await asyncio.create_task(cancel_then_flush())
+        finally:
+            store.finish.set()
+            pending = tuple(getattr(journal, "_pending_flush_tasks", ()))
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_close_without_flush_keeps_tracking_inflight_write(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+        class HangingStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+
+            async def put_batch(self, batch):
+                self.calls += 1
+                self.started.set()
+                await self.finish.wait()
+                return await super().put_batch(batch)
+
+        store = HangingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+        flush_task = asyncio.create_task(journal.flush())
+        try:
+            await store.started.wait()
+            flushed = await asyncio.wait_for(flush_task, timeout=0.2)
+            assert flushed is False
+            assert len(journal._detached_write_tasks) == 1
+            generation_before = journal.feed_generation
+
+            await journal.close(flush=False)
+            assert len(journal._detached_write_tasks) == 1
+
+            store.finish.set()
+            await asyncio.gather(*tuple(journal._detached_write_tasks), return_exceptions=True)
+            await asyncio.sleep(0)
+            assert journal.feed_generation == generation_before + 1
+        finally:
+            store.finish.set()
+            await asyncio.gather(flush_task, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_flush_until_settled_returns_true_after_late_predecessor(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+        class LateStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+                self.calls = 0
+
+            async def put_batch(self, batch):
+                self.calls += 1
+                if self.calls == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                return await super().put_batch(batch)
+
+        store = LateStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+        flush_task = asyncio.create_task(journal.flush())
+        try:
+            await store.first_started.wait()
+            assert (await asyncio.wait_for(flush_task, timeout=0.2)) is False
+            assert len(journal._detached_write_tasks) == 1
+
+            store.release_first.set()
+            assert (await journal.flush_until_settled()) is True
+            assert journal._detached_write_tasks == {}
+            events = await store.list_events("t1", "r1")
+            assert [event["event_type"] for event in events] == ["first"]
+        finally:
+            store.release_first.set()
+            await asyncio.gather(flush_task, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_flush_until_settled_raises_after_pre_requested_cancellation(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+        class HangingStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+
+            async def put_batch(self, batch):
+                self.calls += 1
+                self.started.set()
+                await self.finish.wait()
+                return await super().put_batch(batch)
+
+        store = HangingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+        flush_task = asyncio.create_task(journal.flush())
+        try:
+            await store.started.wait()
+            assert (await asyncio.wait_for(flush_task, timeout=0.2)) is False
+            assert len(journal._detached_write_tasks) == 1
+
+            async def settle_after_cancel():
+                current_task = asyncio.current_task()
+                assert current_task is not None
+                current_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await journal.flush_until_settled()
+
+            settle_task = asyncio.create_task(settle_after_cancel())
+            await asyncio.sleep(0)
+            store.finish.set()
+            await asyncio.wait_for(settle_task, timeout=0.5)
+        finally:
+            store.finish.set()
+            await asyncio.gather(flush_task, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_flush_until_settled_ignores_already_handled_cancellation(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+        class HangingStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+
+            async def put_batch(self, batch):
+                self.calls += 1
+                self.started.set()
+                await self.finish.wait()
+                return await super().put_batch(batch)
+
+        store = HangingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+        flush_task = asyncio.create_task(journal.flush())
+        try:
+            await store.started.wait()
+            assert (await asyncio.wait_for(flush_task, timeout=0.2)) is False
+            assert len(journal._detached_write_tasks) == 1
+
+            async def settle_after_handled_cancel():
+                current_task = asyncio.current_task()
+                assert current_task is not None
+                current_task.cancel()
+                try:
+                    await asyncio.sleep(0)
+                except asyncio.CancelledError:
+                    pass
+                return await journal.flush_until_settled()
+
+            settle_task = asyncio.create_task(settle_after_handled_cancel())
+            await asyncio.sleep(0)
+            store.finish.set()
+            assert (await asyncio.wait_for(settle_task, timeout=0.5)) is True
+        finally:
+            store.finish.set()
+            await asyncio.gather(flush_task, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_flush_until_settled_keeps_drain_owned_when_caller_cancelled_while_blocked(self, monkeypatch):
+        """The settled drain keeps running for a detached predecessor after cancellation.
+
+        Reproduces the reviewer's schedule: a bounded ``flush()`` left write A
+        detached, ``flush_until_settled()`` is blocked joining that drain, and
+        the public caller is cancelled. The drain owns A, so the caller must
+        still be pending until A settles, and must then re-raise the received
+        cancellation without replaying A.
+        """
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+        class HangingStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+
+            async def put_batch(self, batch):
+                self.calls += 1
+                self.started.set()
+                await self.finish.wait()
+                return await super().put_batch(batch)
+
+        store = HangingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+        flush_task = asyncio.create_task(journal.flush())
+
+        settled_wait_entered = asyncio.Event()
+        real_asyncio = journal_module.asyncio
+
+        class WaitSpy:
+            """Journal-local ``asyncio`` proxy that signals every task-set wait.
+
+            The event is set from inside ``wait`` before delegating, so it means
+            "the journal is suspending in a real wait right now": the awaiting
+            task keeps running into the real ``asyncio.wait`` and suspends there
+            before this test resumes. Cancelling the caller afterwards therefore
+            lands in that wait instead of the drain's pre-wait cancellation
+            checkpoint, which would swallow it.
+            """
+
+            def __getattr__(self, name):
+                return getattr(real_asyncio, name)
+
+            async def wait(self, *args, **kwargs):
+                settled_wait_entered.set()
+                return await real_asyncio.wait(*args, **kwargs)
+
+        monkeypatch.setattr(journal_module, "asyncio", WaitSpy())
+
+        settle_task = asyncio.create_task(journal.flush_until_settled())
+        try:
+            await store.started.wait()
+            assert (await asyncio.wait_for(flush_task, timeout=0.2)) is False
+            assert len(journal._detached_write_tasks) == 1
+
+            # The settled drain reached the predecessor wait and is blocked on A,
+            # so the public caller is waiting on that owned drain, not idling.
+            await asyncio.wait_for(settled_wait_entered.wait(), timeout=0.5)
+            assert not settle_task.done()
+
+            settle_task.cancel()
+            await asyncio.sleep(0)  # deliver the cancellation into the join
+            assert not settle_task.done()
+
+            store.finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(settle_task, timeout=0.5)
+        finally:
+            store.finish.set()
+            await asyncio.gather(flush_task, return_exceptions=True)
+            if not settle_task.done():
+                settle_task.cancel()
+            await asyncio.gather(settle_task, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+        assert store.calls == 1
+        assert journal._detached_write_tasks == {}
+        assert journal._buffer == []
+        assert journal.feed_generation == 1
+        events = await store.list_events("t1", "r1")
+        assert [event["event_type"] for event in events] == ["first"]
+
+    @pytest.mark.anyio
+    async def test_flush_until_settled_propagates_fresh_cancellation_with_empty_journal(self):
+        """A cancellation requested before entry is observed even with nothing to drain."""
+        store = MemoryRunEventStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+
+        async def settle_after_cancel():
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            current_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await journal.flush_until_settled()
+
+        await asyncio.wait_for(asyncio.create_task(settle_after_cancel()), timeout=0.5)
+
+        assert journal.feed_generation == 0
+        assert journal._buffer == []
+        assert await store.list_events("t1", "r1") == []
+
+    @pytest.mark.anyio
+    async def test_flush_until_settled_ignores_handled_cancellation_with_empty_journal(self):
+        """A cancellation already handled earlier is not re-reported as new."""
+        store = MemoryRunEventStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+
+        async def settle_after_handled_cancel():
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            current_task.cancel()
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                pass
+            return await journal.flush_until_settled()
+
+        settle_task = asyncio.create_task(settle_after_handled_cancel())
+        assert (await asyncio.wait_for(settle_task, timeout=0.5)) is True
+
+        assert journal.feed_generation == 0
+        assert journal._buffer == []
+        assert await store.list_events("t1", "r1") == []
+
+    @pytest.mark.anyio
+    async def test_flush_until_settled_reports_store_cancelled_write_as_failure(self):
+        """A store cancelling its own write is a definite failure, not caller cancellation."""
+
+        class StoreCancellingWrite:
+            def __init__(self):
+                self.attempts = 0
+
+            async def put_batch(self, batch):
+                self.attempts += 1
+                raise asyncio.CancelledError
+
+        store = StoreCancellingWrite()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+
+        with pytest.raises(BaseException) as excinfo:
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=0.5)
+
+        assert isinstance(excinfo.value, Exception), "the store's own cancellation must be a definite write failure"
+        assert isinstance(excinfo.value.__cause__, asyncio.CancelledError)
+        assert store.attempts == 1
+        assert journal._active_write_tasks == {}
+        assert journal._detached_write_tasks == {}
+        assert journal.feed_generation == 0
+        assert journal._buffer == []
+        assert [event["event_type"] for event in journal._quarantine.batch] == ["first"]
+
+        # The ambiguous batch is never attempted again.
+        with pytest.raises(BaseException):
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=0.5)
+        assert store.attempts == 1
+
+    @pytest.mark.anyio
+    async def test_flush_until_settled_reports_write_failure_over_caller_cancellation(self, monkeypatch):
+        """A definite write failure is reported before the cancellation received while draining."""
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.5, raising=False)
+
+        class FailingStore:
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.fail = asyncio.Event()
+                self.attempts = 0
+
+            async def put_batch(self, batch):
+                self.attempts += 1
+                self.started.set()
+                await self.fail.wait()
+                raise RuntimeError("store write failed")
+
+        store = FailingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+
+        settle_task = asyncio.create_task(journal.flush_until_settled())
+        try:
+            await asyncio.wait_for(store.started.wait(), timeout=0.5)
+            settle_task.cancel()
+            await asyncio.sleep(0)  # deliver the cancellation into the join
+            assert not settle_task.done()
+
+            store.fail.set()
+            with pytest.raises(RuntimeError, match="store write failed"):
+                await asyncio.wait_for(settle_task, timeout=0.5)
+        finally:
+            store.fail.set()
+            await asyncio.gather(settle_task, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+        # The failure is reported, not the cancellation it replaced; that
+        # cancellation was received and suppressed, so the count is balanced.
+        assert settle_task.cancelling() == 0
+        assert store.attempts == 1
+        assert journal._active_write_tasks == {}
+        assert journal.feed_generation == 0
+        assert journal._buffer == []
+        assert [event["event_type"] for event in journal._quarantine.batch] == ["first"]
+
+    @pytest.mark.anyio
+    async def test_close_without_flush_does_not_wait_for_stubborn_progress(self):
+        import deerflow.runtime.journal as journal_module
+
+        progress_started = asyncio.Event()
+        cancellation_seen = asyncio.Event()
+        release_cancellation = asyncio.Event()
+
+        async def stubborn_reporter(_snapshot):
+            progress_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                await release_cancellation.wait()
+                raise
+
+        journal = RunJournal(
+            "r1",
+            "t1",
+            MemoryRunEventStore(),
+            flush_threshold=100,
+            progress_reporter=stubborn_reporter,
+            progress_flush_interval=0,
+        )
+        journal._schedule_progress_flush()
+        await asyncio.wait_for(progress_started.wait(), timeout=0.2)
+        progress_task = journal._pending_progress_task
+        assert progress_task is not None
+
+        await asyncio.wait_for(journal.close(flush=False), timeout=0.2)
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.2)
+        assert progress_task in journal_module._cancelling_progress_tasks
+        assert journal._closed is True
+        assert journal._store is None
+
+        release_cancellation.set()
+        await asyncio.gather(progress_task, return_exceptions=True)
+        assert progress_task not in journal_module._cancelling_progress_tasks
+
+    @pytest.mark.anyio
+    async def test_flush_warning_reports_pending_ownership(self, monkeypatch, caplog):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.05, raising=False)
+        journal = RunJournal("r1", "t1", MemoryRunEventStore(), flush_threshold=100)
+        # A threshold wrapper predecessor still in flight.
+        pending = asyncio.create_task(asyncio.Event().wait())
+        journal._pending_flush_tasks.add(pending)
+        try:
+            with caplog.at_level("WARNING", logger="deerflow.runtime.journal"):
+                assert (await journal.flush()) is False
+            assert "pending_flushes=1" in caplog.text
+            assert "detached_writes=0" in caplog.text
+        finally:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_failed_explicit_write_blocks_successor_without_replay(self):
+        class FailOnceStore(MemoryRunEventStore):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+                self.attempted: list[str] = []
+                self.persisted: list[str] = []
+
+            async def put_batch(self, batch):
+                self.calls += 1
+                self.attempted.extend(event["event_type"] for event in batch)
+                raise RuntimeError("write failed")
+
+        store = FailOnceStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+        with pytest.raises(RuntimeError):
+            await journal.flush()
+
+        assert journal._buffer == []
+        assert journal._active_write_tasks == {}
+        assert [event["event_type"] for event in journal._quarantine.batch] == ["first"]
+
+        journal._put(event_type="second", category="trace", content="second")
+        with pytest.raises(RuntimeError):
+            await journal.flush()
+        assert store.attempted == ["first"]
+        assert store.persisted == []
+
+    @pytest.mark.anyio
+    async def test_flush_ignores_already_handled_cancellation_request(self, journal_setup):
+        journal, store = journal_setup
+        reached_after_flush = False
+
+        async def flush_after_handling_cancellation():
+            nonlocal reached_after_flush
+            current_task = asyncio.current_task()
+            assert current_task is not None
+            current_task.cancel()
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                pass
+
+            journal.record_delivery()
+            await journal.flush()
+            reached_after_flush = True
+
+        await asyncio.create_task(flush_after_handling_cancellation())
+
+        events = await store.list_events("t1", "r1")
+        assert reached_after_flush is True
+        assert [event["event_type"] for event in events] == ["run.delivery"]
+
+    @pytest.mark.anyio
     async def test_flush_threshold(self, journal_setup):
         j, store = journal_setup
         j._flush_threshold = 2
@@ -1012,6 +2801,284 @@ class TestBufferFlush:
         await j.flush()
         events = await store.list_events("t1", "r1")
         assert any(e["event_type"] == "llm.ai.response" for e in events)
+
+    @pytest.mark.anyio
+    async def test_threshold_flush_cancelled_before_start_restores_batch(self):
+        store = MemoryRunEventStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=1)
+        journal.record_delivery()
+
+        flush_task = next(iter(journal._pending_flush_tasks))
+        flush_task.cancel()
+        await asyncio.gather(flush_task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+        await journal.flush()
+        events = await store.list_events("t1", "r1")
+        assert [event["event_type"] for event in events] == ["run.delivery"]
+
+    @pytest.mark.anyio
+    async def test_cancelled_flush_quarantines_batch_after_write_failure(self):
+        class FailingStore:
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.fail = asyncio.Event()
+                self.cancelled = False
+
+            async def put_batch(self, _batch):
+                self.started.set()
+                try:
+                    await self.fail.wait()
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+                raise RuntimeError("write failed")
+
+        store = FailingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal.record_delivery()
+        flush_task = asyncio.create_task(journal.flush())
+        await store.started.wait()
+        flush_task.cancel()
+        store.fail.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await flush_task
+
+        assert store.cancelled is False
+        assert journal._buffer == []
+        assert [event["event_type"] for event in journal._quarantine.batch] == ["run.delivery"]
+
+    @pytest.mark.anyio
+    async def test_uncancelled_flush_bounds_ambiguous_write(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+        class HangingStore:
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+                self.cancelled = False
+
+            async def put_batch(self, _batch):
+                self.calls += 1
+                self.started.set()
+                try:
+                    await self.finish.wait()
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+                return []
+
+        store = HangingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal.record_delivery()
+        flush_task = asyncio.create_task(journal.flush())
+        try:
+            await store.started.wait()
+            await asyncio.wait_for(flush_task, timeout=0.2)
+
+            assert store.calls == 1
+            assert store.cancelled is False
+            assert len(journal._detached_write_tasks) == 1
+            assert journal._buffer == []
+
+            store.finish.set()
+            await asyncio.gather(*tuple(journal._detached_write_tasks), return_exceptions=True)
+            await asyncio.sleep(0)
+            await journal.flush()
+            assert store.calls == 1
+            assert journal._detached_write_tasks == {}
+            assert journal._buffer == []
+        finally:
+            store.finish.set()
+            await asyncio.gather(flush_task, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_cancelled_ambiguous_write_remains_owned_without_retry(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+        class HangingStore:
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.finish = asyncio.Event()
+                self.calls = 0
+                self.cancelled = False
+
+            async def put_batch(self, _batch):
+                self.calls += 1
+                self.started.set()
+                try:
+                    await self.finish.wait()
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+                return []
+
+        store = HangingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal.record_delivery()
+        flush_task = asyncio.create_task(journal.flush())
+        try:
+            await store.started.wait()
+            flush_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(flush_task, timeout=0.2)
+
+            assert store.calls == 1
+            assert store.cancelled is False
+            assert len(journal._detached_write_tasks) == 1
+            assert journal._buffer == []
+
+            store.finish.set()
+            await asyncio.gather(*tuple(journal._detached_write_tasks), return_exceptions=True)
+            await asyncio.sleep(0)
+            await journal.flush()
+            assert store.calls == 1
+            assert journal._detached_write_tasks == {}
+        finally:
+            store.finish.set()
+            await asyncio.gather(flush_task, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_settled_flush_reports_late_failure_before_successor_without_replay(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+        class LateFailingStore:
+            def __init__(self):
+                self.attempted: list[str] = []
+                self.persisted: list[str] = []
+                self.first_started = asyncio.Event()
+                self.fail_first = asyncio.Event()
+                self.calls = 0
+
+            async def put_batch(self, batch):
+                event_types = [event["event_type"] for event in batch]
+                self.calls += 1
+                self.attempted.extend(event_types)
+                if self.calls == 1:
+                    self.first_started.set()
+                    await self.fail_first.wait()
+                    raise RuntimeError("late predecessor failure")
+                self.persisted.extend(event_types)
+                return []
+
+        store = LateFailingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+        first_flush = asyncio.create_task(journal.flush())
+        settled_flush = None
+        try:
+            await store.first_started.wait()
+            await asyncio.wait_for(first_flush, timeout=0.2)
+            journal._put(event_type="second", category="trace", content="second")
+
+            settled_flush = asyncio.create_task(journal.flush_until_settled())
+            await asyncio.sleep(0)
+            assert store.attempted == ["first"]
+
+            store.fail_first.set()
+            with pytest.raises(RuntimeError, match="late predecessor failure"):
+                await asyncio.wait_for(settled_flush, timeout=0.2)
+            # The late failure is reported once; neither the failed batch nor its
+            # successor is replayed or overtaken.
+            assert store.attempted == ["first"]
+            assert store.persisted == []
+            assert [event["event_type"] for event in journal._quarantine.batch] == ["first"]
+        finally:
+            store.fail_first.set()
+            await asyncio.gather(first_flush, return_exceptions=True)
+            if settled_flush is not None:
+                await asyncio.gather(settled_flush, return_exceptions=True)
+            detached = tuple(getattr(journal, "_detached_write_tasks", ()))
+            if detached:
+                await asyncio.gather(*detached, return_exceptions=True)
+
+    @pytest.mark.anyio
+    async def test_concurrent_explicit_flushes_are_serialized(self):
+        class TrackingStore:
+            def __init__(self):
+                self.active = 0
+                self.max_active = 0
+                self.first_started = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def put_batch(self, _batch):
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                if self.active == 1:
+                    self.first_started.set()
+                    await self.release_first.wait()
+                self.active -= 1
+                return []
+
+        store = TrackingStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal._put(event_type="first", category="trace", content="first")
+        first_flush = asyncio.create_task(journal.flush())
+        await store.first_started.wait()
+        journal._put(event_type="second", category="trace", content="second")
+        second_flush = asyncio.create_task(journal.flush())
+        await asyncio.sleep(0)
+        store.release_first.set()
+        await asyncio.gather(first_flush, second_flush)
+
+        assert store.max_active == 1
+
+    @pytest.mark.anyio
+    async def test_close_waits_for_ambiguous_predecessor_before_detaching(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+        class FailOnceStore:
+            def __init__(self):
+                self.calls = 0
+                self.first_started = asyncio.Event()
+                self.fail_first = asyncio.Event()
+                self.persisted: list[str] = []
+
+            async def put_batch(self, batch):
+                self.calls += 1
+                if self.calls == 1:
+                    self.first_started.set()
+                    await self.fail_first.wait()
+                    raise RuntimeError("late failure")
+                self.persisted.extend(event["event_type"] for event in batch)
+                return []
+
+        store = FailOnceStore()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        journal.record_delivery()
+        close_task = asyncio.create_task(journal.close())
+        await store.first_started.wait()
+        await asyncio.sleep(0.02)
+
+        assert not close_task.done()
+        assert journal._store is store
+        assert len(journal._detached_write_tasks) == 1
+
+        store.fail_first.set()
+        with pytest.raises(RuntimeError, match="late failure"):
+            await asyncio.wait_for(close_task, timeout=0.2)
+        # The ambiguous batch is quarantined and never replayed.
+        assert store.calls == 1
+        assert store.persisted == []
+        assert journal._closed is False
+        assert journal._store is store
+        assert [event["event_type"] for event in journal._quarantine.batch] == ["run.delivery"]
 
 
 class TestFeedGeneration:
@@ -1963,6 +4030,84 @@ class TestProgressSnapshots:
         await asyncio.sleep(0)
         assert pending_task_ref() is None
 
+    @pytest.mark.anyio
+    async def test_flush_bounds_hung_progress_and_persists_events(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+        reporter_started = asyncio.Event()
+
+        async def reporter(_snapshot):
+            reporter_started.set()
+            await asyncio.Future()
+
+        store = MemoryRunEventStore()
+        journal = RunJournal(
+            "r1",
+            "t1",
+            store,
+            flush_threshold=100,
+            progress_reporter=reporter,
+            progress_flush_interval=0,
+        )
+        journal.record_delivery()
+        journal._schedule_progress_flush()
+        await reporter_started.wait()
+
+        await asyncio.wait_for(journal.flush(), timeout=0.2)
+
+        events = await store.list_events("t1", "r1")
+        assert [event["event_type"] for event in events] == ["run.delivery"]
+        assert journal._pending_progress_task is None
+
+    @pytest.mark.anyio
+    async def test_flush_retains_stubborn_progress_until_cancellation_settles(self, monkeypatch):
+        import deerflow.runtime.journal as journal_module
+
+        monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+        reporter_started = asyncio.Event()
+        cancellation_seen = asyncio.Event()
+        release_cancellation = asyncio.Event()
+
+        async def reporter(_snapshot):
+            reporter_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                await release_cancellation.wait()
+                raise
+
+        journal = RunJournal(
+            "r1",
+            "t1",
+            MemoryRunEventStore(),
+            flush_threshold=100,
+            progress_reporter=reporter,
+            progress_flush_interval=0,
+        )
+        journal._schedule_progress_flush()
+        await reporter_started.wait()
+        progress_task = journal._pending_progress_task
+        assert progress_task is not None
+
+        try:
+            await asyncio.wait_for(journal.flush(), timeout=0.2)
+            await cancellation_seen.wait()
+            assert journal._pending_progress_task is progress_task
+            assert progress_task in journal_module._cancelling_progress_tasks
+
+            release_cancellation.set()
+            await asyncio.gather(progress_task, return_exceptions=True)
+            await asyncio.sleep(0)
+            assert journal._pending_progress_task is None
+            assert progress_task not in journal_module._cancelling_progress_tasks
+        finally:
+            release_cancellation.set()
+            if not progress_task.done():
+                progress_task.cancel()
+            await asyncio.gather(progress_task, return_exceptions=True)
+
 
 class TestChatModelStartHumanMessage:
     """Tests for on_chat_model_start extracting the first human message."""
@@ -2607,3 +4752,736 @@ class TestDeliveryTracking:
         assert content["presented"] == 1
         assert content["paths"] == ["/mnt/user-data/outputs/anon.txt"]
         assert content["by_tool"] == {}
+
+
+@pytest.mark.anyio
+async def test_write_ack_lost_after_actual_commit_is_unknown_not_replayed(monkeypatch):
+    """A batch that may have committed is UNKNOWN: never replayed, never overtaken."""
+    import deerflow.runtime.journal as journal_module
+
+    monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    store = GatedRunEventStore()
+    journal = RunJournal("r-ack-lost", "t-ack-lost", store, flush_threshold=100)
+    try:
+        journal._put(event_type="A", category="trace", content="a")
+
+        # The bounded drain times out, detaching A while its outcome is unknown.
+        first_drain = asyncio.create_task(journal.flush())
+        await asyncio.wait_for(store.gate(0)[0].wait(), timeout=1.0)
+        await asyncio.wait_for(first_drain, timeout=2.0)
+        assert store.calls == [["A"]]
+
+        # A buffered successor must not overtake the unresolved predecessor.
+        journal._put(event_type="B", category="trace", content="b")
+
+        # A actually committed; only the acknowledgement was lost.
+        store.commit_then_fail[0] = RuntimeError("ack lost after commit")
+        store.release_all()
+
+        with pytest.raises(RuntimeError, match="ack lost after commit"):
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=3.0)
+
+        # Neither A nor its successor is written again: UNKNOWN is not replayable.
+        assert store.calls == [["A"]]
+        assert store.persisted == [["A"]]
+
+        # A later explicit drain still fails closed instead of replaying the batch.
+        with pytest.raises(RuntimeError, match="ack lost after commit"):
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=3.0)
+        assert store.calls == [["A"]]
+    finally:
+        store.release_all()
+        await journal.close(flush=False)
+
+
+@pytest.mark.anyio
+async def test_store_self_cancel_after_possible_commit_is_unknown_not_host_cancel():
+    """A store-originated cancellation is an UNKNOWN failure, not host cancellation."""
+    store = GatedRunEventStore()
+    store.fail_with(0, asyncio.CancelledError("store cancelled its own write"))
+    # The write is never gated here: the injected failure is the point.
+    store.release_all()
+    journal = RunJournal("r-self-cancel", "t-self-cancel", store, flush_threshold=100)
+    try:
+        journal._put(event_type="A", category="trace", content="a")
+
+        with pytest.raises(RuntimeError, match="cancelled its own write"):
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=3.0)
+        assert store.calls == [["A"]]
+
+        # The ambiguous batch is quarantined, so it is never attempted again.
+        with pytest.raises(RuntimeError):
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=3.0)
+        assert store.calls == [["A"]]
+
+        # A bounded flush reports the same definite failure: a store cancelling
+        # its own write is never surfaced as the caller's cancellation.
+        with pytest.raises(RuntimeError, match="cancelled its own write"):
+            await journal.flush()
+        assert store.calls == [["A"]]
+    finally:
+        store.release_all()
+        await journal.close(flush=False)
+
+
+def test_proven_noncommit_marker_is_opt_in_for_adapters():
+    """Only a store that can assert whole-batch non-commit may raise the marker."""
+    import importlib
+    import inspect
+
+    from deerflow.runtime.events.store import base as store_base
+
+    marker = store_base.RunEventWriteNotCommittedError
+    assert issubclass(marker, Exception)
+
+    for module_name in (
+        "deerflow.runtime.events.store.memory",
+        "deerflow.runtime.events.store.db",
+        "deerflow.runtime.events.store.jsonl",
+    ):
+        module = importlib.import_module(module_name)
+        for name, value in vars(module).items():
+            if not inspect.isclass(value) or not hasattr(value, "put_batch"):
+                continue
+            if getattr(value, "__module__", None) != module_name:
+                # Only adapters defined in this module own their put_batch.
+                continue
+            owner = next((klass for klass in value.__mro__ if "put_batch" in klass.__dict__), None)
+            if owner is None:
+                continue
+            source = inspect.getsource(owner.put_batch)
+            assert "RunEventWriteNotCommittedError" not in source, f"{module_name}.{name}.put_batch must not claim proven non-commit"
+
+
+@pytest.mark.anyio
+async def test_owned_join_preentry_cancel_delivered_then_child_fails_balances_only_delivered_cancel():
+    """Only the cancellation this join consumed is balanced; older counts survive."""
+    import deerflow.runtime.journal as journal_module
+
+    child_started = asyncio.Event()
+    fail_child = asyncio.Event()
+
+    async def child() -> None:
+        child_started.set()
+        await fail_child.wait()
+        raise RuntimeError("owned child failed")
+
+    task = asyncio.create_task(child())
+    observed: list[BaseException] = []
+    cancelling_after: list[int] = []
+
+    async def joiner() -> None:
+        current = asyncio.current_task()
+        assert current is not None
+        # One already-handled cancellation stays counted on entry.
+        current.cancel()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            pass
+        assert current.cancelling() == 1
+
+        # A second request queued just before the join is delivered at its
+        # initial checkpoint, so the join owns it.
+        current.cancel()
+        try:
+            await journal_module._await_owned_task(task)
+        except BaseException as error:  # noqa: BLE001 - the test observes the outcome
+            observed.append(error)
+        cancelling_after.append(current.cancelling())
+
+    joiner_task = asyncio.create_task(joiner())
+    await asyncio.wait_for(child_started.wait(), timeout=0.5)
+    await asyncio.sleep(0)
+    fail_child.set()
+    await asyncio.wait_for(joiner_task, timeout=2.0)
+
+    assert len(observed) == 1
+    assert isinstance(observed[0], RuntimeError)
+    assert str(observed[0]) == "owned child failed"
+    # Exactly the delivered request was consumed; the older handled count remains.
+    assert cancelling_after == [1]
+
+
+@pytest.mark.anyio
+async def test_owned_join_repeated_cancel_preserves_child_outcome():
+    """Repeated caller cancellation never cancels the owned child."""
+    import deerflow.runtime.journal as journal_module
+
+    child_started = asyncio.Event()
+    release_child = asyncio.Event()
+    child_cancelled = False
+
+    async def child() -> str:
+        nonlocal child_cancelled
+        child_started.set()
+        try:
+            await release_child.wait()
+        except asyncio.CancelledError:
+            child_cancelled = True
+            raise
+        return "done"
+
+    task = asyncio.create_task(child())
+    observed: list[BaseException] = []
+    results: list[str] = []
+    cancelling_after: list[int] = []
+
+    async def joiner() -> None:
+        current = asyncio.current_task()
+        try:
+            results.append(await journal_module._await_owned_task(task))
+        except BaseException as error:  # noqa: BLE001 - the test observes the outcome
+            observed.append(error)
+        cancelling_after.append(current.cancelling())
+
+    joiner_task = asyncio.create_task(joiner())
+    await asyncio.wait_for(child_started.wait(), timeout=0.5)
+    await asyncio.sleep(0)
+    joiner_task.cancel()
+    await asyncio.sleep(0)
+    joiner_task.cancel()
+    await asyncio.sleep(0)
+    assert not joiner_task.done()
+
+    release_child.set()
+    await asyncio.wait_for(joiner_task, timeout=2.0)
+
+    assert child_cancelled is False
+    assert task.result() == "done"
+    # Success is a fact even though the caller's cancellation still propagates.
+    assert results == []
+    assert len(observed) == 1
+    assert isinstance(observed[0], asyncio.CancelledError)
+    assert cancelling_after == [2]
+
+
+@pytest.mark.anyio
+async def test_owned_join_handled_old_cancel_count_is_untouched():
+    """An older handled cancellation is never cleared by a successful owned join."""
+    import deerflow.runtime.journal as journal_module
+
+    async def child() -> str:
+        return "done"
+
+    task = asyncio.create_task(child())
+    await asyncio.sleep(0)
+    results: list[str] = []
+    cancelling_after: list[int] = []
+
+    async def joiner() -> None:
+        current = asyncio.current_task()
+        assert current is not None
+        current.cancel()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            pass
+        assert current.cancelling() == 1
+
+        results.append(await journal_module._await_owned_task(task))
+        cancelling_after.append(current.cancelling())
+
+    await asyncio.wait_for(asyncio.create_task(joiner()), timeout=2.0)
+
+    assert results == ["done"]
+    assert cancelling_after == [1]
+
+
+@pytest.mark.anyio
+async def test_detached_late_failure_is_reported_once_before_buffered_successor(monkeypatch):
+    """A late failure applied by the done callback still dominates the final drain."""
+    import deerflow.runtime.journal as journal_module
+
+    monkeypatch.setattr(journal_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    store = GatedRunEventStore()
+    journal = RunJournal("r-late", "t-late", store, flush_threshold=100)
+    try:
+        journal._put(event_type="A", category="trace", content="a")
+        first_drain = asyncio.create_task(journal.flush())
+        await asyncio.wait_for(store.gate(0)[0].wait(), timeout=1.0)
+        await asyncio.wait_for(first_drain, timeout=2.0)
+        journal._put(event_type="B", category="trace", content="b")
+
+        store.commit_then_fail[0] = RuntimeError("late failure after possible commit")
+        store.release_all()
+        # Let the done callback apply the outcome before the final drain starts.
+        await asyncio.sleep(0.05)
+        assert journal._quarantine is not None
+
+        with pytest.raises(RuntimeError, match="late failure after possible commit"):
+            await asyncio.wait_for(journal.flush_until_settled(), timeout=2.0)
+
+        # The failure is reported once: A is not replayed and B never overtakes it.
+        assert store.calls == [["A"]]
+        assert [event["event_type"] for event in journal._buffer] == ["B"]
+    finally:
+        store.release_all()
+        await journal.close(flush=False)
+
+
+@pytest.mark.anyio
+async def test_delayed_threshold_wrapper_failure_reaches_finalizer():
+    """A fire-and-forget threshold write failure is published, not only logged."""
+
+    class ThresholdFailingStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def put_batch(self, events):
+            self.calls += 1
+            raise RuntimeError("threshold write failed")
+
+    store = ThresholdFailingStore()
+    journal = RunJournal("r-threshold-wrapper", "t-threshold-wrapper", store, flush_threshold=1)
+    journal._put(event_type="A", category="trace", content="a")
+    await asyncio.sleep(0.05)
+
+    assert store.calls == 1
+    assert journal._quarantine is not None
+
+    with pytest.raises(RuntimeError, match="threshold write failed"):
+        await asyncio.wait_for(journal.flush_until_settled(), timeout=2.0)
+    # The failed batch is never replayed.
+    assert store.calls == 1
+
+    # A quarantined predecessor also blocks the fire-and-forget threshold path,
+    # so a successor cannot overtake it and land alone in the feed.
+    journal._put(event_type="B", category="trace", content="b")
+    await asyncio.sleep(0.05)
+    assert store.calls == 1
+
+
+@pytest.mark.anyio
+async def test_explicit_second_drain_can_retry_only_proven_noncommit():
+    """Only a proven non-commit is retried, and only by an explicit settled drain."""
+    from deerflow.runtime.events.store.base import RunEventWriteNotCommittedError
+
+    class MarkerThenSuccessStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+            self.persisted: list[str] = []
+
+        async def put_batch(self, events):
+            self.calls += 1
+            if self.calls == 1:
+                raise RunEventWriteNotCommittedError("transaction rolled back")
+            self.persisted.extend(event["event_type"] for event in events)
+            return await super().put_batch(events)
+
+    store = MarkerThenSuccessStore()
+    journal = RunJournal("r-marker", "t-marker", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+
+    with pytest.raises(RunEventWriteNotCommittedError, match="transaction rolled back"):
+        await journal.flush_until_settled()
+    assert store.calls == 1
+    assert journal._quarantine.disposition is JournalWriteDisposition.NOT_COMMITTED
+
+    # A bounded flush reports the quarantine but does not replay it.
+    with pytest.raises(RunEventWriteNotCommittedError):
+        await journal.flush()
+    assert store.calls == 1
+
+    # A later explicitly requested settled drain retries the proven non-commit.
+    assert (await journal.flush_until_settled()) is True
+    assert store.calls == 2
+    assert store.persisted == ["A"]
+    assert journal._quarantine is None
+
+
+@pytest.mark.anyio
+async def test_finish_committed_snapshot_survives_detach():
+    """A committed finish returns a snapshot and leaves no run-scoped references."""
+    import deerflow.runtime.journal as journal_module
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-finish", "t-finish", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+    journal.set_first_human_message("hello")
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert result.disposition is journal_module.JournalWriteDisposition.COMMITTED
+    assert result.failure is None
+    assert result.caller_cancellation is None
+    assert result.snapshot is not None
+    assert result.snapshot.feed_generation == 1
+    assert result.snapshot.completion_data["first_human_message"] == "hello"
+    assert result.snapshot.delivery_content["presented"] == 0
+
+    # The snapshot is usable after the run-scoped state is dropped.
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+    events = await store.list_events("t-finish", "r-finish")
+    assert [event["event_type"] for event in events] == ["A"]
+
+
+@pytest.mark.anyio
+async def test_finish_committed_even_when_joining_caller_cancelled():
+    """A committed drain and the caller's cancellation are reported separately."""
+    import deerflow.runtime.journal as journal_module
+
+    store = GatedRunEventStore()
+    journal = RunJournal("r-finish-cancel", "t-finish-cancel", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+
+    finish_task = asyncio.create_task(journal.finish_for_terminal())
+    await asyncio.wait_for(store.gate(0)[0].wait(), timeout=1.0)
+    finish_task.cancel()
+    await asyncio.sleep(0)
+    assert not finish_task.done()
+
+    store.release_all()
+    result = await asyncio.wait_for(finish_task, timeout=2.0)
+
+    assert result.disposition is journal_module.JournalWriteDisposition.COMMITTED
+    assert result.snapshot is not None
+    assert result.failure is None
+    assert isinstance(result.caller_cancellation, asyncio.CancelledError)
+    assert store.persisted == [["A"]]
+
+
+@pytest.mark.anyio
+async def test_finish_unknown_has_no_success_snapshot():
+    """An UNKNOWN write can never produce a committed terminal snapshot."""
+    import deerflow.runtime.journal as journal_module
+
+    class FailingStore(MemoryRunEventStore):
+        async def put_batch(self, events):
+            raise RuntimeError("store unavailable")
+
+    journal = RunJournal("r-finish-unknown", "t-finish-unknown", FailingStore(), flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert result.disposition is journal_module.JournalWriteDisposition.UNKNOWN
+    assert result.snapshot is None
+    assert isinstance(result.failure, RuntimeError)
+    assert str(result.failure) == "store unavailable"
+    assert journal._closed is True
+    assert journal._store is None
+
+
+@pytest.mark.anyio
+async def test_finish_not_committed_has_no_success_snapshot():
+    """A proven non-commit also refuses a success snapshot."""
+    import deerflow.runtime.journal as journal_module
+    from deerflow.runtime.events.store.base import RunEventWriteNotCommittedError
+
+    class MarkerStore(MemoryRunEventStore):
+        async def put_batch(self, events):
+            raise RunEventWriteNotCommittedError("rolled back")
+
+    journal = RunJournal("r-finish-marker", "t-finish-marker", MarkerStore(), flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert result.disposition is journal_module.JournalWriteDisposition.NOT_COMMITTED
+    assert result.snapshot is None
+    assert isinstance(result.failure, RunEventWriteNotCommittedError)
+
+
+@pytest.mark.anyio
+async def test_concurrent_finish_joins_single_owner():
+    """Every concurrent finish joins one owned finalization."""
+    store = GatedRunEventStore()
+    journal = RunJournal("r-finish-join", "t-finish-join", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+
+    first = asyncio.create_task(journal.finish_for_terminal())
+    await asyncio.wait_for(store.gate(0)[0].wait(), timeout=1.0)
+    second = asyncio.create_task(journal.finish_for_terminal())
+    await asyncio.sleep(0)
+    owner = journal._finish_owner_task
+    assert owner is not None
+    assert not owner.done()
+
+    store.release_all()
+    first_result, second_result = await asyncio.wait_for(asyncio.gather(first, second), timeout=2.0)
+
+    assert first_result.disposition is second_result.disposition
+    assert store.persisted == [["A"]]
+
+
+@pytest.mark.anyio
+async def test_foreign_thread_middleware_admitted_before_seal_executes_after_seal_and_persists():
+    """An event admitted before the seal still lands in the terminal drain.
+
+    The foreign thread enqueues while the owner loop is blocked, so the callback
+    is accepted but cannot have run yet when the seal starts.
+    """
+    import deerflow.runtime.journal as journal_module
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-seal-admitted", "t-seal-admitted", store, flush_threshold=100)
+    enqueued = threading.Event()
+
+    def foreign() -> None:
+        journal.record_middleware(
+            "tool_progress",
+            name="ToolProgressMiddleware",
+            hook="wrap_tool_call",
+            action="warn",
+            changes={"to_phase": "warned"},
+        )
+        enqueued.set()
+
+    thread = threading.Thread(target=foreign)
+    thread.start()
+    try:
+        # Blocking the owner loop keeps the accepted callback queued, not run.
+        assert enqueued.wait(timeout=2)
+        assert journal._buffer == []
+    finally:
+        thread.join()
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert result.disposition is journal_module.JournalWriteDisposition.COMMITTED
+    events = await store.list_events("t-seal-admitted", "r-seal-admitted")
+    assert [event["event_type"] for event in events] == ["middleware:tool_progress"]
+
+
+@pytest.mark.anyio
+async def test_foreign_thread_middleware_after_seal_rejected_and_counted():
+    """A foreign-thread producer that loses the admission race is rejected and counted."""
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-seal-late", "t-seal-late", store, flush_threshold=100)
+
+    await journal.seal_producers()
+    journal.record_middleware("owner", name="N", hook="h", action="a", changes={})
+    await asyncio.to_thread(
+        journal.record_middleware,
+        "foreign",
+        name="N",
+        hook="h",
+        action="a",
+        changes={},
+    )
+
+    assert journal._buffer == []
+    assert journal._post_seal_rejected == 2
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+    assert result.disposition is journal_module_disposition(journal)
+    events = await store.list_events("t-seal-late", "r-seal-late")
+    assert events == []
+
+
+def journal_module_disposition(journal):
+    """Return the COMMITTED disposition of ``journal``'s module."""
+    import deerflow.runtime.journal as journal_module
+
+    return journal_module.JournalWriteDisposition.COMMITTED
+
+
+@pytest.mark.anyio
+async def test_direct_journal_callback_after_seal_rejected():
+    """A direct owner-loop append after the seal cannot reopen the journal."""
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-seal-direct", "t-seal-direct", store, flush_threshold=100)
+
+    await journal.seal_producers()
+    journal._put(event_type="late", category="trace", content="late")
+
+    assert journal._buffer == []
+    assert journal._post_seal_rejected == 1
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+    assert result.snapshot is not None
+    events = await store.list_events("t-seal-direct", "r-seal-direct")
+    assert events == []
+
+
+@pytest.mark.anyio
+async def test_subagent_proxy_aclose_happens_before_parent_seal():
+    """A subagent proxy event accepted before its aclose still reaches the drain."""
+    from deerflow.tools.builtins.task_tool import _ParentLoopMiddlewareRecorderProxy
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-proxy-seal", "t-proxy-seal", store, flush_threshold=100)
+    proxy = _ParentLoopMiddlewareRecorderProxy(journal, asyncio.get_running_loop())
+
+    await asyncio.to_thread(
+        proxy.record_middleware,
+        tag="tool_progress",
+        name="ToolProgressMiddleware",
+        hook="wrap_tool_call",
+        action="warn",
+        changes={"to_phase": "warned"},
+    )
+    await proxy.aclose()
+    await journal.seal_producers()
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert result.snapshot is not None
+    events = await store.list_events("t-proxy-seal", "r-proxy-seal")
+    assert [event["event_type"] for event in events] == ["middleware:tool_progress"]
+
+
+@pytest.mark.anyio
+async def test_foreign_thread_middleware_during_terminal_drain_is_rejected_not_dropped():
+    """An enqueue that loses the seal race is rejected and counted, never silently dropped.
+
+    The store enqueues from a foreign thread while the terminal drain is between
+    its last write and its detach. Without a producer seal that callback is
+    accepted and then discarded by the post-detach guard with no record of the
+    loss; with the seal it is refused at admission and counted.
+    """
+
+    class EnqueueDuringWriteStore(MemoryRunEventStore):
+        journal: RunJournal | None = None
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.fired = False
+
+        async def put_batch(self, events):
+            result = await super().put_batch(events)
+            journal = self.journal
+            if not self.fired and journal is not None:
+                self.fired = True
+
+                def foreign() -> None:
+                    journal.record_middleware("race", name="N", hook="h", action="a", changes={})
+
+                thread = threading.Thread(target=foreign)
+                thread.start()
+                # Block the owner loop so the enqueue is admitted and queued
+                # while the drain is between its last write and its detach.
+                thread.join(timeout=2)
+            return result
+
+    store = EnqueueDuringWriteStore()
+    journal = RunJournal("r-seal-race", "t-seal-race", store, flush_threshold=100)
+    store.journal = journal
+    journal._put(event_type="A", category="trace", content="a")
+
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=3.0)
+
+    assert result.snapshot is not None
+    assert journal._post_seal_rejected == 1
+    events = await store.list_events("t-seal-race", "r-seal-race")
+    assert [event["event_type"] for event in events] == ["A"]
+
+
+@pytest.mark.anyio
+async def test_repeated_finish_returns_the_same_committed_result():
+    """A later terminal finish must reuse the first result, not an empty one.
+
+    The first finish detaches the journal, so a second owner would find a closed
+    journal and report a committed-but-empty snapshot instead of the terminal
+    facts the run actually produced.
+    """
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-finish-again", "t-finish-again", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+    journal.set_first_human_message("hello")
+
+    first = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+    second = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert first.disposition is JournalWriteDisposition.COMMITTED
+    assert second.disposition is JournalWriteDisposition.COMMITTED
+    assert second.snapshot == first.snapshot
+    assert second.snapshot.completion_data["first_human_message"] == "hello"
+    assert second.snapshot.delivery_content == first.snapshot.delivery_content
+
+    events = await store.list_events("t-finish-again", "r-finish-again")
+    assert [event["event_type"] for event in events] == ["A"]
+
+
+@pytest.mark.anyio
+async def test_callbacks_after_seal_cannot_mutate_usage_events_or_artifacts():
+    """A post-seal LangChain callback must not change run state or stage events.
+
+    ``on_llm_end`` and ``on_tool_end`` mutate token accumulators, pending response
+    events and artifact statistics directly. Only ``_closed`` guarded them, so a
+    callback landing after the producer seal (but before detach) could still
+    change the terminal snapshot the drain is about to take.
+    """
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
+
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-seal-callbacks", "t-seal-callbacks", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+    journal.set_first_human_message("hello")
+
+    await journal.seal_producers()
+
+    buffer_before = list(journal._buffer)
+    completion_before = journal.get_completion_data()
+    artifacts_before = list(journal._produced_artifacts)
+    pending_before = journal._pending_llm_response
+
+    usage = {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+    journal.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(message=AIMessage(content="late", usage_metadata=usage))]]),
+        run_id=uuid4(),
+        parent_run_id=None,
+        tags=["lead_agent"],
+    )
+    journal._remember_current_run_tool_calls(
+        AIMessage(content="", tool_calls=[{"id": "call-late", "name": "present_files", "args": {}}]),
+        caller="lead_agent",
+    )
+    journal.on_tool_end(
+        Command(
+            update={
+                "artifacts": ["/mnt/user-data/outputs/late.txt"],
+                "messages": [ToolMessage("ok", tool_call_id="call-late")],
+            }
+        ),
+        run_id=uuid4(),
+    )
+    # ``on_chain_end`` reconciles a tool message and ``on_chat_model_start``
+    # captures the first prompt; both mutate completion data directly rather than
+    # only through ``_put``.
+    journal._remember_current_run_tool_calls(
+        AIMessage(content="", tool_calls=[{"id": "call-chain", "name": "present_files", "args": {}}]),
+        caller="lead_agent",
+    )
+    journal.on_chain_end(
+        {"messages": [ToolMessage("ok", tool_call_id="call-chain")]},
+        run_id=uuid4(),
+    )
+    journal.on_chat_model_start(
+        {},
+        [[HumanMessage("late prompt")]],
+        run_id=uuid4(),
+        tags=["lead_agent"],
+    )
+    journal.record_skill_usage({"name": "late-skill", "description": "late"})
+
+    assert journal._buffer == buffer_before
+    assert journal._pending_llm_response is pending_before
+    assert journal.get_completion_data() == completion_before
+    assert journal._produced_artifacts == artifacts_before
+    assert journal._skill_usages == {}
+    assert journal._post_seal_rejected >= 5
+
+
+@pytest.mark.anyio
+async def test_finish_after_close_does_not_claim_a_committed_snapshot():
+    """A journal released before finalization must not report a committed success."""
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-finish-closed", "t-finish-closed", store, flush_threshold=100)
+    journal._put(event_type="A", category="trace", content="a")
+    journal.set_first_human_message("hello")
+
+    await journal.close(flush=True)
+    result = await asyncio.wait_for(journal.finish_for_terminal(), timeout=2.0)
+
+    assert result.disposition is not JournalWriteDisposition.COMMITTED
+    assert result.snapshot is None
+    assert result.failure is not None

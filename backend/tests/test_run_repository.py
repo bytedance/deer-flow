@@ -3,11 +3,13 @@
 Uses a temp SQLite DB to test ORM-backed CRUD operations.
 """
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.dialects import postgresql
 
+from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.persistence.run import RunRepository
 from deerflow.runtime import CancelOutcome, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.runs.manager import ConflictError
@@ -1356,3 +1358,155 @@ class TestMemoryRunStoreDeleteByThread:
         # list_by_thread is run-scoped, so the surviving reservation is not listed
         # even though the row is still tracked.
         assert await store.list_by_thread("t1", user_id="alice") == []
+
+
+@pytest.mark.anyio
+async def test_two_managers_keep_a_live_staged_terminal_finalizer_leased(tmp_path):
+    """A peer must not orphan-reclaim a staged-terminal run whose lease is renewed.
+
+    Real shared SQL store with two managers: the owner stages a terminal status
+    while its finalizer task is still alive and keeps renewing its lease, so the
+    peer's orphan sweep must leave the row alone. The expired-lease pass is the
+    negative control that proves the sweep would otherwise reclaim it.
+    """
+    repo = await _make_repo(tmp_path)
+    try:
+        ownership = RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        )
+        owner = RunManager(store=repo, worker_id="owner", run_ownership_config=ownership)
+        peer = RunManager(store=repo, worker_id="peer", run_ownership_config=ownership)
+
+        record = await owner.create("thread-1")
+        assert await repo.start_run(record.run_id) is True
+        # Staged terminal locally; the durable row is still this worker's running row.
+        record.status = RunStatus.success
+
+        async def hold() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise
+
+        finalizer = asyncio.create_task(hold())
+        record.task = finalizer
+        try:
+            await owner._renew_leases()
+            assert record.ownership_lost is False
+
+            recovered = await peer.reconcile_orphaned_inflight_runs(error="orphan recovery")
+            assert recovered == []
+            row = await repo.get(record.run_id)
+            assert row["status"] == "running"
+            assert row["owner_worker_id"] == "owner"
+
+            # Negative control: an expired lease is reclaimed by the peer.
+            await repo.update_lease(
+                record.run_id,
+                owner_worker_id="owner",
+                lease_expires_at=(datetime.now(UTC) - timedelta(seconds=3600)).isoformat(),
+            )
+            recovered = await peer.reconcile_orphaned_inflight_runs(error="orphan recovery")
+            assert [recovered_record.run_id for recovered_record in recovered] == [record.run_id]
+            assert (await repo.get(record.run_id))["status"] == "error"
+        finally:
+            finalizer.cancel()
+            await asyncio.gather(finalizer, return_exceptions=True)
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.anyio
+async def test_sql_durable_rollback_wins_over_a_later_completion_cas(tmp_path):
+    """The first accepted durable cancel action survives a later completion CAS.
+
+    Real shared SQL store, two managers: a peer records ``rollback`` while the
+    owner still holds a running row, so the owner's later terminal CAS must
+    report the accepted action instead of finalizing as interrupted/success.
+    """
+    repo = await _make_repo(tmp_path)
+    try:
+        ownership = RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        )
+        owner = RunManager(store=repo, worker_id="owner", run_ownership_config=ownership)
+        peer = RunManager(store=repo, worker_id="peer", run_ownership_config=ownership)
+
+        record = await owner.create("thread-1")
+        assert await repo.start_run(record.run_id) is True
+
+        assert await peer._request_durable_cancel(record.run_id, action="rollback") == (
+            CancelOutcome.requested,
+            "rollback",
+        )
+
+        finalization = await repo.finalize_if_not_cancelled(record.run_id, status="interrupted")
+        assert finalization.finalized is False
+        assert finalization.cancel_action == "rollback"
+
+        row = await repo.get(record.run_id)
+        assert row["status"] == "running"
+        assert row["cancel_action"] == "rollback"
+    finally:
+        await _cleanup()
+
+
+@pytest.mark.anyio
+async def test_peer_takeover_error_does_not_ack_matching_local_staged_error(tmp_path):
+    """A peer's takeover error must not be adopted as this worker's own commit.
+
+    ``claim_for_takeover`` writes ``error`` and keeps the previous
+    ``owner_worker_id``, so ``status + owner_worker_id`` cannot prove that this
+    worker wrote the terminal row.
+    """
+    repo = await _make_repo(tmp_path)
+    try:
+        ownership = RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        )
+        owner = RunManager(store=repo, worker_id="owner", run_ownership_config=ownership)
+
+        record = await owner.create("thread-1")
+        assert await repo.start_run(record.run_id) is True
+        # This worker's own run failed locally and staged the same status a peer
+        # takeover writes.
+        record.status = RunStatus.error
+        record.error = "worker failure"
+
+        async def hold() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                raise
+
+        record.task = asyncio.create_task(hold())
+        try:
+            # Let the peer's real orphan takeover win in SQL, then give the owner
+            # a stale-but-valid local lease so it still attempts a renewal.
+            await repo.update_lease(
+                record.run_id,
+                owner_worker_id="owner",
+                lease_expires_at=(datetime.now(UTC) - timedelta(seconds=3600)).isoformat(),
+            )
+            assert await repo.claim_for_takeover(record.run_id, grace_seconds=0, error="orphan recovery") is True
+            record.lease_expires_at = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+
+            row = await repo.get(record.run_id)
+            assert row["status"] == "error"
+            assert row["owner_worker_id"] == "owner"
+
+            await owner._renew_leases()
+
+            assert record.terminal_committed is False
+            assert record.ownership_lost is True
+        finally:
+            record.task.cancel()
+            await asyncio.gather(record.task, return_exceptions=True)
+    finally:
+        await _cleanup()

@@ -24,6 +24,18 @@ class IncompleteMessageRunLookupError(RuntimeError):
     """Raised when a store cannot prove that a targeted lookup is complete."""
 
 
+class RunEventWriteNotCommittedError(Exception):
+    """A store proved that a whole ``put_batch`` did not commit.
+
+    A ``RunEventStore`` implementation may raise this ONLY when it can assert
+    that no event from the batch became durable -- for example a batch rejected
+    before the transaction or file handle was committed. Any other exception,
+    including a store-originated ``CancelledError``, leaves the batch outcome
+    UNKNOWN: it may already be durable, so the caller must not replay it without
+    a stable idempotency key.
+    """
+
+
 def normalize_message_ids(message_ids: set[str]) -> set[str]:
     """Return the non-empty string IDs that can participate in a lookup."""
     return {message_id for message_id in message_ids if isinstance(message_id, str) and message_id}
@@ -77,6 +89,13 @@ class RunEventStore(abc.ABC):
 
         Each dict's keys match put()'s keyword arguments.
         Returns complete records with seq assigned.
+
+        Outcome contract (the caller side lives in ``RunJournal``):
+        return normally once the whole batch is durable, or raise
+        ``RunEventWriteNotCommittedError`` when the whole batch provably did not
+        commit. Every other outcome -- an ordinary exception or a
+        ``CancelledError`` raised by the store itself -- is UNKNOWN and must not
+        be replayed, because the batch may already have committed.
         """
 
     @abc.abstractmethod
