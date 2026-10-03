@@ -24,7 +24,7 @@ async def begin(payload, context: ActionContext):
     run = await runs.start(
         thread_id=thread_id,
         input={"messages": [{"role": "user", "content": payload["prompt"]}]},
-        idempotency_key=f"example.team:{payload['operation_id']}",
+        idempotency_key=payload["operation_id"],
     )
     return {"thread_id": run.thread_id, "run_id": run.run_id}
 ```
