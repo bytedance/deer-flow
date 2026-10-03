@@ -57,7 +57,7 @@ from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
 from deerflow.config.paths import get_paths, make_safe_user_id
-from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
+from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, project_snapshot_for_wait
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
@@ -1066,7 +1066,9 @@ async def wait_run(
             snapshot = await accessor.aget(config)
             snapshot_config = snapshot.config or {}
             if snapshot_config.get("configurable", {}).get("checkpoint_id"):
-                return serialize_channel_values_for_api(snapshot.values)
+                # A tool-approval ``interrupt()`` exits the graph normally, so a
+                # parked run reaches here looking finished.
+                return project_snapshot_for_wait(snapshot)
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 

@@ -48,7 +48,7 @@ from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
 from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
-from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
+from deerflow.runtime import ThreadOperationKind, interrupts_by_task, serialize_channel_values_for_api, serialize_tasks_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
 from deerflow.runtime.context_compaction import (
@@ -588,6 +588,7 @@ class HistoryEntry(_MetadataRedactingResponse):
     values: dict[str, Any] = Field(default_factory=dict)
     created_at: str | None = None
     next: list[str] = Field(default_factory=list)
+    tasks: list[dict[str, Any]] = Field(default_factory=list, description="Pending tasks, including any interrupts they raised")
 
 
 class ThreadHistoryRequest(BaseModel):
@@ -1235,6 +1236,11 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
             updated_at=coerce_iso(r.get("updated_at", "")),
             metadata=r.get("metadata", {}),
             values={"title": r["display_name"]} if r.get("display_name") else {},
+            # Deliberately empty: this list is served from thread metadata, and a
+            # parked run's payload lives on the checkpoint's tasks. Filling it
+            # here would cost one checkpoint load per listed thread. Clients that
+            # need the pending approval read ``GET /threads/{id}`` or ``/state``,
+            # both of which project it from the snapshot they already load.
             interrupts={},
         )
         for r in rows
@@ -1351,6 +1357,7 @@ async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
         updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
         values=serialize_channel_values_for_api(snapshot.values),
+        interrupts=interrupts_by_task(snapshot),
     )
 
 
@@ -1498,8 +1505,7 @@ async def get_thread_state(thread_id: ThreadId, request: Request) -> ThreadState
     parent_checkpoint_id = parent_config.get("configurable", {}).get("checkpoint_id")
     metadata = snapshot.metadata or {}
     created_at = snapshot.created_at or metadata.get("created_at", "")
-    tasks_raw = snapshot.tasks or ()
-    tasks = [{"id": getattr(task, "id", ""), "name": getattr(task, "name", "")} for task in tasks_raw]
+    tasks = serialize_tasks_for_api(snapshot.tasks)
 
     values = serialize_channel_values_for_api(snapshot.values)
     messages = values.get("messages")
@@ -1608,8 +1614,7 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
     parent_checkpoint_id = parent_config.get("configurable", {}).get("checkpoint_id")
     metadata = snapshot.metadata or {}
     created_at = snapshot.created_at or metadata.get("created_at", "")
-    tasks_raw = snapshot.tasks or ()
-    tasks = [{"id": getattr(task, "id", ""), "name": getattr(task, "name", "")} for task in tasks_raw]
+    tasks = serialize_tasks_for_api(snapshot.tasks)
 
     return ThreadStateResponse(
         values=serialize_channel_values_for_api(snapshot.values),
@@ -1930,6 +1935,7 @@ async def get_thread_history(
                     values=values,
                     created_at=coerce_iso(snapshot.created_at or metadata.get("created_at", "")),
                     next=next_tasks,
+                    tasks=serialize_tasks_for_api(getattr(snapshot, "tasks", None)),
                 )
             )
     except _CHECKPOINT_MODE_ERRORS as exc:

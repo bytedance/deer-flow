@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
@@ -38,6 +38,7 @@ from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.lead_agent.prompt import apply_prompt_template, has_bash_tool
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
+from deerflow.agents.middlewares.human_in_the_loop import create_interrupt_middleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
@@ -76,6 +77,9 @@ from deerflow.runtime.checkpoint_mode import (
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import configured_subagent_max_running
 from deerflow.tracing import build_tracing_callbacks
+
+if TYPE_CHECKING:
+    from langchain_core.tools import BaseTool
 
 logger = logging.getLogger(__name__)
 
@@ -496,6 +500,7 @@ def build_middlewares(
     skill_authorization=None,
     extensions=None,
     subagent_execution_capacity: int | None = None,
+    tools: Sequence[BaseTool] | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -532,6 +537,9 @@ def build_middlewares(
             keep advertised and enforced task concurrency aligned after reloads.
         extensions: Loaded extensions whose middleware contributions are merged
             into the final stack. Defaults to the process-wide set.
+        tools: The agent's assembled tools. Only used to capture argument
+            schemas for tool-approval ``edit`` decisions, which LangGraph's
+            batch-mode interrupt cannot recover at execution time.
 
     Returns:
         List of middleware instances.
@@ -719,6 +727,17 @@ def build_middlewares(
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
 
     middlewares.append(SystemMessageCoalescingMiddleware())
+
+    # Tool approval must be appended between SystemMessageCoalescing and the
+    # suppression guards below: ``after_model`` dispatches the list in REVERSE,
+    # so this slot runs approval after every guard but before Clarification.
+    # Both ends matter — see docs/TOOL_APPROVAL.md "Middleware placement".
+    # Registered unconditionally; clients that cannot answer a park send
+    # ``disable_tool_approval`` per run instead. Pinned by
+    # tests/test_hitl_middleware_order.py and test_approval_suppression_order.py.
+    interrupt_middleware = create_interrupt_middleware(resolved_app_config, tools=tools, subagent_enabled=bool(cfg.get("subagent_enabled", False)))
+    if interrupt_middleware:
+        middlewares.append(interrupt_middleware)
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
@@ -1194,6 +1213,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             authorization_provider=_authz_provider,
             skill_authorization=skill_authorization,
             subagent_execution_capacity=subagent_execution_capacity,
+            tools=final_tools,
         )
         middlewares, declared_authorized = narrow_declared_tools(
             middlewares,
@@ -1348,6 +1368,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         authorization_provider=_authz_provider,
         skill_authorization=skill_authorization,
         subagent_execution_capacity=subagent_execution_capacity,
+        tools=final_tools,
     )
     middlewares, declared_authorized = narrow_declared_tools(
         middlewares,

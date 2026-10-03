@@ -340,7 +340,10 @@ def _run_print(plan: LaunchPlan) -> int:
         session = _make_session()
         thread_id = session.resolve_thread(plan)
         outcome = _RunOutcome()
-        for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan)):
+        # Headless has no way to answer an approval request, so the park is
+        # disabled. Left on, a park would end this stream with the turn's
+        # partial text (usually empty) and exit 0, as if the run had finished.
+        for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan), disable_tool_approval=True):
             outcome.observe(event)
     except Exception as exc:  # noqa: BLE001 - headless boundary: report, never traceback
         print(f"Error: {_error_text(exc)}", file=sys.stderr)
@@ -365,7 +368,10 @@ def _run_json(plan: LaunchPlan) -> int:
         session = _make_session()
         thread_id = session.resolve_thread(plan)
         outcome = _RunOutcome()
-        for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan)):
+        # As in ``_run_print``: a park cannot be answered from a one-shot, so
+        # the gate is disabled instead of emitting an ``interrupt`` event no
+        # JSON consumer of this stream can act on.
+        for event in session.client.stream(message, thread_id=thread_id, **_run_overrides(plan), disable_tool_approval=True):
             outcome.observe(event)
             payload = {"type": event.type, "data": event.data}
             sys.stdout.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")

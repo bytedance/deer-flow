@@ -1,71 +1,102 @@
-"""Regression tests for issue #3595: __interrupt__ must survive serialize_channel_values."""
+"""Tests for projecting LangGraph interrupts onto the wire format.
+
+``serialize_interrupts`` is the single source of truth shared by
+``DeerFlowClient`` (stream events) and the Gateway REST layer (thread state
+and history). Both surfaces must agree, or a client that reconciles a resumed
+stream against a refetched snapshot sees two different shapes for the same
+pending approval.
+"""
 
 from __future__ import annotations
 
-from typing import Any
+from types import SimpleNamespace
 
-import pytest
-from langgraph.graph import StateGraph
-from langgraph.types import Interrupt, interrupt
+from langgraph.types import Interrupt
 
-
-def _interrupting_node(state: dict) -> dict[str, Any]:
-    result = interrupt("Please provide API credentials")
-    return {"result": result}
+from deerflow.runtime import serialize_interrupts, serialize_tasks_for_api
+from deerflow.runtime.serialization import serialize
 
 
-def _build_test_graph():
-    builder = StateGraph(dict)
-    builder.add_node("ask_credential", _interrupting_node)
-    builder.set_entry_point("ask_credential")
-    builder.set_finish_point("ask_credential")
-    return builder.compile()
+def test_projects_slotted_interrupt_objects() -> None:
+    """``Interrupt`` uses ``__slots__``, so it must be read field by field."""
+    interrupts = (Interrupt(value={"action": "bash"}, id="int-1"),)
+
+    assert serialize_interrupts(interrupts) == [{"id": "int-1", "value": {"action": "bash"}}]
 
 
-class _StreamCollector:
-    def __init__(self):
-        self.events: list[tuple[str, Any]] = []
-
-    async def publish(self, _run_id: str, event: str, data: Any):
-        self.events.append((event, data))
+def test_absent_channel_yields_nothing() -> None:
+    for empty in (None, (), []):
+        assert serialize_interrupts(empty) == []
 
 
-@pytest.mark.asyncio
-async def test_values_mode_includes_interrupt():
-    from deerflow.runtime.serialization import serialize
+def test_already_serialized_entries_pass_through() -> None:
+    """A checkpoint replay can hand back dicts rather than ``Interrupt``s."""
+    payload = [{"id": "int-2", "value": {"action": "write_file"}}]
 
-    graph = _build_test_graph()
-    collector = _StreamCollector()
-    async for chunk in graph.astream({"messages": []}, stream_mode="values"):
-        data = serialize(chunk, mode="values")
-        await collector.publish("test", "values", data)
-    interrupt_events = [e for e in collector.events if isinstance(e[1], dict) and "__interrupt__" in e[1]]
-    assert len(interrupt_events) > 0, "__interrupt__ was stripped from values events"
-    # Verify the payload is structured (not a str fallback from serialize_lc_object)
-    interrupt_value = interrupt_events[0][1]["__interrupt__"]
-    assert isinstance(interrupt_value, list)
-    assert len(interrupt_value) > 0
-    assert isinstance(interrupt_value[0], dict)
-    assert interrupt_value[0]["value"] == "Please provide API credentials"
+    assert serialize_interrupts(payload) == payload
 
 
-@pytest.mark.asyncio
-async def test_serialize_channel_values_keeps_interrupt():
-    from deerflow.runtime.serialization import serialize_channel_values
+def test_entries_without_a_value_are_skipped() -> None:
+    """Anything that is not interrupt-shaped must not reach the client."""
+    assert serialize_interrupts([object(), Interrupt(value=1, id="int-3")]) == [{"id": "int-3", "value": 1}]
 
-    interrupt_obj = Interrupt(value={"question": "Enter API key"}, id="test-interrupt-id")
-    result = serialize_channel_values(
-        {
-            "__interrupt__": (interrupt_obj,),
-            "__pregel_tasks": "internal",
-            "messages": [],
-        }
-    )
-    assert "__interrupt__" in result
-    assert "__pregel_tasks" not in result
-    assert "messages" in result
-    # Verify payload shape: Interrupt must serialize to a dict, not str
-    assert isinstance(result["__interrupt__"], list)
-    assert len(result["__interrupt__"]) > 0
-    assert isinstance(result["__interrupt__"][0], dict)
-    assert result["__interrupt__"][0]["value"] == {"question": "Enter API key"}
+
+def test_a_bare_interrupt_is_treated_as_one_entry() -> None:
+    """Tolerate a single object where a tuple is normally published."""
+    assert serialize_interrupts(Interrupt(value="approve?", id="int-4")) == [{"id": "int-4", "value": "approve?"}]
+
+
+def test_string_payload_is_not_iterated_character_by_character() -> None:
+    """A str is Iterable; treating it as a sequence would emit garbage."""
+    assert serialize_interrupts("not-an-interrupt") == []
+
+
+def test_nested_payload_is_json_serialisable() -> None:
+    """Interrupt values carry tool args, which may hold LangChain objects."""
+    value = {"action_request": {"action": "bash", "args": {"command": "ls"}}}
+
+    assert serialize_interrupts([Interrupt(value=value, id="int-5")]) == [{"id": "int-5", "value": value}]
+
+
+def test_tasks_projection_keeps_interrupts() -> None:
+    """The REST ``tasks`` projection previously dropped the payload entirely.
+
+    Keeping only ``{id, name}`` made a parked approval invisible to any client
+    that refetched thread state instead of following the stream.
+    """
+    task = SimpleNamespace(id="task-1", name="tools", interrupts=(Interrupt(value={"action": "bash"}, id="int-6"),))
+
+    assert serialize_tasks_for_api([task]) == [{"id": "task-1", "name": "tools", "interrupts": [{"id": "int-6", "value": {"action": "bash"}}]}]
+
+
+def test_tasks_projection_omits_interrupts_when_there_are_none() -> None:
+    """An ordinary in-flight task must not grow an empty key."""
+    task = SimpleNamespace(id="task-2", name="model", interrupts=())
+
+    assert serialize_tasks_for_api([task]) == [{"id": "task-2", "name": "model"}]
+
+
+def test_tasks_projection_tolerates_missing_attributes() -> None:
+    """Snapshots from older checkpoints may not carry every field."""
+    assert serialize_tasks_for_api([SimpleNamespace()]) == [{"id": "", "name": ""}]
+
+
+def test_tasks_projection_handles_no_tasks() -> None:
+    for empty in (None, (), []):
+        assert serialize_tasks_for_api(empty) == []
+
+
+def test_updates_frame_keeps_the_interrupt_readable() -> None:
+    """The web chat stream's only in-stream witness to a park.
+
+    ``forceChatRunStreamOptions`` deletes the ``values`` mode, so the browser
+    never sees the ``values`` snapshot that carries ``__interrupt__``. LangGraph
+    also emits the pending interrupt on ``updates``, and that frame is what the
+    frontend reads (``extractUpdateInterrupts``). It reaches ``serialize`` with
+    no mode-specific branch, so the generic ``Interrupt`` projection is what
+    keeps it usable — losing it would leave the approval card undrawn until the
+    post-stream history refetch.
+    """
+    frame = {"__interrupt__": (Interrupt(value={"action_requests": [{"name": "bash_tool"}]}, id="int-7"),)}
+
+    assert serialize(frame, mode="updates") == {"__interrupt__": [{"value": {"action_requests": [{"name": "bash_tool"}]}, "id": "int-7"}]}
