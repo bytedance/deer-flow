@@ -304,7 +304,6 @@ class FakeConnectionRepo:
         self._states = dict(states or {})
         self._raise_on_consume = raise_on_consume
         self._connections: dict[tuple, dict] = {}
-        self._threads: dict[tuple, str] = {}
         self.upserts = []
         self.lookups = []
 
@@ -326,11 +325,8 @@ class FakeConnectionRepo:
         self.lookups.append({"provider": provider, "external_account_id": external_account_id, "workspace_id": workspace_id})
         return self._connections.get((provider, external_account_id, workspace_id))
 
-    async def set_thread_id(self, *, connection_id, owner_user_id, provider, external_conversation_id, thread_id, external_topic_id=None):
-        self._threads[(connection_id, external_conversation_id, external_topic_id or "")] = thread_id
-
     async def get_thread_id(self, connection_id, external_conversation_id, external_topic_id=None):
-        return self._threads.get((connection_id, external_conversation_id, external_topic_id or ""))
+        return None  # no thread mapped yet; the real-repository round trip is pinned separately
 
 
 def test_connect_code_binds_and_never_publishes_even_for_unauthorized_author():
@@ -940,32 +936,55 @@ def test_unbound_pubkey_inbound_message_carries_no_connection_identity():
 # -- Thread-follow gate must read the mapping from where the manager wrote it ------
 
 
-def test_bound_pubkey_unmentioned_reply_follows_a_thread_the_manager_mapped_in_the_repo(tmp_path):
+@pytest.fixture
+async def sql_connection_repo(tmp_path):
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'channels.db'}", sqlite_dir=str(tmp_path))
+    try:
+        yield ChannelConnectionRepository(get_session_factory(), cipher=ChannelCredentialCipher.from_key("test-encryption-key"))
+    finally:
+        await close_engine()
+
+
+@pytest.mark.anyio
+async def test_bound_pubkey_unmentioned_reply_follows_a_thread_the_manager_mapped_in_the_repo(sql_connection_repo, tmp_path):
     """With channel connections enabled, ``ChannelManager._store_thread_id`` writes a
     bound author's thread mapping to the connection repository *only*. The gate used
     to read just the JSON ``ChannelStore``, so ``engaged_thread`` was always False for
     bound authors and their unmentioned follow-ups were silently dropped. Driven
-    through the real manager so the write and read sides cannot drift apart."""
+    through the real manager, JSON store, and SQL repository (bound via a real
+    ``/connect``) so the write and read sides cannot drift apart."""
+    from datetime import UTC, datetime, timedelta
+
     from app.channels.manager import ChannelManager
     from app.channels.store import ChannelStore
 
-    repo = FakeConnectionRepo(states={"tok-bind": "owner-bound"})
+    repo = sql_connection_repo
+    await repo.create_oauth_state(owner_user_id="owner-bound", provider="buzz", state="tok-bind", expires_at=datetime.now(UTC) + timedelta(minutes=10))
     store = ChannelStore(tmp_path / "store.json")
     ch, captured = _started(connection_repo=repo, channel_store=store)
     ch._transport = FakeTransport()
     manager = ChannelManager(bus=ch.bus, store=store, connection_repo=repo)
     root = "aa" * 32
 
-    _dispatch(ch, _event(sk=SK_OWNER, content="/connect tok-bind", mentions=()))
-    _dispatch(ch, _event(sk=SK_OWNER, reply_to=root, created_at=1700000200))
-    assert len(captured) == 1 and captured[0].connection_id == "conn-1"
-    asyncio.run(manager._store_thread_id(captured[0], "thread-1"))
+    async def dispatch(ev):
+        await ch.handle_relay_frame(json.dumps(["EVENT", "sub1", ev]))
+
+    await dispatch(_event(sk=SK_OWNER, content="/connect tok-bind", mentions=()))
+    await dispatch(_event(sk=SK_OWNER, reply_to=root, created_at=1700000200))
+    assert len(captured) == 1 and captured[0].owner_user_id == "owner-bound"
+    connection_id = captured[0].connection_id
+    assert connection_id
+    await manager._store_thread_id(captured[0], "thread-1")
     assert store.get_thread_id("buzz", CHANNEL, topic_id=root) is None  # the manager wrote the repo only
 
-    _dispatch(ch, _event(sk=SK_OWNER, content="follow-up", mentions=(), reply_to=root, created_at=1700000300))
+    await dispatch(_event(sk=SK_OWNER, content="follow-up", mentions=(), reply_to=root, created_at=1700000300))
     assert len(captured) == 2
     assert captured[1].text == "follow-up" and captured[1].topic_id == root
-    assert captured[1].connection_id == "conn-1"
+    assert captured[1].connection_id == connection_id
+    assert await manager._lookup_thread_id(captured[1]) == "thread-1"
 
 
 def test_bound_pubkey_thread_follow_ignores_a_json_mapping_the_manager_would_not_read():

@@ -468,7 +468,10 @@ This release closes that milestone with **301 merged pull requests**.
   now resolves the connection before the mention gate and looks the thread up
   through the same helper as the manager (`lookup_thread_id`), so a bound
   author's engaged thread is the one the manager will reuse, and a legacy JSON
-  mapping no longer counts for that author.
+  mapping no longer counts for that author. The manager's slash-skill whitelist
+  check had its own copy of the same read and is fixed with it: a bound user
+  with no thread yet was checked against the agent of a legacy JSON thread for
+  the same chat and could be told an enabled skill was not available.
 
 - **channels:** Discord now runs its channel-connection database work on the
   Gateway event loop. discord.py delivers messages on a private loop in the

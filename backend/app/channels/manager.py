@@ -1782,13 +1782,9 @@ class ChannelManager:
                 )
         return policy
 
-    def _resolve_available_skill_names(
-        self,
-        msg: InboundMessage,
-        thread_id: str | None = None,
-    ) -> set[str] | None:
-        if thread_id is None:
-            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or ""
+    def _resolve_available_skill_names(self, msg: InboundMessage, thread_id: str) -> set[str] | None:
+        """*thread_id* comes from ``_lookup_thread_id`` (``""`` when unmapped); never
+        re-read the JSON store here, which holds no mapping for bound messages."""
         _, _, run_context = self._resolve_run_params(msg, thread_id)
         if run_context.get("is_bootstrap"):
             return {"bootstrap"}
@@ -2802,7 +2798,7 @@ class ChannelManager:
             slash_resolution = await asyncio.to_thread(
                 lambda: _resolve_slash_skill_command(
                     raw_text,
-                    self._resolve_available_skill_names(msg, thread_id),
+                    self._resolve_available_skill_names(msg, thread_id or ""),
                     self._get_skill_storage,
                 )
             )
