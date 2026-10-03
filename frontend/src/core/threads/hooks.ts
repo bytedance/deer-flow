@@ -10,7 +10,14 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
@@ -76,6 +83,9 @@ import {
   THREAD_PINNED_METADATA_KEY,
   THREAD_PROJECT_METADATA_KEY,
 } from "./utils";
+
+const useViewLifecycleEffect =
+  typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 export type ThreadStreamOptions = {
   threadId?: string | null | undefined;
@@ -1873,6 +1883,17 @@ export function useThreadStream({
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
   currentViewThreadIdRef.current = currentViewThreadId;
+  const currentViewToken = useMemo(
+    () => ({ viewId: currentViewThreadId }),
+    [currentViewThreadId],
+  );
+  const committedViewTokenRef = useRef(currentViewToken);
+  const mountedRef = useRef(true);
+  const sendOwnerRef = useRef<{
+    viewToken: typeof currentViewToken;
+    threadId: string;
+  } | null>(null);
+  const sendInFlightRef = useRef(false);
   // Optimistic messages shown before the server stream responds.
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [optimisticThreadId, setOptimisticThreadId] = useState<string | null>(
@@ -1887,6 +1908,21 @@ export function useThreadStream({
   const [pendingSupersededMessageIds, setPendingSupersededMessageIds] =
     useState<ReadonlySet<string>>(() => new Set());
   const [isUploading, setIsUploading] = useState(false);
+  useViewLifecycleEffect(() => {
+    committedViewTokenRef.current = currentViewToken;
+    sendOwnerRef.current = null;
+    sendInFlightRef.current = false;
+    setIsUploading(false);
+  }, [currentViewToken]);
+
+  useViewLifecycleEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      sendOwnerRef.current = null;
+      sendInFlightRef.current = false;
+    };
+  }, []);
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
   // Ref to track current thread ID across async callbacks without causing re-renders,
@@ -1947,36 +1983,58 @@ export function useThreadStream({
     threadIdRef.current = normalizedThreadId;
   }, [threadId]);
 
-  const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
-    threadIdRef.current = _threadId;
-    setOptimisticThreadId((currentOptimisticThreadId) => {
-      const currentView = currentViewThreadIdRef.current;
-      if (
-        currentOptimisticThreadId &&
-        (currentOptimisticThreadId === currentView ||
-          currentOptimisticThreadId === _threadId)
-      ) {
-        return _threadId;
+  const handleStreamStart = useCallback(
+    (
+      _threadId: string,
+      _runId: string,
+      submissionViewToken: typeof currentViewToken,
+    ) => {
+      const activeSend = sendOwnerRef.current;
+      const isCurrentView =
+        mountedRef.current &&
+        committedViewTokenRef.current === submissionViewToken;
+      const belongsToCurrentThread =
+        submissionViewToken.viewId !== null &&
+        submissionViewToken.viewId === _threadId;
+      const belongsToActiveSend =
+        activeSend !== null &&
+        activeSend.viewToken === submissionViewToken &&
+        activeSend.threadId === _threadId;
+      if (!isCurrentView || (!belongsToCurrentThread && !belongsToActiveSend)) {
+        return;
       }
-      return currentOptimisticThreadId;
-    });
-    setLiveMessagesThreadId((currentLiveMessagesThreadId) => {
-      const currentView = currentViewThreadIdRef.current;
-      if (
-        currentLiveMessagesThreadId &&
-        (currentLiveMessagesThreadId === currentView ||
-          currentLiveMessagesThreadId === _threadId)
-      ) {
-        return _threadId;
+
+      threadIdRef.current = _threadId;
+      setOptimisticThreadId((currentOptimisticThreadId) => {
+        const currentView = currentViewThreadIdRef.current;
+        if (
+          currentOptimisticThreadId &&
+          (currentOptimisticThreadId === currentView ||
+            currentOptimisticThreadId === _threadId)
+        ) {
+          return _threadId;
+        }
+        return currentOptimisticThreadId;
+      });
+      setLiveMessagesThreadId((currentLiveMessagesThreadId) => {
+        const currentView = currentViewThreadIdRef.current;
+        if (
+          currentLiveMessagesThreadId &&
+          (currentLiveMessagesThreadId === currentView ||
+            currentLiveMessagesThreadId === _threadId)
+        ) {
+          return _threadId;
+        }
+        return currentLiveMessagesThreadId;
+      });
+      if (!startedRef.current) {
+        listeners.current.onStart?.(_threadId, _runId);
+        startedRef.current = true;
       }
-      return currentLiveMessagesThreadId;
-    });
-    if (!startedRef.current) {
-      listeners.current.onStart?.(_threadId, _runId);
-      startedRef.current = true;
-    }
-    setOnStreamThreadId(_threadId);
-  }, []);
+      setOnStreamThreadId(_threadId);
+    },
+    [],
+  );
 
   const queryClient = useQueryClient();
   const { tasksRef, setTasks } = useSubtaskContext();
@@ -2032,6 +2090,7 @@ export function useThreadStream({
     [],
   );
 
+  const streamViewToken = currentViewToken;
   const thread = useStream<AgentThreadState>({
     client: getAPIClient(isMock),
     assistantId,
@@ -2046,7 +2105,7 @@ export function useThreadStream({
     // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
     onCreated(meta) {
-      handleStreamStart(meta.thread_id, meta.run_id);
+      handleStreamStart(meta.thread_id, meta.run_id, streamViewToken);
       const now = new Date().toISOString();
       upsertThreadInSearchCache(queryClient, {
         thread_id: meta.thread_id,
@@ -2354,7 +2413,6 @@ export function useThreadStream({
     (m) => m.type === "human",
   ).length;
   const latestMessageCountsRef = useRef({ humanMessageCount });
-  const sendInFlightRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
   // Non-null only after a turn submitted by this mounted client. Keep it after
   // finish/stop/error because the SDK can retain its transient event order in
@@ -2398,7 +2456,6 @@ export function useThreadStream({
   // optimistic messages and in-flight guards do not leak across chat views.
   useEffect(() => {
     startedRef.current = false;
-    sendInFlightRef.current = false;
     messagesRef.current = [];
     transientHistoryBridgeRef.current = [];
     transientHistoryOrderRef.current = [];
@@ -2504,6 +2561,12 @@ export function useThreadStream({
         return;
       }
       sendInFlightRef.current = true;
+      const sendOwner = { viewToken: currentViewToken, threadId };
+      sendOwnerRef.current = sendOwner;
+      const isCurrentSend = () =>
+        mountedRef.current &&
+        committedViewTokenRef.current === sendOwner.viewToken &&
+        sendOwnerRef.current === sendOwner;
 
       // The send has genuinely proceeded past the in-flight guard, so callers
       // can now run one-time cleanup that must not fire on the dropped path.
@@ -2598,6 +2661,9 @@ export function useThreadStream({
             );
 
             const conversionResults = await Promise.all(filePromises);
+            if (!isCurrentSend()) {
+              throw new Error("thread-submission-stale");
+            }
             const files = conversionResults.filter(
               (file): file is File => file !== null,
             );
@@ -2615,6 +2681,9 @@ export function useThreadStream({
 
             if (files.length > 0) {
               const uploadResponse = await uploadFiles(threadId, files);
+              if (!isCurrentSend()) {
+                throw new Error("thread-submission-stale");
+              }
               uploadedFiles = uploadResponse.files.map((info) => ({
                 filename: info.filename,
                 size: info.size,
@@ -2641,18 +2710,26 @@ export function useThreadStream({
               });
             }
           } catch (error) {
-            const errorMessage =
-              error instanceof Error
-                ? error.message
-                : "Failed to upload files.";
-            toast.error(errorMessage);
-            setOptimisticMessages([]);
-            setOptimisticThreadId(null);
-            setLiveMessagesThreadId(null);
+            if (isCurrentSend()) {
+              const errorMessage =
+                error instanceof Error
+                  ? error.message
+                  : "Failed to upload files.";
+              toast.error(errorMessage);
+              setOptimisticMessages([]);
+              setOptimisticThreadId(null);
+              setLiveMessagesThreadId(null);
+            }
             throw error;
           } finally {
-            setIsUploading(false);
+            if (isCurrentSend()) {
+              setIsUploading(false);
+            }
           }
+        }
+
+        if (!isCurrentSend()) {
+          throw new Error("thread-submission-stale");
         }
 
         await thread.submit(
@@ -2682,23 +2759,32 @@ export function useThreadStream({
             }),
           },
         );
+        if (!isCurrentSend()) {
+          throw new Error("thread-submission-stale");
+        }
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
         void queryClient.invalidateQueries({
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
         });
       } catch (error) {
-        setOptimisticMessages([]);
-        setOptimisticThreadId(null);
-        setLiveMessagesThreadId(null);
-        setIsUploading(false);
-        localTurnAnchorRef.current = null;
+        if (isCurrentSend()) {
+          setOptimisticMessages([]);
+          setOptimisticThreadId(null);
+          setLiveMessagesThreadId(null);
+          setIsUploading(false);
+          localTurnAnchorRef.current = null;
+        }
         throw error;
       } finally {
-        sendInFlightRef.current = false;
+        if (sendOwnerRef.current === sendOwner) {
+          sendOwnerRef.current = null;
+          sendInFlightRef.current = false;
+        }
       }
     },
     [
       thread,
+      currentViewToken,
       t.uploads.uploadingFiles,
       context,
       queryClient,

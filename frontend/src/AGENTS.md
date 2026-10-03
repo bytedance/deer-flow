@@ -6,6 +6,11 @@ undefined to its existing display ID; preserve the human anchor across that
 transition and clear it only on a displayed-conversation switch or the existing
 failure/replay-gap paths. Draft and confirmation regressions live in
 `tests/unit/core/threads/local-turn-order.dom.test.tsx`.
+Attachment uploads and their `onRunCreated` callbacks stay scoped to the captured
+displayed-view token; same-view rerenders and stable-display SDK thread-ID
+confirmation remain valid. Cover navigation, A→B→A, overlapping sends, unmount,
+and StrictMode with real React and LangGraph SDK DOM tests, using local HTTP
+responses only for transport control.
 
 Answer details use `workspace/message-details` descriptors; skill run scoping
 is documented in `docs/skill-usage-ui.md`.

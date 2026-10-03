@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, rs } from "@rstest/core";
+import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { useEffect, type ReactNode } from "react";
@@ -101,9 +101,44 @@ function buildTree(
   );
 }
 
+const originalWindowFetch = window.fetch;
+const originalGlobalFetch = globalThis.fetch;
+const sidecarHistoryUrl =
+  "http://localhost:3000/mock/api/threads/sidecar-thread-1/history";
+
+beforeEach(() => {
+  const fetchMock: typeof globalThis.fetch = async (input, init) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url;
+    const method = (
+      init?.method ??
+      (typeof input === "string" || input instanceof URL ? "GET" : input.method)
+    ).toUpperCase();
+
+    if (url === sidecarHistoryUrl && method === "POST") {
+      return new Response("[]", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    throw new Error(
+      `Unexpected fetch in sidecar delete gating test: ${method} ${url}`,
+    );
+  };
+
+  rs.stubGlobal("fetch", fetchMock);
+  window.fetch = fetchMock;
+});
+
 afterEach(() => {
-  rs.restoreAllMocks();
   cleanup();
+  rs.restoreAllMocks();
+  globalThis.fetch = originalGlobalFetch;
+  window.fetch = originalWindowFetch;
 });
 
 describe("SidecarPanel delete-button permission gating", () => {
