@@ -14,14 +14,17 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Annotated, Any, TypedDict
 from uuid import uuid4
 
 import pytest
 from langchain_core.messages import AnyMessage, HumanMessage
+from langgraph.channels import DeltaChannel
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -32,13 +35,25 @@ from app.gateway.checkpoint_lineage import find_checkpoint_before_message
 from app.gateway.checkpoint_retention import (
     RetentionPolicy,
     _row_field,
+    enforce_completed_run_retention,
     enforce_thread_retention,
 )
-from deerflow.runtime.runs.worker import _new_checkpoint_marker, persist_run_durations
+from deerflow.agents.thread_state import merge_message_writes
+from deerflow.runtime.checkpoint_cache.base import make_history_key
+from deerflow.runtime.checkpoint_cache.memory import MemoryCheckpointHistoryCache
+from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
+from deerflow.runtime.runs.worker import _new_checkpoint_marker, persist_run_durations, persist_run_history_metadata
 
 
 class FullState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
+
+
+class DeltaState(TypedDict):
+    messages: Annotated[
+        list[AnyMessage],
+        DeltaChannel(merge_message_writes, snapshot_frequency=2),
+    ]
 
 
 def _thread_id() -> str:
@@ -602,6 +617,148 @@ async def test_empty_thread_reports_the_same_before_and_after_stats(saver_env: _
     without_stats = await enforce_thread_retention(saver_env.saver, thread_id, collect_stats=False)
     assert without_stats.stats_before == {}
     assert without_stats.stats_after == {}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("state_schema", [FullState, DeltaState], ids=["full", "delta"])
+async def test_completed_run_retention_removes_only_the_trailing_duration_leaf(
+    saver_env: _SaverEnv,
+    state_schema: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The production hook removes the metadata leaf before a later run can
+    make it a permanent ancestor, without touching resumable checkpoints."""
+    graph = _build_graph(state_schema, saver_env.saver)
+    thread_id = _thread_id()
+    await graph.ainvoke({"messages": [HumanMessage(content="hello")]}, _config(thread_id))
+    resumable_head = await saver_env.saver.aget_tuple(_config(thread_id))
+    assert resumable_head is not None
+    resumable_head_id = resumable_head.checkpoint["id"]
+
+    assert await persist_run_durations(
+        checkpointer=saver_env.saver,
+        thread_id=thread_id,
+        durations={"run-1": 3},
+    )
+    duration_head = await saver_env.saver.aget_tuple(_config(thread_id))
+    assert duration_head is not None
+    duration_head_id = duration_head.checkpoint["id"]
+    assert duration_head_id != resumable_head_id
+
+    with caplog.at_level(logging.INFO, logger="app.gateway.checkpoint_retention"):
+        report = await enforce_completed_run_retention(
+            checkpointer=saver_env.saver,
+            thread_id=thread_id,
+        )
+
+    assert report.deleted_checkpoint_ids == [duration_head_id]
+    assert report.stats_before == {}
+    assert report.stats_after == {}
+    resumed = await saver_env.saver.aget_tuple(_config(thread_id))
+    assert resumed is not None
+    assert resumed.checkpoint["id"] == resumable_head_id
+    materialized = await graph.aget_state(_config(thread_id))
+    assert materialized.values["messages"][-1].content == "hello"
+    info_records = [record for record in caplog.records if record.levelno == logging.INFO]
+    assert len(info_records) == 1
+    assert thread_id in info_records[0].message
+    assert duration_head_id in info_records[0].message
+
+    await enforce_completed_run_retention(checkpointer=saver_env.saver, thread_id=thread_id)
+    assert len([record for record in caplog.records if record.levelno == logging.INFO]) == 1
+
+
+@pytest.mark.anyio
+async def test_completed_run_retention_supports_cached_history_saver_and_invalidates_cache(
+    saver_env: _SaverEnv,
+) -> None:
+    """The delta wrapper prunes through its source-of-truth saver and purges
+    cached histories whose checkpoint keys may have just been removed."""
+    cache = MemoryCheckpointHistoryCache(max_entries=16)
+    wrapped = CachedHistorySaver(saver_env.saver, cache, key_prefix="retention-test")
+    graph = _build_graph(DeltaState, wrapped)
+    thread_id = _thread_id()
+    await graph.ainvoke({"messages": [HumanMessage(content="hello")]}, _config(thread_id))
+    assert await persist_run_history_metadata(
+        checkpointer=wrapped,
+        thread_id=thread_id,
+        durations={"run-1": 3},
+        message_run_ids={"message-1": "run-1"},
+    )
+    duration_head = await wrapped.aget_tuple(_config(thread_id))
+    assert duration_head is not None
+    duration_head_id = duration_head.checkpoint["id"]
+    cache_key = make_history_key("retention-test", thread_id, "", duration_head_id, "messages")
+    await cache.aset_many({cache_key: {"writes": []}})
+    assert cache.stats().entries == 1
+
+    report = await enforce_completed_run_retention(
+        checkpointer=wrapped,
+        thread_id=thread_id,
+    )
+
+    assert report.deleted_checkpoint_ids == [duration_head_id]
+    assert cache.stats().entries == 0
+    assert await saver_env.saver.aget_tuple(_config_thread(thread_id, duration_head_id)) is None
+
+
+@pytest.mark.anyio
+async def test_completed_run_retention_preserves_selected_duration_leaf(saver_env: _SaverEnv) -> None:
+    """An admitted run may explicitly resume the metadata leaf it exposed."""
+    graph = _build_graph(FullState, saver_env.saver)
+    thread_id = _thread_id()
+    await graph.ainvoke({"messages": [HumanMessage(content="hello")]}, _config(thread_id))
+    assert await persist_run_durations(
+        checkpointer=saver_env.saver,
+        thread_id=thread_id,
+        durations={"run-1": 3},
+    )
+    selected = await saver_env.saver.aget_tuple(_config(thread_id))
+    assert selected is not None
+    selected_id = selected.checkpoint["id"]
+
+    report = await enforce_completed_run_retention(
+        checkpointer=saver_env.saver,
+        thread_id=thread_id,
+        protect_checkpoint_ids=frozenset({selected_id}),
+    )
+
+    assert report.deleted_checkpoint_ids == []
+    assert await saver_env.saver.aget_tuple(_config_thread(thread_id, selected_id)) is not None
+
+
+@pytest.mark.anyio
+async def test_gateway_admission_retention_failure_isolated_from_scheduler_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Retention remains best-effort and scheduled completion stays separate."""
+    from app.gateway import checkpoint_retention as retention_module
+    from app.gateway.deps import _run_admission_hook, _run_completion_hook
+
+    calls: list[tuple[str, Any]] = []
+
+    async def fail_retention(*, checkpointer: Any, thread_id: str, protect_checkpoint_ids: frozenset[str]):
+        calls.append(("retention", (checkpointer, thread_id, protect_checkpoint_ids)))
+        raise RuntimeError("checkpoint backend unavailable")
+
+    class _Scheduler:
+        async def handle_run_completion(self, record: Any) -> None:
+            calls.append(("scheduler", record))
+
+    monkeypatch.setattr(retention_module, "enforce_completed_run_retention", fail_retention)
+    checkpointer = object()
+    record = SimpleNamespace(thread_id="thread-1", run_id="run-1")
+
+    await _run_admission_hook(checkpointer=checkpointer)(
+        record,
+        {"configurable": {"checkpoint_id": "selected", "checkpoint_map": {"child": "mapped"}}},
+    )
+    await _run_completion_hook(
+        scheduled_task_service=_Scheduler(),
+    )(record)
+
+    assert calls == [
+        ("retention", (checkpointer, "thread-1", frozenset({"selected", "mapped"}))),
+        ("scheduler", record),
+    ]
 
 
 # ---------------------------------------------------------------------------

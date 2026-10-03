@@ -647,6 +647,9 @@ class RunContext:
     # Delta snapshot cadence frozen at startup; ``None`` means "not frozen in
     # this process" (embedded/tests) and resolves to the config default.
     checkpoint_snapshot_frequency: int | None = None
+    # Called after durable same-thread admission is active and before the first
+    # checkpoint read. Failures are isolated from the run outcome.
+    on_run_admitted: Any | None = field(default=None)
     on_run_completed: Any | None = field(default=None)
     # The host binds this capability to one run's authenticated reader and references.
     conversation_reader: Any | None = field(default=None)
@@ -1047,6 +1050,12 @@ async def run_agent(
                 )
             return
         started = True
+
+        if ctx.on_run_admitted is not None:
+            try:
+                await ctx.on_run_admitted(record, config)
+            except Exception:
+                logger.warning("Run admission hook failed for %s (non-fatal)", run_id, exc_info=True)
 
         task_id = lead_task_id(run_id)
         if extensions.needs_task_store:

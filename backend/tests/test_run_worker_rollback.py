@@ -44,6 +44,7 @@ from deerflow.runtime.runs.worker import (
     _LargeFileToolChunkBatcher,
     _rollback_to_pre_run_checkpoint,
     _try_extract_from_message,
+    persist_run_durations,
     run_agent,
 )
 from deerflow.sandbox.lease import (
@@ -68,6 +69,97 @@ def _lease_test_bridge():
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
     )
+
+
+@pytest.mark.anyio
+async def test_admission_hook_holds_durable_thread_exclusivity_until_checkpoint_preflight() -> None:
+    """A peer cannot admit a run while retention is paused in the pre-read hook."""
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="owner")
+    peer = RunManager(store=store, worker_id="peer")
+    record = await owner.create_or_reject("retention-admission-race")
+    hook_entered = asyncio.Event()
+    release_hook = asyncio.Event()
+
+    async def hold_admission(_record, _config) -> None:
+        hook_entered.set()
+        await release_hook.wait()
+
+    class EmptyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield {"messages": []}
+
+    task = asyncio.create_task(
+        run_agent(
+            _lease_test_bridge(),
+            owner,
+            record,
+            ctx=RunContext(checkpointer=None, on_run_admitted=hold_admission),
+            agent_factory=lambda **_kwargs: EmptyAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    await asyncio.wait_for(hook_entered.wait(), timeout=1)
+    with pytest.raises(ConflictError, match="active run"):
+        await peer.create_or_reject("retention-admission-race")
+
+    release_hook.set()
+    await asyncio.wait_for(task, timeout=1)
+    assert record.status == RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_admission_cleanup_finishes_before_first_checkpoint_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real saver is pruned while admission is exclusive, before preflight reads."""
+    from app.gateway.checkpoint_retention import enforce_completed_run_retention
+
+    checkpointer = InMemorySaver()
+    thread_id = "retention-real-checkpointer"
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+    checkpoint = empty_checkpoint()
+    checkpoint["id"] = "00000000-0000-0000-0000-000000000001"
+    await checkpointer.aput(config, checkpoint, {"source": "input", "step": -1, "parents": {}}, {})
+    assert await persist_run_durations(checkpointer=checkpointer, thread_id=thread_id, durations={"prior": 1})
+    duration_head = await checkpointer.aget_tuple(config)
+    assert duration_head is not None
+    duration_id = duration_head.checkpoint["id"]
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="owner")
+    peer = RunManager(store=store, worker_id="peer")
+    record = await manager.create_or_reject(thread_id)
+
+    async def admission_hook(_record, _config) -> None:
+        await enforce_completed_run_retention(checkpointer=checkpointer, thread_id=thread_id)
+
+    async def observe_preflight(*_args, **_kwargs):
+        head = await checkpointer.aget_tuple(config)
+        assert head is not None
+        assert head.checkpoint["id"] != duration_id
+        with pytest.raises(ConflictError, match="active run"):
+            await peer.create_or_reject(thread_id)
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._capture_rollback_point", observe_preflight)
+
+    class EmptyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield {"messages": []}
+
+    await run_agent(
+        _lease_test_bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer, on_run_admitted=admission_hook),
+        agent_factory=lambda **_kwargs: EmptyAgent(),
+        graph_input={},
+        config=config,
+    )
+
+    assert record.status == RunStatus.success
 
 
 @pytest.mark.anyio

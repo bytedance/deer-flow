@@ -23,24 +23,24 @@ by a deleted checkpoint in the same step (contract "deletion mechanics").
 Postgres ``checkpoint_blobs`` rows are keyed by ``version`` = the id of the
 checkpoint that wrote the blob, so the same join keys clean them.
 
-The service ships **without a production trigger**: where retention is
-invoked from (post-run hook vs scheduler vs explicit admin action) is a
-maintainer decision that lands with the contract itself. Measurement-first:
-reports carry before/after per-thread stats in the same normalized shape as
+The Gateway invokes the conservative production policy after the next run has
+won durable same-thread admission but before that worker reads a checkpoint.
+It removes at most the trailing duration/history-cache leaf; the sibling-branch
+shape remains opt-in. Measurement reports carry before/after
+per-thread stats in the same normalized shape as
 ``scripts/benchmark/checkpoint/bench_channels.py``.
 
 History fast-path interaction: the trailing duration-only leaf is also the
 carrier of the run-history metadata cache (``run_durations`` /
-``run_message_ids``) that ``get_thread_history`` reads from the latest
-checkpoint, and the parent it clones does not carry that map. Deleting the
-leaf makes the next history read fall back to store scans and re-persist a
-fresh leaf, so the wiring PR must sequence retention away from history reads
-or adopt a policy that spares cache-carrying leaves — see the contract doc,
-"History fast-path interaction (wiring requirement)".
+``run_message_ids``). Retaining it until the next admission lets repeated
+history reads keep their fast path; pruning immediately before checkpoint
+selection prevents the next run from making a regenerated cache leaf a
+permanent ancestor.
 """
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field
@@ -55,7 +55,14 @@ from app.gateway.checkpoint_lineage import (
     is_duration_only_checkpoint,
 )
 
-__all__ = ["RetentionPolicy", "RetentionReport", "enforce_thread_retention"]
+__all__ = [
+    "RetentionPolicy",
+    "RetentionReport",
+    "enforce_completed_run_retention",
+    "enforce_thread_retention",
+]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -150,7 +157,13 @@ def _mark_duration_leaves_without_the_marker(nodes: dict[tuple[str, str], _Node]
             node.duration_only = True
 
 
-def _ensure_supported_saver(saver: BaseCheckpointSaver) -> None:
+def _storage_saver(saver: BaseCheckpointSaver) -> BaseCheckpointSaver:
+    """Resolve a wrapper through its public source-saver contract."""
+    storage = getattr(saver, "source_saver", saver)
+    return storage if isinstance(storage, BaseCheckpointSaver) else saver
+
+
+def _ensure_supported_saver(saver: BaseCheckpointSaver) -> BaseCheckpointSaver:
     """Fail fast before any row is read or written on an untested saver.
 
     The per-backend helpers below model exactly three storage layouts
@@ -163,18 +176,12 @@ def _ensure_supported_saver(saver: BaseCheckpointSaver) -> None:
     ``NotImplementedError`` beats a partial deletion and a confusing
     traceback.
     """
-    if isinstance(saver, (InMemorySaver, AsyncSqliteSaver)):
-        return
-    async_postgres_saver: type | None = None
-    try:
-        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
-        async_postgres_saver = AsyncPostgresSaver
-    except Exception:
-        pass
-    if async_postgres_saver is not None and isinstance(saver, async_postgres_saver):
-        return
-    raise NotImplementedError(f"checkpoint retention supports InMemorySaver, AsyncSqliteSaver and AsyncPostgresSaver, got {type(saver).__module__}.{type(saver).__name__}")
+    storage = _storage_saver(saver)
+    if isinstance(storage, (InMemorySaver, AsyncSqliteSaver)):
+        return storage
+    if callable(getattr(storage, "_cursor", None)):
+        return storage
+    raise NotImplementedError(f"checkpoint retention requires a supported storage saver, got {type(storage).__module__}.{type(storage).__name__}")
 
 
 async def _thread_storage_stats(saver: Any, thread_id: str) -> dict[str, int]:
@@ -378,7 +385,7 @@ async def enforce_thread_retention(
     before writing, so a post-run-hook call site must invoke retention *after*
     releasing it, not from inside the held section.
     """
-    _ensure_supported_saver(saver)
+    storage_saver = _ensure_supported_saver(saver)
     effective = policy or RetentionPolicy()
     if effective.max_delete_per_run is not None and effective.max_delete_per_run < 0:
         # Fail closed *before* any store read. ``deletable[:cap]`` with a
@@ -390,10 +397,10 @@ async def enforce_thread_retention(
     lock: AbstractAsyncContextManager[None] = thread_lock if thread_lock is not None else nullcontext()
     async with lock:
         if collect_stats:
-            report.stats_before = await _thread_storage_stats(saver, thread_id)
+            report.stats_before = await _thread_storage_stats(storage_saver, thread_id)
 
         nodes: dict[tuple[str, str], _Node] = {}
-        async for tuple_ in saver.alist(_thread_config(thread_id), limit=None):
+        async for tuple_ in storage_saver.alist(_thread_config(thread_id), limit=None):
             configurable = checkpoint_configurable(tuple_)
             cp_id = configurable.get("checkpoint_id")
             if not cp_id:
@@ -472,7 +479,7 @@ async def enforce_thread_retention(
 
         guarded: set[tuple[str, str]] = set()
         if effective.strict_pending_write_guard:
-            guarded = await _checkpoint_ids_with_writes(saver, thread_id)
+            guarded = await _checkpoint_ids_with_writes(storage_saver, thread_id)
 
         deletable: list[tuple[str, str]] = []
         for key, node in nodes.items():
@@ -507,13 +514,63 @@ async def enforce_thread_retention(
             if key not in deleted_keys:
                 survivor_versions.update(node.versions)
 
+        # Invalidate before touching source-of-truth rows. If cache deletion
+        # fails, fail closed with every checkpoint intact; doing this after the
+        # first DELETE could leave a stale wrapper entry for a missing node.
+        invalidate_cache = getattr(saver, "ainvalidate_history_cache", None)
+        if deletable and callable(invalidate_cache):
+            await invalidate_cache(thread_id)
+
         for key in deletable:
-            await _delete_checkpoint_rows(saver, thread_id, key)
+            await _delete_checkpoint_rows(storage_saver, thread_id, key)
             report.deleted_checkpoint_ids.append(key[1])
 
         if deletable:
-            await _delete_unreachable_blobs(saver, thread_id, survivor_versions)
+            await _delete_unreachable_blobs(storage_saver, thread_id, survivor_versions)
 
         if collect_stats:
-            report.stats_after = await _thread_storage_stats(saver, thread_id)
+            report.stats_after = await _thread_storage_stats(storage_saver, thread_id)
         return report
+
+
+async def enforce_completed_run_retention(
+    *,
+    checkpointer: BaseCheckpointSaver,
+    thread_id: str,
+    protect_checkpoint_ids: frozenset[str] = frozenset(),
+) -> RetentionReport:
+    """Run the conservative policy inside the next run's durable admission.
+
+    Successful runs append one metadata-only duration checkpoint.  If it is
+    left in place, the next run forks from it and turns that otherwise
+    disposable leaf into a protected ancestor forever. The run worker calls
+    this hook only after its active durable row excludes all same-thread run,
+    branch and checkpoint-write admissions, and before it reads a checkpoint.
+    The process-local checkpoint lock additionally serializes the local saver.
+
+    Only the contract-proven trailing duration leaf is eligible.  Sibling
+    branches and resumable checkpoints remain protected, and the one-row cap
+    keeps terminal housekeeping bounded.
+    """
+    from deerflow.runtime.runs.worker import _checkpoint_thread_lock
+
+    report = await enforce_thread_retention(
+        checkpointer,
+        thread_id,
+        RetentionPolicy(
+            prune_trailing_duration_leaves=True,
+            prune_leaf_sibling_branches=False,
+            strict_pending_write_guard=True,
+            max_delete_per_run=1,
+            protect_checkpoint_ids=protect_checkpoint_ids,
+        ),
+        thread_lock=_checkpoint_thread_lock(thread_id),
+        collect_stats=False,
+    )
+    if report.deleted_checkpoint_ids:
+        logger.info(
+            "Checkpoint retention removed trailing metadata checkpoints for thread %s: %s",
+            thread_id,
+            report.deleted_checkpoint_ids,
+        )
+    return report
