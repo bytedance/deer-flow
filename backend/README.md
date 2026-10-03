@@ -118,6 +118,8 @@ LLM-powered persistent context retention across conversations:
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
 
+Jina AI web fetch follows HTTP redirects from its API endpoint, including 307/308 redirects, which retain the POST method and body.
+
 ### Run Event Storage
 
 For direct `RunEventStore.list_messages` callers, `after_seq` and `before_seq`

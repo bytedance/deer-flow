@@ -36,7 +36,7 @@ class JinaClient:
             # bound the complete request sequence (including waits and cleanup).
             deadline = asyncio.get_running_loop().time() + retry_budget_seconds if max_retries else None
             async with asyncio.timeout_at(deadline):
-                client_kwargs: dict[str, object] = {"trust_env": trust_env}
+                client_kwargs: dict[str, object] = {"trust_env": trust_env, "follow_redirects": True}
                 if proxy:
                     client_kwargs["proxy"] = proxy
                 async with httpx.AsyncClient(**client_kwargs) as client:
