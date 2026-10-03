@@ -100,8 +100,17 @@ async def test_backoff_jitter_is_capped_by_remaining_budget(requests, monkeypatc
 @pytest.mark.parametrize("during_backoff", [False, True])
 async def test_shared_deadline(requests, monkeypatch, during_backoff):
     monkeypatch.setattr(random, "uniform", lambda low, high: 1.0)
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    start = 0.0
+    # Freeze only mock-client setup. Once the request starts, the actual asyncio
+    # deadline runs for 50ms; host scheduling cannot consume it before this test
+    # reaches the request/backoff operation it intends to exercise.
+    monkeypatch.setattr(loop, "time", lambda: start)
 
     async def post(*args, **kwargs):
+        offset = real_time() - start
+        monkeypatch.setattr(loop, "time", lambda: real_time() - offset)
         assert 0 < kwargs["timeout"] <= 0.05
         if not during_backoff:
             await asyncio.Event().wait()
