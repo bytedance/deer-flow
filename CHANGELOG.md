@@ -2752,7 +2752,7 @@ This release closes that milestone with **301 merged pull requests**.
   appear in order among the non-flag tokens — which also catches values placed
   between them (`config --profile work show`), a case a contiguous match would
   still miss. Argument values that spell a denied path in order are refused too
-  (fail-closed).
+  (fail-closed). ([#6212])
 
 ### Documentation
 
@@ -7622,4 +7622,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6140]: https://github.com/bytedance/deer-flow/pull/6140
 [#6201]: https://github.com/bytedance/deer-flow/pull/6201
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
+[#6212]: https://github.com/bytedance/deer-flow/pull/6212
 

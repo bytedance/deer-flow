@@ -2333,7 +2333,7 @@
   `config show`。broker 无法得知哪些选项带值，因此规则现在只要其 token 按顺序
   出现在非选项 token 中即视为匹配——这也覆盖了值夹在中间的情形
   （`config --profile work show`），而连续匹配仍会漏掉这种情况。参数值恰好按
-  顺序拼出被拒绝路径的调用也会被拒绝（fail-closed）。
+  顺序拼出被拒绝路径的调用也会被拒绝（fail-closed）。([#6212])
 
 ### 文档
 
@@ -6372,3 +6372,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6140]: https://github.com/bytedance/deer-flow/pull/6140
 [#6201]: https://github.com/bytedance/deer-flow/pull/6201
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
+[#6212]: https://github.com/bytedance/deer-flow/pull/6212
