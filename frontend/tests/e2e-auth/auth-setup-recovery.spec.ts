@@ -47,6 +47,62 @@ test.describe("auth setup-status recovery", () => {
     );
   });
 
+  test("setup redirects to sign-in when an administrator already exists", async ({
+    page,
+  }) => {
+    await page.route(SETUP_STATUS_URL, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ needs_setup: false }),
+      }),
+    );
+
+    await page.goto("/setup");
+    await page.waitForURL("**/login");
+
+    await expect(page.getByRole("button", { name: "Sign In" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Create Admin Account" }),
+    ).toHaveCount(0);
+  });
+
+  test("setup redirects after a concurrent admin initialization", async ({
+    page,
+  }) => {
+    await page.route(SETUP_STATUS_URL, (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ needs_setup: true }),
+      }),
+    );
+    await page.route("**/api/v1/auth/initialize", (route) =>
+      route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail: {
+            code: "system_already_initialized",
+            message: "System already initialized",
+          },
+        }),
+      }),
+    );
+
+    await page.goto("/setup");
+    await page
+      .getByRole("textbox", { name: "Email" })
+      .fill("admin@example.com");
+    await page.getByLabel("Password", { exact: true }).fill("AdminPass1!");
+    await page.getByLabel("Confirm Password").fill("AdminPass1!");
+    await page.getByRole("button", { name: "Create Admin Account" }).click();
+    await page.waitForURL("**/login");
+
+    await expect(page.getByRole("button", { name: "Sign In" })).toBeVisible();
+    await expect(page.getByText("System already initialized")).toHaveCount(0);
+  });
+
   test("login restores registration after setup-status retry", async ({
     page,
   }) => {
