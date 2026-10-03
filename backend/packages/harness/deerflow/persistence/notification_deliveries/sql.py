@@ -9,7 +9,6 @@ workers (multi-pod deployments) cannot double-send the same row.
 
 from __future__ import annotations
 
-import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -19,8 +18,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.notification_deliveries.model import NotificationDeliveryRow
-
-logger = logging.getLogger(__name__)
 
 # Exponential backoff base/cap for retries: 60s, 120s, 240s, 480s, ...
 # capped at 15 minutes. Bounded so a broken channel still drains the outbox
@@ -40,9 +37,6 @@ _CHANNEL_DOWN_RETRY_SECONDS = 900
 _CHANNEL_PARK_MAX_AGE = timedelta(days=2)
 # 96 × 15min ≈ 24h of parking at the flat backoff interval.
 _CHANNEL_PARK_MAX_ATTEMPTS = 96
-
-# Rows in these states are finished; later status writes are ignored.
-_TERMINAL_DELIVERY_STATUSES = frozenset({"sent", "failed"})
 
 
 class NotificationDeliveryRepository:
@@ -165,7 +159,7 @@ class NotificationDeliveryRepository:
                             NotificationDeliveryRow.id.in_(due_ids),
                             NotificationDeliveryRow.status == "pending",
                         )
-                        .values(status="sending", updated_at=now)
+                        .values(status="sending", claim_token=self._new_id(), updated_at=now)
                         .returning(NotificationDeliveryRow)
                     )
                 )
@@ -194,86 +188,74 @@ class NotificationDeliveryRepository:
                     NotificationDeliveryRow.status == "sending",
                     NotificationDeliveryRow.updated_at <= cutoff,
                 )
-                .values(status="pending", updated_at=now)
+                .values(status="pending", claim_token=None, updated_at=now)
             )
             await session.commit()
             return result.rowcount
 
-    async def mark_sent(self, delivery_id: str) -> dict[str, Any]:
+    async def _complete_claim(self, session: AsyncSession, delivery_id: str, claim_token: str, **values: Any) -> dict[str, Any]:
+        await session.execute(
+            update(NotificationDeliveryRow)
+            .where(
+                NotificationDeliveryRow.id == delivery_id,
+                NotificationDeliveryRow.status == "sending",
+                NotificationDeliveryRow.claim_token == claim_token,
+                NotificationDeliveryRow.claim_token.is_not(None),
+            )
+            .values(**values, claim_token=None, updated_at=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+        row = await session.get(NotificationDeliveryRow, delivery_id, populate_existing=True)
+        if row is None:
+            raise LookupError(f"notification delivery {delivery_id} not found")
+        return self._to_dict(row)
+
+    async def mark_sent(self, delivery_id: str, *, claim_token: str) -> dict[str, Any]:
+        """Finalize only the sending row owned by this claim generation."""
         async with self.session_factory() as session:
-            row = await session.get(NotificationDeliveryRow, delivery_id)
-            if row is None:
-                raise LookupError(f"notification delivery {delivery_id} not found")
-            if row.status in _TERMINAL_DELIVERY_STATUSES:
-                # A late write after the row was already finalized (a crash
-                # handler racing a terminal mark_failed, or a stale claimant)
-                # must not reopen or relabel it.
-                logger.info("notification delivery %s is already %s; ignoring late mark_sent", delivery_id, row.status)
-                return self._to_dict(row)
-            row.status = "sent"
-            row.sent_at = datetime.now(UTC)
-            await session.commit()
-            await session.refresh(row)
-            return self._to_dict(row)
+            return await self._complete_claim(session, delivery_id, claim_token, status="sent", sent_at=datetime.now(UTC))
 
     async def mark_failed(
         self,
         delivery_id: str,
         *,
+        claim_token: str,
         error: str | None = None,
         count_attempt: bool = True,
         terminal: bool = False,
     ) -> dict[str, Any]:
-        """Record a failed attempt; reschedule with backoff while retries
-        remain, otherwise finalize the row as ``failed``.
+        """Fail or reschedule only the current claim, preserving retry budgets.
 
-        With ``count_attempt=False`` the failure is parked instead: the retry
-        budget stays intact and the row returns on a flat long backoff. Used
-        when the owning channel is not running -- an outage is not the
-        delivery's fault and must not be able to exhaust its retries. Parking
-        is capped by row age and ``parked_attempts`` so permanently absent
-        channels eventually settle to ``failed``.
-
-        With ``terminal=True`` the row is finalized as ``failed`` at once,
-        whatever its remaining budget. Used when the delivery can never
-        become valid again, such as a target the owner has since
-        disconnected: neither waiting nor retrying would make sending it
-        right.
+        Channel-down failures park without consuming the retry budget, until
+        the parking age or attempt cap is reached. Every completion is fenced
+        atomically against reset, reclaim, and concurrent finalization.
         """
         async with self.session_factory() as session:
             row = await session.get(NotificationDeliveryRow, delivery_id)
             if row is None:
                 raise LookupError(f"notification delivery {delivery_id} not found")
-            if row.status in _TERMINAL_DELIVERY_STATUSES:
-                # Terminal states are sticky: a counted or parked mark_failed
-                # arriving after a terminal one must not flip the row back to
-                # pending and send it later after all.
-                logger.info("notification delivery %s is already %s; ignoring late mark_failed", delivery_id, row.status)
+            if not claim_token or row.status != "sending" or row.claim_token != claim_token:
                 return self._to_dict(row)
-            row.last_error = error
+            now = datetime.now(UTC)
+            values: dict[str, Any] = {"last_error": error}
             if terminal:
-                row.status = "failed"
+                values["status"] = "failed"
             elif not count_attempt:
-                now = datetime.now(UTC)
                 created_at = row.created_at
                 if created_at.tzinfo is None:
                     created_at = created_at.replace(tzinfo=UTC)
                 park_expired = (now - created_at) >= _CHANNEL_PARK_MAX_AGE or row.parked_attempts >= _CHANNEL_PARK_MAX_ATTEMPTS
                 if park_expired:
-                    row.status = "failed"
-                    row.last_error = error or "channel did not return before parking limit"
+                    values.update(status="failed", last_error=error or "channel did not return before parking limit")
                 else:
-                    row.parked_attempts += 1
-                    row.status = "pending"
-                    row.available_at = now + timedelta(seconds=_CHANNEL_DOWN_RETRY_SECONDS)
+                    values.update(parked_attempts=row.parked_attempts + 1, status="pending", available_at=now + timedelta(seconds=_CHANNEL_DOWN_RETRY_SECONDS))
             else:
-                row.attempts += 1
-                if row.attempts >= row.max_attempts:
-                    row.status = "failed"
+                attempts = row.attempts + 1
+                values["attempts"] = attempts
+                if attempts >= row.max_attempts:
+                    values["status"] = "failed"
                 else:
-                    delay = min(_RETRY_BASE_SECONDS * 2 ** (row.attempts - 1), _RETRY_MAX_SECONDS)
-                    row.status = "pending"
-                    row.available_at = datetime.now(UTC) + timedelta(seconds=delay)
-            await session.commit()
-            await session.refresh(row)
-            return self._to_dict(row)
+                    delay = min(_RETRY_BASE_SECONDS * 2 ** (attempts - 1), _RETRY_MAX_SECONDS)
+                    values.update(status="pending", available_at=now + timedelta(seconds=delay))
+            return await self._complete_claim(session, delivery_id, claim_token, **values)

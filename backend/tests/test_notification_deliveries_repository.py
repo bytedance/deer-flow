@@ -46,6 +46,92 @@ def _enqueue_kwargs(**overrides):
 
 class TestNotificationDeliveryRepository:
     @pytest.mark.anyio
+    @pytest.mark.parametrize("completion", ["sent", "retry", "park", "terminal"])
+    async def test_completion_is_fenced_when_reclaimed_before_update(self, repo, completion):
+        import asyncio
+
+        await repo.enqueue(**_enqueue_kwargs())
+        now = datetime.now(UTC)
+        old = (await repo.claim_due_deliveries(now=now, limit=1))[0]
+        entered = asyncio.Event()
+        resume = asyncio.Event()
+        real_factory = repo.session_factory
+
+        class PausedSession:
+            def __init__(self):
+                self.session = real_factory()
+
+            async def __aenter__(self):
+                await self.session.__aenter__()
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return await self.session.__aexit__(*exc_info)
+
+            async def execute(self, statement, *args, **kwargs):
+                if getattr(statement, "is_update", False):
+                    entered.set()
+                    await resume.wait()
+                return await self.session.execute(statement, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self.session, name)
+
+        paused_repo = NotificationDeliveryRepository(PausedSession)
+        if completion == "sent":
+            operation = paused_repo.mark_sent(old["id"], claim_token=old["claim_token"])
+        else:
+            operation = paused_repo.mark_failed(
+                old["id"],
+                claim_token=old["claim_token"],
+                error="late",
+                count_attempt=completion != "park",
+                terminal=completion == "terminal",
+            )
+        task = asyncio.create_task(operation)
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            later = now + timedelta(minutes=11)
+            await repo.reset_stale_sending_rows(now=later, timeout=timedelta(minutes=10))
+            current = (await repo.claim_due_deliveries(now=later, limit=1))[0]
+            resume.set()
+            assert await task == current
+            async with real_factory() as session:
+                assert repo._to_dict(await session.get(NotificationDeliveryRow, old["id"])) == current
+        finally:
+            resume.set()
+            await asyncio.gather(task, return_exceptions=True)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("completion", ["sent", "retry", "park", "terminal"])
+    @pytest.mark.parametrize("reclaim", [False, True])
+    async def test_stale_completion_cannot_modify_reset_or_reclaimed_delivery(self, repo, completion, reclaim):
+        await repo.enqueue(**_enqueue_kwargs())
+        now = datetime.now(UTC)
+        old_claim = (await repo.claim_due_deliveries(now=now, limit=1))[0]
+        later = now + timedelta(minutes=11)
+        await repo.reset_stale_sending_rows(now=later, timeout=timedelta(minutes=10))
+        if reclaim:
+            current = (await repo.claim_due_deliveries(now=later, limit=1))[0]
+            assert current["claim_token"] != old_claim["claim_token"]
+        else:
+            async with repo.session_factory() as session:
+                current = repo._to_dict(await session.get(NotificationDeliveryRow, old_claim["id"]))
+        if completion == "sent":
+            updated = await repo.mark_sent(old_claim["id"], claim_token=old_claim["claim_token"])
+        else:
+            updated = await repo.mark_failed(
+                old_claim["id"],
+                claim_token=old_claim["claim_token"],
+                error="late failure",
+                count_attempt=completion != "park",
+                terminal=completion == "terminal",
+            )
+        assert updated == current
+        async with repo.session_factory() as session:
+            assert repo._to_dict(await session.get(NotificationDeliveryRow, old_claim["id"])) == current
+
+    @pytest.mark.anyio
     async def test_enqueue_creates_pending_delivery(self, repo):
         delivery = await repo.enqueue(**_enqueue_kwargs())
 
@@ -196,7 +282,7 @@ class TestNotificationDeliveryRepository:
         await repo.enqueue(**_enqueue_kwargs(task_run_id="run-sent"))
         await repo.enqueue(**_enqueue_kwargs(task_run_id="run-pending"))
         claimed = await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1)
-        await repo.mark_sent(claimed[0]["id"])
+        await repo.mark_sent(claimed[0]["id"], claim_token=claimed[0]["claim_token"])
 
         reset = await repo.reset_stale_sending_rows(now=datetime.now(UTC) + timedelta(hours=1), timeout=timedelta(minutes=10))
 
@@ -204,19 +290,21 @@ class TestNotificationDeliveryRepository:
 
     @pytest.mark.anyio
     async def test_mark_sent_finalises_delivery(self, repo):
-        delivery = await repo.enqueue(**_enqueue_kwargs())
+        await repo.enqueue(**_enqueue_kwargs())
+        delivery = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
 
-        updated = await repo.mark_sent(delivery["id"])
+        updated = await repo.mark_sent(delivery["id"], claim_token=delivery["claim_token"])
 
         assert updated["status"] == "sent"
         assert updated["sent_at"] is not None
 
     @pytest.mark.anyio
     async def test_mark_failed_reschedules_with_backoff_while_retries_remain(self, repo):
-        delivery = await repo.enqueue(**_enqueue_kwargs())
+        await repo.enqueue(**_enqueue_kwargs())
+        delivery = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
         before = datetime.now(UTC)
 
-        updated = await repo.mark_failed(delivery["id"], error="wecom: rate limited")
+        updated = await repo.mark_failed(delivery["id"], claim_token=delivery["claim_token"], error="wecom: rate limited")
 
         assert updated["status"] == "pending"
         assert updated["attempts"] == 1
@@ -230,9 +318,10 @@ class TestNotificationDeliveryRepository:
     async def test_mark_failed_terminal_finalises_at_once_whatever_the_budget(self, repo):
         # Used when the delivery can never become valid again (the owner
         # disconnected the target): no backoff, no parking, budget untouched.
-        delivery = await repo.enqueue(**_enqueue_kwargs())
+        await repo.enqueue(**_enqueue_kwargs())
+        delivery = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
 
-        updated = await repo.mark_failed(delivery["id"], error="target is no longer connected", terminal=True)
+        updated = await repo.mark_failed(delivery["id"], claim_token=delivery["claim_token"], error="target is no longer connected", terminal=True)
 
         assert updated["status"] == "failed"
         assert updated["attempts"] == 0
@@ -244,18 +333,20 @@ class TestNotificationDeliveryRepository:
     async def test_terminal_states_are_sticky(self, repo):
         # A late write from a crash handler or a stale claimant must neither
         # reopen a finished row nor relabel it.
-        dropped = await repo.enqueue(**_enqueue_kwargs())
-        await repo.mark_failed(dropped["id"], error="target is no longer connected", terminal=True)
-        after_late_failure = await repo.mark_failed(dropped["id"], error="delivery crashed before completion")
-        after_late_sent = await repo.mark_sent(dropped["id"])
+        await repo.enqueue(**_enqueue_kwargs())
+        dropped = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
+        await repo.mark_failed(dropped["id"], claim_token=dropped["claim_token"], error="target is no longer connected", terminal=True)
+        after_late_failure = await repo.mark_failed(dropped["id"], claim_token=dropped["claim_token"], error="delivery crashed before completion")
+        after_late_sent = await repo.mark_sent(dropped["id"], claim_token=dropped["claim_token"])
         assert after_late_failure["status"] == "failed"
         assert after_late_sent["status"] == "failed"
         assert after_late_sent["last_error"] == "target is no longer connected"
         assert after_late_sent["attempts"] == 0
 
-        sent = await repo.enqueue(**_enqueue_kwargs(target="other-target"))
-        await repo.mark_sent(sent["id"])
-        after_late_failure = await repo.mark_failed(sent["id"], error="late failure", count_attempt=False)
+        await repo.enqueue(**_enqueue_kwargs(target="other-target"))
+        sent = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
+        await repo.mark_sent(sent["id"], claim_token=sent["claim_token"])
+        after_late_failure = await repo.mark_failed(sent["id"], claim_token=sent["claim_token"], error="late failure", count_attempt=False)
         assert after_late_failure["status"] == "sent"
         assert after_late_failure["last_error"] is None
         assert await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(days=2), limit=10) == []
@@ -268,7 +359,7 @@ class TestNotificationDeliveryRepository:
         for _ in range(delivery["max_attempts"]):
             claimed = await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(days=1), limit=1)
             assert len(claimed) == 1
-            updated = await repo.mark_failed(claimed[0]["id"], error="boom")
+            updated = await repo.mark_failed(claimed[0]["id"], claim_token=claimed[0]["claim_token"], error="boom")
 
         assert updated["status"] == "failed"
         # A failed (exhausted) row is never claimed again.
@@ -278,10 +369,11 @@ class TestNotificationDeliveryRepository:
     async def test_mark_failed_without_counting_attempt_preserves_budget_until_park_cap(self, repo):
         """Channel-down failures are parked, not counted: the row keeps its
         full retry budget until parking expires, then settles to failed."""
-        delivery = await repo.enqueue(**_enqueue_kwargs())
+        await repo.enqueue(**_enqueue_kwargs())
+        delivery = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
         before = datetime.now(UTC)
 
-        updated = await repo.mark_failed(delivery["id"], error="channel 'wecom' is not running", count_attempt=False)
+        updated = await repo.mark_failed(delivery["id"], claim_token=delivery["claim_token"], error="channel 'wecom' is not running", count_attempt=False)
 
         assert updated["status"] == "pending"
         assert updated["attempts"] == 0
@@ -292,23 +384,26 @@ class TestNotificationDeliveryRepository:
         assert retry_at >= before + timedelta(minutes=10)
 
         for _ in range(_CHANNEL_PARK_MAX_ATTEMPTS - 1):
-            updated = await repo.mark_failed(updated["id"], error="channel still down", count_attempt=False)
+            delivery = (await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(days=1), limit=1))[0]
+            updated = await repo.mark_failed(delivery["id"], claim_token=delivery["claim_token"], error="channel still down", count_attempt=False)
             assert updated["status"] == "pending"
             assert updated["attempts"] == 0
 
-        updated = await repo.mark_failed(updated["id"], error="channel still down", count_attempt=False)
+        delivery = (await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(days=1), limit=1))[0]
+        updated = await repo.mark_failed(delivery["id"], claim_token=delivery["claim_token"], error="channel still down", count_attempt=False)
         assert updated["status"] == "failed"
         assert updated["attempts"] == 0
 
     @pytest.mark.anyio
     async def test_mark_failed_parking_expires_by_row_age(self, repo):
-        delivery = await repo.enqueue(**_enqueue_kwargs())
+        await repo.enqueue(**_enqueue_kwargs())
+        delivery = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
         async with repo.session_factory() as session:
             row = await session.get(NotificationDeliveryRow, delivery["id"])
             row.created_at = datetime.now(UTC) - _CHANNEL_PARK_MAX_AGE - timedelta(minutes=1)
             await session.commit()
 
-        updated = await repo.mark_failed(delivery["id"], error="channel 'wecom' is not running", count_attempt=False)
+        updated = await repo.mark_failed(delivery["id"], claim_token=delivery["claim_token"], error="channel 'wecom' is not running", count_attempt=False)
 
         assert updated["status"] == "failed"
         assert updated["attempts"] == 0

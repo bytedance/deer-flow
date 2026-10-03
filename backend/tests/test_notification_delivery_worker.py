@@ -23,6 +23,7 @@ class FakeDeliveryRepo:
         self.rows = list(rows or [])
         self.claims = []
         self.sent = []
+        self.completion_tokens = []
         self.failed = []
         self.terminal_failures = []
         self.resets = []
@@ -39,10 +40,12 @@ class FakeDeliveryRepo:
         self.events.append("claim")
         return claimed
 
-    async def mark_sent(self, delivery_id):
+    async def mark_sent(self, delivery_id, *, claim_token):
+        self.completion_tokens.append(claim_token)
         self.sent.append(delivery_id)
 
-    async def mark_failed(self, delivery_id, *, error=None, count_attempt=True, terminal=False):
+    async def mark_failed(self, delivery_id, *, claim_token, error=None, count_attempt=True, terminal=False):
+        self.completion_tokens.append(claim_token)
         self.failed.append((delivery_id, error, count_attempt))
         if terminal:
             self.terminal_failures.append((delivery_id, error))
@@ -73,6 +76,7 @@ def _delivery_row(
 ):
     return {
         "id": delivery_id,
+        "claim_token": "claim-" + delivery_id,
         "task_id": "task-1",
         "task_run_id": "task-run-1",
         "run_id": "run-1",
@@ -197,6 +201,7 @@ async def test_run_once_delivers_claimed_row_and_marks_sent():
     await worker.run_once(now=datetime.now(UTC))
 
     assert repo.sent == ["delivery-1"]
+    assert repo.completion_tokens == ["claim-delivery-1"]
     assert repo.failed == []
     assert len(channel.sent) == 1
     target, text = channel.sent[0]
