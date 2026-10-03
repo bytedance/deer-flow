@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "《党政机关公文格式》GB/T 9704-2012",
+  
+  "page": {
+    "margin_mm": 25,
+    "$comment": "页边距：上下左右各25mm"
+  },
+  
+  "title": {
+    "font": "方正小标宋简体",
+    "size_pt": 22,
+    "alignment": "center",
+    "$comment": "标题：二号字，居中"
+  },
+  
+  "body": {
+    "font": "仿宋_GB2312",
+    "size_pt": 16,
+    "line_spacing_pt": 28,
+    "first_line_indent_chars": 2,
+    "alignment": "justify",
+    "$comment": "正文：三号字，首行缩进2字符，两端对齐，行距28磅"
+  },
+  
+  "heading1": {
+    "font": "黑体",
+    "size_pt": 16,
+    "first_line_indent_chars": 2,
+    "pattern": "^[一二三四五六七八九十]+、",
+    "$comment": "一级标题：三号字，首行缩进2字符"
+  },
+  
+  "heading2": {
+    "font": "楷体_GB2312",
+    "size_pt": 16,
+    "first_line_indent_chars": 2,
+    "pattern": "^（[一二三四五六七八九十]+）",
+    "$comment": "二级标题：三号字，首行缩进2字符"
+  },
+  
+  "heading3": {
+    "font": "仿宋_GB2312",
+    "size_pt": 16,
+    "bold": true,
+    "first_line_indent_chars": 2,
+    "pattern": "^\\d+[\\.\\、]",
+    "$comment": "三级标题：仿宋加黑，三号字，首行缩进2字符"
+  },
+  
+  "attachment": {
+    "font": "仿宋_GB2312",
+    "size_pt": 16,
+    "first_line_indent": false,
+    "$comment": "附件：三号字，无缩进"
+  },
+  
+  "signing_entity": {
+    "font": "仿宋_GB2312",
+    "size_pt": 16,
+    "alignment": "right",
+    "$comment": "落款单位：三号字，右对齐"
+  },
+  
+  "contact_info": {
+    "font": "仿宋_GB2312",
+    "size_pt": 16,
+    "alignment": "right",
+    "$comment": "联系信息：三号字，右对齐"
+  },
+  
+  "date": {
+    "font": "仿宋_GB2312",
+    "size_pt": 16,
+    "alignment": "right",
+    "$comment": "日期：三号字，右对齐"
+  },
+  
+  "recipient": {
+    "font": "仿宋_GB2312",
+    "size_pt": 16,
+    "first_line_indent": false,
+    "$comment": "主送机关：三号字，无缩进"
+  }
+}
