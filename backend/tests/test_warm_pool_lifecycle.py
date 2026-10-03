@@ -5,6 +5,9 @@ from __future__ import annotations
 import threading
 import time
 from typing import Any
+from unittest import mock
+
+import pytest
 
 from deerflow.community.warm_pool_lifecycle import DEFAULT_IDLE_TIMEOUT, DEFAULT_REPLICAS, WarmPoolLifecycleMixin
 
@@ -76,6 +79,21 @@ def test_reap_expired_warm_noops_when_timeout_disabled() -> None:
 
     assert "expired" in provider._warm_pool
     assert provider.destroyed == []
+
+
+
+def test_stop_idle_checker_rejects_live_thread_after_timeout() -> None:
+    provider = _Provider()
+    thread = mock.Mock()
+    thread.is_alive.return_value = True
+    provider._idle_checker_thread = thread
+
+    with pytest.raises(RuntimeError, match="still running after stop timeout"):
+        provider._stop_idle_checker()
+
+    thread.join.assert_called_once_with(timeout=5)
+    assert provider._idle_checker_thread is thread
+
 
 
 def test_start_idle_checker_uses_monkeypatchable_interval(monkeypatch) -> None:
