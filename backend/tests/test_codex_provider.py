@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.models.credential_loader import CodexCliCredential
@@ -209,6 +210,16 @@ def test_convert_messages_tool_message():
     assert items[0]["type"] == "function_call_output"
     assert items[0]["call_id"] == "tc1"
     assert items[0]["output"] == "result data"
+
+
+@pytest.mark.parametrize("tool_call_id", ["", "   ", "\t\n"])
+def test_convert_messages_drops_tool_results_with_blank_call_id(tool_call_id: str):
+    model = _make_model()
+    tool_msg = ToolMessage(content="orphaned result", tool_call_id=tool_call_id)
+
+    _, items = model._convert_messages([tool_msg])
+
+    assert items == []
 
 
 def test_convert_messages_keeps_placeholder_result_paired_with_invalid_tool_call():

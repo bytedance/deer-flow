@@ -182,6 +182,8 @@ class CodexChatModel(BaseChatModel):
                         }
                     )
             elif isinstance(msg, ToolMessage):
+                if not isinstance(msg.tool_call_id, str) or not msg.tool_call_id.strip():
+                    continue
                 input_items.append(
                     {
                         "type": "function_call_output",
