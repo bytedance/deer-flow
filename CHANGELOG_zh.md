@@ -524,6 +524,14 @@
   Gateway lead agent、`DeerFlowClient` 与系统提示词现在通过同一个辅助函数解析上限：
   `null` 视为未设置，并限制在 1-50，因此面向扩展的 host policy 与 release policy
   报告的也是实际执行的上限，而非超出范围的请求值。([#6088])
+- **记忆：** Honcho、mem0、OpenViking 的 `backend_config` 中不带值的字符串
+  配置项（`assistant_peer:`、`api_key_env:`、`default_peer_id:` 等）现在保留
+  默认值，而不是变成字面字符串 `"None"`。YAML 会把不带值的键解析为 `null`，
+  键存在时 `dict.get(key, default)` 返回 `None`，再经 `str()` 变成 `"None"`：
+  Honcho 的工作区前缀会从 `deerflow-u-` 变成 `None`，assistant peer 也叫 `None`，
+  mem0 会去读名为 `None` 的环境变量，OpenViking 会把会话存到 `None/` 目录下。
+  不带值的 `owner_user_id:` 现在会按空值报错，而不是被当作名为 `None` 的用户。
+  数值配置项此前已把 `null` 视为未设置（[#5555]）。([#6123])
 - **调度器：** 固定小时的 cron 任务在夏令时回退（DST fall-back）当天不再重复运行两次。
   `croniter` 会返回模糊本地时间的两个实例（首个为 `fold=0`，第二个为 `fold=1`）。
   对于分和时字段不包含通配符的固定任务，现在会跳过第二个重复实例（`fold=1`），保持每天只运行一次
@@ -6398,6 +6406,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
 [#6101]: https://github.com/bytedance/deer-flow/pull/6101
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
+[#6123]: https://github.com/bytedance/deer-flow/pull/6123
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135

@@ -64,31 +64,29 @@ class OpenVikingConfig:
             cfg.pop("failure_policy", {}),
             "failure_policy",
         )
-        api_key_env = str(cfg.pop("api_key_env", "OPENVIKING_API_KEY")).strip()
+        api_key_env = _text(cfg.pop("api_key_env", None), "OPENVIKING_API_KEY").strip()
         if not api_key_env:
             raise ValueError("OpenViking api_key_env must not be empty")
 
         result = cls(
-            base_url=str(cfg.pop("base_url", "http://127.0.0.1:1933")).rstrip("/"),
-            storage_path=str(cfg.pop("storage_path", "")),
-            owner_user_id=str(cfg.pop("owner_user_id", "")).strip(),
+            base_url=_text(cfg.pop("base_url", None), "http://127.0.0.1:1933").rstrip("/"),
+            storage_path=_text(cfg.pop("storage_path", None), ""),
+            owner_user_id=_text(cfg.pop("owner_user_id", None), "").strip(),
             api_key=os.environ.get(api_key_env, "").strip(),
             api_key_env=api_key_env,
-            default_peer_id=str(cfg.pop("default_peer_id", "deerflow")).strip(),
+            default_peer_id=_text(cfg.pop("default_peer_id", None), "deerflow").strip(),
             timeout_seconds=_number(cfg, "timeout_seconds", 30.0, float),
             search_top_k=_number(retrieval, "top_k", 8, int),
             score_threshold=_optional_float(retrieval.pop("score_threshold", None), "score_threshold"),
             max_injection_chars=_number(retrieval, "max_injection_chars", 12_000, int),
-            content_mode=str(retrieval.pop("content_mode", "overview")).lower(),  # type: ignore[arg-type]
-            injection_query=str(
-                retrieval.pop(
-                    "injection_query",
-                    "user profile preferences important entities events ongoing goals constraints and prior decisions",
-                )
+            content_mode=_text(retrieval.pop("content_mode", None), "overview").lower(),  # type: ignore[arg-type]
+            injection_query=_text(
+                retrieval.pop("injection_query", None),
+                "user profile preferences important entities events ongoing goals constraints and prior decisions",
             ).strip(),
-            startup_policy=str(cfg.pop("startup_policy", "fail_fast")).lower(),  # type: ignore[arg-type]
-            read_failure_policy=str(failure_policy.pop("read", "fail_open")).lower(),  # type: ignore[arg-type]
-            write_failure_policy=str(failure_policy.pop("write", "log_and_drop")).lower(),  # type: ignore[arg-type]
+            startup_policy=_text(cfg.pop("startup_policy", None), "fail_fast").lower(),  # type: ignore[arg-type]
+            read_failure_policy=_text(failure_policy.pop("read", None), "fail_open").lower(),  # type: ignore[arg-type]
+            write_failure_policy=_text(failure_policy.pop("write", None), "log_and_drop").lower(),  # type: ignore[arg-type]
             allow_insecure_http=_boolean(
                 cfg.pop("allow_insecure_http", False),
                 "allow_insecure_http",
@@ -156,6 +154,17 @@ def _mapping(value: Any, name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"OpenViking {name} must be a mapping")
     return dict(value)
+
+
+def _text(value: Any, default: str) -> str:
+    """Read a string knob, treating a value-less key as unset.
+
+    ``key:`` with nothing after it in YAML arrives as ``None``, and ``str(None)``
+    would carry on as the literal ``"None"`` -- a peer, user or directory named
+    "None" -- instead of the default. A key carrying no value keeps its default,
+    the same line ``_number`` draws for numeric knobs.
+    """
+    return default if value is None else str(value)
 
 
 def _number[T](cfg: dict[str, Any], key: str, default: T, cast: Callable[[Any], T]) -> T:

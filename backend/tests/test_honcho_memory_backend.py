@@ -231,6 +231,20 @@ class TestHonchoConfig:
         cfg = HonchoConfig.from_backend_config({key: value})
         assert getattr(cfg, key) == default
 
+    @pytest.mark.parametrize(
+        ("key", "default"),
+        [
+            ("base_url", "http://localhost:8000"),
+            ("workspace_prefix", "deerflow-u-"),
+            ("assistant_peer", "deerflow"),
+        ],
+    )
+    def test_string_knob_written_without_a_value_keeps_its_default(self, key, default):
+        """``assistant_peer:`` with no value parses as None, which str() used to
+        turn into a peer literally named "None"."""
+        cfg = HonchoConfig.from_backend_config({key: None})
+        assert getattr(cfg, key) == default
+
     @pytest.mark.parametrize(("key", "value", "expected"), [("timeout_seconds", "2.5", 2.5), ("message_char_limit", "120", 120)])
     def test_numeric_strings_still_accepted(self, key, value, expected):
         """float()/int() already accept numeric strings, so a quoted YAML scalar
