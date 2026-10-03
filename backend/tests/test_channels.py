@@ -9208,14 +9208,16 @@ class TestTelegramAllowedUsers:
         assert ch._check_user(123456)
         assert not ch._check_user(1)
 
-    def test_unparseable_entry_is_dropped_with_warning(self, caplog):
+    @pytest.mark.parametrize("bad_entry", ["@alice", 0, -5])
+    def test_unparseable_entry_is_dropped_with_warning(self, bad_entry, caplog):
         with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
-            ch = self._channel({"allowed_users": [123456, "@alice"]})
+            ch = self._channel({"allowed_users": [123456, bad_entry]})
 
         assert ch._check_user(123456)
         assert not ch._check_user(42)
-        assert "'@alice'" in caplog.text
-        assert "numeric" in caplog.text
+        assert repr(bad_entry) in caplog.text
+        # 0 and -5 are numeric, so the hint has to say what they are missing.
+        assert "positive numeric" in caplog.text
 
     @pytest.mark.parametrize(
         "allowed_users",

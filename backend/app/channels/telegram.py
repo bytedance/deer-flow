@@ -129,7 +129,7 @@ def _parse_allowed_users(allowed_users: Any) -> frozenset[int] | None:
     for entry in entries:
         user_id = _parse_telegram_user_id(entry)
         if user_id is None:
-            logger.warning("[Telegram] Ignoring allowed_users entry %r: expected one numeric Telegram user ID (not an @username); list several IDs as a YAML list", entry)
+            logger.warning("[Telegram] Ignoring allowed_users entry %r: expected a positive numeric Telegram user ID (not an @username); list several IDs as a YAML list", entry)
         else:
             user_ids.add(user_id)
     if not user_ids:
