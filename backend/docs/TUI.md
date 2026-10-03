@@ -89,6 +89,9 @@ At the last input row, `↓` preserves the current draft unless you are browsing
 history. After `↑` recalls history, `↓` moves forward and restores the saved
 draft when it passes the newest entry.
 
+At the first input row, `↑` leaves the draft, cursor, and undo history untouched
+when no input history is available.
+
 Transcript updates follow new output while the view is at the bottom. After you
 scroll upward, streaming refreshes preserve the reading position until you
 return to the bottom with `PageDown`.
