@@ -8,6 +8,11 @@ which takes a whole message and uses different list/mapping semantics.
 Regression coverage lives in `tests/test_utils_messages.py`,
 `tests/test_subagent_executor.py`, and `tests/test_task_continuity.py`.
 
+`llm_text.py::strip_markdown_code_fence` removes a backtick wrapper only when
+its first valid matching closing fence is the last line. Preserve separate
+code blocks and malformed fences so input polishing cannot damage a draft's
+Markdown structure. Regression coverage lives in `tests/test_utils_llm_text.py`.
+
 `llm_text.py::strip_think_blocks` scans opening and closing tags forward so
 repeated unclosed `<think>` prefixes in model output do not rescan the same
 suffix. Keep its case-insensitive tag handling, optional whitespace before
