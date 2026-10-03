@@ -16,7 +16,7 @@ from __future__ import annotations
 from pydantic import ValidationInfo
 
 
-def reject_boolean(value: object, info: ValidationInfo, *, kind: str = "an integer") -> object:
+def reject_boolean(value: object, info: ValidationInfo, *, kind: str) -> object:
     """Reject a boolean for the numeric config field named by ``info.field_name``.
 
     Args:
@@ -24,7 +24,8 @@ def reject_boolean(value: object, info: ValidationInfo, *, kind: str = "an integ
         info: the validation context carrying the field name.
         kind: the wording after "must be" — ``"an integer"`` for int fields,
             ``"a number"`` for float fields, or a custom phrase such as
-            ``"a number of seconds or null"``.
+            ``"a number of seconds or null"``. Required, so wiring a float
+            field cannot silently inherit integer wording.
 
     Raises:
         ValueError: when ``value`` is a bool. ``bool`` is an ``int`` subclass,
