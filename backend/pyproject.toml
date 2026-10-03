@@ -15,6 +15,7 @@ dependencies = [
     "deerflow-extension-api",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
+    "websockets>=16.0,<17",
     "python-multipart>=0.0.31",
     "sse-starlette>=2.1.0",
     # Direct dependency on purpose, even though FastAPI already pulls it in:

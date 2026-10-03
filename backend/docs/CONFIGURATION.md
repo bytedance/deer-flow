@@ -269,7 +269,7 @@ models:
           type: enabled
 ```
 
-**Gemini with thinking via OpenAI-compatible gateway**:
+#### Gemini via Google's OpenAI-compatible endpoint
 
 When routing Gemini through an OpenAI-compatible proxy (Vertex AI OpenAI compat endpoint, AI Studio, or third-party gateways) with thinking enabled, the API attaches a `thought_signature` to each tool-call object returned in the response.  Every subsequent request that replays those assistant messages **must** echo those signatures back on the tool-call entries or the API returns:
 
@@ -282,22 +282,24 @@ Standard `langchain_openai:ChatOpenAI` silently drops `thought_signature` when s
 
 ```yaml
 models:
-  - name: gemini-2.5-pro-thinking
-    display_name: Gemini 2.5 Pro (Thinking)
+  - name: gemini-3.1-pro-preview
+    display_name: Gemini 3.1 Pro (Thinking)
     use: deerflow.models.patched_openai:PatchedChatOpenAI
-    model: google/gemini-2.5-pro-preview   # model name as expected by your gateway
+    model: gemini-3.1-pro-preview
     api_key: $GEMINI_API_KEY
-    base_url: https://<your-openai-compat-gateway>/v1
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai/
     max_tokens: 16384
-    supports_thinking: true
     supports_vision: true
-    when_thinking_enabled:
-      extra_body:
-        thinking:
-          type: enabled
+    reasoning:
+      thinking: required
+      dialect: none
+      effort:
+        values: [minimal, low, medium, high]
 ```
 
-For Gemini accessed **without** thinking (e.g. via OpenRouter where thinking is not activated), the plain `langchain_openai:ChatOpenAI` with `supports_thinking: false` is sufficient and no patch is needed.
+This example targets Google's official endpoint. Its [OpenAI compatibility API](https://ai.google.dev/gemini-api/docs/openai#thinking) accepts `reasoning_effort`; `extra_body.thinking` becomes an unsupported top-level `thinking` field and causes HTTP 400. Gemini 3.1 Pro cannot disable thinking, so `thinking: required` keeps it enabled even when a caller requests otherwise, while `dialect: none` prevents a provider-specific thinking toggle. Omitting effort uses the model's default.
+
+If you copied the previous example, replace its `supports_thinking`, `when_thinking_enabled`, and `when_thinking_disabled` settings with the `reasoning` block above. Third-party gateways may require different model IDs and reasoning parameters; follow that gateway's documentation instead of reusing Google's profile unchanged.
 
 **MiMo with thinking via OpenAI-compatible API**:
 
@@ -575,6 +577,41 @@ empty or omitted `include_domains`. These filters compose with `max_results`
 and the model's optional `time_range`. The model-visible arguments remain `query`
 and `time_range`; the filters do not apply to `web_fetch` or other search providers.
 
+#### Jina fetch retries
+
+Jina's `web_fetch` keeps one attempt by default. Configure retries on its existing
+`tools` entry; model-facing arguments remain unchanged:
+
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.jina_ai.tools:web_fetch_tool
+    timeout: 10
+    max_retries: 2              # Additional attempts; default 0 (disabled)
+    retry_budget_seconds: 30   # Total request + backoff budget; default 30
+```
+
+`max_retries` must be a non-negative integer and `retry_budget_seconds` a finite,
+positive number (YAML numbers, not strings or booleans). Invalid values return an
+`Error:` without sending a request. The budget applies only when retries are enabled,
+starts before HTTP client creation, and covers all attempts and waits. Each HTTP
+request timeout is capped by the remaining budget; the outer deadline also bounds
+responses that keep delivering data. The existing `timeout` remains Jina's
+`X-Timeout` header and the per-request HTTP timeout limit.
+
+Only HTTP 502/503/504 and HTTPX connection-establishment errors (`ConnectError`,
+`ConnectTimeout`) are retried. Authentication/client errors, 429, other statuses,
+empty successful responses, read/write timeouts and arbitrary exceptions are not
+retried. `Retry-After` is not interpreted. Backoff ceilings start at 0.5 seconds,
+double to 1 and 2 seconds, then stay at 4 seconds. Each asynchronous wait caps its
+ceiling by the remaining budget and independently samples a uniform factor from
+0.5 to 1.0, reducing synchronized retries without increasing the wait cap.
+Cancellation propagates during requests and waits. This stops local work; it
+cannot cancel work already started by Jina. Enabling retries can send up to `1 + max_retries` upstream requests
+and incur additional cost. Successful content and final `Error:` results retain
+the existing contract.
+
 Serper `web_search` also accepts the optional model argument
 `time_range: "day" | "week" | "month" | "year"`. For example,
 `{"query": "Python releases", "time_range": "week"}` sends `tbs: "qdr:w"`
@@ -610,7 +647,8 @@ tools:
 
 `web_capture` writes screenshots to the current thread's `/mnt/user-data/outputs`
 directory and presents the image path through the standard artifact mechanism. By
-default it refuses URLs that resolve to private, loopback, link-local, or
+default it refuses URLs that resolve to private, loopback, link-local,
+shared (`100.64.0.0/10`, used by CGNAT and Tailscale), other non-global, or
 cloud-metadata addresses; set `allow_private_addresses: true` only when you
 intentionally point the tool at an internal target.
 

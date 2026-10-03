@@ -376,7 +376,13 @@ class TelegramChannel(Channel):
         # actually contains a rich construct. Structured command/error replies
         # are plain text with none, so they stay plain and their newlines and
         # <placeholder> tokens are not collapsed into one line.
-        return bool(self.config.get("rich_messages")) and 0 < len(text) <= TELEGRAM_MAX_RICH_MESSAGE_LENGTH and _has_rich_constructs(text)
+        if not self.config.get("rich_messages"):
+            return False
+        # Telegram measures this cap in UTF-16 code units like its other limits, while
+        # `len()` counts code points, so reuse the bounded scan the plain-text path
+        # uses: an emoji-heavy reply that fits by code points is still rejected.
+        _, over_limit = _first_utf16_chunk(text, TELEGRAM_MAX_RICH_MESSAGE_LENGTH)
+        return not over_limit and _has_rich_constructs(text)
 
     async def _edit_rich_message(self, chat_id: int, message_id: int, text: str) -> bool:
         """Replace a streamed preview with a persistent Telegram Rich Message."""

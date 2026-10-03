@@ -31,3 +31,11 @@ characters, and the original file bytes.
 boundary for artifacts and project documents. Keep platform aliases such as
 Windows' `image/svg` aligned with their standard active type (`image/svg+xml`),
 and preserve the generic `+xml` rule.
+
+### Host Path Portability
+
+`host_paths.py` rejects Windows device names for host-visible creation paths on
+every platform, including the `COM`/`LPT` aliases with superscript ¹, ² and ³.
+Do not normalize arbitrary Unicode digits into device numbers: names such as
+`COM⁴.txt` and `COM¹notes.txt` are ordinary portable names. Read/removal callers
+retain their existing portability exemptions.

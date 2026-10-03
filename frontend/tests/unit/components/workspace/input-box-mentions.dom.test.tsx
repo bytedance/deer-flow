@@ -11,7 +11,10 @@ import type { ComponentProps, ReactNode } from "react";
 
 import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
 import { InputBox } from "@/components/workspace/input-box";
-import { referenceToken } from "@/components/workspace/mentions/inline-references";
+import {
+  focusReferenceAt,
+  referenceToken,
+} from "@/components/workspace/mentions/inline-references";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { DEFAULT_LOCALE } from "@/core/i18n";
@@ -100,7 +103,7 @@ function renderComposer(
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  const tree: ReactNode = (
+  const tree = (currentThreadId: string): ReactNode => (
     <I18nProvider initialLocale={DEFAULT_LOCALE}>
       <QueryClientProvider client={queryClient}>
         <AuthProvider
@@ -117,7 +120,7 @@ function renderComposer(
           >
             <PromptInputProvider>
               <InputBox
-                threadId={threadId}
+                threadId={currentThreadId}
                 projectId="project-1"
                 onSubmit={onSubmit}
                 onPrepareThread={onPrepareThread}
@@ -131,7 +134,12 @@ function renderComposer(
       </QueryClientProvider>
     </I18nProvider>
   );
-  return render(tree);
+  const rendered = render(tree(threadId));
+  return {
+    ...rendered,
+    rerenderThread: (currentThreadId: string) =>
+      rendered.rerender(tree(currentThreadId)),
+  };
 }
 
 const attach = rs.fn();
@@ -294,6 +302,91 @@ describe("unified composer mentions", () => {
     expect(
       submit.mock.calls[0]![1].additionalKwargs?.extension_mentions,
     ).toBeUndefined();
+  });
+  it("clears cached conversation metadata when the draft owner changes", async () => {
+    const submit = rs.fn();
+    const rendered = renderComposer("cache-first", submit);
+    enterMention(rendered.container, "@Writer");
+    fireEvent.click(screen.getByRole("option", { name: "Writer brief" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("conversation-reference-chip")).toBeTruthy(),
+    );
+    rendered.rerenderThread("cache-next");
+    await waitFor(() =>
+      expect(screen.queryByTestId("conversation-reference-chip")).toBeNull(),
+    );
+    const token = referenceToken("conversation", "source-1", "Pasted title");
+    enterMention(rendered.container, token + " summarize");
+    await waitFor(() =>
+      expect(screen.getByTestId("conversation-reference-chip")).toBeTruthy(),
+    );
+    fireEvent.input(screen.getByRole("textbox"));
+    fireEvent.submit(rendered.container.querySelector("form")!);
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(
+      submit.mock.calls[0]![1].additionalKwargs.conversation_references,
+    ).toEqual([{ thread_id: "source-1", title: "Pasted title" }]);
+  });
+  it("restores custom-agent metadata after a conversation reference is removed and undone", async () => {
+    const submit = rs.fn();
+    const { container } = renderComposer("conversation-undo", submit);
+    enterMention(container, "Review @Writer");
+    fireEvent.click(screen.getByRole("option", { name: "Writer brief" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("conversation-reference-chip")).toBeTruthy(),
+    );
+    const editor = screen.getByRole("textbox");
+    const original = editor.cloneNode(true);
+    editor.querySelector("[data-reference]")!.remove();
+    fireEvent.input(editor);
+    await waitFor(() =>
+      expect(screen.queryByTestId("conversation-reference-chip")).toBeNull(),
+    );
+    editor.replaceChildren(...Array.from(original.childNodes));
+    fireEvent.input(editor);
+    fireEvent.submit(container.querySelector("form")!);
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(
+      submit.mock.calls[0]![1].additionalKwargs.conversation_references,
+    ).toEqual([
+      { thread_id: "source-1", title: "Writer brief", agent_name: "writer" },
+    ]);
+  });
+  for (const props of [
+    { ctrlKey: true },
+    { altKey: true },
+    { metaKey: true },
+    { shiftKey: true },
+    { keyCode: 229 },
+  ]) {
+    it(`leaves reference selection to modified/composing deletion: ${JSON.stringify(props)}`, async () => {
+      const token = referenceToken("skill", "research", "research");
+      const id = `reference-delete-${JSON.stringify(props)}`;
+      saveDraft(id, token);
+      renderComposer(id);
+      await waitFor(() =>
+        expect(screen.getByTestId("inline-skill-reference")).toBeTruthy(),
+      );
+      const editor = screen.getByRole("textbox");
+      focusReferenceAt(editor, token.length);
+      fireEvent.keyDown(editor, { key: "Backspace", ...props });
+      expect(window.getSelection()?.isCollapsed).toBe(true);
+      expect(screen.getByTestId("inline-skill-reference")).toBeTruthy();
+    });
+  }
+
+  it("does not select a reference for deletion while the composer is locked", async () => {
+    const token = referenceToken("skill", "research", "research");
+    saveDraft("locked-delete", token);
+    renderComposer("locked-delete", rs.fn(), rs.fn(), { disabled: true });
+    await waitFor(() =>
+      expect(screen.getByTestId("inline-skill-reference")).toBeTruthy(),
+    );
+    const editor = screen.getByRole("textbox");
+    focusReferenceAt(editor, token.length);
+    fireEvent.keyDown(editor, { key: "Backspace" });
+    expect(window.getSelection()?.isCollapsed).toBe(true);
+    expect(screen.getByTestId("inline-skill-reference")).toBeTruthy();
   });
   it("offers only backend-accepted skill names while allowing compact in the mention picker", () => {
     const rejectedNames = ["a--b", "a_b", "Research", "a-", "goal", "status"];

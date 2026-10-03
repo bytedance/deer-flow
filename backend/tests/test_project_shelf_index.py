@@ -305,6 +305,22 @@ class TestResolveShelfSnapshot:
         for i in range(3):
             await doc_repo.insert_active(project["id"], document_id=f"d{i}", name=f"f{i}.txt", relpath=f"r{i}", sha256=f"{i}" * 64, size_bytes=10 + i)
 
+        # datetime.now(UTC) has ~15.6 ms granularity on Windows, so rapid
+        # inserts can share one timestamp and the (updated_at DESC, id ASC)
+        # index order then follows the id tiebreak. Pin strictly increasing
+        # timestamps so the recency contract is exercised deterministically.
+        from datetime import UTC, datetime, timedelta
+
+        from sqlalchemy import update
+
+        from deerflow.persistence.engine import get_session_factory
+        from deerflow.persistence.projects.model import ProjectDocumentRow
+
+        async with get_session_factory()() as session:
+            for i, document_id in enumerate(("d0", "d1", "d2")):
+                await session.execute(update(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id).values(updated_at=datetime.now(UTC) + timedelta(minutes=i)))
+            await session.commit()
+
         snapshot = await resolve_project_context(thread_store, project_repo, "t-1", doc_repo)
         assert snapshot["shelf"]["total"] == 3
         entries = snapshot["shelf"]["entries"]

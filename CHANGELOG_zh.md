@@ -419,12 +419,47 @@
 
 ### 修复
 
+- **社区工具：** 共享 SSRF 校验现在拒绝所有非全局地址，包括原先的标志位检查放行的
+  `100.64.0.0/10` 共享地址段。该地址段包含 CGNAT 与 Tailscale 主机以及阿里云
+  `100.100.100.200` 实例元数据端点，因此 `web_fetch`（crawl4ai、Browserless、
+  fastcrw）、`web_capture`、智能浏览器和个人 MCP 连接此前都能访问它们，包括 DNS
+  应答可以携带的 IPv4 映射形式 `::ffff:100.100.100.200`。原有的标志位检查仍然保留，
+  因为部分非公网形式（例如元数据地址的 NAT64 写法）依然被判定为全局地址。有意通过这些
+  工具访问 tailnet 或 CGNAT 主机的运维人员现在需要设置 `allow_private_addresses: true`。([#6202])
+- **浏览器：** 智能浏览器不会再因为 SSRF 检查之后发生变化的 DNS 应答而被引向
+  内网或云元数据主机。导航检查和逐请求守卫会解析主机名进行筛查，但 Chromium
+  建立连接时会再次解析，因此重绑定 DNS 服务器可以对检查返回公网地址、对连接返回
+  内网地址。现在每个启动的浏览器的所有 TCP 连接都经过一个按会话创建的本地回环 SOCKS5 代理：
+  Chromium 把主机名交给代理，代理按相同的 `allow_private_addresses` 策略只解析一次，
+  并且只连接筛查通过的地址。回环流量同样经过代理。WebRTC UDP 不经过代理，不在覆盖范围内。
+  通过 CDP 连接的 Chrome 不受影响；
+  委托抓取服务（crawl4ai、Browserless、fastcrw）仍在其自身一侧解析，Gateway 无法固定。([#6201])
+- **渠道：** Discord 现在会在智能体生成回复期间真正显示"正在输入"提示。`_start_typing()` 调用的
+  `channel.trigger_typing()` 已在 discord.py 2.0 中移除（项目要求 `>=2.7.0`），而其循环吞掉了
+  所有异常，因此每次都抛出 `AttributeError`，提示从未发送。现在改为 await 2.x 的
+  `channel.typing()` 发送一次提示。每个输入提示循环的首次失败以 WARNING 级别记录（缺少权限或持续限流
+  在默认日志级别下即可见），之后的失败以 DEBUG 级别记录，而不是直接丢弃。([#6138])
+- **社区工具：** SSRF URL 校验在解析主机名时不再阻塞 Gateway 事件循环。
+  `validate_public_http_url` 通过阻塞的 `socket.getaddrinfo` 解析主机名，而
+  crawl4ai 与 Browserless 的 `web_fetch`、`web_capture`、`browser_navigate`、
+  Gateway 浏览器导航路由以及 Live 流的导航输入和 seed 都在异步代码中直接调用它，
+  因此模型或用户选择的 URL 一旦遇到缓慢的 DNS 响应，整个查询期间其他请求和流都会停滞。
+  逐个检查重定向和子资源的 Playwright 请求守卫也在共享的浏览器事件循环上同步解析，
+  会让所有浏览器会话的 Live 画面与输入一同停滞。这些调用方现在通过 `asyncio.to_thread` 运行校验，放行与拒绝的结果不变。
+  严格的阻塞 IO 检测新增 `socket.getaddrinfo` 规则，因为 Blockbuster
+  默认只包装 socket 方法，不包装模块级解析函数。([#6140])
 - **智能体：** 循环检测的整数阈值现在会拒绝 YAML 布尔值，而不是把
   `true` 静默转换为 `1`。此前若配置 `warn_threshold: true` 和
   `hard_limit: true`，第一组工具调用就会达到硬上限并强制终止智能体；
   跟踪窗口、工具频率和按工具覆盖项中的布尔值也会把对应限制缩小为
   1。现在所有整数阈值字段都会在配置加载阶段按字段名报错，同时保持
   有效整数和数字字符串的既有行为。([#6017])
+- **智能体：** 应用配置的整数设置现在会拒绝 YAML 布尔值，而不是把 `true`
+  静默转换为 `1`。此前若配置 `recursion_limit: true`，所有未自带递归上限的
+  Gateway 运行都会在第一个 LangGraph 超级步就触达递归上限；`llm_call` 下的
+  整数字段（`retry_max_attempts`、`max_concurrent_calls` 与两个退避延迟）中的
+  布尔值也会把重试次数和并发上限缩小为 1。现在全部七个整数字段都会在配置
+  加载阶段按字段名报错，同时保持有效整数和数字字符串的既有行为。([#6171])
 - **上传：** 文档转换时现在会记录原文件与 Markdown 的归属关系。
   `list_uploaded_files` 只隐藏归属已验证的转换文件，文档大纲也只读取
   记录中指定的 Markdown；用户自行上传的同名文件会正常显示，不会被
@@ -1487,6 +1522,12 @@
   器现在通过共享的 `file_signature.read_config_with_signature()`
   helper 只读取一次，并对返回的字节精确签名；竞态编辑最多
   只多付出一次重载。([#5848])
+- **沙箱：** `glob` 与 `grep` 不再在搜索根目录（或其任一祖先目录）命中忽略模式（如 `build`、
+  `dist`、`logs`、`node_modules`、`coverage`、`target`）时返回空结果。此前各远端沙箱把
+  `should_ignore_path` 用在**绝对路径**上，而该函数会检查路径的每一段，于是树上任意位置的忽略名
+  都会把整份结果隐藏，智能体刚 `ls` 出来的目录却被搜索告知“无匹配”。现在忽略模式按**搜索根的
+  相对路径**生效，与 `list_dir` 已有的做法一致：忽略名依然隐藏自己的子孙目录，但以被忽略目录
+  为根、或位于被忽略祖先之下的搜索会正常返回其内容。([#5667])
 
 - **sandbox：** HTTP 上传路由获取的临时 sandbox 租约现在会释放。在
   remote/provisioner 部署中，`POST /api/threads/{id}/uploads` 会临时获取线
@@ -2295,6 +2336,16 @@
   提示，provider 错误遵循既有的 fail-closed/fail-open 配置。被拒绝的
   `read_file` 读取 `SKILL.md` 时会打上 `skill_context_denied` 标记，持久上
   下文、技能 allowed-tools 与自主密钥绑定都不会激活被拒绝的技能。([#4541])
+
+- **Lark：** 可选的 Lark broker 子命令拒绝列表
+  （`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`）不再能被以独立 token 传入的选项
+  值绕过。此前匹配只去掉以 `-` 开头的 token 并从头比较剩余部分，因此
+  `--profile work config show` 中的 `work` 成为首个位置参数，`config show`
+  规则永远匹配不上——而真实的 `lark-cli` 1.0.65 在这种写法下仍会执行
+  `config show`。broker 无法得知哪些选项带值，因此规则现在只要其 token 按顺序
+  出现在非选项 token 中即视为匹配——这也覆盖了值夹在中间的情形
+  （`config --profile work show`），而连续匹配仍会漏掉这种情况。参数值恰好按
+  顺序拼出被拒绝路径的调用也会被拒绝（fail-closed）。([#6212])
 
 ### 文档
 
@@ -6129,6 +6180,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5662]: https://github.com/bytedance/deer-flow/pull/5662
 [#5663]: https://github.com/bytedance/deer-flow/pull/5663
 [#5664]: https://github.com/bytedance/deer-flow/pull/5664
+[#5667]: https://github.com/bytedance/deer-flow/pull/5667
 [#5669]: https://github.com/bytedance/deer-flow/pull/5669
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
 [#5676]: https://github.com/bytedance/deer-flow/pull/5676
@@ -6329,3 +6381,9 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135
+[#6138]: https://github.com/bytedance/deer-flow/pull/6138
+[#6140]: https://github.com/bytedance/deer-flow/pull/6140
+[#6171]: https://github.com/bytedance/deer-flow/pull/6171
+[#6201]: https://github.com/bytedance/deer-flow/pull/6201
+[#6202]: https://github.com/bytedance/deer-flow/pull/6202
+[#6212]: https://github.com/bytedance/deer-flow/pull/6212

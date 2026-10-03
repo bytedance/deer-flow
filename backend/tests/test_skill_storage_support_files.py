@@ -74,7 +74,7 @@ def test_ensure_safe_support_path_requires_a_filename_below_the_subdir(storage, 
     assert storage.ensure_safe_support_path("demo-skill", "assets/logo.png") == (skill_dir / "assets" / "logo.png").resolve()
 
 
-@pytest.mark.parametrize("path", ["assets/CON", "assets/nul.txt", "assets/logo.png.", "assets/notes.md "])
+@pytest.mark.parametrize("path", ["assets/CON", "assets/nul.txt", "assets/com¹.txt", "assets/LPT²", "assets/LPT³/icon.png", "assets/logo.png.", "assets/notes.md "])
 def test_ensure_safe_support_path_rejects_windows_incompatible_names(storage, skill_dir, path):
     with pytest.raises(ValueError, match="not portable to Windows"):
         storage.ensure_safe_support_path("demo-skill", path)
