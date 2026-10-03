@@ -1235,6 +1235,14 @@ These are deployment settings; the model still supplies only `query` and optiona
 empty list is forwarded and imposes no restriction of that kind. See the
 [tool configuration example](backend/docs/CONFIGURATION.md#tools).
 
+Serper `web_search` supports deployment-level `include_domains` and
+`exclude_domains` too. It checks returned URL hosts (including subdomains), with
+exclusion taking precedence. Filters can return fewer results, including zero;
+there are no refill requests. This selects sources, not factual accuracy or a
+global URL-access policy. The model arguments and image search are unchanged.
+See [Serper configuration](backend/docs/CONFIGURATION.md#serper-source-filters)
+for validation and query-length limits.
+
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
 Chat tool-step titles accept leading blank lines and up to three spaces before
