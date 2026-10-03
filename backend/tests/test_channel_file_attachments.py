@@ -14,6 +14,15 @@ from support.symlinks import symlink_or_skip
 from app.channels.base import Channel
 from app.channels.message_bus import InboundMessage, MessageBus, OutboundMessage, ResolvedAttachment
 
+# Hoisted module-level marker (review nit): keeps the skip reason in one place
+# instead of repeating it verbatim on each POSIX-only test. Intentionally applied
+# per test rather than via a class-level pytestmark, so that the Windows-safe
+# test_make_inbound_file_sandbox_readable_missing_noop keeps running on Windows.
+_POSIX_ONLY = pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX-only: asserts exact Unix permission modes; os.chmod only toggles the read-only bit on Windows",
+)
+
 
 def _run(coro):
     """Run an async coroutine synchronously."""
@@ -412,6 +421,7 @@ class TestInboundFileIngestion:
 
 
 class TestInboundFileSandboxPerms:
+    @_POSIX_ONLY
     def test_make_inbound_file_sandbox_readable_sets_group_other_read(self, tmp_path):
         from app.channels.manager import _make_inbound_file_sandbox_readable
 
@@ -426,6 +436,7 @@ class TestInboundFileSandboxPerms:
         assert mode & stat.S_IRGRP
         assert mode & stat.S_IROTH
 
+    @_POSIX_ONLY
     def test_make_inbound_file_sandbox_readable_preserves_owner_bits(self, tmp_path):
         from app.channels.manager import _make_inbound_file_sandbox_readable
 
@@ -441,6 +452,7 @@ class TestInboundFileSandboxPerms:
         assert mode == 0o644
         assert not (mode & stat.S_IWOTH)
 
+    @_POSIX_ONLY
     def test_make_inbound_file_sandbox_readable_skips_symlink(self, tmp_path):
         from support.symlinks import symlink_or_skip
 
@@ -463,6 +475,7 @@ class TestInboundFileSandboxPerms:
         # Best-effort helper: a missing file is a silent no-op.
         _make_inbound_file_sandbox_readable(tmp_path / "does-not-exist.txt")
 
+    @_POSIX_ONLY
     def test_make_inbound_file_sandbox_readable_swap_after_lstat_does_not_follow_symlink(self, tmp_path, monkeypatch):
         from app.channels.manager import _make_inbound_file_sandbox_readable
 
