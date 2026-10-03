@@ -285,7 +285,7 @@ DeerFlow поддерживает настраиваемые MCP-серверы 
 
 DeerFlow принимает задачи прямо из мессенджеров. Каналы запускаются автоматически при настройке, публичный IP не нужен.
 
-DeerFlow может также предоставлять в workspace UI пользовательские подключения IM-каналов. Когда включён `channel_connections`, вошедшие в систему пользователи могут привязать Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat или WeCom из боковой панели / Settings > Channels. Это переиспользует существующие исходящие транспорты `channels.*`, поэтому публичный IP или URL обратного вызова провайдера не требуются. Входящие IM-сообщения выполняются от имени подключённого пользователя DeerFlow. Настройки и вопросы безопасности описаны в [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md).
+DeerFlow может также предоставлять в workspace UI пользовательские подключения IM-каналов. Когда включён `channel_connections`, вошедшие в систему пользователи могут привязать Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ или Buzz из боковой панели / Settings > Channels. Это переиспользует существующие исходящие транспорты `channels.*`, поэтому публичный IP или URL обратного вызова провайдера не требуются. Входящие IM-сообщения выполняются от имени подключённого пользователя DeerFlow. Настройки и вопросы безопасности описаны в [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md).
 
 | Канал | Транспорт | Сложность |
 |-------|-----------|-----------|
@@ -295,6 +295,8 @@ DeerFlow может также предоставлять в workspace UI пол
 | WeChat | Tencent iLink (long-polling) | Средне |
 | WeCom | WebSocket | Средне |
 | DingTalk | Stream Push (WebSocket) | Средне |
+| QQ | WebSocket (текст: личные сообщения и упоминания в группе) | Средняя |
+| Buzz | Nostr relay (WebSocket, NIP-42) | Средняя |
 
 **Конфигурация в `config.yaml`:**
 

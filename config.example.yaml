@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 50
+config_version: 51
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -2833,7 +2833,7 @@ run_ownership:
 # - Provider bot/app credentials stay under `channels.*`.
 # - `channel_connections` stores per-user bindings and one-time connect codes.
 # - Telegram uses a deep link when `bot_username` is configured.
-# - Slack, Discord, Feishu, DingTalk, WeChat, and WeCom use `/connect <code>`
+# - Slack, Discord, Feishu, DingTalk, WeChat, WeCom, and QQ use `/connect <code>`
 #   through the already-running bot/app.
 # - When enabled (and channels are running), scheduled-task completions/failures
 #   also enqueue IM pushes to the owner's connected identities (see scheduler
@@ -2868,6 +2868,9 @@ run_ownership:
 #     enabled: false
 #
 #   buzz:
+#     enabled: false
+#
+#   qq:
 #     enabled: false
 
 # ============================================================================
@@ -2909,6 +2912,15 @@ run_ownership:
 #       thinking_enabled: true
 #       is_plan_mode: false
 #       subagent_enabled: false
+#
+#   # QQ Open Platform bot; choose WebSocket in the developer console.
+#   # Text-only C2C and group @mentions; no public callback URL required.
+#   qq:
+#     enabled: false
+#     app_id: $QQ_APP_ID
+#     client_secret: $QQ_CLIENT_SECRET
+#     allowed_users: []  # QQ OpenIDs, not numeric QQ account numbers; empty allows all
+#     sandbox: false    # REST sandbox host only; console sandbox membership is separate
 #
 #   feishu:
 #     enabled: false
