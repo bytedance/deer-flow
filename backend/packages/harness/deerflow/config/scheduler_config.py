@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 
 class SchedulerConfig(BaseModel):
@@ -21,3 +23,16 @@ class SchedulerConfig(BaseModel):
             "AppConfig.max_recursion_limit are clamped."
         ),
     )
+
+    @field_validator(
+        "poll_interval_seconds",
+        "lease_seconds",
+        "max_concurrent_runs",
+        "queue_timeout_seconds",
+        "min_once_delay_seconds",
+        "recursion_limit",
+        mode="before",
+    )
+    @classmethod
+    def _reject_boolean_scheduler_integers(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
