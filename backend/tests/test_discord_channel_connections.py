@@ -306,8 +306,9 @@ def _channel_with_real_typing(bus: MessageBus, repo, discord_loop: asyncio.Abstr
     return channel
 
 
-def _typing_message(text: str = "hello"):
+def _typing_message(text: str = "hello", *, author_id: int = 987):
     message = _discord_message(text)
+    message.author.id = author_id
 
     async def _typing() -> None:
         return None
@@ -362,6 +363,53 @@ async def test_discord_failed_identity_lookup_keeps_another_messages_typing():
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("follower_settles_first", [True, False], ids=["follower-committed", "follower-pending"])
+async def test_discord_failed_typing_creator_keeps_typing_for_a_follower(follower_settles_first: bool):
+    # A starts typing and waits on its lookup; B, to the same target, reuses
+    # that indicator. When A's lookup then fails, B (committed or still
+    # pending) still depends on the indicator, so A must not stop it.
+    gates = {"1": asyncio.Event(), "2": asyncio.Event()}  # creator, follower
+    lookups_started: set[str] = set()
+
+    class _PerAuthorRepo:
+        async def find_connection_by_external_identity(self, *, external_account_id: str, **_kwargs):
+            lookups_started.add(external_account_id)
+            await gates[external_account_id].wait()
+            if external_account_id == "1":
+                raise RuntimeError("database unavailable")
+            return None
+
+    async def _wait_for_lookup(author: str) -> None:
+        while author not in lookups_started:
+            await asyncio.sleep(0.01)
+
+    reactions: list[int] = []
+    bus = MessageBus()
+    discord_loop, thread = _start_discord_loop()
+    try:
+        channel = _channel_with_real_typing(bus, _PerAuthorRepo(), discord_loop, reactions)
+        creator = asyncio.run_coroutine_threadsafe(channel._on_message(_typing_message(author_id=1)), discord_loop)
+        await asyncio.wait_for(_wait_for_lookup("1"), timeout=5)
+        follower = asyncio.run_coroutine_threadsafe(channel._on_message(_typing_message(author_id=2)), discord_loop)
+        await asyncio.wait_for(_wait_for_lookup("2"), timeout=5)
+
+        settle_order = [(gates["2"], follower), (gates["1"], creator)] if follower_settles_first else [(gates["1"], creator), (gates["2"], follower)]
+        for gate, handler in settle_order:
+            gate.set()
+            await asyncio.wait_for(asyncio.wrap_future(handler), timeout=5)
+        typing_targets = list(channel._typing_tasks)
+        await _on_discord_loop(channel._cancel_typing_tasks(), discord_loop)
+        inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
+        bus.inbound_task_done()
+    finally:
+        _stop_discord_loop(discord_loop, thread)
+
+    assert typing_targets == ["456"]
+    assert inbound.text == "hello"
+    assert reactions == [111]
+
+
+@pytest.mark.anyio
 async def test_discord_committed_message_keeps_typing_and_acks(repo):
     await repo.upsert_connection(owner_user_id="alice", provider="discord", external_account_id="987", status="connected")
     reactions: list[int] = []
@@ -372,7 +420,14 @@ async def test_discord_committed_message_keeps_typing_and_acks(repo):
         await _on_discord_loop(channel._on_message(_typing_message()), discord_loop)
         await _on_discord_loop(asyncio.sleep(0), discord_loop)
         typing_targets = list(channel._typing_tasks)
-        await _on_discord_loop(channel._cancel_typing_tasks(), discord_loop)
+        held = sum(channel._typing_dependents.values())
+
+        async def _reply_stops_typing() -> None:
+            await channel._stop_typing("456")
+            await asyncio.sleep(0)  # let the cancelled loop finish
+
+        await _on_discord_loop(_reply_stops_typing(), discord_loop)
+        dependents_after_reply = dict(channel._typing_dependents)
         inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
         bus.inbound_task_done()
     finally:
@@ -380,6 +435,8 @@ async def test_discord_committed_message_keeps_typing_and_acks(repo):
 
     assert inbound.owner_user_id == "alice"
     assert typing_targets == ["456"]
+    assert held == 1  # the committed message holds the indicator
+    assert dependents_after_reply == {}  # released once a reply stops typing
     assert reactions == [111]
 
 

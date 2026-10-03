@@ -474,7 +474,8 @@ This release closes that milestone with **301 merged pull requests**.
   `_submit_threadsafe_coroutine` like Telegram, Feishu, and DingTalk. Bind
   replies go back through the Discord loop, and `stop()` now drains that work
   before tearing the client down. The typing indicator still registers before
-  the hand-off, and a failed lookup stops it and skips the ack reaction, so a
+  the hand-off, and a failed lookup skips the ack reaction and stops the
+  indicator unless another message to the same target still relies on it, so a
   dropped message never shows the bot as working. ([#6214])
 
 - **community:** The shared SSRF guard now refuses every non-global address,

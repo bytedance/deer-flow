@@ -86,6 +86,10 @@ class DiscordChannel(Channel):
 
         # Typing indicator management
         self._typing_tasks: dict[str, asyncio.Task] = {}
+        # Messages whose hand-off is pending or committed, per typing task. A
+        # failed hand-off may stop the indicator only when no other message
+        # still relies on it (see ``_acknowledge_after_handoff``).
+        self._typing_dependents: dict[asyncio.Task, int] = {}
 
         # Strong references for this channel's in-flight ack-reaction tasks.
         # The event loop keeps only weak references to scheduled tasks, so a
@@ -393,6 +397,7 @@ class DiscordChannel(Channel):
 
         task = asyncio.create_task(_typing_loop())
         self._typing_tasks[target_id] = task
+        task.add_done_callback(lambda done: self._typing_dependents.pop(done, None))
         return task
 
     async def _cancel_typing_tasks(self) -> None:
@@ -405,6 +410,7 @@ class DiscordChannel(Channel):
         if typing_tasks:
             await asyncio.gather(*(task for _, task in typing_tasks), return_exceptions=True)
         self._typing_tasks.clear()
+        self._typing_dependents.clear()
 
     def _discard_typing_tasks(self) -> None:
         """Forget stale typing tasks after their owning event loop has stopped."""
@@ -415,6 +421,7 @@ class DiscordChannel(Channel):
                     target_id,
                 )
         self._typing_tasks.clear()
+        self._typing_dependents.clear()
 
     async def _cancel_ack_reaction_tasks(self) -> None:
         """Cancel in-flight ack reactions so stop() does not strand them.
@@ -749,10 +756,16 @@ class DiscordChannel(Channel):
         without yielding, so a fast reply's ``_stop_typing`` cannot run first
         and leave an indicator behind. The ack reaction waits for the commit.
         If identity resolution or the commit fails, or ``stop()`` drains the
-        hand-off, the message was dropped: stop the indicator this message
-        started (never one another in-flight message owns) and skip the ack.
+        hand-off, the message was dropped and gets no ack. Another message to
+        the same target may have reused the indicator meanwhile, pending or
+        already committed, so a failed hand-off stops it only when this message
+        started it and no other message still depends on it.
         """
-        typing_task = await self._start_typing(typing_target, chat_id, thread_id) if typing_target else None
+        target_id = thread_id or chat_id
+        started_task = await self._start_typing(typing_target, chat_id, thread_id) if typing_target else None
+        typing_task = self._typing_tasks.get(target_id) if typing_target else None
+        if typing_task is not None:
+            self._typing_dependents[typing_task] = self._typing_dependents.get(typing_task, 0) + 1
         try:
             committed = await asyncio.shield(asyncio.wrap_future(handoff))
         except asyncio.CancelledError:
@@ -762,10 +775,17 @@ class DiscordChannel(Channel):
         except Exception:
             committed = False  # the submission finalizer already logged it
         if committed:
+            # Keep this message's hold until a reply stops the indicator.
             self._schedule_ack_reaction(message)
             return
-        target_id = thread_id or chat_id
-        if typing_task is not None and self._typing_tasks.get(target_id) is typing_task:
+        if typing_task is None:
+            return
+        remaining = self._typing_dependents.get(typing_task, 1) - 1
+        if remaining > 0:
+            self._typing_dependents[typing_task] = remaining
+            return
+        self._typing_dependents.pop(typing_task, None)
+        if typing_task is started_task and self._typing_tasks.get(target_id) is typing_task:
             await self._stop_typing(chat_id, thread_id)
 
     async def _commit_reserved_inbound_with_identity(
