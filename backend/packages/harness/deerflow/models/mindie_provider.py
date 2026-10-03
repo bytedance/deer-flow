@@ -29,6 +29,16 @@ def _fix_messages(messages: list) -> list:
                     parts.append(block)
                 elif isinstance(block, dict) and block.get("type") == "text":
                     parts.append(block.get("text", ""))
+                elif isinstance(block, dict) and block.get("type") == "json" and "json" in block:
+                    # Structured tool results ride the same text channel; serialize
+                    # them or the model sees an empty <tool_response>. A block with
+                    # no "json" key keeps the old drop behavior instead of emitting
+                    # a literal "null". Circular payloads raise ValueError, other
+                    # non-serializable values TypeError; degrade both to str().
+                    try:
+                        parts.append(json.dumps(block["json"], ensure_ascii=False))
+                    except (TypeError, ValueError):
+                        parts.append(str(block["json"]))
             text = "".join(parts)
         else:
             text = msg.content or ""
