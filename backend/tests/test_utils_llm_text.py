@@ -132,6 +132,36 @@ def test_strip_markdown_code_fence_leaves_unterminated_fence_unchanged() -> None
     assert strip_markdown_code_fence("```\ncontent") == "```\ncontent"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "```python\nprint(1)\n```\nCompare these examples.\n```python\nprint(2)\n```",
+        "```text\nfirst\n```\nTrailing explanation\n```",
+        "````text\ncontent\n```",
+        "```text\ncontent\n```not-a-closing-fence",
+        "```invalid`info\ncontent\n```",
+        "```text\nfirst\n   ```\nsecond\n```",
+    ],
+    ids=["separate-blocks", "trailing-prose", "short-close", "closing-info", "invalid-opening-info", "indented-early-close"],
+)
+def test_strip_markdown_code_fence_preserves_non_wrapping_fences(text: str) -> None:
+    assert strip_markdown_code_fence(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("````markdown\n```python\nprint(1)\n```\n````", "```python\nprint(1)\n```"),
+        ("```text\nhello\n`````", "hello"),
+        ("```text\nhello\n   ```", "hello"),
+        ("```text\n```not-a-close\nhello\n```", "```not-a-close\nhello"),
+    ],
+    ids=["nested-shorter-fence", "longer-close", "indented-close", "fence-like-body"],
+)
+def test_strip_markdown_code_fence_unwraps_matching_outer_fence(text: str, expected: str) -> None:
+    assert strip_markdown_code_fence(text) == expected
+
+
 # ---------------------------------------------------------------------------
 # extract_response_text
 # ---------------------------------------------------------------------------
