@@ -435,11 +435,16 @@ def list_files_in_dir(directory: Path) -> dict:
     files = []
     with os.scandir(directory) as entries:
         for entry in sorted(entries, key=lambda e: e.name):
-            if is_upload_staging_file(entry.name):
+            try:
+                if is_upload_staging_file(entry.name):
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                st = entry.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                # An upload may be removed between scanning and statting it.
+                # Keep the rest of the listing usable.
                 continue
-            if not entry.is_file(follow_symlinks=False):
-                continue
-            st = entry.stat(follow_symlinks=False)
             files.append(
                 {
                     "filename": entry.name,
