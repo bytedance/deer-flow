@@ -778,9 +778,31 @@ class WechatChannel(Channel):
             params["verify_code"] = verify_code
         return await self._request_public_get_json("/ilink/bot/get_qrcode_status", params=params, timeout=timeout)
 
-    async def _save_auth_state_drained(self, **kwargs: Any) -> dict[str, Any]:
-        """Persist QR auth state before propagating caller cancellation."""
-        return await await_drained(asyncio.to_thread(self._save_auth_state, **kwargs))
+    async def _save_auth_state_drained(
+        self,
+        *,
+        status: str,
+        bot_token: str | None = None,
+        ilink_bot_id: str | None = None,
+        qrcode: str | None = None,
+        qrcode_img_content: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist QR auth state before propagating caller cancellation.
+
+        The write is a small local state-file update and is intentionally drained
+        while _auth_lock is held so cancellation cannot expose an in-memory
+        credential before its durable state settles.
+        """
+        return await await_drained(
+            asyncio.to_thread(
+                self._save_auth_state,
+                status=status,
+                bot_token=bot_token,
+                ilink_bot_id=ilink_bot_id,
+                qrcode=qrcode,
+                qrcode_img_content=qrcode_img_content,
+            )
+        )
 
     async def _bind_via_qrcode(self) -> dict[str, Any]:
         qrcode_data = await self.request_login_qrcode()
