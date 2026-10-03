@@ -1,0 +1,505 @@
+"""Team extension contracts exercised through the installed contribution."""
+
+import asyncio
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from deerflow_extension_api import AgentRun, AgentRunError, ExtensionPrincipal
+from deerflow_extension_api.plugins import ActionContext, ToolContext
+
+from deerflow.extensions.loader import ExtensionSpec, load_extensions
+
+
+class Runs:
+    """Controllable host: records real admissions and separate thread states."""
+
+    def __init__(self):
+        self.threads = {}
+        self.runs = {}
+        self.starts = []
+        self.denied = False
+
+    def for_plugin(self, namespace):
+        return self
+
+    async def create_thread(self, *, assistant_id, thread_id, metadata):
+        self.threads.setdefault(thread_id, {"assistant": assistant_id, "values": {"messages": []}, "next": [], "interrupts": []})
+        return thread_id
+
+    async def get_state(self, *, thread_id):
+        if self.denied or thread_id not in self.threads:
+            raise AgentRunError(403, "unavailable")
+        return self.threads[thread_id]
+
+    async def start(self, *, thread_id, input, idempotency_key):
+        if self.denied:
+            raise AgentRunError(403, "revoked")
+        if idempotency_key in self.runs:
+            return self.runs[idempotency_key]
+        if any(r.thread_id == thread_id and r.status == "running" for r in self.runs.values()):
+            raise AgentRunError(409, "busy")
+        self.starts.append((thread_id, input))
+        self.threads[thread_id]["values"]["messages"].extend(input["messages"])
+        run = AgentRun(thread_id, idempotency_key, "running")
+        self.runs[run.run_id] = run
+        return run
+
+    async def get(self, *, thread_id, run_id):
+        if self.denied:
+            raise AgentRunError(403, "revoked")
+        return self.runs[run_id]
+
+    async def cancel(self, *, thread_id, run_id):
+        self.runs[run_id] = AgentRun(thread_id, run_id, "interrupted")
+
+    async def resume(self, *, thread_id, resume, idempotency_key):
+        self.threads[thread_id]["next"] = []
+        self.threads[thread_id]["interrupts"] = []
+        run = AgentRun(thread_id, idempotency_key, "running")
+        self.runs[run.run_id] = run
+        return run
+
+    def finish(self, run_id, answer="Evidence checked.", *, interrupted=False):
+        old = self.runs[run_id]
+        self.runs[run_id] = AgentRun(old.thread_id, run_id, "success")
+        state = self.threads[old.thread_id]
+        state["values"]["messages"].append({"type": "ai", "content": answer})
+        state["next"] = ["tools"] if interrupted else []
+        state["interrupts"] = [{"value": "Approve?"}] if interrupted else []
+
+
+@pytest.fixture
+def plugin(tmp_path, monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-agent-teams"))
+    loaded, diagnostics = load_extensions([ExtensionSpec(use="deerflow_extension_agent_teams:install", config={"enabled": True, "storage_path": str(tmp_path / "teams.sqlite")})])
+    assert not diagnostics
+    ((_, declaration),) = loaded.plugins
+    actions = {a.name: a.handler for a in declaration.backend}
+    service = actions["list"].__self__
+    service.available = True  # Explicit ticks keep lifecycle tests deterministic.
+    return loaded, actions, service
+
+
+def context(runs, owner="alice", thread=None):
+    if thread:
+        return ToolContext(ExtensionPrincipal(owner), {"enabled": True}, thread, agent_runs=runs)
+    return ActionContext(ExtensionPrincipal(owner), {"enabled": True}, agent_runs=runs)
+
+
+async def create(actions, runs):
+    return await actions["create"]({"request_id": "team-one", "name": "Release", "goal": "Check release readiness", "members": [{"name": "Research", "agent": "researcher"}, {"name": "Review", "agent": "reviewer"}]}, context(runs))
+
+
+@pytest.mark.asyncio
+async def test_members_are_full_agents_and_requests_are_deduplicated(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    assert len(runs.threads) == 2
+    assert {t["assistant"] for t in runs.threads.values()} == {"researcher", "reviewer"}
+    assert (await create(actions, runs))["id"] == team["id"]
+    assert (await actions["list"]({}, context(runs, "bob")))["teams"] == []
+    payload = {"team_id": team["id"], "member_id": team["members"][0]["id"], "text": "Check release", "request_id": "one"}
+    with pytest.raises(ValueError):
+        await actions["send"](payload, context(runs, "bob"))
+    jobs = await asyncio.gather(*(actions["send"](payload, context(runs)) for _ in range(4)))
+    assert len({j["id"] for j in jobs}) == 1
+    await service.tick()
+    assert len(runs.starts) == 1
+    runs.finish(jobs[0]["id"])
+    await service.tick()
+    view = await actions["get"]({"team_id": team["id"]}, context(runs))
+    assert view["jobs"][0]["status"] == "completed"
+    assert view["messages"][-1]["text"] == "Evidence checked."
+    assert view["messages"][-1]["member_id"] == payload["member_id"]
+
+
+@pytest.mark.asyncio
+async def test_serial_admission_parallel_members_and_explicit_approval(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    jobs = []
+    for n, member in enumerate([team["members"][0], team["members"][0], team["members"][1]]):
+        jobs.append(await actions["send"]({"team_id": team["id"], "member_id": member["id"], "text": "Check", "request_id": str(n)}, context(runs)))
+    await service.tick()
+    assert len(runs.starts) == 2
+    runs.finish(jobs[0]["id"], interrupted=True)
+    await service.tick()
+    view = await actions["get"]({"team_id": team["id"]}, context(runs))
+    assert view["jobs"][0]["status"] == "waiting_input"
+    await service.tick()
+    assert len(runs.starts) == 2
+    await actions["resume"]({"team_id": team["id"], "job_id": jobs[0]["id"], "response": {"approved": False}, "request_id": "answer"}, context(runs))
+    await service.tick()
+    view = await actions["get"]({"team_id": team["id"]}, context(runs))
+    runs.finish(view["jobs"][0]["run_id"])
+    await service.tick()
+    await service.tick()
+    assert len(runs.starts) == 3
+
+
+@pytest.mark.asyncio
+async def test_peer_handoff_delivers_result_and_cannot_impersonate_member(plugin):
+    loaded, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    sender, recipient = team["members"]
+    tools = {tool.name: tool.handler for _, p in loaded.plugins for tool in p.tools}
+    sent = await tools["send_member"]({"team_id": team["id"], "member_id": recipient["id"], "text": "Review this finding", "request_id": "review"}, context(runs, thread=sender["thread_id"]))
+    await service.tick()
+    runs.finish(sent["id"], "Verified finding")
+    await service.tick()
+    await service.tick()
+    assert len(runs.starts) == 2
+    assert runs.starts[-1][0] == sender["thread_id"]
+    message = runs.starts[-1][1]["messages"][0]
+    assert message["role"] == "user"
+    assert "Verified finding" in message["content"]
+    assert recipient["id"] in message["content"]
+    with pytest.raises(ValueError):
+        await tools["send_member"]({"team_id": team["id"], "member_id": recipient["id"], "text": "Spoof", "request_id": "bad"}, context(runs, thread="unrelated"))
+
+
+@pytest.mark.asyncio
+async def test_native_mentions_route_once_and_reject_foreign_access(plugin):
+    from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
+    from langchain_core.messages import HumanMessage
+
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    await runs.create_thread(assistant_id="lead_agent", thread_id="source", metadata={})
+    member = team["members"][0]
+    message = HumanMessage(id="m", content="@Research check this", additional_kwargs={"extension_mentions": [{"namespace": "community.agent-teams", "provider": "members", "id": f"{team['id']}/{member['id']}", "label": "ignored"}]})
+    runtime = SimpleNamespace(context={"thread_id": "source", "user_id": "alice", AGENT_RUNS_CONTEXT_KEY: runs})
+    await service.mentions([message], runtime)
+    await service.mentions([message], runtime)
+    await service.tick()
+    assert len(runs.starts) == 1
+    runs.denied = True
+    with pytest.raises(AgentRunError):
+        await service.mentions([message.model_copy(update={"id": "stolen"})], runtime)
+
+
+@pytest.mark.asyncio
+async def test_restart_requires_reconnect_and_preserves_existing_run(plugin):
+    from deerflow_extension_agent_teams.service import Teams
+
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    job = await actions["send"]({"team_id": team["id"], "member_id": team["members"][0]["id"], "text": "Check", "request_id": "job"}, context(runs))
+    await service.tick()
+    replacement = Teams(service.store.path)
+    replacement.available = True
+    await replacement.tick()
+    assert len(runs.starts) == 1
+    runs.finish(job["id"])
+    await replacement.connect({"team_id": team["id"]}, context(runs))
+    await replacement.tick()
+    view = await replacement.get({"team_id": team["id"]}, context(runs))
+    assert view["jobs"][0]["status"] == "completed"
+    assert len(runs.starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_revocation_disconnects_without_replacing_an_active_run(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    await actions["send"]({"team_id": team["id"], "member_id": team["members"][0]["id"], "text": "Check", "request_id": "one"}, context(runs))
+    await service.tick()
+    runs.denied = True
+    await service.tick()
+    view = await actions["get"]({"team_id": team["id"]}, context(runs))
+    assert view["connected"] is False
+    assert view["jobs"][0]["status"] == "running"
+    assert len(runs.starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_admission_retries_same_key_and_frozen_input(plugin, monkeypatch):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    original = runs.start
+    calls = []
+
+    async def uncertain(**kwargs):
+        calls.append(kwargs)
+        result = await original(**kwargs)
+        if len(calls) == 1:
+            raise TimeoutError
+        return result
+
+    monkeypatch.setattr(runs, "start", uncertain)
+    await actions["send"]({"team_id": team["id"], "member_id": team["members"][0]["id"], "text": "Check", "request_id": "one"}, context(runs))
+    await service.tick()
+    await service.tick()
+    assert calls[0] == calls[1]
+    assert len(runs.starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_stops_a_running_request_and_pending_delete_is_rejected(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    job = await actions["send"]({"team_id": team["id"], "member_id": team["members"][0]["id"], "text": "Check", "request_id": "one"}, context(runs))
+    with pytest.raises(ValueError):
+        await actions["delete"]({"team_id": team["id"]}, context(runs))
+    await service.tick()
+    await actions["cancel"]({"team_id": team["id"], "job_id": job["id"]}, context(runs))
+    await service.tick()
+    await service.tick()
+    view = await actions["get"]({"team_id": team["id"]}, context(runs))
+    assert view["jobs"][0]["status"] == "cancelled"
+    await actions["delete"]({"team_id": team["id"]}, context(runs))
+    assert (await actions["list"]({}, context(runs)))["teams"] == []
+    assert len(runs.threads) == 2  # No destructive thread API is called.
+
+
+@pytest.mark.asyncio
+async def test_externally_advanced_state_is_never_misattributed(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    job = await actions["send"]({"team_id": team["id"], "member_id": team["members"][0]["id"], "text": "Check", "request_id": "one"}, context(runs))
+    await service.tick()
+    runs.finish(job["id"])
+    runs.threads[team["members"][0]["thread_id"]]["values"]["messages"].extend([{"role": "user", "content": "Another task"}, {"role": "assistant", "content": "Unrelated result"}])
+    await service.tick()
+    view = await actions["get"]({"team_id": team["id"]}, context(runs))
+    assert view["jobs"][0]["status"] == "failed"
+    assert "Unrelated result" not in str(view["messages"])
+
+
+@pytest.mark.asyncio
+async def test_service_lock_prevents_two_workers_and_releases_on_shutdown(plugin):
+    import sqlite3
+
+    from deerflow_extension_agent_teams.service import Teams
+
+    _, _, first = plugin
+    second = Teams(first.store.path)
+    await first.start(None)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            await second.start(None)
+        assert not second.available
+    finally:
+        await first.stop()
+    await second.start(None)
+    await second.stop()
+
+
+@pytest.mark.asyncio
+async def test_real_tool_node_enforces_team_owner_and_current_thread(plugin):
+    from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    from deerflow.extensions.plugin_tools import build_plugin_tools
+
+    loaded, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    tool = next(t for t in build_plugin_tools(loaded) if "send_member" in t.name)
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", ToolNode([tool]))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    args = {"team_id": team["id"], "member_id": team["members"][1]["id"], "text": "Review", "request_id": "from-model"}
+    for owner, expected in [("bob", False), ("alice", True)]:
+        result = await graph.compile().ainvoke(
+            {"messages": [AIMessage(content="", tool_calls=[{"name": tool.name, "args": args, "id": "dispatch"}])]}, context={"thread_id": team["members"][0]["thread_id"], "user_id": owner, AGENT_RUNS_CONTEXT_KEY: runs}
+        )
+        assert ("queued" in result["messages"][-1].content) is expected
+    await service.tick()
+    assert len(runs.starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_mention_middleware_runs_in_real_lead_pipeline(plugin, monkeypatch, tmp_path):
+    from deerflow_extension_api import EXTENSION_TASK_STORE_KEY, ExtensionData
+    from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from langchain_core.messages import HumanMessage
+
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.paths import Paths
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    loaded, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    await runs.create_thread(assistant_id="lead_agent", thread_id="source", metadata={})
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", Paths(str(tmp_path)))
+    config = AppConfig(sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+    config.title.enabled = config.memory.enabled = config.summarization.enabled = False
+    stack = build_middlewares(config={"configurable": {}}, model_name="offline", app_config=config, extensions=loaded, memory_enabled=False, owns_agent_skill_projection=False)
+    graph = create_agent(FakeListChatModel(responses=["Request sent."]), middleware=stack, state_schema=ThreadState)
+    member = team["members"][0]
+    message = HumanMessage(id="native", content="@Research check release", additional_kwargs={"extension_mentions": [{"namespace": "community.agent-teams", "provider": "members", "id": f"{team['id']}/{member['id']}", "label": "Research"}]})
+    result = await graph.ainvoke(
+        {"messages": [message]}, config={"configurable": {"thread_id": "source"}}, context={"thread_id": "source", "user_id": "alice", AGENT_RUNS_CONTEXT_KEY: runs, EXTENSION_TASK_STORE_KEY: ExtensionData("native-run")}
+    )
+    assert any("requests queued" in str(m.content) for m in result["messages"])
+    await service.tick()
+    assert len(runs.starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_fresh_thread_404_is_not_a_failed_first_request(plugin, monkeypatch):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    original = runs.get_state
+
+    async def state(**kwargs):
+        result = await original(**kwargs)
+        if not result["values"]["messages"]:
+            raise AgentRunError(404, "No checkpoint")
+        return result
+
+    monkeypatch.setattr(runs, "get_state", state)
+    await actions["connect"]({"team_id": team["id"]}, context(runs))
+    job = await actions["send"]({"team_id": team["id"], "member_id": team["members"][0]["id"], "text": "First task", "request_id": "one"}, context(runs))
+    await service.tick()
+    runs.finish(job["id"])
+    await service.tick()
+    view = await actions["get"]({"team_id": team["id"]}, context(runs))
+    assert view["jobs"][0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_host_dynamic_context_id_rewrite_preserves_result_attribution(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    job = await actions["send"]({"team_id": team["id"], "member_id": team["members"][0]["id"], "text": "First task", "request_id": "one"}, context(runs))
+    await service.tick()
+    messages = runs.threads[team["members"][0]["thread_id"]]["values"]["messages"]
+    original = messages[0]
+    # Reproduce the real Gateway's admission metadata + dynamic reminder split.
+    messages[:] = [{"type": "system", "id": original["id"], "content": "Current date"}, {**original, "id": original["id"] + "__user", "additional_kwargs": {"run_id": job["id"]}}]
+    runs.finish(job["id"], "Correctly attributed")
+    await service.tick()
+    view = await actions["get"]({"team_id": team["id"]}, context(runs))
+    assert view["jobs"][0]["status"] == "completed"
+    assert view["messages"][-1]["text"] == "Correctly attributed"
+
+
+@pytest.mark.asyncio
+async def test_shared_thread_access_does_not_grant_foreign_team_access(plugin):
+    from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
+    from langchain_core.messages import HumanMessage
+
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    member = team["members"][0]
+    await runs.create_thread(assistant_id="lead_agent", thread_id="source", metadata={})
+    # This host double permits thread reads to both callers, like a shared
+    # conversation. Plugin team data must still use the authenticated owner.
+    runtime = SimpleNamespace(context={"thread_id": "source", "user_id": "bob", AGENT_RUNS_CONTEXT_KEY: runs})
+    message = HumanMessage(id="foreign", content="Send", additional_kwargs={"extension_mentions": [{"namespace": "community.agent-teams", "provider": "members", "id": f"{team['id']}/{member['id']}", "label": "Spoof"}]})
+    with pytest.raises(ValueError):
+        await service.mentions([message], runtime)
+    assert not runs.starts
+
+
+@pytest.mark.asyncio
+async def test_result_context_is_bounded_and_old_pending_jobs_are_paged(plugin):
+    import json
+
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    for i in range(25):
+        await actions["send"]({"team_id": team["id"], "member_id": team["members"][0]["id"], "text": "资料" * 1000, "request_id": str(i)}, context(runs))
+    view = await actions["get"]({"team_id": team["id"]}, context(runs))
+    assert view["total_jobs"] == 25
+    assert len(view["jobs"]) == 20
+    assert len(json.dumps(view, ensure_ascii=False).encode()) < 64 * 1024
+    second = await actions["get"]({"team_id": team["id"], "offset": 20}, context(runs))
+    assert len(second["jobs"]) == 5
+    assert {j["id"] for j in view["jobs"]}.isdisjoint(j["id"] for j in second["jobs"])
+
+
+@pytest.mark.asyncio
+async def test_handoff_chain_cannot_grow_without_bound(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    first, second = team["members"]
+    root = await actions["send"]({"team_id": team["id"], "member_id": first["id"], "text": "Begin", "request_id": "root"}, context(runs))
+    await service.tick()
+    for i in range(11):
+        await actions["send"]({"team_id": team["id"], "member_id": second["id"], "text": "Review", "request_id": str(i)}, context(runs, thread=first["thread_id"]))
+    with pytest.raises(ValueError, match="limit"):
+        await actions["send"]({"team_id": team["id"], "member_id": second["id"], "text": "Review", "request_id": "overflow"}, context(runs, thread=first["thread_id"]))
+    stored = await service.db("get", "alice", team["id"])
+    assert {j["root"] for j in stored["jobs"]} == {root["id"]}
+
+
+@pytest.mark.asyncio
+async def test_activity_keeps_task_result_and_handoff_provenance_after_context_rotation(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    sender, recipient = team["members"]
+    first = await actions["send"]({"team_id": team["id"], "member_id": sender["id"], "text": "Research the release", "request_id": "initial"}, context(runs))
+    await service.tick()
+    peer = await actions["send"]({"team_id": team["id"], "member_id": recipient["id"], "text": "Review the evidence", "request_id": "peer"}, context(runs, thread=sender["thread_id"]))
+    await service.tick()
+    runs.finish(peer["id"], "Review passed")
+    await service.tick()
+    await service.db("change", "alice", team["id"], lambda t: t.update(messages=[]))
+    view = await actions["get"]({"team_id": team["id"], "limit": 200, "details": True}, context(runs))
+    job = next(j for j in view["jobs"] if j["id"] == peer["id"])
+    assert job["text"] == "Review the evidence"
+    assert job["result"] == "Review passed"
+    assert job["source_member_id"] == sender["id"]
+    assert job["parent_id"] == first["id"]
+    assert job["root"] == first["id"]
+    unchanged = await actions["get"]({"team_id": team["id"], "limit": 200, "details": True, "revision": view["revision"]}, context(runs))
+    assert unchanged == {"unchanged": True, "revision": view["revision"]}
+    assert job["created_at"]
+    assert job["completed_at"]
+    assert job["delivery"]["thread_id"] == sender["thread_id"]
+    assert job["delivery"]["status"] == "queued"
+    assert not {"input", "resume", "initial_run_id"} & job.keys()
+    with pytest.raises(ValueError):
+        await actions["get"]({"team_id": team["id"], "limit": 200, "details": True}, context(runs, "bob"))
+
+
+@pytest.mark.asyncio
+async def test_activity_reads_legacy_jobs_and_bounds_projection(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    sent = await actions["send"]({"team_id": team["id"], "member_id": team["members"][0]["id"], "text": "Legacy request", "request_id": "legacy"}, context(runs))
+    await service.tick()
+    runs.finish(sent["id"], "Legacy result")
+    await service.tick()
+
+    def old_version(t):
+        for job in t["jobs"]:
+            for key in ("result", "parent_id", "created_at", "completed_at"):
+                job.pop(key, None)
+
+    await service.db("change", "alice", team["id"], old_version)
+    view = await actions["get"]({"team_id": team["id"], "limit": 1, "details": True}, context(runs))
+    assert view["jobs"][0]["result"] == "Legacy result"
+    assert view["jobs"][0]["created_at"] is None
+    for limit in (0, 201, True, "20"):
+        with pytest.raises(ValueError):
+            await actions["get"]({"team_id": team["id"], "limit": limit}, context(runs))
