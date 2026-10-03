@@ -2319,6 +2319,11 @@ read the previous executed occurrence through opt-in `read_conversation`, with
 the same owner and read-permission checks. This provides a source reference,
 not an automatic summary or a post-back into the originating chat.
 
+For a trial, send a direct request such as "Run this task now" or "先跑一次".
+The host accepts a bounded set of English/Chinese direct-run requests from the
+current user turn; task mentions, quoted or conditional requests, and a bare
+"yes" do not start a paid run. The agent asks for a direct request when needed.
+
 A goal occurrence can use up to nine agent turns, with an evaluator request after
 each. Evaluator requests and provider-reported tokens are included in run usage;
 missing usage makes the corresponding cost estimate unknown. `token_budget`

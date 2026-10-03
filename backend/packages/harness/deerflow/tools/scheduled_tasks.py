@@ -70,7 +70,10 @@ async def schedule_task(
     After creating a recurring report, digest or file task, offer a trial now.
     Do not offer a trial for one-time tasks or condition watchers. Call trial
     only after explicit user confirmation or an explicit request to run now;
-    an offer by itself grants no authorization. A trial is a manual occurrence
+    invite a direct reply such as "Run this task now" or "先跑一次". The host
+    accepts bounded English/Chinese direct-run requests in the current turn;
+    bare "yes", task mentions, quoted or conditional requests are rejected.
+    An offer by itself grants no authorization. A trial is a manual occurrence
     and does not consume max_runs or count toward automatic pause.
 
     Args:
@@ -83,7 +86,7 @@ async def schedule_task(
         schedule_spec: A run_at ISO timestamp for once, every_seconds for interval, or a five-field cron string for cron.
         timezone: IANA timezone name, required for create.
         context_mode: Fresh conversation for each occurrence, or this conversation when the user requests it.
-        goal_objective: Optional checkable outcome copied from the user's instructions.
+        goal_objective: Optional checkable outcome copied from the user's instructions, at most 4000 characters after whitespace normalization.
         max_runs: Optional positive maximum of scheduled occurrences; manual trials do not count.
         end_at: Optional end time as an ISO timestamp with timezone.
         note: The user's explicit standing note, verbatim; used only by note.

@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy import text
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.agents.thread_state import get_thread_state_schema
@@ -26,6 +27,31 @@ from deerflow.runtime.runs.manager import ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 
 
+def _asyncpg_fixture_url(uri: str) -> URL:
+    url = make_url(uri)
+    query = dict(url.query)
+    if "sslmode" in query:
+        query["ssl"] = query.pop("sslmode")
+    return url.set(drivername="postgresql+asyncpg", query=query)
+
+
+@pytest.mark.parametrize("sslmode", [None, "disable", "allow", "prefer", "require", "verify-ca", "verify-full"])
+def test_asyncpg_fixture_url_preserves_sslmode_and_other_connect_options(sslmode):
+    uri = "postgresql://user:password@localhost:5432/deerflow?target_session_attrs=read-write"
+    if sslmode is not None:
+        uri += f"&sslmode={sslmode}"
+    url = _asyncpg_fixture_url(uri)
+    _args, kwargs = url.get_dialect()().create_connect_args(url)
+    assert url.drivername == "postgresql+asyncpg"
+    assert kwargs["target_session_attrs"] == "read-write"
+    assert "sslmode" not in kwargs
+    if sslmode is None:
+        assert "ssl" not in kwargs
+    else:
+        assert kwargs["ssl"] == sslmode
+    assert make_url(dsn_with_search_path(uri, "fixture_schema")).query.get("sslmode") == sslmode
+
+
 @pytest_asyncio.fixture(params=["sqlite", "postgres"])
 async def database_runtime(request, tmp_path):
     schema = None
@@ -35,7 +61,7 @@ async def database_runtime(request, tmp_path):
             pytest.skip("TEST_POSTGRES_URI is not set")
         postgres = pytest.importorskip("langgraph.checkpoint.postgres.aio")
         schema = "scheduled_rollback_" + uuid4().hex
-        engine = create_async_engine(uri.replace("postgresql://", "postgresql+asyncpg://", 1), connect_args=build_asyncpg_connect_args(schema))
+        engine = create_async_engine(_asyncpg_fixture_url(uri), connect_args=build_asyncpg_connect_args(schema))
         saver_context = postgres.AsyncPostgresSaver.from_conn_string(dsn_with_search_path(uri, schema))
     else:
         path = tmp_path / "shared.db"

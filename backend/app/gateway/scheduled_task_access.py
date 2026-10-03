@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import HTTPException, Request
-from pydantic import AwareDatetime, BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field, field_validator
 
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import resolve_route_permissions
@@ -18,8 +18,9 @@ from app.gateway.deps import get_config, get_local_provider, get_scheduled_task_
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 from app.gateway.scheduled_task_validation import validate_scheduled_task_create
 from deerflow.agents.interaction_policy import RunInteractionMode, RunInteractionPolicy
-from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict
+from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict, ScheduledTaskQuotaExceeded
 from deerflow.scheduler.runtime import SchedulerCapabilityMode, SchedulerRunCapability, scheduler_tools_enabled
+from deerflow.utils.goal_objective import normalize_goal_objective
 
 _MANAGE_PERMISSIONS = {
     "create": frozenset({"threads:write", "runs:create"}),
@@ -38,6 +39,39 @@ class _TaskBounds(BaseModel):
     goal_objective: str | None = Field(default=None, min_length=1)
     max_runs: int | None = Field(default=None, ge=1, strict=True)
     end_at: AwareDatetime | None = None
+
+    @field_validator("goal_objective")
+    @classmethod
+    def validate_goal_objective(cls, value: str | None) -> str | None:
+        if value is not None:
+            normalize_goal_objective(value)
+        return value
+
+
+def _has_explicit_trial_request(user_text: str, task: Mapping[str, Any]) -> bool:
+    """Accept bounded direct-run turns, never a keyword in arbitrary user text.
+
+    This is deliberately not a general intent parser. Quoted, conditional,
+    compound or bare-confirmation turns require a new direct user request.
+    """
+    if not user_text or len(user_text) > 500:
+        return False
+    command = " ".join(user_text.strip().rstrip(".!。！").split()).casefold()
+    for prefix in ("yes, please ", "yes, ", "please ", "可以，请", "可以，", "好，", "请"):
+        if command.startswith(prefix):
+            command = command[len(prefix) :].strip()
+            break
+    targets = {"it", "this task"}
+    # Titles are arbitrary prose and may contain quoted/conditional clauses.
+    # Only an opaque selector can safely be interpolated into a direct request.
+    task_id = task.get("id")
+    if isinstance(task_id, str) and 5 < len(task_id) <= 64 and task_id.startswith("task-") and task_id.isascii() and task_id.replace("-", "").replace("_", "").isalnum():
+        targets.add(task_id.casefold())
+    direct_requests = {f"run {target} {timing}" for target in targets for timing in ("now", "once", "once now")}
+    direct_requests.update({"run a trial now", "先跑一次", "现在跑一次", "先试跑一次", "现在试跑一次", "先运行一次", "现在运行一次"})
+    for target in targets - {"it", "this task"}:
+        direct_requests.update({f"先试跑{target}", f"现在试跑{target}", f"先运行{target}一次", f"现在运行{target}一次"})
+    return command in direct_requests
 
 
 def _public_task(task: dict[str, Any]) -> dict[str, Any]:
@@ -124,8 +158,8 @@ class _SchedulerCapability:
                     raise HTTPException(status_code=404, detail="Scheduled task not found")
                 return _public_task(updated)
             if action == "trial":
-                if not self._original_user_text.strip():
-                    raise HTTPException(status_code=403, detail="A trial requires an explicit request in the current user turn")
+                if not _has_explicit_trial_request(self._original_user_text, task):
+                    raise HTTPException(status_code=403, detail="A trial requires a direct request in the current user turn, such as 'Run this task now' or '先跑一次'; a task mention or bare confirmation is insufficient")
                 result = await self._service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
                 status = {"not_found": 404, "conflict": 409, "failed": 502}.get(result.get("outcome"))
                 if status is not None:
@@ -144,6 +178,8 @@ class _SchedulerCapability:
             return _error(exc)
         except ActiveScheduledTaskMutationConflict as exc:
             return {"error": f"Scheduled task has an active {exc.status} occurrence; retry after it finishes", "status_code": 409}
+        except ScheduledTaskQuotaExceeded as exc:
+            return {"error": str(exc), "status_code": 409}
         except ValueError as exc:
             return {"error": str(exc), "status_code": 422}
 

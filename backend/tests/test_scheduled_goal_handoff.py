@@ -3,7 +3,7 @@
 import asyncio
 from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import pytest_asyncio
@@ -54,6 +54,75 @@ def _graph(node, checkpointer, mode):
     graph.add_edge(START, "answer")
     graph.add_edge("answer", END)
     return graph.compile(checkpointer=checkpointer)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("failure", ["ambiguous", "invalid_objective", "unsupported_store"])
+async def test_preflight_resolution_failure_blocks_execution_and_preserves_existing_goal(infrastructure, monkeypatch, mode, failure):
+    store, checkpointer = infrastructure
+    timestamp = "2026-10-03T00:00:00.123456+00:00"
+    existing = goal.build_goal_state("User goal", now=timestamp)
+    await goal.write_thread_goal(checkpointer, "result", existing, create_if_missing=True)
+    if failure == "unsupported_store":
+        monkeypatch.setattr(store, "list_by_thread_created_at", AsyncMock(side_effect=NotImplementedError))
+    else:
+        # Matching history is not proof that this goal belongs to one occurrence:
+        # duplicate identities and malformed candidates must preserve the goal.
+        metadata = {"scheduled_task_id": "task", "scheduled_task_run_id": "occurrence", "scheduled_goal_objective": existing["objective"] if failure == "ambiguous" else " "}
+        for index in range(2 if failure == "ambiguous" else 1):
+            await store.put(f"source-{index}", thread_id="result", user_id="alice", status="error", created_at=timestamp, metadata=metadata)
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject("result", user_id="alice")
+    observed = []
+
+    async def node(state):
+        observed.append(state.get("goal"))
+        return {"messages": [AIMessage(content="New answer")], "title": "New request"}
+
+    evaluate = AsyncMock()
+    monkeypatch.setattr(worker, "evaluate_goal_completion", evaluate)
+    compiled = _graph(node, checkpointer, mode)
+    stream = Mock(wraps=compiled.astream)
+    monkeypatch.setattr(compiled, "astream", stream)
+    bridge = _bridge()
+    await worker.run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=worker.RunContext(checkpointer=checkpointer, checkpoint_channel_mode=mode),
+        agent_factory=lambda config: compiled,
+        graph_input={"messages": [HumanMessage(content="An unrelated user request")]},
+        config={"configurable": {"thread_id": "result"}},
+    )
+    expected_error = "Scheduled goal recovery could not verify the existing goal's ownership. Agent execution did not start; the goal was preserved."
+    assert record.status == RunStatus.error
+    assert record.error == expected_error
+    assert observed == []
+    stream.assert_not_called()
+    evaluate.assert_not_awaited()
+    assert await goal.read_thread_goal(checkpointer, "result") == existing
+    row = await store.get(record.run_id, user_id="alice")
+    assert row["status"] == "error"
+    assert row["error"] == expected_error
+    assert row.get("goal_verdict") is None
+    bridge.publish.assert_any_await(record.run_id, "error", {"message": expected_error, "name": "RuntimeError"})
+
+
+@pytest.mark.asyncio
+async def test_preflight_resolution_does_not_convert_cancellation_to_failure(infrastructure, monkeypatch):
+    store, checkpointer = infrastructure
+    existing = goal.build_goal_state("User goal", now="2026-10-03T00:00:00.123456+00:00")
+    await goal.write_thread_goal(checkpointer, "result", existing, create_if_missing=True)
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject("result", user_id="alice")
+    cancellation = asyncio.CancelledError()
+    monkeypatch.setattr(manager, "scheduled_goal_source", AsyncMock(side_effect=cancellation))
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await worker._clear_stale_scheduled_goal(record=record, run_manager=manager, bridge=_bridge(), checkpointer=checkpointer)
+    assert caught.value is cancellation
+    assert record.status == RunStatus.pending
+    assert await goal.read_thread_goal(checkpointer, "result") == existing
 
 
 @pytest.mark.asyncio

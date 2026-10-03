@@ -2043,7 +2043,12 @@ async def _clear_stale_scheduled_goal(*, record: RunRecord, run_manager: RunMana
             # Only this canonical representation is emitted by the scheduled
             # installer; equivalent user timestamps are not provenance.
             return
-        source = await run_manager.scheduled_goal_source(record.thread_id, user_id=record.user_id, created_at=created_at, objective=current["objective"])
+        try:
+            source = await run_manager.scheduled_goal_source(record.thread_id, user_id=record.user_id, created_at=created_at, objective=current["objective"])
+        except Exception as exc:
+            # Idle recovery can defer cleanup, but a new run must not inherit
+            # an unverified goal. Keep cancellation and the checkpoint intact.
+            raise RuntimeError("Scheduled goal recovery could not verify the existing goal's ownership. Agent execution did not start; the goal was preserved.") from exc
         if source is None or not await run_manager.owns_active_admission(record):
             return
         try:

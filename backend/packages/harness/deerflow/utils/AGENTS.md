@@ -1,3 +1,10 @@
+### Goal Objective Validation
+
+`goal_objective.py` owns the dependency-free normalized 4000-character objective
+validation shared by runtime and scheduled-task capability/repository admission.
+`runtime.goal` re-exports the helper for compatibility. Validation does not replace
+the saved original text; blank or over-limit text is rejected before persistence.
+
 ### Message Text Extraction
 
 `message_content_to_text` takes raw message content and treats `None` as empty

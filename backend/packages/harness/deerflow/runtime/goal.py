@@ -30,6 +30,8 @@ from deerflow.models import create_chat_model
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.file_io import await_drained
+from deerflow.utils.goal_objective import MAX_GOAL_OBJECTIVE_CHARS as MAX_GOAL_OBJECTIVE_CHARS
+from deerflow.utils.goal_objective import normalize_goal_objective as normalize_goal_objective
 from deerflow.utils.messages import message_to_text
 from deerflow.utils.time import now_iso
 
@@ -37,7 +39,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_GOAL_CONTINUATIONS = 8
 DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS = 2
-MAX_GOAL_OBJECTIVE_CHARS = 4000
 MAX_GOAL_REASON_CHARS = 1000
 MAX_GOAL_EVIDENCE_CHARS = 1000
 MAX_GOAL_CONVERSATION_CHARS = 12000
@@ -97,16 +98,6 @@ def parse_goal_command(args: str) -> GoalCommand:
     if stripped.lower() in GOAL_CLEAR_ALIASES:
         return GoalCommand("clear")
     return GoalCommand("set", stripped)
-
-
-def normalize_goal_objective(objective: str) -> str:
-    """Normalize and validate user-provided goal text."""
-    normalized = " ".join(objective.strip().split())
-    if not normalized:
-        raise ValueError("Goal objective must not be empty.")
-    if len(normalized) > MAX_GOAL_OBJECTIVE_CHARS:
-        raise ValueError(f"Goal objective must be at most {MAX_GOAL_OBJECTIVE_CHARS} characters.")
-    return normalized
 
 
 def build_goal_state(

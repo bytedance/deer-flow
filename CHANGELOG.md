@@ -17,7 +17,7 @@ This release closes that milestone with **301 merged pull requests**.
   support bounded automatic launches and per-occurrence goals, and let a scheduled
   agent request stopping its own schedule. Unmet goals and automatic pause use
   the existing notification outbox; explicit notes and authorized previous-run
-  references carry context forward without changing the goal lifecycle.
+  references carry context forward without changing the goal lifecycle. ([#6229])
 
 #### Scheduler
 
@@ -7616,4 +7616,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6140]: https://github.com/bytedance/deer-flow/pull/6140
 [#6201]: https://github.com/bytedance/deer-flow/pull/6201
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
-
+[#6229]: https://github.com/bytedance/deer-flow/pull/6229

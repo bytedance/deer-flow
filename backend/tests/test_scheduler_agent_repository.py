@@ -426,6 +426,37 @@ async def test_update_preserves_goal_fresh_thread_invariant_under_lock(tmp_path,
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("objective", [pytest.param("", id="empty"), pytest.param(" \t\n ", id="blank"), pytest.param("x" * 4001, id="too-long")])
+async def test_create_rejects_invalid_goal_without_inserting_task(tmp_path, database_backend, objective):
+    async with database(tmp_path, backend=database_backend) as (_sf, tasks, _runs):
+        with pytest.raises(ValueError, match="Goal objective"):
+            await task(tasks, goal_objective=objective)
+        assert await tasks.list_by_origin_thread("owner", "origin") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("objective", [pytest.param("", id="empty"), pytest.param(" \t\n ", id="blank"), pytest.param("x" * 4001, id="too-long")])
+async def test_update_rejects_invalid_goal_without_changing_task(tmp_path, database_backend, objective):
+    async with database(tmp_path, backend=database_backend) as (_sf, tasks, _runs):
+        before = await task(tasks, goal_objective="deliver report")
+        with pytest.raises(ValueError, match="Goal objective"):
+            await tasks.update("task", user_id="owner", updates={"goal_objective": objective, "title": "changed"}, require_mutable=True)
+        assert await tasks.get("task", user_id="owner") == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("objective", [pytest.param(None, id="none"), pytest.param("  deliver\t report\n ", id="original-text"), pytest.param(" \n" + "x" * 4000 + "\t ", id="normalized-limit")])
+async def test_create_and_update_preserve_valid_goal_text(tmp_path, database_backend, objective):
+    async with database(tmp_path, backend=database_backend) as (_sf, tasks, _runs):
+        created = await task(tasks, goal_objective=objective)
+        assert created["goal_objective"] == objective
+        await task(tasks, "updated", goal_objective="previous goal")
+        updated = await tasks.update("updated", user_id="owner", updates={"goal_objective": objective}, require_mutable=True)
+        assert updated["goal_objective"] == objective
+        assert (await tasks.get("updated", user_id="owner"))["goal_objective"] == objective
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("live_count", [19, 20])
 async def test_terminal_pause_obeys_quota_and_repeated_pause_preserves_slot(tmp_path, database_backend, live_count):
     async with database(tmp_path, backend=database_backend) as (_sf, tasks, _runs):

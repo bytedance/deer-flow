@@ -14,6 +14,7 @@ from deerflow.persistence.scheduled_task_runs.finalization import FinalizationOb
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
 from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, ScheduledTaskRow
+from deerflow.utils.goal_objective import normalize_goal_objective
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,8 @@ class ScheduledTaskRepository:
         end_at: datetime | str | None = None,
         standing_notes: list[str] | None = None,
     ) -> dict[str, Any]:
+        if goal_objective is not None:
+            normalize_goal_objective(goal_objective)
         if goal_objective is not None and context_mode != "fresh_thread_per_run":
             raise ValueError("goal-backed schedules require fresh_thread_per_run")
         if max_runs is not None and (not isinstance(max_runs, int) or isinstance(max_runs, bool) or max_runs < 1):
@@ -304,6 +307,8 @@ class ScheduledTaskRepository:
         updates: dict[str, Any],
         require_mutable: bool = False,
     ) -> dict[str, Any] | None:
+        if updates.get("goal_objective") is not None:
+            normalize_goal_objective(updates["goal_objective"])
         async with self._sf() as session:
             quota_transition = False
             if updates.get("status") in LIVE_TASK_STATUSES:

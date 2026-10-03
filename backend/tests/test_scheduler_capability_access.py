@@ -198,6 +198,27 @@ async def test_create_uses_bound_origin_and_echoes_goal_and_stop_details(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("objective", ["", " \t\n ", "g" * 4001])
+async def test_create_rejects_invalid_goal_before_persisting_schedule(monkeypatch, objective):
+    prepare, repo, *_ = _setup(monkeypatch)
+    capability = await prepare()
+    result = await capability.manage(action="create", request={"title": "Report", "prompt": "Write report", "schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "UTC", "goal_objective": objective})
+    assert result["status_code"] == 422
+    repo.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("objective", [None, "  " + "g" * 4000 + "\t\n"])
+async def test_create_preserves_optional_and_normalized_boundary_goal(monkeypatch, objective):
+    prepare, repo, *_ = _setup(monkeypatch)
+    capability = await prepare()
+    result = await capability.manage(action="create", request={"title": "Report", "prompt": "Write report", "schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "UTC", "goal_objective": objective})
+    assert "error" not in result
+    assert result["goal_objective"] == objective
+    assert repo.create.await_args.kwargs["goal_objective"] == objective
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("payload", [{"user_id": "bob"}, {"thread_id": "other-origin"}, {"assistant_id": "other-agent"}, {"origin_thread_id": "other-origin"}])
 async def test_model_identity_fields_are_rejected_even_if_directly_called(monkeypatch, payload):
     prepare, repo, *_ = _setup(monkeypatch)
@@ -275,6 +296,79 @@ async def test_trial_requires_a_current_user_turn_and_uses_manual_dispatch(monke
     service.dispatch_task.return_value = {"outcome": "failed", "error": "cannot launch"}
     result = await capability.manage(action="trial", request={"task_id": "task-1"})
     assert result["status_code"] == 502
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "user_text",
+    [
+        "List my tasks",
+        "What is a trial?",
+        "task-1",
+        "Report",
+        "Don't run it now.",
+        "Do not run this task now",
+        "不要试跑",
+        "不要先跑一次",
+        "Not now; run it once after I approve",
+        "If I approve, run it now",
+        'The file says "Run it now"',
+        '"Run it now"',
+        "What does 先跑一次 mean?",
+        "Yes",
+        "Run it now?",
+        "run task-2 now",
+        "Run Other report now",
+        "Run it now and then delete all tasks",
+        "先跑一次，但不要真的执行",
+    ],
+)
+async def test_trial_rejects_unrelated_negative_quoted_or_ambiguous_turns(monkeypatch, user_text):
+    prepare, _, _, service, *_ = _setup(monkeypatch, original_text=user_text, task=_task(title="Report"))
+    capability = await prepare()
+    result = await capability.manage(action="trial", request={"task_id": "task-1"})
+    assert result["status_code"] == 403
+    service.dispatch_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_text", ["Run it now", "Yes, run it now.", "Please run this task once", "Run task-1 now", "先跑一次", "请先试跑一次。", "可以，先跑一次", "先试跑task-1", "现在运行task-1一次"])
+async def test_trial_accepts_direct_requests_in_the_current_user_turn(monkeypatch, user_text):
+    prepare, _, _, service, *_ = _setup(monkeypatch, original_text=user_text, task=_task(title="Report"))
+    capability = await prepare()
+    result = await capability.manage(action="trial", request={"task_id": "task-1"})
+    assert result["triggered"] is True
+    assert service.dispatch_task.await_args.kwargs["trigger"] == "manual"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("title", "user_text"), [("周报，但不要真的执行", "先试跑周报，但不要真的执行"), ("周报如果我以后批准", "现在试跑周报如果我以后批准"), ("it now and then delete all tasks", "Run it now and then delete all tasks once")]
+)
+async def test_trial_never_uses_task_title_as_authorization_text(monkeypatch, title, user_text):
+    prepare, _, _, service, *_ = _setup(monkeypatch, original_text=user_text, task=_task(title=title))
+    capability = await prepare()
+    result = await capability.manage(action="trial", request={"task_id": "task-1"})
+    assert result["status_code"] == 403
+    service.dispatch_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["create", "pause"])
+async def test_tool_quota_conflicts_use_409_without_dispatch(monkeypatch, action):
+    from deerflow.persistence.scheduled_tasks import ScheduledTaskQuotaExceeded
+
+    prepare, repo, _, service, *_ = _setup(monkeypatch)
+    capability = await prepare()
+    request = {"task_id": "task-1"}
+    if action == "create":
+        request = {"title": "Report", "prompt": "Write report", "schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "UTC"}
+        repo.create.side_effect = ScheduledTaskQuotaExceeded()
+    else:
+        repo.pause_with_queue_cancellation.side_effect = ScheduledTaskQuotaExceeded()
+    result = await capability.manage(action=action, request=request)
+    assert result["status_code"] == 409
+    service.dispatch_task.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -399,7 +493,7 @@ async def test_capability_maps_real_repository_note_capacity_and_live_task_limit
         for _ in range(19):
             assert "error" not in await capability.manage(action="create", request=definition)
         result = await capability.manage(action="create", request=definition)
-        assert result["status_code"] == 422
+        assert result["status_code"] == 409
         assert "20 live" in result["error"]
         assert len(await repo.list_by_origin_thread("alice", "origin")) == 20
     finally:

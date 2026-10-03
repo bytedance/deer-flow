@@ -186,6 +186,9 @@ exact owner/thread/timestamp/normalized-objective terminal scheduled run, using
 or unavailable identity fails closed; source metadata must remain server-stamped
 at Gateway admission. `clear_recovered_scheduled_goal` uses the existing idle-thread
 checkpoint-write reservation; a busy thread defers to the next worker's preflight.
+Preflight source-resolution errors stop before graph execution with an explicit
+recovery error and preserve the goal; do not copy idle recovery's catch-and-defer
+behavior into an executing run. Cancellation continues to propagate unchanged.
 Newer user goals and ownership/lease loss always win. Failed cleanup remains
 recoverable through this durable instance tuple without new GoalState fields.
 
