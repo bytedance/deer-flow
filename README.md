@@ -1848,6 +1848,9 @@ Files presented through `present_files` remain part of the thread's artifact sta
 Artifact content revisions refresh when an output file is atomically replaced,
 even if its size and modification time are preserved. Refreshing the preview
 then provides the new revision for saving; an older preview still requires a reload.
+Regular files over the 2 MiB editing limit use file identity and change metadata
+for range validators without hashing the whole file. Conditional byte ranges for
+regular files require a matching ETag; date-form `If-Range` requests receive the full current file.
 
 CSV and TSV artifacts open as tables in the artifact panel and in a separate window. The preview preserves text values (including leading zeros), supports an optional header row, and pages through up to 200 rows and 50 columns from the initial sample. Long or multiline cells can be opened and copied in full. Switch to source to inspect or edit the file; downloads and separate windows use the saved version.
 
