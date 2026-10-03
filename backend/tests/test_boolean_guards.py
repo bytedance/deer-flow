@@ -1,6 +1,9 @@
 """Direct tests for the shared boolean-rejection helper."""
 
+from typing import cast
+
 import pytest
+from pydantic import ValidationInfo
 
 from deerflow.config._boolean_guards import reject_boolean
 
@@ -12,9 +15,8 @@ class _Probe:
         self.field_name = field_name
 
 
-def _info(field_name: str) -> object:
-
-    return _Probe(field_name)
+def _info(field_name: str) -> ValidationInfo:
+    return cast(ValidationInfo, _Probe(field_name))
 
 
 def test_reject_boolean_names_the_field() -> None:
