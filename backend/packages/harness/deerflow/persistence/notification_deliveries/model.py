@@ -43,6 +43,11 @@ class NotificationDeliveryRow(Base):
     # state instead of retrying forever.
     parked_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    # Fencing token minted at claim time (issue #6200): each claim flips the
+    # row to ``sending`` and stamps a fresh token, and completion writes are
+    # guarded by it, so a claimant that stalled past the stale-sending
+    # timeout cannot modify the row after another worker reclaimed it.
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # Bounded result snapshot written at enqueue time (summary text, run
     # status, error); the delivery worker never re-reads agent state.

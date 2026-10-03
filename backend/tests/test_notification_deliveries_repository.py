@@ -314,6 +314,77 @@ class TestNotificationDeliveryRepository:
         assert updated["attempts"] == 0
 
     @pytest.mark.anyio
+    async def test_claim_stamps_a_fresh_claim_token_per_claim(self, repo):
+        """Every claim mints a new fencing token, so a claim that lost its row
+        (stale reset plus a re-claim by another worker) can be told apart
+        from the current owner."""
+        await repo.enqueue(**_enqueue_kwargs())
+
+        first = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
+        assert first["claim_token"]
+
+        await repo.reset_stale_sending_rows(now=datetime.now(UTC) + timedelta(minutes=11), timeout=timedelta(minutes=10))
+        second = (await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(minutes=11), limit=1))[0]
+
+        assert second["claim_token"] != first["claim_token"]
+
+    @pytest.mark.anyio
+    async def test_stale_claim_cannot_finalize_reclaimed_delivery(self, repo):
+        """Issue #6200: a worker that stalled past the stale-sending timeout
+        must not modify the delivery after another worker reclaimed it. The
+        late completion still carries the first claim's token while the row
+        is owned by the second claim, so both late writes must be ignored
+        and the current claim's state and retry accounting stay untouched."""
+        await repo.enqueue(**_enqueue_kwargs())
+        stale = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
+
+        await repo.reset_stale_sending_rows(now=datetime.now(UTC) + timedelta(minutes=11), timeout=timedelta(minutes=10))
+        current = (await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(minutes=11), limit=1))[0]
+        assert current["id"] == stale["id"]
+        assert current["claim_token"] != stale["claim_token"]
+
+        late_failure = await repo.mark_failed(stale["id"], claim_token=stale["claim_token"], error="late result")
+        assert late_failure["status"] == "sending"
+        assert late_failure["attempts"] == 0
+        assert late_failure["last_error"] is None
+
+        late_sent = await repo.mark_sent(stale["id"], claim_token=stale["claim_token"])
+        assert late_sent["status"] == "sending"
+        assert late_sent["sent_at"] is None
+
+        # The current claim is unaffected and keeps working.
+        owned = await repo.mark_failed(current["id"], claim_token=current["claim_token"], error="boom")
+        assert owned["status"] == "pending"
+        assert owned["attempts"] == 1
+
+    @pytest.mark.anyio
+    async def test_fenced_completion_dies_with_its_claim(self, repo):
+        """A token whose claim already ended -- the row went back to pending
+        through its own counted failure -- must not finalize the row again on
+        a later call: completion is only valid while the claim holds the
+        ``sending`` lease."""
+        await repo.enqueue(**_enqueue_kwargs())
+        claimed = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
+
+        finished = await repo.mark_failed(claimed["id"], claim_token=claimed["claim_token"], error="boom")
+        assert finished["status"] == "pending"
+
+        late = await repo.mark_failed(claimed["id"], claim_token=claimed["claim_token"], error="late")
+        assert late["status"] == "pending"
+        assert late["attempts"] == 1
+        assert late["last_error"] == "boom"
+
+    @pytest.mark.anyio
+    async def test_fenced_mark_sent_finalises_while_claim_holds(self, repo):
+        await repo.enqueue(**_enqueue_kwargs())
+        claimed = (await repo.claim_due_deliveries(now=datetime.now(UTC), limit=1))[0]
+
+        updated = await repo.mark_sent(claimed["id"], claim_token=claimed["claim_token"])
+
+        assert updated["status"] == "sent"
+        assert updated["sent_at"] is not None
+
+    @pytest.mark.anyio
     async def test_unique_constraint_rejects_manual_duplicate(self, repo):
         from sqlalchemy.exc import IntegrityError
 

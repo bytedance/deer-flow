@@ -3,8 +3,12 @@
 The completion hook calls :meth:`NotificationDeliveryRepository.enqueue`
 (idempotent), and the delivery worker uses ``claim_due_deliveries`` /
 ``mark_sent`` / ``mark_failed``. Claim flips rows ``pending -> sending``
-inside one transaction guarded by ``status = 'pending'``, so concurrent
-workers (multi-pod deployments) cannot double-send the same row.
+inside one transaction guarded by ``status = 'pending'`` and stamps a fresh
+``claim_token``, so concurrent workers (multi-pod deployments) cannot
+double-send the same row. Completion writes that carry the token land only
+while that claim still owns the row, so a claimant stalled past the
+stale-sending timeout cannot modify a delivery another worker reclaimed
+(issue #6200).
 """
 
 from __future__ import annotations
@@ -136,6 +140,10 @@ class NotificationDeliveryRepository:
         re-SELECT would also match rows a concurrent worker flipped in the
         same window and hand them out twice -- the multi-pod double-send the
         docstring above rules out.
+
+        Each claim also mints a fresh ``claim_token`` fencing token: the
+        claimed rows come back carrying it, and the completion methods
+        require it for as long as the claim owns the row.
         """
         if limit <= 0:
             return []
@@ -165,7 +173,7 @@ class NotificationDeliveryRepository:
                             NotificationDeliveryRow.id.in_(due_ids),
                             NotificationDeliveryRow.status == "pending",
                         )
-                        .values(status="sending", updated_at=now)
+                        .values(status="sending", claim_token=self._new_id(), updated_at=now)
                         .returning(NotificationDeliveryRow)
                     )
                 )
@@ -199,7 +207,7 @@ class NotificationDeliveryRepository:
             await session.commit()
             return result.rowcount
 
-    async def mark_sent(self, delivery_id: str) -> dict[str, Any]:
+    async def mark_sent(self, delivery_id: str, *, claim_token: str | None = None) -> dict[str, Any]:
         async with self.session_factory() as session:
             row = await session.get(NotificationDeliveryRow, delivery_id)
             if row is None:
@@ -210,11 +218,113 @@ class NotificationDeliveryRepository:
                 # must not reopen or relabel it.
                 logger.info("notification delivery %s is already %s; ignoring late mark_sent", delivery_id, row.status)
                 return self._to_dict(row)
+            if claim_token is not None:
+                # Fenced completion (issue #6200): the write lands only while
+                # this claim still owns the row. The conditional UPDATE
+                # matches zero rows once the claim was superseded -- the row
+                # left ``sending`` through the stale reset or a re-claim
+                # minted a new token -- so a stale worker can neither finalize
+                # nor relabel the delivery the current owner is processing.
+                finalized = await self._fenced_completion(
+                    session,
+                    delivery_id,
+                    claim_token,
+                    values={"status": "sent", "sent_at": datetime.now(UTC)},
+                )
+                if finalized is None:
+                    return await self._fenced_out_row(session, delivery_id, claim_token, "mark_sent")
+                await session.commit()
+                return self._to_dict(finalized)
             row.status = "sent"
             row.sent_at = datetime.now(UTC)
             await session.commit()
             await session.refresh(row)
             return self._to_dict(row)
+
+    @staticmethod
+    async def _fenced_completion(
+        session: AsyncSession,
+        delivery_id: str,
+        claim_token: str,
+        *,
+        values: dict[str, Any],
+    ) -> NotificationDeliveryRow | None:
+        """Apply ``values`` only while ``claim_token`` still owns the row.
+
+        One conditional UPDATE guarded by ``status = 'sending'`` and the
+        claim token: zero matched rows means the claim was superseded and
+        nothing is written. The row is stamped with the update time
+        explicitly (a Core UPDATE does not fire ORM ``onupdate``), keeping
+        the stale-``sending`` timeout measured from the last transition.
+        """
+        values = {**values, "updated_at": datetime.now(UTC)}
+        result = await session.execute(
+            update(NotificationDeliveryRow)
+            .where(
+                NotificationDeliveryRow.id == delivery_id,
+                NotificationDeliveryRow.status == "sending",
+                NotificationDeliveryRow.claim_token == claim_token,
+            )
+            .values(**values)
+            .returning(NotificationDeliveryRow)
+        )
+        return result.scalars().first()
+
+    async def _fenced_out_row(
+        self,
+        session: AsyncSession,
+        delivery_id: str,
+        claim_token: str,
+        operation: str,
+    ) -> dict[str, Any]:
+        """Report the current state after a fenced write matched no rows."""
+        logger.info(
+            "notification delivery %s is no longer owned by claim %s; ignoring late %s",
+            delivery_id,
+            claim_token[:8],
+            operation,
+        )
+        await session.rollback()
+        current = await session.get(NotificationDeliveryRow, delivery_id)
+        if current is None:
+            raise LookupError(f"notification delivery {delivery_id} not found")
+        return self._to_dict(current)
+
+    @staticmethod
+    def _failure_outcome(
+        row: NotificationDeliveryRow,
+        *,
+        error: str | None,
+        count_attempt: bool,
+        terminal: bool,
+        now: datetime,
+    ) -> dict[str, Any]:
+        """Compute the next state of one failed attempt (see ``mark_failed``)."""
+        values: dict[str, Any] = {"last_error": error, "updated_at": now}
+        if terminal:
+            values["status"] = "failed"
+        elif not count_attempt:
+            created_at = row.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            park_expired = (now - created_at) >= _CHANNEL_PARK_MAX_AGE or row.parked_attempts >= _CHANNEL_PARK_MAX_ATTEMPTS
+            if park_expired:
+                values["status"] = "failed"
+                values["last_error"] = error or "channel did not return before parking limit"
+            else:
+                values["parked_attempts"] = row.parked_attempts + 1
+                values["status"] = "pending"
+                values["available_at"] = now + timedelta(seconds=_CHANNEL_DOWN_RETRY_SECONDS)
+        else:
+            attempts = row.attempts + 1
+            values["attempts"] = attempts
+            if attempts >= row.max_attempts:
+                values["status"] = "failed"
+            else:
+                delay = min(_RETRY_BASE_SECONDS * 2 ** (attempts - 1), _RETRY_MAX_SECONDS)
+                values["status"] = "pending"
+                values["available_at"] = now + timedelta(seconds=delay)
+        return values
 
     async def mark_failed(
         self,
@@ -223,6 +333,7 @@ class NotificationDeliveryRepository:
         error: str | None = None,
         count_attempt: bool = True,
         terminal: bool = False,
+        claim_token: str | None = None,
     ) -> dict[str, Any]:
         """Record a failed attempt; reschedule with backoff while retries
         remain, otherwise finalize the row as ``failed``.
@@ -239,6 +350,11 @@ class NotificationDeliveryRepository:
         become valid again, such as a target the owner has since
         disconnected: neither waiting nor retrying would make sending it
         right.
+
+        With ``claim_token`` the write is fenced (issue #6200): it applies
+        only while that claim still owns the row, so a stale claimant's late
+        failure can neither consume the current owner's retry budget nor
+        move its row out of ``sending``.
         """
         async with self.session_factory() as session:
             row = await session.get(NotificationDeliveryRow, delivery_id)
@@ -250,30 +366,23 @@ class NotificationDeliveryRepository:
                 # pending and send it later after all.
                 logger.info("notification delivery %s is already %s; ignoring late mark_failed", delivery_id, row.status)
                 return self._to_dict(row)
-            row.last_error = error
-            if terminal:
-                row.status = "failed"
-            elif not count_attempt:
-                now = datetime.now(UTC)
-                created_at = row.created_at
-                if created_at.tzinfo is None:
-                    created_at = created_at.replace(tzinfo=UTC)
-                park_expired = (now - created_at) >= _CHANNEL_PARK_MAX_AGE or row.parked_attempts >= _CHANNEL_PARK_MAX_ATTEMPTS
-                if park_expired:
-                    row.status = "failed"
-                    row.last_error = error or "channel did not return before parking limit"
-                else:
-                    row.parked_attempts += 1
-                    row.status = "pending"
-                    row.available_at = now + timedelta(seconds=_CHANNEL_DOWN_RETRY_SECONDS)
-            else:
-                row.attempts += 1
-                if row.attempts >= row.max_attempts:
-                    row.status = "failed"
-                else:
-                    delay = min(_RETRY_BASE_SECONDS * 2 ** (row.attempts - 1), _RETRY_MAX_SECONDS)
-                    row.status = "pending"
-                    row.available_at = datetime.now(UTC) + timedelta(seconds=delay)
+            now = datetime.now(UTC)
+            if claim_token is not None:
+                # Fenced completion (issue #6200): compute the next state from
+                # this claim's row, then land it with a conditional UPDATE
+                # that applies only while the claim still owns the row.
+                updated = await self._fenced_completion(
+                    session,
+                    delivery_id,
+                    claim_token,
+                    values=self._failure_outcome(row, error=error, count_attempt=count_attempt, terminal=terminal, now=now),
+                )
+                if updated is None:
+                    return await self._fenced_out_row(session, delivery_id, claim_token, "mark_failed")
+                await session.commit()
+                return self._to_dict(updated)
+            for name, value in self._failure_outcome(row, error=error, count_attempt=count_attempt, terminal=terminal, now=now).items():
+                setattr(row, name, value)
             await session.commit()
             await session.refresh(row)
             return self._to_dict(row)
