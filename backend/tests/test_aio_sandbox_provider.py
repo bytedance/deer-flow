@@ -8,7 +8,7 @@ import os
 import stat
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from _windows_acl_helpers import _windows_acl_owner_sid, _windows_acl_sids
@@ -2183,7 +2183,7 @@ def test_shutdown_keeps_aio_warm_entries_owned_when_idle_checker_stop_times_out(
         "warm-retry",
         warm_info,
         reason="shutdown",
-        still_reapable=mock.ANY,
+        still_reapable=ANY,
     )
     assert provider._warm_pool == {}
     assert provider._warm_pool_identity == {}
