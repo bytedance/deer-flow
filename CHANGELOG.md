@@ -2772,6 +2772,15 @@ This release closes that milestone with **301 merged pull requests**.
   still miss. Argument values that spell a denied path in order are refused too
   (fail-closed). ([#6212])
 
+- **channels:** A Telegram `allowed_users` list that contains no numeric user ID
+  now denies every user instead of silently allowing all of them. Entries that
+  failed `int()` were dropped without a log line, and an empty result meant "no
+  allowlist", so `["@alice", "bob"]` opened the bot to everyone. A single ID is
+  now a one-entry list rather than a string whose digits each became an allowed
+  user (`"123456"` allowed users 1–6 and blocked 123456), `null` or a bare
+  integer no longer crashes the channel at startup, and every dropped entry —
+  `@usernames`, floats, booleans — is logged as a warning.
+
 ### Documentation
 
 - **docs:** Fix the Apple Container verification instructions. The guide

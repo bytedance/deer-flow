@@ -781,7 +781,7 @@ channels:
     bot_token: $TELEGRAM_BOT_TOKEN
     # Optional: render final Markdown replies as Telegram Rich Messages.
     rich_messages: false
-    allowed_users: []               # empty = allow all
+    allowed_users: []               # numeric user IDs, not @usernames; empty = allow all
 
   wechat:
     enabled: false

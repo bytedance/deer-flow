@@ -445,7 +445,7 @@ channels:
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
-    allowed_users: []               # 留空表示允许所有人
+    allowed_users: []               # 填数字用户 ID，不是 @用户名；留空表示允许所有人
 
     # 可选：按渠道 / 按用户单独覆盖 session 配置
     session:

@@ -2938,7 +2938,7 @@ run_ownership:
 #   telegram:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
-#     allowed_users: []               # empty = allow all
+#     allowed_users: []               # numeric user IDs, not @usernames; empty = allow all
 #     rich_messages: false             # Bot API 10.1 Rich Messages for final Markdown responses
 #
 #   wechat:
