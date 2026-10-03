@@ -625,6 +625,65 @@ async def test_down_on_last_line_of_multiline_input_falls_back_to_history():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("history", [[], ["previous prompt"]])
+@pytest.mark.parametrize("draft", ["unsent question", "first line\nsecond line"])
+async def test_down_without_history_navigation_preserves_draft_and_cursor(history, draft):
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for entry in history:
+            app._history.add(entry)
+        app.post_message(events.Paste(draft))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        location = (len(draft.splitlines()) - 1, 2)
+        composer.move_cursor(location)
+
+        await pilot.press("down", "down")
+        await pilot.pause()
+        assert composer.value == draft
+        assert composer.cursor_location == location
+        await pilot.press("ctrl+z")
+        await pilot.pause()
+        assert composer.value == ""
+
+
+@pytest.mark.asyncio
+async def test_history_round_trip_restores_draft_and_idle_down_keeps_later_edits():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    draft = "first line\nsecond line"
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._history.add("older prompt")
+        app._history.add("newer prompt")
+        app.post_message(events.Paste(draft))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        composer.cursor_position = 0
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "newer prompt"
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "older prompt"
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == "newer prompt"
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == draft
+
+        app.post_message(events.Paste(" edited"))
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == draft + " edited"
+
+
+@pytest.mark.asyncio
 async def test_slash_command_with_surrounding_whitespace_still_runs_as_command():
     session = _FakeSession()
     app = DeerFlowTUI(session, LaunchPlan(mode="tui"))

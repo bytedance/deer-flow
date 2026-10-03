@@ -312,6 +312,8 @@ export interface Translations {
     mentionSearch: string;
     mentionSkills: string;
     mentionFiles: string;
+    mentionExtensions: string;
+    mentionExtensionsLimit: string;
     mentionConversations: string;
     mentionUpload: string;
     mentionEmpty: string;

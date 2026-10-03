@@ -175,8 +175,18 @@ export function appendHtmlPreviewBaseHref(
   url?: string,
   currentHref = globalThis.location?.href ?? "http://localhost/",
 ) {
-  if (!url || /<base\s/i.exec(content)) {
+  if (!url) {
     return content;
+  }
+
+  // A real base tag requires this text; avoid constructing a DOM for other reports.
+  if (/base/i.test(content)) {
+    // Template contents are inert: parse tags without running scripts or loading assets.
+    const template = document.createElement("template");
+    template.innerHTML = content;
+    if (template.content.querySelector("base")) {
+      return content;
+    }
   }
 
   const baseHref = htmlBaseHref(url, currentHref);
