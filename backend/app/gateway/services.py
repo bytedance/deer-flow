@@ -2411,6 +2411,14 @@ async def sse_consumer(
                 await await_drained(run_mgr.cancel(record.run_id))
 
 
+def serialize_wait_run_status(record: RunRecord) -> dict[str, Any]:
+    """Return durable status and the error envelope recognized by the SDK."""
+    result: dict[str, Any] = {"status": record.status.value, "error": record.error}
+    if record.status == RunStatus.error:
+        result["__error__"] = {"error": "RunError", "message": record.error or "Run failed."}
+    return result
+
+
 async def wait_for_run_completion(
     bridge: StreamBridge,
     record: RunRecord,
