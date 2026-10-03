@@ -79,36 +79,21 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 
 ### QQ WebSocket channel
 
-`qq.py` implements QQ Open Platform text C2C and group @mention events using
-httpx and websockets. Register it in the service, browser provider metadata,
-credential requirements and `ChannelConnectionsConfig` together. It uses the
-shared non-streaming manager and normal bound-identity policy.
+`qq.py` handles text C2C/group @mentions via httpx/websockets and the shared
+non-streaming manager. Keep service, provider, credential and config registration
+aligned. Binding scopes: `<app_id>:c2c` or `<app_id>:group:<group_openid>`; topics
+retain the sender. Bind commands precede allowlists; reserve intake before identity lookup.
 
-Private binding scope is `<app_id>:c2c`; group scope is
-`<app_id>:group:<group_openid>`. Resolve ownership only within that exact scope,
-and retain the sender in the stable topic key so legacy group histories do not
-mix participants. Binding commands precede the ordinary allowlist and never
-enter the agent. Reserve shared bus capacity before identity lookup.
+Start waits for READY; stop drains tasks/HTTP. Keep reads/heartbeats independent
+of intake and SSL/client setup off-loop. Accept only TLS/443 gateways at
+`api.bot.qq.com` or the `sgroup.qq.com` family; reject URL credentials/redirects.
+Logs exclude secrets, content, provider bodies and raw exceptions.
 
-Keep socket reads/heartbeats independent of the bounded inbound worker. Start
-waits for READY; stop drains owned tasks and closes the HTTP client. SSL/client
-initialization runs off the event loop. Do not log provider bodies, message
-content, credentials, or raw transport exceptions. Gateway discovery is
-restricted to `api.bot.qq.com` and the `sgroup.qq.com` family over TLS port 443;
-credentials in URLs and redirects are rejected.
+`thread_ts` is the source message ID. Lock each source; preserve expiry, sequence
+and quota (C2C: four/60 min; group: five/5 min) across redelivery. Ignore progress;
+reuse sequences only after definite auth failure, never ambiguous I/O. Unknown
+timestamps use a full advisory window with content-free, rate-limited warnings.
+Evict expired contexts first; caches are bounded/process-local. One worker per bot.
 
-Outbound `thread_ts` is the source QQ message ID, not the DeerFlow conversation
-key. Preserve passive-reply expiry and each source's quota (four C2C replies,
-five group replies) across concurrent sends. Ignore progress updates,
-serialize each source's replies, and reuse the
-same `msg_seq` only for a definite authentication retry. An ambiguous network
-failure spends its sequence and is not automatically resent. Reply and dedupe
-caches are bounded and process-local; evict expired reply contexts before
-active ones. Unparsable or timezone-naive timestamps use a full advisory reply
-window with a content-free, rate-limited warning; QQ enforces expiry server-side.
-Run one active worker per bot.
-
-Regression coverage: `test_qq_channel.py`, `test_qq_lifecycle.py`,
-`test_qq_binding.py`, QQ cases in `test_channel_connections_router.py`,
-and `blocking_io/test_qq_channel.py`. Setup and platform limitations are in
-[IM_CHANNEL_CONNECTIONS.md](../../docs/IM_CHANNEL_CONNECTIONS.md#qq-websocket-setup-mvp).
+Tests: `test_qq_{channel,lifecycle,binding}.py`, connection router and blocking-I/O.
+Setup: [IM_CHANNEL_CONNECTIONS.md](../../docs/IM_CHANNEL_CONNECTIONS.md#qq-websocket-setup-mvp).
