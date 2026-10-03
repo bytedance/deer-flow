@@ -10,6 +10,9 @@ guards already shipped for ``stream_bridge_config`` (heartbeat interval) and
 
 from __future__ import annotations
 
+from deerflow.config.app_config import AppConfig, LlmCallConfig
+from deerflow.config.sandbox_config import SandboxConfig
+
 import pytest
 from pydantic import ValidationError
 
@@ -174,15 +177,25 @@ class TestAppConfigBoolRejection:
         ],
     )
     def test_llm_call_integers_reject_booleans(self, field: str) -> None:
-        from deerflow.config.app_config import LlmCallConfig
-
         with pytest.raises(ValidationError):
             LlmCallConfig(**{field: True})
 
     def test_llm_call_integers_still_accept_numbers(self) -> None:
-        from deerflow.config.app_config import LlmCallConfig
-
         config = LlmCallConfig(max_concurrent_calls=8, retry_max_attempts=3)
 
         assert config.max_concurrent_calls == 8
         assert config.retry_max_attempts == 3
+
+    @pytest.mark.parametrize("field", ["recursion_limit", "max_recursion_limit"])
+    def test_recursion_limits_reject_booleans(self, field: str) -> None:
+        # These two carry the worst effect of the coercion: recursion_limit: true
+        # became 1, so every Gateway run without an explicit limit died at the
+        # first super-step, and max_recursion_limit: true clamped the ceiling.
+        with pytest.raises(ValidationError):
+            AppConfig(sandbox=SandboxConfig(use="local"), **{field: True})
+
+    @pytest.mark.parametrize("field", ["recursion_limit", "max_recursion_limit"])
+    def test_recursion_limits_still_accept_numbers(self, field: str) -> None:
+        config = AppConfig(sandbox=SandboxConfig(use="local"), **{field: 12})
+
+        assert getattr(config, field) == 12
