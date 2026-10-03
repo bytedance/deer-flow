@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 
-from app.gateway.deps import _enforce_postgres_for_multi_worker, langgraph_runtime
+from app.gateway.deps import _enforce_postgres_for_multi_worker, _validate_agent_storage, langgraph_runtime
 from app.gateway.routers.browser import _browser_tools_enabled
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -52,6 +52,7 @@ def _config_with_backend(
 def test_gate_noop_when_gateway_workers_unset(monkeypatch):
     """With GATEWAY_WORKERS unset, every backend must be accepted."""
     monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
     for backend in ("sqlite", "memory", "postgres"):
         _enforce_postgres_for_multi_worker(_config_with_backend(backend))
 
@@ -61,6 +62,76 @@ def test_gate_noop_for_single_worker(monkeypatch):
     monkeypatch.setenv("GATEWAY_WORKERS", "1")
     for backend in ("sqlite", "memory", "postgres"):
         _enforce_postgres_for_multi_worker(_config_with_backend(backend))
+
+
+# ---------------------------------------------------------------------------
+# Uvicorn's WEB_CONCURRENCY fallback also starts several worker processes
+# ---------------------------------------------------------------------------
+
+
+def test_gate_rejects_multi_worker_from_uvicorn_worker_fallback(monkeypatch):
+    """WEB_CONCURRENCY=N starts N workers even with GATEWAY_WORKERS unset.
+
+    ``backend/Dockerfile`` and ``scripts/serve.sh`` launch uvicorn with no
+    ``--workers``, so uvicorn takes the count from ``WEB_CONCURRENCY``.
+    """
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite"))
+    assert "requires database.backend='postgres'" in str(exc_info.value)
+
+
+def test_gate_rejects_scheduler_duplication_from_uvicorn_worker_fallback(monkeypatch):
+    """Each of those workers starts its own scheduler, which the gate exists to refuse."""
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.setenv("WEB_CONCURRENCY", "3")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite", scheduler_enabled=True))
+    assert "each worker starts its own scheduler" in str(exc_info.value)
+
+
+def test_gate_rejects_process_local_browser_from_uvicorn_worker_fallback(monkeypatch):
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    with pytest.raises(SystemExit, match="process-local"):
+        _enforce_postgres_for_multi_worker(_config_with_backend("postgres", heartbeat_enabled=True, browser_enabled=True))
+
+
+def test_gate_reads_uvicorn_worker_fallback_when_gateway_workers_is_blank(monkeypatch):
+    """A blank GATEWAY_WORKERS means unset, exactly as the compose default treats it."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "")
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    with pytest.raises(SystemExit):
+        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite"))
+
+
+def test_gate_accepts_single_worker_from_uvicorn_worker_fallback(monkeypatch):
+    """WEB_CONCURRENCY=1 is a single worker, so the gate stays inert."""
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    for value in ("1", "0", ""):
+        monkeypatch.setenv("WEB_CONCURRENCY", value)
+        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite", scheduler_enabled=True))
+
+
+def test_gate_prefers_gateway_workers_over_uvicorn_worker_fallback(monkeypatch):
+    """An explicit GATEWAY_WORKERS wins: uvicorn ignores WEB_CONCURRENCY when --workers is passed.
+
+    ``docker/docker-compose.yaml`` always passes ``--workers ${GATEWAY_WORKERS:-1}``.
+    """
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    _enforce_postgres_for_multi_worker(_config_with_backend("sqlite", scheduler_enabled=True))
+
+
+def test_agent_storage_warning_names_the_variable_that_set_the_count(monkeypatch, caplog):
+    """The divergence warning must be actionable for a WEB_CONCURRENCY deployment."""
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    with caplog.at_level("WARNING"):
+        _validate_agent_storage(_config_with_backend("postgres", heartbeat_enabled=True))
+    messages = [r.message for r in caplog.records if "not visible across workers" in r.message]
+    assert messages and "WEB_CONCURRENCY=2" in messages[0]
 
 
 def test_gate_allows_multi_worker_with_postgres_and_heartbeat(monkeypatch):
