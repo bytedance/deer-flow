@@ -45,7 +45,7 @@ export function parseDelimitedPreview({
   // A range may end halfway through CRLF. Without the LF, Papa treats the CR
   // after a closing quote as malformed syntax. Keep the terminal record
   // incomplete so the normal prefix handling below discards it.
-  if (truncated && newline === "\r\n" && input.endsWith("\r")) {
+  if (truncated && newline !== "\r" && input.endsWith("\r")) {
     input = input.slice(0, -1);
   }
   const result: DelimitedPreviewResult = {

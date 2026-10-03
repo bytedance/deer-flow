@@ -84,6 +84,14 @@ describe("delimited preview parser", () => {
     },
   );
   it.each(["," as const, "\t" as const])(
+    "discards a split CRLF record after an LF-first header (%j)",
+    (delimiter) => {
+      const prefix = `ID${delimiter}Note\n001${delimiter}"x"\r`;
+      expect(parse(prefix, true, delimiter).rows).toEqual([["ID", "Note"]]);
+      expect(() => parse(prefix, false, delimiter)).toThrow();
+    },
+  );
+  it.each(["," as const, "\t" as const])(
     "handles a CRLF split at the actual sample limit (%j)",
     (delimiter) => {
       const start = `ID${delimiter}Note\r\n001${delimiter}complete\r\n002${delimiter}"`;
