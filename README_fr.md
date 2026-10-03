@@ -75,6 +75,7 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
     - [Mémoire à long terme](#mémoire-à-long-terme)
   - [Modèles recommandés](#modèles-recommandés)
   - [Client Python intégré](#client-python-intégré)
+  - [Projets](#projets)
   - [Tâches planifiées (Scheduled Tasks)](#tâches-planifiées-scheduled-tasks)
   - [Atelier terminal (TUI)](#atelier-terminal-tui)
   - [Documentation](#documentation)
@@ -295,7 +296,7 @@ Voir le [Guide MCP Server](backend/docs/MCP_SERVER.md) pour les instructions dé
 
 DeerFlow peut recevoir des tâches depuis des applications de messagerie. Les canaux démarrent automatiquement une fois configurés — aucune IP publique n'est requise.
 
-DeerFlow peut aussi exposer des connexions de canaux IM appartenant à l'utilisateur dans l'UI du workspace. Quand `channel_connections` est activé, les utilisateurs connectés peuvent lier Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat ou WeCom depuis la barre latérale / Settings > Channels. Cela réutilise les transports sortants `channels.*` existants, donc aucune IP publique ni URL de callback provider n'est requise. Les messages IM entrants s'exécutent ensuite sous le compte utilisateur DeerFlow connecté. Voir [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) pour la configuration et les notes de sécurité.
+DeerFlow peut aussi exposer des connexions de canaux IM appartenant à l'utilisateur dans l'UI du workspace. Quand `channel_connections` est activé, les utilisateurs connectés peuvent lier Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ ou Buzz depuis la barre latérale / Settings > Channels. Cela réutilise les transports sortants `channels.*` existants, donc aucune IP publique ni URL de callback provider n'est requise. Les messages IM entrants s'exécutent ensuite sous le compte utilisateur DeerFlow connecté. Voir [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) pour la configuration et les notes de sécurité.
 
 | Canal | Transport | Difficulté |
 |---------|-----------|------------|
@@ -305,6 +306,8 @@ DeerFlow peut aussi exposer des connexions de canaux IM appartenant à l'utilisa
 | WeChat | Tencent iLink (long-polling) | Modérée |
 | WeCom | WebSocket | Modérée |
 | DingTalk | Stream Push (WebSocket) | Modérée |
+| QQ | WebSocket (texte : messages privés et mentions de groupe) | Modérée |
+| Buzz | Relais Nostr (WebSocket, NIP-42) | Modérée |
 
 **Configuration dans `config.yaml` :**
 
@@ -674,6 +677,39 @@ client.clear_goal("thread-1")
 ```
 
 Toutes les méthodes retournant des dicts sont validées en CI contre les modèles de réponse Pydantic du Gateway (`TestGatewayConformance`), garantissant que le client intégré reste synchronisé avec les schémas de l'API HTTP. Voir `backend/packages/harness/deerflow/client.py` pour la documentation API complète.
+
+## Projets
+
+Les projets regroupent des conversations liées sous un nom partagé, des instructions et une étagère de documents.
+
+Une conversation rejoint un projet au moment de sa création (lorsqu'un projet est sélectionné) ou plus tard via le menu de déplacement. Les exécutions ne modifient jamais l'appartenance : l'envoi d'un message ne peut pas affecter ou réaffecter une conversation. Déplacer une conversation hors d'un projet la laisse non affectée jusqu'à ce qu'elle soit à nouveau explicitement déplacée.
+
+Le déplacement d'une conversation actualise son rattachement dans l'en-tête ainsi que les listes de projets, y compris lorsqu'une requête de métadonnées plus ancienne est encore en cours.
+
+Les projets exigent les tables et colonnes de base de données actuelles. Une base de données estampillée `0019_thread_incarnations` issue de l'ancien déploiement basé sur 0018 est rejetée au démarrage si le schéma des projets est absent. Suivez la [procédure de récupération hors ligne de la base de données](docs/database-forward-revision-recovery.md) avant de démarrer ce build sur cette base.
+
+### Instructions de projet
+
+Chaque projet stocke des instructions en forme libre — contexte, conventions et contraintes s'appliquant à toutes les conversations du projet — modifiables dans l'onglet Instructions de la page du projet, avec un compteur d'octets en direct. Lorsqu'une exécution démarre sur un thread membre, le Gateway fige une seule fois l'état actuel du projet et rend les instructions sous forme d'un bloc `<project>` borné, propre à cette requête et réservé à cette exécution : le bloc n'entre jamais dans le prompt système ni dans l'historique persisté, et chaque nouvelle exécution voit les dernières instructions enregistrées. Les instructions sont plafonnées à `projects.instructions_max_bytes` octets UTF-8 (par défaut 8192, plage 256–262144) ; les caractères multioctets comptent pour leur longueur en octets UTF-8. Les instructions trop longues sont rejetées avec un `422` à l'écriture et ne sont jamais tronquées silencieusement.
+
+### Étagère de documents
+
+Chaque projet dispose d'une étagère de documents pour les fichiers partagés par l'ensemble du projet, gérée depuis la section Documents de la page du projet :
+
+- **Téléverser** un fichier (bouton ou glisser-déposer, un fichier par requête). Les limites de taille de l'étagère réutilisent `uploads.max_file_size` (par défaut 50 Mio) ; re-téléverser un contenu identique renvoie l'entrée existante au lieu de créer un doublon.
+- **Lister** les entrées avec leur nom, taille, date de modification et provenance (téléversées vs. enregistrées depuis une conversation), et prévisualiser ou télécharger n'importe quelle entrée.
+- **Enregistrer dans le projet** depuis un fichier de thread : le navigateur en lecture seule des fichiers de conversation sous l'étagère liste les téléversements et sorties des threads membres, chacun avec une action « Enregistrer dans le projet ».
+- **Joindre à un thread** : copier un fichier de l'étagère vers les téléversements d'un thread via le pipeline d'ingestion normal, pour que la conversation puisse l'utiliser directement.
+
+Les exécutions sur les threads membres reçoivent également un index `<documents>` borné, rendu à chaque exécution à partir de l'instantané figé (limité par `projects.shelf_index_max_entries` et `projects.shelf_index_max_bytes`), et l'agent peut parcourir l'étagère et lire les documents avec les outils `list_project_documents` et `read_project_document`.
+
+### Sémantique de lecture des projets archivés
+
+Archiver un projet gèle les écritures mais conserve les lectures. Les threads d'un projet archivé s'exécutent toujours et reçoivent toujours les instructions du projet et l'index de l'étagère, et l'étagère reste entièrement lisible : listage, prévisualisation/téléchargement, navigateur de fichiers de conversation et jonction à un thread continuent de fonctionner. Les téléversements, l'enregistrement dans le projet et le déplacement de fichiers individuels de l'étagère vers la corbeille exigent un projet actif, et un document mis à la corbeille ne peut pas être restauré dans un projet archivé. La suppression d'un projet archivé reste possible et déplace toute son étagère vers la corbeille.
+
+### Corbeille
+
+Supprimer un document de l'étagère le déplace vers la corbeille au lieu de l'effacer : l'entrée conserve ses octets et un instantané de son projet d'origine pendant `projects.trash_retention_days` (par défaut 30) avant que le balayage de rétention puisse la purger définitivement. La page `/workspace/trash` — accessible depuis la section Documents de la page du projet et l'en-tête Projets de la barre latérale — liste les documents mis à la corbeille avec leur projet d'origine et la rétention restante, avec des actions Restaurer et Supprimer définitivement par entrée, plus une action Vider la corbeille qui supprime définitivement tous les documents de la corbeille — immédiatement, et non après la fenêtre de rétention ; la fenêtre ne fait que borner la durée pendant laquelle une entrée peut y rester avant que le balayage de rétention ne la récupère. La restauration renvoie le document à son projet d'origine, ou à un projet de votre choix lorsque l'origine a disparu ou est archivée ; si la cible contient déjà un fichier actif identique, les entrées fusionnent. La suppression d'un projet déplace toute son étagère vers la corbeille en une seule étape.
 
 ## Tâches planifiées (Scheduled Tasks)
 

@@ -277,9 +277,9 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
     await _ensure_task_mutable(existing, repo)
 
     updates = body.model_dump(exclude_none=True)
-    if "assistant_id" in updates:
+    if "assistant_id" in body.model_fields_set:
         updates["assistant_id"] = await resolve_scheduled_task_assistant_id(
-            updates["assistant_id"],
+            body.assistant_id,
             user_id=str(user.id),
         )
     if "context_mode" in updates:

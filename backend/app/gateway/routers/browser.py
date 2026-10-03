@@ -261,6 +261,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
             BrowserLiveViewerError,
             BrowserSessionCapacityError,
             get_browser_session_manager,
+            resolve_browser_egress,
             validate_browser_url,
         )
     except ImportError:
@@ -326,6 +327,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
             cdp_url=_cfg_str("cdp_url"),
             allow_unguarded_cdp=_cfg_bool("allow_unguarded_cdp", False),
             url_guard=validate_browser_url,
+            egress_resolver=resolve_browser_egress,
         )
         session = session_lease.__enter__()
     except BrowserSessionCapacityError:
@@ -456,7 +458,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
                     # SSRF-screen client-driven navigations with the same policy
                     # the agent tools enforce; reject rather than dispatch.
                     url = event.get("url")
-                    reason = validate_browser_url(url) if isinstance(url, str) else "Error: invalid navigation URL"
+                    reason = await asyncio.to_thread(validate_browser_url, url) if isinstance(url, str) else "Error: invalid navigation URL"
                     if reason is not None:
                         await _send_payload({"type": "nav_rejected", "url": url, "message": reason})
                         continue
@@ -480,7 +482,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         # page differs from the latest visible browser artifact, align Live with
         # what the user expects instead of requiring an off/on reconnect.
         seed = websocket.query_params.get("seed")
-        if seed and validate_browser_url(seed) is None:
+        if seed and await asyncio.to_thread(validate_browser_url, seed) is None:
             with contextlib.suppress(Exception):
                 current = await session.current_url()
                 if _should_apply_browser_seed(current, seed):

@@ -121,6 +121,9 @@ Optional per-model [`request_admission`](backend/docs/CONFIGURATION.md#model-req
 paces requests to help stay within provider request-per-minute limits.
 It is disabled by default; see the linked guide to enable it.
 
+For Google's official Gemini OpenAI-compatible endpoint, use the
+[Gemini reasoning profile](backend/docs/CONFIGURATION.md#gemini-via-googles-openai-compatible-endpoint).
+
 1. **Clone the DeerFlow repository**
 
    ```bash
@@ -141,6 +144,8 @@ It is disabled by default; see the linked guide to enable it.
    The wizard also lets you configure an optional web search provider, or skip it for now.
 
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
+
+   Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Retry waits are randomized within the time budget. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
 
    Run `make doctor` at any time to verify your setup and get actionable fix hints.
    If you are opening a GitHub issue about a local setup or runtime problem, run
@@ -620,6 +625,12 @@ Remote directory listings report traversal failures (for example, unreadable
 directories) as incomplete results, even when no entries were returned. A
 missing start path is reported separately as “Directory not found.”
 
+The optional [Tenki cloud sandbox provider](backend/packages/harness/deerflow/community/tenki/README.md)
+uses Tenki SDK 1.4.0 or newer. Timed-out commands preserve partial output and
+report `Exit Code: 124`; unsuccessful health checks cannot reclaim a warm sandbox.
+Health probes tolerate login-shell output around the `ok` line, and failures log
+the sandbox ID and probe output before replacing the sandbox.
+
 #### MCP Server
 
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
@@ -697,7 +708,7 @@ cleanup when migrating from legacy metadata credentials.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
-DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, or Buzz from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes.
+DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ, or Buzz from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes.
 
 | Channel | Transport | Difficulty |
 |---------|-----------|------------|
@@ -706,6 +717,7 @@ DeerFlow can also expose user-owned IM channel connections in the workspace UI. 
 | Feishu / Lark | WebSocket | Moderate |
 | WeChat | Tencent iLink (long-polling) | Moderate |
 | WeCom | WebSocket | Moderate |
+| QQ | WebSocket (text-only C2C and group @mentions; four/five passive replies per source) | Moderate |
 | DingTalk | Stream Push (WebSocket) | Moderate |
 | Buzz | Nostr relay (WebSocket, NIP-42) | Moderate |
 
@@ -741,6 +753,12 @@ channels:
     app_secret: $FEISHU_APP_SECRET
     # domain: https://open.feishu.cn       # China (default)
     # domain: https://open.larksuite.com   # International
+
+  qq:
+    enabled: true
+    app_id: $QQ_APP_ID
+    client_secret: $QQ_CLIENT_SECRET
+    allowed_users: []  # QQ OpenIDs, not QQ account numbers
 
   wecom:
     enabled: true
@@ -1843,6 +1861,16 @@ Outline titles are limited to 200 characters and fallback previews to 2,000
 characters per file, with truncation markers. Full uploaded files remain available
 for targeted reads.
 
+Converted upload outlines and previews require a matching source version, including
+modification timestamps. A detected source-version change invalidates its previous
+conversion, including equal-length edits. Older ownership records without source timestamps
+are also rejected; re-upload the source with `uploads.auto_convert_documents: true`
+to restore conversion-backed outlines. Files remain available, and unvalidated
+Markdown conversions appear as standalone files in the agent's historical listing.
+On Windows, `st_ctime_ns` may represent creation time; a same-size rewrite that
+restores the original `mtime` can evade validation. Timestamp checks are
+conservative metadata validation, not a guarantee of content equality.
+
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 
 After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes, and stdio MCP temporary/debug files under the DeerFlow-owned `.mcp/` namespace are excluded because they are process-internal state (like `.git/` and `node_modules/`, any directory named `.mcp` is excluded at any depth). Large, binary, or sensitive-looking files are shown as metadata only.
@@ -1850,6 +1878,8 @@ After each run, DeerFlow records a workspace change summary for the run-owned `w
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
 CSV and TSV artifacts open as tables in the artifact panel and in a separate window. The preview preserves text values (including leading zeros), supports an optional header row, and pages through up to 200 rows and 50 columns from the initial sample. Long or multiline cells can be opened and copied in full. Switch to source to inspect or edit the file; downloads and separate windows use the saved version.
+
+If the sample cuts a CRLF line ending in half, the preview keeps the earlier complete rows and omits the incomplete final record, including when its last field is quoted.
 
 Text artifacts are streamed with HTTP byte-range support. The Web UI initially
 loads at most 1 MiB, shows the preview size when a file is larger, and waits for
@@ -1895,15 +1925,24 @@ also fails, for example because of a Windows sharing violation.
 Once the file is published, a temporary-file cleanup failure is logged without
 failing the upload; hidden staging files are left for the startup sweep.
 
+Uploads, new skill support files, and new local sandbox paths reject Windows
+reserved device names on every platform, including `COM¹`, `LPT²` and names with
+extensions such as `com³.txt`. Rename these files before creating or uploading
+them so the same file tree remains usable on Windows.
+
 Uploaded filenames matching `.upload-*.part` are rejected because that pattern is
 reserved for temporary staging files. Rename such a file before uploading it.
+The restriction includes Windows aliases with trailing dots or spaces and
+case variants, such as `.upload-notes.part.`, `.upload-notes.part `, and
+`.UPLOAD-NOTES.PART`, on every host.
 The HTTP check recognizes both `/` and `\` as path separators, including on
 Linux, when extracting the basename. The endpoint returns `400` with a rename
 hint before publishing any file in a batch containing a reserved name, so the
 chat reports the upload error instead
 of continuing without the attachment. The SDK validates filenames for the whole
-batch before copying any files. Project document names follow the same
-restriction; an older shelf document with a reserved name
+batch before copying any files. New project document names follow the same
+restriction, whether defaulted from the source or explicitly supplied on upload
+or promotion to the shelf; an older shelf document with a reserved name
 remains downloadable but cannot be attached directly. Download it, rename it,
 and upload it to the thread. This change does not recover or migrate older
 thread uploads that already match the staging pattern.
@@ -1925,7 +1964,7 @@ order within a tool entry, with either indented or indentless YAML lists.
 
 Reading a page is not the same as *using* one. Alongside the read-only `web_fetch` and `web_capture` tools, DeerFlow ships an optional agentic browser tool group that keeps a live, per-conversation browser session so the agent can actually operate a page — navigate, read the interactive elements, click, type, submit forms, and follow multi-step flows on JavaScript-heavy sites.
 
-Each action returns a fresh snapshot of the page's interactive elements, each addressed by a stable `[ref]` number, so the agent acts on what it just observed instead of guessing selectors. Outbound URLs are SSRF-screened by default. It is powered by Playwright and shipped as an optional extra so the core install stays lean:
+Each action returns a fresh snapshot of the page's interactive elements, each addressed by a stable `[ref]` number, so the agent acts on what it just observed instead of guessing selectors. Outbound URLs are SSRF-screened by default, and the browser's TCP connections go through a local proxy that pins each one to the screened addresses, so a DNS answer that changes after the check cannot redirect them to a private host (WebRTC UDP is not covered). It is powered by Playwright and shipped as an optional extra so the core install stays lean:
 
 ```bash
 cd backend
@@ -2244,6 +2283,7 @@ Current MVP capabilities:
 - One-time task forms reject local times skipped by daylight-saving transitions; select another time before creating or saving the task.
 - Choose whether each scheduled task reuses a thread and its conversation history or creates a fresh thread per run
 - Pin each task to `lead_agent` (default) or a custom agent the owner already has; unknown names are rejected
+- Sending `assistant_id: null` in a scheduled-task PATCH resets the task to `lead_agent`; omitting `assistant_id` preserves the current agent, including when that custom agent has since been deleted
 - Duplicate an existing task into the create form as an editable draft without copying its run history
 - Support `once`, `cron`, and `interval` schedules
 - Editing or duplicating an interval task preserves its saved cadence until the interval is explicitly changed, including sub-minute intervals allowed by the operator's scheduler configuration
@@ -2320,7 +2360,7 @@ deerflow --recursion-limit 250 --print "task" # override the headless agent-loop
 
 Headless `--print` and `--json` exit with status `1` when the run fails, including provider errors returned as fallback messages. `--print` still writes the fallback text to stdout; `--json` appends a terminal error record.
 
-A keyboard-driven chat surface with a streaming transcript (Markdown-rendered answers), compact tool-activity cards, a `/` slash-command palette, display-only `/clear`, `/goal` goal management, `/model` and `/threads` pickers, input history, PageUp/PageDown transcript navigation, and `Esc` / `Ctrl+C` interrupt. Transcript refreshes preserve your reading position after you scroll upward and resume following new output when you return to the bottom. `/clear` removes rows from the current terminal display without deleting the thread or its persisted conversation; `/new` and `/clear` ask you to wait during an active run instead of resetting in-flight display state. Sessions opened in the TUI also appear in the Web UI sidebar — it writes the shared thread store under the local default user, so terminal and web stay in sync **without running the Gateway**.
+A keyboard-driven chat surface with a streaming transcript (Markdown-rendered answers), compact tool-activity cards, a `/` slash-command palette, display-only `/clear`, `/goal` goal management, `/model` and `/threads` pickers, input history, PageUp/PageDown transcript navigation, and `Esc` / `Ctrl+C` interrupt. The composer preserves line breaks and indentation in pasted code, stack traces, and multi-paragraph prompts; `Enter` sends the complete document. Transcript refreshes preserve your reading position after you scroll upward and resume following new output when you return to the bottom. `/clear` removes rows from the current terminal display without deleting the thread or its persisted conversation; `/new` and `/clear` ask you to wait during an active run instead of resetting in-flight display state. Sessions opened in the TUI also appear in the Web UI sidebar — it writes the shared thread store under the local default user, so terminal and web stay in sync **without running the Gateway**.
 
 See [backend/docs/TUI.md](backend/docs/TUI.md) for the full guide.
 

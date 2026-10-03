@@ -279,3 +279,47 @@ class TestPerCallClientTeardown:
         result = await web_search_tool.ainvoke({"query": "test query"})
 
         assert result == "[]"
+
+
+# `None` is itself a configured value (`max_results:` with nothing after it in YAML), so an absent key
+# needs its own sentinel — otherwise the key-present case is never built and never tested.
+_OMITTED = object()
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected_limit", "warns"),
+    [
+        pytest.param(True, 5, True, id="bool"),
+        pytest.param(0, 5, True, id="zero"),
+        pytest.param(-3, 5, True, id="negative"),
+        pytest.param(3.5, 5, True, id="fractional"),
+        pytest.param("many", 5, True, id="non-numeric-string"),
+        pytest.param("8", 8, False, id="integer-string"),
+        pytest.param(7, 7, False, id="plain-int"),
+        pytest.param(None, 5, True, id="explicit-null"),
+        pytest.param(_OMITTED, 5, False, id="omitted"),
+    ],
+)
+@patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
+@patch("deerflow.community.firecrawl.tools.get_app_config")
+@pytest.mark.anyio
+async def test_search_normalizes_max_results_before_calling_the_client(mock_get_app_config, mock_firecrawl_cls, caplog, configured, expected_limit, warns):
+    search_config = MagicMock()
+    extra: dict[str, object] = {"api_key": "firecrawl-search-key"}
+    if configured is not _OMITTED:
+        extra["max_results"] = configured
+    search_config.model_extra = extra
+    mock_get_app_config.return_value.get_tool_config.return_value = search_config
+
+    mock_result = MagicMock()
+    mock_result.web = []
+    mock_firecrawl_cls.return_value.search = AsyncMock(return_value=mock_result)
+
+    from deerflow.community.firecrawl.tools import web_search_tool
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.community.firecrawl.tools"):
+        result = await web_search_tool.ainvoke({"query": "q"})
+
+    assert result == "[]"
+    mock_firecrawl_cls.return_value.search.assert_called_once_with("q", limit=expected_limit)
+    assert ("Invalid Firecrawl max_results" in caplog.text) is warns

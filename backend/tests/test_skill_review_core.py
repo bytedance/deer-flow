@@ -326,9 +326,12 @@ def test_resource_graph_link_scan_stays_linear(make_payload):
 
 
 def _elapsed(fn, payload):
-    started = time.monotonic()
+    # perf_counter, not monotonic: on Windows monotonic ticks at ~15.6 ms, the
+    # linear scan finishes inside one tick, and small_elapsed can measure as
+    # exactly 0.0 — a zero divisor for the ratio assertion below.
+    started = time.perf_counter()
     fn(payload)
-    return time.monotonic() - started
+    return time.perf_counter() - started
 
 
 @pytest.mark.parametrize(

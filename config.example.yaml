@@ -430,31 +430,30 @@ models:
   #   context_window: 1048576
   #   supports_vision: true
 
-  # Example: Gemini model via OpenAI-compatible gateway (with thinking support)
+  # Example: Gemini model via Google's official OpenAI-compatible endpoint
   # Use PatchedChatOpenAI so that tool-call thought_signature values on tool_calls
   # are preserved across multi-turn tool-call conversations — required by the
   # Gemini API when thinking is enabled. See:
   # https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures
-  # - name: gemini-2.5-pro-thinking
-  #   display_name: Gemini 2.5 Pro (Thinking)
+  # Google accepts reasoning_effort, not extra_body.thinking. Gemini 3.1 Pro
+  # cannot disable thinking; dialect: none avoids emitting a thinking toggle.
+  # https://ai.google.dev/gemini-api/docs/openai#thinking
+  # - name: gemini-3.1-pro-preview
+  #   display_name: Gemini 3.1 Pro (Thinking)
   #   use: deerflow.models.patched_openai:PatchedChatOpenAI
-  #   model: google/gemini-2.5-pro-preview   # model name as expected by your gateway
+  #   model: gemini-3.1-pro-preview
   #   api_key: $GEMINI_API_KEY
-  #   base_url: https://<your-openai-compat-gateway>/v1
+  #   base_url: https://generativelanguage.googleapis.com/v1beta/openai/
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 16384
   #   context_window: 1048576
-  #   supports_thinking: true
   #   supports_vision: true
-  #   when_thinking_enabled:
-  #     extra_body:
-  #       thinking:
-  #         type: enabled
-  #   when_thinking_disabled:
-  #     extra_body:
-  #       thinking:
-  #         type: disabled
+  #   reasoning:
+  #     thinking: required
+  #     dialect: none
+  #     effort:
+  #       values: [minimal, low, medium, high]
 
   # Example: Xiaomi MiMo model (with thinking support)
   # MiMo thinking mode returns reasoning_content and requires that field to be
@@ -1112,7 +1111,8 @@ tools:
   #   timeout_ms: 30000                # Per-action navigation/interaction timeout
   #   viewport_width: 1280
   #   viewport_height: 720
-  #   # allow_private_addresses: false # SSRF guard: keep false in production
+  #   # allow_private_addresses: false # SSRF guard: keep false in production. Also applies to the
+  #   #                                # pinned egress proxy every launched browser connects through.
   #   # cdp_url: http://127.0.0.1:9222 # Attach to YOUR running Chrome (Codex-style)
   #   # allow_unguarded_cdp: false      # REQUIRED true with cdp_url: attaching to an
   #   #                                # existing Chrome prevents DeerFlow from
@@ -1164,6 +1164,9 @@ tools:
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool
     timeout: 10
+    # Opt-in retries may increase upstream requests and cost.
+    # max_retries: 0
+    # retry_budget_seconds: 30
     # Optional proxy for restricted networks / Docker / WSL.
     # Use host.docker.internal instead of 127.0.0.1 when the proxy runs on the host.
     # proxy: $HTTPS_PROXY
@@ -2830,7 +2833,7 @@ run_ownership:
 # - Provider bot/app credentials stay under `channels.*`.
 # - `channel_connections` stores per-user bindings and one-time connect codes.
 # - Telegram uses a deep link when `bot_username` is configured.
-# - Slack, Discord, Feishu, DingTalk, WeChat, and WeCom use `/connect <code>`
+# - Slack, Discord, Feishu, DingTalk, WeChat, WeCom, and QQ use `/connect <code>`
 #   through the already-running bot/app.
 # - When enabled (and channels are running), scheduled-task completions/failures
 #   also enqueue IM pushes to the owner's connected identities (see scheduler
@@ -2865,6 +2868,9 @@ run_ownership:
 #     enabled: false
 #
 #   buzz:
+#     enabled: false
+#
+#   qq:
 #     enabled: false
 
 # ============================================================================
@@ -2906,6 +2912,15 @@ run_ownership:
 #       thinking_enabled: true
 #       is_plan_mode: false
 #       subagent_enabled: false
+#
+#   # QQ Open Platform bot; choose WebSocket in the developer console.
+#   # Text-only C2C and group @mentions; no public callback URL required.
+#   qq:
+#     enabled: false
+#     app_id: $QQ_APP_ID
+#     client_secret: $QQ_CLIENT_SECRET
+#     allowed_users: []  # QQ OpenIDs, not numeric QQ account numbers; empty allows all
+#     sandbox: false    # REST sandbox host only; console sandbox membership is separate
 #
 #   feishu:
 #     enabled: false
