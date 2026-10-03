@@ -1,4 +1,4 @@
-import { expect, test } from "@rstest/core";
+import { expect, rs, test } from "@rstest/core";
 
 import {
   appendHtmlPreviewBaseHref,
@@ -9,6 +9,21 @@ const ARTIFACT_URL = "/api/threads/thread-1/artifacts/report/index.html";
 const CURRENT_HREF = "https://deerflow.example/workspace/chats/thread-1";
 const BASE_ELEMENT =
   '<base href="https://deerflow.example/api/threads/thread-1/artifacts/report/">';
+
+// Textarea/title RCDATA is checked in a real browser: happy-dom misparses it here.
+test("skips DOM construction when HTML contains no base text", () => {
+  const html = `<!doctype html><html><head></head><body>${"<p>Report</p>".repeat(1024)}<img src="chart.png"></body></html>`;
+  const createElement = rs.spyOn(document, "createElement");
+
+  try {
+    expect(appendHtmlPreviewBaseHref(html, ARTIFACT_URL, CURRENT_HREF)).toBe(
+      html.replace("<head>", `<head>${BASE_ELEMENT}`),
+    );
+    expect(createElement).not.toHaveBeenCalled();
+  } finally {
+    createElement.mockRestore();
+  }
+});
 
 test.each([
   ["comment", '<!-- <base href="/"> is disabled -->'],
