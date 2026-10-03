@@ -1709,6 +1709,8 @@ Cancelled or timed-out background sub-agent executions retain provider-reported 
 
 For file acceptance criteria, an empty regular file in the shared workspace can satisfy `file:<path> exists` and `file_written:<path>`, including on remote sandboxes. It fails `file:<path> non-empty` with a deterministic empty-file result.
 
+Cancellation of the parent run waits for an in-flight acceptance read to finish before the sandbox lease is released.
+
 To request JSON syntax validation, explicitly set a `task` or `batch_task` item's
 `acceptance_criteria` to `["file:../outputs/report.json json-valid"]`. Checks cover only
 complete UTF-8 JSON files within the shared workspace, up to **50,000 bytes**.

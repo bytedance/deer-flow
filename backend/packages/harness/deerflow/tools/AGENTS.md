@@ -1,6 +1,9 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
 `task` and `batch_task` opt into JSON checks with `file:<path> json-valid`.
+The completed ordinary `task` path drains its synchronous acceptance checker
+before propagating cancellation, keeping sandbox reads inside the parent
+execution lease.
 See [subagents/AGENTS.md](../subagents/AGENTS.md) for read limits and UNVERIFIED semantics.
 
 `list_uploaded_files` 的续页契约见 [FILE_UPLOAD.md](../../../../docs/FILE_UPLOAD.md)。

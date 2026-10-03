@@ -77,6 +77,12 @@ Use explicit synchronization such as `threading.Event` rather than sleep-based t
 
 Stress/soak testing, AnyIO worker instrumentation, Uvicorn multi-process behavior, and broad production executor redesign are separate concerns and should not be folded into these deterministic regressions.
 
+`test_task_tool_acceptance_lifecycle.py` holds a synthetic sandbox read with
+`threading.Event` while exercising the production task tool, checker, and lease
+manager. Cancellation, including repeated cancellation, must wait for the read
+to drain before the parent releases its holder; cleanup must always unblock the
+reader. Normal verdict and checker-error controls stay in the checklist tests.
+
 ## Managed DeepSeek compatibility
 
 `test_managed_deepseek.py` exercises real SDK request serialization and SSE parsing

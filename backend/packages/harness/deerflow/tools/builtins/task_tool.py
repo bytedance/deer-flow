@@ -29,6 +29,7 @@ from deerflow.mcp_scope import (
     runtime_thread_incarnation,
 )
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.sandbox.lease import run_sync_lifecycle_operation
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
 from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section
@@ -1105,7 +1106,7 @@ async def task_tool(
                 acceptance_verdict = None
                 if acceptance_criteria:
                     try:
-                        acceptance_verdict = await asyncio.to_thread(
+                        acceptance_verdict = await run_sync_lifecycle_operation(
                             check_acceptance_criteria,
                             acceptance_criteria,
                             runtime=runtime,
