@@ -130,6 +130,10 @@ to the last returned sequence to page forward through a bounded history range.
 
 FastAPI application providing REST endpoints for frontend integration:
 
+Integer metadata filters match exact JSON integers, including signed-64-bit
+boundaries. Stored integers outside that range are ignored rather than rounded
+to a boundary (SQLite) or causing the search to fail (PostgreSQL).
+
 | Route | Purpose |
 |-------|---------|
 | `GET /api/models` | List available LLM models |
