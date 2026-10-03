@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, NoReturn
 
@@ -11,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.gateway.deps import require_admin_user
+from app.gateway.persistent_writes import run_drained_write
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
     McpRoutingConfig,
@@ -28,6 +30,7 @@ from deerflow.config.extensions_config import (
 from deerflow.config.runtime_paths import project_root
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
 from deerflow.mcp.cache import publish_mcp_tools_cache_reset, reset_mcp_tools_cache
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
@@ -1199,6 +1202,23 @@ def _validate_extensions_config_candidate(raw_data: dict, *, check_installation_
         _raise_invalid_mcp_configuration("Duplicate MCP installation IDs; remove conflicting entries or assign unique capability IDs in the deployment configuration")
 
 
+async def _run_drained_mcp_apply[T](action: str, apply: Callable[..., T], /, *args) -> T:
+    """Run one MCP config read-modify-write drained, then publish the tools-cache reset.
+
+    A cancelled caller must not detach from the worker holding the
+    extensions-config locks, and the tools-cache reset must not be skipped
+    behind an already-settled write. Caller-facing ``HTTPException`` contracts
+    re-raise unlogged while the caller is still connected.
+    """
+
+    async def _apply_and_publish() -> T:
+        reloaded_servers = await run_drained_write(action, apply, (HTTPException,), *args)
+        reset_mcp_tools_cache()
+        return reloaded_servers
+
+    return await await_drained(_apply_and_publish())
+
+
 def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
     """Worker-thread body for :func:`update_mcp_configuration`.
 
@@ -1520,10 +1540,9 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
         # worker takes extensions_config_write_lock for the whole RMW, so it stays
         # atomic and serialized against the skills router (the other writer of
         # this file) even if this request is cancelled mid-write.
-        reloaded_servers = await asyncio.to_thread(_apply_mcp_config_update, body)
+        reloaded_servers = await _run_drained_mcp_apply("MCP configuration update", _apply_mcp_config_update, body)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
-        reset_mcp_tools_cache()
         return McpConfigResponse(mcp_servers=servers)
 
     except HTTPException:
@@ -1544,10 +1563,9 @@ async def create_mcp_servers(request: Request, body: McpConfigUpdateRequest) -> 
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
         _validate_mcp_update_request(body)
-        reloaded_servers = await asyncio.to_thread(_apply_mcp_servers_create, body)
+        reloaded_servers = await _run_drained_mcp_apply("MCP servers create", _apply_mcp_servers_create, body)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
-        reset_mcp_tools_cache()
         return McpConfigResponse(mcp_servers=servers)
     except HTTPException:
         raise
@@ -1570,10 +1588,9 @@ async def update_mcp_server(request: Request, body: McpServerConfigUpdateRequest
             McpConfigUpdateRequest(mcp_servers={body.server_name: body.server}),
             enforce_execution_policy=body.server.enabled,
         )
-        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_config_update, body)
+        reloaded_servers = await _run_drained_mcp_apply("MCP server config update", _apply_mcp_server_config_update, body)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
-        reset_mcp_tools_cache()
         return McpConfigResponse(mcp_servers=servers)
     except HTTPException:
         raise
@@ -1592,10 +1609,9 @@ async def delete_mcp_server(request: Request, server_name: str) -> McpConfigResp
     """Delete one existing server and reload the MCP tool cache."""
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
-        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_delete, server_name)
+        reloaded_servers = await _run_drained_mcp_apply("MCP server delete", _apply_mcp_server_delete, server_name)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
-        reset_mcp_tools_cache()
         return McpConfigResponse(mcp_servers=servers)
     except HTTPException:
         raise
@@ -1614,10 +1630,9 @@ async def update_mcp_server_state(request: Request, body: McpServerStateUpdateRe
     """Enable or disable one MCP server and reload the MCP tool cache."""
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
-        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_state_update, body)
+        reloaded_servers = await _run_drained_mcp_apply("MCP server state update", _apply_mcp_server_state_update, body)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
-        reset_mcp_tools_cache()
         return McpConfigResponse(mcp_servers=servers)
     except HTTPException:
         raise

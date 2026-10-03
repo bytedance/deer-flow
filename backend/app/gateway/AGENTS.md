@@ -23,8 +23,8 @@ is drained across host cancellation before later runtime resources unwind; each
 service `stop()` remains bounded by its 30-second `asyncio.timeout`, so include
 that bound in pod grace-period budgeting.
 
-Agents, subagents and managed-models routers drain persistent writes
-through `app.gateway.persistent_writes.run_drained_write`.
+Agents, subagents, managed-models and MCP-config routers drain persistent
+writes through `app.gateway.persistent_writes.run_drained_write`.
 
 Gateway lifespan closes the MCP session pool after `langgraph_runtime` exits:
 its run drain and extension-service teardown can still make MCP calls during
