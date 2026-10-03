@@ -85,6 +85,10 @@ for trusted embedded CLI runs.
 | `Ctrl+C` | Interrupt the active run, or quit when idle |
 | `Ctrl+L` | Redraw · `Ctrl+U` clear composer |
 
+At the last input row, `↓` preserves the current draft unless you are browsing
+history. After `↑` recalls history, `↓` moves forward and restores the saved
+draft when it passes the newest entry.
+
 Transcript updates follow new output while the view is at the bottom. After you
 scroll upward, streaming refreshes preserve the reading position until you
 return to the bottom with `PageDown`.
