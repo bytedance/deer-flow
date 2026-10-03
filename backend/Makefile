@@ -50,6 +50,12 @@ test-shard:
 test-shard-durations:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --store-durations --clean-durations --durations-path=$(DURATIONS_FILE) tests/ -q
 
+# Run the informational runtime/config hot-path benchmark suite (no hard
+# performance thresholds; separate from `make test`). Pass plugin options via
+# BENCHMARK_ARGS, e.g. `make benchmark BENCHMARK_ARGS="--benchmark-json=out.json"`.
+benchmark:
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest benchmarks/ --benchmark-only $(BENCHMARK_ARGS)
+
 lint:
 	uv run ruff check .
 	uv run ruff format --check .
