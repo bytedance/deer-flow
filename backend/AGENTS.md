@@ -371,6 +371,9 @@ Automatic conversation summarization when approaching token limits:
   shares the durable active-thread uniqueness constraint with run admission,
   preventing either worker-local or cross-worker checkpoint-write races.
 
+- Measurement only: each summarizer call emits a `middleware:summarize` journal event (`action="summary_result"`, `changes.noop` true when the output is byte-identical to the prior `summary_text`) and bumps `summary_noop_count` / `summary_call_count` on the middleware. The call is never skipped.
+- `RunJournal` enriches every `llm.ai.response` / `llm.error` event's metadata with per-call telemetry (`langchain_run_id`, `caller_category`, `provider`, `model`, `stop_reason`, `status`, token counts, `request_chars` incl. bound-tool schema chars). Unavailable values are `None`; all telemetry fails soft.
+
 See [docs/summarization.md](docs/summarization.md) for details.
 
 ### Vision Support

@@ -658,6 +658,38 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         )
         notify_context_compacted(event, extensions=self._extensions)
 
+    def _record_summary_telemetry(self, runtime: Runtime, previous_summary: str | None, summary: str, summarized_count: int) -> None:
+        """P0 measurement only: count summarizer calls whose output equals the prior ``summary_text``.
+
+        Never skips or alters the summarizer call; fails soft.
+        """
+        try:
+            noop = previous_summary is not None and summary.encode("utf-8") == previous_summary.encode("utf-8")
+            self.summary_call_count = getattr(self, "summary_call_count", 0) + 1
+            if noop:
+                self.summary_noop_count = getattr(self, "summary_noop_count", 0) + 1
+                logger.info("Summarization no-op: summarizer output identical to existing summary_text (%d chars)", len(summary))
+            context = getattr(runtime, "context", None)
+            journal = context.get("__run_journal") if isinstance(context, dict) else None
+            if journal is None:
+                return
+            journal.record_middleware(
+                "summarize",
+                name=type(self).__name__,
+                hook="before_model",
+                action="summary_result",
+                changes={
+                    "noop": noop,
+                    "summary_chars": len(summary),
+                    "previous_summary_chars": len(previous_summary) if previous_summary is not None else None,
+                    "summarized_message_count": summarized_count,
+                    "noop_count": getattr(self, "summary_noop_count", 0),
+                    "call_count": self.summary_call_count,
+                },
+            )
+        except Exception:
+            logger.warning("Summarization telemetry failed", exc_info=True)
+
     def compact_state(
         self,
         state: AgentState,
@@ -684,6 +716,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             if raise_on_failure:
                 raise SummaryGenerationError("summary generation failed")
             return None
+        self._record_summary_telemetry(runtime, previous_summary, summary, len(messages_to_summarize))
         # Fire hooks only once a replacement summary exists — flushing pre-compaction
         # messages into durable memory for a summary that never materializes would
         # duplicate that work on the next attempt. Messages are still removed after
@@ -733,6 +766,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             if raise_on_failure:
                 raise SummaryGenerationError("summary generation failed")
             return None
+        self._record_summary_telemetry(runtime, previous_summary, summary, len(messages_to_summarize))
         # Fire hooks only once a replacement summary exists (see compact_state).
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         self._record_compaction(
