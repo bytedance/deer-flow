@@ -471,7 +471,7 @@ This release closes that milestone with **301 merged pull requests**.
   mapping no longer counts for that author. The manager's slash-skill whitelist
   check had its own copy of the same read and is fixed with it: a bound user
   with no thread yet was checked against the agent of a legacy JSON thread for
-  the same chat and could be told an enabled skill was not available.
+  the same chat and could be told an enabled skill was not available. ([#6232])
 
 - **channels:** Discord now runs its channel-connection database work on the
   Gateway event loop. discord.py delivers messages on a private loop in the
@@ -7675,3 +7675,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
 [#6214]: https://github.com/bytedance/deer-flow/pull/6214
 [#6212]: https://github.com/bytedance/deer-flow/pull/6212
+[#6232]: https://github.com/bytedance/deer-flow/pull/6232

@@ -426,7 +426,7 @@
   相同的辅助函数（`lookup_thread_id`）查找话题，因此已绑定作者的已参与话题就是管理器
   将复用的话题，旧的 JSON 映射也不再对该作者生效。管理器的斜杠技能白名单检查中有同一读取逻辑
   的副本，也一并修复：尚无话题的已绑定用户此前会按同一会话旧 JSON 话题的智能体进行检查，
-  可能被告知已启用的技能不可用。
+  可能被告知已启用的技能不可用。([#6232])
 
 - **渠道：** Discord 的渠道连接数据库操作现在在 Gateway 事件循环上执行。
   discord.py 在客户端线程的私有事件循环上投递消息，而 Discord 适配器此前就在该
@@ -6410,3 +6410,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
 [#6212]: https://github.com/bytedance/deer-flow/pull/6212
 [#6214]: https://github.com/bytedance/deer-flow/pull/6214
+[#6232]: https://github.com/bytedance/deer-flow/pull/6232
