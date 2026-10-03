@@ -88,7 +88,8 @@ def _load_editable_artifact(actual_path: Path, path: str, expected_sha256: str) 
     if file_stat.st_size > MAX_EDITABLE_ARTIFACT_BYTES:
         raise HTTPException(status_code=413, detail="Artifact is too large to edit")
 
-    current = actual_path.read_bytes()
+    with actual_path.open("rb") as handle:
+        current = handle.read(MAX_EDITABLE_ARTIFACT_BYTES + 1)
     if len(current) > MAX_EDITABLE_ARTIFACT_BYTES:
         raise HTTPException(status_code=413, detail="Artifact is too large to edit")
     if b"\x00" in current:
