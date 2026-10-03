@@ -2779,7 +2779,7 @@ This release closes that milestone with **301 merged pull requests**.
   now a one-entry list rather than a string whose digits each became an allowed
   user (`"123456"` allowed users 1–6 and blocked 123456), `null` or a bare
   integer no longer crashes the channel at startup, and every dropped entry —
-  `@usernames`, floats, booleans — is logged as a warning.
+  `@usernames`, floats, booleans — is logged as a warning. ([#6230])
 
 ### Documentation
 
@@ -7651,5 +7651,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6201]: https://github.com/bytedance/deer-flow/pull/6201
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
 [#6212]: https://github.com/bytedance/deer-flow/pull/6212
+[#6230]: https://github.com/bytedance/deer-flow/pull/6230
 
 [#6171]: https://github.com/bytedance/deer-flow/pull/6171
