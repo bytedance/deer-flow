@@ -68,7 +68,9 @@ for trusted embedded CLI runs.
   smooth on long threads.
 - **Status line** — run state + animated spinner, model, thread title, token
   usage, and an `esc interrupt` hint while a run is active.
-- **Composer** — rounded input box. `/` opens the command palette.
+- **Composer** — rounded multiline input box. `/` opens the command palette.
+  Pasted code, stack traces, and multi-paragraph prompts retain their line
+  breaks and indentation; `Enter` sends the complete document.
 
 ### Keys
 
@@ -76,7 +78,7 @@ for trusted embedded CLI runs.
 |---|---|
 | `Enter` | Send message / accept palette selection |
 | `/` | Open the slash-command palette |
-| `↑` / `↓` | Palette navigation, or input history when the palette is closed |
+| `↑` / `↓` | Palette navigation; otherwise move inside multiline input, then use history at the first/last row (wrapped rows included) |
 | `PageUp` / `PageDown` | Scroll the transcript without moving focus from the composer |
 | `Tab` | Complete the highlighted command (adds a trailing space) |
 | `Esc` | Close the palette / overlay |
@@ -115,13 +117,14 @@ render.py       Rich renderers for header / transcript / status / palette (pure)
 theme.py        palette + symbols
 app.py          Textual App: composes widgets, drives runs on a worker thread,
                 marshals actions back to the UI thread, renders ViewState
+widgets/        Textual widgets (the multiline composer)
 persistence.py  writes threads_meta so sessions appear in the Web UI (below)
 ```
 
 `DeerFlowClient.stream()` is a **synchronous** generator, so the app runs it on a
 Textual worker *thread* and marshals each yielded action back to the UI thread
-via `call_from_thread`. The pure layers (everything except `app.py`) have no
-Textual dependency and are unit-tested directly with synthetic `StreamEvent`s.
+via `call_from_thread`. The pure layers (everything except `app.py` and `widgets/`)
+have no Textual dependency and are unit-tested directly with synthetic `StreamEvent`s.
 
 ## Web UI visibility (shared persistence)
 

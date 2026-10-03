@@ -6161,7 +6161,7 @@ class TestDiscordChannel:
         async def go():
             channel = DiscordChannel(MessageBus(), config={})
             channel._running = True
-            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+            typing_target = SimpleNamespace(typing=AsyncMock())
 
             # Queue the starter without yielding to it.  stop() therefore runs
             # first and must form a boundary that the delayed starter cannot
@@ -6203,7 +6203,7 @@ class TestDiscordChannel:
         async def go():
             channel = DiscordChannel(MessageBus(), config={})
             channel._running = True
-            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+            typing_target = SimpleNamespace(typing=AsyncMock())
 
             discord_loop = asyncio.new_event_loop()
             loop_ready = threading.Event()
@@ -6278,7 +6278,7 @@ class TestDiscordChannel:
         async def go():
             channel = DiscordChannel(MessageBus(), config={})
             channel._running = True
-            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+            typing_target = SimpleNamespace(typing=AsyncMock())
 
             discord_loop = asyncio.new_event_loop()
             loop_ready = threading.Event()
@@ -6331,7 +6331,7 @@ class TestDiscordChannel:
 
         channel = DiscordChannel(MessageBus(), config={})
         channel._running = True
-        typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+        typing_target = SimpleNamespace(typing=AsyncMock())
 
         class FailingClient:
             def __init__(self):
