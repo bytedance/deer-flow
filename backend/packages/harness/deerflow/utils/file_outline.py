@@ -51,6 +51,10 @@ _CODE_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 # Match the original indentation so indented code cannot become a heading.
 _ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*))?$")
 
+# Root-level indented code starts at four columns, including
+# a tab after up to three spaces. Do not strip it into a heading.
+_INDENTED_CODE_RE = re.compile(r"^( {4}| {0,3}\t)")
+
 
 def _strip_atx_closing_hashes(raw: str) -> str:
     """Remove a whitespace-separated terminal hash run in linear time."""
@@ -141,9 +145,7 @@ def extract_outline(md_path: Path) -> list[dict]:
                         fence_length = len(marker)
                         continue
 
-                # Root-level indented code starts at four columns, including
-                # a tab after up to three spaces. Do not strip it into a heading.
-                if line.startswith("    ") or line[:4].lstrip(" ").startswith("\t"):
+                if _INDENTED_CODE_RE.match(line):
                     continue
 
                 stripped = line.strip()
