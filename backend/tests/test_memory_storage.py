@@ -191,6 +191,37 @@ class TestFileMemoryStorage:
         memory2 = storage.reload()
         assert memory2["user"]["workContext"]["summary"] == "updated"
 
+    def test_reload_does_not_pin_a_document_older_than_its_signature(self, tmp_path, monkeypatch):
+        """A write committed while reload() reads must not be hidden from later loads."""
+        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
+        storage = FileMemoryStorage(DeerMemConfig())
+
+        def summary_doc(summary: str) -> dict:
+            memory = create_empty_memory()
+            memory["user"]["workContext"]["summary"] = summary
+            return memory
+
+        assert storage.save(summary_doc("old"))
+        read_document = storage._read_document
+        raced = False
+
+        def read_then_concurrent_write(*args, **kwargs):
+            nonlocal raced
+            document = read_document(*args, **kwargs)
+            if not raced:
+                raced = True
+                # A background updater commits after reload() has read the
+                # document but before it caches the result.
+                assert storage.save(summary_doc("new"))
+            return document
+
+        monkeypatch.setattr(storage, "_read_document", read_then_concurrent_write)
+        storage.reload()
+        monkeypatch.setattr(storage, "_read_document", read_document)
+
+        assert raced
+        assert storage.load()["user"]["workContext"]["summary"] == "new"
+
 
 class TestCreateStorage:
     """Test create_storage(config) (replaces the old get_memory_storage() singleton)."""

@@ -1396,8 +1396,11 @@ class FileMemoryStorage(MemoryStorage):
                 migration_notifications = self._run_read_migrations_locked(path, agent_name, user_id=user_id)
         for notification_agent, notifications in migration_notifications:
             self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=notification_agent)
-        document = self._read_document(path, agent_name, user_id=user_id)
+        # Sign before reading, as load() does: a write landing in between then
+        # leaves a stale signature that forces a re-read, never a stale
+        # document cached under the new signature.
         signature = self._scope_signature(path, agent_name)
+        document = self._read_document(path, agent_name, user_id=user_id)
         with self._cache_lock:
             self._memory_cache[key] = (copy.deepcopy(document), signature)
         if _rebuild_retrieval and agent_name is not None and self._retrieval is not None:
