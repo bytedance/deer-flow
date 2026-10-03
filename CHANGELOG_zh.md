@@ -2325,6 +2325,16 @@
   `read_file` 读取 `SKILL.md` 时会打上 `skill_context_denied` 标记，持久上
   下文、技能 allowed-tools 与自主密钥绑定都不会激活被拒绝的技能。([#4541])
 
+- **Lark：** 可选的 Lark broker 子命令拒绝列表
+  （`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`）不再能被以独立 token 传入的选项
+  值绕过。此前匹配只去掉以 `-` 开头的 token 并从头比较剩余部分，因此
+  `--profile work config show` 中的 `work` 成为首个位置参数，`config show`
+  规则永远匹配不上——而真实的 `lark-cli` 1.0.65 在这种写法下仍会执行
+  `config show`。broker 无法得知哪些选项带值，因此规则现在只要其 token 按顺序
+  出现在非选项 token 中即视为匹配——这也覆盖了值夹在中间的情形
+  （`config --profile work show`），而连续匹配仍会漏掉这种情况。参数值恰好按
+  顺序拼出被拒绝路径的调用也会被拒绝（fail-closed）。
+
 ### 文档
 
 - **文档：** 修正 Apple Container 的验证说明。

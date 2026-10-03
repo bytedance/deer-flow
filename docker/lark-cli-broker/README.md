@@ -130,9 +130,12 @@ The broker removes the credential *files* from the sandbox, but the full
 `lark-cli` command surface stays reachable, so any subcommand that prints/exports
 tokens could still exfiltrate them. Set `DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`
 on the sidecar to a comma-separated list of command prefixes the broker should
-refuse (matched against the leading non-flag tokens), e.g.
-`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS="config show, auth token"`. Denied calls
-return exit `126` with a `subcommand ... is disabled` message and never spawn the
-binary. Empty by default (no behavior change); confirm the deployed `lark-cli`
+refuse, e.g. `DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS="config show, auth token"`.
+Denied calls return exit `126` with a `subcommand ... is disabled` message and
+never spawn the binary. The broker does not know which options take a value, so
+a rule matches when its tokens appear in order among the request's non-flag
+tokens, even with other tokens in between: `--profile work config show` and
+`config --profile work show` are both refused by `config show`. This fails closed — a
+call whose argument values spell a denied path in order is refused too. Empty by default (no behavior change); confirm the deployed `lark-cli`
 version's subcommand surface has no trivial secret-dump command before enabling
 broker mode in production.
