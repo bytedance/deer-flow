@@ -47,7 +47,7 @@ from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummari
 from deerflow.agents.middlewares.terminal_response_middleware import TerminalResponseMiddleware
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
-from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
+from deerflow.agents.middlewares.token_usage_middleware import CompletedSubagentUsageMiddleware, TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_declarations import layer_one_outcome, narrow_declared_tools, verify_declared_tool_view
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
@@ -744,6 +744,12 @@ def build_middlewares(
         from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
 
         middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))
+
+    # https://docs.langchain.com/oss/python/langchain/middleware/custom#execution-order
+    # Backfill only completed child usage before budget enforcement. Keep
+    # current-step attribution after the guards that can change tool calls.
+    if token_budget_config.enabled and resolved_app_config.token_usage.enabled:
+        middlewares.append(CompletedSubagentUsageMiddleware())
 
     # Inject custom middlewares before ClarificationMiddleware
     if custom_middlewares:
