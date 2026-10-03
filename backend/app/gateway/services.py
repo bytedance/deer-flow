@@ -1815,7 +1815,14 @@ async def start_run(
         # Validate even when resume takes precedence, so ignored input cannot
         # appear to have been admitted or persist as unchecked run audit data.
         normalized_input = normalize_input(body.input, trusted_internal=is_internal_caller)
-        agent_factory = resolve_agent_factory(body.assistant_id)
+        # resolve_agent_factory lazily imports the full lead-agent assembly
+        # stack (middlewares, authz, MCP, jsonschema — multiple seconds on a
+        # cold start), so it must not run on the event loop: every run-creation
+        # path flows through this single choke point and the first run after
+        # startup would stall every other request. After the first call the
+        # import is cached and the hop only costs a thread switch (same
+        # loop-stall family as issue #5172).
+        agent_factory = await asyncio.to_thread(resolve_agent_factory, body.assistant_id)
         command = getattr(body, "command", None)
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
