@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
+from deerflow.config._boolean_guards import reject_boolean
+
 
 class TitleConfig(BaseModel):
     """Configuration for automatic thread title generation."""
@@ -34,11 +36,7 @@ class TitleConfig(BaseModel):
     @field_validator("max_words", "max_chars", mode="before")
     @classmethod
     def _reject_boolean_limits(cls, value: object, info: ValidationInfo) -> object:
-        # YAML `true`/`false` next to neighbouring boolean knobs must not coerce
-        # into integers (Pydantic would turn `true` into 1 before ge/le runs).
-        if isinstance(value, bool):
-            raise ValueError(f"{info.field_name} must be an integer, not a boolean")
-        return value
+        return reject_boolean(value, info, kind="an integer")
 
 
 # Global configuration instance
