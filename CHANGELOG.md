@@ -460,6 +460,16 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **channels:** Buzz now follows a thread without a fresh mention for authors
+  bound with `/connect`. With `channel_connections.enabled`, the manager maps a
+  bound author's threads only in the connection repository, but Buzz's
+  thread-follow gate read only the JSON channel store, so every unmentioned
+  reply in a thread the bot was already answering was silently dropped. Buzz
+  now resolves the connection before the mention gate and looks the thread up
+  through the same helper as the manager (`lookup_thread_id`), so a bound
+  author's engaged thread is the one the manager will reuse, and a legacy JSON
+  mapping no longer counts for that author.
+
 - **channels:** Discord now runs its channel-connection database work on the
   Gateway event loop. discord.py delivers messages on a private loop in the
   client thread, and the Discord adapter awaited the connection repository there
