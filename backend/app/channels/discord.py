@@ -127,6 +127,7 @@ class DiscordChannel(Channel):
         self._client = client
         self._discord_module = discord
         self._main_loop = asyncio.get_event_loop()
+        self._open_threadsafe_future_intake()
 
         @client.event
         async def on_message(message) -> None:
@@ -208,6 +209,7 @@ class DiscordChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+        await self._close_and_drain_threadsafe_futures()
 
         # Best-effort durability: flush in-memory thread mappings so the most
         # recent channel->thread mapping survives a hard shutdown (process
@@ -585,8 +587,7 @@ class DiscordChannel(Channel):
                         },
                     )
                     inbound.topic_id = thread_id
-                    inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
-                    if not self._publish_reserved(inbound, reservation):
+                    if not self._publish_reserved(inbound, reservation, guild_id=str(guild.id) if guild else None):
                         return
                     reservation_transferred = True
                     # Start typing indicator in the thread
@@ -694,9 +695,8 @@ class DiscordChannel(Channel):
                 },
             )
             inbound.topic_id = thread_id
-            inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
 
-            if not self._publish_reserved(inbound, reservation):
+            if not self._publish_reserved(inbound, reservation, guild_id=str(guild.id) if guild else None):
                 return
             reservation_transferred = True
 
@@ -708,17 +708,37 @@ class DiscordChannel(Channel):
             if not reservation_transferred:
                 reservation.release()
 
-    def _publish_reserved(self, inbound: InboundMessage, reservation: InboundReservation) -> bool:
-        """Transfer an already-reserved message to the Gateway loop."""
-        if self._main_loop and self._main_loop.is_running():
-            try:
-                # This is called from discord.py's private event-loop thread.
-                self._main_loop.call_soon_threadsafe(self._commit_reserved_inbound, reservation, inbound)
-                return True
-            except RuntimeError:
-                logger.info("[Discord] main loop stopped before reserved inbound could be scheduled")
-        reservation.release()
-        return False
+    def _publish_reserved(self, inbound: InboundMessage, reservation: InboundReservation, *, guild_id: str | None) -> bool:
+        """Transfer an already-reserved message to the Gateway loop.
+
+        Called from discord.py's private event-loop thread. The connection
+        identity is resolved on the Gateway loop as well, because the
+        repository's SQLAlchemy engine and pool belong to that loop: awaiting
+        them from the Discord loop fails under asyncpg ("attached to a
+        different loop") and binds the pool's wait queue to the wrong loop
+        under aiosqlite, breaking the Gateway's own queries.
+        """
+        scheduled = self._submit_threadsafe_coroutine(
+            self._commit_reserved_inbound_with_identity(inbound, reservation, guild_id=guild_id),
+            self._main_loop,
+            name="commit_reserved_inbound",
+            msg_id=inbound.metadata.get("message_id"),
+            reservation=reservation,
+        )
+        if not scheduled:
+            logger.info("[Discord] main loop stopped before reserved inbound could be scheduled")
+        return scheduled
+
+    async def _commit_reserved_inbound_with_identity(
+        self,
+        inbound: InboundMessage,
+        reservation: InboundReservation,
+        *,
+        guild_id: str | None,
+    ) -> bool:
+        """Attach connection identity and commit the reservation on the Gateway loop."""
+        inbound = await self._attach_connection_identity(inbound, guild_id=guild_id)
+        return self._commit_reserved_inbound(reservation, inbound)
 
     async def _attach_connection_identity(self, inbound: InboundMessage, guild_id: str | None = None) -> InboundMessage:
         return await attach_connection_identity(
@@ -730,12 +750,27 @@ class DiscordChannel(Channel):
         )
 
     async def _bind_connection_from_connect_code(self, message, code: str) -> bool:
+        """Dispatch the bind flow to the Gateway loop, where the repository's engine lives."""
         if self._connection_repo is None or not code:
             return False
 
+        scheduled = self._submit_threadsafe_coroutine(
+            self._bind_connection_from_connect_code_on_main(message, code),
+            self._main_loop,
+            name="bind_connection",
+            msg_id=getattr(message, "id", None),
+        )
+        if not scheduled:
+            logger.warning("[Discord] main loop not running, cannot bind channel connection")
+        # The code is consumed either way so a bind attempt never reaches the
+        # agent as a chat turn.
+        return True
+
+    async def _bind_connection_from_connect_code_on_main(self, message, code: str) -> bool:
+        """Run the bind flow on the Gateway loop; replies go back through the Discord loop."""
         state = await self._connection_repo.consume_oauth_state(provider="discord", state=code)
         if state is None:
-            await self._send_connection_reply(message, "Discord connection code is invalid or expired.")
+            await self._run_on_discord_loop(self._send_connection_reply(message, "Discord connection code is invalid or expired."))
             return True
 
         guild = getattr(message, "guild", None)
@@ -743,7 +778,7 @@ class DiscordChannel(Channel):
         author = getattr(message, "author", None)
         user_id = str(getattr(author, "id", "") or "")
         if not user_id:
-            await self._send_connection_reply(message, "Discord connection could not be completed from this message.")
+            await self._run_on_discord_loop(self._send_connection_reply(message, "Discord connection could not be completed from this message."))
             return True
 
         guild_id = str(getattr(guild, "id", "") or "") or None
@@ -760,7 +795,7 @@ class DiscordChannel(Channel):
             },
             status="connected",
         )
-        await self._send_connection_reply(message, "Discord connected to DeerFlow.")
+        await self._run_on_discord_loop(self._send_connection_reply(message, "Discord connected to DeerFlow."))
         return True
 
     @staticmethod

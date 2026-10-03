@@ -460,6 +460,21 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **channels:** Discord now runs its channel-connection database work on the
+  Gateway event loop. discord.py delivers messages on a private loop in the
+  client thread, and the Discord adapter awaited the connection repository there
+  even though its SQLAlchemy engine and pool belong to the Gateway loop. With
+  `channel_connections.enabled` on PostgreSQL, the first Discord message after
+  the Gateway had used the pool failed with `got Future … attached to a
+  different loop` and was dropped. With SQLite, a burst that exhausted the pool
+  failed with `Queue … is bound to a different event loop`, and the wait queue
+  stayed bound to the Discord loop, so the Gateway's own queries then failed the
+  same way. The identity lookup now runs together with the intake commit, and
+  `/connect` binding runs separately, both on the Gateway loop through
+  `_submit_threadsafe_coroutine` like Telegram, Feishu, and DingTalk. Bind
+  replies go back through the Discord loop, and `stop()` now drains that work
+  before tearing the client down.
+
 - **community:** The shared SSRF guard now refuses every non-global address,
   including the `100.64.0.0/10` shared address space that its flag checks let
   through. That range holds CGNAT and Tailscale hosts and Alibaba Cloud's

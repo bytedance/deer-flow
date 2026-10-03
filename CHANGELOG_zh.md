@@ -419,6 +419,18 @@
 
 ### 修复
 
+- **渠道：** Discord 的渠道连接数据库操作现在在 Gateway 事件循环上执行。
+  discord.py 在客户端线程的私有事件循环上投递消息，而 Discord 适配器此前就在该
+  循环上 await 连接仓库，但仓库的 SQLAlchemy 引擎与连接池属于 Gateway 循环。在
+  PostgreSQL 上开启 `channel_connections.enabled` 时，Gateway 使用过连接池之后的
+  第一条 Discord 消息会以 `got Future … attached to a different loop` 失败并被
+  丢弃；在 SQLite 上，耗尽连接池的突发流量会以
+  `Queue … is bound to a different event loop` 失败，且等待队列会一直绑定在
+  Discord 循环上，导致 Gateway 自身的查询随后也以同样方式失败。现在身份查询与入站
+  提交一起执行，`/connect` 绑定单独执行，二者都与 Telegram、飞书、钉钉一样经由
+  `_submit_threadsafe_coroutine` 在 Gateway 循环上运行；绑定回复经 Discord 循环
+  发回，`stop()` 也会在关闭客户端前排空这些任务。
+
 - **社区工具：** 共享 SSRF 校验现在拒绝所有非全局地址，包括原先的标志位检查放行的
   `100.64.0.0/10` 共享地址段。该地址段包含 CGNAT 与 Tailscale 主机以及阿里云
   `100.100.100.200` 实例元数据端点，因此 `web_fetch`（crawl4ai、Browserless、
