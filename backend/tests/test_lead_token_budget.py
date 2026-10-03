@@ -9,12 +9,11 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.checkpoint.memory import InMemorySaver
 
-import deerflow.agents.middlewares.token_usage_middleware as token_usage_middleware
 from deerflow.agents.lead_agent.agent import build_middlewares
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
-from deerflow.agents.middlewares.token_usage_middleware import TOKEN_USAGE_ATTRIBUTION_KEY, TokenUsageMiddleware
+from deerflow.agents.middlewares.token_usage_middleware import TOKEN_USAGE_ATTRIBUTION_KEY, CompletedSubagentUsageMiddleware, TokenUsageMiddleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.app_config import AppConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
@@ -25,10 +24,7 @@ from deerflow.config.token_budget_config import TokenBudgetConfig
 from deerflow.config.token_usage_config import TokenUsageConfig
 from deerflow.tools.builtins.task_tool import _task_result_command
 
-_COMPLETED_USAGE_MIDDLEWARE = getattr(token_usage_middleware, "CompletedSubagentUsageMiddleware", None)
-_ACCOUNTING_MIDDLEWARE_TYPES = (TokenBudgetMiddleware, TokenUsageMiddleware)
-if _COMPLETED_USAGE_MIDDLEWARE is not None:
-    _ACCOUNTING_MIDDLEWARE_TYPES += (_COMPLETED_USAGE_MIDDLEWARE,)
+_ACCOUNTING_MIDDLEWARE_TYPES = (TokenBudgetMiddleware, TokenUsageMiddleware, CompletedSubagentUsageMiddleware)
 
 
 class _ToolCallingModel(FakeMessagesListChatModel):
