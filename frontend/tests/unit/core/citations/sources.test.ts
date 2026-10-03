@@ -262,12 +262,84 @@ describe("extractCitationSources", () => {
   });
 
   it("keeps an indented run across a blank line inside it", () => {
+    // The CRLF variant pins the blankness classification: after a split on
+    // "\n" the blank line still carries its "\r", and reading it as content
+    // cleared the run and let Fake2 through.
+    for (const eol of ["\n", "\r\n"]) {
+      const markdown = [
+        "> ```md",
+        "    [citation:Fake1](https://example.com/fake1)",
+        "",
+        "    [citation:Fake2](https://example.com/fake2)",
+        "> ```",
+        "Real [citation:Real](https://example.com/real).",
+      ].join(eol);
+
+      expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+        "https://example.com/real",
+      ]);
+    }
+  });
+
+  it("masks the indented code block that follows the blank line ending a quoted fence", () => {
+    // The blank line ends the blockquote, and the four-space line after it is a
+    // top-level indented code block, so Fake stays code instead of surfacing as
+    // a phantom source. Verified against remark-parse.
     const markdown = [
       "> ```md",
-      "    [citation:Fake1](https://example.com/fake1)",
       "",
-      "    [citation:Fake2](https://example.com/fake2)",
+      "    [citation:Fake](https://example.com/fake)",
       "> ```",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("renders the paragraph that follows the blank line ending a quoted fence", () => {
+    // Two columns is paragraph territory, so the pending quote exit must not
+    // mask the line that classifies it: this pins the boundary against the
+    // four-column case above.
+    const markdown = [
+      "> ```md",
+      "",
+      "  [citation:Para](https://example.com/para)",
+      "> ```",
+      "Real [citation:Real](https://example.com/real).",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/para",
+      "https://example.com/real",
+    ]);
+  });
+
+  it("measures a quote escape against the list item the quote sat in", () => {
+    // The quote is a child of the list item and the item outlives it, so four
+    // columns of indentation are only two past the item's content column: the
+    // citation is paragraph content, not an indented code block. Verified
+    // against remark-parse.
+    const markdown = [
+      "- item",
+      "  > ```md",
+      "    [citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("still masks a quote escape indented past the surviving list item", () => {
+    // Six columns are four past the item's content column, so the escaped line
+    // does start an indented code block — and the unindented line after it ends
+    // the item and the run, rendering again.
+    const markdown = [
+      "- item",
+      "  > ```md",
+      "      [citation:Fake](https://example.com/fake)",
       "Real [citation:Real](https://example.com/real).",
     ].join("\n");
 

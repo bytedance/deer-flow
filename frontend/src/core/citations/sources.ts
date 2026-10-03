@@ -177,7 +177,12 @@ function linePosition(line: string): {
   indent: number;
   body: string;
 } {
-  const { quoteDepth, rest } = quoteContext(line);
+  // After the split on "\n" a CRLF ending still carries its "\r" on the line,
+  // and that "\r" is the other half of the ending rather than content: reading
+  // it as body made a blank CRLF line nonblank, which cleared an indented run
+  // in the middle of a code block.
+  const content = line.endsWith("\r") ? line.slice(0, -1) : line;
+  const { quoteDepth, rest } = quoteContext(content);
   const body = rest.replace(/^[ \t]+/, "");
   return {
     quoteDepth,
@@ -218,9 +223,19 @@ function fenceTail(line: string, match: RegExpExecArray): string {
 
 type OpenFence = { quoteDepth: number; column: number };
 
-// How far a top-level line has to be indented to be an indented code block
-// rather than a paragraph. One tab already reaches it.
+// How far a line has to be indented past its container's content column to be
+// an indented code block rather than a paragraph. One tab already reaches it.
 const INDENTED_CODE_COLUMNS = 4;
+
+// The content column of the deepest list item a line's indentation still keeps
+// open, popping the items the line has dedented past. The scan loop applies the
+// same rule before it reads a new list marker.
+function survivingItemColumn(items: number[], indent: number): number {
+  while (items.length > 0 && indent < (items[items.length - 1] ?? 0)) {
+    items.pop();
+  }
+  return items[items.length - 1] ?? 0;
+}
 
 function maskFencedCodeBlocks(markdown: string): string {
   // Blank a fenced block from its opener to its matching closer — or, while the
@@ -240,19 +255,47 @@ function maskFencedCodeBlocks(markdown: string): string {
   let fence: OpenFence | null = null;
   let items: number[] = [];
   let itemsQuoteDepth = 0;
+  // A quote can sit inside a list item, and the item outlives the quote: the
+  // depth-zero stack is parked here while the quote is scanned, so a fence that
+  // ends with the quote can measure against the item it sat in.
+  let outerItems: number[] | null = null;
   // Leaving a block quote is not the same as reaching free text: a line four
-  // columns in, with no `>` on it, starts an indented code block at the top
-  // level, so its citations stay code and must stay blanked. Blank lines inside
-  // such a run need nothing — they carry no text to hide.
+  // columns past the surviving list item — or past column zero when there is
+  // none — starts an indented code block, so its citations stay code and must
+  // stay blanked. The quote can also end on a blank line, which decides
+  // nothing; the exit then stays pending until the first nonblank line
+  // classifies it. Blank lines inside such a run need nothing — they carry no
+  // text to hide.
   let indentedRun = false;
+  // The container column the active run measures its four columns against.
+  let runBase = 0;
+  // Set when a fence ends because its quote did, on a line too blank to tell
+  // an indented code block from ordinary structure.
+  let pendingQuoteExit = false;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!;
     const position = linePosition(line);
     const opener = FENCE_LINE_RE.exec(line);
+    if (pendingQuoteExit) {
+      if (position.quoteDepth === 0 && position.body === "") {
+        continue;
+      }
+      pendingQuoteExit = false;
+      if (position.quoteDepth === 0) {
+        const base = survivingItemColumn(items, position.indent);
+        if (position.indent - base >= INDENTED_CODE_COLUMNS) {
+          runBase = base;
+          indentedRun = true;
+          lines[i] = maskKeepingNewlines(line);
+          continue;
+        }
+      }
+    }
     if (indentedRun) {
       if (
         position.quoteDepth === 0 &&
-        (position.body === "" || position.indent >= INDENTED_CODE_COLUMNS)
+        (position.body === "" ||
+          position.indent - runBase >= INDENTED_CODE_COLUMNS)
       ) {
         if (position.body !== "") {
           lines[i] = maskKeepingNewlines(line);
@@ -269,12 +312,22 @@ function maskFencedCodeBlocks(markdown: string): string {
         const leftTheQuote = fence!.quoteDepth > 0 && position.quoteDepth === 0;
         openMarker = null;
         fence = null;
-        indentedRun =
-          leftTheQuote &&
-          position.body !== "" &&
-          position.indent >= INDENTED_CODE_COLUMNS;
-        if (indentedRun) {
-          lines[i] = maskKeepingNewlines(line);
+        if (leftTheQuote) {
+          // Returning to depth zero hands the line back to the list items the
+          // quote sat in, so the four-column threshold below is measured
+          // against the surviving item rather than the document root.
+          items = outerItems ?? [];
+          outerItems = null;
+          itemsQuoteDepth = 0;
+          if (position.body === "") {
+            pendingQuoteExit = true;
+          } else {
+            runBase = survivingItemColumn(items, position.indent);
+            indentedRun = position.indent - runBase >= INDENTED_CODE_COLUMNS;
+            if (indentedRun) {
+              lines[i] = maskKeepingNewlines(line);
+            }
+          }
         }
       } else {
         lines[i] = maskKeepingNewlines(line);
@@ -299,15 +352,14 @@ function maskFencedCodeBlocks(markdown: string): string {
     // Outside a fence the line is structure again, so it can open or close a
     // list item. Blank lines neither end an item nor start one.
     if (position.quoteDepth !== itemsQuoteDepth) {
+      if (itemsQuoteDepth === 0 && position.quoteDepth > 0) {
+        outerItems = items;
+      }
       items = [];
       itemsQuoteDepth = position.quoteDepth;
     }
-    while (
-      position.body !== "" &&
-      items.length > 0 &&
-      position.indent < (items[items.length - 1] ?? 0)
-    ) {
-      items.pop();
+    if (position.body !== "") {
+      survivingItemColumn(items, position.indent);
     }
     const item = LIST_ITEM_RE.exec(position.body);
     if (item && position.indent - (items[items.length - 1] ?? 0) <= 3) {
