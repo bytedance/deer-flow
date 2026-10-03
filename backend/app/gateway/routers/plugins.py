@@ -93,6 +93,7 @@ async def plugin_asset(request: Request, namespace: str, revision: str, path: st
 @router.post("/{namespace}/actions/{action_name}")
 async def invoke_plugin_action(request: Request, namespace: str, action_name: str):
     """Invoke an installed action with the authenticated viewer and deployment settings."""
+    from deerflow_extension_api.agent_runs import AgentRunError, resolve_agent_runs
     from deerflow_extension_api.auth import resolve_principal
     from deerflow_extension_api.plugins import ActionContext
 
@@ -116,6 +117,13 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
         raise HTTPException(503, "Plugin settings unavailable.") from exc
     if settings["enabled"] is not True:
         raise HTTPException(403, "Plugin disabled by administrator.")
+    # Authorize after the action is resolved (so the target is a host-validated
+    # declared name and an unknown action stays a 404) and before the body is
+    # streamed (so a denied caller cannot consume the input budget or reach the
+    # handler). No provider decision happens when authorization is disabled.
+    from app.gateway.authz import authorize_plugin_action_for_request
+
+    await authorize_plugin_action_for_request(request, namespace=namespace, action_name=action_name)
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
@@ -129,7 +137,10 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
         raise HTTPException(422, "Plugin action requires a JSON object.") from exc
     try:
         async with asyncio.timeout(30):
-            return await action.handler(MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings)))
+            runs = resolve_agent_runs(request)
+            return await action.handler(MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings), agent_runs=runs.for_plugin(namespace) if runs is not None else None))
+    except AgentRunError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
     except TimeoutError as exc:
         raise HTTPException(504, "Plugin action timed out.") from exc
     except ValueError as exc:

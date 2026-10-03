@@ -27,7 +27,7 @@ def _count(value: object) -> int:
             raise ValueError("Expected an integer")
         return max(1, min(100, int(value)))
     except (TypeError, ValueError, OverflowError):
-        logger.warning("Invalid Webz max_results; using default 5")
+        logger.warning("Invalid Webz max_results=%r; using default 5", value)
         return 5
 
 
@@ -35,22 +35,28 @@ def _normalize(payload: object, count: int) -> list[dict]:
     if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
         raise ValueError("Invalid results")
     results = []
-    for item in payload["results"][:count]:
-        if not isinstance(item, dict) or not isinstance(item.get("article"), dict):
-            raise ValueError("Invalid article")
-        article = item["article"]
-        chunk, metadata = item.get("chunk", {}), item.get("metadata", {})
-        if not isinstance(chunk, dict) or not isinstance(metadata, dict):
-            raise ValueError("Invalid metadata")
-        result = {
-            "title": article.get("title", ""),
-            "url": article.get("url", ""),
-            "content": chunk.get("text") or article.get("summary") or "",
-            "published_at": article.get("published_at", ""),
-        }
-        if any(not isinstance(value, str) for value in result.values()):
-            raise ValueError("Invalid article fields")
+    for index, item in enumerate(payload["results"][:count]):
+        try:
+            if not isinstance(item, dict) or not isinstance(item.get("article"), dict):
+                raise ValueError("Invalid article")
+            article = item["article"]
+            chunk, metadata = item.get("chunk", {}), item.get("metadata", {})
+            if not isinstance(chunk, dict) or not isinstance(metadata, dict):
+                raise ValueError("Invalid metadata")
+            result = {
+                "title": article.get("title", ""),
+                "url": article.get("url", ""),
+                "content": chunk.get("text") or article.get("summary") or "",
+                "published_at": article.get("published_at", ""),
+            }
+            if any(not isinstance(value, str) for value in result.values()):
+                raise ValueError("Invalid article fields")
+        except ValueError:
+            logger.warning("Skipping malformed Webz result at index %d", index)
+            continue
         results.append({**result, "source": metadata})
+    if payload["results"] and not results:
+        raise ValueError("No valid articles")
     return results
 
 
@@ -142,5 +148,6 @@ async def web_search_tool(
     except httpx.RequestError:
         return json.dumps({"error": "Webz request failed"})
     except ValueError:
+        logger.warning("Webz returned an unexpected response")
         return json.dumps({"error": "Webz returned an unexpected response"})
     return json.dumps({"query": query, "returned_results": len(results), "results": results}, ensure_ascii=False)

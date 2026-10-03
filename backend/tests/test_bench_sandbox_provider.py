@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 
 def _load_module(name: str, relative: str):
@@ -276,6 +279,10 @@ def test_boxlite_factory_restores_module_state(monkeypatch):
     assert _FactoryProvider._create_box is original_create_box
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="asserts POSIX exec-bit semantics (os.chmod cannot toggle execute bits on Windows); boxlite sandboxes are Linux-only",
+)
 def test_boxlite_shim_workaround_retries_after_fixing_permissions(monkeypatch, tmp_path):
     boxes_dir = tmp_path / "boxes"
     shim = boxes_dir / "deadbeef" / "bin" / "boxlite-shim"

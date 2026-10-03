@@ -111,6 +111,29 @@ async def test_list_run_events_redacts_historical_run_start_metadata():
     assert events[0] is not stored_row
 
 
+@pytest.mark.parametrize("run_id", ["run.1", "a%20b", "%2e%2e"])
+@pytest.mark.parametrize("route", ["events", "messages", "workspace-changes"])
+def test_run_scoped_reads_of_a_noncanonical_run_id_on_jsonl_match_the_memory_store(tmp_path, route, run_id):
+    """The URL's run_id reaches the event store unvalidated; JSONL must answer it as an unknown run, not a 500."""
+    from _router_auth_helpers import make_authed_test_app
+    from fastapi.testclient import TestClient
+
+    from app.gateway.routers import thread_runs
+    from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+    def get(store):
+        app = make_authed_test_app()
+        app.include_router(thread_runs.router)
+        app.state.run_event_store = store
+        with TestClient(app, raise_server_exceptions=False) as client:
+            return client.get(f"/api/threads/t1/runs/{run_id}/{route}")
+
+    jsonl = get(JsonlRunEventStore(tmp_path))
+    memory = get(MemoryRunEventStore())
+
+    assert (jsonl.status_code, jsonl.json()) == (200, memory.json())
+
+
 @pytest.mark.anyio
 async def test_effective_memory_flows_from_injection_to_the_existing_debug_api():
     """The production run-events route is the field-level consumer for M1.

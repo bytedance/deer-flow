@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -878,6 +880,81 @@ def test_configure_provider_runtime_credentials_preserves_masked_secrets(tmp_pat
     anyio.run(repo.close)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runtime_config", "expected_persisted"),
+    [
+        ({"enabled": True, "bot_token": "new-token"}, {"enabled": True, "bot_token": "new-token"}),
+        (None, {"enabled": False, "_runtime_disabled": True}),
+    ],
+)
+async def test_runtime_config_commit_drains_persistence_and_cache_across_cancellation(
+    monkeypatch,
+    runtime_config,
+    expected_persisted,
+):
+    started = threading.Event()
+    release = threading.Event()
+    persisted: dict[str, dict] = {}
+    live_channels_config = {
+        "telegram": {"enabled": True, "bot_token": "sibling"},
+        "slack": {"enabled": True, "bot_token": "old-token"},
+    }
+
+    def set_provider_config(provider, value):
+        started.set()
+        assert release.wait(timeout=5)
+        persisted[provider] = dict(value)
+
+    def set_provider_disconnected(provider):
+        started.set()
+        assert release.wait(timeout=5)
+        persisted[provider] = {"enabled": False, "_runtime_disabled": True}
+
+    store = SimpleNamespace(
+        set_provider_config=set_provider_config,
+        set_provider_disconnected=set_provider_disconnected,
+    )
+
+    async def get_store(_request):
+        return store
+
+    async def get_channels_config(_request):
+        return live_channels_config
+
+    monkeypatch.setattr(channel_connections, "_get_runtime_config_store", get_store)
+    monkeypatch.setattr(channel_connections, "_get_channels_config", get_channels_config)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(channels_config=live_channels_config)))
+
+    task = asyncio.create_task(channel_connections._commit_runtime_channel_config(request, "slack", runtime_config))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert persisted["slack"] == expected_persisted
+    assert request.app.state.channels_config["telegram"] == {
+        "enabled": True,
+        "bot_token": "sibling",
+    }
+    if runtime_config is None:
+        assert "slack" not in request.app.state.channels_config
+    else:
+        assert request.app.state.channels_config["slack"] == runtime_config
+
+
 def test_disconnect_provider_runtime_config_clears_connected_state(tmp_path):
     import anyio
 
@@ -1226,7 +1303,7 @@ def test_disconnect_connection_is_current_user_scoped(tmp_path):
     anyio.run(repo.close)
 
 
-@pytest.mark.parametrize("worker_env", [{}, {"GATEWAY_WORKERS": "1"}, {"WEB_CONCURRENCY": "1"}])
+@pytest.mark.parametrize("worker_env", [{}, {"GATEWAY_WORKERS": "1"}, {"WEB_CONCURRENCY": "1"}, {"GATEWAY_WORKERS": ""}])
 def test_wechat_qr_login_saves_credentials_without_exposing_token(monkeypatch, worker_env):
     from app.channels.wechat_qr_login import WechatQRLogin
 
@@ -1366,7 +1443,17 @@ def test_wechat_qr_confirmation_preserves_bot_id_unless_replaced(monkeypatch, re
     assert saved == expected
 
 
-@pytest.mark.parametrize("worker_env", [{"GATEWAY_WORKERS": "2"}, {"GATEWAY_WORKERS": "4"}, {"WEB_CONCURRENCY": "2"}, {"GATEWAY_WORKERS": "invalid"}])
+@pytest.mark.parametrize(
+    "worker_env",
+    [
+        {"GATEWAY_WORKERS": "2"},
+        {"GATEWAY_WORKERS": "4"},
+        {"WEB_CONCURRENCY": "2"},
+        {"GATEWAY_WORKERS": "invalid"},
+        # A blank GATEWAY_WORKERS is unset, so WEB_CONCURRENCY still decides.
+        {"GATEWAY_WORKERS": "", "WEB_CONCURRENCY": "2"},
+    ],
+)
 @pytest.mark.parametrize("method,suffix", [("POST", ""), ("POST", "/session/poll"), ("DELETE", "/session")])
 def test_wechat_qr_routes_reject_unsupported_workers_before_session_access(monkeypatch, worker_env, method, suffix):
     from app.channels.wechat_qr_login import WechatQRLogin
@@ -1403,3 +1490,78 @@ def test_manual_wechat_setup_remains_available_with_multiple_workers(monkeypatch
     assert result.status_code == 200
     assert app.state.channels_config["wechat"]["bot_token"] == "manual-token"
     restart.assert_awaited_once()
+
+
+def test_qq_provider_exposes_binding_flow_and_masks_secret(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate({"enabled": True, "qq": {"enabled": True}})
+    app = _make_app(
+        config,
+        repo,
+        {
+            "qq": {
+                "enabled": True,
+                "app_id": "fixture-app",
+                "client_secret": "fixture-private-secret",
+            }
+        },
+    )
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/channels/providers")
+            assert response.status_code == 200
+            providers = response.json()["providers"]
+            assert len(providers) == 1
+            provider = providers[0]
+            assert provider["provider"] == "qq"
+            assert provider["display_name"] == "QQ"
+            assert provider["auth_mode"] == "binding_code"
+            assert provider["configured"] is True
+            assert provider["connectable"] is True
+            assert "fixture-private-secret" not in response.text
+            fields = {field["name"]: field for field in provider["credential_fields"]}
+            assert fields["app_id"]["type"] == "text"
+            assert fields["client_secret"]["type"] == "password"
+            connected = client.post("/api/channels/qq/connect")
+            assert connected.status_code == 200
+            body = connected.json()
+            assert body["mode"] == "binding_code"
+            assert body["url"] is None
+            assert body["instruction"] == f"Send /connect {body['code']} to the DeerFlow QQ bot."
+
+        async def consume():
+            return await repo.consume_oauth_state(provider="qq", state=body["code"])
+
+        state = anyio.run(consume)
+        assert state["owner_user_id"] == str(_user().id)
+        assert anyio.run(consume) is None
+    finally:
+        anyio.run(repo.close)
+
+
+def test_qq_runtime_credentials_can_be_configured_from_browser(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate({"enabled": True, "qq": {"enabled": True}})
+    app = _make_app(config, repo, {})
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/channels/qq/runtime-config",
+                json={
+                    "values": {
+                        "app_id": "fixture-app",
+                        "client_secret": "fixture-private-secret",
+                    }
+                },
+            )
+            assert response.status_code == 200
+            assert response.json()["configured"] is True
+            assert "fixture-private-secret" not in response.text
+            assert app.state.channels_config["qq"]["client_secret"] == "fixture-private-secret"
+            assert client.post("/api/channels/qq/connect").status_code == 200
+    finally:
+        anyio.run(repo.close)

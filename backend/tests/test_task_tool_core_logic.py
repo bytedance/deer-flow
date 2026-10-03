@@ -560,6 +560,59 @@ def test_bound_task_tool_forwards_explicit_execution_capacity(monkeypatch):
     assert captured["executor_kwargs"]["app_config"] is app_config
 
 
+def test_bound_task_tool_sync_path_uses_the_explicit_capacity(monkeypatch):
+    """Sync invocation of the bound copy must not bypass the explicit capacity.
+
+    ``get_available_tools`` wraps the process-wide task_tool singleton in
+    place with a sync ``func``; a bound copy that only rebinds ``coroutine``
+    would keep that wrapper around the unbound coroutine and drop the runtime's
+    owned execution capacity on the sync path.
+    """
+    from deerflow.tools.tools import _ensure_sync_invocable_tool
+
+    runtime = _make_runtime()
+    captured = {}
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=7))
+    app_config = object()
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **_kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name, **_kwargs: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    # Snapshot func so monkeypatch undoes the in-place wrap after this test.
+    monkeypatch.setattr(task_tool_module.task_tool, "func", task_tool_module.task_tool.func)
+    _ensure_sync_invocable_tool(task_tool_module.task_tool)
+
+    bound_tool = task_tool_module.bind_task_tool(capacity, app_config=app_config)
+    assert bound_tool.func is not None
+    bound_tool.func(
+        runtime=runtime,
+        description="test",
+        prompt="p",
+        subagent_type="general-purpose",
+        tool_call_id="tc-capacity-sync",
+    )
+
+    assert captured["executor_kwargs"]["execution_capacity"] is capacity
+    assert captured["executor_kwargs"]["app_config"] is app_config
+
+
 def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
     """The IM-channel sender identity must survive delegation: in group chats
     one thread serves many senders, so a subagent's bash commands need the
@@ -628,6 +681,39 @@ def test_task_tool_forwards_is_internal_true_to_executor(monkeypatch):
 
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-1")
     assert captured["executor_kwargs"]["is_internal"] is True
+
+
+def test_task_tool_preserves_overwrite_sandbox_state_for_executor(monkeypatch):
+    """Fork-restored checkpoints wrap sandbox state in Overwrite; task_tool must preserve the wrapper so executor retains borrow semantics."""
+    from langgraph.types import Overwrite
+
+    runtime = _make_runtime()
+    runtime.state["sandbox"] = Overwrite({"sandbox_id": "sb-fork-123"})
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-1")
+    passed_sandbox = captured["executor_kwargs"]["sandbox_state"]
+    assert isinstance(passed_sandbox, Overwrite)
+    assert passed_sandbox.value == {"sandbox_id": "sb-fork-123"}
 
 
 def test_task_tool_forwards_is_internal_false_to_executor(monkeypatch):

@@ -1,5 +1,8 @@
+import asyncio
 import logging
+import math
 import os
+import random
 
 import httpx
 
@@ -9,7 +12,8 @@ _api_key_warned = False
 
 
 class JinaClient:
-    async def crawl(self, url: str, return_format: str = "html", timeout: int = 10, proxy: str | None = None, trust_env: bool = True) -> str:
+    async def crawl(self, url: str, return_format: str = "html", timeout: int = 10, proxy: str | None = None, trust_env: bool = True, *, max_retries: int = 0, retry_budget_seconds: float = 30.0) -> str:
+        """Fetch with optional bounded retries; cancellation always propagates."""
         global _api_key_warned
         headers = {
             "Content-Type": "application/json",
@@ -23,24 +27,52 @@ class JinaClient:
             logger.warning("Jina API key is not set. Provide your own key to access a higher rate limit. See https://jina.ai/reader for more information.")
         data = {"url": url}
         try:
-            client_kwargs: dict[str, object] = {"trust_env": trust_env}
-            if proxy:
-                client_kwargs["proxy"] = proxy
-            async with httpx.AsyncClient(**client_kwargs) as client:
-                response = await client.post("https://r.jina.ai/", headers=headers, json=data, timeout=timeout)
+            if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+                raise ValueError("max_retries must be a non-negative integer")
+            if isinstance(retry_budget_seconds, bool) or not isinstance(retry_budget_seconds, (int, float)) or not math.isfinite(retry_budget_seconds) or retry_budget_seconds <= 0:
+                raise ValueError("retry_budget_seconds must be a finite positive number")
 
-            if response.status_code != 200:
-                error_message = f"Jina API returned status {response.status_code}: {response.text}"
-                logger.error(error_message)
-                return f"Error: {error_message}"
+            # HTTPX timeouts are per network phase, so use an outer deadline to
+            # bound the complete request sequence (including waits and cleanup).
+            deadline = asyncio.get_running_loop().time() + retry_budget_seconds if max_retries else None
+            async with asyncio.timeout_at(deadline):
+                client_kwargs: dict[str, object] = {"trust_env": trust_env}
+                if proxy:
+                    client_kwargs["proxy"] = proxy
+                async with httpx.AsyncClient(**client_kwargs) as client:
+                    delay = 0.5
+                    for attempt in range(max_retries + 1):
+                        remaining = deadline - asyncio.get_running_loop().time() if deadline is not None else None
+                        if remaining is not None and remaining <= 0:
+                            raise TimeoutError
+                        request_timeout = min(timeout, remaining) if remaining is not None else timeout
+                        try:
+                            response = await client.post("https://r.jina.ai/", headers=headers, json=data, timeout=request_timeout)
+                        except (httpx.ConnectError, httpx.ConnectTimeout):
+                            if attempt == max_retries:
+                                raise
+                        else:
+                            if response.status_code == 200:
+                                if response.text and response.text.strip():
+                                    return response.text
+                                error_message = "Jina API returned empty response"
+                                logger.error(error_message)
+                                return f"Error: {error_message}"
+                            if response.status_code not in {502, 503, 504} or attempt == max_retries:
+                                error_message = f"Jina API returned status {response.status_code}: {response.text}"
+                                logger.error(error_message)
+                                return f"Error: {error_message}"
 
-            if not response.text or not response.text.strip():
-                error_message = "Jina API returned empty response"
-                logger.error(error_message)
-                return f"Error: {error_message}"
-
-            return response.text
+                        # Only allowlisted failures reach the non-blocking wait.
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            raise TimeoutError
+                        await asyncio.sleep(min(delay, remaining) * random.uniform(0.5, 1.0))
+                        delay = min(delay * 2, 4.0)
         except Exception as e:
-            error_message = f"Request to Jina API failed: {type(e).__name__}: {e}"
+            if isinstance(e, TimeoutError) and max_retries and asyncio.get_running_loop().time() >= deadline:
+                error_message = "Request to Jina API failed: retry time budget exhausted"
+            else:
+                error_message = f"Request to Jina API failed: {type(e).__name__}: {e}"
             logger.warning(error_message)
             return f"Error: {error_message}"

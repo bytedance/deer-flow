@@ -1,14 +1,17 @@
 """Cache for MCP tools to avoid repeated loading."""
 
 import asyncio
+import json
 import logging
 import threading
+import uuid
 from pathlib import Path
 
 from langchain_core.tools import BaseTool
 
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
+from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths, normalize_mcp_server_config
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,40 @@ _cache_generation = 0
 # different config file with an equal-or-older mtime structurally invisible.
 _config_path: Path | None = None  # Resolved extensions config path at init time
 _config_signature: _ConfigSignature | None = None  # (mtime, size, sha256) at init time
+
+# JSON snapshot of the effective MCP slice (enabled servers in declaration
+# order + mcpInterceptors) that the currently published tools were built from.
+# May contain resolved credentials: never log or persist it.
+_mcp_config_snapshot: str | None = None
+
+# True when the published cache came from an initialization with no resolvable
+# extensions config. Distinguishes "never configured" (a later config must be
+# picked up) from "config deleted after a successful load" (fail-soft: keep
+# serving the last-known-good tools).
+_initialized_without_config = False
+
+# Signature of the shared-config reset marker observed by the published
+# cache.  ``POST /api/mcp/cache/reset`` advances this marker even when
+# ``extensions_config.json`` itself is unchanged (the important case is a
+# remote MCP server changing its ``tools/list`` response).  Every worker reads
+# the marker from the same writable config directory before returning cached
+# tools, so a reset initiated in one process retires sessions in the others on
+# their next lookup.
+_cache_reset_marker_signature: _ConfigSignature | None = None
+
+
+def _cache_reset_marker_path(config_path: Path) -> Path:
+    """Return the shared reset marker colocated with the extensions config."""
+    path = Path(config_path)
+    target = path.resolve(strict=False) if path.is_symlink() else path
+    return target.parent / f".{target.name}.mcp-cache-reset.json"
+
+
+def _current_cache_reset_marker_signature(config_path: Path | None) -> _ConfigSignature | None:
+    """Return the current shared-reset marker signature, if one exists."""
+    if config_path is None:
+        return None
+    return _get_config_signature(_cache_reset_marker_path(config_path))
 
 
 def _resolve_config_path() -> Path | None:
@@ -76,22 +113,114 @@ def _current_config_state() -> tuple[Path | None, _ConfigSignature | None]:
     return config_path, _get_config_signature(config_path)
 
 
+def _effective_mcp_config_snapshot(config) -> str:
+    """Serialize the MCP-only slice of an extensions config.
+
+    ``extensions_config.json`` also carries skills and middleware settings, so
+    the whole-file signature cannot distinguish an MCP change from a skill
+    toggle. The enabled-server list preserves declaration order (it can affect
+    tool ordering) while ``sort_keys`` only normalizes each server's field
+    order. Parsed models are compared through
+    ``config_normalization.normalize_mcp_server_config`` (equivalent
+    ``type``/``transport`` spellings) and the custom interceptor list through
+    ``config_normalization.normalize_mcp_interceptor_paths`` (a bare string and
+    its single-element list, or a missing key and an empty list), so equivalent
+    spellings do not cause a needless rebuild.
+
+    The result may embed resolved credentials. It stays in process memory and
+    is never logged or written back to disk.
+    """
+    relevant = {
+        "enabled_servers": [(name, normalize_mcp_server_config(server)) for name, server in config.get_enabled_mcp_servers().items()],
+        "mcpInterceptors": normalize_mcp_interceptor_paths((config.model_extra or {}).get("mcpInterceptors")),
+    }
+    return json.dumps(relevant, sort_keys=True, ensure_ascii=False)
+
+
+def _signature_is_verifiable(signature: _ConfigSignature | None) -> bool:
+    """True when a config signature carries a content digest.
+
+    ``get_config_signature`` returns ``(mtime, size, None)`` when the file could
+    be stat-ed but not read. Such a signature cannot prove the content is
+    unchanged, so the MCP cache must neither publish nor adopt it.
+    """
+    return signature is not None and signature[2] is not None
+
+
+def _read_stable_mcp_snapshot(config_path: Path, expected_signature: _ConfigSignature) -> str | None:
+    """Parse the config and return its MCP snapshot only if the file was stable.
+
+    ``expected_signature`` is the signature observed by the caller. A signature
+    without a content digest is treated as unverifiable, and the file is
+    re-hashed after parsing: a mismatch means the config changed while it was
+    being read, so no snapshot can be attributed to a single revision and the
+    caller must treat the cache as stale. Parse failures also return ``None``
+    (conservative: never reuse tools on an unreadable config).
+    """
+    if not _signature_is_verifiable(expected_signature):
+        logger.info("Extensions config signature has no content digest; treating the MCP cache as stale")
+        return None
+
+    from deerflow.config.extensions_config import ExtensionsConfig
+
+    try:
+        config = ExtensionsConfig.from_file(str(config_path))
+    except Exception as exc:
+        # Do NOT pass exc_info/message: ExtensionsConfig.from_file resolves
+        # ``$VAR`` values before validation, so a ValidationError can embed
+        # resolved credentials in its input. Only the exception type is safe.
+        logger.warning(
+            "Could not parse extensions config while checking MCP cache staleness (%s); treating the cache as stale",
+            type(exc).__name__,
+        )
+        return None
+
+    current_signature = _get_config_signature(config_path)
+    if not _signature_is_verifiable(current_signature) or current_signature != expected_signature:
+        logger.info("Extensions config changed while it was being read; treating the MCP cache as stale")
+        return None
+
+    return _effective_mcp_config_snapshot(config)
+
+
 def _is_cache_stale() -> bool:
     """Check if the cache is stale due to config file changes.
 
-    The cache is stale when the resolved extensions config path changed, or when
-    the ``(mtime, size, sha256)`` content signature differs from the one recorded
-    at initialization. Using content equality (``!=``) instead of a strict mtime
-    ``>`` comparison detects same-second edits and backward mtime moves, and
-    tracking the resolved path detects a switch to a different config file.
+    The cache is stale when the effective MCP slice of the resolved config
+    differs from the one recorded at initialization. The resolved path and the
+    ``(mtime, size, sha256)`` content signature are the change signals that
+    trigger that comparison, not invalidation reasons on their own. Using
+    content equality (``!=``) instead of a strict mtime ``>`` comparison detects
+    same-second edits and backward mtime moves. A path switch to a file with the
+    same MCP configuration, or an edit that only touches skills or middleware
+    settings, therefore keeps the cached tools and sessions and adopts the new
+    path and signature.
+
+    When the file signature changes but the effective MCP configuration does
+    not, this function adopts the new signature into ``_config_signature`` and
+    returns False. It is therefore not a read-only predicate; production callers
+    invoke it under ``_init_condition``, the same lock the mutating paths use.
 
     Returns:
         True if the cache should be invalidated, False otherwise.
     """
+    global _config_path, _config_signature
+
     if not _cache_initialized:
         return False  # Not initialized yet, not stale
 
     current_path, current_signature = _current_config_state()
+
+    # A reset marker is independent of configuration bytes.  It exists so an
+    # administrator can refresh a remote server's changed ``tools/list`` in
+    # every Gateway worker without fabricating a config edit.  Missing current
+    # config keeps the existing last-known-good behavior below: there is no
+    # reliable shared directory to consult in that state.
+    if current_path is not None:
+        current_reset_signature = _current_cache_reset_marker_signature(current_path)
+        if current_reset_signature != _cache_reset_marker_signature:
+            logger.info("Shared MCP cache reset generation changed; cache is stale")
+            return True
 
     # Preserve the original "config missing / not yet recorded" behavior: if
     # there was no readable config when the cache was populated, or there is
@@ -103,18 +232,38 @@ def _is_cache_stale() -> bool:
     # longer be stat-ed). Treat this as a deliberate fail-soft choice, not an
     # oversight — a future change that wants "config deleted" to tear down
     # MCP tools needs its own explicit signal here, not an inferred one.
-    if _config_signature is None or current_signature is None:
+    if _config_signature is None:
+        # A config that appears after an unconfigured initialization must be
+        # picked up; a config deleted after a successful load keeps the
+        # last-known-good fail-soft contract below.
+        if _initialized_without_config and current_signature is not None:
+            logger.info("Extensions config appeared after an unconfigured MCP cache; cache is stale")
+            return True
         return False
 
+    if current_signature is None:
+        return False
+
+    if current_path == _config_path and current_signature == _config_signature and _signature_is_verifiable(current_signature):
+        return False
+
+    # The resolved path and/or the file content changed. Both are only signals to
+    # re-read the effective MCP slice: the file also carries skills and middleware
+    # settings, and a path switch can land on a file with the same MCP
+    # configuration, so neither is an invalidation reason on its own.
     if current_path != _config_path:
-        logger.info("MCP config path changed (%s -> %s), cache is stale", _config_path, current_path)
-        return True
+        logger.info("MCP config path changed (%s -> %s); re-checking the effective MCP configuration", _config_path, current_path)
 
-    if current_signature != _config_signature:
-        logger.info("MCP config content changed (signature %s -> %s), cache is stale", _config_signature, current_signature)
-        return True
+    if current_path is not None and _mcp_config_snapshot is not None:
+        current_snapshot = _read_stable_mcp_snapshot(current_path, current_signature)
+        if current_snapshot is not None and current_snapshot == _mcp_config_snapshot:
+            logger.info("Extensions config changed but the effective MCP configuration did not; keeping cached MCP tools and sessions")
+            _config_path = current_path
+            _config_signature = current_signature
+            return False
 
-    return False
+    logger.info("MCP config content changed (signature %s -> %s), cache is stale", _config_signature, current_signature)
+    return True
 
 
 def _wait_for_initialization(generation: int | None) -> None:
@@ -132,7 +281,8 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         List of LangChain tools from all enabled MCP servers.
     """
     global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
-    global _initializing_generation, _cache_generation
+    global _initializing_generation, _cache_generation, _mcp_config_snapshot, _initialized_without_config
+    global _cache_reset_marker_signature
 
     while True:
         with _init_condition:
@@ -141,7 +291,6 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 return _mcp_tools_cache or []
 
             if _initializing_generation is None:
-                pre_path, pre_sig = _current_config_state()
                 claim_generation = _cache_generation
                 _initializing_generation = claim_generation
                 break
@@ -150,16 +299,60 @@ async def initialize_mcp_tools() -> list[BaseTool]:
 
         await asyncio.to_thread(_wait_for_initialization, waiting_generation)
 
+    from deerflow.config.extensions_config import ExtensionsConfig
     from deerflow.mcp.tools import get_mcp_tools
 
     loaded_tools = None
+    loaded_snapshot = None
     post_path = None
     post_sig = None
+    post_snapshot = None
+    loaded_reset_signature = None
+    post_reset_signature = None
     init_succeeded = False
     try:
         logger.info("Initializing MCP tools...")
-        loaded_tools = await get_mcp_tools()
+        # Read the exact revision we hand to discovery. Comparing pre/post file
+        # snapshots alone cannot prove which revision produced the tools, because
+        # get_mcp_tools() would otherwise read the file itself.
+        try:
+            loaded_config = ExtensionsConfig.from_file()
+        except Exception as exc:
+            # Never let a resolved-credential ValidationError reach a caller's
+            # logger: from_file() resolves $VAR values before validation, so the
+            # exception message can embed secrets. Re-raise a sanitized error;
+            # other MCP failures keep their original traceback.
+            logger.warning(
+                "Could not load extensions config before MCP tool discovery (%s); aborting initialization",
+                type(exc).__name__,
+            )
+            raise RuntimeError("Extensions config could not be loaded for MCP tool discovery") from None
+        loaded_snapshot = _effective_mcp_config_snapshot(loaded_config)
+        loaded_reset_signature = _current_cache_reset_marker_signature(_resolve_config_path())
+        loaded_tools = await get_mcp_tools(extensions_config=loaded_config)
         post_path, post_sig = _current_config_state()
+        post_reset_signature = _current_cache_reset_marker_signature(post_path)
+        if post_path is not None and post_sig is not None:
+            post_snapshot = _read_stable_mcp_snapshot(post_path, post_sig)
+        elif post_path is not None:
+            # The path resolved but its signature could not be read. Publishing
+            # here would record an unpinned cache that later checks could never
+            # invalidate, so discard instead.
+            post_snapshot = None
+        else:
+            # No resolvable config now. Re-resolve after the fallback read so a
+            # config that appeared mid-flight is not published as an unpinned
+            # cache; the snapshot comparison still rejects a different revision.
+            try:
+                fallback_snapshot = _effective_mcp_config_snapshot(ExtensionsConfig.from_file())
+            except Exception as exc:
+                logger.warning(
+                    "Could not load extensions config after MCP tool discovery (%s); discarding result",
+                    type(exc).__name__,
+                )
+                fallback_snapshot = None
+            recheck_path, recheck_sig = _current_config_state()
+            post_snapshot = fallback_snapshot if recheck_path is None and recheck_sig is None else None
         init_succeeded = True
     finally:
         if not init_succeeded:
@@ -175,13 +368,17 @@ async def initialize_mcp_tools() -> list[BaseTool]:
                 logger.info("MCP cache was reset during initialization; discarding stale result")
                 return []
 
-            if (pre_path, pre_sig) != (post_path, post_sig):
-                logger.warning("MCP config changed during initialization; discarding stale result")
+            publish = loaded_snapshot is not None and post_snapshot is not None and loaded_snapshot == post_snapshot and loaded_reset_signature == post_reset_signature
+            if not publish:
+                logger.warning("MCP config or shared reset generation changed during initialization; discarding stale result")
                 retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
             else:
                 _mcp_tools_cache = loaded_tools
                 _cache_initialized = True
                 _config_path, _config_signature = post_path, post_sig
+                _mcp_config_snapshot = post_snapshot
+                _initialized_without_config = post_path is None
+                _cache_reset_marker_signature = post_reset_signature
                 logger.info("MCP tools initialized: %d tool(s) loaded (config path: %s)", len(_mcp_tools_cache), _config_path)
                 return _mcp_tools_cache
         finally:
@@ -225,9 +422,18 @@ def get_cached_mcp_tools() -> list[BaseTool]:
             retired_pool.close_all_sync()
 
         logger.info("MCP tools not initialized, performing lazy initialization...")
+        # Only ``get_event_loop()`` may fall back to ``asyncio.run``: a
+        # ``RuntimeError`` raised *by* ``initialize_mcp_tools()`` (for example
+        # ``McpTaskConfigurationError``) must not trigger a second discovery
+        # pass that respawns every stdio server and re-fetches OAuth tokens.
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
+            loop: asyncio.AbstractEventLoop | None = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = None
+        try:
+            if loop is None or loop.is_closed():
+                asyncio.run(initialize_mcp_tools())
+            elif loop.is_running():
                 import concurrent.futures
 
                 with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -235,12 +441,6 @@ def get_cached_mcp_tools() -> list[BaseTool]:
                     future.result()
             else:
                 loop.run_until_complete(initialize_mcp_tools())
-        except RuntimeError:
-            try:
-                asyncio.run(initialize_mcp_tools())
-            except Exception:
-                logger.exception("Failed to lazy-initialize MCP tools")
-                return []
         except Exception:
             logger.exception("Failed to lazy-initialize MCP tools")
             return []
@@ -250,15 +450,53 @@ def get_cached_mcp_tools() -> list[BaseTool]:
                 return _mcp_tools_cache or []
 
 
+def refresh_mcp_cache_if_active() -> bool:
+    """Retire stale MCP cache state without lazily initializing tools.
+
+    Tool assembly skips ``get_cached_mcp_tools()`` when no MCP server is
+    enabled, so a config change that disables the last server would otherwise
+    leave the previous pool and its persistent sessions alive. This entry point
+    performs only the staleness check:
+
+    * it returns immediately when no MCP state was ever initialized and no
+      initialization is in flight, so a process that never initialized MCP
+      tools pays no config-hashing cost. A process that did publish a cache
+      (including an empty one) still pays one stat+sha256 of the config file
+      per call to check that cache for staleness;
+    * it invalidates an in-flight initialization (bumping the cache generation)
+      so tools discovered under the superseded config cannot publish;
+    * it retires the pool outside the lock, matching ``get_cached_mcp_tools``.
+
+    Returns:
+        True when existing cache state or an in-flight initialization was
+        retired.
+    """
+    retired_pool = None
+    retired = False
+    with _init_condition:
+        if not _cache_initialized and _initializing_generation is None:
+            return False
+        if _initializing_generation is not None or _is_cache_stale():
+            retired_pool = _reset_mcp_tools_cache_state_and_retire_pool_locked()
+            retired = True
+    if retired_pool is not None:
+        retired_pool.close_all_sync()
+    return retired
+
+
 def _reset_mcp_tools_cache_state() -> None:
     """Reset cache state under ``_init_condition`` / ``_init_lock``."""
     global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
-    global _cache_generation
+    global _cache_generation, _mcp_config_snapshot, _initialized_without_config
+    global _cache_reset_marker_signature
 
     _mcp_tools_cache = None
     _cache_initialized = False
     _config_path = None
     _config_signature = None
+    _mcp_config_snapshot = None
+    _initialized_without_config = False
+    _cache_reset_marker_signature = None
     _cache_generation += 1
     _init_condition.notify_all()
 
@@ -314,3 +552,44 @@ def reset_mcp_tools_cache() -> None:
         logger.debug("Could not close MCP session pool on cache reset", exc_info=True)
 
     logger.info("MCP tools cache reset")
+
+
+def publish_mcp_tools_cache_reset() -> str | None:
+    """Publish a shared-config reset generation, then retire local MCP state.
+
+    The marker is written next to ``extensions_config.json`` because that file
+    is already the runtime-editable directory shared by workers that consume
+    the same config. A random generation avoids read-modify-write counters and
+    cannot lose two concurrent reset requests: the final atomic write still
+    differs from every worker's previously observed signature.
+
+    Returns:
+        The published generation, or ``None`` when no shared config path can be
+        resolved and the operation therefore falls back to a process-local
+        reset.
+    """
+    config_path = _resolve_config_path()
+    if config_path is None:
+        reset_mcp_tools_cache()
+        return None
+
+    from deerflow.config.extensions_config import (
+        atomic_write_extensions_config,
+        extensions_config_file_lock,
+        extensions_config_write_lock,
+    )
+
+    generation = uuid.uuid4().hex
+    marker_path = _cache_reset_marker_path(config_path)
+    with extensions_config_write_lock, extensions_config_file_lock(config_path):
+        atomic_write_extensions_config(
+            marker_path,
+            {"version": 1, "generation": generation},
+        )
+
+    # Publish-before-retire is intentional.  A successful API response must
+    # never mean only the handling worker was refreshed; if publication fails,
+    # the exception propagates and the local cache remains intact for a safe,
+    # idempotent retry.
+    reset_mcp_tools_cache()
+    return generation

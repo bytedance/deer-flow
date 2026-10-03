@@ -36,6 +36,11 @@ def _lease_is_alive(lease_expires_at: datetime | None, *, now: datetime, grace_s
     return lease_expires_at >= now - timedelta(seconds=grace_seconds)
 
 
+# Task columns that ``_row_to_dict`` serializes as ISO strings and that every
+# write path must coerce back (``_coerce_datetime``) before binding.
+_TIMESTAMP_KEYS = frozenset({"created_at", "updated_at", "next_run_at", "last_run_at", "lease_expires_at"})
+
+
 def _coerce_datetime(value: datetime | str | None) -> datetime | None:
     """Convert serialized task timestamps back before binding DateTime fields."""
     if value is None or isinstance(value, datetime):
@@ -67,13 +72,7 @@ class ScheduledTaskRepository:
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRow) -> dict[str, Any]:
         data = row.to_dict(exclude={"last_occurrence_seq"})
-        for key in (
-            "created_at",
-            "updated_at",
-            "next_run_at",
-            "last_run_at",
-            "lease_expires_at",
-        ):
+        for key in _TIMESTAMP_KEYS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
         return data
@@ -270,7 +269,10 @@ class ScheduledTaskRepository:
                     raise ActiveScheduledTaskMutationConflict(active_status)
             for key, value in updates.items():
                 if hasattr(row, key):
-                    setattr(row, key, value)
+                    # Callers pass timestamps back in the serialized form
+                    # ``_row_to_dict`` returned (the PATCH route reuses an
+                    # interval task's ``next_run_at`` unchanged); bind datetimes.
+                    setattr(row, key, _coerce_datetime(value) if key in _TIMESTAMP_KEYS else value)
             row.updated_at = datetime.now(UTC)
             await session.commit()
             await session.refresh(row)
@@ -348,9 +350,16 @@ class ScheduledTaskRepository:
         expected_lease_owner: str | None,
         status: str,
     ) -> bool:
-        """Release the short due-task claim after its occurrence is queued."""
+        """Release the short due-task claim after its occurrence is queued.
+
+        The lease-owner guard is only as fresh as the row it reads, so the
+        read takes the writer first (``_lock_task``): on SQLite a plain
+        ``SELECT`` sees a pre-pause snapshot, and the unconditional
+        ``row.status = status`` below would then write the caller's
+        ``"enabled"`` over a pause that had already committed.
+        """
         async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+            row = await self._lock_task(session, task_id)
             if row is None:
                 return False
             if expected_lease_owner is not None and row.lease_owner != expected_lease_owner:

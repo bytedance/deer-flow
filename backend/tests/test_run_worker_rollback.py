@@ -1147,6 +1147,93 @@ async def test_run_agent_closes_stream_when_abort_breaks_iteration():
 
 
 @pytest.mark.parametrize("stream_modes", [["values"], ["messages-tuple", "values"]])
+@pytest.mark.parametrize("close_fails", [False, True], ids=["close-succeeds", "close-fails"])
+@pytest.mark.anyio
+async def test_run_agent_repeated_cancellation_waits_for_stream_close(stream_modes, close_fails, caplog):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-stream-close-cancellation")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    iteration_started = asyncio.Event()
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    class BlockingStream:
+        def __init__(self) -> None:
+            self.close_cancelled = False
+            self.closed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            iteration_started.set()
+            await asyncio.Event().wait()
+
+        async def aclose(self) -> None:
+            close_started.set()
+            try:
+                await allow_close.wait()
+            except asyncio.CancelledError:
+                self.close_cancelled = True
+                raise
+            if close_fails:
+                raise RuntimeError("stream close failed")
+            self.closed = True
+
+    stream = BlockingStream()
+
+    class DummyAgent:
+        def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            return stream
+
+    run_task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=lambda **_kwargs: DummyAgent(),
+            graph_input={},
+            config={},
+            stream_modes=stream_modes,
+        )
+    )
+    await iteration_started.wait()
+    run_task.cancel("first")
+    await close_started.wait()
+
+    run_task.cancel("second")
+    await asyncio.sleep(0)
+    run_task.cancel("third")
+    await asyncio.sleep(0)
+
+    assert not run_task.done()
+    assert not stream.close_cancelled
+    assert not stream.closed
+    bridge.publish_end.assert_not_awaited()
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.runtime.runs.worker"):
+        allow_close.set()
+        await run_task
+
+    assert not stream.close_cancelled
+    assert record.status == RunStatus.interrupted
+    if close_fails:
+        assert not stream.closed
+        assert "Could not close agent stream" in caplog.text
+        assert "stream close failed" in caplog.text
+    else:
+        assert stream.closed
+        assert "Could not close agent stream" not in caplog.text
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.parametrize("stream_modes", [["values"], ["messages-tuple", "values"]])
 @pytest.mark.parametrize("abort_before_break", [True, False], ids=["early-break", "exhaustion-race"])
 @pytest.mark.anyio
 async def test_run_agent_ignores_stream_close_failure_after_abort(stream_modes, abort_before_break, caplog):
@@ -1204,6 +1291,62 @@ async def test_run_agent_ignores_stream_close_failure_after_abort(stream_modes, 
     assert record.status == RunStatus.interrupted
     assert record.error is None
     assert "Could not close aborted agent stream" in caplog.text
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.parametrize("stream_modes", [["values"], ["messages-tuple", "values"]])
+@pytest.mark.parametrize("synchronous_close", [False, True], ids=["async-close", "sync-close"])
+@pytest.mark.anyio
+async def test_run_agent_treats_stream_originated_close_cancellation_as_error(stream_modes, synchronous_close):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-stream-self-cancel")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class SelfCancellingCloseStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+        def aclose(self):
+            if synchronous_close:
+                raise asyncio.CancelledError("stream cancelled its own close")
+
+            async def cancel_close() -> None:
+                raise asyncio.CancelledError("stream cancelled its own close")
+
+            return cancel_close()
+
+    stream = SelfCancellingCloseStream()
+
+    class DummyAgent:
+        def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            return stream
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_kwargs: DummyAgent(),
+        graph_input={},
+        config={},
+        stream_modes=stream_modes,
+    )
+
+    assert record.status == RunStatus.error
+    assert record.error == "Agent stream cancelled its own close operation"
+    error_events = [call.args for call in bridge.publish.await_args_list if call.args[1] == "error"]
+    assert len(error_events) == 1
+    error_event = error_events[0]
+    assert error_event[1] == "error"
+    assert error_event[2]["name"] == "AgentStreamCloseCancelledError"
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 

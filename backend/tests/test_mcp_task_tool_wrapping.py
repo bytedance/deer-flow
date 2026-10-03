@@ -124,7 +124,8 @@ def test_configured_task_toolsets_fail_when_a_raw_tool_is_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_wrapper_persists_before_returning_only_the_local_handle() -> None:
+@pytest.mark.parametrize("connection_scope", ["deployment", "personal"])
+async def test_submit_wrapper_persists_before_returning_only_the_local_handle(connection_scope: str) -> None:
     submitter = FakeSubmitter()
     set_mcp_task_submitter(submitter)
     try:
@@ -137,6 +138,7 @@ async def test_submit_wrapper_persists_before_returning_only_the_local_handle() 
             server_name="reports",
             server_config=_server_config(),
             tool_name_prefix=False,
+            connection_scope=connection_scope,
         )
         submit_tool = configured[0]
         runtime = SimpleNamespace(
@@ -165,6 +167,7 @@ async def test_submit_wrapper_persists_before_returning_only_the_local_handle() 
             "submit_tool": "submit_report",
             "status_tool": "get_report_status",
             "cancel_tool": "cancel_report",
+            "connection_scope": connection_scope,
         }
     finally:
         set_mcp_task_submitter(None)

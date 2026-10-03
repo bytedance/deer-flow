@@ -8,13 +8,14 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.skills.frontmatter import split_skill_markdown
 from deerflow.skills.validation import ALLOWED_FRONTMATTER_PROPERTIES, _validate_skill_frontmatter
 
 
-def _write_skill(tmp_path: Path, content: str) -> Path:
+def _write_skill(tmp_path: Path, content: str, encoding: str = "utf-8") -> Path:
     """Write a SKILL.md file and return its parent directory."""
     skill_file = tmp_path / "SKILL.md"
-    skill_file.write_text(content, encoding="utf-8")
+    skill_file.write_text(content, encoding=encoding)
     return tmp_path
 
 
@@ -296,3 +297,43 @@ class TestValidateSkillFrontmatter:
         assert valid is True
         assert msg == "Skill is valid!"
         assert name == "demo-skill"
+
+    def test_valid_when_saved_with_utf8_bom(self, tmp_path):
+        """A SKILL.md saved as "UTF-8 with BOM" installs like any other file.
+
+        Windows Notepad and PowerShell's ``Set-Content -Encoding UTF8`` prepend U+FEFF,
+        which used to fall outside the ``^---`` anchor and report "No YAML frontmatter
+        found" for a file that is byte-for-byte a valid skill.
+        """
+        skill_dir = _write_skill(
+            tmp_path,
+            "---\nname: my-skill\ndescription: A valid skill\n---\n\nBody\n",
+            encoding="utf-8-sig",
+        )
+        assert (skill_dir / "SKILL.md").read_bytes().startswith(b"\xef\xbb\xbf"), "fixture must carry a real BOM"
+
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is True
+        assert msg == "Skill is valid!"
+        assert name == "my-skill"
+
+
+class TestSplitSkillMarkdownBom:
+    def test_bom_is_consumed_and_reaches_neither_metadata_nor_body(self):
+        """The mark is swallowed by the anchor instead of leaking into the parsed parts."""
+        parts, error = split_skill_markdown("\ufeff---\nname: my-skill\ndescription: A valid skill\n---\nBody\n")
+
+        assert error is None
+        assert parts is not None
+        assert parts.metadata["name"] == "my-skill"
+        assert parts.frontmatter_text == "name: my-skill\ndescription: A valid skill"
+        assert parts.body == "Body\n"
+
+    def test_control_document_without_bom_is_parsed_identically(self):
+        parts, error = split_skill_markdown("---\nname: my-skill\ndescription: A valid skill\n---\nBody\n")
+
+        assert error is None
+        assert parts is not None
+        assert parts.metadata["name"] == "my-skill"
+        assert parts.frontmatter_text == "name: my-skill\ndescription: A valid skill"
+        assert parts.body == "Body\n"

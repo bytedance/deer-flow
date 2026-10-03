@@ -57,7 +57,7 @@ def validate_agent_name(name: str) -> None:
     """Validate that the agent name is safe to use in filesystem paths."""
     if not name:
         raise ValueError("Agent name must be a non-empty string.")
-    if name != DEFAULT_AGENT_BUCKET and not AGENT_NAME_PATTERN.match(name):
+    if name != DEFAULT_AGENT_BUCKET and not AGENT_NAME_PATTERN.fullmatch(name):
         raise ValueError(f"Invalid agent name {name!r}: names must match {AGENT_NAME_PATTERN.pattern}")
 
 

@@ -29,6 +29,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 
 import { getMessageRunId } from "../messages/run-duration";
 import { isHiddenFromUIMessage } from "../messages/utils";
+import { SKILL_USAGES_KEY } from "../skills/usage";
 
 // Thread-global feed position, attached by the backend to history rows and to
 // `values` frame messages it has already persisted. Mirrors MESSAGE_SEQ_KEY in
@@ -220,6 +221,7 @@ export function mergeMessages(
   const anySeqByIdentity = new Map<string, number>();
   const savedTurnDurations = new Map<string, number>();
   const savedRunIds = new Map<string, string>();
+  const savedSkillUsages = new Map<string, unknown[]>();
   const collectTrustedSeq = (message: Message) => {
     const identity = messageIdentity(message);
     if (!identity) {
@@ -250,6 +252,15 @@ export function mergeMessages(
     const runId = getMessageRunId(message);
     if (identity && runId) {
       savedRunIds.set(identity, runId);
+    }
+    if (
+      identity &&
+      Array.isArray(message.additional_kwargs?.[SKILL_USAGES_KEY])
+    ) {
+      savedSkillUsages.set(
+        identity,
+        message.additional_kwargs[SKILL_USAGES_KEY],
+      );
     }
     if (identity && message.additional_kwargs?.turn_duration !== undefined) {
       savedTurnDurations.set(
@@ -413,10 +424,14 @@ export function mergeMessages(
     const shouldRestoreTurnDuration =
       savedTurnDurations.has(identity) &&
       message.additional_kwargs?.turn_duration === undefined;
+    const shouldRestoreSkillUsages =
+      savedSkillUsages.has(identity) &&
+      message.additional_kwargs?.[SKILL_USAGES_KEY] === undefined;
     if (
       !shouldRestoreSeq &&
       !shouldRestoreRunId &&
-      !shouldRestoreTurnDuration
+      !shouldRestoreTurnDuration &&
+      !shouldRestoreSkillUsages
     ) {
       return message;
     }
@@ -428,6 +443,9 @@ export function mergeMessages(
         ...(shouldRestoreSeq ? { [MESSAGE_SEQ_KEY]: trustedSeq } : {}),
         ...(shouldRestoreTurnDuration
           ? { turn_duration: savedTurnDurations.get(identity) }
+          : {}),
+        ...(shouldRestoreSkillUsages
+          ? { [SKILL_USAGES_KEY]: savedSkillUsages.get(identity) }
           : {}),
       },
     } as Message;

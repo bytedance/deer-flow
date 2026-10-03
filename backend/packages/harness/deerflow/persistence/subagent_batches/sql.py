@@ -264,6 +264,7 @@ class SubagentBatchRepository:
                         )
                     ).scalars()
                 )
+                terminalized_expired = False
                 for item in expired:
                     item.lease_owner = None
                     item.lease_expires_at = None
@@ -271,13 +272,18 @@ class SubagentBatchRepository:
                     if item.cancel_requested_at is not None:
                         item.status = "cancelled"
                         item.completed_at = now
+                        terminalized_expired = True
                     elif item.attempt >= batch.max_attempts:
                         item.status = "failed"
                         item.error = item.error or "Execution lease expired after the maximum retry count"
                         item.completed_at = now
+                        terminalized_expired = True
                     else:
                         item.status = "queued"
                         item.error = "Previous worker lease expired; retrying"
+
+                if terminalized_expired:
+                    await self._refresh_batch_status(session, batch, now=now)
 
                 counts = await self._counts(session, batch.id)
                 live = counts["queued"] + counts["leased"] + counts["running"]

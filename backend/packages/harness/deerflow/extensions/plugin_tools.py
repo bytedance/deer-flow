@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from types import MappingProxyType
 
+from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from deerflow_extension_api.auth import ExtensionPrincipal
 from deerflow_extension_api.plugins import ToolContext
 from jsonschema import Draft202012Validator
@@ -19,6 +20,7 @@ from langchain_core.tools import StructuredTool, ToolException
 
 from deerflow.config.plugin_settings import defaults
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.tools.tool_provenance import tag_plugin_tool
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +72,12 @@ def _build_tool(source, plugin, declaration):
             if len(json.dumps(payload, allow_nan=False).encode()) > 256 * 1024 or not validator.is_valid(payload):
                 raise ToolException("Invalid plugin tool input.")
             context = runtime.context if isinstance(runtime.context, Mapping) else {}
+            runs = context.get(AGENT_RUNS_CONTEXT_KEY)
             tool_context = ToolContext(
                 ExtensionPrincipal(resolve_runtime_user_id(runtime)),
                 MappingProxyType(settings),
                 context.get("thread_id"),
+                agent_runs=runs.for_plugin(plugin.namespace) if runs is not None else None,
             )
             async with asyncio.timeout(30):
                 result = await declaration.handler(MappingProxyType(payload), tool_context)
@@ -87,7 +91,9 @@ def _build_tool(source, plugin, declaration):
             logger.warning("Plugin tool failed: %s/%s (%s)", plugin.namespace, declaration.name, type(exc).__name__)
             raise ToolException("Plugin tool unavailable or input rejected.") from None
 
-    return StructuredTool(name=plugin_tool_name(plugin.namespace, declaration.name), description=declaration.description, args_schema=schema, coroutine=invoke, handle_tool_error=True)
+    tool = StructuredTool(name=plugin_tool_name(plugin.namespace, declaration.name), description=declaration.description, args_schema=schema, coroutine=invoke, handle_tool_error=True)
+    tag_plugin_tool(tool, namespace=plugin.namespace, declaration=declaration.name, installation=source)
+    return tool
 
 
 def build_plugin_tools(loaded, *, groups=None, reserved_names=()):

@@ -6,11 +6,12 @@ import asyncio
 import json
 import logging
 import re
+import stat
 import threading
 import time
 from typing import Any, Literal
 
-from app.channels.base import Channel
+from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
@@ -27,7 +28,12 @@ from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-from deerflow.uploads.manager import claim_unique_filename, normalize_filename, write_upload_file_no_symlink
+from deerflow.uploads.manager import (
+    apply_upload_sandbox_permits,
+    claim_unique_filename,
+    normalize_filename,
+    write_upload_file_no_symlink,
+)
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
@@ -277,8 +283,14 @@ class FeishuChannel(Channel):
         self._background_tasks.clear()
         self._running_card_tasks.clear()
         if self._thread:
-            self._thread.join(timeout=5)
-            self._thread = None
+            # The SDK thread only returns on a fatal error, so this join
+            # normally waits out its full timeout; keep it off the event loop.
+            thread = self._thread
+            await asyncio.to_thread(thread.join, timeout=5)
+            if thread.is_alive():
+                raise ChannelStopTimeout("Feishu SDK thread is still running after stop timeout")
+            if self._thread is thread:
+                self._thread = None
         logger.info("Feishu channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
@@ -488,6 +500,10 @@ class FeishuChannel(Channel):
 
         try:
             resolved_target = await asyncio.to_thread(_persist)
+            # Root-written uploads are 0o600, which the non-root sandbox cannot
+            # read on a bind-mounted thread dir; grant group/other read like the
+            # channel manager's inbound-file path and the HTTP upload route.
+            await asyncio.to_thread(apply_upload_sandbox_permits, resolved_target, stat.S_IRGRP | stat.S_IROTH)
         except (OSError, ValueError, RuntimeError):
             logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", safe_filename, type)
             return f"Failed to obtain the [{type}]"
@@ -503,6 +519,7 @@ class FeishuChannel(Channel):
                 virtual_path=virtual_path,
                 content=content,
                 owner_prefix="feishu-upload",
+                release_on_last=True,
             )
             if not synced:
                 logger.warning("[Feishu] sandbox not found for thread_id=%s", thread_id)

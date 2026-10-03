@@ -130,11 +130,12 @@ async def test_http_errors_do_not_echo_provider_body_or_credentials(webz, status
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("payload", [{}, {"results": None}, {"results": [None]}, {"results": [{"article": []}]}])
-async def test_malformed_payload_is_an_error(webz, payload):
+async def test_malformed_payload_is_an_error(webz, payload, caplog):
     module, _, _, response, _ = webz
     response.clear()
     response.update(payload)
     assert "error" in json.loads(await module.web_search_tool.ainvoke({"query": "news"}))
+    assert "Webz returned an unexpected response" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -221,3 +222,42 @@ def test_doctor_recognizes_webz_credentials(tmp_path, monkeypatch):
     monkeypatch.setenv("WEBZ_API_KEY", "synthetic-key")
     present = doctor.check_web_search(config)
     assert present.status == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_item", [None, {"article": []}, {"article": {}, "chunk": None}, {"article": {}, "metadata": "synthetic-key"}, {"article": {"title": ["synthetic-key"]}}])
+async def test_malformed_item_preserves_valid_neighbors(webz, bad_item, caplog):
+    module, _, _, response, _ = webz
+    response["results"] = [
+        {"article": {"title": "First", "summary": "First summary"}},
+        bad_item,
+        {"article": {"title": "Last", "summary": "Last summary"}},
+    ]
+    result = json.loads(await module.web_search_tool.ainvoke({"query": "news", "max_results": 3}))
+    assert result["returned_results"] == 2
+    assert [item["title"] for item in result["results"]] == ["First", "Last"]
+    assert "Skipping malformed Webz result at index 1" in caplog.text
+    assert "synthetic-key" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_is_logged_without_response_body(webz, monkeypatch, caplog):
+    module, _, _, _, _ = webz
+
+    async def invalid_json(*args, **kwargs):
+        return httpx.Response(200, text="synthetic-key", request=httpx.Request("POST", "https://api.webz.io/api/news/context"))
+
+    monkeypatch.setattr(RealAsyncClient, "post", invalid_json)
+    result = await module.web_search_tool.ainvoke({"query": "news"})
+    assert "unexpected response" in json.loads(result)["error"]
+    assert "Webz returned an unexpected response" in caplog.text
+    assert "synthetic-key" not in result + caplog.text
+
+
+@pytest.mark.asyncio
+async def test_invalid_configured_count_logs_value(webz, caplog):
+    module, options, requests, _, _ = webz
+    options["max_results"] = 3.5
+    await module.web_search_tool.ainvoke({"query": "news"})
+    assert json.loads(requests[0].content)["k"] == 5
+    assert "max_results=3.5" in caplog.text

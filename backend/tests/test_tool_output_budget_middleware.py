@@ -9,9 +9,11 @@ per-tool overrides, edge cases, and both sync/async code paths.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import pathlib
+import re
 import tempfile
 from types import SimpleNamespace
 
@@ -21,6 +23,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_output_budget_middleware import (
+    TOOL_OUTPUT_BLOB_KEY,
     ToolOutputBudgetMiddleware,
     _build_fallback,
     _build_preview,
@@ -38,6 +41,7 @@ from deerflow.agents.middlewares.tool_output_synopsis import build_tool_output_s
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
+from deerflow.storage import BlobReadError, BlobRef, BlobWriteError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -61,7 +65,7 @@ def _lines_then_long_line(total: int, newline_ratio: float = 0.6) -> str:
 def _make_request(tool_name: str = "remote_executor", tool_call_id: str = "tc-1", outputs_path: str | None = None) -> SimpleNamespace:
     thread_data = {"outputs_path": outputs_path} if outputs_path else None
     state = {"thread_data": thread_data} if thread_data else {}
-    runtime = SimpleNamespace(state=state)
+    runtime = SimpleNamespace(state=state, context={"thread_id": "thread-1"}, config={})
     return SimpleNamespace(
         tool_call={"name": tool_name, "id": tool_call_id},
         runtime=runtime,
@@ -672,6 +676,7 @@ class TestWrapToolCallExternalize:
             assert "Full remote_executor output saved to" in result.content
             assert "read_file" in result.content
             assert result.tool_call_id == "tc-1"
+            assert TOOL_OUTPUT_BLOB_KEY not in result.additional_kwargs
 
             # Verify file was written
             storage_dir = os.path.join(tmpdir, ".tool-results")
@@ -680,6 +685,153 @@ class TestWrapToolCallExternalize:
             assert len(files) == 1
             with open(os.path.join(storage_dir, files[0]), encoding="utf-8") as f:
                 assert f.read() == content
+
+
+class TestToolOutputBlobPersistence:
+    def test_host_externalization_stamps_durable_blob_ref(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        content = "跨节点工具输出" * 80
+        calls: list[dict] = []
+
+        class RecordingStore:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                calls.append({"data": data, **kwargs})
+                return BlobRef(
+                    sha256=hashlib.sha256(data).hexdigest(),
+                    size=len(data),
+                    kind=kwargs["kind"],
+                    content_type=kwargs["content_type"],
+                )
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: RecordingStore())
+        config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
+        result = ToolOutputBudgetMiddleware(config=config).wrap_tool_call(
+            _make_request(outputs_path=str(tmp_path)),
+            lambda _: _tm(content, name="remote_executor"),
+        )
+
+        payload = result.additional_kwargs[TOOL_OUTPUT_BLOB_KEY]
+        assert payload["version"] == 1
+        assert payload["virtual_path"].startswith("/mnt/user-data/outputs/.tool-results/")
+        assert payload["storage_subdir"] == ".tool-results"
+        assert payload["encoding"] == "utf-8"
+        assert payload["ref"] == {
+            "sha256": hashlib.sha256(content.encode()).hexdigest(),
+            "size": len(content.encode()),
+            "kind": "tool-output",
+            "content_type": "text/plain; charset=utf-8",
+        }
+        assert calls == [
+            {
+                "data": content.encode(),
+                "kind": "tool-output",
+                "content_type": "text/plain; charset=utf-8",
+                "thread_id": "thread-1",
+            }
+        ]
+
+    def test_configured_blob_write_failure_falls_back_inline(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        class FailingStore:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                raise BlobWriteError("backend detail")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: FailingStore())
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            fallback_max_chars=200,
+            fallback_head_chars=80,
+            fallback_tail_chars=40,
+        )
+        result = ToolOutputBudgetMiddleware(config=config).wrap_tool_call(
+            _make_request(outputs_path=str(tmp_path)),
+            lambda _: _tm("x" * 500, name="remote_executor"),
+        )
+
+        assert "Persistent storage unavailable" in result.content
+        assert TOOL_OUTPUT_BLOB_KEY not in result.additional_kwargs
+        published = list((tmp_path / ".tool-results").glob("remote_executor-*"))
+        assert len(published) == 1
+        assert published[0].read_text(encoding="utf-8") == "x" * 500
+
+    def test_blob_write_failure_stays_bounded_when_regular_fallback_is_disabled(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        class FailingStore:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                raise BlobWriteError("backend detail")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: FailingStore())
+        monkeypatch.setattr(mod, "_DURABLE_FAILURE_FALLBACK_MAX_CHARS", 80)
+        config = ToolOutputConfig(
+            externalize_min_chars=10,
+            fallback_max_chars=0,
+            fallback_head_chars=20,
+            fallback_tail_chars=10,
+        )
+
+        result = ToolOutputBudgetMiddleware(config=config).wrap_tool_call(
+            _make_request(outputs_path=str(tmp_path)),
+            lambda _: _tm("x" * 500, name="remote_executor"),
+        )
+
+        assert len(result.content) == 80
+        assert result.additional_kwargs["deerflow_tool_transforms"][-1]["kind"] == "truncated"
+        assert TOOL_OUTPUT_BLOB_KEY not in result.additional_kwargs
+
+    def test_blob_producer_cap_falls_back_without_writing(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        class StoreMustNotBeWritten:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                raise AssertionError("oversized content must not reach the blob backend")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: StoreMustNotBeWritten())
+        monkeypatch.setattr(mod, "_MAX_TOOL_OUTPUT_BLOB_BYTES", 32)
+        config = ToolOutputConfig(
+            externalize_min_chars=10,
+            fallback_max_chars=80,
+            fallback_head_chars=20,
+            fallback_tail_chars=10,
+        )
+        result = ToolOutputBudgetMiddleware(config=config).wrap_tool_call(
+            _make_request(outputs_path=str(tmp_path)),
+            lambda _: _tm("x" * 100, name="remote_executor"),
+        )
+
+        assert len(result.content) == 80
+        assert result.additional_kwargs["deerflow_tool_transforms"][-1]["kind"] == "truncated"
+        assert TOOL_OUTPUT_BLOB_KEY not in result.additional_kwargs
+        assert not (tmp_path / ".tool-results").exists()
+
+    def test_blob_producer_cap_stays_bounded_when_regular_fallback_is_disabled(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        class StoreMustNotBeWritten:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                raise AssertionError("oversized content must not reach the blob backend")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: StoreMustNotBeWritten())
+        monkeypatch.setattr(mod, "_MAX_TOOL_OUTPUT_BLOB_BYTES", 32)
+        monkeypatch.setattr(mod, "_DURABLE_FAILURE_FALLBACK_MAX_CHARS", 80)
+        config = ToolOutputConfig(
+            externalize_min_chars=10,
+            fallback_max_chars=0,
+            fallback_head_chars=20,
+            fallback_tail_chars=10,
+        )
+
+        result = ToolOutputBudgetMiddleware(config=config).wrap_tool_call(
+            _make_request(outputs_path=str(tmp_path)),
+            lambda _: _tm("x" * 100, name="remote_executor"),
+        )
+
+        assert len(result.content) == 80
+        assert result.additional_kwargs["deerflow_tool_transforms"][-1]["kind"] == "truncated"
+        assert TOOL_OUTPUT_BLOB_KEY not in result.additional_kwargs
+        assert not (tmp_path / ".tool-results").exists()
 
     def test_preview_contains_typed_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1113,6 +1265,166 @@ class TestWrapModelCall:
         assert "omitted" in msgs[2].content
 
 
+class TestToolOutputBlobRestore:
+    @staticmethod
+    def _request(tmp_path, data: bytes, *, virtual_path: str | None = None) -> tuple[ModelRequest, BlobRef]:
+        ref = BlobRef(
+            sha256=hashlib.sha256(data).hexdigest(),
+            size=len(data),
+            kind="tool-output",
+            content_type="text/plain; charset=utf-8",
+        )
+        path = virtual_path or "/mnt/user-data/outputs/.tool-results/remote_executor-tc-1.txt"
+        message = ToolMessage(
+            content=f"[Full remote_executor output saved to {path}]",
+            name="remote_executor",
+            tool_call_id="tc-1",
+            additional_kwargs={
+                TOOL_OUTPUT_BLOB_KEY: {
+                    "version": 1,
+                    "ref": ref.model_dump(mode="json", exclude_none=True),
+                    "virtual_path": path,
+                    "storage_subdir": ".tool-results",
+                    "encoding": "utf-8",
+                }
+            },
+        )
+        request = ModelRequest(
+            model=None,
+            messages=[message],
+            tools=[],
+            state={"thread_data": {"outputs_path": str(tmp_path)}},
+        )
+        return request, ref
+
+    def test_model_call_restores_exact_bytes_on_another_gateway(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        data = "跨节点完整输出\nsecond line".encode()
+        request, ref = self._request(tmp_path, data)
+        reads: list[BlobRef] = []
+
+        class SharedStore:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                reads.append(requested)
+                return data
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: SharedStore())
+        destination = tmp_path / ".tool-results" / "remote_executor-tc-1.txt"
+
+        def handler(prepared):
+            assert prepared is request
+            assert destination.read_bytes() == data
+            return []
+
+        ToolOutputBudgetMiddleware().wrap_model_call(request, handler)
+
+        assert reads == [ref]
+
+    def test_digest_matching_local_file_avoids_blob_store(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        data = b"already materialized"
+        request, _ = self._request(tmp_path, data)
+        destination = tmp_path / ".tool-results" / "remote_executor-tc-1.txt"
+        destination.parent.mkdir()
+        destination.write_bytes(data)
+
+        def store_must_not_be_resolved():
+            raise AssertionError("matching local bytes should stay on the fast path")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", store_must_not_be_resolved)
+
+        ToolOutputBudgetMiddleware().wrap_model_call(request, lambda prepared: [])
+
+        assert destination.read_bytes() == data
+
+    def test_wrong_size_local_file_skips_read_before_restore(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        data = b"restored shared output"
+        request, _ = self._request(tmp_path, data)
+        destination = tmp_path / ".tool-results" / "remote_executor-tc-1.txt"
+        destination.parent.mkdir()
+        destination.write_bytes(b"wrong size")
+        builtin_open = open
+
+        def fail_if_stale_file_is_read(file, mode="r", *args, **kwargs):
+            if os.fspath(file) == os.fspath(destination) and mode == "rb":
+                raise AssertionError("wrong-size local file should not be read")
+            return builtin_open(file, mode, *args, **kwargs)
+
+        class SharedStore:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                return data
+
+        monkeypatch.setattr(mod, "open", fail_if_stale_file_is_read, raising=False)
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: SharedStore())
+
+        ToolOutputBudgetMiddleware().wrap_model_call(request, lambda prepared: [])
+
+        assert destination.read_bytes() == data
+
+    def test_invalid_virtual_path_is_ignored_without_blob_read(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        request, _ = self._request(
+            tmp_path,
+            b"must-not-escape",
+            virtual_path="/mnt/user-data/outputs/.tool-results/../escape.txt",
+        )
+
+        class StoreMustNotBeRead:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                raise AssertionError(f"untrusted path triggered a blob read: {requested}")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: StoreMustNotBeRead())
+
+        ToolOutputBudgetMiddleware().wrap_model_call(request, lambda prepared: [])
+
+        assert not (tmp_path / "escape.txt").exists()
+
+    def test_blob_read_failure_does_not_block_model_call(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        request, _ = self._request(tmp_path, b"missing")
+
+        class FailingStore:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                raise BlobReadError("temporarily unavailable")
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: FailingStore())
+        called = []
+        destination = tmp_path / ".tool-results" / "remote_executor-tc-1.txt"
+        destination.parent.mkdir()
+        destination.write_bytes(b"corrupt local copy")
+
+        ToolOutputBudgetMiddleware().wrap_model_call(request, lambda prepared: called.append(prepared) or [])
+
+        assert called == [request]
+        assert not destination.exists()
+
+    @pytest.mark.anyio
+    async def test_async_model_call_restores_before_handler(self, monkeypatch, tmp_path):
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        data = b"async shared output"
+        request, _ = self._request(tmp_path, data)
+
+        class SharedStore:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                return data
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: SharedStore())
+        destination = tmp_path / ".tool-results" / "remote_executor-tc-1.txt"
+
+        async def handler(prepared):
+            assert destination.read_bytes() == data
+            return []
+
+        await ToolOutputBudgetMiddleware().awrap_model_call(request, handler)
+
+
 # ===========================================================================
 # Config integration
 # ===========================================================================
@@ -1270,9 +1582,10 @@ class TestConfigVersion:
 class _FakeSandbox:
     """In-memory stand-in for a Sandbox. Records calls and supports failure injection."""
 
-    def __init__(self, *, write_ok: bool = True, check_result: str = "OK") -> None:
+    def __init__(self, *, write_ok: bool = True, check_result: str | None = None) -> None:
         self.commands: list[str] = []
         self.writes: list[tuple[str, str]] = []
+        self.files: dict[str, str] = {}
         self._write_ok = write_ok
         self._check_result = check_result
 
@@ -1284,14 +1597,28 @@ class _FakeSandbox:
     ) -> str:
         del env, timeout
         self.commands.append(command)
-        if command.startswith("test -s"):
+        if self._check_result is not None:
             return self._check_result
+        # Simulate shell execution of:
+        # test -f <path> && test "$(wc -c < <path>)" -eq <expected> && echo OK || echo MISSING
+        match = re.search(r'test -f (\S+) && test "\$\(wc -c < \S+\)" -eq (\d+)', command)
+        if match:
+            path, expected_bytes = match.group(1), int(match.group(2))
+            if path in self.files:
+                actual_bytes = len(self.files[path].encode("utf-8"))
+                if actual_bytes == expected_bytes:
+                    return "OK"
+            return "MISSING"
         return ""
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         if not self._write_ok:
             raise RuntimeError("simulated write failure")
         self.writes.append((path, content))
+        if append and path in self.files:
+            self.files[path] += content
+        else:
+            self.files[path] = content
 
 
 class _FakeProvider:
@@ -1323,7 +1650,8 @@ class TestExternalizeToSandbox:
         assert result.startswith("/mnt/user-data/outputs/.tool-results/bash-")
         assert result.endswith(".log")
         assert any(c.startswith("mkdir -p ") for c in sb.commands)
-        assert any(c.startswith("test -s ") for c in sb.commands)
+        assert any("wc -c" in c for c in sb.commands)
+        assert any("-eq 100" in c for c in sb.commands)
         assert sb.writes and sb.writes[0][0] == result
         assert sb.writes[0][1] == "x" * 100
 
@@ -1354,6 +1682,31 @@ class TestExternalizeToSandbox:
             sandbox=_FakeSandbox(check_result="MISSING"),
         )
         assert result is None
+
+    def test_returns_none_when_byte_size_is_mismatched(self):
+        """A truncated write (fewer bytes than expected) fails validation and returns None."""
+        from deerflow.agents.middlewares.tool_output_budget_middleware import (
+            _externalize_to_sandbox,
+        )
+
+        class _TruncatingSandbox(_FakeSandbox):
+            def write_file(self, path: str, content: str, append: bool = False) -> None:
+                # Simulate a truncated write (e.g. disk full / broken pipe) where only half lands
+                super().write_file(path, content[: len(content) // 2], append=append)
+
+        sb = _TruncatingSandbox()
+        result = _externalize_to_sandbox(
+            "x" * 100,
+            tool_name="bash",
+            tool_call_id="tc-3-truncated",
+            storage_subdir=".tool-results",
+            sandbox=sb,
+        )
+        assert result is None
+        assert any("-eq 100" in c for c in sb.commands)
+        # Confirm the file was actually written with half size, triggering the real byte mismatch
+        assert sb.writes and len(sb.writes[0][1]) == 50
+        assert any(len(content) == 50 for content in sb.files.values())
 
     def test_rejects_unsafe_storage_subdir(self):
         from deerflow.agents.middlewares.tool_output_budget_middleware import (
@@ -1436,11 +1789,18 @@ class TestBudgetContentSandboxDispatch:
         from deerflow.agents.middlewares import tool_output_budget_middleware as mod
 
         sb = _FakeSandbox()
+        blob_calls = {"count": 0}
+
+        def blob_store_must_not_be_resolved():
+            blob_calls["count"] += 1
+            raise AssertionError("sandbox-resident output is outside the host blob migration")
+
         monkeypatch.setattr(
             mod,
             "get_sandbox_provider",
             lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
         )
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", blob_store_must_not_be_resolved)
         config = ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10)
         result = mod._budget_content(
             "x" * 500,
@@ -1457,6 +1817,7 @@ class TestBudgetContentSandboxDispatch:
         assert sb.writes and sb.writes[0][1] == "x" * 500
         # And MUST NOT touch the host.
         assert not (tmp_path / ".tool-results").exists()
+        assert blob_calls["count"] == 0
 
     def test_non_mounted_without_sandbox_falls_back(self, monkeypatch):
         from deerflow.agents.middlewares import tool_output_budget_middleware as mod
@@ -1514,6 +1875,21 @@ class TestResolveSandbox:
             lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
         )
         req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": {"sandbox_id": "sb-1"}}))
+        assert mod._resolve_sandbox(req) is sb
+
+    def test_returns_sandbox_from_provider_when_overwrite_wrapped(self, monkeypatch):
+        from langgraph.types import Overwrite
+
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        sb = _FakeSandbox()
+        monkeypatch.setattr(
+            mod,
+            "get_sandbox_provider",
+            lambda: _FakeProvider(uses_thread_data_mounts=False, sandbox=sb),
+        )
+        # Fork-restored state delivers sandbox wrapped in Overwrite
+        req = SimpleNamespace(runtime=SimpleNamespace(state={"sandbox": Overwrite({"sandbox_id": "sb-fork"})}))
         assert mod._resolve_sandbox(req) is sb
 
     def test_returns_none_on_provider_exception(self, monkeypatch):

@@ -109,17 +109,17 @@ summarization:
      value: 0.8  # 80% of max input tokens
    ```
 
-   The percentage resolves from the **summary model's** declared `context_window`
-   — the anchor that generates summaries: `summarization.model_name` when set,
-   otherwise the run's own model. Declare `context_window` on that models entry
-   in `config.yaml`. Third-party OpenAI-compatible models carry no built-in
+   The percentage resolves from the **active run model's** declared
+   `context_window`: the lead model selected for this run, the subagent's own
+   model, or the model resolved for manual `/compact`. A separately configured
+   `summarization.model_name` generates the replacement summary but never sizes
+   the run model's context budget. Declare `context_window` on the run model's
+   entry in `config.yaml`. Third-party OpenAI-compatible models carry no built-in
    capacity profile, so without a declared `context_window` the fraction clause
    is dropped with a warning at agent build — any remaining absolute clauses
-   (`tokens` / `messages`) keep working. Caveat: when a separate summary model
-   is configured, its window sizes the threshold — a 64k run model paired with
-   a 128k-window summary model resolves `fraction: 0.8` to ~102k tokens and
-   auto-summarization cannot fire before the run model overflows; in that setup
-   prefer absolute `tokens` thresholds sized for the run model.
+   (`tokens` / `messages`) keep working. Fraction-based `keep` uses the same run
+   model profile and falls back to the documented message-count retention when
+   that profile is unavailable.
 
 **Multiple Triggers:**
 ```yaml
@@ -214,6 +214,7 @@ The middleware intelligently preserves message context:
   [Generated summary text]
   </durable_context_data>
   ```
+- **Active goal**: When the thread has an active `/goal`, its objective opens the same data message on every model call, inside an `<active_goal>` element, so compaction cannot take the goal away with the message that stated it. The system contract then ends with a static exception: the agent works toward that element as it would a request in a user message, with no system or developer authority, while every other field value stays data, as does any other text that calls itself a goal. The exception covers only the element at the start of the data message, by position. Within that message every other field value is HTML-escaped, so only the renderer can produce the element; in the lead agent chain the input and tool-result sanitizers also escape `<active_goal>` in user input and remote tool results. Only the objective is rendered, not the evaluator's counters, so the block and the contract change only when the goal is set or cleared.
 
 ## Best Practices
 
@@ -340,7 +341,7 @@ middlewares such as title generation, memory queuing, and clarification:
 - Summarization configuration is loaded from `config.yaml`
 - Generated summaries are stored in `ThreadState.summary_text`, not as regular `messages`
 - The message reducer removes compacted raw messages while the checkpointer persists `summary_text`
-- DurableContextMiddleware projects `summary_text` back into later model calls as hidden durable context data
+- DurableContextMiddleware projects `summary_text` and the active `goal` objective back into later model calls as hidden durable context data
 
 ## Example Configurations
 

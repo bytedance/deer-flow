@@ -629,12 +629,19 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             recovered_runs,
         )
 
+        from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+        from app.gateway.extension_agent_runs import GatewayAgentRunsHost
+
+        app.state.agent_runs_host = GatewayAgentRunsHost(app, load_user=SQLiteUserRepository(sf).get_user_by_id if sf is not None else None)
+        stack.callback(app.state.agent_runs_host.close)
+
         # Start the lease heartbeat if enabled (multi-worker deployments).
         await app.state.run_manager.start_heartbeat()
 
         try:
             yield
         finally:
+            app.state.agent_runs_host.close()
             # Drain in-flight run tasks BEFORE the AsyncExitStack tears down the
             # checkpointer (and its connection pool). A run still mid-graph would
             # otherwise leak into asyncio.run() shutdown, where langgraph's
@@ -759,7 +766,11 @@ def get_run_context(request: Request) -> RunContext:
     captured in :func:`langgraph_runtime` so callers never see a store bound to
     one backend paired with a config pointing at another.
     """
+    host = getattr(request.app.state, "agent_runs_host", None)
+    # Internal/channel and PAT runs deliberately receive no retained delegation.
+    agent_runs = host.bind(request) if host is not None else None
     return RunContext(
+        agent_runs=agent_runs,
         checkpointer=get_checkpointer(request),
         store=get_store(request),
         event_store=get_run_event_store(request),

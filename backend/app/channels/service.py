@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from app.channels.base import Channel
+from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.manager import DEFAULT_CHANNEL_MAX_CONCURRENCY, DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS, DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
 from app.channels.message_bus import DEFAULT_INBOUND_QUEUE_MAXSIZE, MessageBus
 from app.channels.runtime_config_store import merge_runtime_channel_configs
@@ -31,6 +31,7 @@ _CHANNEL_REGISTRY: dict[str, str] = {
     "discord": "app.channels.discord:DiscordChannel",
     "feishu": "app.channels.feishu:FeishuChannel",
     "github": "app.channels.github:GitHubChannel",
+    "qq": "app.channels.qq:QQChannel",
     "slack": "app.channels.slack:SlackChannel",
     "telegram": "app.channels.telegram:TelegramChannel",
     "wechat": "app.channels.wechat:WechatChannel",
@@ -43,6 +44,7 @@ _CHANNEL_CREDENTIAL_KEYS: dict[str, list[str]] = {
     "dingtalk": ["client_id", "client_secret"],
     "discord": ["bot_token"],
     "feishu": ["app_id", "app_secret"],
+    "qq": ["app_id", "client_secret"],
     "slack": ["bot_token", "app_token"],
     "telegram": ["bot_token"],
     "wecom": ["bot_id", "bot_secret"],
@@ -298,6 +300,9 @@ class ChannelService:
                 # The Gateway deadline interrupted shutdown, so detaching them
                 # would hide resources that may still be in use.
                 raise
+            except ChannelStopTimeout as exc:
+                logger.warning("Channel %s remains retained after bounded stop timeout: %s", name, exc)
+                stop_errors.append(exc)
             except Exception as exc:
                 logger.exception("Error stopping channel")
                 stop_errors.append(exc)
@@ -426,6 +431,9 @@ class ChannelService:
             # interrupted cleanup, so detaching it here would hide resources
             # that may still be in use (mirrors ChannelService.stop()).
             raise
+        except ChannelStopTimeout as exc:
+            logger.warning("Channel %s remains retained after bounded stop timeout: %s", name, exc)
+            return
         except Exception:
             logger.exception("Error stopping channel %s during discard", name)
             return

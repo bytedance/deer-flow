@@ -62,3 +62,13 @@ def test_provider_status_reports_disabled_and_unknown_providers():
     assert config.provider_status("wechat") == {"enabled": False, "configured": False}
     assert config.provider_status("wecom") == {"enabled": False, "configured": False}
     assert config.provider_status("unknown") == {"enabled": False, "configured": False}
+
+
+def test_qq_connection_configuration_is_opt_in():
+    assert ChannelConnectionsConfig().provider_status("qq") == {
+        "enabled": False,
+        "configured": False,
+    }
+    configured = ChannelConnectionsConfig.model_validate({"enabled": True, "qq": {"enabled": True}})
+    assert configured.provider_status("qq") == {"enabled": True, "configured": True}
+    assert configured.require_bound_identity is True

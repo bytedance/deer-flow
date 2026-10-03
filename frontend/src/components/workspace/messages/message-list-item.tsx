@@ -22,11 +22,6 @@ import {
   MessageContent as AIElementMessageContent,
   MessageToolbar,
 } from "@/components/ai-elements/message";
-import {
-  Reasoning,
-  ReasoningTrigger,
-} from "@/components/ai-elements/reasoning";
-import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Task, TaskTrigger } from "@/components/ai-elements/task";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -57,7 +52,6 @@ import {
   resolveSlashSkillDisplay,
 } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
-import { SafeReasoningContent } from "@/core/streamdown/components";
 import { pathOfThread } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
@@ -73,6 +67,7 @@ import { Tooltip } from "../tooltip";
 import { KnowledgeScopeSummary } from "./knowledge-scope-summary";
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
+import { MessageReasoning } from "./message-reasoning";
 
 function FeedbackButtons({
   threadId,
@@ -151,6 +146,7 @@ export function MessageListItem({
   artifactPaths = [],
   showCopyButton = true,
   showWorkspaceChanges = false,
+  durationSeconds,
   canEdit = false,
   isEditPending = false,
   onEditAndRegenerate,
@@ -164,6 +160,7 @@ export function MessageListItem({
   runId?: string;
   showCopyButton?: boolean;
   showWorkspaceChanges?: boolean;
+  durationSeconds?: number;
   canEdit?: boolean;
   isEditPending?: boolean;
   onEditAndRegenerate?: (replacementText: string) => void | Promise<boolean>;
@@ -230,6 +227,7 @@ export function MessageListItem({
         artifactPaths={artifactPaths}
         runId={runId}
         showWorkspaceChanges={showWorkspaceChanges}
+        durationSeconds={durationSeconds}
         editState={
           isHuman && isEditing
             ? {
@@ -264,7 +262,7 @@ export function MessageListItem({
                   disabled={isEditPending || isSubmittingEdit}
                   onClick={startEditing}
                 >
-                  <PencilIcon className="size-3" />
+                  <PencilIcon className="size-4" />
                 </Button>
               </Tooltip>
             )}
@@ -380,6 +378,7 @@ function MessageContent_({
   artifactPaths,
   runId,
   showWorkspaceChanges = false,
+  durationSeconds,
   editState,
 }: {
   className?: string;
@@ -389,6 +388,7 @@ function MessageContent_({
   artifactPaths: readonly string[];
   runId?: string;
   showWorkspaceChanges?: boolean;
+  durationSeconds?: number;
   editState?: {
     draft: string;
     disabled: boolean;
@@ -400,15 +400,6 @@ function MessageContent_({
 }) {
   const { t } = useI18n();
   const isHuman = message.type === "human";
-  const getReasoningMessage = useCallback(
-    (isStreaming: boolean) =>
-      isStreaming ? (
-        <Shimmer duration={1}>{t.runDuration.reasoning}</Shimmer>
-      ) : (
-        t.runDuration.reasoning
-      ),
-    [t.runDuration.reasoning],
-  );
   const components = useMemo(
     () => ({
       img: (props: ImgHTMLAttributes<HTMLImageElement>) => (
@@ -497,10 +488,12 @@ function MessageContent_({
   if (!isHuman && reasoningContent && !rawContent) {
     return (
       <AIElementMessageContent className={className}>
-        <Reasoning isStreaming={isLoading}>
-          <ReasoningTrigger getThinkingMessage={getReasoningMessage} />
-          <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
-        </Reasoning>
+        <MessageReasoning
+          isLoading={isLoading}
+          durationSeconds={durationSeconds}
+        >
+          {reasoningContent}
+        </MessageReasoning>
       </AIElementMessageContent>
     );
   }
@@ -607,10 +600,12 @@ function MessageContent_({
     <AIElementMessageContent className={className}>
       {filesList}
       {reasoningContent && (
-        <Reasoning isStreaming={isLoading}>
-          <ReasoningTrigger getThinkingMessage={getReasoningMessage} />
-          <SafeReasoningContent>{reasoningContent}</SafeReasoningContent>
-        </Reasoning>
+        <MessageReasoning
+          isLoading={isLoading}
+          durationSeconds={durationSeconds}
+        >
+          {reasoningContent}
+        </MessageReasoning>
       )}
       <MarkdownContent
         content={contentToDisplay}
