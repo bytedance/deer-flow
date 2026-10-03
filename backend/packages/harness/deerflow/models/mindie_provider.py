@@ -10,6 +10,8 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 
+_JSON_NUMBER_RE = re.compile(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
 
 def _fix_messages(messages: list) -> list:
     """Sanitize incoming messages for MindIE compatibility.
@@ -108,7 +110,7 @@ def _parse_xml_tool_call_to_dict(content: str) -> tuple[str, list[dict]]:
             # Attempt to deserialize string values into native Python types
             # to satisfy downstream Pydantic validation.
             parsed_value = raw_value
-            if raw_value.startswith(("[", "{")) or raw_value in ("true", "false", "null") or raw_value.isdigit():
+            if raw_value.startswith(("[", "{")) or raw_value in ("true", "false", "null") or _JSON_NUMBER_RE.fullmatch(raw_value):
                 try:
                     parsed_value = json.loads(raw_value)
                 except json.JSONDecodeError:

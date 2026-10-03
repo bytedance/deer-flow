@@ -240,6 +240,15 @@ class TestParseXmlToolCalls:
         _, calls = _parse_xml_tool_call_to_dict(content)
         assert calls[0]["args"]["n"] == 42
 
+    @pytest.mark.parametrize(
+        ("raw_value", "expected"),
+        [("-3", -3), ("3.14", 3.14), ("1e-3", 1e-3)],
+    )
+    def test_signed_fractional_and_exponent_params_deserialised(self, raw_value, expected):
+        content = f"<tool_call><function=f><parameter=n>{raw_value}</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == expected
+
     def test_list_param_deserialised(self):
         content = '<tool_call><function=f><parameter=lst>["a","b"]</parameter></function></tool_call>'
         _, calls = _parse_xml_tool_call_to_dict(content)
