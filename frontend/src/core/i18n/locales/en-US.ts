@@ -379,9 +379,11 @@ export const enUS: Translations = {
   // Input Box
   inputBox: {
     mentionPicker: "Add a reference",
-    mentionSearch: "Search skills, project files and conversations",
+    mentionSearch: "Search skills, project files, conversations and plugins",
     mentionSkills: "Skills",
     mentionFiles: "Project files",
+    mentionExtensions: "Plugins",
+    mentionExtensionsLimit: "Select up to 16 plugin references.",
     mentionConversations: "Conversations",
     mentionUpload: "Upload a file",
     mentionEmpty: "No matching references in loaded results",
@@ -1221,6 +1223,7 @@ export const enUS: Translations = {
     saveChanges: "Save changes",
     descriptions: {
       buzz: "Buzz channels and direct messages through your DeerFlow agent.",
+      qq: "QQ direct messages and group @mentions over WebSocket.",
       telegram: "Telegram direct messages through your DeerFlow bot.",
       slack: "Slack workspace messages and mentions.",
       discord: "Discord server messages through your DeerFlow bot.",

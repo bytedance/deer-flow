@@ -359,9 +359,11 @@ export const zhCN: Translations = {
   // Input Box
   inputBox: {
     mentionPicker: "添加引用",
-    mentionSearch: "搜索技能、项目文件和对话",
+    mentionSearch: "搜索技能、项目文件、对话和插件",
     mentionSkills: "技能",
     mentionFiles: "项目文件",
+    mentionExtensions: "插件",
+    mentionExtensionsLimit: "最多选择 16 个插件引用。",
     mentionConversations: "对话",
     mentionUpload: "上传文件",
     mentionEmpty: "已加载的内容中没有匹配的引用",
@@ -1142,6 +1144,7 @@ export const zhCN: Translations = {
     saveChanges: "保存修改",
     descriptions: {
       buzz: "通过 DeerFlow 智能体接收 Buzz 频道消息和私聊。",
+      qq: "通过 WebSocket 接收 QQ 私聊和群聊 @机器人消息。",
       telegram: "通过 DeerFlow Bot 接收 Telegram 私聊消息。",
       slack: "接收 Slack 工作区消息和提及。",
       discord: "通过 DeerFlow Bot 接收 Discord 服务器消息。",

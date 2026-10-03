@@ -281,9 +281,8 @@ async def test_discord_bot_mention_slash_skill_routes_as_chat() -> None:
     channel._add_reaction = noop
 
     await channel._on_message(_make_discord_message("<@999> /data-analysis analyze uploads/foo.csv"))
-    await asyncio.sleep(0)
-
-    inbound = bus.get_inbound_nowait()
+    # The commit runs as a task on the Gateway loop (identity lookup included).
+    inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
     bus.inbound_task_done()
     assert inbound.text == "/data-analysis analyze uploads/foo.csv"
     assert inbound.msg_type == InboundMessageType.CHAT
@@ -306,9 +305,8 @@ async def test_discord_bot_mention_known_command_routes_as_command() -> None:
     channel._add_reaction = noop
 
     await channel._on_message(_make_discord_message("<@999> /help"))
-    await asyncio.sleep(0)
-
-    inbound = bus.get_inbound_nowait()
+    # The commit runs as a task on the Gateway loop (identity lookup included).
+    inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
     bus.inbound_task_done()
     assert inbound.text == "/help"
     assert inbound.msg_type == InboundMessageType.COMMAND
