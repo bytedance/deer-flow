@@ -108,6 +108,10 @@ Skill quality review note:
   revision can suppress a run, and blocker findings can never be waived.
 
 Scheduled-task note:
+- `scheduler.tool_enabled` (default off) offers owner-bound schedule tools only
+  through Gateway capability admission. Interactive turns create/manage their
+  schedules; scheduled turns can request stopping only their own schedule.
+  Per-occurrence goal success does not end a recurring schedule.
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a
   background scheduler gated by `config.yaml -> scheduler.enabled`.
 - Scheduled runs are non-interactive: `ask_clarification` is excluded. `non_interactive`,

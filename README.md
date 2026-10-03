@@ -2275,17 +2275,62 @@ Current MVP capabilities:
 
 **Filter execution history through the API**
 
-To inspect failures without downloading every successful occurrence, authenticated clients with `threads:read` can request `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0` for an owned task. The optional `status` accepts `queued`, `launching`, `running`, `success`, `failed`, `skipped`, or `interrupted`; these are occurrence statuses, so task statuses such as `completed` are invalid (422).
+To inspect failures without downloading every successful occurrence, authenticated clients with `threads:read` can request `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0` for an owned task. The optional `status` accepts `queued`, `launching`, `running`, `success`, `failed`, `skipped`, `interrupted`, or `unmet`; these are occurrence statuses, so task statuses such as `completed` are invalid (422).
 
 Filtering happens before pagination. `limit` (1–200, default 50) and `offset` (nonnegative, default 0) apply to matching records, ordered by creation time then ID, both descending. Omitting `status` preserves the existing mixed-history array response; no matches return `[]`. The API does not change task execution, and the workspace history UI remains unfiltered.
 
 Current MVP limits:
 
-- No conversation-created `schedule_task` tool yet
 - No text-only notification jobs
 - No channel or GitHub dispatch targets (result push above is not a dispatch target)
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
+
+### Create schedules in a conversation
+
+Set both `scheduler.enabled: true` and `scheduler.tool_enabled: true`, then restart
+Gateway. An authorized interactive turn can use `schedule_task` to create, list,
+pause or delete tasks belonging to that conversation. For example: “Prepare a
+weekly meeting report every Monday at 9 AM in Asia/Shanghai for four weeks.”
+The tool returns the exact prompt, schedule, optional goal and stop method.
+Recurring report/file jobs may offer a manual trial; the trial requires your
+request and does not count toward the scheduled-launch limit.
+
+New tasks default to a fresh conversation for each occurrence. A configured
+`goal_objective` applies only to that occurrence: success does not stop a
+recurring schedule. The running agent can request `stop_scheduled_task` for its
+own schedule when your overall end condition has been met; the request takes
+effect during terminal finalization. `max_runs` counts automatic launches only,
+and `end_at` provides a deadline. Either end condition takes precedence over a
+pause request. Tool-created sub-hourly schedules require an end condition; each
+owner may keep at most 20 live tool-created tasks, including paused tasks.
+
+An unmet occurrence is recorded as `unmet`, distinct from an execution failure.
+Three eligible automatic unmet occurrences pause a recurring task. Accepted
+success resets the streak, including a success relying on disclosed assumptions;
+manual trials, interruption, execution failure and external waiting do not
+advance it. Resume retains the streak, so another eligible unmet occurrence can
+pause the task again. Existing notification bindings receive goal-unmet and
+auto-pause notices through the same durable outbox; manual trials stay silent.
+
+You can ask the agent in the originating conversation to save an explicit note
+for future runs (at most 10 notes of 500 characters). Fresh recurring runs may
+read the previous executed occurrence through opt-in `read_conversation`, with
+the same owner and read-permission checks. This provides a source reference,
+not an automatic summary or a post-back into the originating chat.
+
+A goal occurrence can use up to nine agent turns, with an evaluator request after
+each. Evaluator requests and provider-reported tokens are included in run usage;
+missing usage makes the corresponding cost estimate unknown. `token_budget`
+limits the main graph and is checked after model calls; evaluator usage is
+additional, so it is not a strict whole-run or dollar limit.
+
+**Goal evaluation upgrade:** existing scheduled, webhook and autonomous goal
+runs can accept disclosed low-risk, reversible assumptions and record
+`relied_on_assumption` in their verdict. Interactive goal evaluation remains
+strict. This policy also applies when conversation schedule tools are disabled;
+it does not authorize sensitive actions or substitute for user authorization.
+
 
 Scheduled runs use `scheduler.recursion_limit` in `config.yaml` (default `1000`, matching the web UI's interactive budget). Values above `max_recursion_limit` are clamped. This field is read at dispatch, so the next scheduled run picks it up without a Gateway restart.
 

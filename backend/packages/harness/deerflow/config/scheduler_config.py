@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 
 class SchedulerConfig(BaseModel):
     enabled: bool = Field(default=False)
+    tool_enabled: bool = Field(default=False, description="Offer conversation schedule tools only with a host-bound scheduler capability and scheduler.enabled=true.")
     multi_instance: bool = Field(default=False)
     poll_interval_seconds: int = Field(default=5, ge=1, le=300)
     lease_seconds: int = Field(default=120, ge=5, le=3600)

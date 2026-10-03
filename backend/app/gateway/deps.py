@@ -247,6 +247,20 @@ def _log_recovered_stream_cleanup_result(task: asyncio.Task[None], run_id: str) 
         logger.warning("Failed to clean up recovered run stream for %s", run_id, exc_info=True)
 
 
+async def _cleanup_recovered_scheduled_goals(recovered_runs: list[RunRecord], *, run_manager: RunManager, checkpointer: Checkpointer) -> None:
+    """Clear only confirmed occurrence-owned goals after durable orphan recovery."""
+    from deerflow.runtime.runs.worker import clear_recovered_scheduled_goal
+
+    for record in recovered_runs:
+        metadata = getattr(record, "metadata", None) or {}
+        if not isinstance(metadata.get("scheduled_goal_objective"), str):
+            continue
+        try:
+            await clear_recovered_scheduled_goal(record, run_manager=run_manager, checkpointer=checkpointer)
+        except Exception:
+            logger.warning("Scheduled goal cleanup failed for recovered run %s; retained for guarded next-run cleanup", record.run_id, exc_info=True)
+
+
 async def _flush_recovered_stream_cleanups(
     bridge: StreamBridge,
     cleanup_tasks: dict[asyncio.Task[None], str],
@@ -592,6 +606,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             task.add_done_callback(lambda completed: recovered_stream_cleanup_tasks.pop(completed, None))
 
         async def terminalize_recovered_runs(recovered_runs: list[RunRecord]) -> None:
+            await _cleanup_recovered_scheduled_goals(recovered_runs, run_manager=app.state.run_manager, checkpointer=app.state.checkpointer)
             await _terminalize_recovered_runs(
                 app.state.stream_bridge,
                 recovered_runs,
@@ -617,12 +632,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             before=now_iso(),
             stop_reason=ORPHAN_RECOVERY_STOP_REASON,
         )
-        await _terminalize_recovered_runs(
-            app.state.stream_bridge,
-            recovered_runs,
-            cleanup_delay=cleanup_delay,
-            on_cleanup_scheduled=track_recovered_stream_cleanup,
-        )
+        await terminalize_recovered_runs(recovered_runs)
         await _mark_latest_startup_recovered_threads_error(
             app.state.run_manager,
             app.state.thread_store,

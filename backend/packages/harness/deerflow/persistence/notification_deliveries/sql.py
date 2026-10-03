@@ -15,6 +15,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -107,6 +109,59 @@ class NotificationDeliveryRepository:
             if existing is None:
                 raise
             return self._to_dict(existing)
+
+    async def enqueue_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        task_id: str,
+        task_run_id: str,
+        event: str,
+        provider: str,
+        target: str,
+        owner_user_id: str,
+        payload: dict[str, Any] | None = None,
+        run_id: str | None = None,
+        available_at: datetime | None = None,
+        max_attempts: int = 5,
+    ) -> dict[str, Any]:
+        """Stage an idempotent delivery without committing its caller's work.
+
+        Occurrence finalization uses the same transaction for the task change
+        and its notification obligation. Conflict handling must not roll back
+        that transaction or open a second writer while it holds the parent lock.
+        """
+        dialect = session.get_bind().dialect.name
+        if dialect not in {"sqlite", "postgresql"}:
+            raise ValueError(f"Unsupported notification database dialect: {dialect}")
+        insert = sqlite_insert if dialect == "sqlite" else pg_insert
+        values = {
+            "id": self._new_id(),
+            "task_id": task_id,
+            "task_run_id": task_run_id,
+            "run_id": run_id,
+            "event": event,
+            "provider": provider,
+            "target": target,
+            "owner_user_id": owner_user_id,
+            "payload_json": dict(payload or {}),
+            "max_attempts": max_attempts,
+        }
+        if available_at is not None:
+            values["available_at"] = available_at
+        statement = insert(NotificationDeliveryRow).values(**values).on_conflict_do_nothing(index_elements=["task_run_id", "event", "provider", "target"])
+        await session.execute(statement)
+        row = await session.scalar(
+            select(NotificationDeliveryRow).where(
+                NotificationDeliveryRow.task_run_id == task_run_id,
+                NotificationDeliveryRow.event == event,
+                NotificationDeliveryRow.provider == provider,
+                NotificationDeliveryRow.target == target,
+            )
+        )
+        if row is None:
+            raise RuntimeError("Notification insert produced no delivery row")
+        return self._to_dict(row)
 
     async def _find_by_idempotency_key(
         self,

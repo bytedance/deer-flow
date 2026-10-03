@@ -263,7 +263,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 50
+  config_version: 51
   log_level: info
   recursion_limit: 100
   max_recursion_limit: 1000
@@ -275,6 +275,10 @@ config: |
     scope_selection_enabled: false
 
   models: []
+  # Both switches are required for conversation-created schedules. Restart pods.
+  scheduler:
+    enabled: false
+    tool_enabled: false
   # Example (uncomment & set the matching secret in `secrets`):
   #   - name: gpt-4
   #     display_name: GPT-4

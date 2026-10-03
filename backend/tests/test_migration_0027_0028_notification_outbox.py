@@ -1,8 +1,8 @@
 """Migration tests for the scheduled-task notification outbox (issue #4254).
 
 ``0027_notification_deliveries`` creates the outbox table and
-``0028_parked_attempts`` adds its parking counter. This file owns the chain-head
-pin, moved on from ``test_migration_0026_mcp_task_lease_tokens``.
+``0028_parked_attempts`` adds its parking counter. The latest scheduler-agent
+migration test now owns the chain-head pin.
 """
 
 from __future__ import annotations
@@ -23,10 +23,6 @@ OUTBOX = "0027_notification_deliveries"
 PARKED = "0028_parked_attempts"
 PREVIOUS = "0026_mcp_task_lease_tokens"
 TABLE = "notification_deliveries"
-
-
-async def test_0028_is_the_chain_head():
-    assert bootstrap._get_head_revision() == PARKED
 
 
 async def test_outbox_revisions_chain_after_0026():

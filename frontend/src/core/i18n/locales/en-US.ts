@@ -932,6 +932,7 @@ export const enUS: Translations = {
       launching: "Launching",
       running: "Running",
       success: "Success",
+      unmet: "Goal unmet",
       failed: "Failed",
       skipped: "Skipped",
       interrupted: "Interrupted",

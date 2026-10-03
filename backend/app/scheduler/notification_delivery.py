@@ -91,14 +91,30 @@ def render_notification_text(delivery: dict[str, Any]) -> str:
     payload = delivery.get("payload") or {}
     event = delivery.get("event") or ""
     task_label = payload.get("task_title") or payload.get("task_id") or delivery.get("task_id")
-    if event == "run_failed":
+    if event in {"run_unmet", "task_paused"}:
+        label = "Scheduled task goal was not met" if event == "run_unmet" else "Scheduled task automatically paused"
+        lines = [f"**{label}**", f"Task: `{task_label}`"]
+        # These are host-defined result codes, never model/provider error text.
+        reason = payload.get("reason_code")
+        blockers = {"missing_evidence", "needs_user_input", "run_failed", "external_wait", "goal_not_met_yet"}
+        allowed = (
+            blockers
+            | {f"blocked:{blocker}" for blocker in blockers}
+            | {"no_verdict", "consecutive_unmet", "evaluator_failed", "max_continuations_reached", "no_progress_detected", "token_capped", "no_durable_end_of_turn", "thread_changed_after_evaluation", "thread_changed_before_continuation"}
+        )
+        lines.append(f"Reason: `{reason if isinstance(reason, str) and reason in allowed else 'unknown'}`")
+        lines.append("See the DeerFlow workspace for the result and next steps.")
+    elif event == "run_failed":
         lines = ["**Scheduled task failed**", f"Task: `{task_label}`"]
         # Do not forward raw error text to external IM: scheduled runs can
         # surface hostnames, paths, and token fragments in tracebacks. Users
         # can open the workspace for the full detail.
         lines.append("See the DeerFlow workspace for error details.")
     else:
-        lines = ["**Scheduled task completed**", f"Task: `{task_label}`"]
+        heading = "Scheduled task completed"
+        if payload.get("relied_on_assumption") is True:
+            heading += " — met, relying on stated assumptions"
+        lines = [f"**{heading}**", f"Task: `{task_label}`"]
         # The result summary belongs to a successful outcome only: on failed
         # runs a partial answer would be misleading, so the error line above
         # stays the sole detail.

@@ -874,6 +874,7 @@ export const zhCN: Translations = {
       launching: "启动中",
       running: "运行中",
       success: "成功",
+      unmet: "目标未达成",
       failed: "失败",
       skipped: "跳过",
       interrupted: "已中断",

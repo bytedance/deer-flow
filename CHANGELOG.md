@@ -13,6 +13,12 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Added
 
+- **scheduler:** Opt-in conversation tools create and manage owner-bound schedules,
+  support bounded automatic launches and per-occurrence goals, and let a scheduled
+  agent request stopping its own schedule. Unmet goals and automatic pause use
+  the existing notification outbox; explicit notes and authorized previous-run
+  references carry context forward without changing the goal lifecycle.
+
 #### Scheduler
 
 - **scheduler:** Scheduled tasks can be searched by title or prompt. Finding a

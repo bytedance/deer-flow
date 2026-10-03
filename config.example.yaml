@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 50
+config_version: 51
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -2712,6 +2712,7 @@ agent_storage:
 #   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
   enabled: false
+  tool_enabled: false          # Offer schedule tools to authorized Gateway conversations
   multi_instance: false       # Opt into lease-aware recovery across Gateway instances
   poll_interval_seconds: 5
   lease_seconds: 120

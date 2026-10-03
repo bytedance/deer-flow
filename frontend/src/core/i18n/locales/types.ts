@@ -768,6 +768,7 @@ export interface Translations {
       launching: string;
       running: string;
       success: string;
+      unmet: string;
       failed: string;
       skipped: string;
       interrupted: string;
