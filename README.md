@@ -1840,11 +1840,14 @@ characters per file, with truncation markers. Full uploaded files remain availab
 for targeted reads.
 
 Converted upload outlines and previews require a matching source version, including
-modification timestamps. Editing the source invalidates its previous conversion,
-including equal-length edits. Older ownership records without source timestamps
+modification timestamps. A detected source-version change invalidates its previous
+conversion, including equal-length edits. Older ownership records without source timestamps
 are also rejected; re-upload the source with `uploads.auto_convert_documents: true`
 to restore conversion-backed outlines. Files remain available, and unvalidated
 Markdown conversions appear as standalone files in the agent's historical listing.
+On Windows, `st_ctime_ns` may represent creation time; a same-size rewrite that
+restores the original `mtime` can evade validation. Timestamp checks are
+conservative metadata validation, not a guarantee of content equality.
 
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 
