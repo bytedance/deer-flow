@@ -1202,7 +1202,7 @@ def _validate_extensions_config_candidate(raw_data: dict, *, check_installation_
         _raise_invalid_mcp_configuration("Duplicate MCP installation IDs; remove conflicting entries or assign unique capability IDs in the deployment configuration")
 
 
-async def _run_drained_mcp_apply[T](action: str, apply: Callable[..., T], /, *args) -> T:
+async def _run_drained_mcp_apply[**P, T](action: str, apply: Callable[P, T], /, *args: P.args) -> T:
     """Run one MCP config read-modify-write drained, then publish the tools-cache reset.
 
     A cancelled caller must not detach from the worker holding the
