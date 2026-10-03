@@ -29,6 +29,13 @@ def _fix_messages(messages: list) -> list:
                     parts.append(block)
                 elif isinstance(block, dict) and block.get("type") == "text":
                     parts.append(block.get("text", ""))
+                elif isinstance(block, dict) and block.get("type") == "json":
+                    # Structured tool results ride the same text channel; serialize
+                    # them or the model sees an empty <tool_response>.
+                    try:
+                        parts.append(json.dumps(block.get("json"), ensure_ascii=False))
+                    except TypeError:
+                        parts.append(str(block.get("json")))
             text = "".join(parts)
         else:
             text = msg.content or ""
