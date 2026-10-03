@@ -5,8 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 import tempfile
+import threading
+from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, NoReturn
 from weakref import WeakValueDictionary
@@ -31,16 +36,44 @@ from deerflow.tools.types import Runtime
 logger = logging.getLogger(__name__)
 
 # Lock granularity: (user_id, skill_name) to avoid cross-user blocking.
-_skill_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = WeakValueDictionary()
+_skill_locks: WeakValueDictionary[tuple[str, str], threading.Lock] = WeakValueDictionary()
+_skill_locks_guard = threading.Lock()
+_skill_lock_wait_executor = ThreadPoolExecutor(
+    max_workers=min(32, (os.cpu_count() or 1) + 4),
+    thread_name_prefix="skill-manage-lock-wait",
+)
 
 
-def _get_lock(user_id: str, name: str) -> asyncio.Lock:
+def _get_lock(user_id: str, name: str) -> threading.Lock:
     key = (user_id, name)
-    lock = _skill_locks.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _skill_locks[key] = lock
-    return lock
+    with _skill_locks_guard:
+        lock = _skill_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _skill_locks[key] = lock
+        return lock
+
+
+@asynccontextmanager
+async def _async_thread_lock(lock: threading.Lock) -> AsyncIterator[None]:
+    loop = asyncio.get_running_loop()
+    acquire_future = loop.run_in_executor(_skill_lock_wait_executor, lock.acquire)
+    try:
+        await asyncio.shield(acquire_future)
+    except asyncio.CancelledError:
+        while not acquire_future.done():
+            try:
+                await asyncio.shield(acquire_future)
+            except asyncio.CancelledError:
+                continue
+        if not acquire_future.cancelled():
+            acquire_future.result()
+            lock.release()
+        raise
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _get_thread_id(runtime: Runtime | None) -> str | None:
@@ -139,7 +172,7 @@ async def _skill_manage_impl(
     thread_id = _get_thread_id(runtime)
     skill_storage = get_or_new_user_skill_storage(user_id)
 
-    async with lock:
+    async with _async_thread_lock(lock):
         if action == "create":
             if await _to_thread(skill_storage.custom_skill_exists, name):
                 raise ValueError(f"Custom skill '{name}' already exists.")
