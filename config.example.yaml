@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 51
+config_version: 52
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -917,6 +917,8 @@ tools:
   #   group: web
   #   use: deerflow.community.serper.tools:web_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
+  #   include_domains: []  # Optional domain-only lists, at most 10 entries each
+  #   exclude_domains: []  # Exclusion wins; see backend/docs/CONFIGURATION.md
   #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
 
   # Web search tool (uses Serply - Google Search API, requires SERPLY_API_KEY)

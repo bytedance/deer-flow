@@ -39,6 +39,10 @@ class ChannelUnavailable(Exception):
     """
 
 
+class ChannelStopTimeout(RuntimeError):
+    """A channel still owns a live provider worker after bounded teardown."""
+
+
 @dataclass(eq=False, slots=True)
 class _ThreadsafeSubmission:
     coroutine: Coroutine[Any, Any, Any]

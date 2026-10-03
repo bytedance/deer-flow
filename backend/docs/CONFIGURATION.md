@@ -615,8 +615,61 @@ the existing contract.
 Serper `web_search` also accepts the optional model argument
 `time_range: "day" | "week" | "month" | "year"`. For example,
 `{"query": "Python releases", "time_range": "week"}` sends `tbs: "qdr:w"`
-to Serper. Omitting `time_range` or passing `null` keeps the existing unrestricted
+to Serper. Omitting `time_range` or passing `null` omits the recency constraint from the
 search request. This option does not change Serper `image_search`.
+
+#### Serper source filters
+
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.serper.tools:web_search_tool
+    max_results: 5
+    include_domains: [example.com, bücher.de]
+    exclude_domains: [ads.example.com]
+```
+
+Each optional list accepts at most 10 entries (before deduplication). Omitted or
+empty lists impose no restriction; explicit `null`, non-lists, or any invalid
+entry return a configuration error before HTTP. Validation failures are also
+logged without query or configured domain values. Entries must be domain names:
+no surrounding whitespace, scheme, path, port, wildcard, IP literal or query
+operator. Names are lowercased, one trailing dot is removed, and Python's IDNA
+codec converts Unicode names to ASCII. DNS labels must be 1–63 characters and
+the normalized domain at most 253 characters, with at least two labels.
+Duplicates are removed after normalization.
+
+Matching uses the exact hostname or a dot-delimited subdomain; `example.com`
+does not match `notexample.com` or `example.com.evil.com`. Exclusion wins over
+inclusion. With either list non-empty, malformed/non-HTTP(S) result URLs,
+credentials in URLs, and invalid hosts or ports are discarded. No DNS lookup
+or redirect resolution is performed. Unconfigured/empty-filter behavior stays
+unchanged, including the legacy query trimming and 500-character truncation.
+
+The adapter appends Google query operators, for example
+`(news) (site:example.com OR site:example.org) -site:ads.example.com`, in the
+existing Serper `q` field; it sends no provider-specific domain JSON fields.
+After the existing query cleanup, the complete filtered query must fit 500
+characters or the tool returns an error before HTTP. Operators are never
+truncated or dropped. Model-supplied operators can affect upstream retrieval,
+so the local hostname check always enforces the configured scope. The returned
+`query` remains the cleaned original query, without appended restrictions,
+including on provider errors.
+
+`time_range` still maps to `tbs`, and `max_results` caps the filtered results.
+`total_results` reports the actual remaining count (zero with `results: []`
+when none survive). One request is made: no refill or relaxed-filter retries.
+These settings do not affect `image_search` or the model-facing tool schema.
+Source selection is neither a factuality guarantee nor a global URL-access
+policy for fetch tools, browsers, or redirects.
+
+Provider validation: [Google documents `site:` and subdomain behavior](https://developers.google.com/search/docs/monitor-debug/search-operators/all-search-site)
+and [search exclusion syntax](https://support.google.com/websearch/answer/2466433).
+[Serper describes its Google Search API](https://serper.dev/), but live Serper
+operator handling has not been verified here. Upstream operators are best-effort;
+offline mocked tests verify request composition and local filtering, not provider
+retrieval behavior. No paid API calls are needed for the regression suite.
 
 **Built-in Tools**:
 - `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya)
