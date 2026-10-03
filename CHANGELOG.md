@@ -473,7 +473,7 @@ This release closes that milestone with **301 merged pull requests**.
   `/connect` binding runs separately, both on the Gateway loop through
   `_submit_threadsafe_coroutine` like Telegram, Feishu, and DingTalk. Bind
   replies go back through the Discord loop, and `stop()` now drains that work
-  before tearing the client down.
+  before tearing the client down. ([#6214])
 
 - **community:** The shared SSRF guard now refuses every non-global address,
   including the `100.64.0.0/10` shared address space that its flag checks let
@@ -7625,4 +7625,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6140]: https://github.com/bytedance/deer-flow/pull/6140
 [#6201]: https://github.com/bytedance/deer-flow/pull/6201
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
+[#6214]: https://github.com/bytedance/deer-flow/pull/6214
 
