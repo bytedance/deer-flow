@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.models.credential_loader import CodexCliCredential
@@ -202,13 +203,39 @@ def test_convert_messages_ai_with_tool_calls():
     assert any(item.get("type") == "function_call" and item["name"] == "search" for item in items)
 
 
-def test_convert_messages_tool_message():
+@pytest.mark.parametrize("call_id", ["tc1", "0", " tc1 "])
+def test_convert_messages_tool_message(call_id):
     model = _make_model()
-    tool_msg = ToolMessage(content="result data", tool_call_id="tc1")
+    tool_msg = ToolMessage(content="result data", tool_call_id=call_id)
     _, items = model._convert_messages([tool_msg])
     assert items[0]["type"] == "function_call_output"
-    assert items[0]["call_id"] == "tc1"
+    assert items[0]["call_id"] == call_id
     assert items[0]["output"] == "result data"
+
+
+@pytest.mark.parametrize("blank_id", ["", "   ", "\t\r\n"])
+def test_convert_messages_omits_tool_results_with_blank_call_ids(blank_id):
+    model = _make_model()
+    orphaned_result = ToolMessage(content="orphaned result", tool_call_id=blank_id)
+    messages = [
+        SystemMessage(content="Follow the instructions."),
+        HumanMessage(content="Search for foo."),
+        AIMessage(content="", tool_calls=[{"name": "search", "args": {"q": "foo"}, "id": "tc1"}]),
+        orphaned_result,
+        ToolMessage(content=[{"type": "text", "text": "result data"}], tool_call_id="tc1"),
+        AIMessage(content="Done."),
+    ]
+
+    instructions, items = model._convert_messages(messages)
+
+    assert instructions == "Follow the instructions."
+    assert items == [
+        {"role": "user", "content": "Search for foo."},
+        {"type": "function_call", "name": "search", "arguments": '{"q": "foo"}', "call_id": "tc1"},
+        {"type": "function_call_output", "call_id": "tc1", "output": "result data"},
+        {"role": "assistant", "content": "Done."},
+    ]
+    assert orphaned_result.tool_call_id == blank_id
 
 
 def test_convert_messages_keeps_placeholder_result_paired_with_invalid_tool_call():

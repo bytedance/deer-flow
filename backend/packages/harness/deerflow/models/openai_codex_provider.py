@@ -182,6 +182,9 @@ class CodexChatModel(BaseChatModel):
                         }
                     )
             elif isinstance(msg, ToolMessage):
+                # A blank ID cannot identify the call this result answers.
+                if not msg.tool_call_id.strip():
+                    continue
                 input_items.append(
                     {
                         "type": "function_call_output",

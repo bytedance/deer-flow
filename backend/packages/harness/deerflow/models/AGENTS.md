@@ -58,6 +58,14 @@ the same policy first so run metadata reports the effective values. Design note:
 `tests/test_reasoning_contract.py`, the contract section of
 `tests/test_model_factory.py`, `tests/test_models_router_reasoning.py`.
 
+### Codex tool-result serialization (`packages/harness/deerflow/models/openai_codex_provider.py`)
+
+`_convert_messages` omits tool results with empty or whitespace-only call IDs,
+including direct provider use that bypasses middleware repair. Non-blank IDs
+remain byte-for-byte unchanged so calls and results keep their correlation;
+serialization does not trim IDs or rewrite the input messages.
+Coverage: `tests/test_codex_provider.py`.
+
 ### Codex SSE termination (`packages/harness/deerflow/models/openai_codex_provider.py`)
 
 `response.completed` ends stream consumption immediately, before transport EOF;
