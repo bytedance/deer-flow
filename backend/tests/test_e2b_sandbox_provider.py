@@ -278,6 +278,7 @@ def _make_provider(
     provider._transitioning_slots = 0
     provider._capacity_cond = threading.Condition(provider._lock)
     provider._shutdown_called = False
+    provider._shutdown_cleanup_pending = False
     provider._owner_id = "owner-a"
     provider._ownership = FakeOwnershipStore({}, owner_id=provider._owner_id)
     provider._ownership_config = SimpleNamespace(
@@ -3172,6 +3173,46 @@ def test_release_skips_warm_pool_when_sync_reveals_dead_vm(monkeypatch, tmp_path
 
     assert sb.is_dead is True
     assert "sb-died-during-sync" not in p._warm_pool
+    assert client.killed is True
+
+
+def test_shutdown_defers_teardown_while_maintenance_thread_is_alive():
+    p = _make_provider()
+    client = FakeClient(sandbox_id="sb-owned")
+    sandbox = _make_sandbox(client, sandbox_id="sb-owned")
+    p._sandboxes = {"sb-owned": sandbox}
+    p._owned_sandbox_ids = {"sb-owned"}
+
+    class JoinControlledThread:
+        def __init__(self) -> None:
+            self.alive = True
+            self.join_timeout: float | None = None
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_timeout = timeout
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+    lease_thread = JoinControlledThread()
+    p._lease_thread = lease_thread
+
+    with pytest.raises(RuntimeError, match="lease renewal"):
+        p.shutdown()
+
+    assert p._shutdown_called is True
+    assert p._shutdown_cleanup_pending is True
+    assert p._maintenance_stop.is_set()
+    assert p._sandboxes == {"sb-owned": sandbox}
+    assert client.killed is False
+    assert lease_thread.join_timeout == 11.0
+
+    lease_thread.alive = False
+    p.shutdown()
+
+    assert p._shutdown_called is True
+    assert p._shutdown_cleanup_pending is False
+    assert p._sandboxes == {}
     assert client.killed is True
 
 
