@@ -632,7 +632,8 @@ tools:
 
 Each optional list accepts at most 10 entries (before deduplication). Omitted or
 empty lists impose no restriction; explicit `null`, non-lists, or any invalid
-entry return a configuration error before HTTP. Entries must be domain names:
+entry return a configuration error before HTTP. Validation failures are also
+logged without query or configured domain values. Entries must be domain names:
 no surrounding whitespace, scheme, path, port, wildcard, IP literal or query
 operator. Names are lowercased, one trailing dot is removed, and Python's IDNA
 codec converts Unicode names to ASCII. DNS labels must be 1–63 characters and

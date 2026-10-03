@@ -178,3 +178,30 @@ def test_maximum_domain_length(search):
     domain = ".".join(["a" * 63, "b" * 63, "c" * 63, "d" * 61])
     result = search({"include_domains": [domain]}, ["https://" + domain])
     assert result["total_results"] == 1
+
+
+@pytest.mark.parametrize(
+    "config,query,error_fragment",
+    [
+        ({"include_domains": "private.example"}, "private-search-text", "include_domains"),
+        ({"exclude_domains": ["https://private.example/secret"]}, "private-search-text", "exclude_domains"),
+        ({"include_domains": ["example.com"]}, "private-search-text" * 40, "500 characters"),
+    ],
+)
+def test_domain_validation_errors_are_logged_without_input_values(search, caplog, config, query, error_fragment):
+    with caplog.at_level("ERROR", logger=tools.__name__):
+        result = search(config, query=query)
+    assert error_fragment in result["error"]
+    search.client.assert_not_called()
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelname == "ERROR"
+    assert error_fragment in caplog.text
+    assert "private.example" not in caplog.text
+    assert "private-search-text" not in caplog.text
+
+
+def test_valid_domain_settings_do_not_log_errors(search, caplog):
+    with caplog.at_level("ERROR", logger=tools.__name__):
+        result = search({"include_domains": ["example.com"]}, ["https://example.com"])
+    assert result["total_results"] == 1
+    assert not caplog.records

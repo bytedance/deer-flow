@@ -3,7 +3,8 @@
 `tools.py` owns web/image search. Keep model-facing arguments unchanged.
 Web-only `include_domains`/`exclude_domains` use at most 10 domain-only entries
 per list; normalize case, one trailing dot and IDNA, reject invalid configuration
-before transport, and enforce exact-host/dot-subdomain matching with deny precedence.
+before transport, log validation errors without config/query values, and enforce
+exact-host/dot-subdomain matching with deny precedence.
 Google `site:` query operators are best-effort; local URL-host filtering is
 mandatory even for queries containing operators. Never truncate restrictions,
 refill results, or relax scope. The composed query limit is 500 characters;

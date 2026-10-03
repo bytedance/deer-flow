@@ -305,6 +305,7 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
         exclude = _domain_list(extra, "exclude_domains")
         search_query = _domain_query(query, include, exclude)
     except ValueError as exc:
+        logger.error("Invalid Serper domain filters: %s", exc)
         return json.dumps({"error": str(exc), "query": query}, ensure_ascii=False)
 
     api_key = _get_api_key("web_search")
