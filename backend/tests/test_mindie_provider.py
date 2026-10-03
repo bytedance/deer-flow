@@ -240,6 +240,36 @@ class TestParseXmlToolCalls:
         _, calls = _parse_xml_tool_call_to_dict(content)
         assert calls[0]["args"]["n"] == 42
 
+    def test_negative_integer_param_deserialised(self):
+        content = "<tool_call><function=f><parameter=n>-3</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == -3
+
+    def test_float_param_deserialised(self):
+        content = "<tool_call><function=f><parameter=n>3.14</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == 3.14
+
+    def test_exponent_param_deserialised(self):
+        content = "<tool_call><function=f><parameter=n>1e-3</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == 0.001
+
+    def test_leading_zero_param_stays_string(self):
+        content = "<tool_call><function=f><parameter=n>007</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == "007"
+
+    def test_trailing_dot_param_stays_string(self):
+        content = "<tool_call><function=f><parameter=n>3.</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == "3."
+
+    def test_leading_plus_param_stays_string(self):
+        content = "<tool_call><function=f><parameter=n>+3</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == "+3"
+
     def test_list_param_deserialised(self):
         content = '<tool_call><function=f><parameter=lst>["a","b"]</parameter></function></tool_call>'
         _, calls = _parse_xml_tool_call_to_dict(content)
