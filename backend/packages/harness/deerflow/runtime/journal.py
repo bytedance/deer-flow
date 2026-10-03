@@ -19,7 +19,6 @@ Key design decisions:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
 import time
@@ -61,18 +60,34 @@ _MAX_RUN_SKILL_SNAPSHOTS = 64
 
 
 def _content_chars(content: Any) -> int:
-    if isinstance(content, str):
-        return len(content)
-    return len(json.dumps(content, default=str, ensure_ascii=False))
+    """Characters in the string leaves and mapping keys of ``content``.
+
+    Walks the structure without serializing it, so cost scales with the number of
+    nodes rather than the byte size (base64 image payloads are counted by ``len``).
+    """
+    total = 0
+    stack = [content]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            total += len(item)
+        elif isinstance(item, Mapping):
+            for key, value in item.items():
+                total += len(key) if isinstance(key, str) else 0
+                stack.append(value)
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+    return total
 
 
 def _rendered_request_size(messages: Sequence[Sequence[BaseMessage]], invocation_params: Any) -> dict[str, Any]:
     """Measure the request as rendered at ``on_chat_model_start`` (read-only).
 
-    Characters only: token counts for the rendered request are not available
-    without an extra model/tokenizer call, so ``input_tokens`` from the
-    provider's usage metadata (recorded at ``on_llm_end``) is the token figure.
-    ``tools_chars`` is ``None`` when the callback carries no bound-tool schema.
+    Sizes are characters of string content (see ``_content_chars``), not serialized
+    bytes. Token counts for the rendered request are not available without an extra
+    model/tokenizer call, so ``input_tokens`` from the provider's usage metadata
+    (recorded at ``on_llm_end``) is the token figure. ``request_tools_chars`` is
+    ``None`` when the callback carries no bound-tool schema.
     """
     message_chars = 0
     message_count = 0
