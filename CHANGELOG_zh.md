@@ -423,7 +423,7 @@
   此前先读取文档、后计算缓存签名，若两者之间有写入提交（例如后台记忆更
   新器），旧文档就会以新签名写入缓存，之后每次 `load()` 都返回过时的记
   忆，直到下一次写入。`reload()` 现在与 `load()` 一样先计算签名，竞争写
-  入只会触发重新读取。
+  入只会触发重新读取。([#6238])
 - **渠道：** Discord 的渠道连接数据库操作现在在 Gateway 事件循环上执行。
   discord.py 在客户端线程的私有事件循环上投递消息，而 Discord 适配器此前就在该
   循环上 await 连接仓库，但仓库的 SQLAlchemy 引擎与连接池属于 Gateway 循环。在
@@ -6414,3 +6414,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6212]: https://github.com/bytedance/deer-flow/pull/6212
 [#6214]: https://github.com/bytedance/deer-flow/pull/6214
 [#6230]: https://github.com/bytedance/deer-flow/pull/6230
+[#6238]: https://github.com/bytedance/deer-flow/pull/6238

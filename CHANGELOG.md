@@ -466,7 +466,7 @@ This release closes that milestone with **301 merged pull requests**.
   cached the old document under the new signature, and every later `load()`
   returned the outdated memory until the next write. `reload()` now computes
   the signature first, as `load()` already did, so a racing write forces a
-  re-read instead.
+  re-read instead. ([#6238])
 - **channels:** Discord now runs its channel-connection database work on the
   Gateway event loop. discord.py delivers messages on a private loop in the
   client thread, and the Discord adapter awaited the connection repository there
@@ -7679,3 +7679,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6214]: https://github.com/bytedance/deer-flow/pull/6214
 [#6212]: https://github.com/bytedance/deer-flow/pull/6212
 [#6230]: https://github.com/bytedance/deer-flow/pull/6230
+[#6238]: https://github.com/bytedance/deer-flow/pull/6238
