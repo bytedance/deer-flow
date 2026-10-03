@@ -223,6 +223,8 @@ Capability skill discovery (`/api/capabilities/installations/skills`) reuses
 It must preserve the ordinary skill listing's caller visibility and provider
 failure policy rather than exposing the unfiltered user-scoped catalog.
 
+Cap edit reads at `MAX_EDITABLE_ARTIFACT_BYTES + 1` despite stale `lstat`.
+
 ### Route and skill-listing authorization
 
 `authz.authorize_model_use` shares the `model:use` decision between model details
