@@ -85,7 +85,7 @@ def test_extract_article_uses_first_document_base(base, expected):
     assert f"[Next]({expected})" in article.to_markdown()
 
 
-def test_python_extraction_fallback_preserves_article_text(monkeypatch):
+def test_python_extraction_fallback_preserves_article_links(monkeypatch):
     import subprocess
 
     from deerflow.utils import readability
@@ -99,9 +99,79 @@ def test_python_extraction_fallback_preserves_article_text(monkeypatch):
 
     monkeypatch.setattr(readability, "simple_json_from_html_string", extract)
     article = ReadabilityExtractor().extract_article(_article('<a href="../next">Next</a>'), url=PAGE_URL)
-    # The existing Python fallback strips link markup; preserve its text contract.
-    assert "Next" in article.to_markdown()
+    # When Readability.js is unavailable, the fallback must still keep the
+    # destinations that _resolve_html_urls resolved into the markup.
+    assert "[Next](https://example.com/next)" in article.to_markdown()
     assert "This article explains the documentation" in article.to_markdown()
+
+
+def test_unavailable_readabilityjs_fallback_preserves_resolved_destinations(monkeypatch):
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_available", lambda: False)
+    article = ReadabilityExtractor().extract_article(
+        _article('<a href="../next">Next</a> <img src="images/chart.png" alt="Chart">'),
+        url=PAGE_URL,
+    )
+    markdown = article.to_markdown()
+    assert "[Next](https://example.com/next)" in markdown
+    assert "![Chart](https://example.com/docs/images/chart.png)" in markdown
+    assert "# Guide" in markdown
+
+
+def test_unavailable_readabilityjs_fallback_keeps_multi_article_pages(monkeypatch):
+    """A teaser article must not truncate the sections that follow it."""
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_available", lambda: False)
+    html = (
+        f'<html><head><title>News</title></head><body><article><h2>Teaser</h2><p>Short summary of another story.</p></article><section><h1>Real Story</h1>{"<p>Real story prose. </p>" * 30}<a href="../next">Next</a></section></body></html>'
+    )
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+    assert "Teaser" in markdown
+    assert "Real Story" in markdown
+    assert "[Next](https://example.com/next)" in markdown
+    # The entry <h1> headline wins over the generic site-name <title>.
+    assert "# Real Story" in markdown
+
+
+def test_unavailable_readabilityjs_fallback_title_sources(monkeypatch):
+    """og:title and entry <h1> headlines outrank a generic or missing <title>."""
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_available", lambda: False)
+    og_page = '<html><head><title>Example Site</title><meta property="og:title" content="The Real Headline"></head><body><p>Body prose.</p></body></html>'
+    assert ReadabilityExtractor().extract_article(og_page, url=PAGE_URL).title == "The Real Headline"
+
+    generic_title_page = "<html><head><title>Example Site</title></head><body><h1>Entry Headline</h1><p>Body prose.</p></body></html>"
+    assert ReadabilityExtractor().extract_article(generic_title_page, url=PAGE_URL).title == "Entry Headline"
+
+    missing_title_page = "<html><body><h1>Entry Headline</h1><p>Body prose.</p></body></html>"
+    assert ReadabilityExtractor().extract_article(missing_title_page, url=PAGE_URL).title == "Entry Headline"
+
+
+def test_unavailable_readabilityjs_fallback_selects_dominant_single_article(monkeypatch):
+    """A single article carrying nearly all text narrows to drop residual noise."""
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_available", lambda: False)
+    prose = "<p>This article explains the documentation in detail.</p>" * 20
+    html = f"<html><head><title>Doc</title></head><body><article><h1>Main Article</h1>{prose}</article><p>Cookie notice.</p></body></html>"
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+    assert "Main Article" in markdown
+    assert "Cookie notice" not in markdown
+
+
+def test_unavailable_readabilityjs_fallback_skips_site_header_h1(monkeypatch):
+    """A site/logo <h1> in <header> must not become the article headline."""
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_available", lambda: False)
+    html = f"<html><head><title>Real Story</title></head><body><header><h1>Site Name</h1></header><article><h2>Chapter One</h2>{'<p>Story prose. </p>' * 20}</article></body></html>"
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+    assert "# Real Story" in markdown
+    assert "# Site Name" not in markdown
+    assert "Story prose." in markdown
 
 
 @pytest.mark.parametrize("base", ["http://[broken", "data:text/plain,invalid", "javascript:void(0)", "about:blank", "mailto:help@example.com", "blob:https://example.com/id"])
