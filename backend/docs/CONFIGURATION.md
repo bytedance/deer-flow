@@ -1261,6 +1261,35 @@ models:
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
 
+## Backend dotenv selection
+
+Set `DEER_FLOW_ENV_FILE` in the backend process environment **before startup**
+to load one explicit UTF-8 dotenv file instead of default dotenv discovery.
+Use an absolute path for launches from unrelated directories. Relative paths
+are resolved against the backend process working directory, not the YAML file,
+project root or this documentation's directory. No automatic `ENV` profile
+naming or config-relative dotenv lookup is added.
+
+Existing process variables, including empty values, take precedence. An unset
+selector keeps the existing default lookup; a set but empty selector, missing
+file, directory or unreadable file raises an actionable startup error without
+printing file contents. An empty **file** is valid and loads no defaults.
+Restart the backend after changing the selector or file contents.
+
+`DEER_FLOW_CONFIG_PATH` continues to select YAML independently. For example,
+from `backend/`:
+
+```bash
+DEER_FLOW_ENV_FILE=/srv/deer-flow/stage.env DEER_FLOW_CONFIG_PATH=/srv/deer-flow/stage.yaml make gateway
+```
+
+This option covers backend Python startup (including auth and `debug.py`). It
+does not change shell launcher, Docker Compose or frontend dotenv handling;
+values already injected by those layers remain process variables and win.
+For containers, explicitly pass the selector and mount the selected file at a
+container-visible path. Database, runtime-home, storage and tenant isolation
+must be configured separately; selecting a dotenv file does not provide them.
+
 ## Configuration Location
 
 The configuration file should be placed in the **project root directory** (`deer-flow/config.yaml`). Set `DEER_FLOW_PROJECT_ROOT` when the process may start from another working directory, or set `DEER_FLOW_CONFIG_PATH` to point at a specific file.

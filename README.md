@@ -324,6 +324,22 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
 
    </details>
 
+For an explicit backend dotenv file, export `DEER_FLOW_ENV_FILE` before startup,
+alongside `DEER_FLOW_CONFIG_PATH` if needed. For example, from `backend/`:
+
+```bash
+DEER_FLOW_ENV_FILE=/srv/deer-flow/stage.env DEER_FLOW_CONFIG_PATH=/srv/deer-flow/stage.yaml make gateway
+```
+
+Relative dotenv paths use the backend process working directory; absolute paths
+work regardless of that directory. Existing process variables win. An unset
+selector preserves default dotenv discovery; a specified empty, missing,
+non-file or unreadable path fails startup. Restart after changing the file.
+This selects backend dotenv input only: shell launchers, Docker Compose and the
+frontend retain their own environment loading. Values they already export win.
+It does not select `ENV` profiles or isolate databases, storage or tenants.
+See [backend dotenv selection](backend/docs/CONFIGURATION.md#backend-dotenv-selection).
+
 ### Running the Application
 
 #### Deployment Sizing

@@ -64,7 +64,10 @@ def get_auth_config() -> AuthConfig:
     if _auth_config is None:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        from deerflow.env import load_selected_env_file
+
+        if not load_selected_env_file():
+            load_dotenv()
         jwt_secret = os.environ.get("AUTH_JWT_SECRET")
         if not jwt_secret:
             jwt_secret = _load_or_create_secret()

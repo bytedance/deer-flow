@@ -26,7 +26,10 @@ raise, and API create/update validation remains strict.
 
 **Main Configuration** (`config.yaml`):
 
-Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** directory.
+Setup: Copy root `config.example.yaml` to `config.yaml`. Startup callers use
+`deerflow.env.load_selected_env_file()` for optional `DEER_FLOW_ENV_FILE` (cwd-relative,
+strict readable file, process env wins); otherwise retain their original `load_dotenv()`.
+Keep this helper free of config imports so auth/debug cannot preload defaults.
 
 **Config Versioning**: `config.example.yaml` has a `config_version` field. On startup, `AppConfig.from_file()` compares user version vs example version and emits a warning if outdated. Missing `config_version` = version 0. Run `make config-upgrade` to auto-merge missing fields. When changing the config schema, bump `config_version` in `config.example.yaml`.
 
