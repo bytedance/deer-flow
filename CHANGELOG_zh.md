@@ -482,6 +482,14 @@
   整数字段（`retry_max_attempts`、`max_concurrent_calls` 与两个退避延迟）中的
   布尔值也会把重试次数和并发上限缩小为 1。现在全部七个整数字段都会在配置
   加载阶段按字段名报错，同时保持有效整数和数字字符串的既有行为。([#6171])
+- **智能体：** 子代理与 ACP 调用背板现在会拒绝 YAML 布尔值，而不是把 `true`
+  静默转换为 `1`。此前若配置 `subagents.timeout_seconds: true`，每个子代理
+  运行都会在一秒后就被执行器的 `future.result(timeout=...)` 边界收割；
+  `max_turns: true` 则把 LangGraph 递归预算坍缩成单个超级步；按代理覆盖项、
+  自定义代理、单次运行委派上限，以及镜像 `subagents.timeout_seconds` 的
+  ACP 代理超时都存在同一缺口。现在全部八个整数字段都会在配置加载阶段按
+  字段名报错，同时保持 `None` 继承默认值、有效整数和数字字符串的既有
+  行为。([#6242])
 - **上传：** 文档转换时现在会记录原文件与 Markdown 的归属关系。
   `list_uploaded_files` 只隐藏归属已验证的转换文件，文档大纲也只读取
   记录中指定的 Markdown；用户自行上传的同名文件会正常显示，不会被
@@ -6420,3 +6428,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6229]: https://github.com/bytedance/deer-flow/pull/6229
 [#6230]: https://github.com/bytedance/deer-flow/pull/6230
 [#6238]: https://github.com/bytedance/deer-flow/pull/6238
+[#6242]: https://github.com/bytedance/deer-flow/pull/6242

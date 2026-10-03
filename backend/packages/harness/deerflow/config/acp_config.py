@@ -3,9 +3,16 @@
 import logging
 from collections.abc import Mapping
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 logger = logging.getLogger(__name__)
+
+
+def _reject_boolean_int(value: object, info: ValidationInfo) -> object:
+    """Reject YAML `true`/`false` before Pydantic coerces them to `1`/`0`."""
+    if isinstance(value, bool):
+        raise ValueError(f"{info.field_name} must be an integer, not a boolean")
+    return value
 
 
 class ACPAgentConfig(BaseModel):
@@ -35,6 +42,11 @@ class ACPAgentConfig(BaseModel):
             "therefore the whole agent turn, indefinitely."
         ),
     )
+
+    @field_validator("timeout_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_timeout(cls, value: object, info: ValidationInfo) -> object:
+        return _reject_boolean_int(value, info)
 
 
 _acp_agents: dict[str, ACPAgentConfig] = {}
