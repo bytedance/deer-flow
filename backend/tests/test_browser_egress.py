@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from deerflow.community import url_safety
+from deerflow.community.browser_automation import egress
 from deerflow.community.browser_automation import session as session_mod
 from deerflow.community.browser_automation import tools as browser_tools
 from deerflow.community.browser_automation.egress import BrowserEgressProxy
@@ -176,6 +177,86 @@ async def test_proxy_rejects_clients_that_require_authentication():
     finally:
         await proxy.close()
     assert method == 0xFF
+    resolve.assert_not_called()
+
+
+def _blocking_resolver():
+    """A resolver that hangs until released, like a wedged getaddrinfo."""
+    release = threading.Event()
+
+    def resolve(_host: str) -> list[str]:
+        release.wait(timeout=10)
+        return ["127.0.0.1"]
+
+    return resolve, release
+
+
+@pytest.mark.asyncio
+async def test_proxy_reports_a_resolver_fault_as_general_failure(caplog):
+    def resolve(_host: str) -> list[str]:
+        raise RuntimeError("config store unavailable")
+
+    proxy = BrowserEgressProxy(resolve)
+    try:
+        _method, reply, _reader, writer = await _socks_connect(await proxy.start(), 0x03, _domain("fault.example"), 80)
+        writer.close()
+    finally:
+        await proxy.close()
+    # 0x01 (general failure), distinct from the 0x02 a policy refusal returns.
+    assert reply == 0x01
+    assert "browser egress resolver failed for fault.example:80" in caplog.text
+    assert "config store unavailable" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_proxy_bounds_a_stuck_resolution(monkeypatch):
+    monkeypatch.setattr(egress, "_RESOLVE_TIMEOUT_S", 0.2)
+    resolve, release = _blocking_resolver()
+    proxy = BrowserEgressProxy(resolve)
+    try:
+        _method, reply, _reader, writer = await asyncio.wait_for(_socks_connect(await proxy.start(), 0x03, _domain("wedged.example"), 80), timeout=2.0)
+        writer.close()
+    finally:
+        release.set()
+        await proxy.close()
+    assert reply == 0x04
+
+
+@pytest.mark.asyncio
+async def test_proxy_close_is_bounded_by_a_tunnel_it_could_not_sweep(monkeypatch):
+    monkeypatch.setattr(egress, "_CLOSE_TIMEOUT_S", 0.2)
+    proxy = BrowserEgressProxy(MagicMock())
+    proxy_port = int((await proxy.start()).rsplit(":", 1)[1])
+    reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+    try:
+        while not proxy._client_writers:
+            await asyncio.sleep(0.01)
+        # Simulate a connection whose handler registered after the sweep: its
+        # transport stays open in the 15 s handshake read, which would otherwise
+        # hold Server.wait_closed() and with it session close.
+        proxy._client_writers.clear()
+        await asyncio.wait_for(proxy.close(), timeout=1.0)
+    finally:
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_proxy_drops_a_connection_accepted_after_close():
+    resolve = MagicMock(side_effect=ValueError("refused"))
+    proxy = BrowserEgressProxy(resolve)
+    await proxy.start()
+    await proxy.close()
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"\x05\x01\x00\x05\x01\x00\x03" + _domain("late.example") + (80).to_bytes(2, "big"))
+    reader.feed_eof()
+    writer = MagicMock()
+    writer.drain = AsyncMock()
+    writer.wait_closed = AsyncMock()
+
+    # A handler scheduled for a connection accepted just before close() runs now.
+    await asyncio.wait_for(proxy._handle(reader, writer), timeout=1.0)
+
+    writer.close.assert_called_once()
     resolve.assert_not_called()
 
 

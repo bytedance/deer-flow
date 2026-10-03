@@ -25,7 +25,8 @@ from collections.abc import Callable
 logger = logging.getLogger(__name__)
 
 # Resolves a destination host (DNS name or IP literal) to the addresses the
-# browser may connect to. Raises ``ValueError`` when the host must be refused.
+# browser may connect to. Raises ``ValueError`` when the host must be refused;
+# any other exception is logged as a resolver fault and the connection fails.
 EgressResolver = Callable[[str], list[str]]
 
 _SOCKS_VERSION = 5
@@ -36,13 +37,16 @@ _ADDRESS_IPV4 = 0x01
 _ADDRESS_DOMAIN = 0x03
 _ADDRESS_IPV6 = 0x04
 _REPLY_SUCCEEDED = 0x00
+_REPLY_GENERAL_FAILURE = 0x01
 _REPLY_NOT_ALLOWED = 0x02
 _REPLY_HOST_UNREACHABLE = 0x04
 _REPLY_COMMAND_NOT_SUPPORTED = 0x07
 _REPLY_ADDRESS_TYPE_NOT_SUPPORTED = 0x08
 
 _HANDSHAKE_TIMEOUT_S = 15
+_RESOLVE_TIMEOUT_S = 15
 _CONNECT_TIMEOUT_S = 15
+_CLOSE_TIMEOUT_S = 2
 
 
 class _RefusedRequest(Exception):
@@ -75,10 +79,16 @@ class BrowserEgressProxy:
         # tunnels the browser left behind instead of waiting on them.
         for writer in list(self._client_writers):
             writer.close()
+        # A handler still resolving, or accepted just before close, can outlive
+        # the sweep; it must not hold up session close or eviction.
         with contextlib.suppress(Exception):
-            await server.wait_closed()
+            await asyncio.wait_for(server.wait_closed(), timeout=_CLOSE_TIMEOUT_S)
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if self._server is None:
+            # Accepted just before close(); never open a tunnel after it.
+            writer.close()
+            return
         self._client_writers.add(writer)
         try:
             try:
@@ -87,10 +97,20 @@ class BrowserEgressProxy:
                 await _reply(writer, exc.reply)
                 return
             try:
-                addresses = await asyncio.to_thread(self._resolve, host)
+                addresses = await asyncio.wait_for(asyncio.to_thread(self._resolve, host), timeout=_RESOLVE_TIMEOUT_S)
             except ValueError as exc:
                 logger.warning("browser egress refused for %s:%d: %s", host, port, exc)
                 await _reply(writer, _REPLY_NOT_ALLOWED)
+                return
+            except TimeoutError:
+                logger.warning("browser egress resolution timed out for %s:%d", host, port)
+                await _reply(writer, _REPLY_HOST_UNREACHABLE)
+                return
+            except Exception:
+                # A resolver fault is not a policy refusal; keep the two
+                # distinguishable in the log and in the browser's error.
+                logger.exception("browser egress resolver failed for %s:%d", host, port)
+                await _reply(writer, _REPLY_GENERAL_FAILURE)
                 return
             upstream = await _open_first(addresses, port)
             if upstream is None:

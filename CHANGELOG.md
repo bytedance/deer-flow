@@ -465,11 +465,12 @@ This release closes that milestone with **301 merged pull requests**.
   navigate screen and the per-request guard resolve a hostname to vet it, but
   Chromium resolved it again to connect, so a rebinding DNS server could answer
   the checks with a public address and the connection with a private one. Each
-  launched browser now connects only through a per-session loopback SOCKS5
-  proxy: Chromium hands it the hostname, and the proxy resolves it once under
-  the same `allow_private_addresses` policy and connects to exactly the vetted
-  addresses. Loopback traffic goes through the proxy too. CDP-attached Chrome is
-  unchanged, and delegated fetch services (crawl4ai, Browserless, fastcrw)
+  launched browser now sends every TCP connection through a per-session
+  loopback SOCKS5 proxy: Chromium hands it the hostname, and the proxy resolves
+  it once under the same `allow_private_addresses` policy and connects to
+  exactly the vetted addresses. Loopback traffic goes through the proxy too.
+  WebRTC UDP does not traverse the proxy and is not covered. CDP-attached Chrome
+  is unchanged, and delegated fetch services (crawl4ai, Browserless, fastcrw)
   still resolve on their own side, which the Gateway cannot pin. ([#6201])
 - **channels:** The Discord typing indicator is now actually sent while the
   agent works on a reply. `_start_typing()` called `channel.trigger_typing()`, which

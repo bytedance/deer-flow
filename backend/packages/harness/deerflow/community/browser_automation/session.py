@@ -296,7 +296,7 @@ class BrowserSession:
         self._request_guard_bound = False
         # The request guard resolves a URL's host to screen it, but Chromium
         # resolves it again to connect. A launched browser therefore sends every
-        # connection through a loopback SOCKS5 proxy that resolves once through
+        # TCP connection through a loopback SOCKS5 proxy that resolves once through
         # ``egress_resolver`` and connects only to the addresses it vetted, so a
         # rebinding DNS answer cannot reach a private or metadata host.
         self._egress_resolver = egress_resolver

@@ -1930,7 +1930,7 @@ order within a tool entry, with either indented or indentless YAML lists.
 
 Reading a page is not the same as *using* one. Alongside the read-only `web_fetch` and `web_capture` tools, DeerFlow ships an optional agentic browser tool group that keeps a live, per-conversation browser session so the agent can actually operate a page — navigate, read the interactive elements, click, type, submit forms, and follow multi-step flows on JavaScript-heavy sites.
 
-Each action returns a fresh snapshot of the page's interactive elements, each addressed by a stable `[ref]` number, so the agent acts on what it just observed instead of guessing selectors. Outbound URLs are SSRF-screened by default, and the browser connects only through a local proxy that pins each connection to the screened addresses, so a DNS answer that changes after the check cannot redirect it to a private host. It is powered by Playwright and shipped as an optional extra so the core install stays lean:
+Each action returns a fresh snapshot of the page's interactive elements, each addressed by a stable `[ref]` number, so the agent acts on what it just observed instead of guessing selectors. Outbound URLs are SSRF-screened by default, and the browser's TCP connections go through a local proxy that pins each one to the screened addresses, so a DNS answer that changes after the check cannot redirect them to a private host (WebRTC UDP is not covered). It is powered by Playwright and shipped as an optional extra so the core install stays lean:
 
 ```bash
 cd backend
