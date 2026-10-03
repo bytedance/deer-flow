@@ -10,6 +10,9 @@ guards already shipped for ``stream_bridge_config`` (heartbeat interval) and
 
 from __future__ import annotations
 
+from deerflow.config.app_config import AppConfig, LlmCallConfig
+from deerflow.config.sandbox_config import SandboxConfig
+
 import pytest
 from pydantic import ValidationError
 
@@ -158,3 +161,41 @@ class TestTrimTokensToSummarizeGuard:
     def test_rejects_non_positive_and_boolean(self, bad: int | bool) -> None:
         with pytest.raises(ValidationError):
             SummarizationConfig(**{"trim_tokens_to_summarize": bad})
+
+
+class TestAppConfigBoolRejection:
+    """Same failure mode as #6017, on the settings it was not applied to."""
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "max_concurrent_calls",
+            "retry_max_attempts",
+            "retry_base_delay_ms",
+            "retry_cap_delay_ms",
+            "burst_retry_base_delay_ms",
+        ],
+    )
+    def test_llm_call_integers_reject_booleans(self, field: str) -> None:
+        with pytest.raises(ValidationError):
+            LlmCallConfig(**{field: True})
+
+    def test_llm_call_integers_still_accept_numbers(self) -> None:
+        config = LlmCallConfig(max_concurrent_calls=8, retry_max_attempts=3)
+
+        assert config.max_concurrent_calls == 8
+        assert config.retry_max_attempts == 3
+
+    @pytest.mark.parametrize("field", ["recursion_limit", "max_recursion_limit"])
+    def test_recursion_limits_reject_booleans(self, field: str) -> None:
+        # These two carry the worst effect of the coercion: recursion_limit: true
+        # became 1, so every Gateway run without an explicit limit died at the
+        # first super-step, and max_recursion_limit: true clamped the ceiling.
+        with pytest.raises(ValidationError):
+            AppConfig(sandbox=SandboxConfig(use="local"), **{field: True})
+
+    @pytest.mark.parametrize("field", ["recursion_limit", "max_recursion_limit"])
+    def test_recursion_limits_still_accept_numbers(self, field: str) -> None:
+        config = AppConfig(sandbox=SandboxConfig(use="local"), **{field: 12})
+
+        assert getattr(config, field) == 12
