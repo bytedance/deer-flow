@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -927,9 +926,7 @@ async def test_runtime_config_commit_drains_persistence_and_cache_across_cancell
     monkeypatch.setattr(channel_connections, "_get_channels_config", get_channels_config)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(channels_config=live_channels_config)))
 
-    task = asyncio.create_task(
-        channel_connections._commit_runtime_channel_config(request, "slack", runtime_config)
-    )
+    task = asyncio.create_task(channel_connections._commit_runtime_channel_config(request, "slack", runtime_config))
     try:
         assert await asyncio.to_thread(started.wait, 5)
         task.cancel()
