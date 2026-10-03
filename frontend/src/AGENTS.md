@@ -217,3 +217,16 @@ reset on conversation changes. Gateway supplies defaults for clients without a
 selector; frontend visibility must not become a runtime enforcement boundary.
 
 MCP hooks and the editor default to personal scope. Mutation-option builders require an explicit scope. MCP control accessible names include the localized ownership section, so same-named shared and personal connections remain distinct without region context. Query keys include scope and authenticated user ID; remount each editor when that ID changes. Platform provided uses the deployment editor only for administrators outside static mode, restoring add, edit, toggle and delete through the existing admin-only MCP API. Ordinary users see shared entries read-only. My plugins contains personal configuration templates, Lark account authorization and the personal MCP editor; a deployment installation must not mark a personal template configured.
+
+Plugin mention providers extend the existing composer picker via
+`core/extensions/use-mentions.ts`. Keep provider queries bounded and fenced by
+viewer, thread, query, and installed snapshot.
+Provider and page-surface IDs must be strings before slug validation; JavaScript
+coercion is not validation. A settled snapshot with no enabled, viewer-visible
+mention providers returns an empty result immediately without a search timer.
+Settled results may remain visible during query/retry refreshes only within the
+same viewer, thread, locale and installed snapshot; stale responses stay fenced.
+Inline plugin references serialize into human-message
+`additional_kwargs.extension_mentions`; these IDs and labels
+are untrusted input, never a routing or permission grant. Built-in mentions must
+remain usable when a provider fails or times out.

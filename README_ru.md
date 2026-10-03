@@ -323,7 +323,7 @@ channels:
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
-    allowed_users: []
+    allowed_users: []               # числовые ID пользователей, не @username; пусто = разрешить всем
 
   wechat:
     enabled: false

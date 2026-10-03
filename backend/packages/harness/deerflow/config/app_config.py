@@ -61,9 +61,11 @@ from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 from deerflow.config.typesafe_config import TypeSafeConfig, load_typesafe_config_from_dict
 from deerflow.config.verification_config import VerificationConfig
+from deerflow.env import load_selected_env_file
 from deerflow.extensions.loader import ExtensionSpec
 
-load_dotenv()
+if not load_selected_env_file():
+    load_dotenv()
 
 logger = logging.getLogger(__name__)
 

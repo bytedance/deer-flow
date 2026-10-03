@@ -312,6 +312,8 @@ export interface Translations {
     mentionSearch: string;
     mentionSkills: string;
     mentionFiles: string;
+    mentionExtensions: string;
+    mentionExtensionsLimit: string;
     mentionConversations: string;
     mentionUpload: string;
     mentionEmpty: string;
@@ -768,6 +770,7 @@ export interface Translations {
       launching: string;
       running: string;
       success: string;
+      unmet: string;
       failed: string;
       skipped: string;
       interrupted: string;

@@ -615,8 +615,61 @@ the existing contract.
 Serper `web_search` also accepts the optional model argument
 `time_range: "day" | "week" | "month" | "year"`. For example,
 `{"query": "Python releases", "time_range": "week"}` sends `tbs: "qdr:w"`
-to Serper. Omitting `time_range` or passing `null` keeps the existing unrestricted
+to Serper. Omitting `time_range` or passing `null` omits the recency constraint from the
 search request. This option does not change Serper `image_search`.
+
+#### Serper source filters
+
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.serper.tools:web_search_tool
+    max_results: 5
+    include_domains: [example.com, bücher.de]
+    exclude_domains: [ads.example.com]
+```
+
+Each optional list accepts at most 10 entries (before deduplication). Omitted or
+empty lists impose no restriction; explicit `null`, non-lists, or any invalid
+entry return a configuration error before HTTP. Validation failures are also
+logged without query or configured domain values. Entries must be domain names:
+no surrounding whitespace, scheme, path, port, wildcard, IP literal or query
+operator. Names are lowercased, one trailing dot is removed, and Python's IDNA
+codec converts Unicode names to ASCII. DNS labels must be 1–63 characters and
+the normalized domain at most 253 characters, with at least two labels.
+Duplicates are removed after normalization.
+
+Matching uses the exact hostname or a dot-delimited subdomain; `example.com`
+does not match `notexample.com` or `example.com.evil.com`. Exclusion wins over
+inclusion. With either list non-empty, malformed/non-HTTP(S) result URLs,
+credentials in URLs, and invalid hosts or ports are discarded. No DNS lookup
+or redirect resolution is performed. Unconfigured/empty-filter behavior stays
+unchanged, including the legacy query trimming and 500-character truncation.
+
+The adapter appends Google query operators, for example
+`(news) (site:example.com OR site:example.org) -site:ads.example.com`, in the
+existing Serper `q` field; it sends no provider-specific domain JSON fields.
+After the existing query cleanup, the complete filtered query must fit 500
+characters or the tool returns an error before HTTP. Operators are never
+truncated or dropped. Model-supplied operators can affect upstream retrieval,
+so the local hostname check always enforces the configured scope. The returned
+`query` remains the cleaned original query, without appended restrictions,
+including on provider errors.
+
+`time_range` still maps to `tbs`, and `max_results` caps the filtered results.
+`total_results` reports the actual remaining count (zero with `results: []`
+when none survive). One request is made: no refill or relaxed-filter retries.
+These settings do not affect `image_search` or the model-facing tool schema.
+Source selection is neither a factuality guarantee nor a global URL-access
+policy for fetch tools, browsers, or redirects.
+
+Provider validation: [Google documents `site:` and subdomain behavior](https://developers.google.com/search/docs/monitor-debug/search-operators/all-search-site)
+and [search exclusion syntax](https://support.google.com/websearch/answer/2466433).
+[Serper describes its Google Search API](https://serper.dev/), but live Serper
+operator handling has not been verified here. Upstream operators are best-effort;
+offline mocked tests verify request composition and local filtering, not provider
+retrieval behavior. No paid API calls are needed for the regression suite.
 
 **Built-in Tools**:
 - `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya)
@@ -1260,6 +1313,38 @@ models:
 - `DEER_FLOW_HOME` - Runtime state directory (defaults to `.deer-flow` under the project root)
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
+
+## Backend dotenv selection
+
+Set `DEER_FLOW_ENV_FILE` in the backend process environment **before startup**
+to load one explicit UTF-8 dotenv file instead of default dotenv discovery.
+Use an absolute path for launches from unrelated directories. Relative paths
+are resolved against the backend process working directory, not the YAML file,
+project root or this documentation's directory. No automatic `ENV` profile
+naming or config-relative dotenv lookup is added.
+
+Existing process variables, including empty values, take precedence. An unset
+selector keeps the existing default lookup; a set but empty selector, missing
+file, directory or unreadable file raises an actionable startup error without
+printing file contents. An empty **file** is valid and loads no defaults.
+Explicit selection also raises when `PYTHON_DOTENV_DISABLED` is `1`, `true`,
+`t`, `yes` or `y` (case-insensitive), even for an empty file. Unset either option
+to resolve the conflict. Without a selector, python-dotenv's normal disable
+behavior is unchanged. Restart after changing the selector or file contents.
+
+`DEER_FLOW_CONFIG_PATH` continues to select YAML independently. For example,
+from `backend/`:
+
+```bash
+DEER_FLOW_ENV_FILE=/srv/deer-flow/stage.env DEER_FLOW_CONFIG_PATH=/srv/deer-flow/stage.yaml make gateway
+```
+
+This option covers backend Python startup (including auth and `debug.py`). It
+does not change shell launcher, Docker Compose or frontend dotenv handling;
+values already injected by those layers remain process variables and win.
+For containers, explicitly pass the selector and mount the selected file at a
+container-visible path. Database, runtime-home, storage and tenant isolation
+must be configured separately; selecting a dotenv file does not provide them.
 
 ## Configuration Location
 

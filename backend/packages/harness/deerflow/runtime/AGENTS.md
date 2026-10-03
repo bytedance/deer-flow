@@ -55,7 +55,7 @@ from `on_llm_end` before inspecting the response or touching any run state.
 **Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
 answers for paginated history. See `docs/skill-usage-ui.md`.
 
-**Run delivery receipts:** Journal artifact evidence and terminal status must finalize before a satisfied goal is cleared. Goal cleanup uses a durable checkpoint-write reservation; delivery failure retains the goal without another continuation. Details: `backend/docs/runtime-guidance-details.md`.
+**Run delivery receipts:** Journal artifact evidence and terminal status must finalize before an ordinary satisfied goal is cleared. That cleanup uses a durable checkpoint-write reservation; delivery failure retains the ordinary goal without another continuation. The scheduled-only exception is described below. Details: `backend/docs/runtime-guidance-details.md`.
 
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
@@ -154,6 +154,61 @@ rejects caller-supplied `__conversation_reader` values in both context carriers,
 installs only the host value, and releases it during terminal cleanup. The
 callback is not checkpoint state and must never be recovered from an earlier
 run or serialized into run kwargs.
+
+## Scheduled run capabilities and goal outcomes
+
+`RunContext.scheduler_capability` is another per-run host capability. The worker
+installs it under `__scheduler_capability`, rejects caller copies in both context
+carriers, and releases it during terminal cleanup. `scheduled_task_runtime` is a
+separate private occurrence snapshot: its owner, task ID, occurrence ID, and goal
+objective must match the admitted record before the worker may install a goal.
+Run metadata and hidden conversation-reference messages are display data and
+never confer either capability.
+
+A scheduled goal is installed before the first turn, only in a fresh thread,
+using the existing goal writer and default continuation budgets. Terminal
+cleanup clears only that occurrence's goal instance, through the ordinary
+goal lock and expected-checkpoint guard while its own durable run slot is still
+active, before terminal status commits. A process-local scheduled cleanup barrier
+defers local cancel persistence and refuses premature replacement admissions;
+lease renewal continues through this barrier. This scheduled-only exception closes
+the handoff race where a peer could inherit the occurrence's goal. No ORM writer
+transaction spans a checkpointer write. Ordinary user goals retain terminal-first
+completion and delivery cleanup.
+Accepted cancellation during cleanup is applied again after the saver returns,
+including rollback, before terminal persistence; later requests arbitrate through
+the existing durable `cancel_action` compare-and-set.
+
+Scheduled goal `created_at` is the admitted run's timestamp, canonicalized to UTC
+with six microsecond digits. Recovery and ordinary-worker preflight match only an
+exact owner/thread/timestamp/normalized-objective terminal scheduled run, using
+`RunStore.list_by_thread_created_at` without bounded history pagination. Ambiguous
+or unavailable identity fails closed; source metadata must remain server-stamped
+at Gateway admission. `clear_recovered_scheduled_goal` uses the existing idle-thread
+checkpoint-write reservation; a busy thread defers to the next worker's preflight.
+Preflight source-resolution errors stop before graph execution with an explicit
+recovery error and preserve the goal; do not copy idle recovery's catch-and-defer
+behavior into an executing run. Cancellation continues to propagate unchanged.
+Newer user goals and ownership/lease loss always win. Failed cleanup remains
+recoverable through this durable instance tuple without new GoalState fields.
+
+`RunRecord.goal_verdict` / nullable `runs.goal_verdict` preserve the final
+evaluator outcome, including strict boolean `relied_on_assumption`. Persist it
+in the same terminal-status update, including durable cancellation arbitration,
+so recovery need not inspect mutable thread state. All non-interactive policies
+allow disclosed, low-risk reversible assumptions only with achievement evidence;
+their evaluator responses must explicitly provide the assumption boolean.
+
+Goal evaluator usage crosses a JSON-safe sink into
+`RunJournal.record_external_llm_usage_records` before response parsing or observer
+notification can fail. Critic tokens/cache reads and distinct calls belong to
+`middleware:goal_evaluator`; critic responses never enter visible history and
+graph journal callbacks are withheld to prevent double counting. External
+`count_call`/`usage_missing` flags default off for existing subagent consumers;
+missing critic usage adds `missing_usage_calls` to the model bucket, making the
+run's full cost unpriced instead of reporting a partial total as complete.
+Accounting includes critic usage, while the graph token-budget middleware does
+not gate standalone critic calls. A graph token limit is not a strict billing cap.
 
 ## JSONL mutation cancellation
 

@@ -336,7 +336,7 @@ channels:
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
-    allowed_users: []               # 空 = 全員許可
+    allowed_users: []               # 数値のユーザー ID（@ユーザー名は不可）、空 = 全員許可
 
     # オプション: チャネル/ユーザーごとのセッション設定
     session:
