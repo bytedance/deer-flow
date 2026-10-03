@@ -39,7 +39,7 @@ InfoQuest reader, web search, and image search use a 30-second HTTP connect/read
 inactivity timeout. The crawl `timeout` and `navigation_timeout` settings remain
 separate server-side options; they do not control the local HTTP timeout.
 
-DeerFlow has newly integrated the intelligent search and crawling toolset independently developed by BytePlus--[InfoQuest (supports free online experience)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
+DeerFlow has newly integrated the intelligent search and crawling toolset independently developed by BytePlus — [InfoQuest (supports free online experience)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
 
 <a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
   <img
@@ -53,6 +53,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [Official Website](#official-website)
+  - [Sister Projects](#sister-projects)
   - [Coding Plan from ByteDance Volcengine](#coding-plan-from-bytedance-volcengine)
   - [InfoQuest](#infoquest)
   - [Table of Contents](#table-of-contents)
@@ -64,34 +65,53 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
       - [Option 1: Docker (Recommended)](#option-1-docker-recommended)
       - [Upgrading an existing checkout](#upgrading-an-existing-checkout)
       - [Option 2: Local Development](#option-2-local-development)
+      - [Startup Modes](#startup-modes)
+      - [LangGraph Studio (Optional)](#langgraph-studio-optional)
+      - [Docker Production Deployment](#docker-production-deployment)
     - [Advanced](#advanced)
       - [Sandbox Mode](#sandbox-mode)
       - [MCP Server](#mcp-server)
       - [IM Channels](#im-channels)
+      - [Request Trace Correlation](#request-trace-correlation)
       - [LangSmith Tracing](#langsmith-tracing)
       - [Langfuse Tracing](#langfuse-tracing)
       - [Monocle Tracing](#monocle-tracing)
       - [Using Multiple Providers](#using-multiple-providers)
+      - [Existing-Run Stream Actions](#existing-run-stream-actions)
       - [Personal Access Tokens](#personal-access-tokens)
   - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
+      - [Exporting Custom Skills](#exporting-custom-skills)
       - [Claude Code Integration](#claude-code-integration)
+    - [Private Knowledge Retrieval (RAGFlow)](#private-knowledge-retrieval-ragflow)
+    - [Chat Archive](#chat-archive)
     - [Session Goals](#session-goals)
     - [Manual Context Compaction](#manual-context-compaction)
     - [Sub-Agents](#sub-agents)
     - [Sandbox \& File System](#sandbox--file-system)
+    - [Agentic Browser Control](#agentic-browser-control)
     - [Context Engineering](#context-engineering)
+    - [Reading a Referenced Conversation](#reading-a-referenced-conversation)
     - [Current Task Notes](#current-task-notes)
     - [Long-Term Memory](#long-term-memory)
   - [Recommended Models](#recommended-models)
   - [Embedded Python Client](#embedded-python-client)
   - [Projects](#projects)
+    - [Project instructions](#project-instructions)
+    - [Document shelf](#document-shelf)
+    - [Archive read semantics](#archive-read-semantics)
+    - [Trash](#trash)
   - [Scheduled Tasks](#scheduled-tasks)
+    - [Preview cron occurrences through the API](#preview-cron-occurrences-through-the-api)
+    - [Upgrade Notes](#upgrade-notes)
   - [Terminal Workbench (TUI)](#terminal-workbench-tui)
   - [Documentation](#documentation)
   - [⚠️ Security Notice](#️-security-notice)
     - [Improper Deployment May Introduce Security Risks](#improper-deployment-may-introduce-security-risks)
+    - [Gateway Admin Is Equivalent to Code Execution](#gateway-admin-is-equivalent-to-code-execution)
+    - [External Chat Message Roles](#external-chat-message-roles)
+    - [Deployment Defaults](#deployment-defaults)
     - [Security Recommendations](#security-recommendations)
   - [Contributing](#contributing)
   - [License](#license)
@@ -308,7 +328,7 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
        auto_approve_permissions: false
    ```
 
-   `mcode` must be on the Gateway process's `PATH`; installing it only on the Docker host does not make it available inside the Gateway container. DeerFlow invokes it through `invoke_acp_agent` in a per-thread ACP workspace and forwards enabled MCP servers. Keep `auto_approve_permissions: false` for untrusted tasks; enable it only when MCode must edit files or run commands and you trust the task.
+   `mcode` must be on the Gateway process's `PATH`; installing it only on the Docker host does not make it available inside the Gateway container. DeerFlow invokes it through `invoke_acp_agent` in a per-thread ACP workspace and forwards enabled MCP servers. Keep `auto_approve_permissions: false` for untrusted tasks; enable it only when mcode must edit files or run commands and you trust the task.
    - On macOS, export Claude Code auth explicitly if needed:
 
    ```bash
@@ -587,18 +607,18 @@ DeerFlow's built-in custom events are available through both LangGraph streaming
 
 #### Docker Production Deployment
 
-`deploy.sh` supports building and starting separately:
+`./scripts/deploy.sh` supports building and starting separately:
 
 ```bash
 # One-step (build + start)
-deploy.sh
+./scripts/deploy.sh
 
 # Two-step (build once, start later)
-deploy.sh build              # build all images
-deploy.sh start              # start pre-built images
+./scripts/deploy.sh build       # build all images
+./scripts/deploy.sh start       # start pre-built images
 
 # Stop
-deploy.sh down
+./scripts/deploy.sh down
 ```
 
 ### Advanced
