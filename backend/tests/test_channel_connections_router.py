@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -876,6 +878,81 @@ def test_configure_provider_runtime_credentials_preserves_masked_secrets(tmp_pat
     }
 
     anyio.run(repo.close)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runtime_config", "expected_persisted"),
+    [
+        ({"enabled": True, "bot_token": "new-token"}, {"enabled": True, "bot_token": "new-token"}),
+        (None, {"enabled": False, "_runtime_disabled": True}),
+    ],
+)
+async def test_runtime_config_commit_drains_persistence_and_cache_across_cancellation(
+    monkeypatch,
+    runtime_config,
+    expected_persisted,
+):
+    started = threading.Event()
+    release = threading.Event()
+    persisted: dict[str, dict] = {}
+    live_channels_config = {
+        "telegram": {"enabled": True, "bot_token": "sibling"},
+        "slack": {"enabled": True, "bot_token": "old-token"},
+    }
+
+    def set_provider_config(provider, value):
+        started.set()
+        assert release.wait(timeout=5)
+        persisted[provider] = dict(value)
+
+    def set_provider_disconnected(provider):
+        started.set()
+        assert release.wait(timeout=5)
+        persisted[provider] = {"enabled": False, "_runtime_disabled": True}
+
+    store = SimpleNamespace(
+        set_provider_config=set_provider_config,
+        set_provider_disconnected=set_provider_disconnected,
+    )
+
+    async def get_store(_request):
+        return store
+
+    async def get_channels_config(_request):
+        return live_channels_config
+
+    monkeypatch.setattr(channel_connections, "_get_runtime_config_store", get_store)
+    monkeypatch.setattr(channel_connections, "_get_channels_config", get_channels_config)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(channels_config=live_channels_config)))
+
+    task = asyncio.create_task(channel_connections._commit_runtime_channel_config(request, "slack", runtime_config))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert persisted["slack"] == expected_persisted
+    assert request.app.state.channels_config["telegram"] == {
+        "enabled": True,
+        "bot_token": "sibling",
+    }
+    if runtime_config is None:
+        assert "slack" not in request.app.state.channels_config
+    else:
+        assert request.app.state.channels_config["slack"] == runtime_config
 
 
 def test_disconnect_provider_runtime_config_clears_connected_state(tmp_path):

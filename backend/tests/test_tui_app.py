@@ -8,6 +8,7 @@ import asyncio
 import threading
 
 import pytest
+from textual import events
 from textual.containers import VerticalScroll
 
 from deerflow.client import StreamEvent
@@ -80,6 +81,50 @@ async def test_app_runs_a_turn_and_renders_streamed_assistant():
     assistant = [r for r in app.state.rows if r.kind == "assistant"][-1]
     assert assistant.text == "Hello world"
     assert app.state.usage == {"total_tokens": 3}
+
+
+@pytest.mark.asyncio
+async def test_multiline_paste_reaches_agent_without_dropping_lines():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    pasted = 'Traceback:\n  File "worker.py", line 7\nRuntimeError: boom'
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste(pasted))
+        await pilot.pause()
+        await pilot.press("enter")
+        await _wait_until(lambda: bool(session.client.stream_calls), pilot)
+
+    assert session.client.stream_calls[0][0] == pasted
+
+
+@pytest.mark.asyncio
+async def test_multiline_arrows_move_lines_before_input_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._history.add("previous prompt")
+        app.post_message(events.Paste("first line\nsecond line"))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+
+        assert composer.cursor_location == (1, 11)
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "first line\nsecond line"
+        assert composer.cursor_location[0] == 0
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == "first line\nsecond line"
+        assert composer.cursor_location[0] == 1
+
+        composer.cursor_position = 0
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "previous prompt"
 
 
 @pytest.mark.asyncio
@@ -525,3 +570,111 @@ async def test_goal_set_failure_shows_error_tone():
         await pilot.pause()
     errors = [r for r in _system_rows(app) if r.tone == "error"]
     assert any("Could not set goal." in r.text for r in errors)
+
+
+@pytest.mark.asyncio
+async def test_multiline_paste_keeps_leading_indentation_and_trailing_newline():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    pasted = "    def f():\n        return 1\n"
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste(pasted))
+        await pilot.pause()
+        await pilot.press("enter")
+        await _wait_until(lambda: bool(session.client.stream_calls), pilot)
+
+    assert session.client.stream_calls[0][0] == pasted
+    assert app._history.entries() == [pasted]
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_input_is_not_submitted():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste("  \n\t\n"))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert session.client.stream_calls == []
+    assert app._history.entries() == []
+
+
+@pytest.mark.asyncio
+async def test_down_on_last_line_of_multiline_input_falls_back_to_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._history.add("first line\nsecond line")
+        await pilot.press("up")
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        assert composer.value == "first line\nsecond line"
+        assert composer.cursor_location[0] == 1
+
+        # Already on the last document line: Down leaves the recalled entry for the draft.
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == ""
+
+
+@pytest.mark.asyncio
+async def test_slash_command_with_surrounding_whitespace_still_runs_as_command():
+    session = _FakeSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste("  /help\n"))
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert session.client.stream_calls == []
+    assert app._history.entries() == ["/help"]
+
+
+_LONG_PROMPT = " ".join(f"word{i}" for i in range(60))  # one logical line that soft-wraps
+
+
+@pytest.mark.asyncio
+async def test_up_inside_a_soft_wrapped_line_moves_the_cursor_not_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test(size=(60, 24)) as pilot:
+        await pilot.pause()
+        app._history.add("previous prompt")
+        composer = app.query_one("#composer")
+        composer.value = _LONG_PROMPT
+        composer.cursor_position = len(_LONG_PROMPT)
+        await pilot.pause()
+        assert len(composer.wrapped_document.get_offsets(0)) >= 1  # really wrapped
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == _LONG_PROMPT
+        assert composer.cursor_position < len(_LONG_PROMPT)
+
+
+@pytest.mark.asyncio
+async def test_down_inside_a_soft_wrapped_line_moves_the_cursor_not_history():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test(size=(60, 24)) as pilot:
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        composer.value = _LONG_PROMPT
+        composer.cursor_position = 0
+        await pilot.pause()
+        assert len(composer.wrapped_document.get_offsets(0)) >= 1
+
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == _LONG_PROMPT
+        assert composer.cursor_position > 0

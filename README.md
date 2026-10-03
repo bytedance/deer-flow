@@ -625,6 +625,12 @@ Remote directory listings report traversal failures (for example, unreadable
 directories) as incomplete results, even when no entries were returned. A
 missing start path is reported separately as “Directory not found.”
 
+The optional [Tenki cloud sandbox provider](backend/packages/harness/deerflow/community/tenki/README.md)
+uses Tenki SDK 1.4.0 or newer. Timed-out commands preserve partial output and
+report `Exit Code: 124`; unsuccessful health checks cannot reclaim a warm sandbox.
+Health probes tolerate login-shell output around the `ok` line, and failures log
+the sandbox ID and probe output before replacing the sandbox.
+
 #### MCP Server
 
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
@@ -1896,6 +1902,11 @@ also fails, for example because of a Windows sharing violation.
 Once the file is published, a temporary-file cleanup failure is logged without
 failing the upload; hidden staging files are left for the startup sweep.
 
+Uploads, new skill support files, and new local sandbox paths reject Windows
+reserved device names on every platform, including `COM¹`, `LPT²` and names with
+extensions such as `com³.txt`. Rename these files before creating or uploading
+them so the same file tree remains usable on Windows.
+
 Uploaded filenames matching `.upload-*.part` are rejected because that pattern is
 reserved for temporary staging files. Rename such a file before uploading it.
 The restriction includes Windows aliases with trailing dots or spaces and
@@ -1930,7 +1941,7 @@ order within a tool entry, with either indented or indentless YAML lists.
 
 Reading a page is not the same as *using* one. Alongside the read-only `web_fetch` and `web_capture` tools, DeerFlow ships an optional agentic browser tool group that keeps a live, per-conversation browser session so the agent can actually operate a page — navigate, read the interactive elements, click, type, submit forms, and follow multi-step flows on JavaScript-heavy sites.
 
-Each action returns a fresh snapshot of the page's interactive elements, each addressed by a stable `[ref]` number, so the agent acts on what it just observed instead of guessing selectors. Outbound URLs are SSRF-screened by default. It is powered by Playwright and shipped as an optional extra so the core install stays lean:
+Each action returns a fresh snapshot of the page's interactive elements, each addressed by a stable `[ref]` number, so the agent acts on what it just observed instead of guessing selectors. Outbound URLs are SSRF-screened by default, and the browser's TCP connections go through a local proxy that pins each one to the screened addresses, so a DNS answer that changes after the check cannot redirect them to a private host (WebRTC UDP is not covered). It is powered by Playwright and shipped as an optional extra so the core install stays lean:
 
 ```bash
 cd backend
@@ -2326,7 +2337,7 @@ deerflow --recursion-limit 250 --print "task" # override the headless agent-loop
 
 Headless `--print` and `--json` exit with status `1` when the run fails, including provider errors returned as fallback messages. `--print` still writes the fallback text to stdout; `--json` appends a terminal error record.
 
-A keyboard-driven chat surface with a streaming transcript (Markdown-rendered answers), compact tool-activity cards, a `/` slash-command palette, display-only `/clear`, `/goal` goal management, `/model` and `/threads` pickers, input history, PageUp/PageDown transcript navigation, and `Esc` / `Ctrl+C` interrupt. Transcript refreshes preserve your reading position after you scroll upward and resume following new output when you return to the bottom. `/clear` removes rows from the current terminal display without deleting the thread or its persisted conversation; `/new` and `/clear` ask you to wait during an active run instead of resetting in-flight display state. Sessions opened in the TUI also appear in the Web UI sidebar — it writes the shared thread store under the local default user, so terminal and web stay in sync **without running the Gateway**.
+A keyboard-driven chat surface with a streaming transcript (Markdown-rendered answers), compact tool-activity cards, a `/` slash-command palette, display-only `/clear`, `/goal` goal management, `/model` and `/threads` pickers, input history, PageUp/PageDown transcript navigation, and `Esc` / `Ctrl+C` interrupt. The composer preserves line breaks and indentation in pasted code, stack traces, and multi-paragraph prompts; `Enter` sends the complete document. Transcript refreshes preserve your reading position after you scroll upward and resume following new output when you return to the bottom. `/clear` removes rows from the current terminal display without deleting the thread or its persisted conversation; `/new` and `/clear` ask you to wait during an active run instead of resetting in-flight display state. Sessions opened in the TUI also appear in the Web UI sidebar — it writes the shared thread store under the local default user, so terminal and web stay in sync **without running the Gateway**.
 
 See [backend/docs/TUI.md](backend/docs/TUI.md) for the full guide.
 

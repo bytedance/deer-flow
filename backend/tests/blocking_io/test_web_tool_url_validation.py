@@ -6,12 +6,14 @@ traffic. The strict gate's ``socket.getaddrinfo`` rule fails each test if the
 tool resolves on the loop instead of in a worker thread.
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from deerflow.community.browser_automation import tools as browser_tools
+from deerflow.community.browser_automation.egress import BrowserEgressProxy
 from deerflow.community.browserless import tools as browserless_tools
 from deerflow.community.crawl4ai import tools as crawl4ai_tools
 
@@ -114,3 +116,24 @@ async def test_browser_request_guard_resolves_off_loop() -> None:
         await captured["handler"](route)
 
     assert route.aborted_with == "blockedbyclient"
+
+
+async def test_browser_egress_proxy_resolves_off_loop() -> None:
+    # Chromium hands every hostname to the session's egress proxy, which runs on
+    # the same shared Playwright loop as the request guard.
+    proxy = BrowserEgressProxy(browser_tools.resolve_browser_egress)
+    with patch.object(browser_tools, "_get_tool_config", return_value={}):
+        proxy_url = await proxy.start()
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", int(proxy_url.rsplit(":", 1)[1]))
+            writer.write(b"\x05\x01\x00")
+            await writer.drain()
+            assert await reader.readexactly(2) == b"\x05\x00"
+            writer.write(b"\x05\x01\x00\x03\x05127.1\x00\x50")
+            await writer.drain()
+            reply = await reader.readexactly(10)
+            writer.close()
+        finally:
+            await proxy.close()
+
+    assert reply[1] == 0x02  # refused: 127.1 resolves to loopback

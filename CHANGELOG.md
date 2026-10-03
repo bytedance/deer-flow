@@ -471,6 +471,18 @@ This release closes that milestone with **301 merged pull requests**.
   metadata address still report as global. Operators who intentionally fetch
   tailnet or CGNAT hosts with these tools must now set
   `allow_private_addresses: true`. ([#6202])
+- **browser:** The agentic browser can no longer be steered to a private or
+  cloud-metadata host by a DNS answer that changes after the SSRF check. The
+  navigate screen and the per-request guard resolve a hostname to vet it, but
+  Chromium resolved it again to connect, so a rebinding DNS server could answer
+  the checks with a public address and the connection with a private one. Each
+  launched browser now sends every TCP connection through a per-session
+  loopback SOCKS5 proxy: Chromium hands it the hostname, and the proxy resolves
+  it once under the same `allow_private_addresses` policy and connects to
+  exactly the vetted addresses. Loopback traffic goes through the proxy too.
+  WebRTC UDP does not traverse the proxy and is not covered. CDP-attached Chrome
+  is unchanged, and delegated fetch services (crawl4ai, Browserless, fastcrw)
+  still resolve on their own side, which the Gateway cannot pin. ([#6201])
 - **channels:** The Discord typing indicator is now actually sent while the
   agent works on a reply. `_start_typing()` called `channel.trigger_typing()`, which
   discord.py removed in 2.0 (the project requires `>=2.7.0`), and its loop
@@ -7596,5 +7608,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135
 [#6138]: https://github.com/bytedance/deer-flow/pull/6138
 [#6140]: https://github.com/bytedance/deer-flow/pull/6140
+[#6201]: https://github.com/bytedance/deer-flow/pull/6201
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
 

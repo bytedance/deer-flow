@@ -261,6 +261,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
             BrowserLiveViewerError,
             BrowserSessionCapacityError,
             get_browser_session_manager,
+            resolve_browser_egress,
             validate_browser_url,
         )
     except ImportError:
@@ -326,6 +327,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
             cdp_url=_cfg_str("cdp_url"),
             allow_unguarded_cdp=_cfg_bool("allow_unguarded_cdp", False),
             url_guard=validate_browser_url,
+            egress_resolver=resolve_browser_egress,
         )
         session = session_lease.__enter__()
     except BrowserSessionCapacityError:

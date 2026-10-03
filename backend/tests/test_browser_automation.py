@@ -567,7 +567,7 @@ async def test_ensure_page_serializes_concurrent_rebuilds():
     browser.is_connected.return_value = True
     browser.new_context = AsyncMock(return_value=context)
 
-    async def launch(*, headless):
+    async def launch(*, headless, proxy):
         launch_started.set()
         await release_launch.wait()
         return browser
@@ -590,7 +590,7 @@ async def test_ensure_page_serializes_concurrent_rebuilds():
         release_launch.set()
 
         assert await asyncio.wait_for(asyncio.gather(first, second), timeout=1.0) == [page, page]
-    chromium.launch.assert_awaited_once_with(headless=True)
+    chromium.launch.assert_awaited_once_with(headless=True, proxy=None)
     browser.new_context.assert_awaited_once()
     context.new_page.assert_awaited_once()
 

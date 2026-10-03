@@ -389,3 +389,31 @@ def test_browser_stream_resolves_seed_and_navigate_urls_off_the_loop():
     session.navigate.assert_awaited_once_with("https://seed.example/")
     session.dispatch_input.assert_not_awaited()
     assert resolved_on_loop == {"seed.example": False, "internal.example": False}
+
+
+def test_browser_stream_acquires_the_session_with_pinned_egress():
+    # The first caller's launch options stick to a thread's session, so a Live
+    # viewer that opens it first must not launch Chromium without the egress proxy.
+    store = MagicMock()
+    store.check_access = AsyncMock(return_value=True)
+    store.get = AsyncMock(return_value={"thread_id": "thread-1", "user_id": "browser-user"})
+    app = _browser_ws_app(store)
+    session = MagicMock()
+    for method in ("current_url", "start_screencast", "stop_screencast", "tabs"):
+        setattr(session, method, AsyncMock())
+    manager = MagicMock()
+    manager.acquire_session.return_value.__enter__.return_value = session
+
+    from deerflow.community.browser_automation import resolve_browser_egress
+
+    with (
+        patch.object(browser_router, "_authenticate_ws", AsyncMock(return_value=_user())),
+        patch.object(browser_router, "_browser_tools_enabled", return_value=True),
+        patch("deerflow.config.get_app_config", return_value=SimpleNamespace(get_tool_config=lambda _name: None)),
+        patch("deerflow.community.browser_automation.get_browser_session_manager", return_value=manager),
+        TestClient(app) as client,
+        client.websocket_connect("/api/threads/thread-1/browser/stream"),
+    ):
+        pass
+
+    assert manager.acquire_session.call_args.kwargs["egress_resolver"] is resolve_browser_egress
