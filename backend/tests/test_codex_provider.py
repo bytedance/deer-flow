@@ -213,6 +213,37 @@ def test_convert_messages_tool_message(call_id):
     assert items[0]["output"] == "result data"
 
 
+@pytest.mark.parametrize("call_id", ["tc1", "0", " tc1 "])
+def test_convert_messages_preserves_paired_call_ids(call_id):
+    model = _make_model()
+    ai_msg = AIMessage(content="", tool_calls=[{"name": "search", "args": {"q": "foo"}, "id": call_id}])
+    tool_msg = ToolMessage(content="result data", tool_call_id=call_id)
+
+    _, items = model._convert_messages([ai_msg, tool_msg])
+
+    assert items == [
+        {"type": "function_call", "name": "search", "arguments": '{"q": "foo"}', "call_id": call_id},
+        {"type": "function_call_output", "call_id": call_id, "output": "result data"},
+    ]
+    assert ai_msg.tool_calls[0]["id"] == call_id
+    assert tool_msg.tool_call_id == call_id
+
+
+@pytest.mark.parametrize("blank_id", ["", "   ", "\t\r\n"])
+@pytest.mark.parametrize("call_field", ["tool_calls", "invalid_tool_calls"])
+def test_convert_messages_omits_paired_calls_and_results_with_blank_ids(blank_id, call_field):
+    model = _make_model()
+    args = {"q": "foo"} if call_field == "tool_calls" else '{"q":'
+    ai_msg = AIMessage(content="Searching.", **{call_field: [{"name": "search", "args": args, "id": blank_id}]})
+    tool_msg = ToolMessage(content="result data", tool_call_id=blank_id)
+
+    _, items = model._convert_messages([ai_msg, tool_msg])
+
+    assert items == [{"role": "assistant", "content": "Searching."}]
+    assert getattr(ai_msg, call_field)[0]["id"] == blank_id
+    assert tool_msg.tool_call_id == blank_id
+
+
 @pytest.mark.parametrize("blank_id", ["", "   ", "\t\r\n"])
 def test_convert_messages_omits_tool_results_with_blank_call_ids(blank_id):
     model = _make_model()
