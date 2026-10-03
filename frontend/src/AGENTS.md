@@ -1,11 +1,27 @@
 ### Data Flow
 
+Scope local-turn ordering to `displayThreadId ?? threadId`, the displayed
+conversation identity. Confirming a new chat changes the SDK `threadId` from
+undefined to its existing display ID; preserve the human anchor across that
+transition and clear it only on a displayed-conversation switch or the existing
+failure/replay-gap paths. Draft and confirmation regressions live in
+`tests/unit/core/threads/local-turn-order.dom.test.tsx`.
+
 Answer details use `workspace/message-details` descriptors; skill run scoping
 is documented in `docs/skill-usage-ui.md`.
 
 Artifact URLs encode raw filesystem paths, preserving literal percent sequences.
 Only Markdown destinations decode once; relative images match decoded names
 against raw artifact paths before encoding.
+File-type detection uses the basename so extensionless `Dockerfile` and
+`Makefile` artifacts remain recognizable under nested or dotted directories.
+HTML preview base detection skips DOM construction without case-insensitive `base`
+text; otherwise an inert template distinguishes real tags from comments, scripts
+and nested templates without rewriting source. Tests: `preview-base.dom.test.ts`
+(happy-dom); textarea/title RCDATA needs real-browser checks due to parser gaps.
+Other preview helpers retain the node test environment.
+Language-map membership checks only own properties; inherited names such as
+`constructor` and `__proto__` must keep the unknown-file download fallback.
 
 1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission, and `core/voice-input` can transcribe browser microphone input into that same local draft; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming
 2. Stream events update thread state (messages, artifacts, todos, goal). The main thread stream uses the LangGraph SDK's `throttle: true` mode so updates received in the same macrotask coalesce before React is notified; do not replace it with a numeric delay without validating the SDK's trailing-debounce behavior on a continuous stream.
@@ -46,7 +62,7 @@ against raw artifact paths before encoding.
    Personal server management uses targeted `POST /api/mcp/personal/config/servers`,
    `PUT /api/mcp/personal/config/server`, and bodyless
    `DELETE /api/mcp/personal/config/servers/{server_name}` mutations. The deployment
-   `/api/mcp/config` endpoints remain operator-only and are not used by this editor. Delete names are
+   `/api/mcp/config` endpoints remain admin-only and are used by the Platform provided editor. Delete names are
    percent-encoded, including legacy empty and slash-containing names; every
    successful mutation invalidates `["mcpConfig"]` only after the response.
    Current-chat MCP background tasks use `core/background-tasks`: the header
@@ -108,17 +124,19 @@ client preserves structured SkillScan findings on `SkillRequestError`, and the
 settings page renders a compact file/rule/line summary so security rejections
 remain actionable; a proxy-generated 413 is mapped to the localized size error.
 
-Run duration is run-scoped UI metadata even though the compatibility field `additional_kwargs.turn_duration` is repeated on historical AI messages. `core/messages/run-duration.ts` folds those copies into one display anchored after the run's last visible message group. `MessageList` owns the temporary client-side duration for a just-completed live turn until authoritative history arrives. The duration is total run wall-clock time, not per-message reasoning time; reasoning disclosure and run activity/duration are rendered separately.
+Run duration is run-scoped UI metadata even though the compatibility field `additional_kwargs.turn_duration` is repeated on historical AI messages. `core/messages/run-duration.ts` folds those copies into one display owned by the run's last visible message group. `MessageList` owns the temporary client-side duration for a just-completed live turn until authoritative history arrives. The duration is total run wall-clock time, not per-message reasoning time. At that anchor, a completed reasoning disclosure uses the duration as its visible label with a divider underneath and a visually hidden localized reasoning cue for its accessible name. This applies to assistant bubbles, processing groups, and subagent groups. `getMessageGroupReasoningMessage` shares the processing renderer’s trailing-reasoning selection so reasoning before the final tool cannot consume the duration of a disclosure that is not rendered. Groups without a matching rendered reasoning disclosure use a standalone duration header above their content. Historical reasoning without duration retains its generic label. Never repeat the duration on every AI message.
+
+`MessageReasoning` controls its disclosure state: completed mounts start collapsed, live streams open and close once after completion, and history expansion stays under user control. Keep this lifecycle in the workspace wrapper rather than editing generated AI elements. Duration-target selection is lazy for mounted, completed groups with a duration and cached by stable group identity; streaming updates must not re-convert unchanged historical processing/subagent groups. Changed groups must invalidate that cache.
 
 The workspace-change card follows the same rule: it is resolved from `(threadId, runId)` alone, so every AI message of a run would render an identical copy. A run ends in more than one terminal assistant bubble whenever the model emits answer text that never gains a tool call, so `core/messages/workspace-change-anchor.ts` picks the run's last assistant bubble and `MessageListItem` renders the badge only for that anchor (#4555). Any future run-scoped display belongs in the same place — do not hang one off every message. The two anchor helpers deliberately differ in which group types they accept as a run's last position, because an anchor is only useful where the display is actually rendered: run duration is emitted by `MessageList` around every group, so it accepts any type, while the workspace-change card comes from `MessageListItem` and so restricts to `assistant`. Keep a new helper's candidate set matched to its own render site rather than unifying them.
 
-Composer drafts are tab-scoped browser state. `core/threads/composer-draft.ts` stores only text plus the selected slash-skill name in `sessionStorage`, keyed by user, agent, and logical conversation scope. New-chat pages pass the stable scope `"new"` because their runtime `threadId` is a fresh UUID on every reload; established conversations use their real thread ID. `InputBox` waits for enabled skills before restoring a skill chip, degrades a missing/disabled skill back to editable slash text, and clears the stored draft through `SendMessageOptions.onSent` only after the send passes the in-flight guard. Attachments, sidecar quotes, voice state, and polish undo state are not persisted.
+Composer drafts are tab-scoped browser state. `core/threads/composer-draft.ts` stores text with inline reference tokens and conversation metadata in `sessionStorage`, keyed by user, agent, and logical conversation scope. New-chat pages pass the stable scope `"new"` because their runtime `threadId` is a fresh UUID on every reload; established conversations use their real thread ID. New drafts write `skillName: null`; `InputBox` waits for the enabled agent skill scope before converting an older draft selection into an inline `@` reference, and degrades a missing/disabled skill back to editable slash text. The stored draft clears through `SendMessageOptions.onSent` only after the send passes the in-flight guard. Attachments, sidecar quotes, voice state, and polish undo state are not persisted.
 
 Conversation references (`read_conversation`, opt-in on the backend) are attached from the composer. `ReferenceConversationsButton` (`components/workspace/conversation-references/`) renders only while `/api/features` reports `conversation_references.enabled`, opens a picker over the same `useThreads()` list the sidebar uses (the current thread excluded, capped at `max_references`), and shows removable chips in the composer header. On submit the thread IDs ride `InputBoxSubmitOptions.conversationReferences` → `SendMessageOptions.conversationReferences` → run `context.conversation_references`, which the Gateway consumes at admission; the LangGraph SDK drops unknown top-level body fields, so the top-level request field is not reachable from the web UI. `core/conversation-references` also writes display-only `additional_kwargs.conversation_references` (`{thread_id, title, agent_name?}`) on the visible human message so `message-list-item.tsx` can render read-only chips linking to the source — through `pathOfThread`, so custom-agent sources route to `/workspace/agents/{agent}/chats/{id}`; that metadata grants nothing. References are per message: they are not persisted with the draft, clear on send or thread switch, and regenerate/edit of a turn runs without them unless attached again.
 
 Auth UI note: the login page's "keep me signed in" option submits only `remember_me` to the Gateway and may persist only the email address through `core/auth/remember-login.ts`. Passwords and tokens must never be stored in frontend storage; the `HttpOnly access_token` and readable `csrf_token` cookies remain Gateway-owned.
 
-`/goal` and `/compact` are built-in composer commands, not skill activations. `src/components/workspace/input-box.tsx` intercepts `/goal`, `/goal clear`, and `/goal <condition>` before normal chat submission, calling Gateway `GET/PUT/DELETE /api/threads/{thread_id}/goal`. Setting `/goal <condition>` also submits the condition text as the next user task so the agent starts running immediately; status and clear do not start a run. On a project-scoped new chat (`/workspace/chats/new?project=…`), the chat page's project pre-create runs before the goal PUT via the composer's `onPrepareThread` callback: the goal endpoint materializes a missing thread row itself, and an unassigned row would make the later idempotent thread create return it without assigning the project. Goal and compact requests are tied to the current `threadId` with an `AbortController`, so switching threads or unmounting the composer aborts in-flight requests and stale responses cannot update the new thread's composer state. The chat pages render `GoalStatus` above the composer from `AgentThreadState.goal`, with local optimistic state until an incremental goal update or final state reload arrives. `/compact` calls `POST /api/threads/{thread_id}/compact` to summarize older active context while leaving the full visible chat history intact; it is skipped on new/empty threads and blocked server-side while a run is in flight. Thread rename uses the same serialized state-write route; the rename dialog stays open and surfaces the server error when an active run returns 409.
+The web `/` picker lists only `/goal` and `/compact`; skills are selected through the inline `@` picker. `/goal` and `/compact` are built-in composer commands, not skill activations. `src/components/workspace/input-box.tsx` intercepts `/goal`, `/goal clear`, and `/goal <condition>` before normal chat submission, calling Gateway `GET/PUT/DELETE /api/threads/{thread_id}/goal`. Setting `/goal <condition>` also submits the condition text as the next user task so the agent starts running immediately; status and clear do not start a run. On a project-scoped new chat (`/workspace/chats/new?project=…`), the chat page's project pre-create runs before the goal PUT via the composer's `onPrepareThread` callback: the goal endpoint materializes a missing thread row itself, and an unassigned row would make the later idempotent thread create return it without assigning the project. Goal and compact requests are tied to the current `threadId` with an `AbortController`, so switching threads or unmounting the composer aborts in-flight requests and stale responses cannot update the new thread's composer state. The chat pages render `GoalStatus` above the composer from `AgentThreadState.goal`, with local optimistic state until an incremental goal update or final state reload arrives. `/compact` calls `POST /api/threads/{thread_id}/compact` to summarize older active context while leaving the full visible chat history intact; it is skipped on new/empty threads and blocked server-side while a run is in flight. Thread rename uses the same serialized state-write route; the rename dialog stays open and surfaces the server error when an active run returns 409.
 
 Composer `runs:create` gating belongs in `InputBox.handleSubmit` after command classification and before dispatch. Reject message and goal-set actions before `onPrepareThread`, goal persistence, success feedback, or draft clearing. Goal status/clear and compact do not start runs; preserve their endpoint-specific gates. Regression coverage lives in `input-box-send-gating.dom.test.tsx`.
 
@@ -198,4 +216,17 @@ binding; explicit page-local overrides survive new-thread route replacement and
 reset on conversation changes. Gateway supplies defaults for clients without a
 selector; frontend visibility must not become a runtime enforcement boundary.
 
-MCP editor requests use the personal configuration API. Query keys for personal MCP config and capability installations include the authenticated user ID; remount the editor when that ID changes. Deployment installations remain read-only under Platform provided, alongside deployment setup guides. My plugins contains personal configuration templates, Lark account authorization and the personal MCP editor; a deployment installation must not mark a personal template configured.
+MCP hooks and the editor default to personal scope. Mutation-option builders require an explicit scope. MCP control accessible names include the localized ownership section, so same-named shared and personal connections remain distinct without region context. Query keys include scope and authenticated user ID; remount each editor when that ID changes. Platform provided uses the deployment editor only for administrators outside static mode, restoring add, edit, toggle and delete through the existing admin-only MCP API. Ordinary users see shared entries read-only. My plugins contains personal configuration templates, Lark account authorization and the personal MCP editor; a deployment installation must not mark a personal template configured.
+
+Plugin mention providers extend the existing composer picker via
+`core/extensions/use-mentions.ts`. Keep provider queries bounded and fenced by
+viewer, thread, query, and installed snapshot.
+Provider and page-surface IDs must be strings before slug validation; JavaScript
+coercion is not validation. A settled snapshot with no enabled, viewer-visible
+mention providers returns an empty result immediately without a search timer.
+Settled results may remain visible during query/retry refreshes only within the
+same viewer, thread, locale and installed snapshot; stale responses stay fenced.
+Inline plugin references serialize into human-message
+`additional_kwargs.extension_mentions`; these IDs and labels
+are untrusted input, never a routing or permission grant. Built-in mentions must
+remain usable when a provider fails or times out.

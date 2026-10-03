@@ -140,7 +140,10 @@ def _coerce_line_number(value: object) -> int | None:
     """Parse one ``read_file`` line bound, or ``None`` when absent or unusable."""
     try:
         line = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: a model-emitted JSON number such as ``1e999`` parses to
+        # a float('inf') that ``int()`` rejects. Treat it like any other
+        # unusable bound so key derivation cannot crash the after_model hook.
         return None
     return max(line, 1)
 

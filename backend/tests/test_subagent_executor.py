@@ -32,6 +32,7 @@ import pytest
 from packaging.version import Version
 
 from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+from deerflow.runtime.journal import RunJournal
 from deerflow.sandbox.lease import SandboxLeaseManager
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import SubagentCapacityRejected
@@ -87,6 +88,7 @@ def _setup_executor_classes():
     original_modules = {name: sys.modules.get(name) for name in _MOCKED_MODULE_NAMES}
     original_executor = sys.modules.get("deerflow.subagents.executor")
     original_audit_context = sys.modules.get("deerflow.agents.middlewares.audit_context")
+    original_tool_declarations = sys.modules.get("deerflow.agents.middlewares.tool_declarations")
     original_tool_search = sys.modules.get("deerflow.tools.builtins.tool_search")
     original_sandbox_provider = sys.modules.get("deerflow.sandbox.sandbox_provider")
     original_sandbox_overwrite = sys.modules.get("deerflow.sandbox.overwrite")
@@ -95,6 +97,7 @@ def _setup_executor_classes():
     # with cycle-breaking test doubles. Keeping the concrete leaf modules in
     # sys.modules makes this fixture independent of test collection order.
     audit_context_module = importlib.import_module("deerflow.agents.middlewares.audit_context")
+    tool_declarations_module = importlib.import_module("deerflow.agents.middlewares.tool_declarations")
     tool_search_module = importlib.import_module("deerflow.tools.builtins.tool_search")
     sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
     sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
@@ -112,6 +115,7 @@ def _setup_executor_classes():
     storage_module.get_or_new_user_skill_storage = lambda user_id, **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
     sys.modules["deerflow.skills.storage"] = storage_module
     sys.modules["deerflow.agents.middlewares.audit_context"] = audit_context_module
+    sys.modules["deerflow.agents.middlewares.tool_declarations"] = tool_declarations_module
     sys.modules["deerflow.tools.builtins.tool_search"] = tool_search_module
     sys.modules["deerflow.sandbox.sandbox_provider"] = sandbox_provider_module
     sys.modules["deerflow.sandbox.overwrite"] = sandbox_overwrite_module
@@ -163,6 +167,10 @@ def _setup_executor_classes():
         sys.modules["deerflow.agents.middlewares.audit_context"] = original_audit_context
     else:
         sys.modules.pop("deerflow.agents.middlewares.audit_context", None)
+    if original_tool_declarations is not None:
+        sys.modules["deerflow.agents.middlewares.tool_declarations"] = original_tool_declarations
+    else:
+        sys.modules.pop("deerflow.agents.middlewares.tool_declarations", None)
     if original_tool_search is not None:
         sys.modules["deerflow.tools.builtins.tool_search"] = original_tool_search
     else:
@@ -175,6 +183,15 @@ def _setup_executor_classes():
         sys.modules["deerflow.sandbox.overwrite"] = original_sandbox_overwrite
     else:
         sys.modules.pop("deerflow.sandbox.overwrite", None)
+
+
+def _async_create_agent_double(agent):
+    """Async stand-in for SubagentExecutor._create_agent (the real one is async)."""
+
+    async def _create(*_args, **_kwargs):
+        return agent
+
+    return _create
 
 
 # Helper classes that wrap real classes for testing
@@ -320,7 +337,7 @@ class TestAgentConstruction:
         app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")])
         model = object()
         middlewares = [object()]
-        agent = object()
+        agent = SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={}))
         captured: dict[str, dict] = {}
 
         def fake_get_app_config():
@@ -363,7 +380,7 @@ class TestAgentConstruction:
         provider = object()
         executor._authz_provider = provider
 
-        result = executor._create_agent()
+        result = asyncio.run(executor._create_agent())
 
         assert result is agent
         assert captured["middlewares"]["authorization_provider"] is provider
@@ -392,6 +409,151 @@ class TestAgentConstruction:
         assert captured["agent"]["tools"] == []
         assert captured["agent"]["system_prompt"] is None  # system_prompt is merged into initial state messages
 
+    def test_create_agent_narrows_denied_middleware_declared_tools(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Layer 1 declaration pass: a denied middleware-declared tool is removed
+        from the bound stack on an independent copy, decided by the same provider
+        instance and principal as the ordinary pass."""
+        from langchain.agents.middleware import AgentMiddleware
+        from langchain_core.tools import StructuredTool
+
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        def _tool(name):
+            return StructuredTool.from_function(lambda: name, name=name, description=name)
+
+        class _Provider:
+            name = "test"
+
+            def __init__(self):
+                self.calls = []
+
+            def authorize(self, request):
+                from deerflow.authz.provider import AuthzDecision
+
+                return AuthzDecision(allow=True)
+
+            async def aauthorize(self, request):
+                return self.authorize(request)
+
+            def filter_resources(self, principal, resource_type, candidates):
+                self.calls.append((principal, list(candidates)))
+                return [candidate for candidate in candidates if candidate == "allowed_decl"]
+
+        class _Declaring(AgentMiddleware):
+            def __init__(self, tools):
+                super().__init__()
+                self.tools = tools
+
+        app_config = SimpleNamespace(
+            models=[SimpleNamespace(name="default-model")],
+            authorization=SimpleNamespace(enabled=True, fail_closed=True, default_role="user"),
+        )
+        declaring = _Declaring([_tool("allowed_decl"), _tool("denied_decl")])
+        captured: dict[str, dict] = {}
+
+        def fake_build_subagent_runtime_middlewares(**kwargs):
+            captured["middlewares"] = kwargs
+            return [declaring]
+
+        def fake_create_agent(**kwargs):
+            captured["agent"] = kwargs
+            return MagicMock()
+
+        monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: MagicMock())
+        monkeypatch.setattr(executor_module, "create_agent", fake_create_agent)
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=fake_build_subagent_runtime_middlewares,
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=app_config,
+            parent_model="parent-model",
+        )
+        provider = _Provider()
+        executor._authz_provider = provider
+        executor._authz_context = {"user_role": "user"}
+        from deerflow.agents.middlewares.tool_declarations import LayerOneOutcome
+
+        executor._layer_one_outcome = LayerOneOutcome(submitted=frozenset({"regular"}), allowed=frozenset({"regular"}))
+        # Phase 3's skill-authorization resolution needs a real AuthorizationConfig;
+        # this test's SimpleNamespace app_config deliberately lacks one — the
+        # declaration pass under test uses the explicitly-set provider instead.
+        monkeypatch.setattr(executor, "_resolve_skill_authorization", lambda: None)
+
+        asyncio.run(executor._create_agent())
+
+        (bound,) = captured["agent"]["middleware"]
+        assert bound is not declaring
+        assert [tool.name for tool in bound.tools] == ["allowed_decl"]
+        # The caller-owned instance keeps every declaration.
+        assert [tool.name for tool in declaring.tools] == ["allowed_decl", "denied_decl"]
+        # Only the never-submitted names went to the provider, with the run's principal.
+        assert len(provider.calls) == 1
+        principal, candidates = provider.calls[0]
+        assert candidates == ["allowed_decl", "denied_decl"]
+        assert principal.role == "user"
+
+    def test_create_agent_warns_when_the_declared_tool_pass_is_skipped_with_a_provider(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
+    ):
+        """Fail-open must not be silent: a configured provider without the seeded
+        Layer-1 state skips the declaration pass but logs a warning."""
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        app_config = SimpleNamespace(
+            models=[SimpleNamespace(name="default-model")],
+            authorization=SimpleNamespace(enabled=True, fail_closed=True, default_role="user"),
+        )
+
+        monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: MagicMock())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: MagicMock())
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=lambda **kwargs: [],
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=app_config,
+            parent_model="parent-model",
+        )
+        executor._authz_provider = object()
+        # _layer_one_outcome and _authz_context deliberately unset.
+        # Same SimpleNamespace limitation as above: skip Phase 3 resolution so
+        # the skip-warning branch is what runs.
+        monkeypatch.setattr(executor, "_resolve_skill_authorization", lambda: None)
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.subagents.executor"):
+            asyncio.run(executor._create_agent())
+
+        assert "skipping the middleware-declared tool pass" in caplog.text
+        assert "_layer_one_outcome" in caplog.text
+
     def test_create_agent_scales_max_turns_into_a_super_step_budget(
         self,
         classes,
@@ -418,7 +580,7 @@ class TestAgentConstruction:
         middlewares = [_AfterModel(), _AfterModel()]
 
         monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
-        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
         monkeypatch.setitem(
             sys.modules,
             "deerflow.agents.middlewares.tool_error_handling_middleware",
@@ -434,7 +596,7 @@ class TestAgentConstruction:
             app_config=SimpleNamespace(models=[SimpleNamespace(name="default-model")]),
             parent_model="parent-model",
         )
-        executor._create_agent()
+        asyncio.run(executor._create_agent())
 
         # model + tools + two after_model nodes, once per turn.
         assert executor._recursion_limit == base_config.max_turns * 4
@@ -467,7 +629,7 @@ class TestAgentConstruction:
                 return None
 
         monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
-        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
         monkeypatch.setitem(
             sys.modules,
             "deerflow.agents.middlewares.tool_error_handling_middleware",
@@ -484,7 +646,7 @@ class TestAgentConstruction:
             parent_model="parent-model",
         )
         with caplog.at_level(logging.WARNING, logger=executor_module.logger.name):
-            executor._create_agent()
+            asyncio.run(executor._create_agent())
 
         assert "_Jumper.after_model" in caplog.text
         assert "lower bound" in caplog.text
@@ -1360,7 +1522,7 @@ class TestAgentConstruction:
             return [object()]
 
         monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
-        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
         monkeypatch.setitem(
             sys.modules,
             "deerflow.agents.middlewares.tool_error_handling_middleware",
@@ -1373,7 +1535,7 @@ class TestAgentConstruction:
         deferred_setup = DeferredToolSetup(object(), frozenset({"mcp_calc"}), "hash123")
         executor = SubagentExecutor(config=base_config, tools=[], app_config=app_config, parent_model="parent-model")
 
-        executor._create_agent(tools=[], deferred_setup=deferred_setup)
+        asyncio.run(executor._create_agent(tools=[], deferred_setup=deferred_setup))
 
         assert captured["middlewares"]["deferred_setup"] is deferred_setup
 
@@ -4278,7 +4440,7 @@ async def test_subagent_mcp_uses_captured_thread_incarnation(classes, monkeypatc
         return ({"messages": [classes["AIMessage"](content="", tool_calls=[{"name": tool.name, "args": {}, "id": "probe"}])]}, [], None)
 
     monkeypatch.setattr(executor, "_build_initial_state", build_initial_state)
-    monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: child)
+    monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(child))
     result = await executor._aexecute("probe MCP")
 
     if expected_scope is None:
@@ -4330,7 +4492,7 @@ class TestSubagentCheckpointLineage:
             return ({"messages": [classes["HumanMessage"](content=task)]}, [], None)
 
         monkeypatch.setattr(executor, "_build_initial_state", build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -4432,7 +4594,7 @@ class TestSubagentCheckpointLineage:
             return ({"messages": [classes["HumanMessage"](content=task)]}, [], None)
 
         monkeypatch.setattr(executor, "_build_initial_state", build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: child_graph)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(child_graph))
 
         async def delegate(_state):
             task_id = executor.execute_async("run the child graph")
@@ -4543,7 +4705,7 @@ class TestSubagentTracingWiring:
         executor = self._make_executor(classes, user_id="alice")
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         result = await executor._aexecute("do something")
 
@@ -4584,7 +4746,7 @@ class TestSubagentTracingWiring:
         executor = self._make_executor(classes, deerflow_trace_id="parent-trace-1")
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         seen: list[str | None] = []
         original = executor._aexecute_admitted
@@ -4627,7 +4789,7 @@ class TestSubagentTracingWiring:
         executor = self._make_executor(classes, user_id="alice", name="general_purpose", deerflow_trace_id="gateway-trace-sub")
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -4658,7 +4820,7 @@ class TestSubagentTracingWiring:
         executor = self._make_executor(classes, user_id="alice")
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -4688,7 +4850,7 @@ class TestSubagentTracingWiring:
         executor = self._make_executor(classes, user_id=None)
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -4731,7 +4893,7 @@ class TestSubagentTracingWiring:
         )
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -4760,7 +4922,7 @@ class TestSubagentTracingWiring:
         executor = self._make_executor(classes, user_id="alice")
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -4856,7 +5018,7 @@ class TestSubagentGuardrailAttribution:
         )
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -4889,7 +5051,7 @@ class TestSubagentGuardrailAttribution:
         )
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -4915,7 +5077,7 @@ class TestSubagentGuardrailAttribution:
         )
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -4941,7 +5103,7 @@ class TestSubagentGuardrailAttribution:
         )
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -4980,7 +5142,7 @@ class TestSubagentGuardrailAttribution:
         )
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -5002,7 +5164,7 @@ class TestSubagentGuardrailAttribution:
         executor = self._make_executor(classes)
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -5041,7 +5203,7 @@ class TestSubagentGuardrailAttribution:
         )
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -5072,7 +5234,7 @@ class TestSubagentGuardrailAttribution:
         )
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -5107,7 +5269,7 @@ class TestSubagentGuardrailAttribution:
         assert executor.authz_attributes == {"dept": "eng"}
         fake_agent = _FakeStreamAgent()
         monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(fake_agent))
 
         await executor._aexecute("do something")
 
@@ -5135,6 +5297,198 @@ class TestSubagentGuardrailAttribution:
                 tools=[],
                 authz_attributes=["not", "a", "mapping"],
             )
+
+
+class TestInterruptedTokenUsage:
+    @pytest.mark.parametrize("outcome", ["cancelled", "timed_out", "completed"])
+    def test_retains_usage_before_model_node_publishes_state(self, classes, monkeypatch, outcome):
+        """A completed model call costs tokens even if its wrapper is interrupted."""
+        from langchain.agents import create_agent
+        from langchain.agents.middleware import AgentMiddleware
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from langchain_core.tools import tool
+
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+        from deerflow.tools.builtins.task_tool import _report_usage_records, _summarize_usage, _task_result_command
+
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        model_returned = threading.Event()
+        terminal = threading.Event()
+        gate = {}
+
+        class Model(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        class PauseAfterModel(AgentMiddleware):
+            async def awrap_model_call(self, request, handler):
+                response = await handler(request)
+                # The first model node has already published its 15 tokens.
+                # Pause the second *after* on_llm_end but *before* this model
+                # node can yield a values chunk to SubagentExecutor.
+                if not response.result[0].tool_calls:
+                    gate["loop"] = asyncio.get_running_loop()
+                    gate["release"] = asyncio.Event()
+                    model_returned.set()
+                    await gate["release"].wait()
+                return response
+
+        @tool
+        def echo(value: str) -> str:
+            """Return the input."""
+            return value
+
+        ai = classes["AIMessage"]
+        model = Model(
+            responses=[
+                ai(
+                    content="",
+                    tool_calls=[{"name": "echo", "args": {"value": "ok"}, "id": "echo-1", "type": "tool_call"}],
+                    usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                    response_metadata={"model_name": "usage-test-model"},
+                ),
+                ai(
+                    content="Done",
+                    usage_metadata={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+                    response_metadata={"model_name": "usage-test-model"},
+                ),
+            ]
+        )
+        graph = create_agent(model, tools=[echo], middleware=[PauseAfterModel()], checkpointer=False)
+        executor = classes["SubagentExecutor"](
+            config=classes["SubagentConfig"](
+                name="usage-test",
+                description="Test interrupted usage accounting",
+                model="usage-test-model",
+                timeout_seconds=5 if outcome == "timed_out" else 10,
+            ),
+            tools=[],
+            extensions=SimpleNamespace(needs_task_store=False, has_task_lifecycle=False),
+            execution_capacity=SubagentExecutionCapacity(SubagentRuntimeConfig()),
+        )
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({"messages": [classes["HumanMessage"](content="Echo ok")]}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(graph))
+        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(executor_module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+        original_terminal = classes["SubagentResult"].try_set_terminal
+
+        def signal_terminal(holder, *args, **kwargs):
+            changed = original_terminal(holder, *args, **kwargs)
+            if changed:
+                terminal.set()
+            return changed
+
+        monkeypatch.setattr(classes["SubagentResult"], "try_set_terminal", signal_terminal)
+        execution_id = executor.execute_async("Echo ok")
+        try:
+            assert model_returned.wait(5), "second model response was not received"
+            result = executor_module.get_background_task_result(execution_id)
+            assert _summarize_usage(result.token_usage_records) == {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+            journal = RunJournal(run_id="parent-run", thread_id="parent-thread", event_store=MagicMock())
+            _report_usage_records(journal, result)
+            if outcome == "cancelled":
+                executor_module.request_cancel_background_task(execution_id)
+            elif outcome == "completed":
+                gate["loop"].call_soon_threadsafe(gate["release"].set)
+            assert terminal.wait(10), "subagent did not reach a terminal status"
+            assert result.status.value == outcome
+            records = result.token_usage_records
+            assert len(records) == 2
+            assert len({record["source_run_id"] for record in records}) == 2
+            assert {record["model_name"] for record in records} == {"usage-test-model"}
+            expected_usage = {"input_tokens": 30, "output_tokens": 15, "total_tokens": 45}
+            assert _summarize_usage(records) == expected_usage
+            command = _task_result_command(tool_call_id="parent-call", status=outcome, usage=_summarize_usage(records))
+            assert command.update["messages"][0].additional_kwargs["subagent_token_usage"] == expected_usage
+            # An interrupted poller may have delivered the earlier snapshot.
+            # The final delivery must add only the unseen response, once.
+            _report_usage_records(journal, result, final=True)
+            _report_usage_records(journal, result, final=True)
+            assert journal.get_completion_data()["total_tokens"] == 45
+            assert journal.get_completion_data()["subagent_tokens"] == 45
+            assert journal.get_completion_data()["token_usage_by_model"]["usage-test-model"] == expected_usage
+        finally:
+            if "release" in gate:
+                gate["loop"].call_soon_threadsafe(gate["release"].set)
+            executor_module.request_cancel_background_task(execution_id)
+            assert terminal.wait(5)
+            # Drain the production loop before stopping it and restoring the
+            # module fixture; no background task or admission slot may leak.
+            executor_module.run_on_isolated_subagent_loop(asyncio.sleep(0)).result(timeout=5)
+            executor_module.cleanup_background_task(execution_id)
+            executor_module._shutdown_isolated_subagent_loop()
+
+    @pytest.mark.anyio
+    async def test_usage_snapshot_waits_for_stream_cleanup_despite_repeated_cancellation(self, classes, base_config, monkeypatch):
+        from langchain_core.outputs import ChatGeneration, LLMResult
+
+        waiting = asyncio.Event()
+        closing = asyncio.Event()
+        release = asyncio.Event()
+
+        class Stream:
+            def __init__(self, collector):
+                self.collector = collector
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                waiting.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                closing.set()
+                await release.wait()
+                self.collector.on_llm_end(
+                    LLMResult(generations=[[ChatGeneration(message=classes["AIMessage"](content="Done", usage_metadata={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}))]]),
+                    run_id="response-during-cleanup",
+                )
+
+        graph = SimpleNamespace(astream=lambda state, config, **kwargs: Stream(config["callbacks"][0]))
+        executor = classes["SubagentExecutor"](config=base_config, tools=[])
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(graph))
+        holder = classes["SubagentResult"](task_id="cleanup-usage", trace_id="trace", status=classes["SubagentStatus"].RUNNING)
+        running = asyncio.create_task(executor._aexecute_admitted("Task", holder))
+        try:
+            await asyncio.wait_for(waiting.wait(), timeout=5)
+            running.cancel()
+            await asyncio.wait_for(closing.wait(), timeout=5)
+            running.cancel()
+            await asyncio.sleep(0)
+            assert not running.done()
+            assert not holder.token_usage_records
+        finally:
+            release.set()
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+
+        assert len(holder.token_usage_records) == 1
+        assert holder.token_usage_records[0]["source_run_id"] == "response-during-cleanup"
+        assert holder.token_usage_records[0]["total_tokens"] == 30
+
+    @pytest.mark.anyio
+    async def test_cancellation_before_collector_creation_keeps_usage_absent(self, classes, base_config, monkeypatch):
+        building = asyncio.Event()
+
+        async def build_state(task):
+            building.set()
+            await asyncio.Event().wait()
+
+        executor = classes["SubagentExecutor"](config=base_config, tools=[])
+        monkeypatch.setattr(executor, "_build_initial_state", build_state)
+        holder = classes["SubagentResult"](task_id="setup-cancelled", trace_id="trace", status=classes["SubagentStatus"].RUNNING)
+        running = asyncio.create_task(executor._aexecute_admitted("Task", holder))
+        try:
+            await asyncio.wait_for(building.wait(), timeout=5)
+        finally:
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+        assert holder.token_usage_records == []
 
 
 class TestToolReceiptHarvest:

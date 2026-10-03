@@ -6131,13 +6131,37 @@ class TestHandleChatWithArtifacts:
 
 
 class TestDiscordChannel:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "x" * 1990 + "\n\n" + "y" * 30,
+            "x" * 2000 + "\n\n\n" + "y" * 30,
+            "x" * 2000 + "\n" + "y" * 2000,
+            ("第一段\n\n" + "句" * 1990 + "\n\n最后一段") * 3,
+            "x" * 4500,
+        ],
+    )
+    def test_split_text_preserves_content_within_discord_limit(self, text: str):
+        from app.channels.discord import _DISCORD_MAX_MESSAGE_LEN, DiscordChannel
+
+        chunks = DiscordChannel._split_text(text)
+
+        assert all(0 < len(chunk) <= _DISCORD_MAX_MESSAGE_LEN for chunk in chunks)
+        assert "".join(chunks) == text
+
+    def test_split_text_preserves_empty_and_short_messages(self):
+        from app.channels.discord import DiscordChannel
+
+        assert DiscordChannel._split_text("") == [""]
+        assert DiscordChannel._split_text("hello\n\nworld") == ["hello\n\nworld"]
+
     def test_stop_prevents_queued_typing_starter_from_creating_task(self):
         from app.channels.discord import DiscordChannel
 
         async def go():
             channel = DiscordChannel(MessageBus(), config={})
             channel._running = True
-            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+            typing_target = SimpleNamespace(typing=AsyncMock())
 
             # Queue the starter without yielding to it.  stop() therefore runs
             # first and must form a boundary that the delayed starter cannot
@@ -6179,7 +6203,7 @@ class TestDiscordChannel:
         async def go():
             channel = DiscordChannel(MessageBus(), config={})
             channel._running = True
-            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+            typing_target = SimpleNamespace(typing=AsyncMock())
 
             discord_loop = asyncio.new_event_loop()
             loop_ready = threading.Event()
@@ -6254,7 +6278,7 @@ class TestDiscordChannel:
         async def go():
             channel = DiscordChannel(MessageBus(), config={})
             channel._running = True
-            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+            typing_target = SimpleNamespace(typing=AsyncMock())
 
             discord_loop = asyncio.new_event_loop()
             loop_ready = threading.Event()
@@ -6307,7 +6331,7 @@ class TestDiscordChannel:
 
         channel = DiscordChannel(MessageBus(), config={})
         channel._running = True
-        typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+        typing_target = SimpleNamespace(typing=AsyncMock())
 
         class FailingClient:
             def __init__(self):
@@ -8855,6 +8879,49 @@ class TestSlackAllowedUsers:
         assert inbound.text == "/help"
         assert inbound.msg_type == InboundMessageType.COMMAND
 
+    def _inbound_text_for(self, event: dict) -> str:
+        from app.channels.slack import SlackChannel
+
+        bus = MessageBus()
+        bus.publish_inbound = AsyncMock()
+        channel = SlackChannel(bus=bus, config={"bot_user_id": "UBOT"})
+        channel._loop = self._immediate_loop()
+        channel._add_reaction = MagicMock()
+        channel._send_running_reply = MagicMock()
+
+        with patch(
+            "app.channels.slack.asyncio.run_coroutine_threadsafe",
+            side_effect=self._submit_coro,
+        ):
+            channel._handle_message_event({"user": "U123456", "channel": "C123", "ts": "1710000000.000100", **event})
+
+        return bus.get_inbound_nowait().text
+
+    def test_inbound_text_decodes_slack_entity_escapes(self):
+        # Slack delivers a user-typed &, < and > as &amp;, &lt; and &gt;.
+        text = self._inbound_text_for(
+            {
+                "type": "app_mention",
+                "text": '<@UBOT> if a &lt; b &amp;&amp; c &gt; d: print("R&amp;D")',
+            }
+        )
+
+        assert text == 'if a < b && c > d: print("R&D")'
+
+    def test_inbound_text_decodes_an_escaped_entity_only_once(self):
+        # The user literally typed "&lt;", which Slack sends as "&amp;lt;".
+        assert self._inbound_text_for({"text": "write &amp;lt; in HTML"}) == "write &lt; in HTML"
+
+    def test_inbound_text_keeps_slack_control_sequences(self):
+        text = self._inbound_text_for({"text": "ask <@U999> about <https://example.com|the doc> &gt; now"})
+
+        assert text == "ask <@U999> about <https://example.com|the doc> > now"
+
+    def test_inbound_text_decodes_entities_inside_slack_link_labels(self):
+        text = self._inbound_text_for({"text": "see <https://x.com|a&amp;b>"})
+
+        assert text == "see <https://x.com|a&b>"
+
     def test_app_mention_strips_labelled_leading_bot_mention(self):
         from app.channels.slack import SlackChannel
 
@@ -9096,6 +9163,85 @@ class TestSlackAllowedUsers:
             msg = OutboundMessage(channel_name="slack", chat_id="C123", thread_id="t1", text="hello")
             with pytest.raises(RuntimeError, match="without an exception"):
                 await ch.send(msg, _max_retries=0)
+
+        _run(go())
+
+
+# ---------------------------------------------------------------------------
+# Telegram allowed_users tests
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramAllowedUsers:
+    """An allowlist the operator configured must never silently open the bot."""
+
+    @staticmethod
+    def _channel(config_extra: dict):
+        from app.channels.telegram import TelegramChannel
+
+        return TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token", **config_extra})
+
+    @pytest.mark.parametrize("config_extra", [{}, {"allowed_users": None}, {"allowed_users": []}, {"allowed_users": " "}])
+    def test_unset_or_empty_allowlist_allows_everyone_without_warning(self, config_extra, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+            ch = self._channel(config_extra)
+
+        assert ch._check_user(42)
+        assert caplog.records == []
+
+    @pytest.mark.parametrize(
+        "allowed_users",
+        [[123456, 7], ["123456", " 7 "], (123456, 7), {123456, 7}],
+    )
+    def test_numeric_ids_are_allowed_and_others_denied(self, allowed_users):
+        ch = self._channel({"allowed_users": allowed_users})
+
+        assert ch._check_user(123456)
+        assert ch._check_user(7)
+        assert not ch._check_user(42)
+
+    @pytest.mark.parametrize("allowed_users", ["123456", 123456], ids=["str", "int"])
+    def test_scalar_id_is_one_entry_not_its_digits(self, allowed_users):
+        # Iterating the string "123456" used to allow users 1..6 and block 123456.
+        ch = self._channel({"allowed_users": allowed_users})
+
+        assert ch._check_user(123456)
+        assert not ch._check_user(1)
+
+    @pytest.mark.parametrize("bad_entry", ["@alice", 0, -5])
+    def test_unparseable_entry_is_dropped_with_warning(self, bad_entry, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+            ch = self._channel({"allowed_users": [123456, bad_entry]})
+
+        assert ch._check_user(123456)
+        assert not ch._check_user(42)
+        assert repr(bad_entry) in caplog.text
+        # 0 and -5 are numeric, so the hint has to say what they are missing.
+        assert "positive numeric" in caplog.text
+
+    @pytest.mark.parametrize(
+        "allowed_users",
+        # "123456,789" is what a ``$ENV`` reference to a comma-separated value resolves to.
+        [["@alice", "bob"], "@alice", "123456,789", [True], [4.2], {"id": 42}],
+    )
+    def test_allowlist_without_a_parseable_entry_denies_everyone(self, allowed_users, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+            ch = self._channel({"allowed_users": allowed_users})
+
+        assert not ch._check_user(42)
+        assert not ch._check_user(1)
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
+
+    @pytest.mark.parametrize(("allowed_users", "admitted"), [(["@alice"], False), ([42], True)])
+    def test_on_text_applies_the_allowlist(self, allowed_users, admitted):
+        async def go():
+            ch = self._channel({"allowed_users": allowed_users})
+            ch._main_loop = asyncio.get_running_loop()
+            ch._reserve_inbound = MagicMock(return_value=None)
+
+            await ch._on_text(_make_telegram_update("private", message_id=10), None)
+
+            assert ch._reserve_inbound.called is admitted
 
         _run(go())
 

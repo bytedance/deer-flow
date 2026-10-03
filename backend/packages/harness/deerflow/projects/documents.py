@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import Paths
+from deerflow.uploads.manager import is_reserved_upload_filename
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 from deerflow.utils.file_io import run_file_io
 from deerflow.utils.text_detection import is_text_file_by_content
@@ -56,7 +57,8 @@ def validate_shelf_filename(name: str) -> str:
     The display filename occupies its own path component (no hash prefix or
     suffix), so it must be a bare, non-empty filename within the 255 UTF-8
     byte filesystem limit — path separators are rejected outright rather than
-    stripped (§6.5).
+    stripped (§6.5). New display names share upload staging-name validation,
+    including Win32 aliases; existing shelf rows are not revalidated on reads.
     """
     candidate = name.strip() if name else ""
     if not candidate:
@@ -67,6 +69,8 @@ def validate_shelf_filename(name: str) -> str:
         raise ValueError(f"Filename is unsafe: {name!r}")
     if len(candidate.encode("utf-8")) > _MAX_FILENAME_BYTES:
         raise ValueError(f"Filename exceeds {_MAX_FILENAME_BYTES} UTF-8 bytes")
+    if is_reserved_upload_filename(candidate):
+        raise ValueError(f"Filename uses reserved upload staging pattern: {name!r}")
     return candidate
 
 

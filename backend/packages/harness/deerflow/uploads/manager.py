@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.host_paths import windows_incompatible_segment
 from deerflow.utils.thread_id import validate_thread_id
 
 
@@ -58,7 +59,7 @@ def normalize_filename(filename: str) -> str:
         Safe filename (basename only).
 
     Raises:
-        ValueError: If filename is empty or resolves to a traversal pattern.
+        ValueError: If filename is empty, unsafe, too long, or uses the reserved staging pattern.
     """
     if not filename:
         raise ValueError("Filename is empty")
@@ -73,6 +74,11 @@ def normalize_filename(filename: str) -> str:
         raise ValueError(f"Filename contains backslash: {filename!r}")
     if len(safe.encode("utf-8")) > _MAX_FILENAME_BYTES:
         raise ValueError(f"Filename too long: {len(safe)} chars")
+    if is_reserved_upload_filename(safe):
+        raise ValueError(f"Filename uses reserved upload staging pattern: {filename!r}")
+    reason = windows_incompatible_segment(safe)
+    if reason:
+        raise ValueError(f"Filename is not portable to Windows: {filename!r} ({reason})")
     return safe
 
 
@@ -127,6 +133,16 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
 def is_upload_staging_file(filename: str) -> bool:
     """Return whether *filename* is a transient Gateway upload staging file."""
     return filename.startswith(UPLOAD_STAGING_PREFIX) and filename.endswith(UPLOAD_STAGING_SUFFIX)
+
+
+def is_reserved_upload_filename(filename: str) -> bool:
+    """Check a new basename against the staging namespace, including Win32 aliases.
+
+    Win32 trims trailing dots and spaces and normally ignores case when opening
+    a path. Reject those aliases on every host, without changing the name or
+    the on-disk staging predicate used by listings and cleanup of existing files.
+    """
+    return is_upload_staging_file(filename.rstrip(" .").lower())
 
 
 def validate_path_traversal(path: Path, base: Path) -> None:

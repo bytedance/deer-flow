@@ -7,6 +7,7 @@ import base64
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -1488,6 +1489,66 @@ def test_qrcode_login_binds_and_persists_auth_state(monkeypatch, tmp_path: Path)
         assert ((state_dir / "wechat-auth.json").stat().st_mode & 0o777) == 0o600
 
     _run(go())
+
+
+@pytest.mark.asyncio
+async def test_qrcode_confirmation_drains_auth_persistence_across_cancellation(monkeypatch, tmp_path: Path):
+    from app.channels.wechat import WechatChannel
+
+    state_dir = tmp_path / "wechat-state"
+    channel = WechatChannel(
+        bus=MessageBus(),
+        config={
+            "state_dir": str(state_dir),
+            "qrcode_login_enabled": True,
+            "qrcode_poll_interval": 0.01,
+            "qrcode_poll_timeout": 1,
+        },
+    )
+    started = threading.Event()
+    release = threading.Event()
+    original_save_auth_state = channel._save_auth_state
+
+    async def request_qrcode():
+        return {"qrcode": "qr-cancel"}
+
+    async def request_status(_qrcode, **_kwargs):
+        return {"status": "confirmed", "bot_token": "durable-token", "ilink_bot_id": "bot-cancel"}
+
+    def blocking_save_auth_state(**kwargs):
+        if kwargs.get("status") == "confirmed":
+            started.set()
+            assert release.wait(timeout=5)
+        return original_save_auth_state(**kwargs)
+
+    monkeypatch.setattr(channel, "request_login_qrcode", request_qrcode)
+    monkeypatch.setattr(channel, "request_login_status", request_status)
+    monkeypatch.setattr(channel, "_save_auth_state", blocking_save_auth_state)
+
+    task = asyncio.create_task(channel._bind_via_qrcode())
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        assert channel._bot_token == "durable-token"
+
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    auth_state = json.loads((state_dir / "wechat-auth.json").read_text(encoding="utf-8"))
+    assert auth_state["status"] == "confirmed"
+    assert auth_state["bot_token"] == "durable-token"
+    assert auth_state["ilink_bot_id"] == "bot-cancel"
 
 
 def test_save_auth_state_tightens_preexisting_loose_file(tmp_path: Path):

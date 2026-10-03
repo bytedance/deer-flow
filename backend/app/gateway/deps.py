@@ -247,6 +247,20 @@ def _log_recovered_stream_cleanup_result(task: asyncio.Task[None], run_id: str) 
         logger.warning("Failed to clean up recovered run stream for %s", run_id, exc_info=True)
 
 
+async def _cleanup_recovered_scheduled_goals(recovered_runs: list[RunRecord], *, run_manager: RunManager, checkpointer: Checkpointer) -> None:
+    """Clear only confirmed occurrence-owned goals after durable orphan recovery."""
+    from deerflow.runtime.runs.worker import clear_recovered_scheduled_goal
+
+    for record in recovered_runs:
+        metadata = getattr(record, "metadata", None) or {}
+        if not isinstance(metadata.get("scheduled_goal_objective"), str):
+            continue
+        try:
+            await clear_recovered_scheduled_goal(record, run_manager=run_manager, checkpointer=checkpointer)
+        except Exception:
+            logger.warning("Scheduled goal cleanup failed for recovered run %s; retained for guarded next-run cleanup", record.run_id, exc_info=True)
+
+
 async def _flush_recovered_stream_cleanups(
     bridge: StreamBridge,
     cleanup_tasks: dict[asyncio.Task[None], str],
@@ -592,6 +606,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             task.add_done_callback(lambda completed: recovered_stream_cleanup_tasks.pop(completed, None))
 
         async def terminalize_recovered_runs(recovered_runs: list[RunRecord]) -> None:
+            await _cleanup_recovered_scheduled_goals(recovered_runs, run_manager=app.state.run_manager, checkpointer=app.state.checkpointer)
             await _terminalize_recovered_runs(
                 app.state.stream_bridge,
                 recovered_runs,
@@ -617,17 +632,18 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             before=now_iso(),
             stop_reason=ORPHAN_RECOVERY_STOP_REASON,
         )
-        await _terminalize_recovered_runs(
-            app.state.stream_bridge,
-            recovered_runs,
-            cleanup_delay=cleanup_delay,
-            on_cleanup_scheduled=track_recovered_stream_cleanup,
-        )
+        await terminalize_recovered_runs(recovered_runs)
         await _mark_latest_startup_recovered_threads_error(
             app.state.run_manager,
             app.state.thread_store,
             recovered_runs,
         )
+
+        from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+        from app.gateway.extension_agent_runs import GatewayAgentRunsHost
+
+        app.state.agent_runs_host = GatewayAgentRunsHost(app, load_user=SQLiteUserRepository(sf).get_user_by_id if sf is not None else None)
+        stack.callback(app.state.agent_runs_host.close)
 
         # Start the lease heartbeat if enabled (multi-worker deployments).
         await app.state.run_manager.start_heartbeat()
@@ -635,6 +651,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         try:
             yield
         finally:
+            app.state.agent_runs_host.close()
             # Drain in-flight run tasks BEFORE the AsyncExitStack tears down the
             # checkpointer (and its connection pool). A run still mid-graph would
             # otherwise leak into asyncio.run() shutdown, where langgraph's
@@ -759,7 +776,11 @@ def get_run_context(request: Request) -> RunContext:
     captured in :func:`langgraph_runtime` so callers never see a store bound to
     one backend paired with a config pointing at another.
     """
+    host = getattr(request.app.state, "agent_runs_host", None)
+    # Internal/channel and PAT runs deliberately receive no retained delegation.
+    agent_runs = host.bind(request) if host is not None else None
     return RunContext(
+        agent_runs=agent_runs,
         checkpointer=get_checkpointer(request),
         store=get_store(request),
         event_store=get_run_event_store(request),

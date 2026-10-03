@@ -35,6 +35,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request
 
 from app.gateway.github.dispatcher import fanout_event
+from app.gateway.utils import constant_time_equals
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,7 @@ def _verify_signature(secret: str, body: bytes, signature_header: str | None) ->
         return False
     provided = signature_header.removeprefix("sha256=").strip()
     expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(provided, expected)
+    return constant_time_equals(provided, expected)
 
 
 def _summarise_event(event: str, payload: dict[str, Any]) -> str:

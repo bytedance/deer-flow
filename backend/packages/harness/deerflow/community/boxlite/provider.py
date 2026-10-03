@@ -653,7 +653,12 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
                 return
             self._shutdown_called = True
 
-        self._stop_idle_checker()
+        try:
+            self._stop_idle_checker()
+        except Exception:
+            with self._lock:
+                self._shutdown_called = False
+            raise
 
         with self._lock:
             active = list(self._boxes.values())

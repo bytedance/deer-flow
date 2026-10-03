@@ -1025,6 +1025,8 @@ class RunJournal(BaseCallbackHandler):
             output_tokens: Output token count
             total_tokens: Total token count (computed from input+output if 0/missing)
             cache_read_tokens: Optional prompt-cache-hit input tokens
+            count_call: Optional 1 to count this distinct external invocation
+            usage_missing: Optional 1 when token totals cannot fully price it
         """
         if not self._track_tokens:
             return
@@ -1034,6 +1036,8 @@ class RunJournal(BaseCallbackHandler):
                 continue
             if source_id in self._counted_external_source_ids:
                 continue
+            count_call = record.get("count_call") == 1
+            usage_missing = record.get("usage_missing") == 1
 
             total_tk = record.get("total_tokens", 0) or 0
             if total_tk <= 0:
@@ -1041,12 +1045,18 @@ class RunJournal(BaseCallbackHandler):
                 output_tk = record.get("output_tokens", 0) or 0
                 total_tk = input_tk + output_tk
             if total_tk <= 0:
-                continue
+                if not count_call and not usage_missing:
+                    continue
 
             input_tk = record.get("input_tokens", 0) or 0
             output_tk = record.get("output_tokens", 0) or 0
 
             self._counted_external_source_ids.add(source_id)
+            if count_call:
+                self._llm_call_count += 1
+            if usage_missing:
+                bucket = self._tokens_by_model.setdefault(record.get("model_name") or "unknown", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+                bucket["missing_usage_calls"] = bucket.get("missing_usage_calls", 0) + 1
             self._total_input_tokens += input_tk
             self._total_output_tokens += output_tk
             self._total_tokens += total_tk

@@ -23,6 +23,13 @@ export interface Translations {
     deploymentHint: string;
     moduleUnavailable: string;
     noResults: string;
+    catalogEntry: string;
+    catalogHint: string;
+    installationGuide: string;
+    catalog: Record<
+      "bookmarks" | "context" | "classify" | "screening" | "example",
+      { title: string; description: string }
+    >;
     pageUnavailable: string;
     pageUnavailableHint: string;
     viewAll: string;
@@ -301,6 +308,26 @@ export interface Translations {
 
   // Input Box
   inputBox: {
+    mentionPicker: string;
+    mentionSearch: string;
+    mentionSkills: string;
+    mentionFiles: string;
+    mentionExtensions: string;
+    mentionExtensionsLimit: string;
+    mentionConversations: string;
+    mentionUpload: string;
+    mentionEmpty: string;
+    mentionLoadMore: string;
+    mentionLoading: string;
+    mentionFailed: string;
+    mentionRetry: string;
+    mentionAttaching: string;
+    mentionAttachFailed: string;
+    mentionMultipleSkills: string;
+    mentionNoProject: string;
+    mentionUnavailable: string;
+    mentionClose: string;
+
     placeholder: string;
     disclaimer: string;
     createSkillPrompt: string;
@@ -743,6 +770,7 @@ export interface Translations {
       launching: string;
       running: string;
       success: string;
+      unmet: string;
       failed: string;
       skipped: string;
       interrupted: string;

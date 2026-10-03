@@ -118,6 +118,14 @@ LLM-powered persistent context retention across conversations:
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
 
+### Run Event Storage
+
+For direct `RunEventStore.list_messages` callers, `after_seq` and `before_seq`
+bound an exclusive message window. With both cursors, reads return the first
+`limit` messages inside that window in ascending sequence order across memory,
+JSONL, and database backends. Keep `before_seq` fixed and advance `after_seq`
+to the last returned sequence to page forward through a bounded history range.
+
 ### Gateway API
 
 FastAPI application providing REST endpoints for frontend integration:
@@ -127,7 +135,8 @@ FastAPI application providing REST endpoints for frontend integration:
 | `GET /api/models` | List available LLM models |
 | `GET/PUT /api/mcp/config` | Manage MCP server configurations |
 | `POST /api/mcp/cache/reset` | Reset cached MCP tools so they reload on next use |
-| `GET/PUT /api/skills` | List and manage skills |
+| `GET /api/skills` | List skills visible to the caller |
+| `PUT /api/skills/{skill_name}` | Enable or disable a skill (admin only) |
 | `POST /api/skills/install` | Install skill from `.skill` archive |
 | `GET /api/memory` | Retrieve memory data |
 | `POST /api/memory/reload` | Force memory reload |
@@ -143,6 +152,12 @@ Cancelling an upload waits for an already-running document conversion worker to
 finish before removing its temporary source. This prevents cleanup from deleting
 a file that the converter is still reading; cancellation can therefore take as
 long as that conversion.
+
+Converted-upload ownership records live in each thread's `upload-companions/`
+directory, outside the sandbox-mounted `user-data/` tree. Older conversions
+without a record remain separate Markdown uploads and no longer provide an
+inferred outline for their source document; see [file upload storage and upgrade
+behavior](docs/FILE_UPLOAD.md#支持的文档格式).
 
 ### IM Channels
 

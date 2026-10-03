@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from urllib.parse import urlparse
 
+from .egress import BrowserEgressProxy, EgressResolver
+
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext, Page, Playwright
 
@@ -276,6 +278,7 @@ class BrowserSession:
         viewport: dict[str, int],
         cdp_url: str | None = None,
         url_guard: Callable[[str], str | None] | None = None,
+        egress_resolver: EgressResolver | None = None,
         on_activity: Callable[[], None] | None = None,
     ) -> None:
         self._loop = loop
@@ -291,6 +294,13 @@ class BrowserSession:
         # cloud-metadata host.
         self._url_guard = url_guard
         self._request_guard_bound = False
+        # The request guard resolves a URL's host to screen it, but Chromium
+        # resolves it again to connect. A launched browser therefore sends every
+        # TCP connection through a loopback SOCKS5 proxy that resolves once through
+        # ``egress_resolver`` and connects only to the addresses it vetted, so a
+        # rebinding DNS answer cannot reach a private or metadata host.
+        self._egress_resolver = egress_resolver
+        self._egress_proxy: BrowserEgressProxy | None = None
         # When set, attach to an already-running Chrome via the DevTools
         # Protocol (like Codex's "connect to your real browser") instead of
         # launching a private headless instance. The user watches the agent
@@ -399,7 +409,7 @@ class BrowserSession:
                 return self._page
 
             if self._browser is None or not self._browser.is_connected():
-                self._browser = await self._playwright.chromium.launch(headless=self._headless)
+                self._browser = await self._playwright.chromium.launch(headless=self._headless, proxy=await self._egress_proxy_settings())
             # device_scale_factor=2 renders screenshots at retina density so the
             # panel stays crisp when the image is scaled up to fill the view.
             self._context = await self._browser.new_context(viewport=self._viewport, device_scale_factor=2)
@@ -408,6 +418,15 @@ class BrowserSession:
             self._set_active_page(await self._context.new_page())
             self._bind_new_page_listener()
             return self._page
+
+    async def _egress_proxy_settings(self) -> dict[str, str] | None:
+        if self._egress_resolver is None:
+            return None
+        if self._egress_proxy is None:
+            self._egress_proxy = BrowserEgressProxy(self._egress_resolver)
+        # Playwright already proxies loopback for Chromium unless an environment
+        # override disables it; spell it out so localhost is never exempt.
+        return {"server": await self._egress_proxy.start(), "bypass": "<-loopback>"}
 
     def _set_active_page(self, page: Page) -> None:
         """Adopt *page* as the active page and keep the live screencast on it.
@@ -461,7 +480,8 @@ class BrowserSession:
             url = ""
             with contextlib.suppress(Exception):
                 url = route.request.url
-            if url.startswith(("http://", "https://")) and guard(url) is not None:
+            # The guard resolves hostnames; keep that off the shared browser loop.
+            if url.startswith(("http://", "https://")) and await asyncio.to_thread(guard, url) is not None:
                 logger.warning("browser request blocked by SSRF guard: %s", redact_browser_url(url))
                 with contextlib.suppress(Exception):
                     await route.abort("blockedbyclient")
@@ -692,7 +712,11 @@ class BrowserSession:
             if self._playwright is not None:
                 with contextlib.suppress(Exception):
                     await self._playwright.stop()
+            if self._egress_proxy is not None:
+                with contextlib.suppress(Exception):
+                    await self._egress_proxy.close()
         finally:
+            self._egress_proxy = None
             self._playwright = None
             self._browser = None
             self._context = None
@@ -917,6 +941,7 @@ class BrowserSessionManager:
         cdp_url: str | None = None,
         allow_unguarded_cdp: bool = False,
         url_guard: Callable[[str], str | None] | None = None,
+        egress_resolver: EgressResolver | None = None,
         pin: bool = False,
     ) -> BrowserSession:
         ensure_browser_worker_compatibility()
@@ -941,6 +966,7 @@ class BrowserSessionManager:
                     viewport=viewport or {"width": 1280, "height": 720},
                     cdp_url=cdp_url,
                     url_guard=url_guard,
+                    egress_resolver=egress_resolver,
                     on_activity=lambda: self._touch_session(key),
                 )
                 self._sessions[key] = session

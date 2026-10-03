@@ -26,7 +26,11 @@ raise, and API create/update validation remains strict.
 
 **Main Configuration** (`config.yaml`):
 
-Setup: Copy `config.example.yaml` to `config.yaml` in the **project root** directory.
+Setup: Copy root `config.example.yaml` to `config.yaml`. Startup callers use
+`deerflow.env.load_selected_env_file()` for optional `DEER_FLOW_ENV_FILE` (cwd-relative,
+strict readable file, process env wins). Reject a disabling `PYTHON_DOTENV_DISABLED`
+when selection is explicit; otherwise retain the original `load_dotenv()`.
+Keep this helper free of config imports so auth/debug cannot preload defaults.
 
 **Config Versioning**: `config.example.yaml` has a `config_version` field. On startup, `AppConfig.from_file()` compares user version vs example version and emits a warning if outdated. Missing `config_version` = version 0. Run `make config-upgrade` to auto-merge missing fields. When changing the config schema, bump `config_version` in `config.example.yaml`.
 
@@ -38,6 +42,13 @@ RAGFlow `knowledge_search` tool; LightRAG and other knowledge providers keep
 their tool-local settings unchanged.
 
 Top-level `recursion_limit` and `max_recursion_limit` are hot-reloaded per Gateway run. The former supplies the default when a request omits or provides an invalid value; the latter caps both configured and client-provided budgets.
+
+`tool_output` character/count limits and every `tool_overrides` value share
+non-negative integer validation. Reject booleans before Pydantic coercion;
+preserve numeric strings from environment substitution and explicit zero.
+Zero per-tool overrides disable externalization only; a positive global
+fallback budget still truncates oversized output. Regression tests exercise
+YAML loading and both middleware tool-call paths in `test_tool_output_config_limits.py`.
 
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale. The loader reads the file once through `file_signature.read_config_with_signature` and parses those same bytes, so the recorded signature always describes the parsed content: a write that races the load can only cause one extra reload, never a cache that holds one revision under another revision's signature (which the comparison could never detect).
 
@@ -53,9 +64,13 @@ application repositories continue to use `database`.
 
 Configuration priority:
 1. Explicit `config_path` argument
-2. `DEER_FLOW_CONFIG_PATH` environment variable
-3. `config.yaml` in current directory (backend/)
-4. `config.yaml` in parent directory (project root - **recommended location**)
+2. `DEER_FLOW_CONFIG_PATH` environment variable (a missing file is an error, not a fallthrough)
+3. `config.yaml` under `DEER_FLOW_PROJECT_ROOT`, or the current directory when it is unset
+4. Legacy `backend/config.yaml`, then repository-root `config.yaml` (project root is the **recommended location**)
+
+`scripts/config-upgrade.sh` calls `AppConfig.resolve_config_path` rather than copying this order.
+The legacy locations are anchored to the installed harness source, not to the caller's checkout.
+`scripts/doctor.py` calls `AppConfig.resolve_config_path` rather than copying this order.
 
 Config values starting with `$` are resolved as environment variables (e.g., `$OPENAI_API_KEY`).
 `ModelConfig` also declares `use_responses_api` and `output_version` so OpenAI `/v1/responses` can be enabled explicitly while still using `langchain_openai:ChatOpenAI`.
