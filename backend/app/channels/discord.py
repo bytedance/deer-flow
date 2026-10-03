@@ -762,8 +762,9 @@ class DiscordChannel(Channel):
         )
         if not scheduled:
             logger.warning("[Discord] main loop not running, cannot bind channel connection")
-        # The code is consumed either way so a bind attempt never reaches the
-        # agent as a chat turn.
+        # Handled either way so a bind attempt never reaches the agent as a chat
+        # turn; an unscheduled bind leaves the code unconsumed, so the user can
+        # retry it after the Gateway restarts.
         return True
 
     async def _bind_connection_from_connect_code_on_main(self, message, code: str) -> bool:

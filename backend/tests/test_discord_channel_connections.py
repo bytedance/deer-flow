@@ -265,6 +265,28 @@ async def test_discord_stop_cancels_pending_identity_lookup_and_releases_intake(
     assert bus.inbound_queue.qsize() == 1
 
 
+@pytest.mark.anyio
+async def test_discord_unscheduled_bind_is_handled_but_leaves_code_unconsumed(repo):
+    state = "discord-bind-code"
+    await repo.create_oauth_state(
+        owner_user_id="deerflow-user-1",
+        provider="discord",
+        state=state,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    bus = MessageBus()
+    channel = DiscordChannel(bus=bus, config={"bot_token": "token", "connection_repo": repo})
+    channel._main_loop = None  # Gateway loop already gone
+
+    handled = await channel._bind_connection_from_connect_code(_discord_message(f"/connect {state}"), state)
+
+    # The message is swallowed rather than published as a chat turn, but the
+    # one-time code was never consumed, so a retry after restart still binds.
+    assert handled is True
+    assert bus.inbound_queue.qsize() == 0
+    assert await repo.consume_oauth_state(provider="discord", state=state) is not None
+
+
 def _fake_discord_module() -> SimpleNamespace:
     class _Client:
         def __init__(self, **_kwargs) -> None:
