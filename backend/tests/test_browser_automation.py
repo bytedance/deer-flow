@@ -26,6 +26,7 @@ from deerflow.community.browser_automation.session import (
     BrowserSessionManager,
     PageSnapshot,
     SnapshotElement,
+    browser_multi_worker_error,
 )
 
 
@@ -882,9 +883,20 @@ class TestSessionManager:
 
     async def test_get_session_rejects_runtime_multi_worker_browser_use(self, monkeypatch):
         monkeypatch.setenv("GATEWAY_WORKERS", "2")
+        monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
         manager = BrowserSessionManager()
 
         with pytest.raises(RuntimeError, match="process-local"):
+            manager.get_session("thread-a")
+
+    async def test_get_session_rejects_worker_count_from_the_uvicorn_fallback(self, monkeypatch):
+        # backend/Dockerfile and scripts/serve.sh start uvicorn with no --workers, so
+        # WEB_CONCURRENCY is what really decides the process count here too.
+        monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+        monkeypatch.setenv("WEB_CONCURRENCY", "2")
+        manager = BrowserSessionManager()
+
+        with pytest.raises(RuntimeError, match=r"WEB_CONCURRENCY=2 cannot enable agentic browser tools"):
             manager.get_session("thread-a")
 
     async def test_cdp_requires_explicit_unguarded_trust_opt_in(self):
@@ -946,6 +958,47 @@ class TestSessionManager:
         release.set()
         assert await operation == "https://example.com/"
         assert session.active_refs == 0
+
+
+@pytest.mark.parametrize(
+    ("gateway_workers", "web_concurrency", "expected"),
+    [
+        pytest.param(None, "4", 4, id="uvicorn-fallback-counts"),
+        pytest.param("2", None, 2, id="documented-knob-counts"),
+        pytest.param("1", "4", 1, id="documented-knob-wins-when-both-set"),
+        pytest.param("  ", "3", 3, id="blank-is-unset"),
+        pytest.param(None, None, 1, id="nothing-set"),
+        pytest.param(None, "auto", 1, id="uvicorn_rejects_it_so_stay_inert"),
+    ],
+)
+def test_worker_count_resolution_reads_both_spellings(monkeypatch, gateway_workers, web_concurrency, expected):
+    for name, value in (("GATEWAY_WORKERS", gateway_workers), ("WEB_CONCURRENCY", web_concurrency)):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+    assert session_mod._worker_count_from_env()[0] == expected
+
+
+def test_worker_count_error_names_the_variable_that_set_the_count(monkeypatch):
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+
+    error = browser_multi_worker_error()
+
+    assert error is not None
+    assert error.startswith("WEB_CONCURRENCY=4 ")
+    assert "Set WEB_CONCURRENCY=1" in error
+
+
+def test_worker_count_error_keeps_naming_the_documented_knob_when_passed_in(monkeypatch):
+    # deps._enforce_postgres_for_multi_worker passes the count it resolved itself, so
+    # the refusal it raises keeps naming GATEWAY_WORKERS as it always has.
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+
+    assert browser_multi_worker_error(3).startswith("GATEWAY_WORKERS=3 ")
 
 
 def test_resolve_session_always_reads_browser_navigate_config():
