@@ -123,3 +123,7 @@ repeat provider selection or persist the probe override.
 Tests: `test_managed_models.py`, `test_managed_deepseek.py` (real SDK serialization
 with an HTTP double), opt-in `test_managed_deepseek_live.py`, and
 `tests/blocking_io/test_managed_models.py`.
+
+### Native Anthropic async transport (`anthropic_provider.py`)
+
+The model factory wraps only the official `langchain_anthropic.chat_models.ChatAnthropic` class; import aliases resolve to the same class, while custom subclasses retain their own behavior. LangChain's default async HTTPX helper caches transports process-wide by endpoint/timeout/proxy, which lets a child agent's native event loop reuse a socket created on the parent loop. The adapter creates an Anthropic SDK client within each async generation/stream scope and closes it on completion, error, or cancellation. Its `ContextVar` includes the owning task so copied contexts and child tasks cannot reuse another task's transport. Sync calls continue through the inherited client path. Regression coverage: `tests/test_anthropic_async_loop_isolation.py`.

@@ -464,6 +464,13 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if model_config is None:
         raise ValueError(f"Model {name} not found in config") from None
     model_class = resolve_class(model_config.use, BaseChatModel)
+    if model_class.__module__ == "langchain_anthropic.chat_models":
+        from langchain_anthropic import ChatAnthropic
+
+        if model_class is ChatAnthropic:
+            from deerflow.models.anthropic_provider import LoopIsolatedChatAnthropic
+
+            model_class = LoopIsolatedChatAnthropic
     model_settings_from_config = model_config.model_dump(exclude_none=True, exclude=set(_MODEL_METADATA_FIELDS))
     if isinstance(model_config.reasoning, bool | str):
         # Before the capability contract, ``reasoning`` was an unrestricted
