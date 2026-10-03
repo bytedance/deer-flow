@@ -39,10 +39,10 @@ class FakeDeliveryRepo:
         self.events.append("claim")
         return claimed
 
-    async def mark_sent(self, delivery_id):
+    async def mark_sent(self, delivery_id, *, claim_token=None):
         self.sent.append(delivery_id)
 
-    async def mark_failed(self, delivery_id, *, error=None, count_attempt=True, terminal=False):
+    async def mark_failed(self, delivery_id, *, claim_token=None, error=None, count_attempt=True, terminal=False):
         self.failed.append((delivery_id, error, count_attempt))
         if terminal:
             self.terminal_failures.append((delivery_id, error))
