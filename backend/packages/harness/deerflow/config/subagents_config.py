@@ -2,7 +2,7 @@
 
 import logging
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 from deerflow.config.prompt_overlay import PromptOverlay
 from deerflow.config.token_budget_config import TokenBudgetConfig
@@ -14,6 +14,13 @@ MIN_TOTAL_SUBAGENTS_PER_RUN = 1
 MAX_TOTAL_SUBAGENTS_PER_RUN = 50
 MIN_CONCURRENT_SUBAGENT_CALLS = 1
 MAX_CONCURRENT_SUBAGENT_CALLS = 64
+
+
+def _reject_boolean_int(value: object, info: ValidationInfo) -> object:
+    """Reject YAML `true`/`false` before Pydantic coerces them to `1`/`0`."""
+    if isinstance(value, bool):
+        raise ValueError(f"{info.field_name} must be an integer, not a boolean")
+    return value
 
 
 def clamp_subagent_concurrency(value: int, *, execution_capacity: int | None = None) -> int:
@@ -114,6 +121,11 @@ class SubagentOverrideConfig(BaseModel):
         description="Per-run token budget override for this subagent (None = use the global subagents.token_budget default). Symmetric with timeout_seconds/max_turns.",
     )
 
+    @field_validator("timeout_seconds", "max_turns", mode="before")
+    @classmethod
+    def _reject_boolean_override_backstops(cls, value: object, info: ValidationInfo) -> object:
+        return _reject_boolean_int(value, info)
+
 
 class CustomSubagentConfig(BaseModel):
     """User-defined subagent type declared in config.yaml."""
@@ -151,6 +163,11 @@ class CustomSubagentConfig(BaseModel):
         description="Maximum execution time in seconds",
     )
 
+    @field_validator("timeout_seconds", "max_turns", mode="before")
+    @classmethod
+    def _reject_boolean_custom_backstops(cls, value: object, info: ValidationInfo) -> object:
+        return _reject_boolean_int(value, info)
+
 
 class SubagentsAppConfig(BaseModel):
     """Configuration for the subagent system."""
@@ -171,6 +188,12 @@ class SubagentsAppConfig(BaseModel):
         le=MAX_TOTAL_SUBAGENTS_PER_RUN,
         description="Default total number of subagent delegations allowed in one lead-agent run. This is a deterministic backstop against repeated legal-sized task batches. Valid range: 1-50.",
     )
+
+    @field_validator("timeout_seconds", "max_turns", "max_total_per_run", mode="before")
+    @classmethod
+    def _reject_boolean_global_backstops(cls, value: object, info: ValidationInfo) -> object:
+        return _reject_boolean_int(value, info)
+
     token_budget: TokenBudgetConfig = Field(
         default_factory=default_subagent_token_budget,
         description="Default per-run token budget for subagents — a cost-ceiling backstop that engages by default (#3875 Phase 2). Set enabled: false to disable, or override per agent via agents.<name>.token_budget.",
