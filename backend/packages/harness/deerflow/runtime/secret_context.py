@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
+
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
 
 # Reserved sub-key of the run context that holds request-scoped secrets supplied
@@ -186,6 +188,7 @@ _SLASH_SKILL_ACTIVATION_RUN_KEY = "__slash_skill_activation_run"
 REDACTED_CONTEXT_KEYS = frozenset(
     {
         SECRETS_CONTEXT_KEY,
+        AGENT_RUNS_CONTEXT_KEY,
         ACTIVE_SECRETS_CONTEXT_KEY,
         _SLASH_SECRET_SOURCE_KEY,
         _SECRETS_BINDING_AUDIT_KEY,

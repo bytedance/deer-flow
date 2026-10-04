@@ -41,6 +41,33 @@ rs.mock("@/core/models/hooks", () => ({
   }),
 }));
 
+const pluginSearch = rs.fn();
+rs.mock("@/core/extensions/hooks", () => ({
+  useFrontendExtensions: () => ({
+    data: pluginEntries,
+    isPending: false,
+    isError: false,
+  }),
+}));
+const pluginEntries = [
+  {
+    namespace: "community.team",
+    viewer_id: "user-1",
+    module: "team",
+    entry: null,
+    title: "Team",
+    description: "",
+    settings: { enabled: true },
+    extension: {
+      apiVersion: 1,
+      module: "team",
+      mentionProviders: [
+        { id: "people", label: "People", search: pluginSearch },
+      ],
+    },
+  },
+];
+
 const skillCatalog = [
   {
     name: "research",
@@ -176,6 +203,8 @@ rs.mock("@/core/threads/hooks", () => ({
 }));
 
 beforeEach(() => {
+  pluginSearch.mockReset();
+  pluginSearch.mockResolvedValue([]);
   skillCatalog.splice(1);
   capability.enabled = true;
   capability.maxReferences = 3;
@@ -228,6 +257,52 @@ function enterMention(
 }
 
 describe("unified composer mentions", () => {
+  it("submits a plugin selection as readable text and structured metadata", async () => {
+    pluginSearch.mockResolvedValue([{ id: "alice", label: "Alice" }]);
+    const submit = rs.fn();
+    const { container } = renderComposer("plugin-mention", submit);
+    enterMention(container, "Ask @ali");
+    fireEvent.click(
+      await screen.findByRole("option", { name: "Alice People" }),
+    );
+    expect(screen.getByTestId("extension-mention-chip")).toBeTruthy();
+    fireEvent.keyDown(container.querySelector('[contenteditable="true"]')!, {
+      key: "Enter",
+    });
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(submit.mock.calls[0]![0].text).toBe("Ask @Alice ");
+    expect(
+      submit.mock.calls[0]![1].additionalKwargs.extension_mentions,
+    ).toEqual([
+      {
+        namespace: "community.team",
+        provider: "people",
+        id: "alice",
+        label: "Alice",
+      },
+    ]);
+  });
+  it("drops metadata when a plugin reference is toggled off", async () => {
+    pluginSearch.mockResolvedValue([{ id: "alice", label: "Alice" }]);
+    const submit = rs.fn();
+    const { container } = renderComposer("remove-plugin-mention", submit);
+    enterMention(container, "Ask @ali");
+    fireEvent.click(
+      await screen.findByRole("option", { name: "Alice People" }),
+    );
+    enterMention(container, "@ali");
+    fireEvent.click(
+      await screen.findByRole("option", { name: "Alice People" }),
+    );
+    expect(screen.queryByTestId("extension-mention-chip")).toBeNull();
+    fireEvent.keyDown(container.querySelector('[contenteditable="true"]')!, {
+      key: "Enter",
+    });
+    await waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(
+      submit.mock.calls[0]![1].additionalKwargs?.extension_mentions,
+    ).toBeUndefined();
+  });
   it("clears cached conversation metadata when the draft owner changes", async () => {
     const submit = rs.fn();
     const rendered = renderComposer("cache-first", submit);

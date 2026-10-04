@@ -9228,6 +9228,85 @@ class TestSlackAllowedUsers:
 
 
 # ---------------------------------------------------------------------------
+# Telegram allowed_users tests
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramAllowedUsers:
+    """An allowlist the operator configured must never silently open the bot."""
+
+    @staticmethod
+    def _channel(config_extra: dict):
+        from app.channels.telegram import TelegramChannel
+
+        return TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token", **config_extra})
+
+    @pytest.mark.parametrize("config_extra", [{}, {"allowed_users": None}, {"allowed_users": []}, {"allowed_users": " "}])
+    def test_unset_or_empty_allowlist_allows_everyone_without_warning(self, config_extra, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+            ch = self._channel(config_extra)
+
+        assert ch._check_user(42)
+        assert caplog.records == []
+
+    @pytest.mark.parametrize(
+        "allowed_users",
+        [[123456, 7], ["123456", " 7 "], (123456, 7), {123456, 7}],
+    )
+    def test_numeric_ids_are_allowed_and_others_denied(self, allowed_users):
+        ch = self._channel({"allowed_users": allowed_users})
+
+        assert ch._check_user(123456)
+        assert ch._check_user(7)
+        assert not ch._check_user(42)
+
+    @pytest.mark.parametrize("allowed_users", ["123456", 123456], ids=["str", "int"])
+    def test_scalar_id_is_one_entry_not_its_digits(self, allowed_users):
+        # Iterating the string "123456" used to allow users 1..6 and block 123456.
+        ch = self._channel({"allowed_users": allowed_users})
+
+        assert ch._check_user(123456)
+        assert not ch._check_user(1)
+
+    @pytest.mark.parametrize("bad_entry", ["@alice", 0, -5])
+    def test_unparseable_entry_is_dropped_with_warning(self, bad_entry, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+            ch = self._channel({"allowed_users": [123456, bad_entry]})
+
+        assert ch._check_user(123456)
+        assert not ch._check_user(42)
+        assert repr(bad_entry) in caplog.text
+        # 0 and -5 are numeric, so the hint has to say what they are missing.
+        assert "positive numeric" in caplog.text
+
+    @pytest.mark.parametrize(
+        "allowed_users",
+        # "123456,789" is what a ``$ENV`` reference to a comma-separated value resolves to.
+        [["@alice", "bob"], "@alice", "123456,789", [True], [4.2], {"id": 42}],
+    )
+    def test_allowlist_without_a_parseable_entry_denies_everyone(self, allowed_users, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+            ch = self._channel({"allowed_users": allowed_users})
+
+        assert not ch._check_user(42)
+        assert not ch._check_user(1)
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
+
+    @pytest.mark.parametrize(("allowed_users", "admitted"), [(["@alice"], False), ([42], True)])
+    def test_on_text_applies_the_allowlist(self, allowed_users, admitted):
+        async def go():
+            ch = self._channel({"allowed_users": allowed_users})
+            ch._main_loop = asyncio.get_running_loop()
+            ch._reserve_inbound = MagicMock(return_value=None)
+
+            await ch._on_text(_make_telegram_update("private", message_id=10), None)
+
+            assert ch._reserve_inbound.called is admitted
+
+        _run(go())
+
+
+# ---------------------------------------------------------------------------
 # Telegram send retry tests
 # ---------------------------------------------------------------------------
 

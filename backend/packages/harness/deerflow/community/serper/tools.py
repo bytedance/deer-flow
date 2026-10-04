@@ -8,6 +8,7 @@ API. An API key is required. Sign up at https://serper.dev to get one.
 import json
 import logging
 import os
+import re
 from ipaddress import IPv4Address, ip_address
 from urllib.parse import urlparse
 
@@ -89,6 +90,70 @@ def _clean_query(query: str) -> str:
     if len(query) > 500:
         query = query[:500]
     return query
+
+
+def _normalize_domain(value: object) -> str:
+    """Accept DNS domains only, using Python's IDNA codec consistently."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ValueError("expected a domain string")
+    domain = value.removesuffix(".").lower()
+    try:
+        domain = domain.encode("idna").decode("ascii")
+        # Validate existing A-labels too (the encoder otherwise passes them through).
+        domain.encode("ascii").decode("idna")
+    except UnicodeError as exc:
+        raise ValueError("invalid IDNA domain") from exc
+    labels = domain.split(".")
+    if len(domain) > 253 or len(labels) < 2 or any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels):
+        raise ValueError("expected a DNS domain without scheme, port, path or operators")
+    try:
+        ip_address(domain)
+    except ValueError:
+        if _decode_ipv4(domain) is None:
+            return domain
+    raise ValueError("IP literals are not domains")
+
+
+def _domain_list(extra: dict, name: str) -> list[str]:
+    values = extra.get(name, [])
+    if not isinstance(values, list) or len(values) > 10:
+        raise ValueError(f"{name} must be a list of at most 10 domains")
+    try:
+        return list(dict.fromkeys(_normalize_domain(value) for value in values))
+    except ValueError as exc:
+        raise ValueError(f"Invalid {name}: {exc}") from exc
+
+
+def _domain_query(query: str, include: list[str], exclude: list[str]) -> str:
+    if not include and not exclude:
+        return query
+    parts = [f"({query})"]
+    if include:
+        parts.append("(" + " OR ".join(f"site:{domain}" for domain in include) + ")")
+    parts.extend(f"-site:{domain}" for domain in exclude)
+    scoped = " ".join(parts)
+    if len(scoped) > 500:
+        raise ValueError("Serper query with domain filters exceeds 500 characters; shorten the query or domain lists")
+    return scoped
+
+
+def _matches_domain_scope(value: object, include: list[str], exclude: list[str]) -> bool:
+    # This is source selection, not DNS resolution or a fetch permission check.
+    if not isinstance(value, str) or any(ord(char) <= 32 or ord(char) == 127 for char in value) or "\\" in value:
+        return False
+    try:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username is not None or parsed.password is not None:
+            return False
+        _ = parsed.port  # Reject malformed/out-of-range ports.
+        host = _normalize_domain(parsed.hostname)
+    except ValueError:
+        return False
+
+    def matches(domains: list[str]) -> bool:
+        return any(host == domain or host.endswith("." + domain) for domain in domains)
+
+    return not matches(exclude) and (not include or matches(include))
 
 
 def _decode_ipv4(host: str) -> IPv4Address | None:
@@ -234,19 +299,33 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     max_results = _coerce_max_results(max_results)
     query = _clean_query(query)
 
+    try:
+        extra = config.model_extra if config is not None else {}
+        include = _domain_list(extra, "include_domains")
+        exclude = _domain_list(extra, "exclude_domains")
+        search_query = _domain_query(query, include, exclude)
+    except ValueError as exc:
+        logger.error("Invalid Serper domain filters: %s", exc)
+        return json.dumps({"error": str(exc), "query": query}, ensure_ascii=False)
+
     api_key = _get_api_key("web_search")
     if not api_key:
         return _missing_key_error(query, "web_search")
 
-    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, query, max_results, time_range=time_range)
+    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range)
     if error_json is not None:
-        return error_json
+        error = json.loads(error_json)
+        error["query"] = query
+        return json.dumps(error, ensure_ascii=False)
 
     organic, error_json = _response_items(data, "organic", query)
     if error_json is not None:
         return error_json
-    if not organic:
+    if not organic and not (include or exclude):
         return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
+
+    if include or exclude:
+        organic = [result for result in organic if _matches_domain_scope(result.get("link"), include, exclude)]
 
     # Search result links are returned verbatim (not passed through
     # _safe_public_url): they are surfaced as citations for the model to read,

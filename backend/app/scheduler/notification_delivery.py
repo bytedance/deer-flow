@@ -91,14 +91,30 @@ def render_notification_text(delivery: dict[str, Any]) -> str:
     payload = delivery.get("payload") or {}
     event = delivery.get("event") or ""
     task_label = payload.get("task_title") or payload.get("task_id") or delivery.get("task_id")
-    if event == "run_failed":
+    if event in {"run_unmet", "task_paused"}:
+        label = "Scheduled task goal was not met" if event == "run_unmet" else "Scheduled task automatically paused"
+        lines = [f"**{label}**", f"Task: `{task_label}`"]
+        # These are host-defined result codes, never model/provider error text.
+        reason = payload.get("reason_code")
+        blockers = {"missing_evidence", "needs_user_input", "run_failed", "external_wait", "goal_not_met_yet"}
+        allowed = (
+            blockers
+            | {f"blocked:{blocker}" for blocker in blockers}
+            | {"no_verdict", "consecutive_unmet", "evaluator_failed", "max_continuations_reached", "no_progress_detected", "token_capped", "no_durable_end_of_turn", "thread_changed_after_evaluation", "thread_changed_before_continuation"}
+        )
+        lines.append(f"Reason: `{reason if isinstance(reason, str) and reason in allowed else 'unknown'}`")
+        lines.append("See the DeerFlow workspace for the result and next steps.")
+    elif event == "run_failed":
         lines = ["**Scheduled task failed**", f"Task: `{task_label}`"]
         # Do not forward raw error text to external IM: scheduled runs can
         # surface hostnames, paths, and token fragments in tracebacks. Users
         # can open the workspace for the full detail.
         lines.append("See the DeerFlow workspace for error details.")
     else:
-        lines = ["**Scheduled task completed**", f"Task: `{task_label}`"]
+        heading = "Scheduled task completed"
+        if payload.get("relied_on_assumption") is True:
+            heading += " — met, relying on stated assumptions"
+        lines = [f"**{heading}**", f"Task: `{task_label}`"]
         # The result summary belongs to a successful outcome only: on failed
         # runs a partial answer would be misleading, so the error line above
         # stays the sole detail.
@@ -175,7 +191,7 @@ class NotificationDeliveryWorker:
                 # reclaims the row on a later poll.
                 logger.exception("Notification delivery %s crashed; isolating from the rest of the batch", row.get("id"))
                 try:
-                    await self._delivery_repo.mark_failed(row["id"], error="delivery crashed before completion")
+                    await self._delivery_repo.mark_failed(row["id"], claim_token=row.get("claim_token"), error="delivery crashed before completion")
                 except Exception:
                     logger.warning("Could not mark crashed delivery %s as failed; stale reset will recover it", row.get("id"), exc_info=True)
 
@@ -277,12 +293,13 @@ class NotificationDeliveryWorker:
             if still_connected is False:
                 await self._delivery_repo.mark_failed(
                     delivery_id,
+                    claim_token=delivery.get("claim_token"),
                     error=f"target is no longer a connected {provider} identity of its owner",
                     terminal=True,
                 )
                 return
             if still_connected is None:
-                await self._delivery_repo.mark_failed(delivery_id, error="could not verify the target's channel connection", count_attempt=False)
+                await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error="could not verify the target's channel connection", count_attempt=False)
                 return
         # Re-check channel liveness at delivery time, not enqueue time: the
         # channel may have been disabled or disconnected after the outbox row
@@ -294,7 +311,7 @@ class NotificationDeliveryWorker:
             # Channel outage is not the delivery's fault: park the row
             # without consuming its retry budget so it survives an
             # hours-long outage and delivers once the channel returns.
-            await self._delivery_repo.mark_failed(delivery_id, error=f"channel '{provider}' is not running", count_attempt=False)
+            await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error=f"channel '{provider}' is not running", count_attempt=False)
             return
         enriched = delivery
         if delivery.get("event") == "run_completed":
@@ -310,12 +327,12 @@ class NotificationDeliveryWorker:
                 text_markdown=render_notification_text(enriched),
             )
         except ChannelUnavailable as exc:
-            await self._delivery_repo.mark_failed(delivery_id, error=str(exc), count_attempt=False)
+            await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error=str(exc), count_attempt=False)
             return
         except Exception as exc:
-            await self._delivery_repo.mark_failed(delivery_id, error=str(exc))
+            await self._delivery_repo.mark_failed(delivery_id, claim_token=delivery.get("claim_token"), error=str(exc))
             return
-        await self._delivery_repo.mark_sent(delivery_id)
+        await self._delivery_repo.mark_sent(delivery_id, claim_token=delivery.get("claim_token"))
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():

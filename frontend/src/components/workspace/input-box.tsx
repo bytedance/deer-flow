@@ -78,6 +78,10 @@ import {
   buildConversationReferenceMetadata,
   type ConversationReference,
 } from "@/core/conversation-references";
+import {
+  extensionMentionId,
+  MAX_EXTENSION_MENTIONS,
+} from "@/core/extensions/mentions";
 import { useConversationReferencesCapability } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
@@ -169,6 +173,7 @@ import {
   type SlashCommandSuggestion,
 } from "./input-box-helpers";
 import {
+  extensionMentionMetadata,
   inlineReferences,
   reconcileConversationReferences,
   MAX_EXPLICIT_SKILLS,
@@ -1463,12 +1468,21 @@ export function InputBox({
         toast.warning(t.inputBox.mentionMultipleSkills);
         return Promise.reject(new Error("Too many skill references."));
       }
+      const extensionMetadata = extensionMentionMetadata(textInput.value);
+      if (
+        (extensionMetadata.extension_mentions?.length ?? 0) >
+        MAX_EXTENSION_MENTIONS
+      ) {
+        toast.warning(t.inputBox.mentionExtensionsLimit);
+        return Promise.reject(new Error("Too many extension mentions"));
+      }
       pendingDraftSubmissionRef.current = {
         key: draftKey,
         text: textInput.value,
         skillName: null,
       };
       const additionalKwargs = {
+        ...extensionMetadata,
         ...(skillReferences.length
           ? { skill_references: skillReferences }
           : {}),
@@ -1551,6 +1565,7 @@ export function InputBox({
       sidecar,
       t.inputBox.suggestionPlaceholderRequired,
       t.inputBox.mentionMultipleSkills,
+      t.inputBox.mentionExtensionsLimit,
       conversationCapability,
       threadId,
       uploadLimits,
@@ -1845,7 +1860,9 @@ export function InputBox({
           ? selection.skill.name
           : selection.kind === "conversation"
             ? selection.reference.threadId
-            : null;
+            : selection.kind === "extension"
+              ? extensionMentionId(selection.reference)
+              : null;
       const selected =
         selectionId &&
         inlineReferences(originalText).some(
@@ -1882,6 +1899,12 @@ export function InputBox({
           "conversation",
           selection.reference.threadId,
           selection.reference.title,
+        );
+      if (selection.kind === "extension")
+        token = referenceToken(
+          "extension",
+          extensionMentionId(selection.reference),
+          selection.reference.label,
         );
       if (selection.kind === "file")
         token = referenceToken(
@@ -2878,6 +2901,9 @@ export function InputBox({
           style={{ maxHeight: mentionPlacement.maxHeight }}
         >
           <MentionPicker
+            selectedExtensions={inlineReferences(textInput.value)
+              .filter((ref) => ref.kind === "extension")
+              .map((ref) => ref.id)}
             ref={mentionPickerRef}
             listId={mentionListId}
             query={mentionQuery?.query ?? ""}

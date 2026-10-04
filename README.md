@@ -344,6 +344,23 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
 
    </details>
 
+For an explicit backend dotenv file, export `DEER_FLOW_ENV_FILE` before startup,
+alongside `DEER_FLOW_CONFIG_PATH` if needed. For example, from `backend/`:
+
+```bash
+DEER_FLOW_ENV_FILE=/srv/deer-flow/stage.env DEER_FLOW_CONFIG_PATH=/srv/deer-flow/stage.yaml make gateway
+```
+
+Relative dotenv paths use the backend process working directory; absolute paths
+work regardless of that directory. Existing process variables win. An unset
+selector preserves default dotenv discovery; a specified empty, missing,
+non-file or unreadable path fails startup. Explicit selection also fails when
+`PYTHON_DOTENV_DISABLED` disables dotenv loading. Restart after changing the file.
+This selects backend dotenv input only: shell launchers, Docker Compose and the
+frontend retain their own environment loading. Values they already export win.
+It does not select `ENV` profiles or isolate databases, storage or tenants.
+See [backend dotenv selection](backend/docs/CONFIGURATION.md#backend-dotenv-selection).
+
 ### Running the Application
 
 #### Deployment Sizing
@@ -435,6 +452,11 @@ schema and positions required by that version.
 For lightweight single-process event persistence, `run_events.backend: jsonl`
 keeps Unicode message content intact, including line and paragraph separators.
 Existing valid JSONL records remain readable without rewriting the files.
+
+For per-call usage audits, an immediate LLM response replay with populated usage
+updates both nested usage and top-level token counters, even if initial usage was absent or zero.
+The original request, model, and status metadata stay intact; flushed events are
+not rewritten. See the [run event contract](contracts/run_event_stream_contract.json).
 
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
@@ -602,6 +624,8 @@ The default DeerFlow service topology remains the Gateway-embedded runtime
 described above.
 
 Gateway runs automatically enforce native delivery for artifacts created or modified under `/mnt/user-data/outputs`: `present_files` must present at least one output produced by the current run, and the terminal `run.delivery` receipt must be durably recorded. Virtual artifact paths are resolved within the same authenticated user and thread scope that produced the output before the output-directory boundary is validated. Runs that do not produce output artifacts keep ordinary conversational behavior.
+
+Thread-scoped `runs.wait()` calls that finish with `status: error` report the current run error instead of an earlier answer. The asynchronous Python LangGraph SDK raises by default; pass `raise_error=False` to inspect the returned status and error.
 
 DeerFlow's built-in custom events are available through both LangGraph streaming interfaces: native clients can continue subscribing to `stream_mode="custom"`, while callback-based integrations can consume the same payloads as `on_custom_event` records from `astream_events(version="v2")`. The callback event name matches the payload's `type` field.
 
@@ -801,7 +825,7 @@ channels:
     bot_token: $TELEGRAM_BOT_TOKEN
     # Optional: render final Markdown replies as Telegram Rich Messages.
     rich_messages: false
-    allowed_users: []               # empty = allow all
+    allowed_users: []               # numeric user IDs, not @usernames; empty = allow all
 
   wechat:
     enabled: false
@@ -1260,6 +1284,8 @@ If a trusted operator manages the configured skills directory through an externa
 
 Skill installs and agent-managed skill edits run through **SkillScan**, a native deterministic safety scanner before the LLM-based skill scanner. Phase 1 runs offline with no Semgrep/OpenGrep dependency, blocks high-confidence `CRITICAL` findings such as private keys or shell execution, and passes warning findings to the LLM scanner for contextual review. Code files (anything under `scripts/`, a script suffix such as `.py`, `.sh`, or `.js`, or an extensionless file starting with `#!`) that are not NUL-free UTF-8 text raise a warning and are still analyzed over a lossy decode, so a single stray byte cannot hide them from `CRITICAL` checks. The moderation adapter normalizes both plain-text model responses and LangChain Responses API text blocks before parsing the required JSON decision. Python instance-client exfiltration checks follow a minimal same-scope evidence chain: a simple name bound to a known client constructor, optional name-to-name aliases, and an actual outbound method or context-manager use supported by that constructor. Constructor roots must be proven imports; bare canonical-looking names are not inferred as modules. Nested scopes do not inherit client handles and inherit only constructor import aliases that are never rebound in the enclosing scope. Comprehensions, walrus-bearing statements, annotations, complex binding targets, unsupported operations, and ambiguous branch flows produce no finding from this signal; skipped constructs conservatively invalidate every name they may bind so stale client state cannot create a finding. A deterministic work budget or recursion limit reached by this best-effort analysis does not discard findings already collected for the file. Set `skill_scan.enabled: false` in `config.yaml` to disable only the deterministic analyzers; safe archive extraction and the LLM scanner still run.
 
+For Python credential mappings, SkillScan checks literal values while treating ordinary dictionary keys as labels. A mapping such as `tokens = {"access_token": os.getenv("ACCESS_TOKEN")}` does not report a hardcoded credential. Keys matching a recognized cloud or API token format are still checked as embedded credentials.
+
 DeerFlow also ships with **skill-reviewer**, a public skill for read-only skill quality review. It uses the built-in `review_skill_package` tool to inspect installed skills, local packages, archives, or pasted `SKILL.md` content without activating the target skill, binding its secrets, executing its scripts, or installing it. The tool returns a compact, tag-neutralized JSON payload to the model context and keeps the full raw review payload in the tool artifact for programmatic consumers. The deterministic review core reuses DeerFlow parsing and SkillScan facts, emits versioned JSON contracts under `contracts/skill_review/`, and can be run from the backend CLI:
 
 ```bash
@@ -1285,6 +1311,14 @@ These are deployment settings; the model still supplies only `query` and optiona
 `time_range`. Omitted filters preserve the existing SDK request; an explicit
 empty list is forwarded and imposes no restriction of that kind. See the
 [tool configuration example](backend/docs/CONFIGURATION.md#tools).
+
+Serper `web_search` supports deployment-level `include_domains` and
+`exclude_domains` too. It checks returned URL hosts (including subdomains), with
+exclusion taking precedence. Filters can return fewer results, including zero;
+there are no refill requests. This selects sources, not factual accuracy or a
+global URL-access policy. The model arguments and image search are unchanged.
+See [Serper configuration](backend/docs/CONFIGURATION.md#serper-source-filters)
+for validation and query-length limits.
 
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
@@ -1873,8 +1907,8 @@ AIO directory listings discard missing shell sessions so the next request can re
 After a dropped connection, directory listings and persistent shell commands report an
 unknown outcome without replaying the operation; later calls use a fresh session.
 
-Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip fenced code examples, so hashtags and code comments do not
-crowd out real document sections from the agent's heading preview.
+Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip fenced and indented code examples, so hashtags and code comments do not
+crowd out real document sections from the agent's heading preview. Indented bold examples are also excluded; PDF-style bold headings with up to three leading spaces remain supported.
 UTF-8 Markdown files with or without a byte-order mark (BOM) produce the same
 outlines and fallback previews, with original line numbers preserved.
 Outline titles are limited to 200 characters and fallback previews to 2,000
@@ -1913,8 +1947,12 @@ If the sample cuts a CRLF line ending in half, the preview keeps the earlier com
 Text artifacts are streamed with HTTP byte-range support. The Web UI initially
 loads at most 1 MiB, shows the preview size when a file is larger, and waits for
 an explicit **Load full file** action before fetching the remainder or mounting
-the full code editor. Active HTML, XHTML, and SVG artifacts remain forced
-downloads at the Gateway boundary.
+the full code editor. Editing becomes available once the complete file has loaded;
+unsaved-change detection uses the full content, including when reverting edits
+or deleting the portion beyond the initial preview. If a reload fails or returns
+only a preview, users can still exit editing while retaining their unsaved draft.
+Active HTML, XHTML, and SVG artifacts remain forced downloads at the Gateway
+boundary.
 
 Artifact previews and downloads preserve literal percent sequences in file names:
 `report%20final.md` and `report final.md` remain distinct files. Markdown links
@@ -2327,17 +2365,67 @@ Current MVP capabilities:
 
 **Filter execution history through the API**
 
-To inspect failures without downloading every successful occurrence, authenticated clients with `threads:read` can request `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0` for an owned task. The optional `status` accepts `queued`, `launching`, `running`, `success`, `failed`, `skipped`, or `interrupted`; these are occurrence statuses, so task statuses such as `completed` are invalid (422).
+To inspect failures without downloading every successful occurrence, authenticated clients with `threads:read` can request `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0` for an owned task. The optional `status` accepts `queued`, `launching`, `running`, `success`, `failed`, `skipped`, `interrupted`, or `unmet`; these are occurrence statuses, so task statuses such as `completed` are invalid (422).
 
 Filtering happens before pagination. `limit` (1–200, default 50) and `offset` (nonnegative, default 0) apply to matching records, ordered by creation time then ID, both descending. Omitting `status` preserves the existing mixed-history array response; no matches return `[]`. The API does not change task execution, and the workspace history UI remains unfiltered.
 
 Current MVP limits:
 
-- No conversation-created `schedule_task` tool yet
 - No text-only notification jobs
 - No channel or GitHub dispatch targets (result push above is not a dispatch target)
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
+
+### Create schedules in a conversation
+
+Set both `scheduler.enabled: true` and `scheduler.tool_enabled: true`, then restart
+Gateway. An authorized interactive turn can use `schedule_task` to create, list,
+pause or delete tasks belonging to that conversation. For example: “Prepare a
+weekly meeting report every Monday at 9 AM in Asia/Shanghai for four weeks.”
+The tool returns the exact prompt, schedule, optional goal and stop method.
+Recurring report/file jobs may offer a manual trial; the trial requires your
+request and does not count toward the scheduled-launch limit.
+
+New tasks default to a fresh conversation for each occurrence. A configured
+`goal_objective` applies only to that occurrence: success does not stop a
+recurring schedule. The running agent can request `stop_scheduled_task` for its
+own schedule when your overall end condition has been met; the request takes
+effect during terminal finalization. `max_runs` counts automatic launches only,
+and `end_at` provides a deadline. Either end condition takes precedence over a
+pause request. Tool-created sub-hourly schedules require an end condition; each
+owner may keep at most 20 live tool-created tasks, including paused tasks.
+
+An unmet occurrence is recorded as `unmet`, distinct from an execution failure.
+Three eligible automatic unmet occurrences pause a recurring task. Accepted
+success resets the streak, including a success relying on disclosed assumptions;
+manual trials, interruption, execution failure and external waiting do not
+advance it. Resume retains the streak, so another eligible unmet occurrence can
+pause the task again. Existing notification bindings receive goal-unmet and
+auto-pause notices through the same durable outbox; manual trials stay silent.
+
+You can ask the agent in the originating conversation to save an explicit note
+for future runs (at most 10 notes of 500 characters). Fresh recurring runs may
+read the previous executed occurrence through opt-in `read_conversation`, with
+the same owner and read-permission checks. This provides a source reference,
+not an automatic summary or a post-back into the originating chat.
+
+For a trial, send a direct request such as "Run this task now" or "先跑一次".
+The host accepts a bounded set of English/Chinese direct-run requests from the
+current user turn; task mentions, quoted or conditional requests, and a bare
+"yes" do not start a paid run. The agent asks for a direct request when needed.
+
+A goal occurrence can use up to nine agent turns, with an evaluator request after
+each. Evaluator requests and provider-reported tokens are included in run usage;
+missing usage makes the corresponding cost estimate unknown. `token_budget`
+limits the main graph and is checked after model calls; evaluator usage is
+additional, so it is not a strict whole-run or dollar limit.
+
+**Goal evaluation upgrade:** existing scheduled, webhook and autonomous goal
+runs can accept disclosed low-risk, reversible assumptions and record
+`relied_on_assumption` in their verdict. Interactive goal evaluation remains
+strict. This policy also applies when conversation schedule tools are disabled;
+it does not authorize sensitive actions or substitute for user authorization.
+
 
 Scheduled runs use `scheduler.recursion_limit` in `config.yaml` (default `1000`, matching the web UI's interactive budget). Values above `max_recursion_limit` are clamped. This field is read at dispatch, so the next scheduled run picks it up without a Gateway restart.
 

@@ -13,6 +13,12 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Added
 
+- **scheduler:** Opt-in conversation tools create and manage owner-bound schedules,
+  support bounded automatic launches and per-occurrence goals, and let a scheduled
+  agent request stopping its own schedule. Unmet goals and automatic pause use
+  the existing notification outbox; explicit notes and authorized previous-run
+  references carry context forward without changing the goal lifecycle. ([#6229])
+
 #### Scheduler
 
 - **scheduler:** Scheduled tasks can be searched by title or prompt. Finding a
@@ -472,7 +478,23 @@ This release closes that milestone with **301 merged pull requests**.
   check had its own copy of the same read and is fixed with it: a bound user
   with no thread yet was checked against the agent of a legacy JSON thread for
   the same chat and could be told an enabled skill was not available. ([#6232])
-
+- **memory:** Reading DeerMem agent memory no longer fails while another write
+  deletes a fact. `load()`, `reload()`, and the full `rebuild_index()` scan list
+  the fact files without the storage locks, so a delete committed between the
+  listing and opening a file raised `MemoryStorageCorruption` for data that was
+  intact: the memory API returned HTTP 500 ("Stored memory data is corrupted"),
+  prompt injection dropped the whole memory block for that turn (or failed the
+  run under `failure_policy.read: fail_closed`), and a full index rebuild counted
+  the fact as failed. A fact that vanishes after the listing is now treated as
+  deleted; an entry that is still present but unreadable, such as a dangling
+  symlink, is still reported as corruption. ([#6255])
+- **memory:** A DeerMem memory reload no longer pins an older document in the
+  cache. `reload()` read the document before computing its cache signature, so
+  a write committed in between (for example by the background memory updater)
+  cached the old document under the new signature, and every later `load()`
+  returned the outdated memory until the next write. `reload()` now computes
+  the signature first, as `load()` already did, so a racing write forces a
+  re-read instead. ([#6238])
 - **channels:** Discord now runs its channel-connection database work on the
   Gateway event loop. discord.py delivers messages on a private loop in the
   client thread, and the Discord adapter awaited the connection repository there
@@ -2802,6 +2824,15 @@ This release closes that milestone with **301 merged pull requests**.
   between them (`config --profile work show`), a case a contiguous match would
   still miss. Argument values that spell a denied path in order are refused too
   (fail-closed). ([#6212])
+
+- **channels:** A Telegram `allowed_users` list that contains no numeric user ID
+  now denies every user instead of silently allowing all of them. Entries that
+  failed `int()` were dropped without a log line, and an empty result meant "no
+  allowlist", so `["@alice", "bob"]` opened the bot to everyone. A single ID is
+  now a one-entry list rather than a string whose digits each became an allowed
+  user (`"123456"` allowed users 1–6 and blocked 123456), `null` or a bare
+  integer no longer crashes the channel at startup, and every dropped entry —
+  `@usernames`, floats, booleans — is logged as a warning. ([#6230])
 
 ### Documentation
 
@@ -7673,6 +7704,10 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6171]: https://github.com/bytedance/deer-flow/pull/6171
 [#6201]: https://github.com/bytedance/deer-flow/pull/6201
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
-[#6214]: https://github.com/bytedance/deer-flow/pull/6214
 [#6212]: https://github.com/bytedance/deer-flow/pull/6212
+[#6214]: https://github.com/bytedance/deer-flow/pull/6214
+[#6229]: https://github.com/bytedance/deer-flow/pull/6229
+[#6230]: https://github.com/bytedance/deer-flow/pull/6230
 [#6232]: https://github.com/bytedance/deer-flow/pull/6232
+[#6238]: https://github.com/bytedance/deer-flow/pull/6238
+[#6255]: https://github.com/bytedance/deer-flow/pull/6255

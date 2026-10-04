@@ -349,7 +349,7 @@ channels:
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
-    allowed_users: []               # empty = allow all
+    allowed_users: []               # identifiants numériques, pas de @pseudo ; vide = tout le monde autorisé
 
     # Optional: per-channel / per-user session settings
     session:

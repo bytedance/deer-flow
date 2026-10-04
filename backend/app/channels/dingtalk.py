@@ -14,7 +14,7 @@ from typing import Any
 
 import httpx
 
-from app.channels.base import Channel
+from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
@@ -230,8 +230,12 @@ class DingTalkChannel(Channel):
         if self._thread:
             # The SDK thread only returns on a fatal error, so this join
             # normally waits out its full timeout; keep it off the event loop.
-            await asyncio.to_thread(self._thread.join, timeout=5)
-            self._thread = None
+            thread = self._thread
+            await asyncio.to_thread(thread.join, timeout=5)
+            if thread.is_alive():
+                raise ChannelStopTimeout("DingTalk SDK thread is still running after stop timeout")
+            if self._thread is thread:
+                self._thread = None
         logger.info("DingTalk channel stopped")
 
     def _resolve_routing(self, msg: OutboundMessage) -> tuple[str, str, str]:
