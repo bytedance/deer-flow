@@ -62,3 +62,27 @@ def test_cache_text_file_returns_a_complete_entry(tmp_path):
     # The key is derived from the virtual path, so a partial entry would be served
     # as the file's content on every later read.
     assert Path(returned).name == __import__("hashlib").sha256(virtual_path.encode()).hexdigest()
+
+
+def test_cache_entry_survives_a_failed_publish(tmp_path, monkeypatch):
+    """The real entry point: a failed publish must not damage the cached entry."""
+    import hashlib
+
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    virtual_path = "/workspace/report.csv"
+    name = hashlib.sha256(virtual_path.encode()).hexdigest()
+    entry = cache_dir / name
+    entry.write_text("previous body", encoding="utf-8")
+
+    def _boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", _boom)
+
+    with pytest.raises(OSError):
+        _cache_text_file("new body", virtual_path, cache_dir)
+
+    # A truncating write would have emptied the entry before failing, and the
+    # caller serves this path as the file's content on every later read.
+    assert entry.read_text(encoding="utf-8") == "previous body"
