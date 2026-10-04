@@ -77,15 +77,19 @@ def records(messages, cap: int = 16000) -> list[dict]:
     return result
 
 
-def _tokens(text: str) -> list[str]:
-    words = re.findall(r"[^\W_]+", text.casefold())
-    tokens = []
-    for word in words:
+def _token_spans(folded: str):
+    """Preserve indexed token positions in casefolded text without changing tokenization."""
+    for match in re.finditer(r"[^\W_]+", folded):
+        word = match.group()
         if re.search(r"[\u3400-\u9fff]", word):
-            tokens.extend(word[i : i + 2] for i in range(max(1, len(word) - 1)))
+            for index in range(max(1, len(word) - 1)):
+                yield word[index : index + 2], match.start() + index, match.start() + min(index + 2, len(word))
         else:
-            tokens.append(word)
-    return list(dict.fromkeys(tokens))
+            yield word, match.start(), match.end()
+
+
+def _tokens(text: str) -> list[str]:
+    return list(dict.fromkeys(word for word, _, _ in _token_spans(text.casefold())))
 
 
 def terms(text: str) -> list[str]:
@@ -94,6 +98,25 @@ def terms(text: str) -> list[str]:
 
 def index_text(text: str) -> str:
     return " ".join(_tokens(text))
+
+
+def _search_excerpt(text: str, keywords: list[str], *, substring: bool) -> dict:
+    """Locate the first casefolded keyword match and return an excerpt from the readable source."""
+    folded = text.casefold()
+    if substring:
+        hits = [(position, position + len(term)) for term in keywords if (position := folded.find(term)) >= 0]
+    else:
+        keyword_set = set(keywords)
+        hits = [(left, right) for word, left, right in _token_spans(folded) if word in keyword_set]
+    start = 0
+    if hits:
+        positions = [index for index, char in enumerate(text) for _ in char.casefold()]
+        hits = [(positions[left], positions[right - 1] + 1) for left, right in hits if positions[right - 1] + 1 - positions[left] <= 600]
+    if hits:
+        match_start, match_end = min(hits)
+        start = max(0, min(match_start - (600 - (match_end - match_start)) // 2, len(text) - 600))
+    end = min(len(text), start + 600)
+    return {"excerpt": text[start:end], "excerpt_start": start, "excerpt_end": end, "excerpt_match": bool(hits)}
 
 
 def reachable(state: dict, owner: str) -> list[str]:
@@ -152,7 +175,7 @@ async def acapture(*args) -> dict:
         raise
 
 
-def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | None = None, role: str | None = None) -> dict:
+def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | None = None, role: str | None = None, excerpts: bool = False) -> dict:
     path, owner = scope(runtime)
     batches = reachable(state, owner)
     active = records(state.get("messages", []), 64000)
@@ -170,7 +193,7 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 if present != len(batches) and status != "unavailable":
                     status = "partially_expired"
                 if source_id:
-                    rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? LIMIT 1", [*batches, source_id])
+                    rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id])
                 else:
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
@@ -179,6 +202,15 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 for (payload,) in rows:
                     row = json.loads(payload)
                     found[row["id"]] = row
+                if excerpts and query is not None and found:
+                    # A source may be archived at different lengths; select its first stored version, as history_read does.
+                    ids = list(found)
+                    id_placeholders = ",".join("?" for _ in ids)
+                    canonical = {}
+                    for (payload,) in db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id IN ({id_placeholders}) ORDER BY rowid", [*batches, *ids]):
+                        row = json.loads(payload)
+                        canonical.setdefault(row["id"], row)
+                    found.update(canonical)
         except (OSError, sqlite3.Error):
             status = "unavailable"
     elif history.get("scope") is not None and history["scope"] != owner:
@@ -186,4 +218,14 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     for row in active:
         if (source_id and row["id"] == source_id) or (query is not None and (role is None or row["role"] == role) and any(t in row["text"].casefold() for t in keywords)):
             found[row["id"]] = row
-    return {"results": list(found.values())[:8], "status": status}
+    results = list(found.values())[:8]
+    if excerpts and query is not None:
+        active_by_id = {row["id"]: row for row in active}
+        excerpts_result = []
+        for row in results:
+            # Active text takes precedence when reading by ID, even if only archived FTS matched the source.
+            row = dict(active_by_id.get(row["id"], row))
+            row.update(_search_excerpt(row.pop("text"), keywords, substring=row["id"] in active_by_id))
+            excerpts_result.append(row)
+        results = excerpts_result
+    return {"results": results, "status": status}
