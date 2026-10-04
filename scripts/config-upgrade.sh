@@ -15,6 +15,13 @@ set -e
 # restricting mirror would fail the re-resolution the upgrade needs; drop
 # them so the repo's own pinned index applies.
 unset UV_DEFAULT_INDEX UV_INDEX UV_EXTRA_INDEX_URL UV_INDEX_URL
+# The reset is unconditional: on a lockdown host whose only reachable index IS
+# the exported mirror (pypi.org firewalled), the upgrade now fails where it
+# previously worked through the mirror — the inverse of the failure this
+# fixes. That trade-off is deliberate (a partial mirror that 403s some
+# packages is the common case, and the resolution must match the registry the
+# lockfile was built against); if lockdown hosts ever need an opt-out, add it
+# here.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.yaml"

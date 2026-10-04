@@ -34,6 +34,21 @@ def test_knowledge_base_config_is_provider_agnostic() -> None:
 SCRIPT_BASH = find_script_bash()
 
 
+def test_config_upgrade_script_resets_host_uv_index_overrides() -> None:
+    """The script must drop the host's uv index env overrides before its uv runs.
+
+    The script's ``uv run`` re-resolutions must use the registry the repo's own
+    ``[tool.uv] index-url`` pins, but uv's index env channels outrank project
+    settings, so a host shell exporting a restricting mirror fails the upgrade.
+    CI never exports these vars, so this textual pin is the only guard against
+    the ``unset`` line silently disappearing (cf. the textual pins in
+    test_compose_default_bind_host.py and test_deploy_dotenv_secrets.py).
+    """
+    script = (Path(__file__).resolve().parents[2] / "scripts" / "config-upgrade.sh").read_text(encoding="utf-8")
+    unset_lines = [line for line in script.splitlines() if line.startswith("unset ")]
+    assert unset_lines == ["unset UV_DEFAULT_INDEX UV_INDEX UV_EXTRA_INDEX_URL UV_INDEX_URL"]
+
+
 def _make_config_files(tmpdir: Path, user_config: dict, example_config: dict) -> Path:
     """Write user config.yaml and config.example.yaml to a temp dir, return config path."""
     config_path = tmpdir / "config.yaml"
