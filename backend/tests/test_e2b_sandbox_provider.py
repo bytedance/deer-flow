@@ -8,6 +8,7 @@ import importlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -3176,12 +3177,18 @@ def test_release_skips_warm_pool_when_sync_reveals_dead_vm(monkeypatch, tmp_path
     assert client.killed is True
 
 
-def test_shutdown_defers_teardown_while_maintenance_thread_is_alive():
+@pytest.mark.anyio
+async def test_shutdown_defers_teardown_and_fences_cached_acquire_while_maintenance_thread_is_alive():
     p = _make_provider()
+    p._acquire_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="e2b-shutdown-acquire-test",
+    )
     client = FakeClient(sandbox_id="sb-owned")
     sandbox = _make_sandbox(client, sandbox_id="sb-owned")
     p._sandboxes = {"sb-owned": sandbox}
     p._owned_sandbox_ids = {"sb-owned"}
+    p._thread_sandboxes[p._thread_key("thread-owned", "user-owned")] = "sb-owned"
 
     class JoinControlledThread:
         def __init__(self) -> None:
@@ -3204,8 +3211,17 @@ def test_shutdown_defers_teardown_while_maintenance_thread_is_alive():
     assert p._shutdown_cleanup_pending is True
     assert p._maintenance_stop.is_set()
     assert p._sandboxes == {"sb-owned": sandbox}
+    assert p._thread_sandboxes[p._thread_key("thread-owned", "user-owned")] == "sb-owned"
     assert client.killed is False
     assert lease_thread.join_timeout == 11.0
+
+    with pytest.raises(SandboxCapacityExceededError) as sync_exc:
+        p.acquire("thread-owned", user_id="user-owned")
+    assert sync_exc.value.reason == "shutdown"
+
+    with pytest.raises(SandboxCapacityExceededError) as async_exc:
+        await p.acquire_async("thread-owned", user_id="user-owned")
+    assert async_exc.value.reason == "shutdown"
 
     lease_thread.alive = False
     p.shutdown()
@@ -3214,6 +3230,33 @@ def test_shutdown_defers_teardown_while_maintenance_thread_is_alive():
     assert p._shutdown_cleanup_pending is False
     assert p._sandboxes == {}
     assert client.killed is True
+
+
+def test_signal_handler_forwards_original_action_when_shutdown_cleanup_is_pending(monkeypatch):
+    p = _make_provider()
+    registered: dict[int, Any] = {}
+    forwarded: list[tuple[int, Any]] = []
+
+    def original_handler(signum, frame):
+        forwarded.append((signum, frame))
+
+    monkeypatch.setattr(signal, "getsignal", lambda _signum: original_handler)
+    monkeypatch.setattr(signal, "signal", lambda signum, handler: registered.__setitem__(signum, handler))
+
+    def blocked_shutdown() -> None:
+        with p._lock:
+            p._shutdown_called = True
+            p._shutdown_cleanup_pending = True
+        raise RuntimeError("E2B maintenance thread shutdown timed out: lease renewal")
+
+    monkeypatch.setattr(p, "shutdown", blocked_shutdown)
+    p._register_signal_handlers()
+
+    frame = object()
+    registered[signal.SIGTERM](signal.SIGTERM, frame)
+
+    assert forwarded == [(signal.SIGTERM, frame)]
+    assert p._shutdown_cleanup_pending is True
 
 
 def test_shutdown_only_kills_sandboxes_owned_by_current_instance(monkeypatch):
