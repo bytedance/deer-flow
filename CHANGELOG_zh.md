@@ -429,7 +429,7 @@
   此前租约续期会跳过本地状态已是终态的运行，收尾一旦超过租约加宽限期（默认约
   30–40 秒），其他 worker 或本 worker 自己的回收器就会接管这条仍处于活动状态的
   记录。心跳现在会持续续期直到这次延迟写入被执行，若期间被其他 worker 接管则隔离
-  本地运行。仅影响启用 `run_ownership.heartbeat_enabled` 的部署。
+  本地运行。仅影响启用 `run_ownership.heartbeat_enabled` 的部署。([#6263])
 - **记忆：** 读取 DeerMem 智能体记忆时，不再因另一写入同时删除事实而失败。
   `load()`、`reload()` 与全量 `rebuild_index()` 扫描在不持有存储锁的情况下列
   出事实文件，若删除恰好在列出之后、打开文件之前提交，就会对完好的数据抛出
@@ -6435,3 +6435,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6230]: https://github.com/bytedance/deer-flow/pull/6230
 [#6238]: https://github.com/bytedance/deer-flow/pull/6238
 [#6255]: https://github.com/bytedance/deer-flow/pull/6255
+[#6263]: https://github.com/bytedance/deer-flow/pull/6263

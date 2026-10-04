@@ -475,7 +475,7 @@ This release closes that milestone with **301 merged pull requests**.
   plus grace (about 30–40 seconds by default) let a peer, or the worker's own
   reconciler, claim the still-active row. The heartbeat now keeps renewing
   until that deferred write is attempted, and fences the run if a peer claims
-  it. Affects only `run_ownership.heartbeat_enabled` deployments.
+  it. Affects only `run_ownership.heartbeat_enabled` deployments. ([#6263])
 - **memory:** Reading DeerMem agent memory no longer fails while another write
   deletes a fact. `load()`, `reload()`, and the full `rebuild_index()` scan list
   the fact files without the storage locks, so a delete committed between the
@@ -7708,3 +7708,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6230]: https://github.com/bytedance/deer-flow/pull/6230
 [#6238]: https://github.com/bytedance/deer-flow/pull/6238
 [#6255]: https://github.com/bytedance/deer-flow/pull/6255
+[#6263]: https://github.com/bytedance/deer-flow/pull/6263
