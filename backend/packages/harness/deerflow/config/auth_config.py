@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 
 class OIDCProviderConfig(BaseModel):
@@ -99,6 +101,16 @@ class LocalAuthConfig(BaseModel):
         allow_inf_nan=False,
         description=("Seconds an IP stays locked out after reaching auth.local.max_login_attempts. Defaults preserve the historical hardcoded policy (5 minutes)."),
     )
+
+    @field_validator("max_login_attempts", mode="before")
+    @classmethod
+    def _reject_boolean_login_threshold(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
+
+    @field_validator("lockout_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_lockout_window(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number")
 
 
 class AuthAppConfig(BaseModel):
