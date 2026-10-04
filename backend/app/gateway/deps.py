@@ -56,6 +56,36 @@ def _browser_tools_enabled_in_config(config: AppConfig) -> bool:
     return any(getattr(tool, "name", None) == "browser_navigate" for tool in (getattr(config, "tools", None) or []))
 
 
+# ``GATEWAY_WORKERS`` is the knob this project documents and the one
+# ``docker/docker-compose.yaml`` forwards as ``--workers``. ``backend/Dockerfile``
+# and ``scripts/serve.sh`` launch uvicorn with no worker count at all, and uvicorn
+# then takes the count from ``WEB_CONCURRENCY``. Both must be read, otherwise a
+# multi-process deployment starts with the safety gates inert.
+# A blank value means "unset", as the compose command's ``${GATEWAY_WORKERS:-1}`` treats it.
+_WORKER_COUNT_ENV_VARS = ("GATEWAY_WORKERS", "WEB_CONCURRENCY")
+
+
+def _gateway_worker_count() -> tuple[int, str]:
+    """Return the Gateway worker-process count and the environment variable that set it.
+
+    The name belongs in the refusal text: an operator who only ever set
+    ``WEB_CONCURRENCY`` cannot act on a message about ``GATEWAY_WORKERS``.
+    """
+    for name in _WORKER_COUNT_ENV_VARS:
+        raw = os.environ.get(name)
+        if not raw or not raw.strip():
+            continue
+        try:
+            return int(raw), name
+        except (TypeError, ValueError):
+            # Uvicorn rejects a non-numeric count itself, so this is not the place
+            # to fail the launch -- but an unparsable documented knob must not hide
+            # the count uvicorn takes from ``WEB_CONCURRENCY`` on the launches that
+            # pass no ``--workers``. Keep looking; report 1 only after the loop.
+            continue
+    return 1, _WORKER_COUNT_ENV_VARS[0]
+
+
 def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     """Refuse unsafe multi-process configurations before persistence starts.
 
@@ -80,10 +110,7 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     initialised so the error message is clear and the process exits
     immediately.
     """
-    try:
-        workers = int(os.environ.get("GATEWAY_WORKERS", "1"))
-    except (TypeError, ValueError):
-        workers = 1
+    workers, worker_env = _gateway_worker_count()
 
     scheduler = getattr(config, "scheduler", None)
     multi_instance_requested = bool(getattr(scheduler, "multi_instance", False))
@@ -104,24 +131,24 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
         return
 
     if config.scheduler.enabled and not multi_instance_scheduler:
-        raise SystemExit(f"GATEWAY_WORKERS={workers} cannot run with scheduler.enabled=true because each worker starts its own scheduler. Set GATEWAY_WORKERS=1, scheduler.multi_instance=true, or scheduler.enabled=false.")
+        raise SystemExit(f"{worker_env}={workers} cannot run with scheduler.enabled=true because each worker starts its own scheduler. Set {worker_env}=1, scheduler.multi_instance=true, or scheduler.enabled=false.")
 
     if _browser_tools_enabled_in_config(config):
         raise SystemExit(browser_multi_worker_error(workers))
 
     if backend != "postgres":
-        raise SystemExit(f"GATEWAY_WORKERS={workers} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. Set GATEWAY_WORKERS=1 or switch to Postgres.")
+        raise SystemExit(f"{worker_env}={workers} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. Set {worker_env}=1 or switch to Postgres.")
 
     if run_events_backend != "db":
         raise SystemExit(
-            f"GATEWAY_WORKERS={workers} requires run_events.backend='db', but run_events.backend is '{run_events_backend}'. "
+            f"{worker_env}={workers} requires run_events.backend='db', but run_events.backend is '{run_events_backend}'. "
             "Memory and JSONL event stores are process-local, so delivery receipt singleton guarantees cannot hold across workers. "
-            "Set GATEWAY_WORKERS=1 or configure run_events.backend: db."
+            f"Set {worker_env}=1 or configure run_events.backend: db."
         )
 
     if run_ownership is None or not run_ownership.heartbeat_enabled:
         raise SystemExit(
-            f"GATEWAY_WORKERS={workers} requires run_ownership.heartbeat_enabled=true. "
+            f"{worker_env}={workers} requires run_ownership.heartbeat_enabled=true. "
             "Without heartbeat, every run has a NULL lease, so reconciliation "
             "treats all inflight runs as orphans — Worker B would kill Worker A's "
             "live runs on every rolling update or scale-up. "
@@ -151,15 +178,13 @@ def _validate_agent_storage(config: AppConfig) -> None:
             f"but database.backend is '{db_backend}'. A 'memory' database is per-process and cannot "
             "share agent definitions across nodes. Set database.backend, or use agent_storage.backend='file'."
         )
-    try:
-        workers = int(os.environ.get("GATEWAY_WORKERS", "1"))
-    except (TypeError, ValueError):
-        workers = 1
+    workers, worker_env = _gateway_worker_count()
     if workers > 1 and db_backend == "postgres" and backend == "file":
         logger.warning(
-            "GATEWAY_WORKERS=%s with database.backend='postgres' but agent_storage.backend='file': "
+            "%s=%s with database.backend='postgres' but agent_storage.backend='file': "
             "custom agents and managed subagents are stored per-node on local disk and are not visible "
             "across workers/nodes. Set agent_storage.backend='db' to share them.",
+            worker_env,
             workers,
         )
 
@@ -245,6 +270,20 @@ def _log_recovered_stream_cleanup_result(task: asyncio.Task[None], run_id: str) 
         task.result()
     except Exception:
         logger.warning("Failed to clean up recovered run stream for %s", run_id, exc_info=True)
+
+
+async def _cleanup_recovered_scheduled_goals(recovered_runs: list[RunRecord], *, run_manager: RunManager, checkpointer: Checkpointer) -> None:
+    """Clear only confirmed occurrence-owned goals after durable orphan recovery."""
+    from deerflow.runtime.runs.worker import clear_recovered_scheduled_goal
+
+    for record in recovered_runs:
+        metadata = getattr(record, "metadata", None) or {}
+        if not isinstance(metadata.get("scheduled_goal_objective"), str):
+            continue
+        try:
+            await clear_recovered_scheduled_goal(record, run_manager=run_manager, checkpointer=checkpointer)
+        except Exception:
+            logger.warning("Scheduled goal cleanup failed for recovered run %s; retained for guarded next-run cleanup", record.run_id, exc_info=True)
 
 
 async def _flush_recovered_stream_cleanups(
@@ -592,6 +631,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             task.add_done_callback(lambda completed: recovered_stream_cleanup_tasks.pop(completed, None))
 
         async def terminalize_recovered_runs(recovered_runs: list[RunRecord]) -> None:
+            await _cleanup_recovered_scheduled_goals(recovered_runs, run_manager=app.state.run_manager, checkpointer=app.state.checkpointer)
             await _terminalize_recovered_runs(
                 app.state.stream_bridge,
                 recovered_runs,
@@ -617,12 +657,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             before=now_iso(),
             stop_reason=ORPHAN_RECOVERY_STOP_REASON,
         )
-        await _terminalize_recovered_runs(
-            app.state.stream_bridge,
-            recovered_runs,
-            cleanup_delay=cleanup_delay,
-            on_cleanup_scheduled=track_recovered_stream_cleanup,
-        )
+        await terminalize_recovered_runs(recovered_runs)
         await _mark_latest_startup_recovered_threads_error(
             app.state.run_manager,
             app.state.thread_store,

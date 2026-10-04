@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Index, Integer, String, Text, text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -23,6 +23,9 @@ class ScheduledTaskRunRow(Base):
     trigger: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    goal_objective: Mapped[str | None] = mapped_column(Text, nullable=True)
+    goal_verdict: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    stop_requested_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

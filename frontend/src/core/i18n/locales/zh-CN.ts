@@ -40,6 +40,10 @@ export const zhCN: Translations = {
       "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。",
     installationGuide: "查看安装说明",
     catalog: {
+      agentTeams: {
+        title: "Agent 团队",
+        description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
+      },
       bookmarks: {
         title: "会话书签",
         description: "收藏有用的回答，在独立页面查找与整理自己的书签。",
@@ -876,6 +880,7 @@ export const zhCN: Translations = {
       launching: "启动中",
       running: "运行中",
       success: "成功",
+      unmet: "目标未达成",
       failed: "失败",
       skipped: "跳过",
       interrupted: "已中断",

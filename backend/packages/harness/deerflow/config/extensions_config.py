@@ -14,8 +14,9 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.runtime_paths import existing_project_file
 from deerflow.constants import (
     DEFAULT_MCP_SESSION_INIT_TIMEOUT,
@@ -206,10 +207,8 @@ class McpOAuthConfig(BaseModel):
 
     @field_validator("refresh_skew_seconds", mode="before")
     @classmethod
-    def _reject_boolean_refresh_skew(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be an integer, not a boolean")
-        return value
+    def _reject_boolean_refresh_skew(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
     extra_token_params: dict[str, str] = Field(default_factory=dict, description="Additional form params sent to token endpoint")
     model_config = ConfigDict(extra="allow")
@@ -262,10 +261,8 @@ class McpServerConfig(BaseModel):
 
     @field_validator("tool_call_timeout", "session_init_timeout", mode="before")
     @classmethod
-    def _reject_boolean_mcp_timeouts(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be a number, not a boolean")
-        return value
+    def _reject_boolean_mcp_timeouts(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number")
 
     task_toolsets: list[McpTaskToolsetConfig] = Field(
         default_factory=list,

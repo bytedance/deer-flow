@@ -27,7 +27,12 @@ export interface Translations {
     catalogHint: string;
     installationGuide: string;
     catalog: Record<
-      "bookmarks" | "context" | "classify" | "screening" | "example",
+      | "agentTeams"
+      | "bookmarks"
+      | "context"
+      | "classify"
+      | "screening"
+      | "example",
       { title: string; description: string }
     >;
     pageUnavailable: string;
@@ -770,6 +775,7 @@ export interface Translations {
       launching: string;
       running: string;
       success: string;
+      unmet: string;
       failed: string;
       skipped: string;
       interrupted: string;

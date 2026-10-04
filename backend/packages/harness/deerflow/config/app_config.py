@@ -9,6 +9,7 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationInfo, field_validator, model_validator
 
+from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agent_storage_config import AgentStorageConfig
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
@@ -76,13 +77,6 @@ CONFIG_FILE_DATABASE_DEFAULTS = {
 }
 
 
-def _reject_boolean_int(value: object, info: ValidationInfo) -> object:
-    """Reject YAML `true`/`false` before Pydantic coerces them to `1`/`0`."""
-    if isinstance(value, bool):
-        raise ValueError(f"{info.field_name} must be an integer, not a boolean")
-    return value
-
-
 class CircuitBreakerConfig(BaseModel):
     """Configuration for the LLM Circuit Breaker."""
 
@@ -99,10 +93,8 @@ class CircuitBreakerConfig(BaseModel):
 
     @field_validator("failure_threshold", "recovery_timeout_sec", mode="before")
     @classmethod
-    def _reject_boolean_circuit_settings(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be an integer, not a boolean")
-        return value
+    def _reject_boolean_circuit_settings(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
 
 class LlmCallConfig(BaseModel):
@@ -171,7 +163,7 @@ class LlmCallConfig(BaseModel):
     )
     @classmethod
     def _reject_boolean_llm_call_settings(cls, value: object, info: ValidationInfo) -> object:
-        return _reject_boolean_int(value, info)
+        return reject_boolean(value, info, kind="an integer")
 
 
 class LoggingEnhanceConfig(BaseModel):
@@ -275,7 +267,7 @@ class AppConfig(BaseModel):
     @field_validator("recursion_limit", "max_recursion_limit", mode="before")
     @classmethod
     def _reject_boolean_recursion_limits(cls, value: object, info: ValidationInfo) -> object:
-        return _reject_boolean_int(value, info)
+        return reject_boolean(value, info, kind="an integer")
 
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
     sandbox: SandboxConfig = Field(

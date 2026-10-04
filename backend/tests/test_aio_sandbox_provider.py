@@ -8,7 +8,7 @@ import os
 import stat
 import threading
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from _windows_acl_helpers import _windows_acl_owner_sid, _windows_acl_sids
@@ -2149,6 +2149,44 @@ def test_destroy_swallows_close_errors_and_still_destroys_backend(tmp_path, capl
 
     assert "Error closing sandbox sandbox-dest-err during destroy" in caplog.text
     provider._backend.destroy.assert_called_once()
+
+
+def test_shutdown_keeps_aio_warm_entries_owned_when_idle_checker_stop_times_out(tmp_path):
+    """A failed reaper join must leave AIO warm entries available to a retry."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._shutdown_called = False
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    warm_info = aio_mod.SandboxInfo(sandbox_id="warm-retry", sandbox_url="http://warm-retry")
+    provider._warm_pool = {"warm-retry": (warm_info, 1.0)}
+    provider._warm_pool_identity = {"warm-retry": ("default", "thread-retry")}
+    provider._stop_idle_checker = MagicMock(side_effect=[RuntimeError("reaper still alive"), None])
+    provider._stop_lease_renewal = MagicMock()
+    provider._destroy_warm_entry = MagicMock()
+    provider._ownership.close = MagicMock()
+
+    with pytest.raises(RuntimeError, match="reaper still alive"):
+        provider.shutdown()
+
+    assert provider._shutdown_called is False
+    assert provider._warm_pool == {"warm-retry": (warm_info, 1.0)}
+    assert provider._warm_pool_identity == {"warm-retry": ("default", "thread-retry")}
+    provider._destroy_warm_entry.assert_not_called()
+
+    provider.shutdown()
+
+    provider._destroy_warm_entry.assert_called_once_with(
+        "warm-retry",
+        warm_info,
+        reason="shutdown",
+        still_reapable=ANY,
+    )
+    assert provider._warm_pool == {}
+    assert provider._warm_pool_identity == {}
 
 
 def test_cleanup_idle_sandboxes_keeps_active_cleanup_and_delegates_warm_expiry(tmp_path):

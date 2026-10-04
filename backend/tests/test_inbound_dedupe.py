@@ -18,6 +18,18 @@ from app.channels.dedupe_store import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_worker_env(monkeypatch):
+    """Keep config-resolution tests independent of the invoking shell.
+
+    ``WEB_CONCURRENCY`` is a common ambient convention on uvicorn/gunicorn/PaaS hosts,
+    and it now decides whether a deployment counts as multi-worker here too. The tests
+    that exercise that path set the spelling they mean to exercise.
+    """
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+
+
 class _FakeDedupe:
     def __init__(self, backend: str) -> None:
         self.backend = backend  # plain string, mimics DedupeStorageBackend.value
@@ -104,6 +116,60 @@ def test_factory_warns_when_auto_resolves_memory_under_multi_worker(monkeypatch,
         store = make_inbound_dedupe_store(app)
     assert isinstance(store, MemoryInboundDedupeStore)
     assert any("Multi-worker deployment detected but dedupe_storage=auto" in r.message for r in caplog.records)
+
+
+def test_factory_warns_under_the_uvicorn_worker_fallback(monkeypatch, caplog):
+    import logging
+
+    # backend/Dockerfile and scripts/serve.sh start uvicorn with no --workers, so
+    # WEB_CONCURRENCY is what decides how many processes share no dedupe state.
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    app = _FakeApp("memory", "sqlite")
+    with caplog.at_level(logging.WARNING):
+        store = make_inbound_dedupe_store(app)
+    assert isinstance(store, MemoryInboundDedupeStore)
+    assert any("dedupe_storage=memory with WEB_CONCURRENCY>1" in r.message for r in caplog.records)
+
+
+def test_factory_warns_when_an_unparsable_knob_hides_the_fallback_count(monkeypatch, caplog):
+    import logging
+
+    # GATEWAY_WORKERS never reaches uvicorn on the launchers that pass no --workers, so
+    # an unusable value there must not report the deployment as single-worker while
+    # WEB_CONCURRENCY still starts the processes.
+    monkeypatch.setenv("GATEWAY_WORKERS", "abc")
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    app = _FakeApp("memory", "sqlite")
+    with caplog.at_level(logging.WARNING):
+        make_inbound_dedupe_store(app)
+    assert any("dedupe_storage=memory with WEB_CONCURRENCY>1" in r.message for r in caplog.records)
+
+
+def test_factory_prefers_the_documented_knob_when_both_are_set(monkeypatch, caplog):
+    import logging
+
+    # docker-compose forwards GATEWAY_WORKERS as --workers, which outranks the
+    # WEB_CONCURRENCY uvicorn would otherwise read.
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    app = _FakeApp("memory", "sqlite")
+    with caplog.at_level(logging.WARNING):
+        make_inbound_dedupe_store(app)
+    assert not any("dedupe_storage=memory with" in r.message for r in caplog.records)
+
+
+def test_factory_treats_a_blank_gateway_workers_as_unset(monkeypatch, caplog):
+    import logging
+
+    # The compose command spells the fallback ${GATEWAY_WORKERS:-1}, so an exported
+    # empty value means "unset" rather than "no workers".
+    monkeypatch.setenv("GATEWAY_WORKERS", "   ")
+    monkeypatch.setenv("WEB_CONCURRENCY", "3")
+    app = _FakeApp("auto", "sqlite")
+    with caplog.at_level(logging.WARNING):
+        make_inbound_dedupe_store(app)
+    assert any("Multi-worker deployment detected" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,9 @@
 import logging
 from collections.abc import Mapping
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,11 @@ class ACPAgentConfig(BaseModel):
             "therefore the whole agent turn, indefinitely."
         ),
     )
+
+    @field_validator("timeout_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_timeout(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
 
 _acp_agents: dict[str, ACPAgentConfig] = {}

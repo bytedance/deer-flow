@@ -3,7 +3,9 @@
 import math
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 ContextSizeType = Literal["fraction", "tokens", "messages"]
 DEFAULT_SKILL_FILE_READ_TOOL_NAMES: tuple[str, ...] = ("read_file", "read", "view", "cat")
@@ -88,10 +90,8 @@ class SummarizationConfig(BaseModel):
 
     @field_validator("trim_tokens_to_summarize", mode="before")
     @classmethod
-    def _reject_boolean_trim_tokens(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be an integer, not a boolean")
-        return value
+    def _reject_boolean_trim_tokens(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
     summary_prompt: str | None = Field(
         default=None,

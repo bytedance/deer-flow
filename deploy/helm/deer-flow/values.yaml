@@ -275,6 +275,10 @@ config: |
     scope_selection_enabled: false
 
   models: []
+  # Both switches are required for conversation-created schedules. Restart pods.
+  scheduler:
+    enabled: false
+    tool_enabled: false
   # Example (uncomment & set the matching secret in `secrets`):
   #   - name: gpt-4
   #     display_name: GPT-4

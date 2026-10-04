@@ -14,6 +14,10 @@
 
 ### 新增
 
+- **调度器：** 按需启用对话工具创建及管理属主绑定的定时任务，支持自动启动上限、
+  每次执行的目标评估，以及 Agent 请求停止自身调度。目标未达成与自动暂停复用
+  现有通知 outbox；明确备注和获授权的上次执行引用延续上下文，不增加 goal 状态。([#6229])
+
 #### 调度器
 
 - **调度器：** 定时任务现在可以按标题或 prompt 搜索。此前找一个任
@@ -419,6 +423,18 @@
 
 ### 修复
 
+- **记忆：** 读取 DeerMem 智能体记忆时，不再因另一写入同时删除事实而失败。
+  `load()`、`reload()` 与全量 `rebuild_index()` 扫描在不持有存储锁的情况下列
+  出事实文件，若删除恰好在列出之后、打开文件之前提交，就会对完好的数据抛出
+  `MemoryStorageCorruption`：记忆 API 返回 HTTP 500（"Stored memory data is
+  corrupted"），提示词注入在该轮丢弃整个记忆块（在 `failure_policy.read:
+  fail_closed` 下则使运行失败），全量索引重建则把该事实计为失败。列出后消失的事实现在被视为已删除；仍然存在但无法读取的条目（例如悬空符
+  号链接）仍会报告为损坏。([#6255])
+- **记忆：** DeerMem 记忆重新加载不再把旧文档固定在缓存中。`reload()`
+  此前先读取文档、后计算缓存签名，若两者之间有写入提交（例如后台记忆更
+  新器），旧文档就会以新签名写入缓存，之后每次 `load()` 都返回过时的记
+  忆，直到下一次写入。`reload()` 现在与 `load()` 一样先计算签名，竞争写
+  入只会触发重新读取。([#6238])
 - **渠道：** Discord 的渠道连接数据库操作现在在 Gateway 事件循环上执行。
   discord.py 在客户端线程的私有事件循环上投递消息，而 Discord 适配器此前就在该
   循环上 await 连接仓库，但仓库的 SQLAlchemy 引擎与连接池属于 Gateway 循环。在
@@ -6408,4 +6424,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
 [#6212]: https://github.com/bytedance/deer-flow/pull/6212
 [#6214]: https://github.com/bytedance/deer-flow/pull/6214
+[#6229]: https://github.com/bytedance/deer-flow/pull/6229
 [#6230]: https://github.com/bytedance/deer-flow/pull/6230
+[#6238]: https://github.com/bytedance/deer-flow/pull/6238
+[#6255]: https://github.com/bytedance/deer-flow/pull/6255

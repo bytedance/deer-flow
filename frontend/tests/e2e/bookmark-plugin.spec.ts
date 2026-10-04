@@ -442,13 +442,44 @@ for (const locale of ["en-US", "zh-CN"]) {
         exact: true,
       }),
     ).toBeVisible();
-    await expect(page.getByRole("article")).toHaveCount(5);
+    await expect(page.getByRole("article")).toHaveCount(6);
     await expect(
       page.getByRole("button", {
         name: zh ? "查看 会话书签" : "View Bookmarks",
         exact: true,
       }),
     ).toBeVisible();
+    await page
+      .getByRole("button", {
+        name: zh ? "查看 Agent 团队" : "View Agent teams",
+        exact: true,
+      })
+      .click();
+    await expect(
+      page.getByRole("heading", {
+        name: zh ? "Agent 团队" : "Agent teams",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        zh
+          ? "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。"
+          : "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", {
+        name: zh ? "查看安装说明" : "Installation guide",
+      }),
+    ).toHaveAttribute("href", /deerflow-extension-agent-teams#readme$/);
+    await page
+      .getByRole("button", {
+        name: zh ? "全部扩展" : "All extensions",
+        exact: true,
+      })
+      .click();
     await page
       .getByPlaceholder(
         zh ? "按名称或用途搜索扩展" : "Search extensions by name or purpose",
@@ -516,8 +547,8 @@ test("catalog remains discoverable when runtime discovery fails", async ({
   await expect(
     page.getByRole("alert").filter({ hasText: "Extensions unavailable." }),
   ).toBeVisible();
-  await expect(page.getByRole("article")).toHaveCount(5);
+  await expect(page.getByRole("article")).toHaveCount(6);
   await expect(
     page.getByRole("article").filter({ hasText: "Catalog extension" }),
-  ).toHaveCount(5);
+  ).toHaveCount(6);
 });
