@@ -78,8 +78,11 @@ def _gateway_worker_count() -> tuple[int, str]:
         try:
             return int(raw), name
         except (TypeError, ValueError):
-            # Uvicorn rejects these itself; stay inert rather than preempt it.
-            return 1, name
+            # Uvicorn rejects a non-numeric count itself, so this is not the place
+            # to fail the launch -- but an unparsable documented knob must not hide
+            # the count uvicorn takes from ``WEB_CONCURRENCY`` on the launches that
+            # pass no ``--workers``. Keep looking; report 1 only after the loop.
+            continue
     return 1, _WORKER_COUNT_ENV_VARS[0]
 
 

@@ -44,6 +44,20 @@ def _config_with_backend(
     )
 
 
+@pytest.fixture(autouse=True)
+def isolated_worker_env(monkeypatch):
+    """Keep the suite independent of the invoking shell's worker count.
+
+    Several tests here assert that the gate stays inert, which only holds when
+    no worker count is set at all. ``WEB_CONCURRENCY`` is the count uvicorn takes
+    on the launches that pass no ``--workers``, so an exported value in the
+    invoking shell would otherwise turn these inert-gate expectations into
+    refusals.
+    """
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Unit tests of the gate function itself
 # ---------------------------------------------------------------------------
@@ -104,6 +118,37 @@ def test_gate_reads_uvicorn_worker_fallback_when_gateway_workers_is_blank(monkey
     monkeypatch.setenv("WEB_CONCURRENCY", "2")
     with pytest.raises(SystemExit):
         _enforce_postgres_for_multi_worker(_config_with_backend("sqlite"))
+
+
+def test_unparsable_gateway_workers_does_not_mask_uvicorn_worker_fallback(monkeypatch):
+    """A non-numeric documented knob must not report one worker while uvicorn starts four.
+
+    The launchers that pass no ``--workers`` (``backend/Dockerfile``, ``scripts/serve.sh``,
+    ``backend/Makefile gateway``) take the count from ``WEB_CONCURRENCY`` alone, so there
+    ``GATEWAY_WORKERS=abc`` never reaches uvicorn at all.
+    """
+    monkeypatch.setenv("GATEWAY_WORKERS", "abc")
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite"))
+    assert "WEB_CONCURRENCY=4" in str(exc_info.value), "must name the variable that actually set the count"
+
+
+def test_unparsable_gateway_workers_does_not_mask_the_browser_gate(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "auto")
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    config = _config_with_backend("postgres", heartbeat_enabled=True, browser_enabled=True)
+    with pytest.raises(SystemExit, match="process-local"):
+        _enforce_postgres_for_multi_worker(config)
+
+
+def test_agent_storage_warning_names_the_fallback_when_the_knob_is_unparsable(monkeypatch, caplog):
+    monkeypatch.setenv("GATEWAY_WORKERS", "auto")
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    with caplog.at_level("WARNING"):
+        _validate_agent_storage(_config_with_backend("postgres", heartbeat_enabled=True))
+    messages = [r.message for r in caplog.records if "not visible across workers" in r.message]
+    assert messages and "WEB_CONCURRENCY=2" in messages[0]
 
 
 def test_gate_accepts_single_worker_from_uvicorn_worker_fallback(monkeypatch):
@@ -315,7 +360,8 @@ def test_gate_treats_invalid_env_as_single_worker(monkeypatch):
     """Non-integer GATEWAY_WORKERS values must not crash startup.
 
     Uvicorn itself rejects these later; the gate should not preempt
-    that with its own crash. Falling back to 1 keeps the gate inert.
+    that with its own crash. The count is then taken from the remaining
+    spellings, and with no other variable set the gate stays inert.
     """
     for invalid in ("", "auto", "1.5", "abc", "0x4"):
         monkeypatch.setenv("GATEWAY_WORKERS", invalid)
