@@ -423,6 +423,13 @@
 
 ### 修复
 
+- **记忆：** 读取 DeerMem 智能体记忆时，不再因另一写入同时删除事实而失败。
+  `load()`、`reload()` 与全量 `rebuild_index()` 扫描在不持有存储锁的情况下列
+  出事实文件，若删除恰好在列出之后、打开文件之前提交，就会对完好的数据抛出
+  `MemoryStorageCorruption`：记忆 API 返回 HTTP 500（"Stored memory data is
+  corrupted"），提示词注入在该轮丢弃整个记忆块（在 `failure_policy.read:
+  fail_closed` 下则使运行失败），全量索引重建则把该事实计为失败。列出后消失的事实现在被视为已删除；仍然存在但无法读取的条目（例如悬空符
+  号链接）仍会报告为损坏。([#6255])
 - **记忆：** DeerMem 记忆重新加载不再把旧文档固定在缓存中。`reload()`
   此前先读取文档、后计算缓存签名，若两者之间有写入提交（例如后台记忆更
   新器），旧文档就会以新签名写入缓存，之后每次 `load()` 都返回过时的记
@@ -6420,3 +6427,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6229]: https://github.com/bytedance/deer-flow/pull/6229
 [#6230]: https://github.com/bytedance/deer-flow/pull/6230
 [#6238]: https://github.com/bytedance/deer-flow/pull/6238
+[#6255]: https://github.com/bytedance/deer-flow/pull/6255

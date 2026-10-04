@@ -410,6 +410,21 @@ def _parse_fact_markdown(path: Path) -> dict[str, Any]:
         raise MemoryStorageCorruption(f"Failed to parse canonical fact {path}: {exc}") from exc
 
 
+def _parse_listed_fact(path: Path) -> dict[str, Any] | None:
+    """Parse a fact found by a directory scan that ran without the scope locks.
+
+    A commit can delete a listed fact before it is opened; that vanished entry
+    returns ``None``. An entry that is still present but unreadable (such as a
+    dangling symlink) remains corruption.
+    """
+    try:
+        return _parse_fact_markdown(path)
+    except MemoryStorageCorruption:
+        if os.path.lexists(path):
+            raise
+        return None
+
+
 def _fsync_parent_directory(directory: Path) -> None:
     """Make a completed rename durable on POSIX filesystems."""
     if os.name == "nt":
@@ -869,7 +884,10 @@ class FileMemoryStorage(MemoryStorage):
             return []
         facts: list[dict[str, Any]] = []
         for fact_path in sorted(agent_facts_directory(path, agent_name).glob("**/*.md")):
-            fact = _parse_fact_markdown(fact_path)
+            # load()/reload() reach here without the scope locks.
+            fact = _parse_listed_fact(fact_path)
+            if fact is None:
+                continue
             facts.append(self._validate_loaded_fact(fact, fact_path, user_id=user_id, agent_name=agent_name))
         # Shard directories are an internal layout detail and must not change
         # the stable fact order observed by callers.
@@ -1843,7 +1861,9 @@ class FileMemoryStorage(MemoryStorage):
             candidates = root.glob("**/facts/**/*.md")
             for path in candidates:
                 try:
-                    fact = _parse_fact_markdown(path)
+                    fact = _parse_listed_fact(path)
+                    if fact is None:
+                        continue
                     relative_parts = path.relative_to(root).parts
                     agents_index = relative_parts.index("agents")
                     expected_agent = relative_parts[agents_index + 1]
