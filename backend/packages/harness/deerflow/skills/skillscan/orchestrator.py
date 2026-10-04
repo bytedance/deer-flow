@@ -706,7 +706,11 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, text, match))
     if match := re.search(_DESTRUCTIVE_RM_RE + r"|:\(\)\{\s*:\|:&\s*\};:|dd\s+[^#\n]*\bof=/dev/", text):
         findings.append(_finding_from_match("shell-destructive-command", rel_path, text, match))
-    if match := re.search(r"\b(env|printenv|export\s+-p)\b", text):
+    # A path, URL or flag component is not a command: `#!/usr/bin/env bash` and
+    # `https://env.example.com` name the word `env` without dumping anything, and
+    # `--env FOO=1` only sets a variable. The command word therefore must not follow
+    # `/`, `.`, `-` or a word character; a bare `env` / `printenv` still reports.
+    if match := re.search(r"(?<![/\w.-])(?:env|printenv)\b|\bexport\s+-p\b", text):
         findings.append(_finding_from_match("shell-env-dump", rel_path, text, match))
     return findings
 
