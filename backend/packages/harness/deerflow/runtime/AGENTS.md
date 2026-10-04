@@ -56,7 +56,9 @@ It must not retain provider-owned message objects because a provider may mutate 
 reuse the same response for the usage replay. Usage metadata is deep-snapshotted,
 including nested token-detail mappings, before it enters a staged or buffered event.
 An adjacent same-id positive-usage replay may enrich only each corresponding staged
-event's metadata/content usage fields. Replay
+event's metadata/content usage fields, including the `input_tokens`, `output_tokens`,
+and `total_tokens` aliases derived from the accepted usage snapshot. Request size,
+identity, caller, stop reason, and status retain their canonical values. Replay
 generation-count differences never add, remove, or replace canonical messages. The next
 unrelated event, an effective buffer size (committed plus pending events) reaching the
 flush threshold, or an explicit flush commits the staged unit and updates the message

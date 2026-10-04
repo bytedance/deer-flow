@@ -977,7 +977,10 @@ class RunJournal(BaseCallbackHandler):
             if isinstance(replay_metadata, Mapping):
                 replay_usage = replay_metadata.get("usage")
                 if isinstance(replay_usage, Mapping):
-                    canonical["metadata"]["usage"] = deepcopy(dict(replay_usage))
+                    canonical_metadata = canonical["metadata"]
+                    canonical_metadata["usage"] = deepcopy(dict(replay_usage))
+                    for key in ("input_tokens", "output_tokens", "total_tokens"):
+                        canonical_metadata[key] = canonical_metadata["usage"].get(key)
 
             canonical_content = canonical.get("content")
             replay_content = replay.get("content")

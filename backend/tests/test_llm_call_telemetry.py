@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -146,22 +147,74 @@ async def test_llm_error_without_prior_start_records_unavailable_request_size():
 
 
 @pytest.mark.anyio
-async def test_replayed_on_llm_end_keeps_canonical_request_metadata():
+@pytest.mark.parametrize(
+    "initial_usage",
+    [None, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}],
+    ids=["missing-usage", "zero-usage"],
+)
+async def test_replayed_on_llm_end_keeps_canonical_request_metadata(initial_usage):
+    store = MemoryRunEventStore()
+    journal = RunJournal("r1", "t1", store, flush_threshold=100)
+    rid, parent_id = uuid4(), uuid4()
+    journal.on_chat_model_start(
+        {},
+        [[HumanMessage(content="question")]],
+        run_id=rid,
+        tags=["lead_agent"],
+        metadata={"ls_provider": "anthropic", "ls_model_name": "requested-model"},
+    )
+    response_metadata = {"model_name": "canonical-model", "finish_reason": "stop"}
+    # The first callback has missing or zero usage; the adjacent replay fills it in.
+    journal.on_llm_end(_response(usage=initial_usage, response_metadata=response_metadata), run_id=rid, parent_run_id=parent_id, tags=["lead_agent"])
+    assert journal._pending_llm_response is not None
+    canonical_metadata = dict(journal._pending_llm_response.events[0]["metadata"])
+    usage = {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
+    journal.on_llm_end(
+        _response(
+            usage=usage,
+            response_metadata={"model_name": "replay-model", "finish_reason": "length"},
+            additional_kwargs={"deerflow_error_fallback": True, "error_detail": "replay fallback"},
+        ),
+        run_id=rid,
+        parent_run_id=uuid4(),
+        tags=["middleware:summarize"],
+    )
+
+    (event,) = await _events(journal, store, "llm.ai.response")
+    meta = event["metadata"]
+    assert meta == {**canonical_metadata, "usage": usage, **usage}
+    assert event["content"]["usage_metadata"] == usage
+    assert event["content"]["response_metadata"] == response_metadata
+    assert meta["request_message_chars"] == len("question")  # canonical request size preserved
+    assert meta["request_message_count"] == 1
+    assert meta["langchain_run_id"] == str(rid)
+    assert meta["langchain_parent_run_id"] == str(parent_id)
+    assert meta["caller_category"] == "lead_agent" and meta["status"] == "ok"
+    assert meta["model"] == "canonical-model" and meta["stop_reason"] == "stop"
+    assert not journal.had_llm_error_fallback
+    assert journal.get_completion_data()["total_tokens"] == 10
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "initial_usage",
+    [None, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}],
+    ids=["missing-usage", "zero-usage"],
+)
+async def test_usage_replay_after_flush_keeps_committed_telemetry(initial_usage):
     store = MemoryRunEventStore()
     journal = RunJournal("r1", "t1", store, flush_threshold=100)
     rid = uuid4()
-    journal.on_chat_model_start({}, [[HumanMessage(content="question")]], run_id=rid, tags=["lead_agent"])
-    # Provider fires on_llm_end first without usage, then replays it with usage populated.
-    journal.on_llm_end(_response(), run_id=rid, tags=["lead_agent"])
+    journal.on_llm_end(_response(usage=initial_usage), run_id=rid, tags=["lead_agent"])
+    (canonical_event,) = await _events(journal, store, "llm.ai.response")
+    canonical_event = deepcopy(canonical_event)
+
     usage = {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
     journal.on_llm_end(_response(usage=usage), run_id=rid, tags=["lead_agent"])
 
     (event,) = await _events(journal, store, "llm.ai.response")
-    meta = event["metadata"]
-    assert meta["usage"] == usage  # replay enriches usage only
-    assert meta["request_message_chars"] == len("question")  # canonical request size preserved
-    assert meta["request_message_count"] == 1
-    assert meta["langchain_run_id"] == str(rid)
+    assert event == canonical_event
+    assert journal.get_completion_data()["total_tokens"] == 10
 
 
 @pytest.mark.anyio
