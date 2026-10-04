@@ -8,6 +8,14 @@
 
 set -e
 
+# The script runs `uv run` against this checkout's backend environment, whose
+# [tool.uv] index-url pins the registry the lockfile was resolved against.
+# Host index overrides (UV_DEFAULT_INDEX/UV_INDEX/UV_EXTRA_INDEX_URL/
+# UV_INDEX_URL) outrank that project setting, so a shell pointing uv at a
+# restricting mirror would fail the re-resolution the upgrade needs; drop
+# them so the repo's own pinned index applies.
+unset UV_DEFAULT_INDEX UV_INDEX UV_EXTRA_INDEX_URL UV_INDEX_URL
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.yaml"
 
