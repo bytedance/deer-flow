@@ -2640,6 +2640,10 @@ class ChannelManager:
                     accumulated_text, current_message_id = _accumulate_stream_text(streamed_buffers, current_message_id, data)
                     if accumulated_text:
                         latest_text = accumulated_text
+                elif event == "error":
+                    # The v1 SDK yields backend errors as frames, not exceptions.
+                    # Keep draining the stream and use the existing failure path.
+                    stream_error = RuntimeError("Agent run failed.")
                 elif event == "values" and isinstance(data, (dict, list)):
                     last_values = data
                     # Clarification text is only in the values snapshot;
