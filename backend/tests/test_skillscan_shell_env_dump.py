@@ -5,9 +5,11 @@ that actually dumps it counts. The word `env` also appears as a path component i
 the portable shebang (`#!/usr/bin/env bash`, used by this repository's own
 `skills/public/claude-to-deerflow/scripts/*.sh`), in host labels
 (`https://env.example.com`), in dotted file names and in option names
-(`--env`), as a plain command argument (`echo env`) and inside comments
-(`# export -p`); none of them dumps anything, so the command word must sit at the
-start of a command (line start or after a `;`, `&`, `|`, `(`, `)` or `{`).
+(`--env`), as a plain command argument (`echo env`), as a variable (`${env}`) and
+inside comments (`# export -p`); none of them dumps anything, so the command word
+must sit at the start of a command: a line start, a position after a `;`, `&`,
+`|`, `(`, `)` or backtick separator, the `{` of a brace group, or the position
+after a reserved word that introduces a command (`then`, `do`, `exec`, ...).
 Comment text after a separator and heredoc bodies are data rather than commands
 too, so they are stripped before that command-position match.
 """
@@ -144,4 +146,63 @@ def test_env_on_the_line_that_opens_a_heredoc_still_reports(tmp_path: Path) -> N
 def test_export_p_after_a_command_separator_still_reports(tmp_path: Path) -> None:
     """`echo hi; export -p` runs `export -p` as a second command on the line."""
     _write_script(tmp_path, "#!/bin/bash\necho hi; export -p\n")
+    assert "shell-env-dump" in _rules(tmp_path)
+
+
+def test_env_after_then_still_reports(tmp_path: Path) -> None:
+    """`then` introduces a command list, so an `env` there is a real invocation."""
+    _write_script(tmp_path, "#!/bin/bash\nif true; then env; fi\n")
+    assert "shell-env-dump" in _rules(tmp_path)
+
+
+def test_printenv_after_do_still_reports(tmp_path: Path) -> None:
+    """A loop body is a command list too, so `do printenv` dumps the environment."""
+    _write_script(tmp_path, "#!/bin/bash\nwhile true; do printenv; done\n")
+    assert "shell-env-dump" in _rules(tmp_path)
+
+
+def test_env_as_a_condition_still_reports(tmp_path: Path) -> None:
+    """`if env; then ...` runs `env` as the condition command."""
+    _write_script(tmp_path, "#!/bin/bash\nif env; then :; fi\n")
+    assert "shell-env-dump" in _rules(tmp_path)
+
+
+def test_env_after_exec_still_reports(tmp_path: Path) -> None:
+    _write_script(tmp_path, "#!/bin/bash\nexec env\n")
+    assert "shell-env-dump" in _rules(tmp_path)
+
+
+def test_env_in_a_backtick_substitution_still_reports(tmp_path: Path) -> None:
+    """A backtick opens a command substitution, just as `$(` does."""
+    _write_script(tmp_path, "#!/bin/bash\nV=`env`\n")
+    assert "shell-env-dump" in _rules(tmp_path)
+
+
+def test_env_in_a_brace_group_still_reports(tmp_path: Path) -> None:
+    """A brace group is written `{ env; }`, so the `{` is followed by whitespace."""
+    _write_script(tmp_path, "#!/bin/bash\n{ env; }\n")
+    assert "shell-env-dump" in _rules(tmp_path)
+
+
+def test_env_in_a_parameter_expansion_is_not_an_environment_dump(tmp_path: Path) -> None:
+    """`${env}` reads one variable; that `{` does not open a command group."""
+    _write_script(tmp_path, "#!/bin/bash\nx=${env}\n")
+    assert "shell-env-dump" not in _rules(tmp_path)
+
+
+def test_keyword_like_path_component_is_not_a_command_position(tmp_path: Path) -> None:
+    """`./then env` runs a local program named `then`; `env` is its argument."""
+    _write_script(tmp_path, "#!/bin/bash\n./then env\n")
+    assert "shell-env-dump" not in _rules(tmp_path)
+
+
+def test_env_after_a_length_expansion_still_reports(tmp_path: Path) -> None:
+    """`${#HOME}` is not a comment, so the dump after the `;` is still real code."""
+    _write_script(tmp_path, "#!/bin/bash\nn=${#HOME}; env\n")
+    assert "shell-env-dump" in _rules(tmp_path)
+
+
+def test_printenv_after_an_array_length_expansion_still_reports(tmp_path: Path) -> None:
+    """`${#arr[@]}` keeps the line as code, so its `;` starts a real command."""
+    _write_script(tmp_path, "#!/bin/bash\nn=${#arr[@]}; printenv\n")
     assert "shell-env-dump" in _rules(tmp_path)

@@ -146,14 +146,20 @@ _DESTRUCTIVE_RM_RE = (
     r"/(?:\*|\s|$|(?:bin|boot|dev|etc|home|lib|lib64|opt|proc|root|run|sbin|srv|sys|usr|var)(?:/\*?)?(?:\s|$))"
 )
 # `env`, `printenv` and `export -p` dump the environment only when they run as a
-# command: at the start of a line or right after a `;`, `&`, `|`, `(`, `)` or `{`
-# separator (an `NAME=value` assignment prefix may come first). Anywhere else the
-# word names something else -- a path in `#!/usr/bin/env bash`, a host in
-# `https://env.example.com`, a flag in `--env FOO=1`, an argument in `echo env`,
-# or comment text in `# export -p` -- and dumps nothing. The text this is matched
-# against is first reduced to shell code by `_shell_code_only`, so a `;` inside a
-# comment and a command-looking line inside a heredoc body do not count either.
-_SHELL_ENV_DUMP_RE = re.compile(r"(?m)(?:^|(?<=[;&|(){}]))[ \t]*(?:[A-Za-z_]\w*=[^ \t]*[ \t]+)*(?P<cmd>env\b|printenv\b|export[ \t]+-p\b)")
+# command: at the start of a line, right after a `;`, `&`, `|`, `(`, `)` or
+# backtick separator, after the `{` that opens a brace group (`{ env; }`, which
+# bash requires to be followed by whitespace), or after a reserved word that must
+# introduce a command (`then`, `do`, `exec`, ...). An `NAME=value` assignment
+# prefix may come first. Anywhere else the word names something else -- a path in
+# `#!/usr/bin/env bash`, a host in `https://env.example.com`, a flag in
+# `--env FOO=1`, an argument in `echo env`, a variable in `${env}`, or comment
+# text in `# export -p` -- and dumps nothing. The text this is matched against is
+# first reduced to shell code by `_shell_code_only`, so a `;` inside a comment and
+# a command-looking line inside a heredoc body do not count either.
+_SHELL_ENV_DUMP_RE = re.compile(
+    r"(?m)(?:^|(?<=[;&|()`])|\{(?=[ \t])|(?<![\w/.-])(?:if|then|elif|else|while|until|do|exec)\b[ \t]+)"
+    r"[ \t]*(?:[A-Za-z_]\w*=[^ \t]*[ \t]+)*(?P<cmd>env\b|printenv\b|export[ \t]+-p\b)"
+)
 # The head of a heredoc redirection: `<<` or `<<-`, an optional quoted delimiter,
 # then the delimiter word. Requiring a leading letter/underscore keeps arithmetic
 # shifts such as `$((1 << 2))` from being read as a heredoc opener.
@@ -711,6 +717,11 @@ def _split_shell_line(line: str) -> tuple[str, list[tuple[str, bool]]]:
     Quote-aware: a `#` outside quotes starts a comment only at a word start, and
     `<<` outside quotes opens a heredoc. Returns the code text (comment stripped)
     together with the `(delimiter, strip_tabs)` pairs the line opens.
+
+    A `{` or `}` immediately before the `#` is not a word start: bash reads
+    `${#HOME}` as the length operator and `}#` as part of a word, while a brace
+    group needs the space of `{ # ...`. Those two characters are therefore left
+    out of the set that admits a comment.
     """
     heredocs: list[tuple[str, bool]] = []
     in_single = in_double = False
@@ -731,7 +742,7 @@ def _split_shell_line(line: str) -> tuple[str, list[tuple[str, bool]]]:
             in_single = True
         elif ch == '"':
             in_double = True
-        elif ch == "#" and (i == 0 or line[i - 1] in " \t;&|(){}<>"):
+        elif ch == "#" and (i == 0 or line[i - 1] in " \t;&|()<>"):
             return line[:i], heredocs
         elif ch == "<" and line.startswith("<<", i) and not line.startswith("<<<", i) and (i == 0 or not (line[i - 1].isalnum() or line[i - 1] == "_")):
             if head := _HEREDOC_HEAD_RE.match(line, i):
