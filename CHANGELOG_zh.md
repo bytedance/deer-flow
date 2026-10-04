@@ -431,7 +431,7 @@
   `/workspace-changes` 报告没有变更，`/artifacts/archive` 返回 404，重新生成的
   源运行查找退回兜底路径或返回 409。这些读取现在使用与线程消息路由（#5448）相同
   的数据身份，所有事件存储的 `list_messages_by_run()` 都接受 `user_id`。浏览器与
-  API 会话仍保留按用户过滤。
+  API 会话仍保留按用户过滤。([#6282])
 - **记忆：** 读取 DeerMem 智能体记忆时，不再因另一写入同时删除事实而失败。
   `load()`、`reload()` 与全量 `rebuild_index()` 扫描在不持有存储锁的情况下列
   出事实文件，若删除恰好在列出之后、打开文件之前提交，就会对完好的数据抛出
@@ -6437,3 +6437,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6230]: https://github.com/bytedance/deer-flow/pull/6230
 [#6238]: https://github.com/bytedance/deer-flow/pull/6238
 [#6255]: https://github.com/bytedance/deer-flow/pull/6255
+[#6282]: https://github.com/bytedance/deer-flow/pull/6282

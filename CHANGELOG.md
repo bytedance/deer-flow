@@ -476,7 +476,7 @@ This release closes that milestone with **301 merged pull requests**.
   404, and the regenerate source-run lookup fell back or failed with 409. These
   reads now use the same data identity as the thread message routes (#5448),
   and every event store accepts `user_id` on `list_messages_by_run()`. Browser
-  and API sessions keep their per-user filter.
+  and API sessions keep their per-user filter. ([#6282])
 - **memory:** Reading DeerMem agent memory no longer fails while another write
   deletes a fact. `load()`, `reload()`, and the full `rebuild_index()` scan list
   the fact files without the storage locks, so a delete committed between the
@@ -7709,3 +7709,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6230]: https://github.com/bytedance/deer-flow/pull/6230
 [#6238]: https://github.com/bytedance/deer-flow/pull/6238
 [#6255]: https://github.com/bytedance/deer-flow/pull/6255
+[#6282]: https://github.com/bytedance/deer-flow/pull/6282
