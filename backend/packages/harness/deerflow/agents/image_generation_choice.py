@@ -72,11 +72,31 @@ def adapt_channel_image_choice_reply(
     if not isinstance(channel_name, str) or not channel_name or not isinstance(channel_user_id, str) or not channel_user_id:
         return graph_input, None
 
+    return _adapt_text_image_choice_reply(graph_input, prior_messages, environment, channel_name=channel_name, channel_user_id=channel_user_id)
+
+
+def adapt_embedded_image_choice_reply(
+    graph_input: dict[str, Any],
+    prior_messages: tuple[Any, ...],
+    environment: dict[str, str],
+) -> tuple[dict[str, Any], Literal["managed", "sandbox_environment"] | None]:
+    """Accept a plain embedded-client answer only for an unbound current card."""
+    return _adapt_text_image_choice_reply(graph_input, prior_messages, environment, channel_name=None, channel_user_id=None)
+
+
+def _adapt_text_image_choice_reply(
+    graph_input: dict[str, Any],
+    prior_messages: tuple[Any, ...],
+    environment: dict[str, str],
+    *,
+    channel_name: str | None,
+    channel_user_id: str | None,
+) -> tuple[dict[str, Any], Literal["managed", "sandbox_environment"] | None]:
     incoming = graph_input.get("messages") if isinstance(graph_input, dict) else None
     if not isinstance(incoming, list) or len(incoming) != 1 or not isinstance(incoming[0], HumanMessage):
         return graph_input, None
     message = incoming[0]
-    if not isinstance(message.content, str) or message.additional_kwargs:
+    if not isinstance(message.content, str) or (set(message.additional_kwargs) - ({"run_id"} if channel_name is None else set())):
         return graph_input, None
 
     # The card must still be the last checkpointed message. A later turn or
@@ -89,7 +109,12 @@ def adapt_channel_image_choice_reply(
     if not isinstance(payload, dict) or payload.get("request_id") != card.id or payload.get("clarification_type") != "image_model_choice" or payload.get("input_mode") != "single_choice":
         return graph_input, None
     marker = payload.get("image_profile_choice")
-    if not isinstance(marker, dict) or marker.get("channel_name") != channel_name or marker.get("channel_user_id") != channel_user_id:
+    if not isinstance(marker, dict):
+        return graph_input, None
+    if channel_name is None:
+        if "channel_name" in marker or "channel_user_id" in marker:
+            return graph_input, None
+    elif marker.get("channel_name") != channel_name or marker.get("channel_user_id") != channel_user_id:
         return graph_input, None
     options = payload.get("options")
     if not isinstance(options, list) or len(options) != 2:
