@@ -59,6 +59,77 @@ _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification",
 _MAX_RUN_SKILL_SNAPSHOTS = 64
 
 
+def _content_chars(content: Any) -> int:
+    """Characters in the string leaves and mapping keys of ``content``.
+
+    Walks the structure without serializing it, so cost scales with the number of
+    nodes rather than the byte size (base64 image payloads are counted by ``len``).
+    """
+    total = 0
+    stack = [content]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            total += len(item)
+        elif isinstance(item, Mapping):
+            for key, value in item.items():
+                total += len(key) if isinstance(key, str) else 0
+                stack.append(value)
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+    return total
+
+
+def _rendered_request_size(messages: Sequence[Sequence[BaseMessage]], invocation_params: Any) -> dict[str, Any]:
+    """Measure the request as rendered at ``on_chat_model_start`` (read-only).
+
+    Sizes are characters of string content (see ``_content_chars``), not serialized
+    bytes. Token counts for the rendered request are not available without an extra
+    model/tokenizer call, so ``input_tokens`` from the provider's usage metadata
+    (recorded at ``on_llm_end``) is the token figure. ``request_tools_chars`` is
+    ``None`` when the callback carries no bound-tool schema.
+    """
+    message_chars = 0
+    message_count = 0
+    for batch in messages:
+        for message in batch:
+            message_count += 1
+            message_chars += _content_chars(getattr(message, "content", ""))
+            tool_calls = getattr(message, "tool_calls", None)
+            if tool_calls:
+                message_chars += _content_chars(tool_calls)
+    tools = invocation_params.get("tools") if isinstance(invocation_params, Mapping) else None
+    tools_chars = _content_chars(tools) if tools else None
+    return {
+        "request_chars": message_chars + (tools_chars or 0),
+        "request_message_chars": message_chars,
+        "request_tools_chars": tools_chars,
+        "request_message_count": message_count,
+    }
+
+
+def _llm_caller_category(caller: str, *, error_fallback: bool) -> str:
+    if error_fallback:
+        return "fallback"
+    if caller.startswith("middleware:"):
+        return "middleware"
+    if caller.startswith("subagent:"):
+        return "subagent"
+    if caller == "lead_agent":
+        return "lead_agent"
+    return "other"
+
+
+def _first_str(mapping: Any, *keys: str) -> str | None:
+    if not isinstance(mapping, Mapping):
+        return None
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 @dataclass
 class _PendingLlmResponse:
     llm_run_id: str
@@ -306,6 +377,9 @@ class RunJournal(BaseCallbackHandler):
 
         # Latency tracking
         self._llm_start_times: dict[str, float] = {}  # langchain run_id -> start time
+        # P0 telemetry: per-call request measurement captured at start, merged into
+        # the llm.ai.response / llm.error metadata at end. Observation only.
+        self._llm_start_telemetry: dict[str, dict[str, Any]] = {}
 
         # LLM request/response tracking
         self._llm_call_index = 0
@@ -424,6 +498,7 @@ class RunJournal(BaseCallbackHandler):
         self._llm_start_times[rid] = time.monotonic()
         self._llm_call_index += 1
         self._seen_llm_starts.add(rid)
+        self._capture_start_telemetry(rid, serialized, messages, kwargs)
 
         logger.debug(
             "on_chat_model_start %s: tags=%s num_batches=%d message_counts=%s",
@@ -537,6 +612,7 @@ class RunJournal(BaseCallbackHandler):
                         "usage": usage_dict,
                         "latency_ms": latency_ms,
                         "llm_call_index": call_index,
+                        **self._end_telemetry(rid, message, usage_dict, caller, parent_run_id),
                     },
                 )
             )
@@ -572,6 +648,8 @@ class RunJournal(BaseCallbackHandler):
 
                     should_schedule_progress = True
 
+        self._llm_start_telemetry.pop(rid, None)
+
         if messages:
             self._queue_llm_response_events(
                 str(run_id),
@@ -584,12 +662,74 @@ class RunJournal(BaseCallbackHandler):
             self._schedule_progress_flush()
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
-        self._llm_start_times.pop(str(run_id), None)
+        rid = str(run_id)
+        self._llm_start_times.pop(rid, None)
+        error_metadata = self._error_telemetry(rid, error, kwargs.get("tags"), kwargs.get("parent_run_id"))
         self._put(
             event_type=LLM_ERROR_EVENT.event_type,
             category=LLM_ERROR_EVENT.category,
             content=str(error),
+            metadata=error_metadata or None,
         )
+
+    # -- P0 per-call telemetry (observation only; every helper fails soft) --
+
+    def _capture_start_telemetry(self, rid: str, serialized: Any, messages: list[list[BaseMessage]], kwargs: dict[str, Any]) -> None:
+        try:
+            start_metadata = kwargs.get("metadata")
+            telemetry = _rendered_request_size(messages, kwargs.get("invocation_params"))
+            telemetry["request_started_at"] = datetime.now(UTC).isoformat()
+            telemetry["provider"] = _first_str(start_metadata, "ls_provider")
+            telemetry["requested_model"] = _first_str(start_metadata, "ls_model_name")
+            if telemetry["provider"] is None and isinstance(serialized, Mapping):
+                serialized_id = serialized.get("id")
+                if isinstance(serialized_id, list) and serialized_id:
+                    telemetry["provider"] = str(serialized_id[-1])
+            self._llm_start_telemetry[rid] = telemetry
+        except Exception:
+            logger.warning("LLM start telemetry capture failed for %s", rid, exc_info=True)
+
+    def _end_telemetry(self, rid: str, message: Any, usage: Mapping[str, Any], caller: str, parent_run_id: UUID | None) -> dict[str, Any]:
+        try:
+            start = self._llm_start_telemetry.get(rid) or {}
+            response_metadata = getattr(message, "response_metadata", None) or {}
+            additional_kwargs = getattr(message, "additional_kwargs", None) or {}
+            error_fallback = isinstance(additional_kwargs, Mapping) and bool(additional_kwargs.get("deerflow_error_fallback"))
+            return {
+                "langchain_run_id": rid,
+                "langchain_parent_run_id": str(parent_run_id) if parent_run_id else None,
+                "caller_category": _llm_caller_category(caller, error_fallback=error_fallback),
+                "provider": start.get("provider"),
+                "model": _first_str(response_metadata, "model_name", "model") or start.get("requested_model"),
+                "stop_reason": _first_str(response_metadata, "stop_reason", "finish_reason", "finishReason"),
+                "status": "fallback" if error_fallback else "ok",
+                "input_tokens": usage.get("input_tokens"),
+                "output_tokens": usage.get("output_tokens"),
+                "total_tokens": usage.get("total_tokens"),
+                **{k: v for k, v in start.items() if k.startswith("request_")},
+            }
+        except Exception:
+            logger.warning("LLM end telemetry build failed for %s", rid, exc_info=True)
+            return {}
+
+    def _error_telemetry(self, rid: str, error: BaseException, tags: list[str] | None, parent_run_id: UUID | None) -> dict[str, Any]:
+        try:
+            start = self._llm_start_telemetry.pop(rid, None) or {}
+            return {
+                "langchain_run_id": rid,
+                "langchain_parent_run_id": str(parent_run_id) if parent_run_id else None,
+                "caller_category": _llm_caller_category(self._identify_caller(tags), error_fallback=False),
+                "caller": self._identify_caller(tags),
+                "provider": start.get("provider"),
+                "model": start.get("requested_model"),
+                "status": "error",
+                "stop_reason": None,
+                "error_type": type(error).__name__,
+                **{k: v for k, v in start.items() if k.startswith("request_")},
+            }
+        except Exception:
+            logger.warning("LLM error telemetry build failed for %s", rid, exc_info=True)
+            return {}
 
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
         """Cache the executing tool name for artifact attribution."""
@@ -837,7 +977,10 @@ class RunJournal(BaseCallbackHandler):
             if isinstance(replay_metadata, Mapping):
                 replay_usage = replay_metadata.get("usage")
                 if isinstance(replay_usage, Mapping):
-                    canonical["metadata"]["usage"] = deepcopy(dict(replay_usage))
+                    canonical_metadata = canonical["metadata"]
+                    canonical_metadata["usage"] = deepcopy(dict(replay_usage))
+                    for key in ("input_tokens", "output_tokens", "total_tokens"):
+                        canonical_metadata[key] = canonical_metadata["usage"].get(key)
 
             canonical_content = canonical.get("content")
             replay_content = replay.get("content")

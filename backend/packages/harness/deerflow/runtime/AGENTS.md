@@ -33,6 +33,19 @@ the optional display summary. Image-only input has no text but must still stop
 the batch scan and later model calls from appending another human-input event.
 `tests/test_run_journal.py` covers callback and full/delta graph paths.
 
+**Per-call LLM telemetry** (`runtime/journal.py`): `RunJournal` adds observation-only keys
+to `llm.ai.response` metadata and to `llm.error` metadata (previously empty): `langchain_run_id`,
+`langchain_parent_run_id`, `caller_category` (`lead_agent` / `middleware` / `subagent` /
+`fallback` / `other`), `provider`, `model`, `stop_reason`, `status`, provider-reported token counts,
+and the rendered request size measured at `on_chat_model_start` (`request_chars`,
+`request_message_chars`, `request_tools_chars`, `request_message_count`, `request_started_at`).
+Sizes count string-leaf characters without serializing the request (the callback runs inline on
+the event loop); there is no pre-call token count, so `input_tokens` is the provider's figure.
+Unavailable values are `None` or absent, never estimated. Every helper fails soft: a telemetry
+error is logged and must not change the call, the staged events' existing fields, or token
+accounting. The contract lists the optional keys in `contracts/run_event_stream_contract.json`.
+Retries are not distinguishable from first attempts.
+
 **LLM response callback coalescing** (`runtime/journal.py`): a provider may fire
 `on_llm_end` twice for one LangChain run id, first without usage (or with all token
 counts zero) and immediately again with usage populated. The first callback's generation
@@ -43,7 +56,9 @@ It must not retain provider-owned message objects because a provider may mutate 
 reuse the same response for the usage replay. Usage metadata is deep-snapshotted,
 including nested token-detail mappings, before it enters a staged or buffered event.
 An adjacent same-id positive-usage replay may enrich only each corresponding staged
-event's metadata/content usage fields. Replay
+event's metadata/content usage fields, including the `input_tokens`, `output_tokens`,
+and `total_tokens` aliases derived from the accepted usage snapshot. Request size,
+identity, caller, stop reason, and status retain their canonical values. Replay
 generation-count differences never add, remove, or replace canonical messages. The next
 unrelated event, an effective buffer size (committed plus pending events) reaching the
 flush threshold, or an explicit flush commits the staged unit and updates the message

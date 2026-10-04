@@ -3128,10 +3128,70 @@ class TestChannelManager:
 
         expected_owner = manager._resolve_run_params(msg, "")[2].get("user_id")
 
-        manager._resolve_available_skill_names(msg)
+        manager._resolve_available_skill_names(msg, "")
 
         assert expected_owner and expected_owner != "default"
         assert captured["user_id"] == expected_owner
+
+    def test_slash_skill_whitelist_for_a_bound_message_ignores_the_json_store_mapping(self, monkeypatch, tmp_path):
+        """A bound message's thread lives in the connection repository only
+        (``lookup_thread_id``). When the repository has no mapping yet, the whitelist
+        pre-check used to fall back to reading the JSON ``ChannelStore`` itself, so a
+        legacy unbound mapping for the same chat — here a thread pinned to a
+        frontend-only custom agent — decided which skills the bound user could run.
+        """
+        from app.channels.manager import ChannelManager
+
+        loaded_agents: list[str] = []
+
+        def spy_load_agent_config(name, *, user_id=None):
+            loaded_agents.append(name)
+            return SimpleNamespace(skills=["frontend-design"])
+
+        monkeypatch.setattr("app.channels.manager.load_agent_config", spy_load_agent_config)
+
+        class EmptyConnectionRepo:
+            async def get_thread_id(self, connection_id, external_conversation_id, external_topic_id=None):
+                return None
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            store.set_thread_id("test", "chat1", "legacy-thread", user_id="platform-user")
+            manager = ChannelManager(bus=bus, store=store, connection_repo=EmptyConnectionRepo())
+            manager._remember_thread_agent("legacy-thread", "frontend-only")
+            manager._skill_storage = _make_channel_skill_storage([_make_channel_skill(tmp_path, "data-analysis")])
+
+            routed_to_chat: list[InboundMessage] = []
+
+            async def record_chat(msg, **kwargs):
+                routed_to_chat.append(msg)
+
+            manager._handle_chat = record_chat
+            outbound_received: list[OutboundMessage] = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            await manager._handle_command(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat1",
+                    user_id="platform-user",
+                    connection_id="conn-1",
+                    owner_user_id="owner-alice",
+                    text="/data-analysis go",
+                    msg_type=InboundMessageType.COMMAND,
+                )
+            )
+
+            assert outbound_received == []
+            assert len(routed_to_chat) == 1
+            assert loaded_agents == []
+
+        _run(go())
 
     def test_handle_command_slash_skill_reports_disabled_skill(self, tmp_path):
         from app.channels.manager import ChannelManager

@@ -24,6 +24,7 @@ from langgraph_sdk.errors import ConflictError
 from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.connection_identity import lookup_thread_id
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
@@ -1781,13 +1782,9 @@ class ChannelManager:
                 )
         return policy
 
-    def _resolve_available_skill_names(
-        self,
-        msg: InboundMessage,
-        thread_id: str | None = None,
-    ) -> set[str] | None:
-        if thread_id is None:
-            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or ""
+    def _resolve_available_skill_names(self, msg: InboundMessage, thread_id: str) -> set[str] | None:
+        """*thread_id* comes from ``_lookup_thread_id`` (``""`` when unmapped); never
+        re-read the JSON store here, which holds no mapping for bound messages."""
         _, _, run_context = self._resolve_run_params(msg, thread_id)
         if run_context.get("is_bootstrap"):
             return {"bootstrap"}
@@ -2199,13 +2196,7 @@ class ChannelManager:
         await self.bus.publish_outbound(outbound)
 
     async def _lookup_thread_id(self, msg: InboundMessage) -> str | None:
-        if msg.connection_id and self._connection_repo is not None:
-            return await self._connection_repo.get_thread_id(
-                msg.connection_id,
-                msg.chat_id,
-                msg.topic_id,
-            )
-        return self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        return await lookup_thread_id(msg, repo=self._connection_repo, store=self.store)
 
     async def _store_thread_id(self, msg: InboundMessage, thread_id: str) -> None:
         if msg.connection_id and msg.owner_user_id and self._connection_repo is not None:
@@ -2807,7 +2798,7 @@ class ChannelManager:
             slash_resolution = await asyncio.to_thread(
                 lambda: _resolve_slash_skill_command(
                     raw_text,
-                    self._resolve_available_skill_names(msg, thread_id),
+                    self._resolve_available_skill_names(msg, thread_id or ""),
                     self._get_skill_storage,
                 )
             )
