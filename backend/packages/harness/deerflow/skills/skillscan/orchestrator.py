@@ -118,6 +118,15 @@ _PLACEHOLDER_VALUES = {"", "x", "xx", "xxx", "xxxx", "changeme", "change-me", "e
 # analyzed from its AST instead, because a regex cannot tell an annotation from a value.
 _SECRET_ASSIGNMENT_RE = re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)")
 _SECRET_ASSIGNMENT_NAME_RE = re.compile(r"(?i)^(?:token|password|passwd|api[_-]?key|secret|credential)s?$")
+_SECRET_TOKEN_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
+        r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b",
+        r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b",
+        r"\bsk-[A-Za-z0-9]{20,}\b",
+    )
+)
 _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
 _EXTERNAL_HTTP_RE = re.compile(r"http://([A-Za-z0-9.-]+)(?::\d+)?(?:/|\b)")
 _URL_RE = re.compile(r"https?://[^\s)'\"<>]+")
@@ -315,14 +324,8 @@ def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
     if private_key:
         findings.append(_finding_from_match("secret-private-key", rel_path, text, private_key))
 
-    token_patterns = [
-        r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
-        r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b",
-        r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b",
-        r"\bsk-[A-Za-z0-9]{20,}\b",
-    ]
-    for pattern in token_patterns:
-        match = re.search(pattern, text)
+    for pattern in _SECRET_TOKEN_PATTERNS:
+        match = pattern.search(text)
         if match and not _looks_like_placeholder(match.group(0)):
             findings.append(_finding_from_match("secret-cloud-token", rel_path, text, match))
             break
@@ -503,15 +506,20 @@ def _python_secret_literal_members(expr: ast.expr) -> list[ast.expr]:
     token it grabbed is only a bracket. This names the literal instead of the bracket.
     Each member is asserted on by itself, because joining a container's members would
     describe a string that no Python program ever binds.
+
+    Mapping keys are structural labels, so they need independent evidence from a
+    recognized token format; the enclosing secret-like name is evidence only for values.
     """
     if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
         return list(expr.elts)
     if isinstance(expr, ast.Dict):
-        # A ``{**spread: …}`` entry carries a None key and names nothing of its own.
+        # A ``{**spread}`` entry carries a None key and names nothing of its own.
         members: list[ast.expr] = []
         for key, value in zip(expr.keys, expr.values, strict=True):
             if key is not None:
-                members.append(key)
+                literal = _python_secret_literal(key)
+                if literal is not None and any(pattern.search(literal) for pattern in _SECRET_TOKEN_PATTERNS):
+                    members.append(key)
             members.append(value)
         return members
     if isinstance(expr, ast.IfExp):
@@ -548,9 +556,10 @@ def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFi
     (``api_key = os.getenv("X")``) from a literal, and it points at an annotated
     assignment's annotation rather than at its value.
 
-    What it gains is precision, never less coverage: every binding form the
-    sweep reported stays reported, per ``_python_secret_bindings``, and so does
-    every literal value shape it saw, per ``_python_secret_literal_candidates``.
+    ``_python_secret_bindings`` preserves the sweep's binding forms, and
+    ``_python_secret_literal_candidates`` covers literal values inside containers
+    and conditionals. Mapping labels do not inherit credential evidence from the
+    enclosing name; only keys matching a recognized token format are candidates.
 
     A file Python cannot parse falls back to that sweep: the AST is only an
     improvement, and returning nothing would let one syntax error (or a NUL byte)

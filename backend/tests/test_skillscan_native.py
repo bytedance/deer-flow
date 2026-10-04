@@ -1603,19 +1603,51 @@ def test_secret_assignment_ignores_python_container_without_literal(tmp_path: Pa
     assert _secret_assignments(_scan_python_sample(tmp_path, source)) == []
 
 
-def test_secret_assignment_still_flags_python_dict_key_literal(tmp_path: Path) -> None:
-    """A credential can be written where a dict key goes: ``{SECRET: "live"}`` is in the
-    package either way, and the sweep this rule replaced already reported the line (its
-    value capture grabbed the opening brace, which is not a placeholder).
+@pytest.mark.parametrize("key", ['"ghp_a1b2c3d4e5f6g7h8i9j0"', '"ghp_" + "a1b2c3d4e5f6g7h8i9j0"'])
+def test_secret_assignment_still_flags_python_dict_key_literal(tmp_path: Path, key: str) -> None:
+    """A mapping key needs credential evidence of its own: a known token format,
+    including one spelled as a concatenation of literals.
 
     The key and the value are put on separate lines so the reported line says which of the
     two was asserted on: a value-only reader would name line 3.
     """
-    source = 'api_key = {\n    "9f8e7d6c5b4a3210ff":\n        "live",\n}\n'
+    source = f'api_key = {{\n    {key}:\n        "live",\n}}\n'
 
     finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
 
     assert finding["line"] == 2
+    assert finding["evidence"] == "[redacted]"
+    assert "a1b2c3d4e5f6g7h8i9j0" not in repr(finding)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'tokens = {"access_token": os.getenv("ACCESS_TOKEN"), "refresh_token": os.getenv("REFRESH_TOKEN")}\n',
+        'credentials = {"api_key": token_from_config, "password": config["password"]}\n',
+        'tokens = {"outer": {"access_token": os.environ["ACCESS_TOKEN"]}}\n',
+        'connect(tokens={"access_token": os.getenv("ACCESS_TOKEN")})\n',
+        'tokens = {("access_token", "refresh_token"): runtime_tokens}\n',
+        'api_key = {123456: os.getenv("API_KEY")}\n',
+        'tokens = {"9f8e7d6c5b4a3210ff": runtime_token}\n',
+    ],
+)
+def test_secret_assignment_ignores_python_mapping_labels_with_runtime_values(tmp_path: Path, source: str) -> None:
+    """Mapping labels do not become credentials because the enclosing name is secret-like."""
+    findings = _scan_python_sample(tmp_path, source)
+
+    assert [finding for finding in findings if finding["rule_id"].startswith("secret-")] == []
+
+
+@pytest.mark.parametrize("value", ['"9f8e7d6c5b4a3210ff"', 'os.getenv("ACCESS_TOKEN") if prod else "9f8e7d6c5b4a3210ff"'])
+def test_secret_assignment_reports_python_mapping_credential_value(tmp_path: Path, value: str) -> None:
+    """A label must neither hide a hardcoded value nor take its source location."""
+    source = f'tokens = {{\n    "access_token":\n        {value},\n}}\n'
+
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["line"] == 3
+    assert finding["severity"] == "HIGH"
     assert finding["evidence"] == "[redacted]"
     assert "9f8e7d6c5b4a3210ff" not in repr(finding)
 
