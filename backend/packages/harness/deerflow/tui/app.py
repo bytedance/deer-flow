@@ -667,12 +667,19 @@ class DeerFlowTUI(App):
                 break
             if isinstance(action, ThreadTitle):
                 latest_title = action.title
-            self.call_from_thread(self._on_action, action)
+            self.call_from_thread(self._on_stream_action, thread_id, action)
 
         # Only persist a title for a run that completed normally — an interrupted
         # run may only have emitted the title middleware's first, truncated guess.
         if writer is not None and latest_title and not self._cancelled:
             writer.set_title(thread_id, latest_title)
+
+    def _on_stream_action(self, thread_id: str, action) -> None:
+        # Interrupt/switch may happen after the worker's cancellation check.
+        # Validate the destination when Textual delivers the action to the UI.
+        if thread_id != self._conv_thread_id:
+            return
+        self._on_action(action)
 
     def _on_action(self, action) -> None:
         self.state = reduce(self.state, action)

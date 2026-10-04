@@ -106,6 +106,8 @@ semantics as elsewhere in DeerFlow). `/model` and `/threads` open modal pickers.
 opens the thread picker. During an active run, `/resume`, `/threads`, and `/switch`
 ask you to wait instead of switching away from in-flight output. An invalid
 `/resume` reference displays an error and leaves the current conversation intact.
+After an interrupt and conversation switch, late stream actions from the previous
+thread are discarded when they reach the UI.
 
 Use `/goal <condition>` to set the active thread goal, `/goal` to show it, and
 `/goal clear` to clear it.

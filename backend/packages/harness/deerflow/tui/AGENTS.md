@@ -18,6 +18,10 @@ and when applying the picker callback, which may outlive the idle state in which
 it opened. Keep the current thread and transcript unchanged when rejecting a
 switch. Report invalid resume references as error rows without relaxing the
 canonical thread-id validation or terminating the app.
+Worker actions must carry their originating thread id into the UI callback.
+Check it against the displayed thread on delivery, not just before scheduling:
+an interrupt/switch can race with the worker's cancellation check. Drop actions
+for another thread before they reach the reducer or change streaming state.
 
 `InputHistory.down()` returns `None` when history navigation is inactive; the
 app must then leave the composer untouched, including its cursor and undo state.

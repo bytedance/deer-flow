@@ -9,7 +9,7 @@ from deerflow.client import StreamEvent
 from deerflow.tui.app import DeerFlowTUI, SelectScreen
 from deerflow.tui.cli import LaunchPlan
 from deerflow.tui.session import Session
-from deerflow.tui.view_state import RunEnded, RunStarted
+from deerflow.tui.view_state import AssistantDelta, RunEnded, RunStarted
 
 
 class _ControlledClient:
@@ -42,6 +42,51 @@ async def _settle(pilot, predicate):
             return
         await asyncio.sleep(0.01)
     raise AssertionError("Expected TUI event did not arrive")
+
+
+@pytest.mark.asyncio
+async def test_interrupt_then_resume_discards_old_thread_delivery(monkeypatch):
+    client = _ControlledClient()
+    app = DeerFlowTUI(Session(client=client), LaunchPlan(mode="tui", thread_id="thread-a"))
+    ready = threading.Event()
+    deliver = threading.Event()
+    delivered = threading.Event()
+    original = app.call_from_thread
+
+    def paused_delivery(callback, *args):
+        action = args[-1]
+        if isinstance(action, AssistantDelta) and action.text == "after":
+            ready.set()
+            if not deliver.wait(10):
+                raise TimeoutError("UI delivery was not released")
+            result = original(callback, *args)
+            delivered.set()
+            return result
+        return original(callback, *args)
+
+    # Pause a real stream action after the worker's cancellation check but
+    # before Textual executes its callback on the UI thread.
+    monkeypatch.setattr(app, "call_from_thread", paused_delivery)
+    async with app.run_test() as pilot:
+        try:
+            await pilot.pause()
+            app.query_one("#composer").value = "original question"
+            await pilot.press("enter")
+            await _settle(pilot, lambda: app._streaming and any(row.kind == "assistant" for row in app.state.rows))
+            client.release.set()
+            await _settle(pilot, ready.is_set)
+
+            app.action_interrupt()
+            app.query_one("#composer").value = "/resume thread-b"
+            await pilot.press("enter")
+            await _settle(pilot, lambda: app._conv_thread_id == "thread-b")
+            deliver.set()
+            await _settle(pilot, delivered.is_set)
+            assert not any(row.kind == "assistant" for row in app.state.rows)
+        finally:
+            client.release.set()
+            deliver.set()
+            await pilot.pause()
 
 
 @pytest.mark.asyncio
