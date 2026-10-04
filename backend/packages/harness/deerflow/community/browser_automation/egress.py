@@ -65,14 +65,12 @@ class _ResolverCapacityExceeded(RuntimeError):
     pass
 
 
-def _finish_resolver(future: asyncio.Future[object], slots: threading.BoundedSemaphore) -> None:
-    """Consume abandoned results and release capacity when worker work ends."""
+def _consume_resolver_result(future: asyncio.Future[object]) -> None:
+    """Consume abandoned results after a timeout or cancelled SOCKS handler."""
     try:
         future.exception()
     except (asyncio.CancelledError, Exception):
         pass
-    finally:
-        slots.release()
 
 
 async def _resolve_with_timeout(resolve: EgressResolver, host: str) -> list[str]:
@@ -83,11 +81,15 @@ async def _resolve_with_timeout(resolve: EgressResolver, host: str) -> list[str]
     loop = asyncio.get_running_loop()
     context = contextvars.copy_context()
     try:
-        future = loop.run_in_executor(_RESOLVER_EXECUTOR, context.run, resolve, host)
+        worker = _RESOLVER_EXECUTOR.submit(context.run, resolve, host)
     except BaseException:
         slots.release()
         raise
-    future.add_done_callback(lambda completed: _finish_resolver(completed, slots))
+    # Release from the concurrent future's callback, which runs with the worker
+    # completion and does not depend on the event loop still being alive.
+    worker.add_done_callback(lambda _completed: slots.release())
+    future = asyncio.wrap_future(worker, loop=loop)
+    future.add_done_callback(_consume_resolver_result)
     # Shield the executor future: cancellation of the SOCKS handler must not
     # release its permit before the already-started resolver thread exits.
     return await asyncio.wait_for(asyncio.shield(future), timeout=_RESOLVE_TIMEOUT_S)

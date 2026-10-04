@@ -14,6 +14,7 @@ import socket
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -238,9 +239,13 @@ def test_timed_out_egress_resolution_does_not_starve_gateway_default_executor(mo
         counter_started = asyncio.Event()
         release_resolver = threading.Event()
         resolver_calls: list[str] = []
+        resolver_context = ContextVar("test_browser_egress_context")
+        context_token = resolver_context.set("request-context")
+        observed_context: list[str | None] = []
 
         def resolve(host: str) -> list[str]:
             resolver_calls.append(host)
+            observed_context.append(resolver_context.get(None))
             loop.call_soon_threadsafe(resolver_started.set)
             release_resolver.wait()
             return ["127.0.0.1"]
@@ -279,6 +284,7 @@ def test_timed_out_egress_resolution_does_not_starve_gateway_default_executor(mo
             _method, reply, _reader, writer = await asyncio.wait_for(connect_task, timeout=2)
             writer.close()
             assert reply == 0x04
+            assert observed_context == ["request-context"]
 
             # The first resolver is still running despite its SOCKS timeout.
             # The sole admission slot must stay occupied and reject a second
@@ -311,10 +317,49 @@ def test_timed_out_egress_resolution_does_not_starve_gateway_default_executor(mo
             if usage_task is not None and not usage_task.done():
                 await asyncio.wait_for(usage_task, timeout=2)
             await proxy.close()
+            resolver_context.reset(context_token)
             resolver_executor.shutdown(wait=True, cancel_futures=True)
             default_executor.shutdown(wait=True, cancel_futures=True)
 
     asyncio.run(scenario())
+
+
+def test_timed_out_resolver_releases_slot_after_event_loop_closes(monkeypatch):
+    executor = ThreadPoolExecutor(max_workers=1)
+    slots = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(egress, "_RESOLVER_EXECUTOR", executor)
+    monkeypatch.setattr(egress, "_RESOLVER_SLOTS", slots)
+    monkeypatch.setattr(egress, "_RESOLVE_TIMEOUT_S", 0.05)
+
+    resolver_started = threading.Event()
+    release_resolver = threading.Event()
+    resolver_finished = threading.Event()
+
+    def resolve(_host: str) -> list[str]:
+        resolver_started.set()
+        release_resolver.wait()
+        resolver_finished.set()
+        return ["127.0.0.1"]
+
+    async def time_out_resolver():
+        task = asyncio.create_task(egress._resolve_with_timeout(resolve, "wedged.example"))
+        assert await asyncio.wait_for(asyncio.to_thread(resolver_started.wait), timeout=2)
+        with pytest.raises(TimeoutError):
+            await task
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(time_out_resolver())
+    finally:
+        loop.close()
+        release_resolver.set()
+
+    try:
+        assert resolver_finished.wait(timeout=2)
+        assert slots.acquire(timeout=2), "resolver worker completion must release capacity without its event loop"
+        slots.release()
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 @pytest.mark.asyncio
