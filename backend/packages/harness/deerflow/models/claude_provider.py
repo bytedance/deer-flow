@@ -276,13 +276,16 @@ class ClaudeChatModel(ChatAnthropic):
         budget_tokens = thinking.get("budget_tokens")
         if budget_tokens is not None:
             if not isinstance(budget_tokens, int) or isinstance(budget_tokens, bool) or not MIN_THINKING_BUDGET_TOKENS <= budget_tokens < max_tokens:
-                raise ValueError(f"Claude extended thinking requires budget_tokens to be an integer between {MIN_THINKING_BUDGET_TOKENS} and max_tokens ({max_tokens}); got {budget_tokens}")
+                raise ValueError(f"Claude extended thinking requires budget_tokens to be an integer at least {MIN_THINKING_BUDGET_TOKENS} and strictly less than max_tokens ({max_tokens}); got {budget_tokens}")
             return
 
-        thinking["budget_tokens"] = max(
-            MIN_THINKING_BUDGET_TOKENS,
-            int(max_tokens * THINKING_BUDGET_RATIO),
-        )
+        payload["thinking"] = {
+            **thinking,
+            "budget_tokens": max(
+                MIN_THINKING_BUDGET_TOKENS,
+                int(max_tokens * THINKING_BUDGET_RATIO),
+            ),
+        }
 
     @staticmethod
     def _strip_cache_control(payload: dict) -> None:

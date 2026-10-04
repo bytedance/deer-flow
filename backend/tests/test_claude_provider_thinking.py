@@ -73,5 +73,16 @@ def test_explicit_budget_must_fit_anthropic_limits(budget_tokens):
     model = _make_model()
     payload = {"thinking": {"type": "enabled", "budget_tokens": budget_tokens}, "max_tokens": 4096}
 
-    with pytest.raises(ValueError, match="between 1024 and max_tokens"):
+    with pytest.raises(ValueError, match="at least 1024 and strictly less than max_tokens"):
         model._apply_thinking_budget(payload)
+
+
+def test_auto_budget_does_not_mutate_shared_thinking_config():
+    model = _make_model()
+    thinking = {"type": "enabled"}
+    payload = {"thinking": thinking, "max_tokens": 8192}
+
+    model._apply_thinking_budget(payload)
+
+    assert payload["thinking"]["budget_tokens"] == 6553
+    assert thinking == {"type": "enabled"}
