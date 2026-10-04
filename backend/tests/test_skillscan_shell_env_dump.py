@@ -8,6 +8,8 @@ the portable shebang (`#!/usr/bin/env bash`, used by this repository's own
 (`--env`), as a plain command argument (`echo env`) and inside comments
 (`# export -p`); none of them dumps anything, so the command word must sit at the
 start of a command (line start or after a `;`, `&`, `|`, `(`, `)` or `{`).
+Comment text after a separator and heredoc bodies are data rather than commands
+too, so they are stripped before that command-position match.
 """
 
 from __future__ import annotations
@@ -106,4 +108,40 @@ def test_indented_env_still_reports(tmp_path: Path) -> None:
 def test_env_after_an_assignment_prefix_still_reports(tmp_path: Path) -> None:
     """`FOO=1 env` runs `env`; the assignment is a prefix, not an argument."""
     _write_script(tmp_path, "#!/bin/bash\nFOO=1 env\n")
+    assert "shell-env-dump" in _rules(tmp_path)
+
+
+def test_env_after_a_separator_inside_a_comment_is_not_an_environment_dump(tmp_path: Path) -> None:
+    """A `;` inside a comment does not turn its text into a second command."""
+    _write_script(tmp_path, "#!/bin/bash\n# documentation; env is only an example\n")
+    assert "shell-env-dump" not in _rules(tmp_path)
+
+
+def test_export_p_after_a_separator_inside_a_comment_is_not_an_environment_dump(tmp_path: Path) -> None:
+    """Comment text after a separator is documentation, not an invocation."""
+    _write_script(tmp_path, "#!/bin/bash\necho hi # ; export -p\n")
+    assert "shell-env-dump" not in _rules(tmp_path)
+
+
+def test_env_in_a_quoted_heredoc_body_is_not_an_environment_dump(tmp_path: Path) -> None:
+    """A line inside heredoc data is input, not a command."""
+    _write_script(tmp_path, "#!/bin/bash\ncat <<'EOF'\nenv\nEOF\n")
+    assert "shell-env-dump" not in _rules(tmp_path)
+
+
+def test_printenv_in_a_tab_stripped_heredoc_body_is_not_an_environment_dump(tmp_path: Path) -> None:
+    """`<<-` strips leading tabs from the body and its terminator alike."""
+    _write_script(tmp_path, "#!/bin/bash\ncat <<-EOF\n\tprintenv\n\tEOF\n")
+    assert "shell-env-dump" not in _rules(tmp_path)
+
+
+def test_env_on_the_line_that_opens_a_heredoc_still_reports(tmp_path: Path) -> None:
+    """Only the heredoc body is data; the command before it is still code."""
+    _write_script(tmp_path, "#!/bin/bash\nenv <<EOF\nFOO\nEOF\n")
+    assert "shell-env-dump" in _rules(tmp_path)
+
+
+def test_export_p_after_a_command_separator_still_reports(tmp_path: Path) -> None:
+    """`echo hi; export -p` runs `export -p` as a second command on the line."""
+    _write_script(tmp_path, "#!/bin/bash\necho hi; export -p\n")
     assert "shell-env-dump" in _rules(tmp_path)
