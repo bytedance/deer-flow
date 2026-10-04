@@ -135,6 +135,7 @@ Use the typed conflict classes instead of matching exception text.
 The weak lock cache must not retain inactive user scopes.
 Cache validation uses the manifest metadata and persisted revision.
 Unlocked `load()`/`reload()` compute that signature before reading the document.
+Unlocked fact scans skip entries deleted after listing; present unreadable entries are corruption.
 Out-of-band Markdown edits require `reload()`.
 POSIX atomic replacement must sync the parent directory.
 

@@ -466,6 +466,16 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **memory:** Reading DeerMem agent memory no longer fails while another write
+  deletes a fact. `load()`, `reload()`, and the full `rebuild_index()` scan list
+  the fact files without the storage locks, so a delete committed between the
+  listing and opening a file raised `MemoryStorageCorruption` for data that was
+  intact: the memory API returned HTTP 500 ("Stored memory data is corrupted"),
+  prompt injection dropped the whole memory block for that turn (or failed the
+  run under `failure_policy.read: fail_closed`), and a full index rebuild counted
+  the fact as failed. A fact that vanishes after the listing is now treated as
+  deleted; an entry that is still present but unreadable, such as a dangling
+  symlink, is still reported as corruption.
 - **memory:** A DeerMem memory reload no longer pins an older document in the
   cache. `reload()` read the document before computing its cache signature, so
   a write committed in between (for example by the background memory updater)
