@@ -51,7 +51,14 @@ from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
-from app.gateway.services import abuild_checkpoint_state_accessor, build_thread_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from app.gateway.services import (
+    abuild_checkpoint_state_accessor,
+    build_thread_checkpoint_state_accessor,
+    serialize_wait_run_status,
+    sse_consumer,
+    start_run,
+    wait_for_run_completion,
+)
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
@@ -1047,12 +1054,19 @@ async def wait_run(
     # serializing whatever checkpoint happens to exist.
     if getattr(record, "store_only", False) and not getattr(bridge, "supports_cross_process", False):
         record = await _refresh_store_backed_run(run_mgr, record)
-        return {"status": record.status.value, "error": record.error}
+        return serialize_wait_run_status(record)
 
     if record.task is not None or getattr(record, "store_only", False):
         completed = await wait_for_run_completion(bridge, record, request, run_mgr)
     else:
         completed = True
+
+    if completed:
+        record = await _refresh_store_backed_run(run_mgr, record)
+        if record.status == RunStatus.error:
+            # A failure before the first checkpoint leaves an earlier answer at
+            # the thread head. Return this run's error, never that old state.
+            return serialize_wait_run_status(record)
 
     # Idempotent reuse is not bound to a run-specific checkpoint id. The latest
     # thread head may be a later run, so do not claim it as this run's result.
@@ -1070,9 +1084,7 @@ async def wait_run(
         except Exception:
             logger.exception("Failed to fetch final state for run %s", record.run_id)
 
-    if completed:
-        record = await _refresh_store_backed_run(run_mgr, record)
-    return {"status": record.status.value, "error": record.error}
+    return serialize_wait_run_status(record)
 
 
 def _parse_run_page_created_at(value: str) -> str:

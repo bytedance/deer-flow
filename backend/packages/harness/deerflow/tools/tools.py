@@ -12,6 +12,7 @@ from deerflow.constants import CONVERSATION_TOOL_USE
 from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
+from deerflow.scheduler.runtime import SchedulerRunCapability, is_scheduler_capability, scheduler_tools_enabled
 from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
 from deerflow.tools.builtins import (
     ask_clarification_tool,
@@ -110,6 +111,7 @@ def get_available_tools(
     mcp_plugins: list[str] | None = None,
     include_upload_tool: bool = True,
     include_conversation_reader: bool = False,
+    scheduler_capability: SchedulerRunCapability | None = None,
     app_config: AppConfig | None = None,
     extensions=None,
     chat_model: BaseChatModel | None = None,
@@ -134,12 +136,18 @@ def get_available_tools(
         include_conversation_reader: Allow the configured conversation reader
             only when the host provides its authorized runtime capability.
             Defaults to false for embedded callers and subagents.
+        scheduler_capability: Current-run host grant for conversation schedule
+            management or own-schedule stopping. Omitted for embedded,
+            bootstrap and subagent assembly.
 
     Returns:
         List of available tools.
     """
     config = app_config or get_app_config()
     tool_configs = [tool for tool in config.tools if groups is None or tool.group in groups]
+    # These operations are assembled from the host grant below. Registering a
+    # tool path in YAML cannot widen that grant or its interaction mode.
+    tool_configs = [tool for tool in tool_configs if tool.use not in {"deerflow.tools.scheduled_tasks:schedule_task", "deerflow.tools.scheduled_tasks:stop_scheduled_task"}]
     if not include_conversation_reader:
         tool_configs = [tool for tool in tool_configs if tool.use != CONVERSATION_TOOL_USE]
 
@@ -173,6 +181,10 @@ def get_available_tools(
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
+    if scheduler_tools_enabled(config) and is_scheduler_capability(scheduler_capability):
+        from deerflow.tools.scheduled_tasks import schedule_task, stop_scheduled_task
+
+        builtin_tools.append(schedule_task if scheduler_capability.mode == "interactive" else stop_scheduled_task)
     if is_mcp_task_runtime_available():
         builtin_tools.extend((list_background_tasks, cancel_background_task))
     if include_upload_tool:

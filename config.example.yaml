@@ -1129,7 +1129,9 @@ tools:
   #   #                                # CDP handshake. If so, use headless: false to launch
   #   #                                # Playwright's own visible browser instead.
   #   # Multi-worker note: browser sessions live in one Gateway worker's memory.
-  #   # Keep GATEWAY_WORKERS=1 while this tool group is enabled.
+  #   # Keep the Gateway to one worker process while this tool group is enabled:
+  #   # GATEWAY_WORKERS=1, and WEB_CONCURRENCY unset or 1 on the launches that pass
+  #   # uvicorn no --workers (backend/Dockerfile, scripts/serve.sh).
   # - name: browser_snapshot
   #   group: browser
   #   use: deerflow.community.browser_automation.tools:browser_snapshot_tool
@@ -2714,6 +2716,7 @@ agent_storage:
 #   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
   enabled: false
+  tool_enabled: false          # Offer schedule tools to authorized Gateway conversations
   multi_instance: false       # Opt into lease-aware recovery across Gateway instances
   poll_interval_seconds: 5
   lease_seconds: 120

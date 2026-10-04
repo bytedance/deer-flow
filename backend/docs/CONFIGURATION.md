@@ -516,7 +516,7 @@ Notes:
 - **Upgrade note:** before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either run the scheduler on exactly one Gateway worker or enable `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The startup gate now rejects the unsafe combination instead of allowing it to start silently.
 - **Upgrade note:** in multi-instance mode, `max_concurrent_runs` is cluster-wide rather than per Pod and counts `launching`/`running` occurrences. Waiting `queued` rows remain outside the execution cap; capacity does not multiply with the replica count.
 - **Upgrade note:** `scheduler.multi_instance` and its related scheduler, ownership, and run-event settings are startup-only. Restart all Gateway Pods together after changing them; a ConfigMap update without a coordinated restart leaves the running service on its previous mode.
-- Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend, enable run ownership heartbeats, and set `run_events.backend: db`. SQLite silently ignores row-level locks, while memory and JSONL run-event stores are process-local and cannot enforce singleton delivery receipts across workers; startup rejects these combinations. The process-local agentic browser tool group is incompatible with multiple Gateway workers; keep `GATEWAY_WORKERS=1` while `browser_navigate` is enabled. Browser control also requires the backend `browser` extra (`cd backend && uv sync --extra browser && uv run playwright install chromium`); startup detects enabled browser config and fails fast when Playwright is missing, and `/api/features` reports `browser_control.enabled=false` until the runtime is available.
+- Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend, enable run ownership heartbeats, and set `run_events.backend: db`. SQLite silently ignores row-level locks, while memory and JSONL run-event stores are process-local and cannot enforce singleton delivery receipts across workers; startup rejects these combinations. The process-local agentic browser tool group is incompatible with multiple Gateway workers; keep the Gateway to one worker process while `browser_navigate` is enabled — `GATEWAY_WORKERS=1`, plus `WEB_CONCURRENCY` unset or `1` on launches that pass uvicorn no worker count (`backend/Dockerfile`, `scripts/serve.sh`), where uvicorn takes the process count from it. Browser control also requires the backend `browser` extra (`cd backend && uv sync --extra browser && uv run playwright install chromium`); startup detects enabled browser config and fails fast when Playwright is missing, and `/api/features` reports `browser_control.enabled=false` until the runtime is available.
 - The MVP supports thread reuse and fresh-thread-per-run execution modes.
 - Create/update accept optional `assistant_id` (`lead_agent` by default, or an existing custom agent for the task owner).
 - Create/update accept `once`, `cron`, and `interval`. Interval uses `schedule_spec.every_seconds` (UTC `now + N`, no missed-beat catch-up). N is at least `min_once_delay_seconds` (default 60) and at most 30 days.
@@ -1313,6 +1313,38 @@ models:
 - `DEER_FLOW_HOME` - Runtime state directory (defaults to `.deer-flow` under the project root)
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
+
+## Backend dotenv selection
+
+Set `DEER_FLOW_ENV_FILE` in the backend process environment **before startup**
+to load one explicit UTF-8 dotenv file instead of default dotenv discovery.
+Use an absolute path for launches from unrelated directories. Relative paths
+are resolved against the backend process working directory, not the YAML file,
+project root or this documentation's directory. No automatic `ENV` profile
+naming or config-relative dotenv lookup is added.
+
+Existing process variables, including empty values, take precedence. An unset
+selector keeps the existing default lookup; a set but empty selector, missing
+file, directory or unreadable file raises an actionable startup error without
+printing file contents. An empty **file** is valid and loads no defaults.
+Explicit selection also raises when `PYTHON_DOTENV_DISABLED` is `1`, `true`,
+`t`, `yes` or `y` (case-insensitive), even for an empty file. Unset either option
+to resolve the conflict. Without a selector, python-dotenv's normal disable
+behavior is unchanged. Restart after changing the selector or file contents.
+
+`DEER_FLOW_CONFIG_PATH` continues to select YAML independently. For example,
+from `backend/`:
+
+```bash
+DEER_FLOW_ENV_FILE=/srv/deer-flow/stage.env DEER_FLOW_CONFIG_PATH=/srv/deer-flow/stage.yaml make gateway
+```
+
+This option covers backend Python startup (including auth and `debug.py`). It
+does not change shell launcher, Docker Compose or frontend dotenv handling;
+values already injected by those layers remain process variables and win.
+For containers, explicitly pass the selector and mount the selected file at a
+container-visible path. Database, runtime-home, storage and tenant isolation
+must be configured separately; selecting a dotenv file does not provide them.
 
 ## Configuration Location
 

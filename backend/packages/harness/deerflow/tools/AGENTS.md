@@ -44,6 +44,11 @@ Only standalone tool discovery without a model falls back to the base profile.
 The ordinary `task` boundary carries one narrow parent-loop middleware recorder into the isolated subagent runtime under separate loop-detection, tool-promotion, and tool-progress keys. It schedules only `record_middleware` calls back onto the loop that owns `RunJournal`, keeps an execution-local atomic promotion claim so parallel searches do not double-report one new schema, is fenced and drained once before `task` returns, and never exposes the journal or event store to the child loop. Durable batch tasks have no parent run journal and do not use this bridge.
 
 Scheduled-task runtime note:
+- Trial admission matches the entire current user turn against bounded English/Chinese
+  direct-run forms. Bare confirmations, task mentions, quotes and conditional or
+  compound text do not dispatch. Never interpolate titles into authorization text;
+  only fixed commands and opaque task-ID forms are accepted. This host gate is
+  deliberately conservative, not a general intent parser.
 - Scheduled background runs resolve to the `scheduled` interaction policy through trusted `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. The legacy `context.non_interactive=true` key remains accepted only for internally authenticated scheduler calls during migration; arbitrary HTTP/IM clients cannot set it.
 
 Durable MCP task-management tools are added only while the process-local task submitter is installed. They expose bounded local task fields, including whether cancellation was requested, but never the remote handle. Cancellation records that request durably and returns immediately; the background service owns the remote call and retries. These remain ordinary business tools under an active skill's `allowed-tools` policy and must be declared explicitly.

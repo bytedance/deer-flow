@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
 
+def _is_valid_call_id(call_id: Any) -> bool:
+    """Check call/result correlation IDs without rewriting non-blank values."""
+    return isinstance(call_id, str) and bool(call_id.strip())
+
+
 def _build_usage_metadata(oai_usage: dict) -> dict:
     """Convert Codex/Responses API usage dict to LangChain usage_metadata format.
 
@@ -170,7 +175,7 @@ class CodexChatModel(BaseChatModel):
                     call_id = tc.get("id")
                     if not (isinstance(name, str) and name):
                         continue
-                    if not (isinstance(call_id, str) and call_id):
+                    if not _is_valid_call_id(call_id):
                         continue
                     args = tc.get("args")
                     input_items.append(
@@ -182,11 +187,16 @@ class CodexChatModel(BaseChatModel):
                         }
                     )
             elif isinstance(msg, ToolMessage):
+                content = self._normalize_content(msg.content)
+                # A blank ID cannot identify the call this result answers.
+                if not _is_valid_call_id(msg.tool_call_id):
+                    logger.warning("Dropping tool result with blank call_id (content %d chars)", len(content))
+                    continue
                 input_items.append(
                     {
                         "type": "function_call_output",
                         "call_id": msg.tool_call_id,
-                        "output": self._normalize_content(msg.content),
+                        "output": content,
                     }
                 )
 

@@ -317,7 +317,9 @@ class DeerFlowTUI(App):
         if self._palette_open:
             self.action_palette_up()
         else:
-            self._history_move(self._history.up(self.query_one("#composer", ComposerInput).value))
+            value = self._history.up(self.query_one("#composer", ComposerInput).value)
+            if value is not None:
+                self._history_move(value)
 
     def action_nav_down(self) -> None:
         if self._palette_open:
@@ -329,6 +331,8 @@ class DeerFlowTUI(App):
 
     def _history_move(self, value: str) -> None:
         composer = self.query_one("#composer", ComposerInput)
+        if composer.value == value:
+            return
         composer.value = value
         composer.cursor_position = len(value)
 

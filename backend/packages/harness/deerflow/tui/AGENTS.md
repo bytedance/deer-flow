@@ -13,8 +13,12 @@ A terminal-native UI over the embedded harness, exposed as the `deerflow` consol
 
 **Web UI visibility**: the Web UI lists threads from the `threads_meta` SQL table (user-scoped), not the checkpointer. `persistence.py` writes a `threads_meta` row under the default user (`"default"`) into the same DB the Gateway reads — via the harness-only `deerflow.persistence.engine.init_engine_from_config()` — so TUI sessions appear in the Web UI sidebar **without** running the Gateway. Best-effort: a no-op on the `memory` backend. All DB work runs on one long-lived background event loop (a SQLAlchemy async engine is bound to its creating loop).
 
-`InputHistory.down()` returns `None` when history navigation is inactive; the
-app must then leave the composer untouched, including its cursor and undo state.
+`InputHistory.up()` returns `None` when history is empty, and `down()` returns
+`None` when history navigation is inactive; the app must then leave the composer
+untouched, including its cursor and undo state.
 An empty string is a valid saved draft and must still be restored after history.
+History navigation may advance its index without changing the input text. When
+the recalled value equals the composer value, skip loading the document so its
+cursor and undo state survive.
 
 **Tests**: `tests/test_tui_*.py` — pure layers via plain pytest, the app/palette/overlays via Textual's pilot harness with a fake in-process session, and `test_tui_persistence.py` for the `threads_meta` round-trip.

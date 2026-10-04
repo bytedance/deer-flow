@@ -64,7 +64,7 @@ deer-flow/
 │                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
 │                                    # Integration credentials and enabled state remain per-user
 ├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
-├── examples/                       # Extension examples: deerflow-extension-{example,bookmarks}
+├── examples/                       # Extension examples: deerflow-extension-{example,bookmarks,agent-teams}
 ├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
@@ -88,7 +88,7 @@ above. Stay in core for bug fixes and for changes to the agent loop, memory, con
 compaction, or authentication. If existing hooks cannot express the feature, add a
 generic hook to the extension contract plus an extension that uses it — do not
 hard-code business logic into core. Working examples:
-`examples/deerflow-extension-{example,bookmarks}`.
+`examples/deerflow-extension-{example,bookmarks,agent-teams}`.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
@@ -106,6 +106,10 @@ Skill quality review note:
   revision can suppress a run, and blocker findings can never be waived.
 
 Scheduled-task note:
+- `scheduler.tool_enabled` (default off) offers owner-bound schedule tools only
+  through Gateway capability admission. Interactive turns create/manage their
+  schedules; scheduled turns can request stopping only their own schedule.
+  Per-occurrence goal success does not end a recurring schedule.
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a
   background scheduler gated by `config.yaml -> scheduler.enabled`.
 - Scheduled runs are non-interactive: `ask_clarification` is excluded. `non_interactive`,

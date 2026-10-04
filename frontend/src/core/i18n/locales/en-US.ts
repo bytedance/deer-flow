@@ -40,6 +40,11 @@ export const enUS: Translations = {
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
     catalog: {
+      agentTeams: {
+        title: "Agent teams",
+        description:
+          "Let full Custom Agents collaborate through @mentions, shared records and task handoffs.",
+      },
       bookmarks: {
         title: "Bookmarks",
         description:
@@ -934,6 +939,7 @@ export const enUS: Translations = {
       launching: "Launching",
       running: "Running",
       success: "Success",
+      unmet: "Goal unmet",
       failed: "Failed",
       skipped: "Skipped",
       interrupted: "Interrupted",

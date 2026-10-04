@@ -391,7 +391,12 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             if self._shutdown_called:
                 return
             self._shutdown_called = True
-        self._stop_idle_checker()
+        try:
+            self._stop_idle_checker()
+        except Exception:
+            with self._lock:
+                self._shutdown_called = False
+            raise
         with self._lock:
             sandboxes = list(self._sandboxes.values()) + [entry for entry, _ in self._warm_pool.values()]
             self._sandboxes.clear()
