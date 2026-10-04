@@ -116,7 +116,9 @@ _HIDDEN_SENSITIVE_FILES = {
 _PLACEHOLDER_VALUES = {"", "x", "xx", "xxx", "xxxx", "changeme", "change-me", "example", "placeholder", "test", "dummy", "your-key", "<your-key>"}
 # `name[:=]value` sweep for line-oriented text (config, shell, YAML, Markdown). Python is
 # analyzed from its AST instead, because a regex cannot tell an annotation from a value.
-_SECRET_ASSIGNMENT_RE = re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)")
+# The key may be quoted, so that JSON (`{"api_key": "..."}`) reads the same as the YAML,
+# `.env`, `.ini` and shell spellings of the same binding.
+_SECRET_ASSIGNMENT_RE = re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b[\"']?\s*[:=]\s*[\"']?([^\"'\s#]+)")
 _SECRET_ASSIGNMENT_NAME_RE = re.compile(r"(?i)^(?:token|password|passwd|api[_-]?key|secret|credential)s?$")
 _SECRET_TOKEN_PATTERNS = tuple(
     re.compile(pattern)
