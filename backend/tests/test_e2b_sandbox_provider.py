@@ -3233,6 +3233,7 @@ async def test_shutdown_defers_teardown_and_fences_cached_acquire_while_maintena
 
 
 def test_signal_handler_forwards_original_action_when_shutdown_cleanup_is_pending(monkeypatch):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     p = _make_provider()
     registered: dict[int, Any] = {}
     forwarded: list[tuple[int, Any]] = []
@@ -3247,7 +3248,9 @@ def test_signal_handler_forwards_original_action_when_shutdown_cleanup_is_pendin
         with p._lock:
             p._shutdown_called = True
             p._shutdown_cleanup_pending = True
-        raise RuntimeError("E2B maintenance thread shutdown timed out: lease renewal")
+        raise mod._E2BMaintenanceShutdownTimeout(
+            "E2B maintenance thread shutdown timed out: lease renewal"
+        )
 
     monkeypatch.setattr(p, "shutdown", blocked_shutdown)
     p._register_signal_handlers()
