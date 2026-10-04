@@ -38,6 +38,11 @@ headings. Keep legitimate bold headings with up to three spaces and the shared
 conversion-companion path working. Regression coverage lives in
 `tests/test_file_outline_indented_bold.py`.
 
+Split-bold headings reject a purely numeric/punctuation second block regardless
+of its first character, including parentheses, signs, and leading whitespace.
+Keep punctuated titles containing text and non-ASCII titles supported; coverage
+lives in `tests/test_file_outline_split_bold.py`.
+
 ### Active Content MIME Types
 
 `text_detection.py::_is_active_content_mime_type` is the shared download-safety

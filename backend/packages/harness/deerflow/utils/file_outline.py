@@ -32,7 +32,7 @@ _BOLD_HEADING_RE = re.compile(r"^\*\*((ITEM|PART|SECTION|SCHEDULE|EXHIBIT|APPEND
 #      **1** **概述** or accented words (negative lookahead instead of [A-Za-z])
 #   4. At most two additional blocks (four total) with [^*]+ (no * inside) to keep
 #      the regex linear and avoid ReDoS on attacker-controlled content
-_SPLIT_BOLD_HEADING_RE = re.compile(r"^\*\*[\dA-Z][\d\.]*\*\*\s+\*\*(?!\d[\d\s.,\-–—/:()%]*\*\*)[^*]+\*\*(?:\s+\*\*[^*]+\*\*){0,2}\s*$")
+_SPLIT_BOLD_HEADING_RE = re.compile(r"^\*\*[\dA-Z][\d\.]*\*\*\s+\*\*(?![\d\s.,+\-–—/:()%]+\*\*)[^*]+\*\*(?:\s+\*\*[^*]+\*\*){0,2}\s*$")
 
 # Maximum number of outline entries injected into the agent context.
 # Keeps prompt size bounded even for very long documents.
