@@ -1,3 +1,10 @@
+## Manual Claude OAuth Export
+
+`export_claude_code_oauth.py` validates Keychain JSON as an object containing an
+object `claudeAiOauth` and a nonblank string `accessToken` before any export action.
+Malformed containers use the existing token-missing error without exposing their
+contents. Offline CLI coverage: `backend/tests/test_claude_keychain_export.py`.
+
 ## Service Startup Contracts
 
 Optional browser dependency detection reads the top-level `tools:` sequence

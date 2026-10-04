@@ -71,8 +71,9 @@ def load_keychain_container(service: str, account: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise RuntimeError("Claude Code Keychain item did not contain valid JSON.") from exc
 
-    access_token = data.get("claudeAiOauth", {}).get("accessToken", "")
-    if not access_token:
+    oauth = data.get("claudeAiOauth") if isinstance(data, dict) else None
+    access_token = oauth.get("accessToken") if isinstance(oauth, dict) else None
+    if not isinstance(access_token, str) or not access_token.strip():
         raise RuntimeError("Claude Code Keychain item did not contain claudeAiOauth.accessToken.")
 
     return data

@@ -335,6 +335,8 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
    eval "$(python3 scripts/export_claude_code_oauth.py --print-export)"
    ```
 
+   The exporter rejects malformed credential containers and non-string or blank access tokens before printing a token, emitting a shell export, or writing a credentials file.
+
    API keys can also be set manually in `.env` (recommended) or exported in your shell:
 
    ```bash
