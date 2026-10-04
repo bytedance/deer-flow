@@ -3484,10 +3484,11 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     async def _scenario():
         captured: dict[str, object] = {}
 
-        async def fake_start_run(body, thread_id, request, *, idempotency_key=None):
+        async def fake_start_run(body, thread_id, request, *, idempotency_key=None, scheduled_task_runtime=None):
             captured["body"] = body
             captured["thread_id"] = thread_id
             captured["context"] = body.context
+            captured["scheduled_task_runtime"] = scheduled_task_runtime
             captured["metadata"] = body.metadata
             captured["idempotency_key"] = idempotency_key
             captured["if_not_exists"] = body.if_not_exists
@@ -3514,6 +3515,7 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     assert isinstance(captured["body"], RunCreateRequest)
     assert captured["body"].config == {"recursion_limit": 1000}
     assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
+    assert captured["scheduled_task_runtime"] == {"task_id": "task-1", "occurrence_id": "task-run-1", "user_id": "user-1"}
     assert captured["metadata"] == {
         "scheduled_task_id": "task-1",
         "scheduled_task_run_id": "task-run-1",
@@ -3544,7 +3546,7 @@ def test_launch_scheduled_thread_run_uses_configured_recursion_limit(_stub_app_c
     async def _scenario():
         captured: dict[str, object] = {}
 
-        async def fake_start_run(body, thread_id, request, *, idempotency_key=None):
+        async def fake_start_run(body, thread_id, request, *, idempotency_key=None, scheduled_task_runtime=None):
             assert idempotency_key is None
             captured["config"] = body.config
             return SimpleNamespace(run_id="run-1", thread_id=thread_id)
@@ -3586,7 +3588,7 @@ def test_launch_scheduled_thread_run_recursion_limit_is_clamped_to_ceiling(_stub
     async def _scenario():
         captured: dict[str, object] = {}
 
-        async def fake_start_run(body, thread_id, request, *, idempotency_key=None):
+        async def fake_start_run(body, thread_id, request, *, idempotency_key=None, scheduled_task_runtime=None):
             assert idempotency_key is None
             captured["config"] = body.config
             return SimpleNamespace(run_id="run-1", thread_id=thread_id)
@@ -3619,7 +3621,7 @@ def test_launch_scheduled_thread_run_falls_back_when_config_unloadable(_stub_app
     async def _scenario():
         captured: dict[str, object] = {}
 
-        async def fake_start_run(body, thread_id, request, *, idempotency_key=None):
+        async def fake_start_run(body, thread_id, request, *, idempotency_key=None, scheduled_task_runtime=None):
             assert idempotency_key is None
             captured["config"] = body.config
             return SimpleNamespace(run_id="run-1", thread_id=thread_id)

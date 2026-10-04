@@ -323,7 +323,9 @@ class DeerFlowTUI(App):
         if self._palette_open:
             self.action_palette_down()
         else:
-            self._history_move(self._history.down())
+            value = self._history.down()
+            if value is not None:
+                self._history_move(value)
 
     def _history_move(self, value: str) -> None:
         composer = self.query_one("#composer", ComposerInput)

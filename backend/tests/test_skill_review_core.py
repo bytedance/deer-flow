@@ -451,6 +451,20 @@ def test_skillscan_high_findings_are_review_errors(tmp_path):
     assert finding["skillscan_severity"] == "HIGH"
 
 
+@pytest.mark.parametrize("hardcoded", [False, True])
+def test_cli_mapping_credentials_gate_on_values(tmp_path, capsys, hardcoded):
+    _write(tmp_path / "SKILL.md", _valid_skill() + "\nRead [loader](scripts/load.py).\n")
+    value = '"9f8e7d6c5b4a3210ff"' if hardcoded else 'os.getenv("ACCESS_TOKEN")'
+    _write(tmp_path / "scripts" / "load.py", f'import os\ntokens = {{"access_token": {value}, "refresh_token": os.getenv("REFRESH_TOKEN")}}\n')
+
+    exit_code = review_cli_main([str(tmp_path), "--format", "json", "--fail-on", "error", "--fail-on-incomplete"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert exit_code == (1 if hardcoded else 0)
+    assert any(finding["rule_id"] == "secret-env-assignment" for finding in report["findings"]) is hardcoded
+    assert "9f8e7d6c5b4a3210ff" not in repr(report)
+
+
 def test_skillscan_ignores_eval_fixture_skill_markdown(tmp_path):
     _write(tmp_path / "SKILL.md", _valid_skill())
     _write(

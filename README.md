@@ -39,7 +39,7 @@ InfoQuest reader, web search, and image search use a 30-second HTTP connect/read
 inactivity timeout. The crawl `timeout` and `navigation_timeout` settings remain
 separate server-side options; they do not control the local HTTP timeout.
 
-DeerFlow has newly integrated the intelligent search and crawling toolset independently developed by BytePlus--[InfoQuest (supports free online experience)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
+DeerFlow has newly integrated the intelligent search and crawling toolset independently developed by BytePlus — [InfoQuest (supports free online experience)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
 
 <a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
   <img
@@ -53,6 +53,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [Official Website](#official-website)
+  - [Sister Projects](#sister-projects)
   - [Coding Plan from ByteDance Volcengine](#coding-plan-from-bytedance-volcengine)
   - [InfoQuest](#infoquest)
   - [Table of Contents](#table-of-contents)
@@ -64,34 +65,53 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
       - [Option 1: Docker (Recommended)](#option-1-docker-recommended)
       - [Upgrading an existing checkout](#upgrading-an-existing-checkout)
       - [Option 2: Local Development](#option-2-local-development)
+      - [Startup Modes](#startup-modes)
+      - [LangGraph Studio (Optional)](#langgraph-studio-optional)
+      - [Docker Production Deployment](#docker-production-deployment)
     - [Advanced](#advanced)
       - [Sandbox Mode](#sandbox-mode)
       - [MCP Server](#mcp-server)
       - [IM Channels](#im-channels)
+      - [Request Trace Correlation](#request-trace-correlation)
       - [LangSmith Tracing](#langsmith-tracing)
       - [Langfuse Tracing](#langfuse-tracing)
       - [Monocle Tracing](#monocle-tracing)
       - [Using Multiple Providers](#using-multiple-providers)
+      - [Existing-Run Stream Actions](#existing-run-stream-actions)
       - [Personal Access Tokens](#personal-access-tokens)
   - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
+      - [Exporting Custom Skills](#exporting-custom-skills)
       - [Claude Code Integration](#claude-code-integration)
+    - [Private Knowledge Retrieval (RAGFlow)](#private-knowledge-retrieval-ragflow)
+    - [Chat Archive](#chat-archive)
     - [Session Goals](#session-goals)
     - [Manual Context Compaction](#manual-context-compaction)
     - [Sub-Agents](#sub-agents)
     - [Sandbox \& File System](#sandbox--file-system)
+    - [Agentic Browser Control](#agentic-browser-control)
     - [Context Engineering](#context-engineering)
+    - [Reading a Referenced Conversation](#reading-a-referenced-conversation)
     - [Current Task Notes](#current-task-notes)
     - [Long-Term Memory](#long-term-memory)
   - [Recommended Models](#recommended-models)
   - [Embedded Python Client](#embedded-python-client)
   - [Projects](#projects)
+    - [Project instructions](#project-instructions)
+    - [Document shelf](#document-shelf)
+    - [Archive read semantics](#archive-read-semantics)
+    - [Trash](#trash)
   - [Scheduled Tasks](#scheduled-tasks)
+    - [Preview cron occurrences through the API](#preview-cron-occurrences-through-the-api)
+    - [Upgrade Notes](#upgrade-notes)
   - [Terminal Workbench (TUI)](#terminal-workbench-tui)
   - [Documentation](#documentation)
   - [⚠️ Security Notice](#️-security-notice)
     - [Improper Deployment May Introduce Security Risks](#improper-deployment-may-introduce-security-risks)
+    - [Gateway Admin Is Equivalent to Code Execution](#gateway-admin-is-equivalent-to-code-execution)
+    - [External Chat Message Roles](#external-chat-message-roles)
+    - [Deployment Defaults](#deployment-defaults)
     - [Security Recommendations](#security-recommendations)
   - [Contributing](#contributing)
   - [License](#license)
@@ -308,7 +328,7 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
        auto_approve_permissions: false
    ```
 
-   `mcode` must be on the Gateway process's `PATH`; installing it only on the Docker host does not make it available inside the Gateway container. DeerFlow invokes it through `invoke_acp_agent` in a per-thread ACP workspace and forwards enabled MCP servers. Keep `auto_approve_permissions: false` for untrusted tasks; enable it only when MCode must edit files or run commands and you trust the task.
+   `mcode` must be on the Gateway process's `PATH`; installing it only on the Docker host does not make it available inside the Gateway container. DeerFlow invokes it through `invoke_acp_agent` in a per-thread ACP workspace and forwards enabled MCP servers. Keep `auto_approve_permissions: false` for untrusted tasks; enable it only when mcode must edit files or run commands and you trust the task.
    - On macOS, export Claude Code auth explicitly if needed:
 
    ```bash
@@ -323,6 +343,23 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
    ```
 
    </details>
+
+For an explicit backend dotenv file, export `DEER_FLOW_ENV_FILE` before startup,
+alongside `DEER_FLOW_CONFIG_PATH` if needed. For example, from `backend/`:
+
+```bash
+DEER_FLOW_ENV_FILE=/srv/deer-flow/stage.env DEER_FLOW_CONFIG_PATH=/srv/deer-flow/stage.yaml make gateway
+```
+
+Relative dotenv paths use the backend process working directory; absolute paths
+work regardless of that directory. Existing process variables win. An unset
+selector preserves default dotenv discovery; a specified empty, missing,
+non-file or unreadable path fails startup. Explicit selection also fails when
+`PYTHON_DOTENV_DISABLED` disables dotenv loading. Restart after changing the file.
+This selects backend dotenv input only: shell launchers, Docker Compose and the
+frontend retain their own environment loading. Values they already export win.
+It does not select `ENV` profiles or isolate databases, storage or tenants.
+See [backend dotenv selection](backend/docs/CONFIGURATION.md#backend-dotenv-selection).
 
 ### Running the Application
 
@@ -415,6 +452,11 @@ schema and positions required by that version.
 For lightweight single-process event persistence, `run_events.backend: jsonl`
 keeps Unicode message content intact, including line and paragraph separators.
 Existing valid JSONL records remain readable without rewriting the files.
+
+For per-call usage audits, an immediate LLM response replay with populated usage
+updates both nested usage and top-level token counters, even if initial usage was absent or zero.
+The original request, model, and status metadata stay intact; flushed events are
+not rewritten. See the [run event contract](contracts/run_event_stream_contract.json).
 
 The unified nginx endpoint is same-origin by default and does not emit browser CORS headers. If you run a split-origin or port-forwarded browser client, set `GATEWAY_CORS_ORIGINS` to comma-separated exact origins such as `http://localhost:3000`; the Gateway then applies the CORS allowlist and matching CSRF origin checks.
 
@@ -583,22 +625,24 @@ described above.
 
 Gateway runs automatically enforce native delivery for artifacts created or modified under `/mnt/user-data/outputs`: `present_files` must present at least one output produced by the current run, and the terminal `run.delivery` receipt must be durably recorded. Virtual artifact paths are resolved within the same authenticated user and thread scope that produced the output before the output-directory boundary is validated. Runs that do not produce output artifacts keep ordinary conversational behavior.
 
+Thread-scoped `runs.wait()` calls that finish with `status: error` report the current run error instead of an earlier answer. The asynchronous Python LangGraph SDK raises by default; pass `raise_error=False` to inspect the returned status and error.
+
 DeerFlow's built-in custom events are available through both LangGraph streaming interfaces: native clients can continue subscribing to `stream_mode="custom"`, while callback-based integrations can consume the same payloads as `on_custom_event` records from `astream_events(version="v2")`. The callback event name matches the payload's `type` field.
 
 #### Docker Production Deployment
 
-`deploy.sh` supports building and starting separately:
+`./scripts/deploy.sh` supports building and starting separately:
 
 ```bash
 # One-step (build + start)
-deploy.sh
+./scripts/deploy.sh
 
 # Two-step (build once, start later)
-deploy.sh build              # build all images
-deploy.sh start              # start pre-built images
+./scripts/deploy.sh build       # build all images
+./scripts/deploy.sh start       # start pre-built images
 
 # Stop
-deploy.sh down
+./scripts/deploy.sh down
 ```
 
 ### Advanced
@@ -708,7 +752,7 @@ cleanup when migrating from legacy metadata credentials.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
-DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, or Buzz from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes.
+DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ, or Buzz from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes.
 
 | Channel | Transport | Difficulty |
 |---------|-----------|------------|
@@ -717,6 +761,7 @@ DeerFlow can also expose user-owned IM channel connections in the workspace UI. 
 | Feishu / Lark | WebSocket | Moderate |
 | WeChat | Tencent iLink (long-polling) | Moderate |
 | WeCom | WebSocket | Moderate |
+| QQ | WebSocket (text-only C2C and group @mentions; four/five passive replies per source) | Moderate |
 | DingTalk | Stream Push (WebSocket) | Moderate |
 | Buzz | Nostr relay (WebSocket, NIP-42) | Moderate |
 
@@ -753,6 +798,12 @@ channels:
     # domain: https://open.feishu.cn       # China (default)
     # domain: https://open.larksuite.com   # International
 
+  qq:
+    enabled: true
+    app_id: $QQ_APP_ID
+    client_secret: $QQ_CLIENT_SECRET
+    allowed_users: []  # QQ OpenIDs, not QQ account numbers
+
   wecom:
     enabled: true
     bot_id: $WECOM_BOT_ID
@@ -774,7 +825,7 @@ channels:
     bot_token: $TELEGRAM_BOT_TOKEN
     # Optional: render final Markdown replies as Telegram Rich Messages.
     rich_messages: false
-    allowed_users: []               # empty = allow all
+    allowed_users: []               # numeric user IDs, not @usernames; empty = allow all
 
   wechat:
     enabled: false
@@ -1111,6 +1162,30 @@ When you install `.skill` archives through the Gateway, DeerFlow accepts standar
 
 Disabling a skill also removes it from the sandbox filesystem view, so shell commands and structured file tools follow the same enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Structured `read_file` calls (including line ranges and read-before-write checks) use the sandbox provider's mount mapping, so the user identity captured when the sandbox was acquired remains authoritative. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Existing E2B sandboxes retain their creation-time snapshot until they are recreated. PVC-backed provisioner skills keep their configured PVC snapshot/layout for now; dynamic PVC materialization is tracked separately.
 
+```
+# Paths inside the sandbox container
+/mnt/skills/public
+├── research/SKILL.md
+├── report-generation/SKILL.md
+├── slide-creation/SKILL.md
+├── web-page/SKILL.md
+└── image-generation/SKILL.md
+
+/mnt/skills/custom
+└── your-custom-skill/SKILL.md      ← yours
+
+/mnt/skills/integrations
+└── lark-cli/lark-doc/SKILL.md      ← managed, read-only
+```
+
+The built-in `image-generation` skill supports Gemini, MiniMax, and
+OpenAI-compatible Images APIs. Select the latter with
+`IMAGE_GENERATION_PROVIDER=openai`, then configure
+`IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
+`IMAGE_GENERATION_MODEL`. For a containerized sandbox, expose these variables
+through `sandbox.environment`; sandbox commands intentionally do not inherit
+API keys from the Gateway process.
+
 For `LocalSandboxProvider`, this is a managed tool-path boundary rather than host filesystem isolation. Explicit per-Agent skill policies are accepted only while host bash is disabled (the default), because a host subprocess can address canonical paths without using the provider's virtual-path mappings. Use Docker/AIO, the Kubernetes provisioner, or E2B when the filesystem boundary must remain enforceable alongside shell access.
 
 Managed integrations install shared read-only skill packs without mixing them
@@ -1209,6 +1284,8 @@ If a trusted operator manages the configured skills directory through an externa
 
 Skill installs and agent-managed skill edits run through **SkillScan**, a native deterministic safety scanner before the LLM-based skill scanner. Phase 1 runs offline with no Semgrep/OpenGrep dependency, blocks high-confidence `CRITICAL` findings such as private keys or shell execution, and passes warning findings to the LLM scanner for contextual review. Code files (anything under `scripts/`, a script suffix such as `.py`, `.sh`, or `.js`, or an extensionless file starting with `#!`) that are not NUL-free UTF-8 text raise a warning and are still analyzed over a lossy decode, so a single stray byte cannot hide them from `CRITICAL` checks. The moderation adapter normalizes both plain-text model responses and LangChain Responses API text blocks before parsing the required JSON decision. Python instance-client exfiltration checks follow a minimal same-scope evidence chain: a simple name bound to a known client constructor, optional name-to-name aliases, and an actual outbound method or context-manager use supported by that constructor. Constructor roots must be proven imports; bare canonical-looking names are not inferred as modules. Nested scopes do not inherit client handles and inherit only constructor import aliases that are never rebound in the enclosing scope. Comprehensions, walrus-bearing statements, annotations, complex binding targets, unsupported operations, and ambiguous branch flows produce no finding from this signal; skipped constructs conservatively invalidate every name they may bind so stale client state cannot create a finding. A deterministic work budget or recursion limit reached by this best-effort analysis does not discard findings already collected for the file. Set `skill_scan.enabled: false` in `config.yaml` to disable only the deterministic analyzers; safe archive extraction and the LLM scanner still run.
 
+For Python credential mappings, SkillScan checks literal values while treating ordinary dictionary keys as labels. A mapping such as `tokens = {"access_token": os.getenv("ACCESS_TOKEN")}` does not report a hardcoded credential. Keys matching a recognized cloud or API token format are still checked as embedded credentials.
+
 DeerFlow also ships with **skill-reviewer**, a public skill for read-only skill quality review. It uses the built-in `review_skill_package` tool to inspect installed skills, local packages, archives, or pasted `SKILL.md` content without activating the target skill, binding its secrets, executing its scripts, or installing it. The tool returns a compact, tag-neutralized JSON payload to the model context and keeps the full raw review payload in the tool artifact for programmatic consumers. The deterministic review core reuses DeerFlow parsing and SkillScan facts, emits versioned JSON contracts under `contracts/skill_review/`, and can be run from the backend CLI:
 
 ```bash
@@ -1235,6 +1312,14 @@ These are deployment settings; the model still supplies only `query` and optiona
 empty list is forwarded and imposes no restriction of that kind. See the
 [tool configuration example](backend/docs/CONFIGURATION.md#tools).
 
+Serper `web_search` supports deployment-level `include_domains` and
+`exclude_domains` too. It checks returned URL hosts (including subdomains), with
+exclusion taking precedence. Filters can return fewer results, including zero;
+there are no refill requests. This selects sources, not factual accuracy or a
+global URL-access policy. The model arguments and image search are unchanged.
+See [Serper configuration](backend/docs/CONFIGURATION.md#serper-source-filters)
+for validation and query-length limits.
+
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
 Chat tool-step titles accept leading blank lines and up to three spaces before
@@ -1245,6 +1330,41 @@ Tavily search and fetch each read `api_key` from their own tool entry in
 reuse the search entry's key, so search can use a different provider. If you
 previously configured a shared Tavily key only under `web_search`, also set it
 under `web_fetch` or use `TAVILY_API_KEY` for both.
+
+#### Exporting Custom Skills
+
+Administrators can export their own custom skills from **Capability Center → Skills → My skills → View details → Export**. Review the file list and declared environment requirements, then choose **Download .skill**. The archive contains the currently saved skill, including supporting files and empty directories; disabled skills can also be exported. If the skill changes after preview, refresh the file list before downloading. Import the archive on another DeerFlow instance with **Install .skill**; existing-name conflicts and normal installation security checks still apply.
+
+Account settings, conversations and history outside the skill folder are excluded. Files inside the folder are preserved unchanged, including any credentials an author placed there; filename notices are advisory. Configure dependencies and credentials on the destination. Linked folders/files, hard links, unsupported executable binaries, nested `SKILL.md` files and nonportable paths cannot be exported. Export supports hosts with descriptor-relative no-follow filesystem APIs (Linux/macOS); unsupported hosts fail explicitly. Limits: 4096 ZIP entries, 64 MiB per file, 100 MiB total content/archive and 1 MiB frontmatter. YAML aliases and excessively complex declarations are not supported. Ordinary script executable semantics are preserved on POSIX import, without restoring special permissions. See [the export API contract](backend/docs/API.md#export-a-custom-skill).
+
+#### Claude Code Integration
+
+The `claude-to-deerflow` skill lets you interact with a running DeerFlow instance directly from [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Send research tasks, check status, manage threads — all without leaving the terminal.
+
+**Install the skill**:
+
+```bash
+npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
+```
+
+Then make sure DeerFlow is running (default at `http://localhost:2026`) and use the `/claude-to-deerflow` command in Claude Code.
+
+**What you can do**:
+- Send messages to DeerFlow and get streaming responses
+- Choose execution modes: flash (fast), standard, pro (planning), ultra (sub-agents)
+- Check DeerFlow health, list models/skills/agents
+- Manage threads and conversation history
+- Upload files for analysis
+
+**Environment variables** (optional, for custom endpoints):
+
+```bash
+DEERFLOW_URL=http://localhost:2026            # Unified proxy base URL
+DEERFLOW_GATEWAY_URL=http://localhost:2026    # Gateway API
+DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
+```
+
+See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) for the full API reference.
 
 ### Private Knowledge Retrieval (RAGFlow)
 
@@ -1396,6 +1516,10 @@ authenticated backend operations and model tools through the
 one package with persistent user data, its own sidebar page and a read-only search tool.
 Reopening a bookmark resolves the conversation's current agent through the host, so
 custom-agent conversations retain their original chat entry point, including older bookmarks.
+The independent [Agent teams example](examples/deerflow-extension-agent-teams/README.md)
+lets full Custom Agents collaborate through native `@` mentions, shared messages and
+asynchronous peer requests, with a separate team page and persistent member conversations.
+Capability Center lists the example with localized installation information even before it is installed.
 Installation and activation remain deployment-controlled; Capability Center shows plugin
 information and status. Browser code runs as trusted same-origin code.
 The browser API and inline `BrowserModule.code` transport are experimental. The
@@ -1531,65 +1655,6 @@ Literal `<think>` tags in fenced, indented, or inline code remain part of the an
 In the Web UI, the latest completed user turn can also be edited and rerun from the message toolbar. DeerFlow restores the conversation checkpoint before that user message, submits the edited text as a new user message, and hides the superseded turn once the replay is in progress or succeeds. This is a conversation-state replay only: files, memory updates, and external tool side effects are not undone.
 
 Web UI chat links percent-encode custom thread identifiers before placing them in route segments, so reserved URL characters such as `#` and `?` do not change which conversation is opened.
-
-```
-# Paths inside the sandbox container
-/mnt/skills/public
-├── research/SKILL.md
-├── report-generation/SKILL.md
-├── slide-creation/SKILL.md
-├── web-page/SKILL.md
-└── image-generation/SKILL.md
-
-/mnt/skills/custom
-└── your-custom-skill/SKILL.md      ← yours
-
-/mnt/skills/integrations
-└── lark-cli/lark-doc/SKILL.md      ← managed, read-only
-```
-
-The built-in `image-generation` skill supports Gemini, MiniMax, and
-OpenAI-compatible Images APIs. Select the latter with
-`IMAGE_GENERATION_PROVIDER=openai`, then configure
-`IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
-`IMAGE_GENERATION_MODEL`. For a containerized sandbox, expose these variables
-through `sandbox.environment`; sandbox commands intentionally do not inherit
-API keys from the Gateway process.
-
-#### Exporting Custom Skills
-
-Administrators can export their own custom skills from **Capability Center → Skills → My skills → View details → Export**. Review the file list and declared environment requirements, then choose **Download .skill**. The archive contains the currently saved skill, including supporting files and empty directories; disabled skills can also be exported. If the skill changes after preview, refresh the file list before downloading. Import the archive on another DeerFlow instance with **Install .skill**; existing-name conflicts and normal installation security checks still apply.
-
-Account settings, conversations and history outside the skill folder are excluded. Files inside the folder are preserved unchanged, including any credentials an author placed there; filename notices are advisory. Configure dependencies and credentials on the destination. Linked folders/files, hard links, unsupported executable binaries, nested `SKILL.md` files and nonportable paths cannot be exported. Export supports hosts with descriptor-relative no-follow filesystem APIs (Linux/macOS); unsupported hosts fail explicitly. Limits: 4096 ZIP entries, 64 MiB per file, 100 MiB total content/archive and 1 MiB frontmatter. YAML aliases and excessively complex declarations are not supported. Ordinary script executable semantics are preserved on POSIX import, without restoring special permissions. See [the export API contract](backend/docs/API.md#export-a-custom-skill).
-
-#### Claude Code Integration
-
-The `claude-to-deerflow` skill lets you interact with a running DeerFlow instance directly from [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Send research tasks, check status, manage threads — all without leaving the terminal.
-
-**Install the skill**:
-
-```bash
-npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
-```
-
-Then make sure DeerFlow is running (default at `http://localhost:2026`) and use the `/claude-to-deerflow` command in Claude Code.
-
-**What you can do**:
-- Send messages to DeerFlow and get streaming responses
-- Choose execution modes: flash (fast), standard, pro (planning), ultra (sub-agents)
-- Check DeerFlow health, list models/skills/agents
-- Manage threads and conversation history
-- Upload files for analysis
-
-**Environment variables** (optional, for custom endpoints):
-
-```bash
-DEERFLOW_URL=http://localhost:2026            # Unified proxy base URL
-DEERFLOW_GATEWAY_URL=http://localhost:2026    # Gateway API
-DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
-```
-
-See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) for the full API reference.
 
 ### Chat Archive
 
@@ -1773,6 +1838,10 @@ For example, independent read-only research can run concurrently when the wall-c
 ### Sandbox & File System
 
 Host-externalized tool outputs use the Gateway's normal file-creation umask.
+`tool_output` character/count budgets, including per-tool overrides, require
+non-negative integers; YAML booleans are rejected rather than treated as 0 or 1.
+An explicit zero per-tool override disables externalization while preserving
+any positive global fallback limit.
 Mounted sandboxes running under another UID need read access through the shared
 storage permissions. An unclean shutdown can leave `.tool-output-*.tmp` files in
 `tool_output.storage_subdir` (default `.tool-results`) under thread outputs.
@@ -1844,13 +1913,23 @@ AIO directory listings discard missing shell sessions so the next request can re
 After a dropped connection, directory listings and persistent shell commands report an
 unknown outcome without replaying the operation; later calls use a fresh session.
 
-Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip fenced code examples, so hashtags and code comments do not
-crowd out real document sections from the agent's heading preview.
+Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip fenced and indented code examples, so hashtags and code comments do not
+crowd out real document sections from the agent's heading preview. Indented bold examples are also excluded; PDF-style bold headings with up to three leading spaces remain supported.
 UTF-8 Markdown files with or without a byte-order mark (BOM) produce the same
 outlines and fallback previews, with original line numbers preserved.
 Outline titles are limited to 200 characters and fallback previews to 2,000
 characters per file, with truncation markers. Full uploaded files remain available
 for targeted reads.
+
+Converted upload outlines and previews require a matching source version, including
+modification timestamps. A detected source-version change invalidates its previous
+conversion, including equal-length edits. Older ownership records without source timestamps
+are also rejected; re-upload the source with `uploads.auto_convert_documents: true`
+to restore conversion-backed outlines. Files remain available, and unvalidated
+Markdown conversions appear as standalone files in the agent's historical listing.
+On Windows, `st_ctime_ns` may represent creation time; a same-size rewrite that
+restores the original `mtime` can evade validation. Timestamp checks are
+conservative metadata validation, not a guarantee of content equality.
 
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 
@@ -1858,13 +1937,28 @@ After each run, DeerFlow records a workspace change summary for the run-owned `w
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
+Artifact content revisions refresh when an output file is atomically replaced,
+even if its size and modification time are preserved. Refreshing the preview
+then provides the new revision for saving; an older preview still requires a reload.
+Regular files over the 2 MiB editing limit use file identity and change metadata
+for range validators without hashing the whole file. Conditional byte ranges for
+regular files require a matching ETag; date-form `If-Range` requests receive the full current file.
+
 CSV and TSV artifacts open as tables in the artifact panel and in a separate window. The preview preserves text values (including leading zeros), supports an optional header row, and pages through up to 200 rows and 50 columns from the initial sample. Long or multiline cells can be opened and copied in full. Switch to source to inspect or edit the file; downloads and separate windows use the saved version.
+
+HTML artifact previews resolve relative assets from the artifact directory unless the document contains a real `<base>` element. Base-tag examples in comments or script text do not change that resolution.
+
+If the sample cuts a CRLF line ending in half, the preview keeps the earlier complete rows and omits the incomplete final record, including when its last field is quoted.
 
 Text artifacts are streamed with HTTP byte-range support. The Web UI initially
 loads at most 1 MiB, shows the preview size when a file is larger, and waits for
 an explicit **Load full file** action before fetching the remainder or mounting
-the full code editor. Active HTML, XHTML, and SVG artifacts remain forced
-downloads at the Gateway boundary.
+the full code editor. Editing becomes available once the complete file has loaded;
+unsaved-change detection uses the full content, including when reverting edits
+or deleting the portion beyond the initial preview. If a reload fails or returns
+only a preview, users can still exit editing while retaining their unsaved draft.
+Active HTML, XHTML, and SVG artifacts remain forced downloads at the Gateway
+boundary.
 
 Artifact previews and downloads preserve literal percent sequences in file names:
 `report%20final.md` and `report final.md` remain distinct files. Markdown links
@@ -1951,7 +2045,7 @@ uv sync --extra browser
 uv run playwright install chromium
 ```
 
-Then uncomment the `group: browser` tool entries in `config.yaml` (`browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_get_text`, `browser_back`, `browser_screenshot`, `browser_close`). `make dev` / Docker startup detects an enabled `browser_navigate` tool and preserves the `browser` extra on dependency syncs. The Gateway fails startup if browser control is configured but Playwright is missing, and `/api/features` hides the Browser UI unless the backend can actually serve it. Keep `headless: true` and `allow_private_addresses: false` for anything but local, trusted debugging. Attaching to an existing Chrome with `cdp_url` cannot enforce DeerFlow's subresource/redirect SSRF guard and therefore fails closed unless `allow_unguarded_cdp: true` explicitly acknowledges that risk; use it only with a trusted local browser. Browser sessions are process-local; keep `GATEWAY_WORKERS=1` while this tool group is enabled because ordinary uvicorn worker dispatch does not provide thread affinity.
+Then uncomment the `group: browser` tool entries in `config.yaml` (`browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_get_text`, `browser_back`, `browser_screenshot`, `browser_close`). `make dev` / Docker startup detects an enabled `browser_navigate` tool and preserves the `browser` extra on dependency syncs. The Gateway fails startup if browser control is configured but Playwright is missing, and `/api/features` hides the Browser UI unless the backend can actually serve it. Keep `headless: true` and `allow_private_addresses: false` for anything but local, trusted debugging. Attaching to an existing Chrome with `cdp_url` cannot enforce DeerFlow's subresource/redirect SSRF guard and therefore fails closed unless `allow_unguarded_cdp: true` explicitly acknowledges that risk; use it only with a trusted local browser. Browser sessions are process-local; keep the Gateway to a single worker process while this tool group is enabled because ordinary uvicorn worker dispatch does not provide thread affinity. That means `GATEWAY_WORKERS=1`, and on the launches that pass uvicorn no worker count at all (`backend/Dockerfile`, `scripts/serve.sh`) also `WEB_CONCURRENCY` unset or `1`, since uvicorn takes the process count from it.
 
 Existing, non-mock Custom Agent chats expose the same Browser Live controls when browser control is available and the agent either leaves `tool_groups` unrestricted or includes the `browser` group. An explicit tool-group allowlist without `browser` keeps those controls hidden.
 
@@ -2277,17 +2371,67 @@ Current MVP capabilities:
 
 **Filter execution history through the API**
 
-To inspect failures without downloading every successful occurrence, authenticated clients with `threads:read` can request `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0` for an owned task. The optional `status` accepts `queued`, `launching`, `running`, `success`, `failed`, `skipped`, or `interrupted`; these are occurrence statuses, so task statuses such as `completed` are invalid (422).
+To inspect failures without downloading every successful occurrence, authenticated clients with `threads:read` can request `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0` for an owned task. The optional `status` accepts `queued`, `launching`, `running`, `success`, `failed`, `skipped`, `interrupted`, or `unmet`; these are occurrence statuses, so task statuses such as `completed` are invalid (422).
 
 Filtering happens before pagination. `limit` (1–200, default 50) and `offset` (nonnegative, default 0) apply to matching records, ordered by creation time then ID, both descending. Omitting `status` preserves the existing mixed-history array response; no matches return `[]`. The API does not change task execution, and the workspace history UI remains unfiltered.
 
 Current MVP limits:
 
-- No conversation-created `schedule_task` tool yet
 - No text-only notification jobs
 - No channel or GitHub dispatch targets (result push above is not a dispatch target)
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
+
+### Create schedules in a conversation
+
+Set both `scheduler.enabled: true` and `scheduler.tool_enabled: true`, then restart
+Gateway. An authorized interactive turn can use `schedule_task` to create, list,
+pause or delete tasks belonging to that conversation. For example: “Prepare a
+weekly meeting report every Monday at 9 AM in Asia/Shanghai for four weeks.”
+The tool returns the exact prompt, schedule, optional goal and stop method.
+Recurring report/file jobs may offer a manual trial; the trial requires your
+request and does not count toward the scheduled-launch limit.
+
+New tasks default to a fresh conversation for each occurrence. A configured
+`goal_objective` applies only to that occurrence: success does not stop a
+recurring schedule. The running agent can request `stop_scheduled_task` for its
+own schedule when your overall end condition has been met; the request takes
+effect during terminal finalization. `max_runs` counts automatic launches only,
+and `end_at` provides a deadline. Either end condition takes precedence over a
+pause request. Tool-created sub-hourly schedules require an end condition; each
+owner may keep at most 20 live tool-created tasks, including paused tasks.
+
+An unmet occurrence is recorded as `unmet`, distinct from an execution failure.
+Three eligible automatic unmet occurrences pause a recurring task. Accepted
+success resets the streak, including a success relying on disclosed assumptions;
+manual trials, interruption, execution failure and external waiting do not
+advance it. Resume retains the streak, so another eligible unmet occurrence can
+pause the task again. Existing notification bindings receive goal-unmet and
+auto-pause notices through the same durable outbox; manual trials stay silent.
+
+You can ask the agent in the originating conversation to save an explicit note
+for future runs (at most 10 notes of 500 characters). Fresh recurring runs may
+read the previous executed occurrence through opt-in `read_conversation`, with
+the same owner and read-permission checks. This provides a source reference,
+not an automatic summary or a post-back into the originating chat.
+
+For a trial, send a direct request such as "Run this task now" or "先跑一次".
+The host accepts a bounded set of English/Chinese direct-run requests from the
+current user turn; task mentions, quoted or conditional requests, and a bare
+"yes" do not start a paid run. The agent asks for a direct request when needed.
+
+A goal occurrence can use up to nine agent turns, with an evaluator request after
+each. Evaluator requests and provider-reported tokens are included in run usage;
+missing usage makes the corresponding cost estimate unknown. `token_budget`
+limits the main graph and is checked after model calls; evaluator usage is
+additional, so it is not a strict whole-run or dollar limit.
+
+**Goal evaluation upgrade:** existing scheduled, webhook and autonomous goal
+runs can accept disclosed low-risk, reversible assumptions and record
+`relied_on_assumption` in their verdict. Interactive goal evaluation remains
+strict. This policy also applies when conversation schedule tools are disabled;
+it does not authorize sensitive actions or substitute for user authorization.
+
 
 Scheduled runs use `scheduler.recursion_limit` in `config.yaml` (default `1000`, matching the web UI's interactive budget). Values above `max_recursion_limit` are clamped. This field is read at dispatch, so the next scheduled run picks it up without a Gateway restart.
 
@@ -2340,6 +2484,10 @@ deerflow --recursion-limit 250 --print "task" # override the headless agent-loop
 Headless `--print` and `--json` exit with status `1` when the run fails, including provider errors returned as fallback messages. `--print` still writes the fallback text to stdout; `--json` appends a terminal error record.
 
 A keyboard-driven chat surface with a streaming transcript (Markdown-rendered answers), compact tool-activity cards, a `/` slash-command palette, display-only `/clear`, `/goal` goal management, `/model` and `/threads` pickers, input history, PageUp/PageDown transcript navigation, and `Esc` / `Ctrl+C` interrupt. The composer preserves line breaks and indentation in pasted code, stack traces, and multi-paragraph prompts; `Enter` sends the complete document. Transcript refreshes preserve your reading position after you scroll upward and resume following new output when you return to the bottom. `/clear` removes rows from the current terminal display without deleting the thread or its persisted conversation; `/new` and `/clear` ask you to wait during an active run instead of resetting in-flight display state. Sessions opened in the TUI also appear in the Web UI sidebar — it writes the shared thread store under the local default user, so terminal and web stay in sync **without running the Gateway**.
+
+At the last composer row, `Down` leaves an unsent draft untouched unless you are
+browsing input history; after recalling history, it moves forward to restore your
+saved draft.
 
 See [backend/docs/TUI.md](backend/docs/TUI.md) for the full guide.
 

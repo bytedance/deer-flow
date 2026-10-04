@@ -2661,12 +2661,22 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if self._shutdown_called:
                 return
             self._shutdown_called = True
+
+        try:
+            self._stop_idle_checker()
+        except Exception:
+            with self._lock:
+                self._shutdown_called = False
+            raise
+
+        # Do not detach tracked sandboxes before the reaper is known stopped.
+        # If the bounded join fails, a retry must still own every warm entry.
+        with self._lock:
             sandbox_ids = list(self._sandboxes.keys())
             warm_items = list(self._warm_pool.items())
             self._warm_pool.clear()
             self._warm_pool_identity.clear()
 
-        self._stop_idle_checker()
         # Stop renewing before destroying: the destroy paths claim ownership
         # themselves, and a renewal racing them only re-publishes leases we are
         # about to drop.

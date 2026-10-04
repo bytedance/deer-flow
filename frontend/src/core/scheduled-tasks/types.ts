@@ -37,6 +37,7 @@ export type ScheduledTaskRun = {
     | "launching"
     | "running"
     | "success"
+    | "unmet"
     | "failed"
     | "skipped"
     | "interrupted";

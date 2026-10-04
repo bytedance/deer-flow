@@ -338,7 +338,7 @@ Outlines use ATX syntax (1–6 hashes, space/tab separator, ≤3 leading spaces)
 - Rejects directories before copying to keep uploads all-or-nothing
 - One conversion worker per request when called from an active event loop
 - Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
-- Thread ownership: `upload-companions/`.
+- Per-thread `upload-companions/`: source mtime/ctime.
 - Duplicate filenames within one request get `_N` suffixes to prevent overwrites.
 - Gateway HTTP uploads stage `.upload-*.part` files, hidden from upload listings, agent context, and sandbox listings/searches. After size validation, publication is atomic; staged-name cleanup logs errors and leaves leftovers for startup sweep.
 - Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.
@@ -370,6 +370,7 @@ Automatic conversation summarization when approaching token limits:
   manual state updates). Its short-lived `checkpoint_write` thread operation
   shares the durable active-thread uniqueness constraint with run admission,
   preventing either worker-local or cross-worker checkpoint-write races.
+- Each summarizer call emits a `middleware:summarize` journal event (`MIDDLEWARE_SUMMARIZE_TAG`; `action="summary_result"`, `changes.noop` true when the output is byte-identical to the prior `summary_text`) and bumps `summary_noop_count` / `summary_call_count` on the middleware. This is observation only; the summarizer call is never skipped. Per-call LLM telemetry lives on `RunJournal` (see the runtime guide).
 
 See [docs/summarization.md](docs/summarization.md) for details.
 

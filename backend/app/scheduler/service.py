@@ -8,7 +8,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import HTTPException
+from sqlalchemy import select
 
+from deerflow.persistence.channel_connections.model import ChannelConnectionRow
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.schedules import next_run_at
@@ -59,6 +61,41 @@ class ScheduledTaskService:
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._skip_next_lease_reconciliation = False
+        self._install_finalization_observers()
+
+    def _install_finalization_observers(self) -> None:
+        observer = self._enqueue_finalization_notices if self._connection_repo is not None and self._notification_repo is not None else None
+        for repository in (self._task_repo, self._task_run_repo):
+            register = getattr(repository, "set_finalization_observer", None)
+            if callable(register):
+                register(observer)
+
+    async def _enqueue_finalization_notices(self, session, task, occurrence, *, events: tuple[str, ...]) -> None:
+        """Commit new lifecycle notices with their first terminal transition.
+
+        Ordinary success/failure notification behavior remains in the existing
+        completion hook. Only goal-unmet and automatic-pause obligations use
+        this transaction-aware callback, including during crash recovery.
+        """
+        selected = tuple(event for event in events if event in {"run_unmet", "task_paused"})
+        if not selected or occurrence.trigger == "manual" or self._notification_repo is None or self._connection_repo is None:
+            return
+        bindings = await session.scalars(select(ChannelConnectionRow).where(ChannelConnectionRow.owner_user_id == task.user_id, ChannelConnectionRow.status == "connected"))
+        for binding in bindings:
+            if not binding.provider or not binding.external_account_id:
+                continue
+            for event in selected:
+                await self._notification_repo.enqueue_in_session(
+                    session,
+                    task_id=task.id,
+                    task_run_id=occurrence.id,
+                    run_id=occurrence.run_id,
+                    event=event,
+                    provider=binding.provider,
+                    target=binding.external_account_id,
+                    owner_user_id=task.user_id,
+                    payload={"task_id": task.id, "task_title": task.title, "reason_code": "consecutive_unmet" if event == "task_paused" else occurrence.error},
+                )
 
     def detach_notification_outbox(self) -> None:
         """Stop enqueueing run notifications (issue #4254).
@@ -68,6 +105,7 @@ class ScheduledTaskService:
         """
         self._connection_repo = None
         self._notification_repo = None
+        self._install_finalization_observers()
 
     async def run_once(self, *, now: datetime) -> None:
         if self._multi_instance:
@@ -131,6 +169,9 @@ class ScheduledTaskService:
         now: datetime,
         trigger: str,
     ) -> dict[str, Any]:
+        end_check = getattr(self._task_repo, "complete_if_ended", None)
+        if trigger == "scheduled" and callable(end_check) and await end_check(task["id"], user_id=task.get("user_id"), now=now):
+            return {"outcome": "completed", "task_run_id": None, "run_id": None, "thread_id": task.get("thread_id"), "error": None}
         expected_lease_owner = self._lease_owner if trigger == "scheduled" else None
         execution_thread_id = task.get("thread_id")
         if task.get("context_mode") == "fresh_thread_per_run" or execution_thread_id is None:
@@ -199,6 +240,8 @@ class ScheduledTaskService:
                 return self._active_run_conflict_result(execution_thread_id)
             return self._existing_active_result(active, execution_thread_id, trigger=trigger)
         except ScheduledTaskAdmissionRejected as exc:
+            if exc.reason == "ended":
+                return {"outcome": "completed", "task_run_id": None, "run_id": None, "thread_id": execution_thread_id, "error": None}
             if exc.reason == "not_found":
                 return {
                     "outcome": "not_found",
@@ -279,16 +322,27 @@ class ScheduledTaskService:
         launched_thread_id: str | None = None
         launch_succeeded = False
         try:
+            prompt = task["prompt"]
+            metadata = {"scheduled_task_id": task["id"], "scheduled_task_run_id": task_run_id, "scheduled_trigger": trigger}
+            if task.get("origin_thread_id") is not None:
+                metadata["scheduled_tool_created"] = True
+                metadata["scheduled_context_mode"] = task.get("context_mode")
+                notes = task.get("standing_notes") or []
+                if notes:
+                    prompt += "\n\nStanding task notes supplied by the user:\n" + "\n".join(notes)
+                if task.get("goal_objective") is not None:
+                    metadata["scheduled_goal_objective"] = task["goal_objective"]
+                previous_lookup = getattr(self._task_run_repo, "previous_occurrence", None)
+                if task.get("context_mode") == "fresh_thread_per_run" and task["schedule_type"] != "once" and callable(previous_lookup):
+                    previous = await previous_lookup(task["id"], before_task_run_id=task_run_id)
+                    if previous is not None and previous.get("thread_id") != execution_thread_id:
+                        metadata["scheduled_previous_thread_id"] = previous["thread_id"]
             result = await self._launch_run(
                 thread_id=execution_thread_id,
                 assistant_id=task.get("assistant_id"),
-                prompt=task["prompt"],
+                prompt=prompt,
                 owner_user_id=task.get("user_id"),
-                metadata={
-                    "scheduled_task_id": task["id"],
-                    "scheduled_task_run_id": task_run_id,
-                    "scheduled_trigger": trigger,
-                },
+                metadata=metadata,
             )
             launch_succeeded = True
             launched_run_id = result["run_id"]
@@ -538,10 +592,14 @@ class ScheduledTaskService:
         if not isinstance(task_id, str) or not isinstance(task_run_id, str) or not user_id:
             return
 
-        terminal_status: Literal["success", "failed", "interrupted"] | None
+        terminal_status: Literal["success", "failed", "interrupted", "unmet"] | None
         if record.status.value == "success":
             terminal_status = "success"
             error = None
+            verdict = getattr(record, "goal_verdict", None)
+            if metadata.get("scheduled_goal_objective") is not None and (not isinstance(verdict, dict) or verdict.get("satisfied") is not True):
+                terminal_status = "unmet"
+                error = (verdict.get("stand_down_reason") if isinstance(verdict, dict) else None) or "no_verdict"
         elif record.status.value == "interrupted":
             # Distinct from "failed": an interrupt (user cancel, same-thread
             # takeover) carries no error and is not an execution failure.
@@ -556,6 +614,9 @@ class ScheduledTaskService:
         if terminal_status is None:
             return
 
+        completion_kwargs = {}
+        if metadata.get("scheduled_goal_objective") is not None:
+            completion_kwargs["goal_verdict"] = getattr(record, "goal_verdict", None)
         completed = await self._task_repo.complete_run(
             task_id,
             user_id=user_id,
@@ -564,10 +625,15 @@ class ScheduledTaskService:
             status=terminal_status,
             error=error,
             finished_at=datetime.now(UTC),
+            **completion_kwargs,
         )
         if not completed:
             # The occurrence was not this run's to complete (missing row, another
             # run, another owner): nothing was recorded, so nothing is announced.
+            return
+
+        if terminal_status == "unmet":
+            # Its distinct notice was staged in the same transaction above.
             return
 
         if metadata.get("scheduled_trigger") == "manual":
@@ -600,6 +666,7 @@ class ScheduledTaskService:
             terminal_status=terminal_status,
             error=error,
             task_title=task_title,
+            relied_on_assumption=(isinstance(getattr(record, "goal_verdict", None), dict) and record.goal_verdict.get("satisfied") is True and record.goal_verdict.get("relied_on_assumption") is True),
         )
 
     async def _enqueue_run_notifications(
@@ -612,6 +679,7 @@ class ScheduledTaskService:
         terminal_status: str,
         error: str | None,
         task_title: str | None = None,
+        relied_on_assumption: bool = False,
     ) -> None:
         """Write durable outbox rows for the run outcome (issue #4254).
 
@@ -636,6 +704,8 @@ class ScheduledTaskService:
             "task_id": task_id,
             "task_title": task_title,
         }
+        if relied_on_assumption:
+            payload["relied_on_assumption"] = True
         for connection in connections:
             if connection.get("status") != "connected":
                 continue

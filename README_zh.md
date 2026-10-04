@@ -392,7 +392,7 @@ DeerFlow 支持可配置的 MCP Server 和 skills，用来扩展能力。
 
 DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应渠道会自动启动，而且都不需要公网 IP。
 
-DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。启用 `channel_connections` 后，已登录用户可以从侧边栏 / Settings > Channels 绑定 Telegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat 或 WeCom。它复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。入站 IM 消息会以所连接的 DeerFlow 用户身份运行。设置和安全注意事项参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
+DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。启用 `channel_connections` 后，已登录用户可以从侧边栏 / Settings > Channels 绑定 Telegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat、WeCom、QQ 或 Buzz。它复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。入站 IM 消息会以所连接的 DeerFlow 用户身份运行。设置和安全注意事项参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
 
 | 渠道 | 传输方式 | 上手难度 |
 |---------|-----------|------------|
@@ -402,6 +402,8 @@ DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。�
 | WeChat | Tencent iLink（long-polling） | 中等 |
 | 企业微信智能机器人 | WebSocket | 中等 |
 | 钉钉 | Stream Push（WebSocket） | 中等 |
+| QQ | WebSocket（仅文本私聊及群 @；每条来源消息最多回复 4 / 5 条） | 中等 |
+| Buzz | Nostr relay（WebSocket，NIP-42） | 中等 |
 
 **`config.yaml` 中的配置示例：**
 
@@ -443,7 +445,7 @@ channels:
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
-    allowed_users: []               # 留空表示允许所有人
+    allowed_users: []               # 填数字用户 ID，不是 @用户名；留空表示允许所有人
 
     # 可选：按渠道 / 按用户单独覆盖 session 配置
     session:
@@ -770,6 +772,8 @@ lead agent 只会在委派具有明确净收益时动态拉起 sub-agents，例�
 
 ### Sandbox 与文件系统
 
+上传文档的转换大纲和预览会校验原文件版本，包括修改时间戳。检测到原文件版本变化后，即使大小不变，也不会再使用旧转换结果。缺少原文件时间戳的旧归属记录同样会被拒绝；可在启用 `uploads.auto_convert_documents: true` 后重新上传原文件以恢复转换大纲。文件都会保留，未通过校验的转换 Markdown 会在 Agent 的历史文件列表中作为独立文件显示。Windows 上的 `st_ctime_ns` 可能表示创建时间，因此等长度覆盖后若恢复原 `mtime`，校验可能无法识别变化。时间戳校验是保守的元数据校验，不能保证文件内容完全一致。
+
 DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电脑”。
 
 每个任务都运行在隔离的 Docker 容器里，里面有完整的文件系统，包括 skills、workspace、uploads、outputs。agent 可以读写和编辑文件，可以执行 bash 命令和代码，也可以查看图片。整个过程都在 sandbox 内完成，可审计、会隔离，不会在不同 session 之间互相污染。
@@ -926,17 +930,56 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 
 **通过 API 筛选执行历史**
 
-排查失败记录时，无需先下载所有成功记录。已认证且具有 `threads:read` 权限的客户端，可以针对自己的任务请求 `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0`。可选的 `status` 支持 `queued`、`launching`、`running`、`success`、`failed`、`skipped`、`interrupted`；这些是执行记录的状态，`completed` 等任务状态会被拒绝（422）。
+排查失败记录时，无需先下载所有成功记录。已认证且具有 `threads:read` 权限的客户端，可以针对自己的任务请求 `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0`。可选的 `status` 支持 `queued`、`launching`、`running`、`success`、`failed`、`skipped`、`interrupted`、`unmet`；这些是执行记录的状态，`completed` 等任务状态会被拒绝（422）。
 
 筛选先于分页执行。`limit`（1–200，默认 50）和 `offset`（非负整数，默认 0）作用于匹配记录，按创建时间、ID 依次降序排列。不传 `status` 时保留原有的混合历史数组，无匹配项返回 `[]`。此 API 不改变任务执行行为，workspace 历史界面仍展示未筛选的记录。
 
 当前 MVP 限制：
 
-- 暂时还没有可在对话中创建任务的 `schedule_task` 工具
 - 没有纯文本通知任务
 - 没有渠道或 GitHub 分发目标（上面的结果推送不是分发目标）
 
 通过 `config.yaml -> scheduler.enabled` 开启后台轮询。手动触发使用同样的 scheduled-task 资源和执行路径。
+
+### 在对话中创建定时任务
+
+同时设置 `scheduler.enabled: true` 和 `scheduler.tool_enabled: true`，重启
+Gateway 后，具有权限的交互式对话可以通过 `schedule_task` 创建、列出、暂停或
+删除属于该会话的任务。例如：“未来四周，每周一北京时间上午九点准备会议报告。”
+工具回显实际保存的提示词、调度、可选目标和停止方法。周期性报告或文件任务可以
+提出手动试跑，只有用户提出试跑要求才执行，且不计入自动调度次数上限。
+
+新任务默认每次创建独立会话。`goal_objective` 只验证当次执行，达成它不会结束
+周期性调度。运行中的 Agent 在用户的总体结束条件满足后，可以请求
+`stop_scheduled_task` 停止自己的调度，请求在执行终结时生效。`max_runs` 只计算
+自动启动次数，`end_at` 指定结束时间；结束条件优先于暂停请求。工具创建的每小时
+多次调度必须带结束条件，每位用户最多保留 20 个活动工具任务，暂停任务也占名额。
+
+未达目标的执行记为 `unmet`，与执行故障区分。周期任务连续三次符合条件的自动
+执行未达目标后会暂停。成功会重置计数，包括依赖已声明假设的成功；手动试跑、
+中断、执行故障和等待外部条件不递增计数。恢复不重置计数，下一次符合条件的
+未达目标可能再次暂停。目标未达成及自动暂停通知复用现有绑定和持久化 outbox，
+手动试跑不通知。
+
+用户可以在来源会话明确要求保存今后执行的备注，最多 10 条、每条 500 字符。
+新会话中的周期任务可以通过按需开启的 `read_conversation` 回查上一次已执行的
+会话，仍须满足属主和读取权限检查。这是来源引用，不会自动生成记忆，也不会把
+结果回写到来源会话。
+
+试跑时请直接说“先跑一次”或“Run this task now”。宿主只接受本轮用户消息中
+限定的中英文直接执行请求；单独提到任务、引用、条件句或仅回答“好”不会启动
+付费运行。需要时，Agent 会请用户给出直接请求。
+
+一次目标执行最多包含九轮智能体回合，每轮后可以有一次评估器请求。运行用量
+包含评估器请求及服务商返回的 token；缺少用量时，对应费用估算为未知。
+`token_budget` 限制主图，并在模型调用后检查；评估器用量另行计入，因此它
+不是严格的整个运行用量上限，也不是金额上限。
+
+**目标评估升级：** 现有 scheduled、webhook、autonomous 模式的目标运行可以
+接受已声明的低风险、可逆假设，并将 `relied_on_assumption` 记录到评估结果。
+交互式目标评估仍保持严格。即使未启用对话调度工具，此策略也适用；它不授予
+敏感操作权限，也不代替用户授权。
+
 
 定时任务运行会读取 `config.yaml` 中的 `scheduler.recursion_limit`（默认 `1000`，与 Web UI 的交互式预算一致）。超过 `max_recursion_limit` 的值会被截断。该字段在 dispatch 时读取，因此下一次定时运行即可生效，无需重启 Gateway。
 

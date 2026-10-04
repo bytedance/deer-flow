@@ -1772,6 +1772,22 @@ class TestCardMode:
 
 
 class TestStop:
+    def test_stop_retains_live_stream_thread_after_join_timeout(self):
+        async def go():
+            channel = DingTalkChannel(MessageBus(), config={})
+            thread = MagicMock()
+            thread.is_alive.return_value = True
+            channel._thread = thread
+            channel._running = True
+
+            with pytest.raises(RuntimeError, match="still running after stop timeout"):
+                await channel.stop()
+
+            thread.join.assert_called_once_with(timeout=5)
+            assert channel._thread is thread
+
+        _run(go())
+
     def test_stop_joins_stream_thread_off_the_event_loop(self):
         async def go():
             channel = DingTalkChannel(MessageBus(), config={})

@@ -39,6 +39,10 @@ class ChannelUnavailable(Exception):
     """
 
 
+class ChannelStopTimeout(RuntimeError):
+    """A channel still owns a live provider worker after bounded teardown."""
+
+
 @dataclass(eq=False, slots=True)
 class _ThreadsafeSubmission:
     coroutine: Coroutine[Any, Any, Any]
@@ -195,13 +199,42 @@ class Channel(ABC):
         reservation: InboundReservation | None = None,
     ) -> bool:
         """Submit provider-thread work while retaining its real asyncio Task."""
+        return (
+            self._submit_threadsafe_coroutine_future(
+                coroutine,
+                loop,
+                name=name,
+                msg_id=msg_id,
+                reservation=reservation,
+            )
+            is not None
+        )
+
+    def _submit_threadsafe_coroutine_future(
+        self,
+        coroutine: Coroutine[Any, Any, T],
+        loop: asyncio.AbstractEventLoop | None,
+        *,
+        name: str,
+        msg_id: Any,
+        reservation: InboundReservation | None = None,
+    ) -> Future[T] | None:
+        """Like ``_submit_threadsafe_coroutine``, returning the completion future.
+
+        ``None`` means the work was refused (and the reservation released).
+        The future settles on every path: the task's result or exception, or
+        cancellation when ``_close_and_drain_threadsafe_futures`` stops the
+        work before or while it runs. Await it from another loop through
+        ``asyncio.shield(asyncio.wrap_future(...))`` so cancelling the waiter
+        never cancels the shared future the finalizer still has to settle.
+        """
 
         with self._threadsafe_submissions_lock:
             if not self._threadsafe_submission_intake_open or loop is None or not loop.is_running():
                 coroutine.close()
                 if reservation is not None:
                     reservation.release()
-                return False
+                return None
 
             submission = _ThreadsafeSubmission(
                 coroutine=coroutine,
@@ -219,8 +252,8 @@ class Channel(ABC):
                 coroutine.close()
                 if reservation is not None:
                     reservation.release()
-                return False
-        return True
+                return None
+        return submission.completion
 
     def _start_threadsafe_submission(self, submission: _ThreadsafeSubmission) -> None:
         """Create the owned Task on its event loop or finish a pre-start cancel."""
