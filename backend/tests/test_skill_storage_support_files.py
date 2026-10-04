@@ -80,6 +80,12 @@ def test_ensure_safe_support_path_rejects_windows_incompatible_names(storage, sk
         storage.ensure_safe_support_path("demo-skill", path)
 
 
+@pytest.mark.parametrize("path", ["assets/CONIN$", "scripts/conout$", "assets/CONIN$.txt", "assets/CONOUT$/icon.png"])
+def test_ensure_safe_support_path_rejects_console_device_names(storage, skill_dir, path):
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        storage.ensure_safe_support_path("demo-skill", path)
+
+
 def test_read_text_or_none_decodes_text_and_returns_none_for_binary(tmp_path: Path):
     text = tmp_path / "t.md"
     text.write_text("héllo", encoding="utf-8")

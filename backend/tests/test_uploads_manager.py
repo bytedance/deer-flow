@@ -100,6 +100,15 @@ class TestNormalizeFilename:
         with pytest.raises(ValueError, match="not portable to Windows"):
             normalize_filename(filename)
 
+    @pytest.mark.parametrize("filename", ["CONIN$", "conin$", "CONOUT$", "conout$", "CONIN$.txt", "folder/CONOUT$.log"])
+    def test_rejects_windows_console_device_names(self, filename):
+        with pytest.raises(ValueError, match="reserved Windows device name"):
+            normalize_filename(filename)
+
+    @pytest.mark.parametrize("filename", ["CONIN", "CONOUT", "CONIN$notes.txt", "CONOUT$notes.log"])
+    def test_allows_names_resembling_console_devices(self, filename):
+        assert normalize_filename(filename) == filename
+
     @pytest.mark.parametrize("filename", ["report.pdf", "contour.txt", "console.log", "COM0", "COM10", "COM⁴.txt", "LPT⁵", "COM¹notes.txt", "LPT²0.md", ".gitignore"])
     def test_allows_portable_names(self, filename):
         assert normalize_filename(filename) == filename
