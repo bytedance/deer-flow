@@ -29,12 +29,14 @@ from app.gateway.authz import AuthContext, Permissions
 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, get_internal_user
 from app.gateway.routers import thread_runs
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+from deerflow.persistence.run.sql import RunRepository
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.workspace_changes.types import WORKSPACE_CHANGES_EVENT_TYPE
 
 THREAD_ID = "thread-scope"
 BROWSER_USER_ID = UUID("00000000-0000-0000-0000-00000000000a")
@@ -812,24 +814,31 @@ def db_event_store(tmp_path):
     anyio.run(close_engine)
 
 
-def _seed_owner_stamped_message(event_store: DbRunEventStore, run_id: str, message_id: str, *, owner: str) -> None:
-    """Write a message row under ``owner``, as ``start_run``'s owner context does."""
+def _as_owner(owner: str, write) -> None:
+    """Run ``write`` under ``owner``'s user context, as ``start_run`` does."""
 
-    async def _put() -> None:
+    async def _run() -> None:
         token = set_current_user(SimpleNamespace(id=owner))
         try:
-            await event_store.put(
-                thread_id=THREAD_ID,
-                run_id=run_id,
-                event_type="llm.ai.response",
-                category="message",
-                content={"type": "ai", "id": message_id, "content": message_id, "additional_kwargs": {}},
-                metadata={},
-            )
+            await write()
         finally:
             reset_current_user(token)
 
-    anyio.run(_put)
+    anyio.run(_run)
+
+
+def _seed_owner_stamped_message(event_store: DbRunEventStore, run_id: str, message_id: str, *, owner: str) -> None:
+    _as_owner(
+        owner,
+        lambda: event_store.put(
+            thread_id=THREAD_ID,
+            run_id=run_id,
+            event_type="llm.ai.response",
+            category="message",
+            content={"type": "ai", "id": message_id, "content": message_id, "additional_kwargs": {}},
+            metadata={},
+        ),
+    )
 
 
 @pytest.mark.parametrize("ownership", ["established", "missing_meta"])
@@ -914,3 +923,57 @@ def test_regenerate_target_lookup_reads_raw_owner_stamped_events(db_event_store:
             reset_current_user(token)
 
     assert anyio.run(_lookup) == RUN_OWNER
+
+
+@pytest.mark.parametrize("ownership", ["established", "null_owner"])
+def test_internal_caller_reads_raw_owner_stamped_run_outputs(db_event_store: DbRunEventStore, ownership: str) -> None:
+    """Workspace changes and the archive manifest resolve the raw owner stamp.
+
+    Both read SQL rows stamped by ``start_run``: the archive manifest also
+    looks the run row up itself, so it needs the SQL run store here.
+    """
+    if ownership == "established":
+        thread_store = _PermissiveThreadStore()
+    else:
+        thread_store = MemoryThreadMetaStore(InMemoryStore())
+        asyncio.run(thread_store.create(THREAD_ID, assistant_id=None, user_id=None))
+    run_store = RunRepository(get_session_factory())
+
+    async def _seed() -> None:
+        await run_store.put(RUN_OWNER, thread_id=THREAD_ID, status="success")
+        await db_event_store.put(
+            thread_id=THREAD_ID,
+            run_id=RUN_OWNER,
+            event_type="run.delivery",
+            category="outputs",
+            content={"presented": 1, "by_tool": {"present_files": ["/mnt/user-data/outputs/a.txt"]}},
+        )
+        await db_event_store.put(
+            thread_id=THREAD_ID,
+            run_id=RUN_OWNER,
+            event_type=WORKSPACE_CHANGES_EVENT_TYPE,
+            category="outputs",
+            content={"summary": {"created": 1}, "files": []},
+        )
+
+    _as_owner(OWNER_RAW, _seed)
+
+    client = _make_app(
+        user=_internal_user(OWNER_RAW),
+        auth_source=AUTH_SOURCE_INTERNAL,
+        run_store=run_store,
+        event_store=db_event_store,
+        thread_store=thread_store,
+    )
+    headers = {INTERNAL_OWNER_USER_ID_HEADER_NAME: OWNER_RAW}
+    base = f"/api/threads/{THREAD_ID}/runs/{RUN_OWNER}"
+
+    with client:
+        changes = client.get(base + "/workspace-changes", headers=headers)
+        manifest = client.get(base + "/artifacts/archive", headers=headers)
+
+    assert changes.status_code == 200
+    assert changes.json()["available"] is True
+    assert changes.json()["summary"]["created"] == 1
+    assert manifest.status_code == 200, manifest.text
+    assert manifest.json()["file_count"] == 1

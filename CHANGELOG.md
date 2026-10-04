@@ -466,16 +466,17 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
-- **gateway:** Per-run message and event reads now return the rows of IM-channel
-  owners. `start_run` stamps run events with the raw trusted owner id (for
-  example `feishu:owner-777`), but `GET /api/threads/{id}/runs/{rid}/messages`
-  and `/events` filtered by the internal caller's normalized id, so on the
-  database event store they returned an empty list for any owner id containing
-  characters outside `[A-Za-z0-9_-]`. The regenerate source-run lookup had the
-  same mismatch and fell back or failed with 409. These reads now use the same
-  data identity as the thread message routes (#5448), and every event store
-  accepts `user_id` on `list_messages_by_run()`. Browser and API sessions keep
-  their per-user filter.
+- **gateway:** Per-run reads now return the rows of IM-channel owners.
+  `start_run` stamps run rows and run events with the raw trusted owner id (for
+  example `feishu:owner-777`), but several run-scoped routes filtered by the
+  internal caller's normalized id, so on the SQL stores any owner id containing
+  characters outside `[A-Za-z0-9_-]` matched nothing:
+  `GET /api/threads/{id}/runs/{rid}/messages` and `/events` returned an empty
+  list, `/workspace-changes` reported no changes, `/artifacts/archive` answered
+  404, and the regenerate source-run lookup fell back or failed with 409. These
+  reads now use the same data identity as the thread message routes (#5448),
+  and every event store accepts `user_id` on `list_messages_by_run()`. Browser
+  and API sessions keep their per-user filter.
 - **memory:** Reading DeerMem agent memory no longer fails while another write
   deletes a fact. `load()`, `reload()`, and the full `rebuild_index()` scan list
   the fact files without the storage locks, so a delete committed between the

@@ -129,7 +129,8 @@ writer enter the supposedly stable snapshot. The default and JSONL paths share t
 `list_messages_by_run` accept `user_id` on every backend (DB filters;
 memory/JSONL accept it for parity). `start_run` stamps rows with the raw trusted
 owner, but `AUTO` resolves to the internal user's `make_safe_user_id` form, so
-Gateway thread/run reads must pass `_run_scope_user_id()` explicitly.
+Gateway thread/run reads (including run-row lookups) must pass
+`_run_scope_user_id()` explicitly.
 
 **Event-store mutation fence** (`runtime/events/store/`): every thread mutation —
 `put`, `put_batch`, `put_if_absent`, `delete_by_thread`, `delete_by_run` — shares
