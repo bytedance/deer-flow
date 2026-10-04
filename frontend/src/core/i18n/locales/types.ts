@@ -1188,6 +1188,73 @@ export interface Translations {
       tool_call_missing: string;
       connection_failed: string;
     };
+    imageModels: {
+      title: string;
+      description: string;
+      add: string;
+      reload: string;
+      loading: string;
+      failed: string;
+      empty: string;
+      status: string;
+      statuses: Record<
+        | "not_configured"
+        | "invalid_config"
+        | "configured_unverified"
+        | "ready"
+        | "unreachable",
+        string
+      >;
+      serverConfig: string;
+      selected: string;
+      notSelected: string;
+      chooseInChat: string;
+      overridesServer: string;
+      setDefault: string;
+      setDefaultLabel: (name: string) => string;
+      defaultTag: string;
+      defaultTagLabel: (name: string) => string;
+      defaultSaved: string;
+      enabled: string;
+      disabled: string;
+      edit: string;
+      enable: string;
+      disable: string;
+      keySaved: string;
+      keyMissing: string;
+      generationReady: string;
+      generationUntested: string;
+      editReady: string;
+      editUntested: string;
+      testGeneration: string;
+      testEdit: string;
+      working: string;
+      formDescription: string;
+      name: string;
+      displayName: string;
+      provider: string;
+      providers: Record<"openai" | "gemini" | "minimax", string>;
+      modelId: string;
+      endpoint: string;
+      size: string;
+      keepKey: string;
+      requiredKey: string;
+      clearKey: string;
+      cancel: string;
+      save: string;
+      saved: string;
+      results: Record<
+        | "success"
+        | "authentication_failed"
+        | "rate_limited"
+        | "unsupported_edit"
+        | "provider_rejected"
+        | "invalid_response"
+        | "unreachable"
+        | "missing_api_key",
+        string
+      >;
+    };
     sections: {
       models: string;
       account: string;

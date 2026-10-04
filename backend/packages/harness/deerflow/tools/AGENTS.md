@@ -25,6 +25,33 @@ The cloned `write_file` budget hint uses that instance's effective `max_tokens`,
 including custom-agent and thinking-mode overrides; an absent cap omits the hint.
 Only standalone tool discovery without a model falls back to the base profile.
 
+`check_image_generation` performs the configuration preflight used by the
+image and PPT skills. `generate_image` validates virtual paths, uses the
+saved or run-selected source, injects managed credentials for a single sandbox
+command, validates the returned image, and requires a validated chat choice
+when both usable sources coexist in an interactive run without a saved default.
+Unattended runs select the server source before sandbox acquisition; the check
+tool receives runtime context and reports that selection. The choice is bound
+to one run. The prior run parks its AIO container, so the selected source
+acquires its own container identity without directly destroying the old one;
+normal idle cleanup still applies. The tool
+converts it to the requested PNG/JPEG/WebP format before moving it to the
+requested output path. Its async entry point checks missing configuration
+before sandbox acquisition. Legacy `sandbox.environment` credentials already
+present in an AIO container use its startup environment and old shell API.
+For local AIO, that fallback runs only in a container with the base sandbox
+identity; a held profile-scoped container is rejected even if disabling the
+managed profile cleared its bound revision marker.
+For a local AIO web profile, the tool checks the container's bound profile
+revision and probes `/v1/bash/exec`: modern images use per-command credentials,
+while legacy images use startup credentials on their profile-scoped container.
+Remote AIO still needs the per-command API. The tool launches one `python -I`
+command with base64-encoded paths; isolated mode excludes cwd, `PYTHONPATH`, and
+user site-packages before any import runs with the managed key. LocalSandbox's
+Windows PowerShell/cmd fallback does not parse POSIX operators. The image CLI
+validates, converts, atomically replaces and cleans up in Python; the tool
+requires its success marker as well as the authoritative shell exit status.
+
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
 
 1. **Config-defined tools** - Resolved from `config.yaml` via `resolve_variable()`

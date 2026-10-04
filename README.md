@@ -1173,13 +1173,88 @@ Disabling a skill also removes it from the sandbox filesystem view, so shell com
 └── lark-cli/lark-doc/SKILL.md      ← managed, read-only
 ```
 
-The built-in `image-generation` skill supports Gemini, MiniMax, and
-OpenAI-compatible Images APIs. Select the latter with
-`IMAGE_GENERATION_PROVIDER=openai`, then configure
-`IMAGE_GENERATION_API_KEY`, `IMAGE_GENERATION_BASE_URL`, and
-`IMAGE_GENERATION_MODEL`. For a containerized sandbox, expose these variables
-through `sandbox.environment`; sandbox commands intentionally do not inherit
-API keys from the Gateway process.
+The built-in `image-generation` and `ppt-generation` skills support Gemini,
+MiniMax, and OpenAI-compatible Images APIs. Admins configure an image model in
+**Settings → Models → Image models**, separately from chat models. Web profiles
+are encrypted under `DEER_FLOW_HOME/managed-image-profiles/`; back up both
+`catalog.enc` and `key`. They are not stored in the database or `config.yaml`.
+The administrator's default selection is stored alongside the catalog in
+`default.json`; back it up with the catalog. Only one web profile can be enabled.
+Settings can select the server or enabled web profile as the default for new
+chats and requests. When both are available and there is no valid saved default,
+the next generation request shows a choice card in the chat, regardless of
+which was configured first. A changed model or endpoint invalidates a saved
+default or pending choice card. The chat choice applies to that run only.
+Scheduled runs, webhooks, and subagents cannot answer a chat choice. When both
+image sources are usable and no saved default applies, these runs use the
+server-configured model. A valid saved default still takes precedence. The source
+is selected before sandbox acquisition, and `check_image_generation` reports the
+model the run will use.
+In an interactive IM channel, the person who requested the image can answer
+the model-choice question with `1`, `2`, or the exact option label. Answers to
+an old question or from another sender are treated as ordinary messages.
+The terminal workbench accepts `1`, `2`, or an exact option label from the
+current image-model question when its thread has a checkpointer. A stale answer
+remains ordinary chat text.
+Image configuration errors stop image generation but do not block unrelated
+sandbox tools such as bash or file operations.
+For a server-owned model, use the typed top-level `image_generation` block in
+`config.yaml`:
+
+```yaml
+image_generation:
+  provider: openai
+  model: gpt-image-1
+  base_url: https://api.openai.com/v1
+  api_key: $IMAGE_GENERATION_API_KEY
+```
+
+The server entry is read-only in Settings, but admins can test generation and
+reference editing there. Results are tied to the exact provider, model,
+endpoint, and key; changing any of them clears the displayed test result.
+The old `sandbox.environment` image variables remain a fallback when the typed
+block is absent. Do not define image settings in both places; configuration
+loading rejects that conflict. The server entry can coexist with web profiles,
+and either can be selected as the default.
+
+Deployments that manage image credentials only through `config.yaml` can set
+`DEER_FLOW_MANAGED_IMAGE_PROFILES_ENABLED=false` in the Gateway environment
+(`.env` for the bundled Docker stacks). Restart a local Gateway or recreate its
+Docker container to apply the value. This removes
+the `/api/image-generation` management and test routes, hides the image-model
+Settings section, and makes the Agent use only the server image model. Existing
+web profiles and saved defaults stay on disk but are ignored until the switch
+is turned back on. The switch defaults to `true`. The static website build
+continues to use its local fixtures and does not request this Gateway feature.
+
+Local AIO images with `/v1/bash/exec` receive web credentials per command.
+Older images get a new container with startup credentials and the same
+workspace/upload/output mounts; active runs finish first. Container-only files,
+processes, and temporary installs are not preserved, and the key stays in the
+old container's environment until removal. Remote/provisioner AIO still needs
+`/v1/bash/exec` for web-managed and typed server keys. Changing legacy
+`sandbox.environment` requires a Gateway restart. A typed server model or key
+change uses a separate local AIO container with the selected startup credentials.
+A chat choice of a new server model uses a separate
+container identity; the previous container remains available until normal
+idle or capacity cleanup. Other existing containers still need recreation to
+pick up changed startup variables. If a web profile is
+disabled during an active run, its profile-scoped local container cannot be
+used for the legacy fallback; image generation reports `IMAGE_PROFILE_CHANGED`
+until that container is replaced. See
+[sandbox configuration](backend/docs/CONFIGURATION.md) for details.
+
+Gateway-side generation/edit tests may incur provider charges and do not test
+sandbox egress. PPT slides are generated sequentially because each references
+the previous slide. Generation scripts exit nonzero on failure; composition
+rejects missing or mismatched slide images. The controlled image tool also works
+with LocalSandbox's PowerShell or cmd.exe fallback on Windows hosts.
+The PPT skill records verified slide progress in `/mnt/user-data/workspace`.
+If the image model changes during generation, it stops and offers to continue
+the remaining slides in a new request or regenerate the deck. A follow-up
+checks the saved plan and images before resuming; composition requires all
+recorded slides to be present and unchanged. The new request acquires a sandbox
+for the currently selected image model.
 
 For `LocalSandboxProvider`, this is a managed tool-path boundary rather than host filesystem isolation. Explicit per-Agent skill policies are accepted only while host bash is disabled (the default), because a host subprocess can address canonical paths without using the provider's virtual-path mappings. Use Docker/AIO, the Kubernetes provisioner, or E2B when the filesystem boundary must remain enforceable alongside shell access.
 

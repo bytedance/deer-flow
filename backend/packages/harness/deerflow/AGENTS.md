@@ -65,6 +65,7 @@ drift.
 - Lazy graph creation uses `create_agent()` + `build_middlewares()`.
 - Cache graphs by storage `user_id` and the unordered set of named-agent `mcp_plugins`. `stream()` materializes `user_id` before worker/loop boundaries in every auth mode.
 - Supports `checkpointer` parameter for state persistence across turns
+- Embedded/TUI image choices need a checkpointer; bind the source per step and reset before yielding.
 - `reset_agent()` reloads AgentConfig and rebuilds the graph. Every run's metadata carries `mcp_plugins` for delegation, including cache hits.
 - [Streaming design](../../../docs/STREAMING.md): Gateway/client parallel paths, LangGraph `stream_mode`, per-id deduplication, and regression tests
 

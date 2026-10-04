@@ -25,6 +25,7 @@ def _app_with_config(
     app = FastAPI()
     app.state.mcp_tasks_available = mcp_tasks_available
     app.state.subagent_batches_available = subagent_batches_available
+    app.state.image_generation_management_enabled = True
     if subagent_batch_repo_available is None:
         subagent_batch_repo_available = subagent_batches_available
     app.state.subagent_batch_repo = object() if subagent_batch_repo_available else None
@@ -67,6 +68,7 @@ def test_features_reports_agents_api_enabled() -> None:
         "knowledge_base": {
             "scope_selection_enabled": False,
         },
+        "image_generation_management": {"enabled": True},
     }
 
 
@@ -88,6 +90,7 @@ def test_features_reports_agents_api_disabled() -> None:
         "knowledge_base": {
             "scope_selection_enabled": False,
         },
+        "image_generation_management": {"enabled": True},
     }
 
 

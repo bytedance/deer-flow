@@ -24,6 +24,7 @@ from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
 from deerflow.config.file_signature import read_config_with_signature as _read_config_with_signature
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
+from deerflow.config.image_generation import ImageGenerationProfile
 from deerflow.config.input_polish_config import InputPolishConfig
 from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
@@ -278,6 +279,7 @@ class AppConfig(BaseModel):
         return _reject_boolean_int(value, info)
 
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
+    image_generation: ImageGenerationProfile | None = Field(default=None, description="Operator-owned image provider; legacy sandbox.environment image variables remain supported when this is absent")
     sandbox: SandboxConfig = Field(
         description=format_field_description(
             "sandbox",
@@ -331,6 +333,7 @@ class AppConfig(BaseModel):
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
     auth: AuthAppConfig = Field(default_factory=AuthAppConfig, description="Authentication configuration (local + OIDC SSO)")
     model_config = ConfigDict(extra="allow")
+
     database: DatabaseConfig = Field(
         default_factory=DatabaseConfig,
         description=format_field_description(
@@ -417,6 +420,31 @@ class AppConfig(BaseModel):
     _models_by_name: dict[str, ModelConfig] = PrivateAttr(default_factory=dict)
     _tools_by_name: dict[str, ToolConfig] = PrivateAttr(default_factory=dict)
     _tool_groups_by_name: dict[str, ToolGroupConfig] = PrivateAttr(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_image_generation_source(self) -> Self:
+        if self.image_generation is not None and any(
+            key in self.sandbox.environment
+            for key in (
+                "IMAGE_GENERATION_PROVIDER",
+                "IMAGE_GENERATION_API_KEY",
+                "IMAGE_GENERATION_BASE_URL",
+                "IMAGE_GENERATION_MODEL",
+                "IMAGE_GENERATION_SIZE",
+                "GEMINI_API_KEY",
+                "GEMINI_IMAGE_MODEL",
+                "MINIMAX_API_KEY",
+                "MINIMAX_IMAGE_MODEL",
+                "MINIMAX_API_HOST",
+            )
+        ):
+            raise ValueError("image_generation and sandbox.environment image settings cannot both be configured")
+        return self
+
+    @property
+    def image_generation_environment(self) -> dict[str, str]:
+        """Canonical server image settings for both YAML formats."""
+        return self.image_generation.server_environment() if self.image_generation is not None else self.sandbox.environment
 
     @model_validator(mode="before")
     @classmethod

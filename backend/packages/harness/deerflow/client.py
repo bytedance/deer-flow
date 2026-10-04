@@ -23,7 +23,7 @@ import mimetypes
 import os
 import tempfile
 import uuid
-from collections.abc import Generator, Iterator, Mapping, Sequence
+from collections.abc import Generator, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -39,7 +39,7 @@ from deerflow.agents.middlewares.tool_declarations import layer_one_outcome, nar
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
-from deerflow.config.app_config import get_app_config, reload_app_config
+from deerflow.config.app_config import AppConfig, get_app_config, reload_app_config
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
     atomic_write_extensions_config,
@@ -51,6 +51,7 @@ from deerflow.config.extensions_config import (
     set_raw_skill_enabled,
     validate_raw_extensions_config,
 )
+from deerflow.config.image_generation import bind_image_generation_source
 from deerflow.config.paths import get_paths
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
@@ -101,17 +102,39 @@ _EMBEDDED_AUTHORIZATION_CONTEXT_KEYS = frozenset(
 )
 
 
-def _stream_with_sandbox_lease_cleanup(items: Iterator[Any], context: dict[str, Any]) -> Iterator[Any]:
-    """Fence an embedded graph iterator with execution-lease cleanup."""
+def _stream_with_sandbox_lease_cleanup(
+    items: Iterable[Any],
+    context: dict[str, Any],
+    image_source: Literal["managed", "sandbox_environment"] | None = None,
+) -> Iterator[Any]:
+    """Scope each graph step to its image choice and release its sandbox lease."""
+    iterator = None
+    exhausted = False
     try:
-        yield from items
+        with bind_image_generation_source(image_source):
+            iterator = iter(items)
+        while True:
+            with bind_image_generation_source(image_source):
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    exhausted = True
+                    return
+            yield item
     finally:
-        try:
-            from deerflow.sandbox.lease import release_sandbox_execution_lease
+        with bind_image_generation_source(image_source):
+            try:
+                if iterator is not None and not exhausted:
+                    close = getattr(iterator, "close", None)
+                    if callable(close):
+                        close()
+            finally:
+                try:
+                    from deerflow.sandbox.lease import release_sandbox_execution_lease
 
-            release_sandbox_execution_lease(context)
-        except Exception:
-            logger.warning("Failed to release embedded sandbox execution lease", exc_info=True)
+                    release_sandbox_execution_lease(context)
+                except Exception:
+                    logger.warning("Failed to release embedded sandbox execution lease", exc_info=True)
 
 
 def _run_async_from_sync(coro):
@@ -1071,6 +1094,31 @@ class DeerFlowClient:
         )
 
         state: dict[str, Any] = {"messages": [HumanMessage(content=message, additional_kwargs={"run_id": run_id})]}
+        image_source = None
+        if isinstance(self._app_config, AppConfig):
+            from deerflow.agents.image_generation_choice import adapt_embedded_image_choice_reply
+            from deerflow.config.image_generation import image_generation_source_for_run, image_profile_choice_needed
+
+            try:
+                # Image tools read the current configuration. Validate an old
+                # card against that same snapshot, not this client's startup
+                # configuration, so endpoint changes invalidate the answer.
+                environment = get_app_config().image_generation_environment
+                image_source = image_generation_source_for_run(environment, allows_clarification=True)
+                needs_choice = image_source is None and image_profile_choice_needed(environment)
+            except (OSError, ValueError):
+                # Image configuration failure must not block unrelated tools.
+                logger.warning("Embedded image model choice could not be validated")
+                needs_choice = False
+            if needs_choice and checkpointer is not None:
+                snapshot = CheckpointStateAccessor.bind(self._agent, checkpointer, mode=self._checkpoint_channel_mode).get(checkpoint_config)
+                values = snapshot.values or {}
+                prior_messages = tuple(values.get("messages") or ()) if isinstance(values, dict) else ()
+                try:
+                    state, image_source = adapt_embedded_image_choice_reply(state, prior_messages, environment)
+                except (OSError, ValueError):
+                    # Leave the answer as ordinary text when a card is stale.
+                    logger.warning("Embedded image model choice could not be validated")
         context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
         if self._agent_name:
             context["agent_name"] = self._agent_name
@@ -1140,13 +1188,14 @@ class DeerFlowClient:
             sent.update(delta)
             return delta
 
-        agent_items = self._agent.stream(
-            state,
-            config=config,
-            context=context,
-            stream_mode=["values", "messages", "custom"],
-        )
-        for item in _stream_with_sandbox_lease_cleanup(agent_items, context):
+        with bind_image_generation_source(image_source):
+            agent_items = self._agent.stream(
+                state,
+                config=config,
+                context=context,
+                stream_mode=["values", "messages", "custom"],
+            )
+        for item in _stream_with_sandbox_lease_cleanup(agent_items, context, image_source):
             if isinstance(item, tuple) and len(item) == 2:
                 mode, chunk = item
                 mode = str(mode)

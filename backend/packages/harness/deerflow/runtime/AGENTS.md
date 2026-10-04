@@ -1,3 +1,16 @@
+### Image Source Selection
+
+Image source selection in `runtime/runs/worker.py` uses the run interaction
+policy before graph streaming. With both sources usable and no valid saved
+default, interactive runs leave the choice to the chat card; unattended runs
+bind the server source so AIO sandbox identity matches image execution.
+For interactive IM replies, the worker uses that same materialized pre-run
+checkpoint to recognize an explicit `1`/`2` or exact label only when the image
+choice card is the latest message and its recorded channel/sender match the
+trusted run context. It creates the normal `human_input_response` message and
+rechecks the managed revision and server model identity before binding the source; no IM worker cache is
+needed, so replies remain valid after Gateway worker restart.
+
 ### Stream Bridge Heartbeats
 
 Memory/Redis bridges keep startup-only `stream_bridge.heartbeat_interval_seconds`; explicit `subscribe(..., heartbeat_interval=...)` overrides it. Provider contexts drain owned cache/bridge/checkpointer/Store teardown across cancellation. `close_agent_stream()` shields close to completion: preserve counts, defer host cancellation, balance repeats, keep active errors, log attached close failures at callers, map close cancellation to failure, never time out.

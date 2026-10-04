@@ -1,15 +1,17 @@
 """Middleware for intercepting clarification requests and presenting them to the user."""
 
+import asyncio
 import json
 import logging
 import re
+import uuid
 from collections.abc import Callable
 from hashlib import sha256
 from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
@@ -17,6 +19,14 @@ from langgraph.types import Command
 
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
+from deerflow.config.app_config import get_app_config
+from deerflow.config.image_generation import (
+    ManagedImageGenerationProfileStore,
+    image_profile_choice_needed,
+    image_profile_identity,
+    legacy_image_profile,
+    selected_image_generation_source,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -499,6 +509,10 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         request_id = self._stable_message_id(tool_call_id, formatted_message)
         human_input_payload = self._build_human_input_payload(args, tool_call_id=tool_call_id, request_id=request_id, fields=fields)
+        choice = args.get("_image_profile_choice")
+        if isinstance(choice, dict) and args.get("clarification_type") == "image_model_choice":
+            human_input_payload["image_profile_choice"] = choice
+            human_input_payload["input_mode"] = "single_choice"
 
         # Create a ToolMessage with the formatted question
         # This will be added to the message history
@@ -570,10 +584,73 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         return self._handle_clarification(request)
 
+    def _image_model_choice(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Turn an ambiguous image call into the existing inline chat choice card."""
+        if self._clarification_disabled(runtime) or selected_image_generation_source() is not None:
+            return None
+        messages = state.get("messages", [])
+        last = messages[-1] if messages else None
+        if not isinstance(last, AIMessage):
+            return None
+        calls = last.tool_calls or []
+        if not any(call.get("name") == "generate_image" for call in calls) or any(call.get("name") == ASK_CLARIFICATION_TOOL_NAME for call in calls):
+            return None
+        try:
+            environment = get_app_config().image_generation_environment
+            if not image_profile_choice_needed(environment):
+                return None
+            managed = next(item for item in ManagedImageGenerationProfileStore().list() if item.enabled)
+            server = legacy_image_profile(environment)
+            if server is None:
+                return None
+        except (OSError, ValueError, StopIteration):
+            # The image tool also checks the catalog and fails before sandbox
+            # acquisition; an unavailable catalog must never trigger a guess.
+            return None
+
+        latest_user = next((item for item in reversed(messages) if isinstance(item, HumanMessage)), None)
+        chinese = latest_user is not None and self._is_chinese(str(latest_user.content))
+
+        choice_marker = {
+            "managed_revision": managed.revision,
+            "server_profile_identity": image_profile_identity(server),
+        }
+        context = getattr(runtime, "context", None)
+        if isinstance(context, dict):
+            channel_name = context.get("channel_name")
+            channel_user_id = context.get("channel_user_id")
+            if isinstance(channel_name, str) and channel_name and isinstance(channel_user_id, str) and channel_user_id:
+                choice_marker.update({"channel_name": channel_name, "channel_user_id": channel_user_id})
+
+        call = {
+            "name": ASK_CLARIFICATION_TOOL_NAME,
+            "id": f"image-choice-{uuid.uuid4().hex}",
+            "args": {
+                "question": "这张图片要使用哪个图片模型？" if chinese else "Which image model should I use for this image?",
+                "clarification_type": "image_model_choice",
+                "context": "现在有两个图片模型，请为本次生成选择一个。" if chinese else "Two image models are configured. Choose one for this request.",
+                "options": [
+                    f"{'网页' if chinese else 'Web'}: {managed.display_name or managed.name} ({managed.provider.value}/{managed.model})",
+                    f"{'服务器' if chinese else 'Server'}: {server.provider.value}/{server.model}",
+                ],
+                "_image_profile_choice": choice_marker,
+            },
+        }
+        # Build a fresh message with the original id. Reusing the provider's
+        # raw tool-call blocks would replay generate_image on some adapters.
+        patched = AIMessage(id=last.id, content="", tool_calls=[call], response_metadata=last.response_metadata, usage_metadata=last.usage_metadata)
+        return {"messages": [patched]}
+
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        return self._drop_parallel_non_clarification_tools(state, runtime)
+        return self._image_model_choice(state, runtime) or self._drop_parallel_non_clarification_tools(state, runtime)
 
     @override
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        messages = state.get("messages", [])
+        last = messages[-1] if messages else None
+        if isinstance(last, AIMessage) and any(call.get("name") == "generate_image" for call in last.tool_calls or []):
+            choice = await asyncio.to_thread(self._image_model_choice, state, runtime)
+            if choice is not None:
+                return choice
         return self._drop_parallel_non_clarification_tools(state, runtime)

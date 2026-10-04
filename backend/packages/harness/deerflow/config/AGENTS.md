@@ -1,5 +1,40 @@
 ### Configuration System
 
+Top-level `image_generation` is a typed, single operator-owned profile; it
+reuses the managed profile's provider/model/URL/key validation. Legacy image
+variables in `sandbox.environment` remain a fallback, but the two YAML forms
+cannot coexist. Both server forms share the image resolver and admin probe API.
+`DEER_FLOW_MANAGED_IMAGE_PROFILES_ENABLED=false` disables catalog reads and
+writes, saved web defaults, and per-run web choices; the resolver still accepts
+the server image profile. Gateway startup uses the same switch to omit the
+image management router and reports it through `/api/features`. Restart the
+local Gateway or recreate its Docker container after changing the switch.
+Server probe results are stored by credential-bound fingerprint in an encrypted
+catalog; a model, URL, or key change invalidates displayed readiness. Managed
+image profiles use `image_generation.py` and the same encrypted JSON
+catalog primitive as managed chat models. The image catalog lives at
+`runtime_home()/managed-image-profiles/catalog.enc` with an adjacent `key`, not
+in SQL or `config.yaml`. The admin-selected default lives in the adjacent
+`default.json` and contains source/model identities but no credentials. Both
+files need backup. One profile may be enabled; its revision fences
+updates and capability test results. When a usable server image model and an
+enabled usable web profile coexist without a valid saved default, image
+generation requires a chat choice regardless of configuration order. The
+response is checked against the recorded card, current managed revision, and
+server profile identity (provider, model, endpoint, and size; no API key).
+A valid saved default selects either source
+across runs; changes to either model or endpoint invalidate it and require a
+new chat choice. Unattended runs use the server source when both usable sources
+coexist without a valid default; a saved default still wins. Bind that source
+before sandbox acquisition so AIO identity and image credentials agree.
+Disabled profiles do not shadow legacy variables. The
+`ImageConnectionStatus` enum is specific to image readiness: the existing IM
+channel connection state does not represent generation versus reference edit.
+Legacy AIO image variables are inherited at container creation and do not
+require its per-command environment API; managed profiles do. Changing legacy
+variables requires restarting the Gateway and recreating existing sandboxes.
+Readiness probes originate in the Gateway; actual sandbox egress can differ.
+
 Operator prompt overlays: `lead_prompt_overlay` on AppConfig and
 `subagents.agents.<name>.prompt_overlay` accept literal `prepend`/`append` strings.
 The per-assembly snapshot owns these settings; no run-context override exists.
