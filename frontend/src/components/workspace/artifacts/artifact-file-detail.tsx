@@ -513,29 +513,27 @@ export function ArtifactFileDetail({
               />
             )}
             {canEdit && isEditing && (
-              <>
-                <ArtifactAction
-                  className={cn(
-                    isDirty && !activeDraft.conflict && "text-primary",
-                  )}
-                  icon={isSaving ? LoaderIcon : SaveIcon}
-                  label={t.common.save}
-                  tooltip={
-                    thread.isLoading
-                      ? t.artifactEditing.runInProgress
-                      : activeDraft.conflict
-                        ? t.artifactEditing.conflict
-                        : t.common.save
-                  }
-                  disabled={
-                    !isDirty ||
-                    isSaving ||
-                    thread.isLoading ||
-                    activeDraft.conflict
-                  }
-                  onClick={() => void handleSave()}
-                />
-              </>
+              <ArtifactAction
+                className={cn(
+                  isDirty && !activeDraft.conflict && "text-primary",
+                )}
+                icon={isSaving ? LoaderIcon : SaveIcon}
+                label={t.common.save}
+                tooltip={
+                  thread.isLoading
+                    ? t.artifactEditing.runInProgress
+                    : activeDraft.conflict
+                      ? t.artifactEditing.conflict
+                      : t.common.save
+                }
+                disabled={
+                  !isDirty ||
+                  isSaving ||
+                  thread.isLoading ||
+                  activeDraft.conflict
+                }
+                onClick={() => void handleSave()}
+              />
             )}
             {isEditing && (
               <ArtifactAction
@@ -547,19 +545,17 @@ export function ArtifactFileDetail({
               />
             )}
             {canEdit && isEditing && (
-              <>
-                <ArtifactAction
-                  icon={RotateCcwIcon}
-                  label={t.artifactEditing.discard}
-                  tooltip={t.artifactEditing.discard}
-                  disabled={isSaving}
-                  onClick={() => {
-                    if (confirmDiscard()) {
-                      discardDraft();
-                    }
-                  }}
-                />
-              </>
+              <ArtifactAction
+                icon={RotateCcwIcon}
+                label={t.artifactEditing.discard}
+                tooltip={t.artifactEditing.discard}
+                disabled={isSaving}
+                onClick={() => {
+                  if (confirmDiscard()) {
+                    discardDraft();
+                  }
+                }}
+              />
             )}
             {!isEditing &&
               !isWriteFile &&
