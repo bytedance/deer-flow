@@ -8,6 +8,7 @@ from deerflow_extension_api import BrowserAssets, BrowserModule, PluginContribut
 from deerflow_extension_api.auth import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from support.symlinks import symlink_or_skip
 
 from app.gateway.routers.plugins import router
 from deerflow.extensions import browser_assets
@@ -120,17 +121,25 @@ def test_invalid_manifests_rejected(package, change):
         registry_for(declaration)
 
 
-def test_missing_symlink_duplicate_keys_and_size_limits(package, monkeypatch):
-    declaration, manifest = package
+def test_missing_asset_is_rejected(package):
+    declaration, _ = package
     file = declaration.root / "static/chunk.mjs"
     file.unlink()
     with pytest.raises(FileNotFoundError):
         load_browser_assets(declaration)
-    file.symlink_to(declaration.root / "static/index.mjs")
+
+
+def test_symlink_asset_is_rejected(package):
+    declaration, _ = package
+    file = declaration.root / "static/chunk.mjs"
+    file.unlink()
+    symlink_or_skip(file, declaration.root / "static/index.mjs")
     with pytest.raises(ValueError, match="symlinks"):
         load_browser_assets(declaration)
-    file.unlink()
-    file.write_text("export default 1;")
+
+
+def test_duplicate_keys_and_size_limits(package, monkeypatch):
+    declaration, _ = package
     monkeypatch.setattr(browser_assets, "MAX_FILE_BYTES", 4)
     with pytest.raises(ValueError, match="size limit"):
         load_browser_assets(declaration)
@@ -145,15 +154,17 @@ def test_missing_symlink_duplicate_keys_and_size_limits(package, monkeypatch):
         load_browser_assets(replace(declaration, manifest="../ui_manifest.json"))
 
 
-def test_intermediate_symlink_and_manifest_limits(package, tmp_path, monkeypatch):
-    declaration, manifest = package
+def test_intermediate_symlink_is_rejected(package, tmp_path):
+    declaration, _ = package
     directory = tmp_path / "static"
     directory.rename(tmp_path / "real")
-    directory.symlink_to(tmp_path / "real", target_is_directory=True)
+    symlink_or_skip(directory, tmp_path / "real", target_is_directory=True)
     with pytest.raises(ValueError, match="symlinks"):
         load_browser_assets(declaration)
-    directory.unlink()
-    (tmp_path / "real").rename(directory)
+
+
+def test_manifest_limits(package, tmp_path, monkeypatch):
+    declaration, _ = package
     monkeypatch.setattr(browser_assets, "MAX_FILES", 1)
     with pytest.raises(ValueError, match="unique asset paths"):
         load_browser_assets(declaration)
@@ -166,7 +177,7 @@ def test_intermediate_symlink_and_manifest_limits(package, tmp_path, monkeypatch
 def test_asset_root_symlink_is_rejected_before_resolution(package, dangling):
     declaration, _ = package
     link = declaration.root / "root-link"
-    link.symlink_to(declaration.root / "missing" if dangling else declaration.root, target_is_directory=True)
+    symlink_or_skip(link, declaration.root / "missing" if dangling else declaration.root, target_is_directory=True)
     with pytest.raises(ValueError, match="root.*symlink"):
         load_browser_assets(replace(declaration, root=link))
 
@@ -175,7 +186,7 @@ def test_asset_root_retains_normal_parent_symlink_resolution(package):
     declaration, _ = package
     # Deployment paths can legitimately traverse aliases such as /var -> /private/var.
     alias = declaration.root / "parent-alias"
-    alias.symlink_to(declaration.root.parent, target_is_directory=True)
+    symlink_or_skip(alias, declaration.root.parent, target_is_directory=True)
     via_alias = alias / declaration.root.name
     assert not via_alias.is_symlink()
     assert load_browser_assets(replace(declaration, root=via_alias)).revision == load_browser_assets(declaration).revision

@@ -1943,6 +1943,9 @@ then provides the new revision for saving; an older preview still requires a rel
 Regular files over the 2 MiB editing limit use file identity and change metadata
 for range validators without hashing the whole file. Conditional byte ranges for
 regular files require a matching ETag; date-form `If-Range` requests receive the full current file.
+Saving also bounds the existing-file read to 2 MiB plus one detection byte, so a
+file that grows or is replaced after the size check is rejected without loading
+the entire oversized file into memory.
 
 CSV and TSV artifacts open as tables in the artifact panel and in a separate window. The preview preserves text values (including leading zeros), supports an optional header row, and pages through up to 200 rows and 50 columns from the initial sample. Long or multiline cells can be opened and copied in full. Switch to source to inspect or edit the file; downloads and separate windows use the saved version.
 
@@ -2484,6 +2487,12 @@ deerflow --recursion-limit 250 --print "task" # override the headless agent-loop
 Headless `--print` and `--json` exit with status `1` when the run fails, including provider errors returned as fallback messages. `--print` still writes the fallback text to stdout; `--json` appends a terminal error record.
 
 A keyboard-driven chat surface with a streaming transcript (Markdown-rendered answers), compact tool-activity cards, a `/` slash-command palette, display-only `/clear`, `/goal` goal management, `/model` and `/threads` pickers, input history, PageUp/PageDown transcript navigation, and `Esc` / `Ctrl+C` interrupt. The composer preserves line breaks and indentation in pasted code, stack traces, and multi-paragraph prompts; `Enter` sends the complete document. Transcript refreshes preserve your reading position after you scroll upward and resume following new output when you return to the bottom. `/clear` removes rows from the current terminal display without deleting the thread or its persisted conversation; `/new` and `/clear` ask you to wait during an active run instead of resetting in-flight display state. Sessions opened in the TUI also appear in the Web UI sidebar — it writes the shared thread store under the local default user, so terminal and web stay in sync **without running the Gateway**.
+
+During an active run, `/resume`, `/threads`, and `/switch` ask you to wait before
+switching conversations. An invalid `/resume` reference displays an error without
+closing the TUI or changing the current conversation.
+After an interrupt and conversation switch, late stream actions from the previous
+thread cannot change the new conversation's display or run state.
 
 At the last composer row, `Down` leaves an unsent draft untouched unless you are
 browsing input history; after recalling history, it moves forward to restore your
