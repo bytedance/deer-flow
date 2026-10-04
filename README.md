@@ -2492,8 +2492,8 @@ A keyboard-driven chat surface with a streaming transcript (Markdown-rendered an
 During an active run, `/resume`, `/threads`, and `/switch` ask you to wait before
 switching conversations. An invalid `/resume` reference displays an error without
 closing the TUI or changing the current conversation.
-After an interrupt and conversation switch, late stream actions from the previous
-thread cannot change the new conversation's display or run state.
+After an interrupt, late stream actions from the previous run cannot change the
+next run's display or status, even when both prompts use the same conversation.
 
 At the last composer row, `Down` leaves an unsent draft untouched unless you are
 browsing input history; after recalling history, it moves forward to restore your
