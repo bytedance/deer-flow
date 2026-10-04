@@ -417,27 +417,31 @@ def list_files_in_dir(directory: Path) -> dict:
         return {"files": [], "count": 0}
 
     files = []
-    with os.scandir(directory) as entries:
-        for entry in sorted(entries, key=lambda e: e.name):
-            try:
-                if is_upload_staging_file(entry.name):
+    try:
+        with os.scandir(directory) as entries:
+            for entry in sorted(entries, key=lambda e: e.name):
+                try:
+                    if is_upload_staging_file(entry.name):
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    st = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    # An upload may be removed between scanning and statting it.
+                    # Keep the rest of the listing usable.
                     continue
-                if not entry.is_file(follow_symlinks=False):
-                    continue
-                st = entry.stat(follow_symlinks=False)
-            except FileNotFoundError:
-                # An upload may be removed between scanning and statting it.
-                # Keep the rest of the listing usable.
-                continue
-            files.append(
-                {
-                    "filename": entry.name,
-                    "size": st.st_size,
-                    "path": entry.path,
-                    "extension": Path(entry.name).suffix,
-                    "modified": st.st_mtime,
-                }
-            )
+                files.append(
+                    {
+                        "filename": entry.name,
+                        "size": st.st_size,
+                        "path": entry.path,
+                        "extension": Path(entry.name).suffix,
+                        "modified": st.st_mtime,
+                    }
+                )
+    except FileNotFoundError:
+        # The directory itself may disappear after the is_dir() check.
+        return {"files": files, "count": len(files)}
     return {"files": files, "count": len(files)}
 
 

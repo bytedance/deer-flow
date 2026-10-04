@@ -332,6 +332,12 @@ class TestListFilesInDir:
         result = list_files_in_dir(tmp_path / "nope")
         assert result == {"files": [], "count": 0}
 
+    def test_directory_removed_after_is_dir_check(self, tmp_path):
+        with patch.object(os, "scandir", side_effect=FileNotFoundError("removed")):
+            result = list_files_in_dir(tmp_path)
+
+        assert result == {"files": [], "count": 0}
+
     def test_multiple_files_sorted(self, tmp_path):
         (tmp_path / "b.txt").write_text("b")
         (tmp_path / "a.txt").write_text("a")
