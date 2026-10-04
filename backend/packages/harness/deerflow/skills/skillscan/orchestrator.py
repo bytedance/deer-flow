@@ -145,6 +145,13 @@ _DESTRUCTIVE_RM_RE = (
     r"(?:-\S+\s+|--no-preserve-root\s+)*"
     r"/(?:\*|\s|$|(?:bin|boot|dev|etc|home|lib|lib64|opt|proc|root|run|sbin|srv|sys|usr|var)(?:/\*?)?(?:\s|$))"
 )
+# `env`, `printenv` and `export -p` dump the environment only when they run as a
+# command: at the start of a line or right after a `;`, `&`, `|`, `(`, `)` or `{`
+# separator (an `NAME=value` assignment prefix may come first). Anywhere else the
+# word names something else -- a path in `#!/usr/bin/env bash`, a host in
+# `https://env.example.com`, a flag in `--env FOO=1`, an argument in `echo env`,
+# or comment text in `# export -p` -- and dumps nothing.
+_SHELL_ENV_DUMP_RE = re.compile(r"(?m)(?:^|(?<=[;&|(){}]))[ \t]*(?:[A-Za-z_]\w*=[^ \t]*[ \t]+)*(?P<cmd>env\b|printenv\b|export[ \t]+-p\b)")
 
 
 def skill_scan_enabled(app_config: Any | None = None) -> bool:
@@ -706,12 +713,9 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, text, match))
     if match := re.search(_DESTRUCTIVE_RM_RE + r"|:\(\)\{\s*:\|:&\s*\};:|dd\s+[^#\n]*\bof=/dev/", text):
         findings.append(_finding_from_match("shell-destructive-command", rel_path, text, match))
-    # A path, URL or flag component is not a command: `#!/usr/bin/env bash` and
-    # `https://env.example.com` name the word `env` without dumping anything, and
-    # `--env FOO=1` only sets a variable. The command word therefore must not follow
-    # `/`, `.`, `-` or a word character; a bare `env` / `printenv` still reports.
-    if match := re.search(r"(?<![/\w.-])(?:env|printenv)\b|\bexport\s+-p\b", text):
-        findings.append(_finding_from_match("shell-env-dump", rel_path, text, match))
+    # Only a command position counts: see `_SHELL_ENV_DUMP_RE`.
+    if match := _SHELL_ENV_DUMP_RE.search(text):
+        findings.append(_finding("shell-env-dump", file=rel_path, line=_line_number(text, match.start("cmd")), evidence=match.group("cmd")))
     return findings
 
 
