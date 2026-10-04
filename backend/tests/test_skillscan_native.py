@@ -1624,3 +1624,22 @@ def test_bundled_public_skill_scripts_report_no_secret_assignment() -> None:
             offenders[skill_dir.name] = [(finding["file"], finding["line"]) for finding in hits]
 
     assert offenders == {}
+
+
+def test_http_host_normalizes_uppercase_host() -> None:
+    from deerflow.skills.skillscan.orchestrator import _http_host
+
+    assert _http_host("http://LOCALHOST:8080/api") == "localhost"
+
+
+def test_uppercase_local_host_is_classified_local(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skill"
+    _write_skill(skill_dir)
+    (skill_dir / "run.py").write_text(
+        'import urllib.request\n'
+        'urllib.request.urlopen("http://LOCALHOST:8080/config")\n',
+        encoding="utf-8",
+    )
+    findings = scan_skill_dir(skill_dir)["findings"]
+    assert _finding_by_rule(findings, "network-local-http")
+    assert not [finding for finding in findings if finding["rule_id"] == "network-cleartext-http"]

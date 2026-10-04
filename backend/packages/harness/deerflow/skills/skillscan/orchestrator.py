@@ -599,7 +599,7 @@ def _scan_network_and_resource(rel_path: str, text: str) -> list[SecurityFinding
     if match := re.search(r":\(\)\{\s*:\|:&\s*\};:", text):
         findings.append(_finding_from_match("resource-fork-bomb", rel_path, text, match))
     for match in _EXTERNAL_HTTP_RE.finditer(text):
-        host = match.group(1)
+        host = match.group(1).lower()
         if host in _LOCAL_HTTP_HOSTS or host.startswith("10.") or host.startswith("192.168.") or re.match(r"172\.(1[6-9]|2\d|3[01])\.", host):
             findings.append(_finding_from_match("network-local-http", rel_path, text, match))
         else:
@@ -798,7 +798,9 @@ def _looks_like_placeholder(value: str) -> bool:
 
 def _http_host(url: str) -> str | None:
     match = re.match(r"https?://\[?([^]/:]+)", url)
-    return match.group(1) if match else None
+    # Host names are case-insensitive (RFC 4343); normalize so the
+    # `_LOCAL_HTTP_HOSTS` membership tests treat `LOCALHOST` like `localhost`.
+    return match.group(1).lower() if match else None
 
 
 def _is_outbound_url(value: str) -> bool:
