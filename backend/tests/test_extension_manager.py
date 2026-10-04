@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 import yaml
 from support.symlinks import symlink_or_skip
+from support.uv_env import apply_official_package_index
 
 from deerflow.extensions.cli import find_project_root
 from deerflow.extensions.loader import ExtensionSpec
@@ -32,23 +33,14 @@ from deerflow.tui.cli import main as deerflow_main
 
 
 @pytest.fixture(autouse=True)
-def _pin_official_package_index(monkeypatch) -> None:
-    """Keep host uv index configuration (e.g. a blocking mirror) out of this suite.
+def _pin_official_package_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin index environment variables for source-build subprocesses.
 
-    The source-build tests shell out to uv and resolve build backends such as
-    hatchling from the package index, so a host-configured mirror that blocks
-    those packages fails the suite even though the code under test is fine.
-    Pin the default index (which also wins over the legacy ``UV_INDEX_URL``)
-    and drop the extra-index env channels, whose entries take priority over
-    the default index. ``UV_NO_CONFIG=1`` would additionally drop the host
-    ``uv.toml`` ``[[index]]`` channel, but also the fixture's own ``[tool.uv]``
-    pyproject settings the assertions rely on, so file-based extra indexes
-    stay out of scope. Tests that install their own index (the local
-    simple-index servers) set their own env afterwards and keep precedence.
+    Local simple-index tests set their own environment afterwards and retain
+    precedence. File-based index configuration remains outside the shared
+    helper's scope.
     """
-    monkeypatch.setenv("UV_DEFAULT_INDEX", "https://pypi.org/simple")
-    monkeypatch.delenv("UV_INDEX", raising=False)
-    monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+    apply_official_package_index(monkeypatch)
 
 
 def _write_local_extension(

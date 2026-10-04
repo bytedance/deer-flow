@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 from support.shell import find_script_bash
+from support.uv_env import apply_official_package_index
 
 from deerflow.config.app_config import AppConfig, _legacy_config_candidates
 from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
@@ -17,20 +18,14 @@ from deerflow.tools.tools import get_available_tools
 
 
 @pytest.fixture(autouse=True)
-def _pin_official_package_index(monkeypatch) -> None:
-    """Keep host uv index configuration (e.g. a blocking mirror) out of this suite.
+def _pin_official_package_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin index environment variables inherited by config-upgrade subprocesses.
 
-    The config-upgrade script shells out to ``uv run`` against the real backend
-    environment, and that re-resolves workspace splits against the package
-    index: a host-configured mirror that blocks those packages fails the suite
-    even though the upgrade under test is fine. ``UV_DEFAULT_INDEX`` wins over
-    the legacy ``UV_INDEX_URL``; the extra-index env channels, whose entries
-    take priority over the default index, are dropped. Tests that need their
-    own index set their own env afterwards and keep precedence.
+    ``_run_config_upgrade_in_checkout`` applies ``env_overrides`` after copying
+    the environment, so explicit subprocess overrides retain precedence.
+    File-based index configuration remains outside the shared helper's scope.
     """
-    monkeypatch.setenv("UV_DEFAULT_INDEX", "https://pypi.org/simple")
-    monkeypatch.delenv("UV_INDEX", raising=False)
-    monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
+    apply_official_package_index(monkeypatch)
 
 
 def test_knowledge_base_config_is_provider_agnostic() -> None:

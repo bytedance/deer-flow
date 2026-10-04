@@ -6,6 +6,15 @@ The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
 `ast`, checking both `encoding` and `errors`; module-wide literal counts can
 hide unpinned calls behind unrelated settings.
 
+## Package-index environment fixtures
+
+Suites that invoke uv opt in to `support.uv_env.apply_official_package_index`
+through module-local autouse fixtures. Keep the environment setup in that helper;
+test-specific overrides still apply afterwards, including `env_overrides` in
+`test_config_version.py`'s config-upgrade subprocess helper. Isolation covers
+environment-provided indexes only: file-based indexes remain out of scope, and
+fixture-owned project uv settings must remain active.
+
 ## Router auth fixtures
 
 For owner-scoped route assertions, pass a stable `user_factory` and
