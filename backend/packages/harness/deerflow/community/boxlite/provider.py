@@ -54,6 +54,10 @@ _VIRTUAL_DIRS = (
 )
 
 
+class _BoxliteLoopShutdownTimeout(RuntimeError):
+    """The private BoxLite event-loop thread outlived its shutdown join."""
+
+
 class SandboxIdentityCollisionError(RuntimeError):
     """A deterministic ID is already tracked for a different user/thread."""
 
@@ -129,15 +133,20 @@ class _EventLoopThread:
             raise
 
     def close(self) -> None:
-        if self._loop is None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
             return
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        wake = getattr(self._loop, "_write_to_self", None)
+        loop.call_soon_threadsafe(loop.stop)
+        wake = getattr(loop, "_write_to_self", None)
         if wake is not None:
             wake()
         self._thread.join(timeout=5)
-        if not self._loop.is_running():
-            self._loop.close()
+        if self._thread.is_alive():
+            raise _BoxliteLoopShutdownTimeout(
+                "BoxLite event-loop thread is still running after stop timeout"
+            )
+        if not loop.is_running():
+            loop.close()
 
 
 class _SyncBoxAdapter:
@@ -214,6 +223,7 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
         self._shutdown_called = False
+        self._loop_cleanup_pending = False
         self._config = self._load_config()
         self._loop = _EventLoopThread()
         atexit.register(self.shutdown)
@@ -372,6 +382,10 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
     # ── Acquire / release ────────────────────────────────────────────────
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        with self._lock:
+            if self._shutdown_called:
+                raise RuntimeError("BoxLite provider is shutting down; cannot acquire sandbox")
+
         if thread_id is None:
             sandbox_id = str(uuid.uuid4())[:8]
             box = self._create_box(sandbox_id)
@@ -647,11 +661,29 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             self._thread_boxes.clear()
             self._acquire_serializer.close()
 
+    def _close_loop_for_shutdown(self) -> None:
+        try:
+            self._loop.close()
+        except _BoxliteLoopShutdownTimeout:
+            with self._lock:
+                self._loop_cleanup_pending = True
+            raise
+        with self._lock:
+            self._loop_cleanup_pending = False
+
     def shutdown(self) -> None:
         with self._lock:
             if self._shutdown_called:
-                return
-            self._shutdown_called = True
+                retry_loop_cleanup = self._loop_cleanup_pending
+                if not retry_loop_cleanup:
+                    return
+            else:
+                self._shutdown_called = True
+                retry_loop_cleanup = False
+
+        if retry_loop_cleanup:
+            self._close_loop_for_shutdown()
+            return
 
         try:
             self._stop_idle_checker()
@@ -676,4 +708,4 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
                 box.close()
             except Exception as e:  # pragma: no cover - defensive
                 logger.warning("Error closing BoxLite box %s during shutdown: %s", box.id, e)
-        self._loop.close()
+        self._close_loop_for_shutdown()
