@@ -119,6 +119,11 @@ _MAX_MOUNT_PASS_FILES = 2000
 # Deadline checks stop preflight work and new writes. Active SDK writes finish.
 _MOUNT_PASS_DEADLINE_SECONDS = 120
 
+
+class _E2BMaintenanceShutdownTimeout(RuntimeError):
+    """A bounded maintenance-worker join did not prove worker termination."""
+
+
 # Recursive skill projection replacement must never target an operating-system
 # tree. The configured E2B home is handled separately: an isolated descendant
 # such as /home/user/skills is supported, while the home directory itself and
@@ -542,11 +547,7 @@ class E2BSandboxProvider(SandboxProvider):
         def _handler(signum, frame):
             try:
                 self.shutdown()
-            except RuntimeError:
-                with self._lock:
-                    cleanup_pending = self._shutdown_cleanup_pending
-                if not cleanup_pending:
-                    raise
+            except _E2BMaintenanceShutdownTimeout:
                 logger.warning(
                     "E2B shutdown cleanup is still pending while handling signal %s; forwarding the signal action",
                     signum,
@@ -2970,7 +2971,7 @@ class E2BSandboxProvider(SandboxProvider):
         if live_threads:
             with self._lock:
                 self._shutdown_cleanup_pending = True
-            raise RuntimeError(
+            raise _E2BMaintenanceShutdownTimeout(
                 "E2B maintenance thread shutdown timed out: "
                 + ", ".join(live_threads)
             )
