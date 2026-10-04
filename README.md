@@ -2315,6 +2315,11 @@ from the project page's Documents section:
 - **Attach to thread**: copy a shelf file into a thread's uploads through the
   normal ingestion pipeline, so the conversation can work with it directly.
 
+New shelf names, including explicit upload `name` and promotion `shelf_name`,
+follow ordinary upload filename validation. Names containing NUL, Windows
+reserved device names (such as `CON.txt`), or trailing dots are rejected with
+`400` before bytes are staged.
+
 Runs on member threads also receive a bounded `<documents>` index rendered per
 run from the pinned snapshot (capped by `projects.shelf_index_max_entries` and
 `projects.shelf_index_max_bytes`), and the agent can page the shelf and read
