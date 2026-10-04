@@ -32,3 +32,7 @@ signalling the lease-renewal and reconciliation threads, a bounded join is only
 a wait budget: verify each worker actually exited before clearing registries or
 tearing down resources. If either worker is still alive, keep admission fenced
 and preserve all tracked state so a later `shutdown()` can retry cleanup.
+That fence covers cached sync/async acquisition too: recheck after serializer
+waits and immediately before exposing a reused client. Signal-triggered shutdown
+may report deferred cleanup, but it must still forward the process's original
+SIGTERM/SIGINT/SIGHUP action while retaining the pending E2B state.
