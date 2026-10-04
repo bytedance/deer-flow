@@ -22,6 +22,14 @@ each request can produce at most one receipt, bounding the ledger to 200 entries
 Browser member labels must remain unique after trimming and truncation to the
 backend character/UTF-8 byte limits. Use host theme tokens for action colors.
 
+Ordinary human-input artifacts end runs successfully without a graph interrupt.
+Keep unanswered requests waiting; persist text-response inputs and idempotency
+keys before ordinary admission, and retain their message/run IDs for result
+attribution. Graph interrupts still use explicit resume. Do not admit new work
+over either unresolved input path. Peer handoffs inherit the first unfinished
+source-thread occupant only when it has begun admission and is not waiting for
+input; later queued jobs never supply the parent or chain budget.
+
 Run the backend plugin tests and the browser check documented in README.md after
 changes. The preview fixture has synthetic authentication and must remain
 loopback-only; never use it as a deployed Gateway.

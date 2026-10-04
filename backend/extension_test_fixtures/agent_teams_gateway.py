@@ -19,11 +19,31 @@ from deerflow_extension_api.plugins import ToolContext
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from langchain.agents import create_agent
-from langchain_core.language_models.fake_chat_models import FakeListChatModel
+from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 
 from app.gateway.routers.plugins import router
+from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
+from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
+
+
+class PreviewModel(FakeMessagesListChatModel):
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        latest = next(m for m in reversed(messages) if m.type == "human")
+        response = latest.additional_kwargs.get("human_input_response")
+        if response:
+            answer = AIMessage(content=f"Clarification accepted: {response['value']}.")
+        elif "Clarification fixture" in latest.content:
+            answer = AIMessage(content="", tool_calls=[{"name": "ask_clarification", "id": "clarify-environment", "args": {"question": "Which environment should I check?", "clarification_type": "missing_info"}, "type": "tool_call"}])
+        else:
+            answer = AIMessage(content="Release evidence verified. See the shared team record.")
+        return ChatResult(generations=[ChatGeneration(message=answer)])
 
 
 class PreviewRuns:
@@ -31,7 +51,7 @@ class PreviewRuns:
         self.threads = {}
         self.runs = {}
         self.tasks = set()
-        self.graph = create_agent(FakeListChatModel(responses=["Release evidence verified. See the shared team record."]), checkpointer=InMemorySaver())
+        self.graph = create_agent(PreviewModel(responses=[]), tools=[ask_clarification_tool], middleware=[ClarificationMiddleware()], checkpointer=InMemorySaver())
 
     def bound(self, owner):
         host = self

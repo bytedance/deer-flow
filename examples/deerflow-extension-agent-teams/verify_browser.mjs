@@ -269,6 +269,33 @@ try {
   await expect(composer).toHaveValue(
     "Keep this draft through a failed refresh.",
   );
+  // Real ask_clarification ends the graph successfully, but the team must wait.
+  await page
+    .getByRole("button", { name: "Mention Research", exact: true })
+    .click();
+  await composer.fill(
+    "Clarification fixture: ask before checking the environment.",
+  );
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  const clarificationCard = page.locator(".task-message").last();
+  await expect(clarificationCard).toContainText("Needs input", {
+    timeout: 12000,
+  });
+  await clarificationCard.locator(".task-details summary").click();
+  await expect(clarificationCard).toContainText(
+    "Which environment should I check?",
+  );
+  await clarificationCard
+    .getByLabel("Your answer", { exact: true })
+    .fill("staging");
+  await clarificationCard
+    .getByRole("button", { name: "Submit response", exact: true })
+    .click();
+  await expect(clarificationCard).toContainText(
+    "Clarification accepted: staging.",
+    { timeout: 12000 },
+  );
+  await expect(clarificationCard).toContainText("Completed");
   // Opening an existing team should return to its conversation, not a blank form.
   await page.reload();
   await expect(

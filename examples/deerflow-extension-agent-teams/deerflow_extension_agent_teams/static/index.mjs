@@ -769,11 +769,17 @@ function mount(root, context) {
           }),
         );
       if (job.status === "waiting_input") {
+        if (job.clarification)
+          area.append(
+            node("p", job.clarification.question, { className: "team-goal" }),
+          );
         const [label, response] = field(
-          t(
-            "Inspect the conversation, then enter the explicit response as JSON",
-            "查看会话中的确认请求后，以 JSON 填写明确响应",
-          ),
+          job.clarification
+            ? t("Your answer", "你的回答")
+            : t(
+                "Inspect the conversation, then enter the explicit response as JSON",
+                "查看会话中的确认请求后，以 JSON 填写明确响应",
+              ),
           true,
         );
         let resumeId = requestId(),
@@ -781,7 +787,9 @@ function mount(root, context) {
         area.append(
           label,
           button(t("Submit response", "提交响应"), async () => {
-            const parsed = JSON.parse(response.value);
+            const parsed = job.clarification
+              ? response.value.trim()
+              : JSON.parse(response.value);
             if (response.value !== responseSnapshot) {
               resumeId = requestId();
               responseSnapshot = response.value;

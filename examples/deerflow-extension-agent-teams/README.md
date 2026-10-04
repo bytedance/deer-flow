@@ -54,16 +54,22 @@ same database; it cannot dispatch through its actions or middleware.
 5. A member can call `send_member` to ask a peer for work. Its result returns to
    the requesting conversation in a later turn. `read_team_context` reads the
    current shared record; members do not synchronously block or poll each other.
+   Handoffs inherit the executing request's parent and chain budget. Later queued
+   requests do not change that attribution; an ordinary member chat with no
+   executing team request starts its own chain.
 6. The activity feed pairs requests with their results, identifies the sender and
    recipient, and shows peer handoffs and return status. It updates automatically
    while visible, preserving unsent drafts, expanded details and approval input.
    Unchanged revisions return a small response. Task details open the full member
    conversation or cancel an active task. Files stay in the original conversation.
-7. When a task or its result receipt needs input, expand its details, inspect the
-   actual interruption in its conversation, then submit an explicit JSON response.
-   The plugin never generates approvals. Respond through the team page while it
-   owns the request so it can track the resumed run. Cancelling keeps checkpoints;
-   an interrupted checkpoint blocks subsequent new tasks until resolved.
+7. When a task or its result receipt needs input, expand its details. An ordinary
+   clarification shows its question and accepts a text answer, submitted as a
+   human message. A graph interrupt instead requires inspection in the member
+   conversation and an explicit JSON response. The plugin never generates
+   approvals. Respond through the team page while it owns the request so it can
+   track the continued run. Unanswered questions do not produce completed-result
+   receipts. Cancelling keeps checkpoints; unresolved questions and interrupts
+   block subsequent new tasks in that conversation until answered.
 8. After restarting Gateway, choose **Manage → Reconnect** in an active team.
    Persisted jobs retain their inputs and idempotency keys; active runs are
    reconciled instead of blindly restarted. Reconnection also recreates a missing
@@ -128,6 +134,10 @@ real ToolNode dispatch, mention middleware in the Lead middleware pipeline,
 serialization, interrupts, cancellation, restart/reconnect (including incomplete
 creation), request capacity independent of receipts, ambiguous admission, and
 lifecycle locking. Host-run transport is controlled for deterministic tests.
+Clarification tests execute the host's real tool and middleware in an Agent graph,
+including repeated questions, peer/mention/result-receipt paths, lost response
+acknowledgements and restart. Queued-request regressions pin handoff attribution
+and the chain limit while the first request is running or awaiting admission acknowledgement.
 
 For a browser check, install the repo's frontend dependencies, then start the
 loopback-only fixture from `backend/`:
@@ -149,7 +159,7 @@ search and selection, unique bounded member labels after truncation, keyboard
 mentions, task/result pairing, peer receipts,
 automatic conditional updates, draft/detail preservation, owner isolation,
 conversation navigation, mobile/dark layouts, delete-action contrast in both
-themes, reopening, deletion and disposal.
+themes, ordinary clarification and text responses, reopening, deletion and disposal.
 The agent catalog and identity are synthetic; the peer fixture calls the real
 plugin handler through the public ToolContext contract. It does not claim production
 authentication or live-model coverage. Set `TEAM_PREVIEW_URL` for another port and

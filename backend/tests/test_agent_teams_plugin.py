@@ -624,3 +624,235 @@ async def test_request_capacity_reserves_all_receipts_and_keeps_retries_idempote
     with pytest.raises(ValueError, match="limit"):
         await actions["send"]({**payload, "request_id": "101"}, caller)
     assert (await actions["get"]({"team_id": team["id"]}, context(runs)))["total_jobs"] == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_kind", ["peer", "mention", "receipt"])
+@pytest.mark.parametrize("rounds", [1, 2])
+async def test_real_clarification_waits_and_continues_with_human_messages(plugin, monkeypatch, source_kind, rounds):
+    from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+    from langchain_core.messages import AIMessage, HumanMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+    from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
+
+    class Model(FakeMessagesListChatModel):
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+    question = AIMessage(content="", tool_calls=[{"name": "ask_clarification", "id": "clarify-environment", "args": {"question": "Which environment?", "clarification_type": "missing_info"}, "type": "tool_call"}])
+    questions = [question.model_copy(update={"tool_calls": [{**question.tool_calls[0], "id": f"clarify-{index}"}]}) for index in range(rounds)]
+    graph = create_agent(Model(responses=[*questions, AIMessage(content="Confirmed staging.")]), tools=[ask_clarification_tool], middleware=[ClarificationMiddleware()], checkpointer=InMemorySaver())
+
+    class ClarifyingRuns(Runs):
+        async def start(self, *, thread_id, input, idempotency_key):
+            if idempotency_key in self.runs:
+                return self.runs[idempotency_key]
+            run = await super().start(thread_id=thread_id, input=input, idempotency_key=idempotency_key)
+            await graph.ainvoke(input, config={"configurable": {"thread_id": thread_id}})
+            state = await graph.aget_state({"configurable": {"thread_id": thread_id}})
+            self.threads[thread_id].update(values={"messages": [m.model_dump() for m in state.values["messages"]]}, next=list(state.next), interrupts=list(state.interrupts))
+            self.runs[run.run_id] = AgentRun(thread_id, run.run_id, "success")
+            return self.runs[run.run_id]
+
+        async def resume(self, **kwargs):
+            pytest.fail("Ordinary clarification must not use LangGraph resume")
+
+    _, actions, service = plugin
+    runs = ClarifyingRuns()
+    team = await create(actions, runs)
+    sender, recipient = team["members"]
+    if source_kind == "mention":
+        await runs.create_thread(assistant_id="lead_agent", thread_id="external", metadata={})
+        message = HumanMessage(id="mention", content="Review", additional_kwargs={"extension_mentions": [{"namespace": "community.agent-teams", "provider": "members", "id": f"{team['id']}/{recipient['id']}"}]})
+        await service.mentions([message], SimpleNamespace(context={"thread_id": "external", "user_id": "alice", AGENT_RUNS_CONTEXT_KEY: runs}))
+    else:
+        await actions["send"]({"team_id": team["id"], "member_id": recipient["id"], "text": "Review", "request_id": "peer"}, context(runs, thread=sender["thread_id"]))
+        if source_kind == "receipt":
+            stored = await service.db("get", "alice", team["id"])
+            await service.finish("alice", stored, stored["jobs"][0], "completed", "Peer result")
+    await service.tick()
+    view = await actions["get"]({"team_id": team["id"], "details": True}, context(runs))
+    waiting = view["jobs"][-1]
+    assert waiting["status"] == "waiting_input"
+    assert waiting["clarification"]["question"] == "Which environment?"
+    assert len(view["jobs"]) == (2 if source_kind == "receipt" else 1)
+    state = runs.threads[waiting["thread_id"]]
+    assert not state["next"] and not state["interrupts"]
+    request = state["values"]["messages"][-1]["artifact"]["human_input"]
+    assert request["kind"] == "human_input_request"
+    assert runs.runs[waiting["run_id"]].status == "success"
+    await service.tick()
+    assert len(runs.starts) == 1
+    for index in range(rounds):
+        await actions["resume"]({"team_id": team["id"], "job_id": waiting["id"], "response": "staging", "request_id": "answer"}, context(runs))
+        if source_kind == "mention" and index == 0:
+            from deerflow_extension_agent_teams.service import Teams
+
+            start = runs.start
+            attempts = []
+
+            async def lost_response(**kwargs):
+                attempts.append(kwargs)
+                result = await start(**kwargs)
+                if len(attempts) == 1:
+                    raise TimeoutError("response admitted but acknowledgement lost")
+                return result
+
+            monkeypatch.setattr(runs, "start", lost_response)
+            await service.tick()
+            # Admission metadata survives the host's dynamic-context ID rewrite.
+            messages = runs.threads[waiting["thread_id"]]["values"]["messages"]
+            response_id = attempts[0]["input"]["messages"][0]["id"]
+            position = next(i for i, message in enumerate(messages) if message.get("id") == response_id)
+            original = messages[position]
+            messages[position : position + 1] = [
+                {"type": "system", "id": response_id, "content": "Current date"},
+                {**original, "id": response_id + "__user", "additional_kwargs": {**original["additional_kwargs"], "run_id": attempts[0]["idempotency_key"]}},
+            ]
+            service = Teams(service.store.path)
+            service.available = True
+            await service.connect({"team_id": team["id"]}, context(runs))
+            actions = {name: getattr(service, name) for name in actions}
+            await service.tick()
+            assert attempts[0] == attempts[1]
+            monkeypatch.setattr(runs, "start", start)
+        else:
+            await service.tick()
+        view = await actions["get"]({"team_id": team["id"], "details": True}, context(runs))
+        current = next(j for j in view["jobs"] if j["id"] == waiting["id"])
+        assert current["status"] == ("waiting_input" if index + 1 < rounds else "completed")
+        assert len(runs.starts) == index + 2
+    view = await actions["get"]({"team_id": team["id"], "details": True}, context(runs))
+    completed = next(j for j in view["jobs"] if j["id"] == waiting["id"])
+    assert completed["status"] == "completed"
+    assert completed["result"] == "Confirmed staging."
+    response = runs.starts[1][1]["messages"][0]
+    assert response["role"] == "user" and response["content"] == "staging"
+    assert response["additional_kwargs"]["human_input_response"]["request_id"] == request["request_id"]
+    assert sum(j["kind"] == "receipt" for j in view["jobs"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ambiguous_admission", [False, True])
+async def test_peer_handoff_keeps_running_parent_and_budget_with_later_queued_requests(plugin, monkeypatch, ambiguous_admission):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    first, second = team["members"]
+    payload = {"team_id": team["id"], "member_id": first["id"], "text": "Begin", "request_id": "A1"}
+    running = await actions["send"](payload, context(runs))
+    if ambiguous_admission:
+        start = runs.start
+
+        async def lost_admission(**kwargs):
+            await start(**kwargs)
+            raise TimeoutError("admission accepted")
+
+        monkeypatch.setattr(runs, "start", lost_admission)
+    await service.tick()
+    await actions["send"]({**payload, "request_id": "A2"}, context(runs))
+    peer_payload = {**payload, "member_id": second["id"], "text": "Review"}
+    for index in range(11):
+        sent = await actions["send"]({**peer_payload, "request_id": f"peer-{index}"}, context(runs, thread=first["thread_id"]))
+        view = await actions["get"]({"team_id": team["id"]}, context(runs))
+        peer = next(j for j in view["jobs"] if j["id"] == sent["id"])
+        assert peer["parent_id"] == peer["root"] == running["id"]
+    await actions["send"]({**payload, "request_id": "A3"}, context(runs))
+    with pytest.raises(ValueError, match="limit"):
+        await actions["send"]({**peer_payload, "request_id": "overflow"}, context(runs, thread=first["thread_id"]))
+    assert len(runs.starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_external_member_tool_call_does_not_inherit_an_unstarted_team_request(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    first, second = team["members"]
+    await actions["send"]({"team_id": team["id"], "member_id": first["id"], "text": "Queued", "request_id": "queued"}, context(runs))
+    sent = await actions["send"]({"team_id": team["id"], "member_id": second["id"], "text": "From ordinary member chat", "request_id": "peer"}, context(runs, thread=first["thread_id"]))
+    view = await actions["get"]({"team_id": team["id"]}, context(runs))
+    peer = next(j for j in view["jobs"] if j["id"] == sent["id"])
+    assert peer["parent_id"] is None and peer["root"] == peer["id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["queued", "waiting", "resuming"])
+async def test_clarification_never_overwrites_an_external_conversation_turn(plugin, stage):
+    from langchain_core.messages import AIMessage
+
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    member = team["members"][0]
+    request = SimpleNamespace(tool_call={"name": "ask_clarification", "id": "outside", "args": {"question": "Which environment?", "clarification_type": "missing_info"}}, runtime=None)
+    command = ClarificationMiddleware().wrap_tool_call(request, lambda _: pytest.fail("tool handler should be intercepted"))
+    sent = await actions["send"]({"team_id": team["id"], "member_id": member["id"], "text": "Work", "request_id": "job"}, context(runs))
+    if stage != "queued":
+        await service.tick()
+        runs.runs[sent["id"]] = AgentRun(member["thread_id"], sent["id"], "success")
+    messages = runs.threads[member["thread_id"]]["values"]["messages"]
+    messages.extend([AIMessage(content="", tool_calls=[{**request.tool_call, "type": "tool_call"}]).model_dump(), *[m.model_dump() for m in command.update["messages"]]])
+    await service.tick()
+    response = {"team_id": team["id"], "job_id": sent["id"], "response": "staging", "request_id": "response"}
+    if stage == "queued":
+        assert not runs.starts
+    else:
+        with pytest.raises(ValueError, match="Invalid response"):
+            await actions["resume"]({**response, "response": {"approved": True}}, context(runs))
+        if stage == "resuming":
+            await actions["resume"](response, context(runs))
+    messages.append({"type": "human", "content": "I answered directly in the member chat"})
+    if stage == "waiting":
+        with pytest.raises(ValueError, match="Clarification changed"):
+            await actions["resume"](response, context(runs))
+    await service.tick()
+    assert len(runs.starts) == 1
+    job = (await actions["get"]({"team_id": team["id"]}, context(runs)))["jobs"][0]
+    assert job["status"] == {"queued": "running", "waiting": "waiting_input", "resuming": "failed"}[stage]
+
+
+@pytest.mark.asyncio
+async def test_cancel_reconciles_a_clarification_response_with_lost_admission_ack(plugin, monkeypatch):
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    sender, member = team["members"]
+    sent = await actions["send"]({"team_id": team["id"], "member_id": member["id"], "text": "Work", "request_id": "job"}, context(runs, thread=sender["thread_id"]))
+    await service.tick()
+    runs.runs[sent["id"]] = AgentRun(member["thread_id"], sent["id"], "success")
+    request = SimpleNamespace(tool_call={"name": "ask_clarification", "id": "question", "args": {"question": "Which environment?", "clarification_type": "missing_info"}}, runtime=None)
+    command = ClarificationMiddleware().wrap_tool_call(request, lambda _: pytest.fail("intercept clarification"))
+    runs.threads[member["thread_id"]]["values"]["messages"].extend(m.model_dump() for m in command.update["messages"])
+    await service.tick()
+    await actions["resume"]({"team_id": team["id"], "job_id": sent["id"], "response": "staging", "request_id": "answer"}, context(runs))
+    start = runs.start
+    attempts = []
+
+    async def lost_ack(**kwargs):
+        attempts.append(kwargs)
+        result = await start(**kwargs)
+        if len(attempts) == 1:
+            raise TimeoutError("ack lost")
+        return result
+
+    monkeypatch.setattr(runs, "start", lost_ack)
+    await service.tick()
+    response_run = next(r for r in runs.runs.values() if r.run_id != sent["id"])
+    assert response_run.status == "running"
+    await actions["cancel"]({"team_id": team["id"], "job_id": sent["id"]}, context(runs))
+    await service.tick()
+    assert runs.runs[response_run.run_id].status == "interrupted"
+    assert attempts[0] == attempts[1]
+    await service.tick()
+    view = await actions["get"]({"team_id": team["id"]}, context(runs))
+    assert view["jobs"][0]["status"] == "cancelled"
+    assert len(view["jobs"]) == 1 and len(runs.starts) == 2
