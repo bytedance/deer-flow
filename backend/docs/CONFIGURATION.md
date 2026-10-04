@@ -617,17 +617,22 @@ request timeout is capped by the remaining budget; the outer deadline also bound
 responses that keep delivering data. The existing `timeout` remains Jina's
 `X-Timeout` header and the per-request HTTP timeout limit.
 
-Only HTTP 502/503/504 and HTTPX connection-establishment errors (`ConnectError`,
-`ConnectTimeout`) are retried. Authentication/client errors, 429, other statuses,
-empty successful responses, read/write timeouts and arbitrary exceptions are not
-retried. `Retry-After` is not interpreted. Backoff ceilings start at 0.5 seconds,
-double to 1 and 2 seconds, then stay at 4 seconds. Each asynchronous wait caps its
-ceiling by the remaining budget and independently samples a uniform factor from
-0.5 to 1.0, reducing synchronized retries without increasing the wait cap.
-Cancellation propagates during requests and waits. This stops local work; it
-cannot cancel work already started by Jina. Enabling retries can send up to `1 + max_retries` upstream requests
-and incur additional cost. Successful content and final `Error:` results retain
-the existing contract.
+HTTP 502/503/504 and HTTPX connection-establishment errors (`ConnectError`,
+`ConnectTimeout`) remain retryable. A 429 retries only when it has a valid
+`Retry-After` hint; missing or malformed hints leave it terminal. A valid hint
+on 503 is honored, while a missing or malformed 503 hint keeps the local
+exponential backoff. Integer-seconds and HTTP-date hints are supported; past
+dates have a zero server floor. The local backoff still applies as a minimum
+wait, and a valid server delay is never jittered or capped down. If the required
+HTTP retry wait cannot fit the remaining budget, the last HTTP error is returned
+without another request. Other statuses (including authentication/payment
+failures), empty successful responses, read/write timeouts and arbitrary
+exceptions are not retried. Backoff ceilings start at 0.5 seconds, double to 1
+and 2 seconds, then stay at 4 seconds; each local wait samples a fresh uniform
+factor from 0.5 to 1.0. Cancellation propagates during requests and waits. This
+stops local work; it cannot cancel work already started by Jina. Enabling retries
+can send up to `1 + max_retries` upstream requests and incur additional cost.
+Successful content and final `Error:` results retain the existing contract.
 
 Serper `web_search` also accepts the optional model argument
 `time_range: "day" | "week" | "month" | "year"`. For example,

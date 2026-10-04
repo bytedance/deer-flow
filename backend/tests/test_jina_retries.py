@@ -2,12 +2,15 @@
 
 import asyncio
 import random
+from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
 
+import deerflow.community.jina_ai.jina_client as jina_client_module
 from deerflow.community.jina_ai.jina_client import JinaClient
 
 pytestmark = pytest.mark.anyio
@@ -44,6 +47,116 @@ async def test_transient_recovers(requests, monkeypatch, failure):
     requests.side_effect = [failure, httpx.Response(200, text="success")]
     assert await JinaClient().crawl("https://example.com", max_retries=1) == "success"
     assert requests.await_count == 2
+
+
+@pytest.mark.parametrize("header", ["", "later", "-1", "1.5", ","])
+async def test_429_is_terminal_without_a_valid_retry_after(requests, monkeypatch, header):
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    requests.side_effect = [httpx.Response(429, text="rate limited", headers={"Retry-After": header}), httpx.Response(200, text="unexpected")]
+
+    result = await JinaClient().crawl("https://example.com", max_retries=2)
+
+    assert "429" in result
+    assert requests.await_count == 1
+
+
+async def test_429_retries_after_valid_server_hint(requests, monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(random, "uniform", lambda low, high: 1.0)
+    requests.side_effect = [httpx.Response(429, text="rate limited", headers={"Retry-After": "2"}), httpx.Response(200, text="recovered")]
+
+    assert await JinaClient().crawl("https://example.com", max_retries=1) == "recovered"
+
+    assert requests.await_count == 2
+    sleep.assert_awaited_once_with(2.0)
+
+
+@pytest.mark.parametrize("status", [401, 402])
+async def test_auth_and_payment_failures_stay_terminal_with_retry_after(requests, monkeypatch, status):
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    requests.side_effect = [httpx.Response(status, headers={"Retry-After": "0"}), httpx.Response(200, text="unexpected")]
+
+    result = await JinaClient().crawl("https://example.com", max_retries=2)
+
+    assert str(status) in result
+    assert requests.await_count == 1
+
+
+async def test_503_uses_retry_after_as_a_floor_over_jittered_backoff(requests, monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(random, "uniform", lambda low, high: 0.5)
+    requests.side_effect = [httpx.Response(503, headers={"Retry-After": "3"}), httpx.Response(200, text="recovered")]
+
+    assert await JinaClient().crawl("https://example.com", max_retries=1) == "recovered"
+
+    sleep.assert_awaited_once_with(3.0)
+    assert requests.await_count == 2
+
+
+async def test_503_malformed_hint_keeps_local_backoff(requests, monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(random, "uniform", lambda low, high: 0.5)
+    requests.side_effect = [httpx.Response(503, headers={"Retry-After": "tomorrow"}), httpx.Response(200, text="recovered")]
+
+    assert await JinaClient().crawl("https://example.com", max_retries=1) == "recovered"
+
+    sleep.assert_awaited_once_with(0.25)
+
+
+def test_parse_retry_after_accepts_http_date_and_clamps_past_dates():
+    now = datetime(2026, 10, 4, 12, 0, tzinfo=UTC)
+
+    assert jina_client_module._parse_retry_after(format_datetime(now + timedelta(seconds=7), usegmt=True), now=now) == 7.0
+    assert jina_client_module._parse_retry_after(format_datetime(now - timedelta(seconds=7), usegmt=True), now=now) == 0.0
+    assert jina_client_module._parse_retry_after("Sun, 04 Oct 2026 12:00:07", now=now) is None
+
+
+def test_parse_retry_after_keeps_huge_valid_delay_without_overflow():
+    assert jina_client_module._parse_retry_after("9" * 10000) == float("inf")
+
+
+async def test_huge_retry_after_does_not_fall_back_to_early_retry(requests, monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    requests.side_effect = [httpx.Response(503, headers={"Retry-After": "9" * 10000}), httpx.Response(200, text="too early")]
+
+    result = await JinaClient().crawl("https://example.com", max_retries=2)
+
+    assert "503" in result
+    assert requests.await_count == 1
+    sleep.assert_not_awaited()
+
+
+async def test_retry_after_that_cannot_fit_budget_returns_last_http_error(requests, monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    requests.side_effect = [httpx.Response(429, text="rate limited", headers={"Retry-After": "5"}), httpx.Response(200, text="too early")]
+
+    result = await JinaClient().crawl("https://example.com", max_retries=1, retry_budget_seconds=0.05)
+
+    assert "429" in result
+    assert "rate limited" in result
+    assert requests.await_count == 1
+    sleep.assert_not_awaited()
+
+
+async def test_each_server_hint_applies_to_its_own_response(requests, monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(random, "uniform", lambda low, high: 1.0)
+    requests.side_effect = [
+        httpx.Response(503, headers={"Retry-After": "1"}),
+        httpx.Response(503, headers={"Retry-After": "3"}),
+        httpx.Response(200, text="recovered"),
+    ]
+
+    assert await JinaClient().crawl("https://example.com", max_retries=2) == "recovered"
+
+    assert [call.args[0] for call in sleep.await_args_list] == [1.0, 3.0]
+    assert requests.await_count == 3
 
 
 @pytest.mark.parametrize("failure", [httpx.Response(code) for code in (400, 401, 403, 404, 429, 500)] + [httpx.Response(200, text="  "), httpx.ReadTimeout("slow"), httpx.WriteError("write"), RuntimeError("unexpected")])
@@ -84,17 +197,17 @@ async def test_each_retry_samples_new_jitter(requests, monkeypatch):
     assert jitter.call_count == 3
 
 
-async def test_backoff_jitter_is_capped_by_remaining_budget(requests, monkeypatch):
+async def test_insufficient_backoff_budget_returns_last_http_error(requests, monkeypatch):
     sleep = AsyncMock()
     monkeypatch.setattr(asyncio, "sleep", sleep)
     monkeypatch.setattr(random, "uniform", lambda low, high: 0.5)
     requests.side_effect = [httpx.Response(503), httpx.Response(200, text="success")]
 
-    assert await JinaClient().crawl("https://example.com", max_retries=1, retry_budget_seconds=0.1) == "success"
+    result = await JinaClient().crawl("https://example.com", max_retries=1, retry_budget_seconds=0.1)
 
-    assert requests.await_count == 2
-    sleep.assert_awaited_once()
-    assert 0 < sleep.await_args.args[0] <= 0.05
+    assert "503" in result
+    assert requests.await_count == 1
+    sleep.assert_not_awaited()
 
 
 @pytest.mark.parametrize("during_backoff", [False, True])
@@ -110,7 +223,7 @@ async def test_shared_deadline(requests, monkeypatch, during_backoff):
     requests.side_effect = post
     result = await asyncio.wait_for(JinaClient().crawl("https://example.com", max_retries=2, retry_budget_seconds=0.05), timeout=1)
     assert result.startswith("Error:")
-    assert "budget" in result
+    assert ("budget" in result) is (not during_backoff)
     assert requests.await_count == 1
 
 
@@ -127,7 +240,7 @@ async def test_budget_is_shared_across_attempts(requests, monkeypatch):
 
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
     requests.side_effect = post
-    result = await asyncio.wait_for(JinaClient().crawl("https://example.com", max_retries=2, retry_budget_seconds=0.1), 1)
+    result = await asyncio.wait_for(JinaClient().crawl("https://example.com", max_retries=2, retry_budget_seconds=1), 2)
     assert "budget" in result
     assert len(timeouts) == 2
     assert timeouts[1] < timeouts[0]

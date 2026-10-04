@@ -3,12 +3,39 @@ import logging
 import math
 import os
 import random
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 _api_key_warned = False
+
+
+def _parse_retry_after(value: str | None, *, now: datetime | None = None) -> float | None:
+    """Return a valid Retry-After delay without overflowing on large integers."""
+    if not value:
+        return None
+    value = value.strip()
+    if value.isascii() and value.isdigit():
+        seconds = value.lstrip("0")
+        if not seconds:
+            return 0.0
+        # A delay beyond this range is already much larger than any useful
+        # retry budget; infinity makes it safely non-retryable under a deadline.
+        if len(seconds) > 18:
+            return math.inf
+        return float(int(seconds))
+
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if retry_at.tzinfo is None:
+        return None
+    current_time = now or datetime.now(UTC)
+    return max(0.0, (retry_at.astimezone(UTC) - current_time.astimezone(UTC)).total_seconds())
 
 
 class JinaClient:
@@ -46,6 +73,8 @@ class JinaClient:
                         if remaining is not None and remaining <= 0:
                             raise TimeoutError
                         request_timeout = min(timeout, remaining) if remaining is not None else timeout
+                        retry_after = None
+                        last_http_error = None
                         try:
                             response = await client.post("https://r.jina.ai/", headers=headers, json=data, timeout=request_timeout)
                         except (httpx.ConnectError, httpx.ConnectTimeout):
@@ -58,16 +87,33 @@ class JinaClient:
                                 error_message = "Jina API returned empty response"
                                 logger.error(error_message)
                                 return f"Error: {error_message}"
-                            if response.status_code not in {502, 503, 504} or attempt == max_retries:
-                                error_message = f"Jina API returned status {response.status_code}: {response.text}"
-                                logger.error(error_message)
-                                return f"Error: {error_message}"
+                            last_http_error = f"Jina API returned status {response.status_code}: {response.text}"
+                            if attempt == max_retries:
+                                logger.error(last_http_error)
+                                return f"Error: {last_http_error}"
+                            if response.status_code == 429:
+                                retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+                                if retry_after is None:
+                                    logger.error(last_http_error)
+                                    return f"Error: {last_http_error}"
+                            elif response.status_code == 503:
+                                retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+                            elif response.status_code not in {502, 504}:
+                                logger.error(last_http_error)
+                                return f"Error: {last_http_error}"
 
-                        # Only allowlisted failures reach the non-blocking wait.
+                        # Keep local jitter as a minimum pacing floor. A valid
+                        # server hint is never jittered or shortened to fit the
+                        # retry budget.
+                        local_wait = delay * random.uniform(0.5, 1.0)
+                        wait_seconds = max(local_wait, retry_after) if retry_after is not None else local_wait
                         remaining = deadline - asyncio.get_running_loop().time()
-                        if remaining <= 0:
+                        if remaining <= wait_seconds:
+                            if last_http_error is not None:
+                                logger.error(last_http_error)
+                                return f"Error: {last_http_error}"
                             raise TimeoutError
-                        await asyncio.sleep(min(delay, remaining) * random.uniform(0.5, 1.0))
+                        await asyncio.sleep(wait_seconds)
                         delay = min(delay * 2, 4.0)
         except Exception as e:
             if isinstance(e, TimeoutError) and max_retries and asyncio.get_running_loop().time() >= deadline:
