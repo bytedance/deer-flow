@@ -201,16 +201,22 @@ class PostgresInboundDedupeStore:
 # The gateway worker count has two spellings: ``GATEWAY_WORKERS``, which
 # docker-compose forwards as ``--workers``, and ``WEB_CONCURRENCY``, which uvicorn reads
 # when no count is passed at all (``backend/Dockerfile``, ``scripts/serve.sh``). Read
-# both, the way ``app/gateway/routers/channel_connections.py`` already does, otherwise a
-# multi-worker pod that shares no dedupe state reports itself as single-worker.
+# both, otherwise a multi-worker pod that shares no dedupe state reports itself as
+# single-worker.
 _WORKER_COUNT_ENV_VARS = ("GATEWAY_WORKERS", "WEB_CONCURRENCY")
 
 
 def _gateway_workers() -> tuple[int, str]:
-    """Mirror deps._enforce_postgres_for_multi_worker's worker detection.
+    """Resolve the Gateway worker count the same way the startup gates do.
 
     Returns the count and the name of the variable that set it, so a warning can name
     the knob the operator actually has to change. A blank value means "unset".
+
+    This is a second reader of the same two spellings, not an import of
+    ``app/gateway/deps.py``'s helper, so the two can drift; and it differs on purpose
+    from ``app/gateway/routers/channel_connections.py``, which turns an unparsable value
+    into 0 and refuses, while here an unparsable value is skipped and only a resolved
+    count above 1 warns.
     """
     for name in _WORKER_COUNT_ENV_VARS:
         raw = os.environ.get(name)
@@ -219,7 +225,10 @@ def _gateway_workers() -> tuple[int, str]:
         try:
             return int(raw), name
         except (TypeError, ValueError):
-            return 1, name
+            # Do not let an unparsable ``GATEWAY_WORKERS`` mask a real count in
+            # ``WEB_CONCURRENCY``: on the launchers that pass no ``--workers`` the
+            # former never reaches uvicorn, so the latter is what starts the processes.
+            continue
     return 1, _WORKER_COUNT_ENV_VARS[0]
 
 

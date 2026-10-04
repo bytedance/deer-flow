@@ -18,6 +18,18 @@ from app.channels.dedupe_store import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_worker_env(monkeypatch):
+    """Keep config-resolution tests independent of the invoking shell.
+
+    ``WEB_CONCURRENCY`` is a common ambient convention on uvicorn/gunicorn/PaaS hosts,
+    and it now decides whether a deployment counts as multi-worker here too. The tests
+    that exercise that path set the spelling they mean to exercise.
+    """
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+
+
 class _FakeDedupe:
     def __init__(self, backend: str) -> None:
         self.backend = backend  # plain string, mimics DedupeStorageBackend.value
@@ -117,6 +129,20 @@ def test_factory_warns_under_the_uvicorn_worker_fallback(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         store = make_inbound_dedupe_store(app)
     assert isinstance(store, MemoryInboundDedupeStore)
+    assert any("dedupe_storage=memory with WEB_CONCURRENCY>1" in r.message for r in caplog.records)
+
+
+def test_factory_warns_when_an_unparsable_knob_hides_the_fallback_count(monkeypatch, caplog):
+    import logging
+
+    # GATEWAY_WORKERS never reaches uvicorn on the launchers that pass no --workers, so
+    # an unusable value there must not report the deployment as single-worker while
+    # WEB_CONCURRENCY still starts the processes.
+    monkeypatch.setenv("GATEWAY_WORKERS", "abc")
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+    app = _FakeApp("memory", "sqlite")
+    with caplog.at_level(logging.WARNING):
+        make_inbound_dedupe_store(app)
     assert any("dedupe_storage=memory with WEB_CONCURRENCY>1" in r.message for r in caplog.records)
 
 

@@ -146,8 +146,11 @@ _DEFAULT_IDLE_TIMEOUT_S = 30 * 60.0
 # ``GATEWAY_WORKERS`` is the documented knob and the one docker-compose forwards as
 # ``--workers``; ``backend/Dockerfile`` and ``scripts/serve.sh`` start uvicorn with no
 # worker count at all, and uvicorn then takes the count from ``WEB_CONCURRENCY``. Both
-# must be read, the way ``app/gateway/routers/channel_connections.py`` already does, or
-# this gate stays inert in exactly the deployment it exists to refuse.
+# must be read, or this gate stays inert in exactly the deployment it exists to refuse.
+# ``app/gateway/routers/channel_connections.py`` reads the same two spellings and treats a
+# blank value as unset the same way, but deliberately differs on unparsable input: that
+# route resolves it to 0 and refuses, while this one falls through to the next spelling
+# and stays inert, because uvicorn rejects ``--workers abc`` itself before serving.
 _WORKER_COUNT_ENV_VARS = ("GATEWAY_WORKERS", "WEB_CONCURRENCY")
 
 
@@ -160,19 +163,29 @@ def _worker_count_from_env() -> tuple[int, str]:
         try:
             return int(raw), name
         except (TypeError, ValueError):
-            # Uvicorn rejects these itself before serving, so stay inert here too.
-            return 1, name
+            # Unparsable here must not hide a valid count in the other spelling: an
+            # exported ``GATEWAY_WORKERS=abc`` never reaches uvicorn on the launchers
+            # that pass no ``--workers``, so ``WEB_CONCURRENCY`` is still what decides
+            # how many processes start.
+            continue
     return 1, _WORKER_COUNT_ENV_VARS[0]
 
 
-def browser_multi_worker_error(workers: int | None = None) -> str | None:
-    """Return the fail-closed reason for process-local browser sessions."""
-    worker_env = _WORKER_COUNT_ENV_VARS[0]
+def browser_multi_worker_error(workers: int | None = None, env_name: str | None = None) -> str | None:
+    """Return the fail-closed reason for process-local browser sessions.
+
+    ``env_name`` is the spelling the caller resolved the count from; the refusal has to
+    name it, because an operator who only ever set ``WEB_CONCURRENCY`` cannot act on a
+    message about ``GATEWAY_WORKERS``. Without it the name is resolved from the
+    environment, which is the same source the count came from.
+    """
     if workers is None:
-        workers, worker_env = _worker_count_from_env()
+        workers, env_name = _worker_count_from_env()
+    elif env_name is None:
+        env_name = _worker_count_from_env()[1]
     if workers <= 1:
         return None
-    return f"{worker_env}={workers} cannot enable agentic browser tools: browser sessions are process-local and uvicorn does not provide thread affinity. Set {worker_env}=1 or disable the browser_navigate tool."
+    return f"{env_name}={workers} cannot enable agentic browser tools: browser sessions are process-local and uvicorn does not provide thread affinity. Set {env_name}=1 or disable the browser_navigate tool."
 
 
 def ensure_browser_worker_compatibility() -> None:

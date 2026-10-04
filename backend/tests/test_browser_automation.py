@@ -30,6 +30,18 @@ from deerflow.community.browser_automation.session import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_worker_env(monkeypatch):
+    """Keep the suite independent of the invoking shell's worker count.
+
+    ``WEB_CONCURRENCY`` is a common ambient convention on uvicorn/gunicorn/PaaS hosts,
+    and either spelling now decides whether process-local browser sessions are refused.
+    The tests that exercise the refusal set the spelling they mean to exercise.
+    """
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+
+
 @pytest.fixture
 def public_dns():
     """Keep mocked tool calls offline while exercising the real URL safety check."""
@@ -967,6 +979,7 @@ class TestSessionManager:
         pytest.param("2", None, 2, id="documented-knob-counts"),
         pytest.param("1", "4", 1, id="documented-knob-wins-when-both-set"),
         pytest.param("  ", "3", 3, id="blank-is-unset"),
+        pytest.param("abc", "4", 4, id="unparsable-knob-does-not-mask-the-fallback"),
         pytest.param(None, None, 1, id="nothing-set"),
         pytest.param(None, "auto", 1, id="uvicorn_rejects_it_so_stay_inert"),
     ],
@@ -992,9 +1005,19 @@ def test_worker_count_error_names_the_variable_that_set_the_count(monkeypatch):
     assert "Set WEB_CONCURRENCY=1" in error
 
 
+def test_worker_count_error_names_the_fallback_for_a_passed_in_count(monkeypatch):
+    # The Gateway startup gate resolves the count and calls this with the number only;
+    # the refusal still has to name the knob the operator set, or its advice would
+    # silence the gate while uvicorn keeps starting the extra processes.
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
+
+    assert browser_multi_worker_error(4).startswith("WEB_CONCURRENCY=4 ")
+
+
 def test_worker_count_error_keeps_naming_the_documented_knob_when_passed_in(monkeypatch):
-    # deps._enforce_postgres_for_multi_worker passes the count it resolved itself, so
-    # the refusal it raises keeps naming GATEWAY_WORKERS as it always has.
+    # With neither spelling in the environment there is nothing to attribute the count
+    # to, so a passed-in number keeps naming GATEWAY_WORKERS as it always has.
     monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
     monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
 
