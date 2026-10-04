@@ -78,6 +78,35 @@ class TestNormalizeFilename:
         with pytest.raises(ValueError, match="NUL"):
             normalize_filename("report\x00.pdf")
 
+    @pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-.part", "folder/.upload-notes.part"])
+    def test_rejects_reserved_staging_names(self, filename):
+        with pytest.raises(ValueError, match="reserved upload staging"):
+            normalize_filename(filename)
+
+    @pytest.mark.parametrize("filename", [".upload-notes.txt", "notes.part", ".env", ".UPLOAD-notes.txt", "notes.PART"])
+    def test_keeps_non_staging_names(self, filename):
+        assert normalize_filename(filename) == filename
+
+    def test_reserved_name_rejected_before_writing_upload(self, tmp_path):
+        with pytest.raises(ValueError, match="reserved upload staging"):
+            write_upload_file_no_symlink(tmp_path, ".upload-notes.part", b"user document")
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "filename",
+        ["CON", "con.txt", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9", "COM¹", "com².txt", "COM³.log", "LPT¹", "lpt².md", "LPT³.pdf", "file.txt.", "file.txt ", "a.", "folder/CON"],
+    )
+    def test_rejects_windows_incompatible_names(self, filename):
+        with pytest.raises(ValueError, match="not portable to Windows"):
+            normalize_filename(filename)
+
+    @pytest.mark.parametrize("filename", ["report.pdf", "contour.txt", "console.log", "COM0", "COM10", "COM⁴.txt", "LPT⁵", "COM¹notes.txt", "LPT²0.md", ".gitignore"])
+    def test_allows_portable_names(self, filename):
+        assert normalize_filename(filename) == filename
+
+    def test_reserved_parent_is_stripped_with_the_directory(self):
+        assert normalize_filename("CON/notes.md") == "notes.md"
+
 
 # ---------------------------------------------------------------------------
 # claim_unique_filename

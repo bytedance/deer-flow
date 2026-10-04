@@ -8,9 +8,9 @@ a reader can verify what it got back. Contract: `storage/contract.py`
 Operator-facing behaviour and the producer migration plan: `docs/blob-storage.md`.
 Factory: `storage/manager.py`.
 
-**Disabled by default**: `blob_storage.enabled` is `false`, and no producer has
-been migrated, so an untouched deployment behaves exactly as before. Producers
-call `get_blob_store_if_enabled()` and keep their existing local-path code for the
+**Disabled by default**: `blob_storage.enabled` is `false`, so an untouched
+deployment behaves exactly as before. Migrated producers call
+`get_blob_store_if_enabled()` and keep their existing local-path code for the
 `None` case; only a caller that genuinely requires the store uses
 `get_blob_store()`, which raises `BlobNotConfiguredError` when it is disabled.
 Both accessors are exported from this package — prefer
@@ -20,6 +20,16 @@ cached store, so hot-reloaded `blob_storage` edits take effect on new accesses.
 Replaced stores stay open for callers that already hold them and are closed by
 `reset_blob_store()`; changing a root requires preserving existing blob refs
 and coordinating deployment instances.
+
+`ToolOutputBudgetMiddleware` is a migrated producer for host-externalized
+results. It persists exact UTF-8 bytes as `kind="tool-output"`, checkpoints a
+versioned ref beside the virtual path, and restores the file atomically under
+the current thread outputs before a model can follow that path. The ref's kind,
+content type, digest, size, storage subdirectory, and confined virtual path are
+validated before a store read or host write. A configured-store write failure
+or output above the 64 MiB producer cap falls back inline, capped at 30,000
+characters or a lower configured fallback; non-mounted sandbox externalization
+remains outside this host-blob flow.
 
 **Layout** (local_fs, the default)::
 

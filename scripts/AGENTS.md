@@ -306,10 +306,12 @@ Memory backend async boundary:
 
 CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
 
-Agentic browser sessions are process-local. The Gateway startup safety gate rejects
-`GATEWAY_WORKERS > 1` when `browser_navigate` is configured, because ordinary
-uvicorn worker dispatch does not provide thread affinity for browser tools, REST
-navigation, and the Live WebSocket.
+Agentic browser sessions are process-local. Browser use is refused when the Gateway runs
+more than one worker process, because ordinary uvicorn worker dispatch does not provide
+thread affinity for browser tools, REST navigation, and the Live WebSocket. Keep
+`GATEWAY_WORKERS=1`, and on the launchers that pass uvicorn no `--workers`
+(`scripts/serve.sh`, `backend/Dockerfile`) keep `WEB_CONCURRENCY` unset or `1` too — that
+is where uvicorn takes the process count from.
 
 Browser Live screenshots remain JPEG bytes inside the harness and the Gateway's
 bounded, drop-oldest frame queue. WebSocket clients that request

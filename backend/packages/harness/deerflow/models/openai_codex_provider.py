@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
 
+def _is_valid_call_id(call_id: Any) -> bool:
+    """Check call/result correlation IDs without rewriting non-blank values."""
+    return isinstance(call_id, str) and bool(call_id.strip())
+
+
 def _build_usage_metadata(oai_usage: dict) -> dict:
     """Convert Codex/Responses API usage dict to LangChain usage_metadata format.
 
@@ -170,7 +175,7 @@ class CodexChatModel(BaseChatModel):
                     call_id = tc.get("id")
                     if not (isinstance(name, str) and name):
                         continue
-                    if not (isinstance(call_id, str) and call_id):
+                    if not _is_valid_call_id(call_id):
                         continue
                     args = tc.get("args")
                     input_items.append(
@@ -182,11 +187,16 @@ class CodexChatModel(BaseChatModel):
                         }
                     )
             elif isinstance(msg, ToolMessage):
+                content = self._normalize_content(msg.content)
+                # A blank ID cannot identify the call this result answers.
+                if not _is_valid_call_id(msg.tool_call_id):
+                    logger.warning("Dropping tool result with blank call_id (content %d chars)", len(content))
+                    continue
                 input_items.append(
                     {
                         "type": "function_call_output",
                         "call_id": msg.tool_call_id,
-                        "output": self._normalize_content(msg.content),
+                        "output": content,
                     }
                 )
 
@@ -283,6 +293,27 @@ class CodexChatModel(BaseChatModel):
                             streamed_output_items[output_index] = output_item
                     elif event_type == "response.completed":
                         completed_response = data["response"]
+                        # A terminal event completes the request even if the server
+                        # keeps the connection open. Do not let a later read timeout
+                        # replace the completed output with a transport error.
+                        break
+                    elif event_type in ("response.failed", "response.incomplete", "error"):
+                        response = data.get("response") or {}
+                        if event_type == "error":
+                            details = data.get("error") or data
+                        elif not isinstance(response, dict):
+                            details = response
+                        elif event_type == "response.failed":
+                            details = response.get("error") or {}
+                        else:
+                            details = response.get("incomplete_details") or {}
+
+                        if not isinstance(details, dict):
+                            details = {"message": str(details)}
+                        code = details.get("code")
+                        reason = details.get("message") or details.get("reason") or "No details provided"
+                        code_suffix = f" ({code})" if code else ""
+                        raise RuntimeError(f"Codex API {event_type}{code_suffix}: {reason}")
 
         if not completed_response:
             raise RuntimeError("Codex API stream ended without response.completed event")

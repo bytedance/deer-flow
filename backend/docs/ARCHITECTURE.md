@@ -178,7 +178,7 @@ class ThreadState(AgentState):
               ▼                                         ▼
 ┌─────────────────────────┐              ┌─────────────────────────┐
 │  LocalSandboxProvider   │              │  AioSandboxProvider     │
-│  (packages/harness/deerflow/sandbox/local.py) │              │  (packages/harness/deerflow/community/)       │
+│  (packages/harness/deerflow/sandbox/local/) │              │  (packages/harness/deerflow/community/)       │
 │                         │              │                         │
 │  - Singleton instance   │              │  - Docker-based         │
 │  - Direct execution     │              │  - Isolated containers  │
@@ -228,7 +228,7 @@ class ThreadState(AgentState):
                                    ▼
                       ┌─────────────────────────┐
                       │   get_available_tools() │
-                      │   (packages/harness/deerflow/tools/__init__)  │
+                      │   (packages/harness/deerflow/tools/__init__.py)  │
                       └─────────────────────────┘
 ```
 
@@ -284,7 +284,7 @@ config.yaml:
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          MCP Integration                                 │
-│                        (packages/harness/deerflow/mcp/manager.py)                              │
+│                        (packages/harness/deerflow/mcp/)                              │
 └─────────────────────────────────────────────────────────────────────────┘
 
 extensions_config.json:
@@ -322,7 +322,7 @@ extensions_config.json:
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          Skills System                                   │
-│                       (packages/harness/deerflow/skills/loader.py)                             │
+│                       (packages/harness/deerflow/skills/)                             │
 └─────────────────────────────────────────────────────────────────────────┘
 
 Directory Structure:
@@ -448,9 +448,11 @@ SKILL.md Format:
 
 2. Gateway updates runtime state
    - PUT writes extensions_config.json and reloads configuration
-   - Both endpoints reset the MCP tools cache and persistent sessions
+   - Config mutations reset the handling worker; peer workers detect the config signature
+   - Cache reset writes a shared generation marker, then retires the handling worker
 
 3. MCP Manager reloads on next use
+   - Every worker sharing that config directory compares the reset generation before serving cached tools
    - get_cached_mcp_tools() lazily reinitializes MCP tools
    - Loads current server configurations and tool lists
 

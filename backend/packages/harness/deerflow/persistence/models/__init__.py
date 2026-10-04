@@ -25,6 +25,7 @@ from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.notification_deliveries.model import NotificationDeliveryRow
 from deerflow.persistence.personal_access_tokens.model import PersonalAccessTokenRow
 from deerflow.persistence.projects.model import ProjectDocumentRow, ProjectRow
 from deerflow.persistence.run.model import RunChangeClockRow, RunRow
@@ -44,6 +45,7 @@ __all__ = [
     "FeedbackRow",
     "McpTaskRow",
     "ManagedSubagentRow",
+    "NotificationDeliveryRow",
     "PersonalAccessTokenRow",
     "ProjectDocumentRow",
     "ProjectRow",

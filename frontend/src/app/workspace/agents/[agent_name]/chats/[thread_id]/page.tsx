@@ -71,7 +71,7 @@ import {
   selectContextUsage,
   threadTokenUsageToTokenUsage,
 } from "@/core/threads/token-usage";
-import { textOfMessage } from "@/core/threads/utils";
+import { projectIdOfThread, textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -513,6 +513,11 @@ export default function AgentChatPage() {
                     )}
                     isWelcomeMode={isWelcomeMode}
                     threadId={threadId}
+                    projectId={
+                      !isNewThread && threadMetadata.data
+                        ? projectIdOfThread(threadMetadata.data)
+                        : null
+                    }
                     draftThreadId={isNewThread ? "new" : threadId}
                     draftAgentName={agent_name}
                     agentSkillNames={agent?.skills}

@@ -171,7 +171,7 @@ async def test_preview_first_occurrence_matches_task_creation_at_same_clock(clie
     repo = SimpleNamespace(create=AsyncMock())
     monkeypatch.setattr(scheduled_tasks, "get_scheduled_task_repo", lambda request: repo)
     monkeypatch.setattr(scheduled_tasks, "get_thread_store", lambda request: None)
-    monkeypatch.setattr(scheduled_tasks, "get_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(scheduled_tasks, "get_config", lambda: SimpleNamespace(scheduler=SimpleNamespace(min_once_delay_seconds=60)))
     request = SimpleNamespace(state=SimpleNamespace(auth=AuthContext(user=SimpleNamespace(id="preview-user"))))
     body = scheduled_tasks.ScheduledTaskCreateRequest(title="Example", prompt="Example", schedule_type="cron", schedule_spec={"cron": PAYLOAD["cron"]}, timezone=PAYLOAD["timezone"])
     await call_unwrapped(scheduled_tasks.create_scheduled_task, request=request, body=body)
