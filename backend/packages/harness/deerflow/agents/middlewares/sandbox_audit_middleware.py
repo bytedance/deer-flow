@@ -114,6 +114,12 @@ _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bPATH\s*="),
 ]
 
+# Shell exit markers as providers emit them (mirrors
+# ``sandbox.tools._BASH_EXIT_MARKER_TAIL_RE``): local ``Exit Code: N`` at the
+# end of the output, remote ``Command exited with code N`` as the whole output.
+_EXIT_MARKER_TAIL_RE = re.compile(r"(?:^|\n)Exit Code: -?\d+\s*$")
+_SILENT_EXIT_MARKER_RE = re.compile(r"Command exited with code -?\d+")
+
 
 # A heredoc header and its delimiter: ``<<EOF``, ``<< EOF``, ``<<-EOF``,
 # ``<<\EOF``, ``<<'EOF'``, ``<<"EOF"``. Both guards are needed to keep ``<<<``
@@ -427,13 +433,18 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         if isinstance(result.content, list):
             new_content = list(result.content) + [{"type": "text", "text": warning}]
         else:
-            new_content = str(result.content) + warning
-        return ToolMessage(
-            content=new_content,
-            tool_call_id=result.tool_call_id,
-            name=result.name,
-            status=result.status,
-        )
+            content = str(result.content)
+            if _SILENT_EXIT_MARKER_RE.fullmatch(content.strip()):
+                # The whole output IS the exit marker; evidence consumers
+                # fullmatch it, so any added text would erase the failure.
+                return result
+            # Keep a trailing exit marker last: evidence consumers anchor on
+            # it to recover the real shell status (see sandbox/tools.py).
+            marker = _EXIT_MARKER_TAIL_RE.search(content)
+            cut = marker.start() if marker else len(content)
+            new_content = content[:cut] + warning + content[cut:]
+        # model_copy keeps additional_kwargs (deerflow_tool_meta), artifact and id.
+        return result.model_copy(update={"content": new_content})
 
     # ------------------------------------------------------------------
     # Input sanitisation
