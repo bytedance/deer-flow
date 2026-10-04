@@ -18,9 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import ipaddress
 import logging
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,47 @@ _HANDSHAKE_TIMEOUT_S = 15
 _RESOLVE_TIMEOUT_S = 15
 _CONNECT_TIMEOUT_S = 15
 _CLOSE_TIMEOUT_S = 2
+_EGRESS_RESOLVER_WORKERS = 8
+
+# A timed-out synchronous resolver keeps running in its worker thread. Keep
+# those calls out of asyncio's process-wide default executor, and acquire a
+# permit before submission so the dedicated executor never accumulates an
+# unbounded work queue. Saturated egress fails closed instead of queuing DNS
+# behind work that may itself be stuck.
+_RESOLVER_EXECUTOR = ThreadPoolExecutor(max_workers=_EGRESS_RESOLVER_WORKERS, thread_name_prefix="browser-egress-dns")
+_RESOLVER_SLOTS = threading.BoundedSemaphore(_EGRESS_RESOLVER_WORKERS)
+
+
+class _ResolverCapacityExceeded(RuntimeError):
+    pass
+
+
+def _finish_resolver(future: asyncio.Future[object], slots: threading.BoundedSemaphore) -> None:
+    """Consume abandoned results and release capacity when worker work ends."""
+    try:
+        future.exception()
+    except (asyncio.CancelledError, Exception):
+        pass
+    finally:
+        slots.release()
+
+
+async def _resolve_with_timeout(resolve: EgressResolver, host: str) -> list[str]:
+    slots = _RESOLVER_SLOTS
+    if not slots.acquire(blocking=False):
+        raise _ResolverCapacityExceeded("browser egress resolver capacity is full")
+
+    loop = asyncio.get_running_loop()
+    context = contextvars.copy_context()
+    try:
+        future = loop.run_in_executor(_RESOLVER_EXECUTOR, context.run, resolve, host)
+    except BaseException:
+        slots.release()
+        raise
+    future.add_done_callback(lambda completed: _finish_resolver(completed, slots))
+    # Shield the executor future: cancellation of the SOCKS handler must not
+    # release its permit before the already-started resolver thread exits.
+    return await asyncio.wait_for(asyncio.shield(future), timeout=_RESOLVE_TIMEOUT_S)
 
 
 class _RefusedRequest(Exception):
@@ -97,10 +141,14 @@ class BrowserEgressProxy:
                 await _reply(writer, exc.reply)
                 return
             try:
-                addresses = await asyncio.wait_for(asyncio.to_thread(self._resolve, host), timeout=_RESOLVE_TIMEOUT_S)
+                addresses = await _resolve_with_timeout(self._resolve, host)
             except ValueError as exc:
                 logger.warning("browser egress refused for %s:%d: %s", host, port, exc)
                 await _reply(writer, _REPLY_NOT_ALLOWED)
+                return
+            except _ResolverCapacityExceeded:
+                logger.warning("browser egress resolution capacity full for %s:%d", host, port)
+                await _reply(writer, _REPLY_HOST_UNREACHABLE)
                 return
             except TimeoutError:
                 logger.warning("browser egress resolution timed out for %s:%d", host, port)

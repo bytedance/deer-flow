@@ -13,12 +13,14 @@ import ipaddress
 import socket
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.gateway import context_usage
 from deerflow.community import url_safety
 from deerflow.community.browser_automation import egress
 from deerflow.community.browser_automation import session as session_mod
@@ -220,6 +222,99 @@ async def test_proxy_bounds_a_stuck_resolution(monkeypatch):
         release.set()
         await proxy.close()
     assert reply == 0x04
+
+
+def test_timed_out_egress_resolution_does_not_starve_gateway_default_executor(monkeypatch):
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        default_executor = ThreadPoolExecutor(max_workers=1)
+        resolver_executor = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(default_executor)
+        monkeypatch.setattr(egress, "_RESOLVER_EXECUTOR", resolver_executor, raising=False)
+        monkeypatch.setattr(egress, "_RESOLVER_SLOTS", threading.BoundedSemaphore(1), raising=False)
+        monkeypatch.setattr(egress, "_RESOLVE_TIMEOUT_S", 0.1)
+
+        resolver_started = asyncio.Event()
+        counter_started = asyncio.Event()
+        release_resolver = threading.Event()
+        resolver_calls: list[str] = []
+
+        def resolve(host: str) -> list[str]:
+            resolver_calls.append(host)
+            loop.call_soon_threadsafe(resolver_started.set)
+            release_resolver.wait()
+            return ["127.0.0.1"]
+
+        def count_messages(_messages) -> int:
+            loop.call_soon_threadsafe(counter_started.set)
+            return 250
+
+        messages = [SimpleNamespace(content="hello")]
+        snapshot = SimpleNamespace(values={"messages": messages})
+
+        class Accessor:
+            async def aget(self, _config):
+                return snapshot
+
+        model = SimpleNamespace(name="test-model", context_window=1000)
+        app_config = SimpleNamespace(models=[model], get_model_config=lambda _name: model)
+
+        class RunStore:
+            async def list_by_thread(self, *_args, **_kwargs):
+                return []
+
+        async def build_accessor(_request, *, thread_id):
+            return Accessor(), {"configurable": {"thread_id": thread_id}}
+
+        monkeypatch.setattr(context_usage, "_count_messages_approximately", count_messages)
+        monkeypatch.setattr(context_usage, "build_thread_checkpoint_state_accessor", build_accessor)
+        monkeypatch.setattr(context_usage, "get_config", lambda: app_config)
+
+        proxy = BrowserEgressProxy(resolve)
+        usage_task = None
+        try:
+            proxy_url = await proxy.start()
+            connect_task = asyncio.create_task(_socks_connect(proxy_url, 0x03, _domain("wedged.example"), 80))
+            await asyncio.wait_for(resolver_started.wait(), timeout=2)
+            _method, reply, _reader, writer = await asyncio.wait_for(connect_task, timeout=2)
+            writer.close()
+            assert reply == 0x04
+
+            # The first resolver is still running despite its SOCKS timeout.
+            # The sole admission slot must stay occupied and reject a second
+            # lookup instead of queuing another worker job.
+            _method, overloaded_reply, _reader, overloaded_writer = await asyncio.wait_for(
+                _socks_connect(proxy_url, 0x03, _domain("second.example"), 80),
+                timeout=2,
+            )
+            overloaded_writer.close()
+            assert overloaded_reply == 0x04
+            assert resolver_calls == ["wedged.example"]
+
+            usage_task = asyncio.create_task(
+                context_usage.build_context_usage(
+                    request=SimpleNamespace(app=SimpleNamespace()),
+                    thread_id="thread-1",
+                    run_store=RunStore(),
+                )
+            )
+            # This is the same token-counting path used by the Gateway's
+            # GET /threads/{thread_id}/token-usage handler.
+            await asyncio.wait_for(counter_started.wait(), timeout=2)
+            assert await usage_task == {
+                "token_count": 250,
+                "max_context_tokens": 1000,
+                "percentage": 25.0,
+            }
+        finally:
+            release_resolver.set()
+            if usage_task is not None and not usage_task.done():
+                await asyncio.wait_for(usage_task, timeout=2)
+            await proxy.close()
+            resolver_executor.shutdown(wait=True, cancel_futures=True)
+            default_executor.shutdown(wait=True, cancel_futures=True)
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.asyncio

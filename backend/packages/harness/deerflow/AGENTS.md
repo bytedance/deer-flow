@@ -102,6 +102,17 @@ policy or network-mode mismatch; only the provider may replace it after the
 orphan grace, local teardown reservation, and cross-instance teardown lease.
 Destroy the sandbox, sidecar, and both networks together.
 
+### Browser Egress Resolution
+
+The browser SOCKS egress proxy resolves destination hosts synchronously after
+its bounded handshake. Resolver calls use a dedicated process-wide executor
+with one admission permit per worker; a timeout or cancelled SOCKS handler
+does not release the permit until the underlying resolver thread exits. If all
+resolver slots are occupied, fail the connection closed rather than queueing
+unbounded DNS work or consuming the Gateway's asyncio default executor. Copy
+the caller's context into the resolver thread. `tests/test_browser_egress.py`
+covers timed-out resolver isolation from the Gateway token-usage executor path.
+
 ### Tenki `sticky`
 
 Env values stay strings; parse booleans before SDK calls (`bool("false")` is true).
