@@ -1327,6 +1327,9 @@ model the run will use.
 In an interactive IM channel, the person who requested the image can answer
 the model-choice question with `1`, `2`, or the exact option label. Answers to
 an old question or from another sender are treated as ordinary messages.
+The terminal workbench accepts `1`, `2`, or an exact option label from the
+current image-model question when its thread has a checkpointer. A stale answer
+remains ordinary chat text.
 Image configuration errors stop image generation but do not block unrelated
 sandbox tools such as bash or file operations.
 For a server-owned model, use the typed top-level `image_generation` block in
