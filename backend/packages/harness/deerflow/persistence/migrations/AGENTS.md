@@ -26,7 +26,8 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0023_run_change_seq` → `0023_user_preferences` →
 `0024_project_documents` → `0025_repair_run_change_seq` →
 `0026_mcp_task_lease_tokens` → `0027_notification_deliveries` →
-`0028_parked_attempts` (current head). The preference
+`0028_parked_attempts` → `0029_scheduler_agent_tasks` →
+`0030_notification_claim_tokens` (current head). The preference
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to
