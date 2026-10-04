@@ -99,6 +99,8 @@ own teams. Sharing a host conversation does **not** share its team's private dat
   fairness and finer-grained locking are outside this example's current scope.
   Each conversation is serialized, including result
   receipts. A busy host conversation stays queued without cancelling its run.
+  Queued jobs blocked by an unanswered question or interrupt do not consume the
+  active-job budget before admission; an unknown admission outcome still does.
 - Each owner can have 20 teams. A team accepts at most 100 requests, with separate
   space for up to 100 result receipts (200 total job entries); a handoff chain
   accepts at most 12 requests. Start a new user request for another chain, or a
