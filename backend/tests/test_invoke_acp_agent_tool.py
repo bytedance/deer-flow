@@ -837,55 +837,50 @@ def test_get_available_tools_uses_explicit_app_config_for_acp_agents(monkeypatch
     assert "invoke_acp_agent" in [tool.name for tool in tools]
 
 
-# ---------------------------------------------------------------------------
-# Regression: invoke_acp_agent must not hang forever on a stuck prompt() call
-# ---------------------------------------------------------------------------
-#
-# A minimal, real ACP agent subprocess that answers `initialize`/`new_session`
-# correctly but then hangs forever inside `prompt()` (never responds). This
-# reproduces an agent that has finished the ACP handshake but then wedges —
-# e.g. stuck on a runaway internal step — instead of a mocked `acp` module,
-# so the regression test below exercises the real spawn/kill subprocess path.
-_HUNG_ACP_AGENT_SCRIPT = """\
+# A real ACP subprocess can stop responding at any protocol phase. Keep the
+# SDK's transport and cleanup intact so these tests detect leaked child processes.
+_ACP_AGENT_SCRIPT = """\
 import asyncio
+import sys
+from pathlib import Path
 
 import acp
-from acp.schema import InitializeResponse, NewSessionResponse
+from acp.schema import InitializeResponse, NewSessionResponse, PromptResponse
 
 
-class _HungAgent:
+class _TestAgent:
+    def on_connect(self, conn):
+        self._conn = conn
+
+    async def _enter_phase(self, phase):
+        Path(sys.argv[3]).write_text(phase, encoding="utf-8")
+        if phase == "prompt":
+            await self._conn.session_update(session_id="test-session", update=acp.update_agent_thought_text(phase))
+        if phase == sys.argv[1]:
+            await asyncio.Event().wait()
+        delay = float(sys.argv[2])
+        if delay:
+            await asyncio.sleep(delay)
+
     async def initialize(self, protocol_version, client_capabilities=None, client_info=None, **kwargs):
+        await self._enter_phase("initialize")
         return InitializeResponse(protocol_version=protocol_version)
 
     async def new_session(self, cwd, additional_directories=None, mcp_servers=None, **kwargs):
-        return NewSessionResponse(session_id="hung-session")
+        await self._enter_phase("new_session")
+        return NewSessionResponse(session_id="test-session")
 
     async def prompt(self, session_id, prompt, **kwargs):
-        # Deliberately never respond: simulates an ACP agent that completes the
-        # handshake but then hangs instead of answering session/prompt.
-        await asyncio.Event().wait()
+        await self._enter_phase("prompt")
+        return PromptResponse(stop_reason="end_turn")
 
 
-asyncio.run(acp.run_agent(_HungAgent()))
+asyncio.run(acp.run_agent(_TestAgent()))
 """
 
 
-@pytest.mark.anyio
-async def test_invoke_acp_agent_times_out_and_kills_hung_subprocess(monkeypatch, tmp_path):
-    """invoke_acp_agent must time out and kill the subprocess instead of hanging
-    forever when the agent answers initialize/new_session but then never
-    responds to session/prompt.
-
-    Before the timeout_seconds fix, neither this tool nor ACPAgentConfig had
-    any timeout, so this exact scenario blocked the tool call — and therefore
-    the whole agent turn — indefinitely, with the child process left running.
-
-    `timeout_seconds` is configured small (2s) so the pass-after run completes
-    in a couple of seconds. The outer `asyncio.wait_for(..., timeout=20)` is
-    only a test-level safety net: it must never fire in the pass-after case
-    (elapsed stays well under it), but bounds this test to ~20s instead of
-    hanging the whole suite forever if the fix regresses.
-    """
+@pytest.fixture
+def acp_subprocess_tool(monkeypatch, tmp_path):
     import acp as acp_module
 
     from deerflow.config import paths as paths_module
@@ -895,43 +890,89 @@ async def test_invoke_acp_agent_times_out_and_kills_hung_subprocess(monkeypatch,
         "deerflow.config.extensions_config.ExtensionsConfig.from_file",
         classmethod(lambda cls: ExtensionsConfig(mcp_servers={}, skills={})),
     )
-
-    script_path = tmp_path / "hung_acp_agent.py"
-    script_path.write_text(_HUNG_ACP_AGENT_SCRIPT, encoding="utf-8")
-
-    captured: dict[str, object] = {}
+    script_path = tmp_path / "test_acp_agent.py"
+    script_path.write_text(_ACP_AGENT_SCRIPT, encoding="utf-8")
+    phase_path = tmp_path / "phase.txt"
+    captured = {}
+    phase_entered = asyncio.Event()
     real_spawn_agent_process = acp_module.spawn_agent_process
 
-    # Spy on the real spawn_agent_process (not a fake) so we can inspect the
-    # actual asyncio.subprocess.Process afterwards, while every bit of real
-    # spawn/handshake/cleanup behavior stays exactly as production uses it.
     @contextlib.asynccontextmanager
     async def _spying_spawn_agent_process(client, cmd, *args, env=None, cwd=None):
+        original_session_update = client.session_update
+
+        async def _session_update(session_id, update, **kwargs):
+            if getattr(update, "session_update", None) == "agent_thought_chunk":
+                phase_entered.set()
+            await original_session_update(session_id, update, **kwargs)
+
+        client.session_update = _session_update
         async with real_spawn_agent_process(client, cmd, *args, env=env, cwd=cwd) as (conn, proc):
             captured["proc"] = proc
             yield conn, proc
 
     monkeypatch.setattr(acp_module, "spawn_agent_process", _spying_spawn_agent_process)
 
-    tool = build_invoke_acp_agent_tool(
-        {
-            "hung": ACPAgentConfig(
-                command=sys.executable,
-                args=[str(script_path)],
-                description="Hung test agent",
-                timeout_seconds=2,
-            )
-        }
-    )
+    def build_tool(hang_phase="", phase_delay=0, timeout_seconds=2):
+        tool = build_invoke_acp_agent_tool(
+            {
+                "test": ACPAgentConfig(
+                    command=sys.executable,
+                    args=[str(script_path), hang_phase, str(phase_delay), str(phase_path)],
+                    description="Test ACP agent",
+                    timeout_seconds=timeout_seconds,
+                )
+            }
+        )
+        return tool
 
+    return SimpleNamespace(build_tool=build_tool, captured=captured, phase_entered=phase_entered, phase_path=phase_path)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", ["initialize", "new_session", "prompt"])
+async def test_invoke_acp_agent_times_out_and_kills_hung_subprocess(acp_subprocess_tool, phase):
+    tool = acp_subprocess_tool.build_tool(hang_phase=phase)
     start = time.monotonic()
-    result = await asyncio.wait_for(tool.coroutine(agent="hung", prompt="do work"), timeout=20)
-    elapsed = time.monotonic() - start
-
-    assert elapsed < 10, f"expected the configured 2s timeout to fire quickly, took {elapsed:.1f}s"
+    # The outer timeout only bounds a regression; it must not supply the tool's deadline.
+    result = await asyncio.wait_for(tool.coroutine(agent="test", prompt="do work"), timeout=15)
+    assert time.monotonic() - start < 10
     assert "timed out" in result.lower()
-    assert "hung" in result
+    assert "test" in result
+    assert acp_subprocess_tool.phase_path.read_text(encoding="utf-8") == phase
+    assert acp_subprocess_tool.captured["proc"].returncode is not None
 
-    proc = captured.get("proc")
-    assert proc is not None, "spawn_agent_process spy did not capture the subprocess"
-    assert proc.returncode is not None, "subprocess must be terminated, not left running after a timeout"
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_shares_one_timeout_budget(acp_subprocess_tool):
+    # Each phase completes within 3s, but their combined 3.6s exceeds one invocation budget.
+    tool = acp_subprocess_tool.build_tool(phase_delay=1.2, timeout_seconds=3)
+    result = await asyncio.wait_for(tool.coroutine(agent="test", prompt="do work"), timeout=15)
+    assert "timed out" in result.lower()
+    assert acp_subprocess_tool.captured["proc"].returncode is not None
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_completes_within_timeout(acp_subprocess_tool):
+    tool = acp_subprocess_tool.build_tool()
+    result = await asyncio.wait_for(tool.coroutine(agent="test", prompt="do work"), timeout=15)
+    assert result == "(no response)"
+    assert acp_subprocess_tool.phase_path.read_text(encoding="utf-8") == "prompt"
+    assert acp_subprocess_tool.captured["proc"].returncode is not None
+
+
+@pytest.mark.anyio
+async def test_invoke_acp_agent_cancellation_closes_subprocess(acp_subprocess_tool):
+    tool = acp_subprocess_tool.build_tool(hang_phase="prompt", timeout_seconds=60)
+    invocation = asyncio.create_task(tool.coroutine(agent="test", prompt="do work"))
+    try:
+        await asyncio.wait_for(acp_subprocess_tool.phase_entered.wait(), timeout=15)
+        invocation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(invocation, timeout=15)
+        assert acp_subprocess_tool.captured["proc"].returncode is not None
+    finally:
+        if not invocation.done():
+            invocation.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await invocation
