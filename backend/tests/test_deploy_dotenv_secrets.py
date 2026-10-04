@@ -314,7 +314,11 @@ real_compose = pytest.mark.parametrize(
 @pytest.fixture
 def real_docker(client: str, tmp_path: Path) -> str:
     """A `docker`-shaped entry point for the client: the CLI itself, or a shim that drops the `compose` word for a standalone binary."""
-    if Path(client).name == "docker":
+    # The Docker CLI is docker.exe on Windows: compare the stem so the CLI is
+    # recognized there too. Feeding it through the standalone wrapper would
+    # strip the `compose` subcommand, and the root CLI then rejects the
+    # script's --env-file probe with "unknown flag: --env-file".
+    if Path(client).stem.lower() == "docker":
         return client
     shim = tmp_path / "compose-shim" / "docker"
     shim.parent.mkdir()
