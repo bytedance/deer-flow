@@ -309,6 +309,8 @@ merged by explicit namespace with runtime descriptors. Catalog-only entries are 
 metadata, never module-loader inputs or proof of installation. Backend-only examples may
 have no plugin descriptor; keep their runtime status unasserted. Details link to package
 installation instructions. Keep the catalog aligned with `examples/deerflow-extension-*`.
+Agent teams uses `community.agent-teams`; merge its installed descriptor into the
+localized catalog entry without asserting runtime status for a catalog-only row.
 Conversation action slots augment normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
 Plugin views use mount/dispose and abort signals; Shadow DOM is CSS isolation, not a sandbox.
 Descriptors are user-keyed page snapshots, refreshed manually. Backend calls bind the plugin's
