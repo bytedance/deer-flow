@@ -466,6 +466,16 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **runtime:** A multi-worker run that finished successfully is no longer
+  reclaimed as an orphan `error` while its worker is still finalizing. With an
+  event store, the worker records the terminal status in memory first and
+  writes it to the run store only after the journal flush, delivery receipt,
+  workspace scan and duration checkpoint. Lease renewal skipped runs whose
+  local status was already terminal, so a finalization longer than the lease
+  plus grace (about 30–40 seconds by default) let a peer, or the worker's own
+  reconciler, claim the still-active row. The heartbeat now keeps renewing
+  until that deferred write is attempted, and fences the run if a peer claims
+  it. Affects only `run_ownership.heartbeat_enabled` deployments.
 - **memory:** Reading DeerMem agent memory no longer fails while another write
   deletes a fact. `load()`, `reload()`, and the full `rebuild_index()` scan list
   the fact files without the storage locks, so a delete committed between the
