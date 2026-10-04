@@ -1,5 +1,6 @@
 """Error SSE frames must enter the IM channel's existing failure cleanup."""
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,10 +18,20 @@ from deerflow.runtime.stream_bridge.memory import MemoryStreamBridge
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("has_error", [False, True], ids=["success", "error-event"])
+@pytest.mark.parametrize(
+    "has_error, error_payload",
+    [
+        (False, None),
+        (True, {"name": "RuntimeError", "message": "Model failed."}),
+        (True, None),
+        (True, {"name": "ConflictError", "message": "Thread already running a task."}),
+    ],
+    ids=["success", "error-event", "empty-error-event", "busy-error-event"],
+)
 @pytest.mark.parametrize("has_partial", [False, True], ids=["empty", "partial-text"])
 @pytest.mark.parametrize("has_values", [False, True], ids=["message-stream", "with-values"])
-async def test_channel_consumes_error_sse_and_releases_dedupe_after_final_publish(monkeypatch, tmp_path, has_error, has_partial, has_values):
+async def test_channel_consumes_error_sse_and_releases_dedupe_after_final_publish(monkeypatch, tmp_path, caplog, has_error, error_payload, has_partial, has_values):
+    caplog.set_level(logging.WARNING, logger="app.channels.manager")
     bridge = MemoryStreamBridge()
     record = RunRecord(
         run_id="stream-run",
@@ -37,7 +48,7 @@ async def test_channel_consumes_error_sse_and_releases_dedupe_after_final_publis
         if has_values:
             await bridge.publish(record.run_id, "values", {"messages": [{"type": "ai", "content": "Partial"}] if has_partial else []})
         if has_error:
-            await bridge.publish(record.run_id, "error", {"name": "RuntimeError", "message": "Model failed."})
+            await bridge.publish(record.run_id, "error", error_payload)
         await bridge.publish_end(record.run_id)
         return record
 
@@ -81,3 +92,16 @@ async def test_channel_consumes_error_sse_and_releases_dedupe_after_final_publis
         assert final.text == "(No response from agent)"
     assert deduped_during_final == [True]
     assert await manager._is_duplicate_inbound(inbound) is (not has_error)
+
+    error_logs = [record for record in caplog.records if record.name == "app.channels.manager" and "stream error frame:" in record.getMessage()]
+    assert len(error_logs) == int(has_error)
+    if has_error:
+        assert error_logs[0].levelno == logging.WARNING
+        logged = error_logs[0].getMessage()
+        assert "thread_id=thread-1" in logged
+        if isinstance(error_payload, dict):
+            assert error_payload["name"] in logged
+            assert error_payload["message"] in logged
+        else:
+            assert "Error" in logged
+            assert "unknown" in logged

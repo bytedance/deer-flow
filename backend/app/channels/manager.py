@@ -2641,6 +2641,13 @@ class ChannelManager:
                     if accumulated_text:
                         latest_text = accumulated_text
                 elif event == "error":
+                    error_data = data if isinstance(data, dict) else {}
+                    logger.warning(
+                        "[Manager] stream error frame: thread_id=%s, error=%s: %s",
+                        thread_id,
+                        error_data.get("name", "Error"),
+                        error_data.get("message", "unknown"),
+                    )
                     # The v1 SDK yields backend errors as frames, not exceptions.
                     # Keep draining the stream and use the existing failure path.
                     stream_error = RuntimeError("Agent run failed.")
