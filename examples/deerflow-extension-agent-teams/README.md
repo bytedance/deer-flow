@@ -91,14 +91,26 @@ own teams. Sharing a host conversation does **not** share its team's private dat
   Gateway rechecks the user, permission ceiling, current permissions and thread
   access on every call. PAT/internal callers without this capability cannot run teams.
 - Different member conversations can run concurrently; admissions are bounded to
-  eight active plugin jobs. Each conversation is serialized, including result
+  eight active plugin jobs shared by all owners in this process, without per-owner
+  quotas or fair scheduling. A busy owner can keep other owners' jobs queued.
+  The tick loop holds a shared lock while checking/admitting jobs, with a ten-second
+  timeout per job advancement; slow host calls delay create, send, cancel, resume,
+  delete and reconnect for all teams until the pass releases the lock. Per-owner
+  fairness and finer-grained locking are outside this example's current scope.
+  Each conversation is serialized, including result
   receipts. A busy host conversation stays queued without cancelling its run.
 - Each owner can have 20 teams. A team accepts at most 100 requests, with separate
   space for up to 100 result receipts (200 total job entries); a handoff chain
   accepts at most 12 requests. Start a new user request for another chain, or a
   new team when the team's capacity is exhausted. Agent-to-Agent loops therefore
   cannot grow without a bound.
-- Tasks accept up to 4,000 characters / 8,000 UTF-8 bytes. Shared context contains
+- Team names accept up to 80 characters / 160 UTF-8 bytes; goals accept up to
+  2,000 characters / 4,000 UTF-8 bytes. Tasks and clarification answers accept
+  up to 4,000 characters / 8,000 UTF-8 bytes. The UI validates both bounds before
+  submission and preserves oversized text for editing. Native mention labels
+  fall back to the member name when the combined team/member label exceeds the
+  host's 120 UTF-16-unit limit; selection still routes by team/member IDs.
+  Shared context contains
   at most eight recent messages within a 24 KiB JSON budget, plus the goal and
   roster. Final answers are capped at 6,000 UTF-8 bytes with a truncation notice.
   Team storage retains the most recent 100 shared messages. Each new job also
@@ -131,6 +143,7 @@ uv run ruff format --check ../examples/deerflow-extension-agent-teams
 
 The tests load the real extension and exercise owner isolation, directed requests,
 real ToolNode dispatch, mention middleware in the Lead middleware pipeline,
+host-compatible mention labels at the UTF-16 boundary with stable routing IDs,
 serialization, interrupts, cancellation, restart/reconnect (including incomplete
 creation), request capacity independent of receipts, ambiguous admission, and
 lifecycle locking. Host-run transport is controlled for deterministic tests.
@@ -155,7 +168,9 @@ node examples/deerflow-extension-agent-teams/verify_browser.mjs
 This drives packaged UI assets, real plugin routes, SQLite and graph checkpoints,
 with a synthetic identity and deterministic model. It verifies team creation,
 insecure HTTP without `crypto.randomUUID`, Shadow DOM, catalog failure/retry,
-search and selection, unique bounded member labels after truncation, keyboard
+search and selection, unique bounded member labels after truncation, Unicode
+character/byte validation with draft preservation for names, goals, tasks and
+clarification answers, accepted ASCII/CJK/emoji boundary inputs, keyboard
 mentions, task/result pairing, peer receipts,
 automatic conditional updates, draft/detail preservation, owner isolation,
 conversation navigation, mobile/dark layouts, delete-action contrast in both

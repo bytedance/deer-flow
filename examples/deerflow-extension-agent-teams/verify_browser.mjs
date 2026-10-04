@@ -20,12 +20,27 @@ try {
     extraHTTPHeaders: { "x-test-user": `browser-${Date.now()}` },
   });
   const errors = [];
+  let submittedRequests = 0;
   page.on("pageerror", (error) => errors.push(error.message));
   let requests = 0,
     unchanged = 0;
   page.on("request", (r) => {
     if (r.url().includes("/actions/get")) requests++;
+    if (/\/actions\/(create|send|resume)$/.test(r.url())) submittedRequests++;
   });
+  async function rejectText(label, value, limit, button) {
+    const input = page.getByLabel(label, { exact: true });
+    await input.fill(value);
+    const before = submittedRequests;
+    await page.getByRole("button", { name: button, exact: true }).click();
+    await expect(
+      page.getByRole("status").filter({
+        hasText: `${label} must be at most ${limit} characters and ${limit * 2} UTF-8 bytes.`,
+      }),
+    ).toBeVisible();
+    assert.equal(submittedRequests, before);
+    await expect(input).toHaveValue(value);
+  }
   page.on("response", async (r) => {
     if (r.url().includes("/actions/get")) {
       try {
@@ -243,6 +258,8 @@ try {
   await page
     .getByRole("button", { name: "Mention Review", exact: true })
     .click();
+  await rejectText("Message to team", "中".repeat(2667), 4000, "Send");
+  await rejectText("Message to team", "T".repeat(4001), 4000, "Send");
   await composer.fill("Independently check the next release.");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.locator(".task-message")).toHaveCount(4, {
@@ -285,6 +302,8 @@ try {
   await expect(clarificationCard).toContainText(
     "Which environment should I check?",
   );
+  await rejectText("Your answer", "中".repeat(2667), 4000, "Submit response");
+  await rejectText("Your answer", "T".repeat(4001), 4000, "Submit response");
   await clarificationCard
     .getByLabel("Your answer", { exact: true })
     .fill("staging");
@@ -336,11 +355,30 @@ try {
     await expect(page.getByRole("checkbox")).toHaveCount(3);
     for (const checkbox of await page.getByRole("checkbox").all())
       await checkbox.check();
-    const title = `Name boundaries ${index}`;
+    const teamTextCases = [
+      ["T".repeat(80), "G".repeat(2000)],
+      ["中".repeat(53) + "x", "中".repeat(1333) + "x"],
+      ["😀".repeat(40), "😀".repeat(1000)],
+      ["T".repeat(50) + "😀".repeat(20), "G".repeat(1400) + "😀".repeat(300)],
+    ];
+    const [title, goal] = teamTextCases[index];
+    if (index === 0) {
+      const invalidInputs = [
+        ["Team name", "中".repeat(80), 80],
+        ["Team name", "T".repeat(81), 80],
+        ["Shared goal", "中".repeat(1400), 2000],
+        ["Shared goal", "G".repeat(2001), 2000],
+      ];
+      for (const [label, value, limit] of invalidInputs) {
+        await page.getByLabel("Team name", { exact: true }).fill("Valid team");
+        await page
+          .getByLabel("Shared goal", { exact: true })
+          .fill("Valid goal");
+        await rejectText(label, value, limit, "Create team");
+      }
+    }
     await page.getByLabel("Team name", { exact: true }).fill(title);
-    await page
-      .getByLabel("Shared goal", { exact: true })
-      .fill("Check member names");
+    await page.getByLabel("Shared goal", { exact: true }).fill(goal);
     const created = page.waitForResponse((r) =>
       r.url().endsWith("/actions/create"),
     );
@@ -350,6 +388,8 @@ try {
     const response = await created;
     assert.equal(response.status(), 200, await response.text());
     const result = await response.json();
+    assert.equal(result.name, title);
+    assert.equal(result.goal, goal);
     const names = result.members.map((m) => m.name);
     assert.equal(new Set(names).size, 3);
     assert.ok(

@@ -26,6 +26,21 @@ function memberName(title, suffix = "") {
 
 function mount(root, context) {
   const t = (en, cn) => (zh(context) ? cn : en);
+  function inputText(input, label, limit = 4000) {
+    const value = input.value.trim();
+    if (!value) throw new Error(t(`${label} is required.`, `请填写${label}。`));
+    if (
+      Array.from(value).length > limit ||
+      new TextEncoder().encode(value).length > limit * 2
+    )
+      throw new Error(
+        t(
+          `${label} must be at most ${limit} characters and ${limit * 2} UTF-8 bytes.`,
+          `${label}不能超过 ${limit} 个字符或 ${limit * 2} 个 UTF-8 字节。`,
+        ),
+      );
+    return value;
+  }
   const controller = new AbortController();
   const sheet = node("link", "", {
     rel: "stylesheet",
@@ -223,8 +238,6 @@ function mount(root, context) {
     const body = node("div", "", { className: "form-body" });
     const [nameLabel, name] = field(t("Team name", "团队名称"));
     const [goalLabel, goal] = field(t("Shared goal", "共同目标"), true);
-    name.maxLength = 80;
-    goal.maxLength = 2000;
     name.placeholder = t("e.g. Product research", "例如：产品研究小组");
     goal.placeholder = t(
       "What should this team achieve together?",
@@ -269,8 +282,8 @@ function mount(root, context) {
           return { name, agent: agent.name };
         });
         const payload = {
-          name: name.value.trim(),
-          goal: goal.value.trim(),
+          name: inputText(name, t("Team name", "团队名称"), 80),
+          goal: inputText(goal, t("Shared goal", "共同目标"), 2000),
           members,
         };
         const fingerprint = JSON.stringify(payload);
@@ -501,7 +514,6 @@ function mount(root, context) {
       ariaLabel: t("Recipients", "接收成员"),
     });
     const task = node("textarea", "", {
-      maxLength: 4000,
       required: true,
       ariaLabel: t("Message to team", "发送给团队的消息"),
       placeholder: t(
@@ -540,7 +552,7 @@ function mount(root, context) {
           return;
         }
         if (!composer.reportValidity() || !task.value.trim()) return;
-        const text = task.value.trim(),
+        const text = inputText(task, t("Message to team", "发送给团队的消息")),
           ids = [...recipients];
         const fingerprint = JSON.stringify([text, [...ids].sort()]);
         if (fingerprint !== sentFingerprint) {
@@ -788,7 +800,7 @@ function mount(root, context) {
           label,
           button(t("Submit response", "提交响应"), async () => {
             const parsed = job.clarification
-              ? response.value.trim()
+              ? inputText(response, t("Your answer", "你的回答"))
               : JSON.parse(response.value);
             if (response.value !== responseSnapshot) {
               resumeId = requestId();

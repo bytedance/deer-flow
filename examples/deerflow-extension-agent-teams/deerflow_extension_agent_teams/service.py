@@ -26,6 +26,13 @@ def text(payload, key, limit=4000):
     return value.strip()
 
 
+def mention_label(team_name, member_name):
+    label = f"{team_name} / {member_name}"
+    # The host bounds labels using JavaScript string.length (UTF-16 units).
+    # A validated member name alone fits; routing still uses the full IDs.
+    return label if len(label.encode("utf-16-le")) <= 240 else member_name
+
+
 def fields(payload, expected):
     if set(payload) != set(expected.split()):
         raise ValueError("Unexpected request fields")
@@ -217,7 +224,9 @@ class Teams:
         teams = await self.db("list", context.principal.user_id)
         query = payload["query"].casefold()
         return {
-            "items": [{"id": f"{t['id']}/{m['id']}", "label": f"{t['name']} / {m['name']}", "description": m["agent"]} for t in teams if t["ready"] for m in t["members"] if query in f"{t['name']} {m['name']} {m['agent']}".casefold()][:16]
+            "items": [
+                {"id": f"{t['id']}/{m['id']}", "label": mention_label(t["name"], m["name"]), "description": m["agent"]} for t in teams if t["ready"] for m in t["members"] if query in f"{t['name']} {m['name']} {m['agent']}".casefold()
+            ][:16]
         }
 
     @staticmethod

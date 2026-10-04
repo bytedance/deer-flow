@@ -21,6 +21,9 @@ with deletion and task updates. Count only requests toward the 100-request cap;
 each request can produce at most one receipt, bounding the ledger to 200 entries.
 Browser member labels must remain unique after trimming and truncation to the
 backend character/UTF-8 byte limits. Use host theme tokens for action colors.
+Validate user-entered team names, goals, tasks and clarification answers against
+both backend bounds without truncating the draft. Native mention labels must fit
+the host's 120 UTF-16-unit limit; keep routing IDs independent of display labels.
 
 Ordinary human-input artifacts end runs successfully without a graph interrupt.
 Keep unanswered requests waiting; persist text-response inputs and idempotency

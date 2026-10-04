@@ -92,6 +92,22 @@ async def create(actions, runs):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "team_name,member_name,expected", [("Release", "Research", "Release / Research"), ("T" * 80, "M" * 37, "T" * 80 + " / " + "M" * 37), ("T" * 80, "M" * 38, "M" * 38), ("T" * 80, "M" * 80, "M" * 80), ("😀" * 40, "😀" * 40, "😀" * 40)]
+)
+async def test_native_mention_labels_fit_host_limit_without_changing_routing(plugin, team_name, member_name, expected):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await actions["create"]({"request_id": "long-name", "name": team_name, "goal": "Check mentions", "members": [{"name": member_name, "agent": "researcher"}, {"name": "Review", "agent": "reviewer"}]}, context(runs))
+    # Search still matches the full team/member names, even if the label falls back.
+    candidates = (await service.search({"query": team_name}, context(runs)))["items"]
+    assert len(candidates) == 2
+    assert candidates[0]["label"] == expected
+    assert all(len(item["label"].encode("utf-16-le")) // 2 <= 120 for item in candidates)
+    assert candidates[0]["id"] == f"{team['id']}/{team['members'][0]['id']}"
+
+
+@pytest.mark.asyncio
 async def test_members_are_full_agents_and_requests_are_deduplicated(plugin):
     _, actions, service = plugin
     runs = Runs()
