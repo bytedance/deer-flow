@@ -190,15 +190,17 @@ class PatchedChatMiniMax(ChatOpenAI):
         if logprobs:
             generation_info["logprobs"] = logprobs
 
-        reasoning = _extract_reasoning_text(
+        reasoning_details = _extract_reasoning_text(
             delta.get("reasoning_details"),
             strip_parts=False,
         )
-        if reasoning is None:
-            reasoning = _extract_reasoning_text(
-                delta.get("reasoning_content"),
-                strip_parts=False,
-            )
+        reasoning_content = _extract_reasoning_text(
+            delta.get("reasoning_content"),
+            strip_parts=False,
+        )
+        reasoning = reasoning_details
+        if reasoning is None or (isinstance(delta.get("reasoning_details"), list) and not reasoning.strip() and reasoning_content is not None):
+            reasoning = reasoning_content
         if isinstance(message_chunk, AIMessageChunk):
             if usage_metadata:
                 message_chunk.usage_metadata = usage_metadata
