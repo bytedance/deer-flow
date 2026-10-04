@@ -187,14 +187,16 @@ class CodexChatModel(BaseChatModel):
                         }
                     )
             elif isinstance(msg, ToolMessage):
+                content = self._normalize_content(msg.content)
                 # A blank ID cannot identify the call this result answers.
                 if not _is_valid_call_id(msg.tool_call_id):
+                    logger.warning("Dropping tool result with blank call_id (content %d chars)", len(content))
                     continue
                 input_items.append(
                     {
                         "type": "function_call_output",
                         "call_id": msg.tool_call_id,
-                        "output": self._normalize_content(msg.content),
+                        "output": content,
                     }
                 )
 

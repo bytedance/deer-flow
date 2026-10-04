@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -204,13 +205,15 @@ def test_convert_messages_ai_with_tool_calls():
 
 
 @pytest.mark.parametrize("call_id", ["tc1", "0", " tc1 "])
-def test_convert_messages_tool_message(call_id):
+def test_convert_messages_tool_message(call_id, caplog):
     model = _make_model()
     tool_msg = ToolMessage(content="result data", tool_call_id=call_id)
-    _, items = model._convert_messages([tool_msg])
+    with caplog.at_level(logging.WARNING, logger="deerflow.models.openai_codex_provider"):
+        _, items = model._convert_messages([tool_msg])
     assert items[0]["type"] == "function_call_output"
     assert items[0]["call_id"] == call_id
     assert items[0]["output"] == "result data"
+    assert caplog.record_tuples == []
 
 
 @pytest.mark.parametrize("call_id", ["tc1", "0", " tc1 "])
@@ -245,9 +248,18 @@ def test_convert_messages_omits_paired_calls_and_results_with_blank_ids(blank_id
 
 
 @pytest.mark.parametrize("blank_id", ["", "   ", "\t\r\n"])
-def test_convert_messages_omits_tool_results_with_blank_call_ids(blank_id):
+@pytest.mark.parametrize(
+    ("content", "content_length"),
+    [
+        ("private result", 14),
+        ([{"type": "text", "text": "private"}, {"type": "text", "text": "result"}], 14),
+        ("", 0),
+    ],
+)
+def test_convert_messages_omits_tool_results_with_blank_call_ids(blank_id, content, content_length, caplog):
     model = _make_model()
-    orphaned_result = ToolMessage(content="orphaned result", tool_call_id=blank_id)
+    orphaned_result = ToolMessage(content=content, tool_call_id=blank_id)
+    original_result = orphaned_result.model_dump()
     messages = [
         SystemMessage(content="Follow the instructions."),
         HumanMessage(content="Search for foo."),
@@ -257,7 +269,8 @@ def test_convert_messages_omits_tool_results_with_blank_call_ids(blank_id):
         AIMessage(content="Done."),
     ]
 
-    instructions, items = model._convert_messages(messages)
+    with caplog.at_level(logging.WARNING, logger="deerflow.models.openai_codex_provider"):
+        instructions, items = model._convert_messages(messages)
 
     assert instructions == "Follow the instructions."
     assert items == [
@@ -266,7 +279,10 @@ def test_convert_messages_omits_tool_results_with_blank_call_ids(blank_id):
         {"type": "function_call_output", "call_id": "tc1", "output": "result data"},
         {"role": "assistant", "content": "Done."},
     ]
-    assert orphaned_result.tool_call_id == blank_id
+    assert orphaned_result.model_dump() == original_result
+    assert caplog.record_tuples == [
+        ("deerflow.models.openai_codex_provider", logging.WARNING, f"Dropping tool result with blank call_id (content {content_length} chars)"),
+    ]
 
 
 def test_convert_messages_keeps_placeholder_result_paired_with_invalid_tool_call():

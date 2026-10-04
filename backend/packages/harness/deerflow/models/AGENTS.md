@@ -65,6 +65,8 @@ the same policy first so run metadata reports the effective values. Design note:
 whitespace-only call IDs even when direct provider use bypasses middleware repair.
 Non-blank IDs remain byte-for-byte unchanged so calls and results keep their
 correlation; serialization does not trim IDs or rewrite the input messages.
+Each omitted tool result emits a warning with its normalized content length;
+the warning never includes the result content.
 Coverage: `tests/test_codex_provider.py`.
 
 ### Codex SSE termination (`packages/harness/deerflow/models/openai_codex_provider.py`)
