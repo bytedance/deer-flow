@@ -604,8 +604,9 @@ async def _find_target_run_id(
     source_human: Any,
     request: Request,
 ) -> str:
+    user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
-    rows = await event_store.list_messages(thread_id, limit=REGENERATE_HISTORY_SCAN_LIMIT)
+    rows = await event_store.list_messages(thread_id, limit=REGENERATE_HISTORY_SCAN_LIMIT, user_id=user_id)
     for row in reversed(rows):
         if row.get("event_type") not in {"ai_message", "llm.ai.response"}:
             continue
@@ -619,7 +620,6 @@ async def _find_target_run_id(
         return source_run_id
 
     run_mgr = get_run_manager(request)
-    user_id = await _run_scope_user_id(request, thread_id)
     records = await run_mgr.list_by_thread(thread_id, user_id=user_id, limit=10)
     fallback_record = next(
         (record for record in records if record.status == RunStatus.success and _run_last_ai_matches_message(record, target_message)),
@@ -1159,10 +1159,12 @@ async def _require_run_visible_to_scope(run_id: str, thread_id: str, request: Re
     """Gate run-scoped sub-resource reads and writes (events, messages, join,
     stream, cancel, artifact archive).
 
-    These routes query or mutate by ``(thread_id, run_id)`` without a
-    per-user filter of their own. For trusted internal callers on threads
-    without established ownership, that let an internal caller acting for
-    owner A read or cancel owner B's run by id (#5448 review P1 follow-up).
+    These routes query or mutate by ``(thread_id, run_id)``; events and
+    messages add only the ``_run_scope_user_id`` data filter, which matches
+    row stamps rather than gating the run itself. For trusted internal
+    callers on threads without established ownership, a missing gate let an
+    internal caller acting for owner A read or cancel owner B's run by id
+    (#5448 review P1 follow-up).
     The run's own stamp must therefore match the acting owner's raw value (or
     the legacy ``"default"`` stamp); every other caller and every
     established-ownership thread keeps its existing semantics.
@@ -1638,6 +1640,7 @@ async def list_run_messages(
     Response: { data: [...], has_more: bool }
     """
     await _require_run_visible_to_scope(run_id, thread_id, request)
+    user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages_by_run(
         thread_id,
@@ -1645,6 +1648,7 @@ async def list_run_messages(
         limit=limit + 1,
         before_seq=before_seq,
         after_seq=after_seq,
+        user_id=user_id,
     )
     data, has_more = trim_run_message_page(rows, limit=limit, after_seq=after_seq)
 
@@ -1825,6 +1829,7 @@ async def list_run_events(
     task's persisted steps without the run-wide ``limit`` truncating the tail (#3779).
     """
     await _require_run_visible_to_scope(run_id, thread_id, request)
+    user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
     types = event_types.split(",") if event_types else None
     events = await event_store.list_events(
@@ -1834,6 +1839,7 @@ async def list_run_events(
         task_id=task_id,
         limit=limit,
         after_seq=after_seq,
+        user_id=user_id,
     )
     return [
         {
