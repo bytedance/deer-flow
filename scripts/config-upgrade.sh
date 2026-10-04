@@ -5,23 +5,15 @@
 # 1. Runs version-specific migrations (value replacements, renames, etc.)
 # 2. Merges missing fields from the example into the user config
 # 3. Backs up config.yaml to config.yaml.bak before modifying.
+#
+# Both `uv run` invocations pass --no-sync: the backend environment is a
+# prerequisite of every caller (make install before make dev/start, the
+# pre-built Docker image), so the upgrade must use it as-is. Re-resolving
+# here would consult the package index — breaking hosts whose uv points at
+# a restricting mirror, and overriding operator index configuration — for
+# no benefit: the upgrade changes config.yaml, never dependencies.
 
 set -e
-
-# The script runs `uv run` against this checkout's backend environment, whose
-# [tool.uv] index-url pins the registry the lockfile was resolved against.
-# Host index overrides (UV_DEFAULT_INDEX/UV_INDEX/UV_EXTRA_INDEX_URL/
-# UV_INDEX_URL) outrank that project setting, so a shell pointing uv at a
-# restricting mirror would fail the re-resolution the upgrade needs; drop
-# them so the repo's own pinned index applies.
-unset UV_DEFAULT_INDEX UV_INDEX UV_EXTRA_INDEX_URL UV_INDEX_URL
-# The reset is unconditional: on a lockdown host whose only reachable index IS
-# the exported mirror (pypi.org firewalled), the upgrade now fails where it
-# previously worked through the mirror — the inverse of the failure this
-# fixes. That trade-off is deliberate (a partial mirror that 403s some
-# packages is the common case, and the resolution must match the registry the
-# lockfile was built against); if lockdown hosts ever need an opt-out, add it
-# here.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.yaml"
@@ -37,7 +29,7 @@ fi
 # backend/config.yaml present, `make dev` reads the checkout copy. The import
 # loads .env as the Gateway does; DEER_FLOW_PROJECT_ROOT then defaults to the
 # checkout, as in serve.sh. Prints nothing when no config exists yet.
-CONFIG="$(cd "$REPO_ROOT/backend" && REPO_ROOT_WIN_PATH="$REPO_ROOT_WIN" uv run python -c "
+CONFIG="$(cd "$REPO_ROOT/backend" && REPO_ROOT_WIN_PATH="$REPO_ROOT_WIN" uv run --no-sync python -c "
 import os
 import sys
 
@@ -76,7 +68,7 @@ else
     EXAMPLE_WIN="$EXAMPLE"
 fi
 
-cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run python -c "
+cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run --no-sync python -c "
 import os
 import sys, shutil, copy, re, secrets
 from pathlib import Path
@@ -120,7 +112,6 @@ RAGFLOW_PROVIDER_KEYS = (
     'max_chars_per_chunk',
     'max_total_chars',
 )
-
 
 def migrate_knowledge_provider_settings(data):
     # Move legacy RAGFlow settings to the provider tool and remove them from the generic block.
@@ -172,7 +163,6 @@ def migrate_knowledge_provider_settings(data):
         del knowledge_base[key]
     return changes
 
-
 MIGRATIONS = {
     1: {
         'description': 'Rename src.* module paths to deerflow.*',
@@ -188,7 +178,6 @@ MIGRATIONS = {
         'data_transform': migrate_knowledge_provider_settings,
     },
 }
-
 
 def migrate_pii_token_secret(data):
     # token_secret became mandatory whenever pii_redaction is enabled (v47).
@@ -206,7 +195,6 @@ def migrate_pii_token_secret(data):
     pii['token_secret'] = secrets.token_urlsafe(32)
     changes.append('pii_redaction.token_secret generated (required for enabled redaction; a random value was persisted to config.yaml)')
     return changes
-
 
 MIGRATIONS[47] = {
     'description': 'Generate a token_secret for deployments with pii_redaction enabled (now mandatory)',
