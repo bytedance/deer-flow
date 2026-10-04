@@ -31,7 +31,17 @@ def test_bootstrap_preserves_owner_display_name(tmp_path, monkeypatch, backend, 
         store = SqlAgentStore(url)
     monkeypatch.setattr("deerflow.tools.builtins.setup_agent_tool.get_agent_store", lambda: store)
     owner = "test-user-autouse"
-    store.create("reviewer", {"display_name": display_name}, "old soul", user_id=owner)
+    store.create(
+        "reviewer",
+        {
+            "display_name": display_name,
+            "model": "existing-model",
+            "subagent_enabled": True,
+            "max_concurrent_subagents": 2,
+        },
+        "old soul",
+        user_id=owner,
+    )
     store.create("reviewer", {"display_name": "Other owner"}, "other soul", user_id="other")
     result = setup_agent.func(
         soul="new soul",
@@ -42,6 +52,9 @@ def test_bootstrap_preserves_owner_display_name(tmp_path, monkeypatch, backend, 
     assert result.update["created_agent_name"] == "reviewer"
     config = store.get("reviewer", user_id=owner)
     assert config.display_name == display_name
+    assert config.model == "existing-model"
+    assert config.subagent_enabled is True
+    assert config.max_concurrent_subagents == 2
     assert config.description == "rebootstrapped"
     assert config.skills == ["test-skill"]
     assert store.get_soul("reviewer", user_id=owner) == "new soul"
