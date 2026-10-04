@@ -1,9 +1,11 @@
 import ast
 import html
 import json
+import math
 import re
 import uuid
 from collections.abc import Iterator
+from decimal import Decimal, InvalidOperation
 
 import httpx
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
@@ -11,6 +13,29 @@ from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 
 _JSON_NUMBER_RE = re.compile(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def _parse_json_float(value: str) -> float:
+    """Parse a JSON float without silently overflowing or underflowing."""
+    try:
+        precise = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid JSON number: {value}") from exc
+    converted = float(precise)
+    if not math.isfinite(converted) or (precise != 0 and converted == 0.0):
+        raise ValueError(f"JSON number is outside the representable float range: {value}")
+    return converted
+
+
+def _safe_literal(value: object) -> bool:
+    """Reject non-finite floats nested in an AST fallback value."""
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_safe_literal(item) for item in value)
+    if isinstance(value, dict):
+        return all(_safe_literal(item) for item in value.values())
+    return True
 
 
 def _fix_messages(messages: list) -> list:
@@ -112,12 +137,19 @@ def _parse_xml_tool_call_to_dict(content: str) -> tuple[str, list[dict]]:
             parsed_value = raw_value
             if raw_value.startswith(("[", "{")) or raw_value in ("true", "false", "null") or _JSON_NUMBER_RE.fullmatch(raw_value):
                 try:
-                    parsed_value = json.loads(raw_value)
-                except json.JSONDecodeError:
-                    try:
-                        parsed_value = ast.literal_eval(raw_value)
-                    except (ValueError, SyntaxError):
-                        pass
+                    parsed_value = json.loads(raw_value, parse_float=_parse_json_float)
+                except (json.JSONDecodeError, ValueError):
+                    # Numeric-looking values must remain strings when the
+                    # JSON conversion would overflow, underflow, or exceed
+                    # Python's integer digit limit. Do not let literal_eval
+                    # silently turn those values into a different number.
+                    if not _JSON_NUMBER_RE.fullmatch(raw_value):
+                        try:
+                            candidate = ast.literal_eval(raw_value)
+                            if _safe_literal(candidate):
+                                parsed_value = candidate
+                        except (ValueError, SyntaxError):
+                            pass
 
             args[key] = parsed_value
 

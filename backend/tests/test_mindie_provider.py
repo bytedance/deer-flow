@@ -249,6 +249,12 @@ class TestParseXmlToolCalls:
         _, calls = _parse_xml_tool_call_to_dict(content)
         assert calls[0]["args"]["n"] == expected
 
+    @pytest.mark.parametrize("raw_value", ["9" * 5000, "1e400", "1e-400"])
+    def test_unsafe_numeric_params_stay_strings(self, raw_value):
+        content = f"<tool_call><function=f><parameter=n>{raw_value}</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == raw_value
+
     def test_list_param_deserialised(self):
         content = '<tool_call><function=f><parameter=lst>["a","b"]</parameter></function></tool_call>'
         _, calls = _parse_xml_tool_call_to_dict(content)
