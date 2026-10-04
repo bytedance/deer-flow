@@ -11,33 +11,53 @@ from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 
 _MAX_TOOL_RESULT_CHARS = 30_000
-_MEDIA_BLOCK_TYPES = frozenset({"file", "image", "image_url", "resource", "blob"})
+_MEDIA_BLOCK_TYPES = frozenset({"document", "file", "image", "image_url", "resource", "blob"})
 _BINARY_CONTENT_KEYS = frozenset({"base64", "blob", "data"})
 
 
-def _compact_media_block(block: dict) -> dict:
-    """Keep media metadata while removing inline binary payloads."""
+def _compact_media_value(value: object) -> tuple[object, bool]:
+    """Recursively remove binary payloads from a media block."""
+    if isinstance(value, list):
+        compact_items: list[object] = []
+        omitted = False
+        for item in value:
+            compact_item, item_omitted = _compact_media_value(item)
+            compact_items.append(compact_item)
+            omitted = omitted or item_omitted
+        return compact_items, omitted
+    if not isinstance(value, dict):
+        return value, False
+
     compact: dict = {}
     omitted = False
-    for key, value in block.items():
+    for key, item in value.items():
         if key in _BINARY_CONTENT_KEYS:
             omitted = True
             continue
         if key == "image_url":
-            if isinstance(value, dict):
-                image_url = dict(value)
+            if isinstance(item, dict):
+                image_url = dict(item)
                 url = image_url.get("url")
                 if isinstance(url, str) and url.startswith("data:"):
                     image_url["url"] = "[inline image data omitted]"
                     omitted = True
                 compact[key] = image_url
                 continue
-            if isinstance(value, str) and value.startswith("data:"):
+            if isinstance(item, str) and item.startswith("data:"):
                 compact[key] = "[inline image data omitted]"
                 omitted = True
                 continue
-        compact[key] = value
+        compact_item, item_omitted = _compact_media_value(item)
+        compact[key] = compact_item
+        omitted = omitted or item_omitted
+    return compact, omitted
+
+
+def _compact_media_block(block: dict) -> dict:
+    """Keep media metadata while removing inline binary payloads."""
+    compact, omitted = _compact_media_value(block)
     if omitted:
+        assert isinstance(compact, dict)
         compact["content_omitted"] = "binary media payload omitted"
     return compact
 
@@ -70,7 +90,10 @@ def _tool_result_to_text(content: object) -> str:
         return _truncate_tool_result("".join(parts))
     if content is None:
         return ""
-    return _truncate_tool_result(json.dumps(content, ensure_ascii=False, default=str))
+    serializable = content
+    if isinstance(content, dict) and content.get("type") in _MEDIA_BLOCK_TYPES:
+        serializable = _compact_media_block(content)
+    return _truncate_tool_result(json.dumps(serializable, ensure_ascii=False, default=str))
 
 
 def _fix_messages(messages: list) -> list:

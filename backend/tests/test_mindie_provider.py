@@ -2,6 +2,7 @@
 Unit tests for MindIEChatModel adapter.
 """
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -181,6 +182,20 @@ class TestFixMessages:
         assert len(serialized) <= _MAX_TOOL_RESULT_CHARS
         assert payload not in serialized
         assert "omitted" in serialized
+
+    @pytest.mark.parametrize(
+        "block",
+        [
+            {"type": "document", "source": {"type": "base64", "data": "payload"}},
+            {"type": "resource", "resource": {"blob": "payload"}},
+        ],
+    )
+    def test_tool_message_omits_nested_binary_media_payloads(self, block):
+        block = json.loads(json.dumps(block).replace("payload", "SENSITIVE_BYTES_123"))
+        serialized = _tool_result_to_text([block])
+
+        assert "SENSITIVE_BYTES_123" not in serialized
+        assert "content_omitted" in serialized
 
     def test_tool_message_caps_large_structured_payload(self):
         block = {"type": "json", "json": {"content": "x" * (_MAX_TOOL_RESULT_CHARS * 2)}}

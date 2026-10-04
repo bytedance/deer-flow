@@ -380,9 +380,10 @@ def _redact_json_value(value: object, redactor: _Redactor) -> tuple[object, bool
         result: dict[object, object] = {}
         changed = False
         for key, item in value.items():
+            redacted_key = redactor.redact(key) if isinstance(key, str) else key
             redacted_item, item_changed = _redact_json_value(item, redactor)
-            result[key] = redacted_item
-            changed = changed or item_changed
+            result[redacted_key] = redacted_item
+            changed = changed or item_changed or redacted_key != key
         return result, changed
     return value, False
 
