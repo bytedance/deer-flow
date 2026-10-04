@@ -100,12 +100,20 @@ return to the bottom with `PageDown`.
 
 ### Slash commands
 
-`/help` `/new` `/clear` `/goal` `/threads` (`/switch`) `/model` `/skills` `/tools`
+`/help` `/new` `/clear` `/goal` `/resume` `/threads` (`/switch`) `/model` `/skills` `/tools`
 `/mcp` `/memory` `/uploads` `/usage` `/config` `/quit`, plus
 `/<skill-name> task` to activate any enabled skill for the current turn (same
 semantics as elsewhere in DeerFlow). `/model` and `/threads` open modal pickers.
 
 `/clear` removes the current transcript rows from the terminal display only; it keeps the active thread and persisted conversation intact. During an active run, `/new` and `/clear` ask you to wait for the run to finish instead of resetting in-flight display state.
+
+`/resume <id-or-title>` switches conversations, while `/resume` without an argument
+opens the thread picker. During an active run, `/resume`, `/threads`, and `/switch`
+ask you to wait instead of switching away from in-flight output. An invalid
+`/resume` reference displays an error and leaves the current conversation intact.
+After an interrupt and conversation switch, late stream actions from the previous
+thread are discarded when they reach the UI.
+
 Use `/goal <condition>` to set the active thread goal, `/goal` to show it, and
 `/goal clear` to clear it.
 
