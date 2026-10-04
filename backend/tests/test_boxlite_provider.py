@@ -1132,6 +1132,50 @@ def test_replica_enforcement_counts_active_and_warm(monkeypatch):
 # ── Task 8: Shutdown and reset including warm pool ────────────────────
 
 
+def test_shutdown_retries_only_private_loop_cleanup_after_join_timeout(monkeypatch):
+    from deerflow.community.boxlite.provider import _BoxliteLoopShutdownTimeout
+
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"idle_timeout": 0}),
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.close()
+
+    class RetryLoop:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise _BoxliteLoopShutdownTimeout(
+                    "BoxLite event-loop thread is still running after stop timeout"
+                )
+
+    retry_loop = RetryLoop()
+    provider._loop = retry_loop
+
+    with pytest.raises(_BoxliteLoopShutdownTimeout, match="still running"):
+        provider.shutdown()
+
+    assert provider._shutdown_called is True
+    assert provider._loop_cleanup_pending is True
+    assert retry_loop.close_calls == 1
+
+    with pytest.raises(RuntimeError, match="shutting down"):
+        provider.acquire()
+
+    provider.shutdown()
+
+    assert provider._loop_cleanup_pending is False
+    assert retry_loop.close_calls == 2
+
+    provider.shutdown()
+    assert retry_loop.close_calls == 2
+
+
 def test_shutdown_stops_idle_reaper_and_destroys_all_boxes(monkeypatch):
     """shutdown stops the idle reaper thread and destroys all active + warm boxes."""
     monkeypatch.setattr(
@@ -1532,6 +1576,67 @@ def test_grep_single_file_path_with_matching_glob(tmp_path, monkeypatch) -> None
     assert [m.path for m in matches] == [str(target)]
     assert truncated is False
     assert box.grep(str(target), "needle", glob="*.md") == ([], False)
+
+
+def test_event_loop_thread_close_rejects_live_thread_after_timeout() -> None:
+    from deerflow.community.boxlite.provider import (
+        _BoxliteLoopShutdownTimeout,
+        _EventLoopThread,
+    )
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self.running = True
+            self.closed = False
+            self.stop_calls = 0
+            self.close_calls = 0
+
+        def is_closed(self) -> bool:
+            return self.closed
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+        def call_soon_threadsafe(self, callback) -> None:
+            callback()
+
+        def _write_to_self(self) -> None:
+            return None
+
+        def is_running(self) -> bool:
+            return self.running
+
+        def close(self) -> None:
+            self.close_calls += 1
+            self.closed = True
+
+    class JoinControlledThread:
+        def __init__(self) -> None:
+            self.alive = True
+            self.join_timeout: float | None = None
+
+        def join(self, timeout: float | None = None) -> None:
+            self.join_timeout = timeout
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+    loop_thread = _EventLoopThread.__new__(_EventLoopThread)
+    loop_thread._loop = FakeLoop()
+    loop_thread._thread = JoinControlledThread()
+
+    with pytest.raises(_BoxliteLoopShutdownTimeout, match="still running"):
+        loop_thread.close()
+
+    assert loop_thread._thread.join_timeout == 5
+    assert loop_thread._loop.close_calls == 0
+
+    loop_thread._thread.alive = False
+    loop_thread._loop.running = False
+    loop_thread.close()
+
+    assert loop_thread._loop.closed is True
+    assert loop_thread._loop.close_calls == 1
 
 
 def test_event_loop_thread_timeout_cancels_submitted_coroutine() -> None:
