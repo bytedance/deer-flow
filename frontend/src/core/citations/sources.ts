@@ -168,6 +168,14 @@ function quoteContext(line: string): { quoteDepth: number; rest: string } {
   };
 }
 
+function splitIndentation(content: string): { indent: number; body: string } {
+  const body = content.replace(/^[ \t]+/, "");
+  return {
+    indent: indentationColumns(content.slice(0, content.length - body.length)),
+    body,
+  };
+}
+
 // Where a line sits once its blockquote markers are stripped: how deep in the
 // quotes it is, the column its content starts at inside them, and the text after
 // that indentation. A line that loses a `>` has left the blockquote that held
@@ -183,12 +191,21 @@ function linePosition(line: string): {
   // in the middle of a code block.
   const content = line.endsWith("\r") ? line.slice(0, -1) : line;
   const { quoteDepth, rest } = quoteContext(content);
-  const body = rest.replace(/^[ \t]+/, "");
-  return {
-    quoteDepth,
-    indent: indentationColumns(rest.slice(0, rest.length - body.length)),
-    body,
-  };
+  return { quoteDepth, ...splitIndentation(rest) };
+}
+
+// The same measurement with no block quote container assumed: a line inside an
+// open fence is literal, so a `>` there is code and keeps the columns it
+// occupies. Used to check containment for a fence that was not opened in a
+// quote, where stripping the marker made an indented content line read as column
+// zero and escape the fence.
+function literalPosition(line: string): {
+  quoteDepth: number;
+  indent: number;
+  body: string;
+} {
+  const content = line.endsWith("\r") ? line.slice(0, -1) : line;
+  return { quoteDepth: 0, ...splitIndentation(content) };
 }
 
 // Column a fence marker starts at, measured from the content of the innermost
@@ -305,9 +322,15 @@ function maskFencedCodeBlocks(markdown: string): string {
       indentedRun = false;
     }
     if (openMarker) {
+      // A fence that was not opened in a quote has no quote container a later
+      // line can leave, and its content lines are literal: measuring them
+      // through `linePosition()` stripped a leading `>` and its padding, so
+      // `  > example` inside a column-two list fence looked dedented to zero.
+      const containment =
+        fence!.quoteDepth === 0 ? literalPosition(line) : position;
       const escaped =
-        position.quoteDepth < fence!.quoteDepth ||
-        (position.body !== "" && position.indent < fence!.column);
+        containment.quoteDepth < fence!.quoteDepth ||
+        (containment.body !== "" && containment.indent < fence!.column);
       if (escaped) {
         const leftTheQuote = fence!.quoteDepth > 0 && position.quoteDepth === 0;
         openMarker = null;
@@ -361,12 +384,23 @@ function maskFencedCodeBlocks(markdown: string): string {
     if (position.body !== "") {
       survivingItemColumn(items, position.indent);
     }
-    const item = LIST_ITEM_RE.exec(position.body);
-    if (item && position.indent - (items[items.length - 1] ?? 0) <= 3) {
+    // A line can open several list items at once and the fence belongs to the
+    // deepest of them: `- - - ```md` has its content column at six, so applying
+    // the marker pattern once recorded column two and the opener check below
+    // rejected a valid fence as four columns past its container.
+    let markerColumn = position.indent;
+    let markerRest = position.body;
+    for (
+      let item = LIST_ITEM_RE.exec(markerRest);
+      item && markerColumn - (items[items.length - 1] ?? 0) <= 3;
+      item = LIST_ITEM_RE.exec(markerRest)
+    ) {
       // The item's content column is where its marker text ends in columns, not
       // in characters: `-\t` reaches column four, and reading it as two would
       // keep a citation two spaces in inside a fence the reader already left.
-      items.push(advanceColumns(position.indent, item[0]));
+      markerColumn = advanceColumns(markerColumn, item[0]);
+      items.push(markerColumn);
+      markerRest = markerRest.slice(item[0].length);
     }
     // The opener gets the same three-column budget as the closer: four columns
     // past the container's content column is an indented code block, so a marker

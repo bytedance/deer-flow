@@ -711,6 +711,57 @@ describe("extractCitationSources", () => {
     ]);
   });
 
+  it("keeps a literal quote marker inside an open list fence", () => {
+    // Once a fence is open its lines are literal, so the `>` here is code rather
+    // than a new block quote. Reading it as a container made the line look
+    // dedented to column zero, which escaped the column-two list fence and
+    // surfaced the sample's citation while reinterpreting the real closer as a
+    // top-level opener.
+    const markdown = [
+      "- ```md",
+      "  > example",
+      "  [citation:Fake](https://example.com/fake)",
+      "  ```",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("keeps a citation on a literal quote line inside a list fence", () => {
+    // Same shape with the citation on the quoted line itself: it stays code.
+    const markdown = [
+      "- ```md",
+      "  > [citation:Fake](https://example.com/fake)",
+      "  ```",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
+  it("keeps a citation inside a fence opened behind several list markers", () => {
+    // `- - - ```md` is a fence in the third list item, whose content column is
+    // six. Recording only the first marker put the fence at column two, which
+    // rejected the valid opener as four columns past its container.
+    const markdown = [
+      "- - - ```md",
+      "      [citation:Fake1](https://example.com/fake1)",
+      "",
+      "      [citation:Fake2](https://example.com/fake2)",
+      "      ```",
+      "[citation:Real](https://example.com/real)",
+    ].join("\n");
+
+    expect(extractCitationSources(markdown).map((s) => s.url)).toEqual([
+      "https://example.com/real",
+    ]);
+  });
+
   it("uses the source domain when the citation label is generic", () => {
     const markdown = "See [citation:Source](https://www.example.com/path).";
 
