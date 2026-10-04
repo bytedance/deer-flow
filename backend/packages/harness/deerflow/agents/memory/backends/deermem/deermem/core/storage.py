@@ -416,6 +416,11 @@ def _parse_listed_fact(path: Path) -> dict[str, Any] | None:
     A commit can delete a listed fact before it is opened; that vanished entry
     returns ``None``. An entry that is still present but unreadable (such as a
     dangling symlink) remains corruption.
+
+    The ``lexists`` re-check is a best-effort heuristic, not an exact test: a
+    delete followed by a recreate of the same id before the check still raises
+    (the conservative side), and an ``lstat`` failure on a parent directory
+    (such as ``EACCES``) reads as vanished, so that entry is skipped.
     """
     try:
         return _parse_fact_markdown(path)
@@ -884,7 +889,9 @@ class FileMemoryStorage(MemoryStorage):
             return []
         facts: list[dict[str, Any]] = []
         for fact_path in sorted(agent_facts_directory(path, agent_name).glob("**/*.md")):
-            # load()/reload() reach here without the scope locks.
+            # Reached both unlocked (load()/reload()) and under the scope locks
+            # (save(), clear_all(), default-bucket migration); the vanished-entry
+            # skip only ever fires on the unlocked paths.
             fact = _parse_listed_fact(fact_path)
             if fact is None:
                 continue
