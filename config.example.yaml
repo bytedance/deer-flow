@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 50
+config_version: 52
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -430,31 +430,30 @@ models:
   #   context_window: 1048576
   #   supports_vision: true
 
-  # Example: Gemini model via OpenAI-compatible gateway (with thinking support)
+  # Example: Gemini model via Google's official OpenAI-compatible endpoint
   # Use PatchedChatOpenAI so that tool-call thought_signature values on tool_calls
   # are preserved across multi-turn tool-call conversations — required by the
   # Gemini API when thinking is enabled. See:
   # https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures
-  # - name: gemini-2.5-pro-thinking
-  #   display_name: Gemini 2.5 Pro (Thinking)
+  # Google accepts reasoning_effort, not extra_body.thinking. Gemini 3.1 Pro
+  # cannot disable thinking; dialect: none avoids emitting a thinking toggle.
+  # https://ai.google.dev/gemini-api/docs/openai#thinking
+  # - name: gemini-3.1-pro-preview
+  #   display_name: Gemini 3.1 Pro (Thinking)
   #   use: deerflow.models.patched_openai:PatchedChatOpenAI
-  #   model: google/gemini-2.5-pro-preview   # model name as expected by your gateway
+  #   model: gemini-3.1-pro-preview
   #   api_key: $GEMINI_API_KEY
-  #   base_url: https://<your-openai-compat-gateway>/v1
+  #   base_url: https://generativelanguage.googleapis.com/v1beta/openai/
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 16384
   #   context_window: 1048576
-  #   supports_thinking: true
   #   supports_vision: true
-  #   when_thinking_enabled:
-  #     extra_body:
-  #       thinking:
-  #         type: enabled
-  #   when_thinking_disabled:
-  #     extra_body:
-  #       thinking:
-  #         type: disabled
+  #   reasoning:
+  #     thinking: required
+  #     dialect: none
+  #     effort:
+  #       values: [minimal, low, medium, high]
 
   # Example: Xiaomi MiMo model (with thinking support)
   # MiMo thinking mode returns reasoning_content and requires that field to be
@@ -918,6 +917,8 @@ tools:
   #   group: web
   #   use: deerflow.community.serper.tools:web_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
+  #   include_domains: []  # Optional domain-only lists, at most 10 entries each
+  #   exclude_domains: []  # Exclusion wins; see backend/docs/CONFIGURATION.md
   #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
 
   # Web search tool (uses Serply - Google Search API, requires SERPLY_API_KEY)
@@ -1112,7 +1113,8 @@ tools:
   #   timeout_ms: 30000                # Per-action navigation/interaction timeout
   #   viewport_width: 1280
   #   viewport_height: 720
-  #   # allow_private_addresses: false # SSRF guard: keep false in production
+  #   # allow_private_addresses: false # SSRF guard: keep false in production. Also applies to the
+  #   #                                # pinned egress proxy every launched browser connects through.
   #   # cdp_url: http://127.0.0.1:9222 # Attach to YOUR running Chrome (Codex-style)
   #   # allow_unguarded_cdp: false      # REQUIRED true with cdp_url: attaching to an
   #   #                                # existing Chrome prevents DeerFlow from
@@ -1127,7 +1129,9 @@ tools:
   #   #                                # CDP handshake. If so, use headless: false to launch
   #   #                                # Playwright's own visible browser instead.
   #   # Multi-worker note: browser sessions live in one Gateway worker's memory.
-  #   # Keep GATEWAY_WORKERS=1 while this tool group is enabled.
+  #   # Keep the Gateway to one worker process while this tool group is enabled:
+  #   # GATEWAY_WORKERS=1, and WEB_CONCURRENCY unset or 1 on the launches that pass
+  #   # uvicorn no --workers (backend/Dockerfile, scripts/serve.sh).
   # - name: browser_snapshot
   #   group: browser
   #   use: deerflow.community.browser_automation.tools:browser_snapshot_tool
@@ -1164,6 +1168,9 @@ tools:
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool
     timeout: 10
+    # Opt-in retries may increase upstream requests and cost.
+    # max_retries: 0
+    # retry_budget_seconds: 30
     # Optional proxy for restricted networks / Docker / WSL.
     # Use host.docker.internal instead of 127.0.0.1 when the proxy runs on the host.
     # proxy: $HTTPS_PROXY
@@ -2693,10 +2700,15 @@ agent_storage:
 # when every Gateway instance shares Postgres, run ownership heartbeats, and
 # database-backed run events; startup recovery then preserves live peer runs.
 #
+# When channel_connections.enabled is true and IM channels are running, the
+# same poll_interval_seconds also drives the notification delivery worker that
+# pushes scheduled-run outcomes to the owner's bound IM identities (WeCom
+# proactive push today). Manual "run now" and interrupts stay silent.
+#
 # scheduler:
 #   enabled: false               # Master switch for the background poller
 #   multi_instance: false        # Opt into lease-aware recovery across Gateway instances
-#   poll_interval_seconds: 5     # How often to scan for due tasks
+#   poll_interval_seconds: 5     # How often to scan for due tasks (+ IM outbox delivery)
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
 #   max_concurrent_runs: 3       # Global cap on launching/running scheduled runs across multi-instance Pods
 #   queue_timeout_seconds: 3600  # Maximum durable queue wait before an occurrence fails
@@ -2704,6 +2716,7 @@ agent_storage:
 #   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
   enabled: false
+  tool_enabled: false          # Offer schedule tools to authorized Gateway conversations
   multi_instance: false       # Opt into lease-aware recovery across Gateway instances
   poll_interval_seconds: 5
   lease_seconds: 120
@@ -2802,7 +2815,7 @@ run_ownership:
 #                                # to disable. This is not a run timeout.
 #   recovered_stream_cleanup_delay_seconds: 60  # seconds to wait after
 #                                # publishing END for a recovered orphan run
-#                                # before deleting the stream key.
+#                                # before deleting the stream key (max: 86400).
 #   max_connections: 100         # optional pool ceiling. Each live SSE client
 #                                # holds one connection blocked in XREAD ... BLOCK
 #                                # for up to the configured heartbeat interval, so
@@ -2825,8 +2838,11 @@ run_ownership:
 # - Provider bot/app credentials stay under `channels.*`.
 # - `channel_connections` stores per-user bindings and one-time connect codes.
 # - Telegram uses a deep link when `bot_username` is configured.
-# - Slack, Discord, Feishu, DingTalk, WeChat, and WeCom use `/connect <code>`
+# - Slack, Discord, Feishu, DingTalk, WeChat, WeCom, and QQ use `/connect <code>`
 #   through the already-running bot/app.
+# - When enabled (and channels are running), scheduled-task completions/failures
+#   also enqueue IM pushes to the owner's connected identities (see scheduler
+#   section above). Manual triggers and interrupts do not notify.
 #
 # channel_connections:
 #   enabled: false
@@ -2857,6 +2873,9 @@ run_ownership:
 #     enabled: false
 #
 #   buzz:
+#     enabled: false
+#
+#   qq:
 #     enabled: false
 
 # ============================================================================
@@ -2899,6 +2918,15 @@ run_ownership:
 #       is_plan_mode: false
 #       subagent_enabled: false
 #
+#   # QQ Open Platform bot; choose WebSocket in the developer console.
+#   # Text-only C2C and group @mentions; no public callback URL required.
+#   qq:
+#     enabled: false
+#     app_id: $QQ_APP_ID
+#     client_secret: $QQ_CLIENT_SECRET
+#     allowed_users: []  # QQ OpenIDs, not numeric QQ account numbers; empty allows all
+#     sandbox: false    # REST sandbox host only; console sandbox membership is separate
+#
 #   feishu:
 #     enabled: false
 #     app_id: $FEISHU_APP_ID
@@ -2915,7 +2943,7 @@ run_ownership:
 #   telegram:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
-#     allowed_users: []               # empty = allow all
+#     allowed_users: []               # numeric user IDs, not @usernames; empty = allow all
 #     rich_messages: false             # Bot API 10.1 Rich Messages for final Markdown responses
 #
 #   wechat:
@@ -2985,6 +3013,8 @@ run_ownership:
 #     allowed_users: []               # empty = allow all
 #     card_template_id: ""            # Optional: AI Card template ID for streaming updates
 #
+#   # Discord joins as a bot; requires the `discord` dependency extra
+#   # (uv sync --extra discord) for discord.py.
 #   discord:
 #     enabled: false
 #     bot_token: $DISCORD_BOT_TOKEN

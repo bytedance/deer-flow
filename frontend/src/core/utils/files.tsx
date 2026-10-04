@@ -109,7 +109,8 @@ const extensionMap: Record<string, string> = {
   lua: "lua",
   r: "r",
   matlab: "matlab",
-  julia: "jl",
+  julia: "julia",
+  jl: "julia",
   elm: "elm",
   haskell: "haskell",
   hs: "haskell",
@@ -172,7 +173,7 @@ export function getFileName(filepath: string) {
 }
 
 export function getFileExtension(filepath: string) {
-  return filepath.split(".").pop()!.toLocaleLowerCase();
+  return getFileName(filepath).split(".").pop()!.toLocaleLowerCase();
 }
 
 export function checkCodeFile(
@@ -181,7 +182,7 @@ export function checkCodeFile(
   | { isCodeFile: true; language: string }
   | { isCodeFile: false; language: null } {
   const extension = getFileExtension(filepath);
-  const isCodeFile = extension in extensionMap;
+  const isCodeFile = Object.hasOwn(extensionMap, extension);
   if (isCodeFile) {
     return {
       isCodeFile: true,

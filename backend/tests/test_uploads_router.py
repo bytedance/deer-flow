@@ -4,7 +4,7 @@ import os
 import stat
 import threading
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,6 +17,7 @@ from app.gateway import upload_ingestion
 from app.gateway.deps import get_config
 from app.gateway.routers import uploads
 from deerflow.sandbox.lease import get_sandbox_lease_manager
+from deerflow.uploads.companions import resolve_companion
 
 
 class ChunkedUpload:
@@ -266,6 +267,7 @@ def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
 
     assert (thread_uploads_dir / "report.pdf").read_bytes() == b"pdf-bytes"
     assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "converted"
+    assert resolve_companion(thread_uploads_dir / "report.pdf") == thread_uploads_dir / "report.md"
 
     sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.pdf", b"pdf-bytes")
     sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.md", b"converted")
@@ -1015,6 +1017,87 @@ def test_upload_files_adjusts_read_permissions_for_mounted_non_local_sandbox(tmp
     make_readable.assert_called_once()
     called_path = make_readable.call_args[0][0]
     assert called_path.name == "notes.txt"
+
+
+@pytest.mark.parametrize("filename", [".upload-notes.part", ".upload-.part", "folder/.upload-notes.part"])
+@pytest.mark.parametrize("batch", ["single", "reserved_first", "reserved_last"])
+def test_upload_files_rejects_reserved_names_before_starting_batch(tmp_path, filename, batch):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    existing = thread_uploads_dir / "existing.txt"
+    existing.write_bytes(b"existing document")
+    app = make_authed_test_app()
+    app.include_router(uploads.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+
+    reserved = ("files", (filename, b"reserved document"))
+    normal = ("files", ("normal.txt", b"normal document"))
+    files = [reserved] if batch == "single" else [reserved, normal] if batch == "reserved_first" else [normal, reserved]
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir) as ensure_dir,
+        patch.object(uploads, "get_sandbox_provider") as get_provider,
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/threads/thread-local/uploads", files=files)
+
+    assert response.status_code == 400
+    assert "reserved upload staging" in response.json()["detail"]
+    assert "Rename" in response.json()["detail"]
+    ensure_dir.assert_not_called()
+    get_provider.assert_not_called()
+    assert [path.name for path in thread_uploads_dir.iterdir()] == ["existing.txt"]
+    assert existing.read_bytes() == b"existing document"
+
+
+@pytest.mark.parametrize("filename", [r"folder\.upload-notes.part", r"C:\users\.upload-notes.part"])
+@pytest.mark.parametrize("batch", ["single", "reserved_first", "reserved_last"])
+def test_upload_files_rejects_windows_reserved_names_with_posix_basename_rules(tmp_path, monkeypatch, filename, batch):
+    # Emulate Linux basename parsing only for the multipart filename; keep
+    # native filesystem paths for ingestion and the test fixtures.
+    monkeypatch.setattr(uploads, "Path", lambda value: PurePosixPath(value) if value == filename else Path(value))
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir()
+    existing = thread_uploads_dir / "existing.txt"
+    existing.write_bytes(b"existing document")
+    reserved = ChunkedUpload(filename, [b"reserved document"])
+    normal = ChunkedUpload("normal.txt", [b"normal document"])
+    files = [reserved] if batch == "single" else [reserved, normal] if batch == "reserved_first" else [normal, reserved]
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir) as ensure_dir,
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()) as get_provider,
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=files, config=SimpleNamespace()))
+
+    assert exc_info.value.status_code == 400
+    assert "reserved upload staging" in exc_info.value.detail
+    assert "Rename" in exc_info.value.detail
+    ensure_dir.assert_not_called()
+    get_provider.assert_not_called()
+    assert all(file.read_calls == [] for file in files)
+    assert [path.name for path in thread_uploads_dir.iterdir()] == ["existing.txt"]
+    assert existing.read_bytes() == b"existing document"
+
+
+@pytest.mark.parametrize("filename", [".upload-notes.txt", "notes.part", ".env"])
+def test_upload_files_accepts_names_near_reserved_pattern(tmp_path, filename):
+    app = make_authed_test_app()
+    app.include_router(uploads.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=tmp_path),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/threads/thread-local/uploads", files={"files": (filename, b"user document")})
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    assert [entry["filename"] for entry in response.json()["files"]] == [filename]
+    assert (tmp_path / filename).read_bytes() == b"user document"
 
 
 def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):

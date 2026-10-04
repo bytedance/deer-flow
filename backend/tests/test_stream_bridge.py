@@ -10,7 +10,12 @@ import anyio
 import pytest
 from pydantic import ValidationError
 
-from deerflow.config.stream_bridge_config import MAX_HEARTBEAT_INTERVAL_SECONDS, StreamBridgeConfig, set_stream_bridge_config
+from deerflow.config.stream_bridge_config import (
+    MAX_HEARTBEAT_INTERVAL_SECONDS,
+    MAX_RECOVERED_STREAM_CLEANUP_DELAY_SECONDS,
+    StreamBridgeConfig,
+    set_stream_bridge_config,
+)
 from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, StreamGap, make_stream_bridge
 
 # RedisStreamBridge is no longer re-exported from deerflow.runtime (redis is an
@@ -982,6 +987,31 @@ def test_stream_bridge_config_accepts_numeric_heartbeat_string():
     config = StreamBridgeConfig(heartbeat_interval_seconds="2.5")
 
     assert config.heartbeat_interval_seconds == 2.5
+
+
+@pytest.mark.parametrize(
+    "cleanup_delay",
+    [
+        True,
+        False,
+        -1,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        MAX_RECOVERED_STREAM_CLEANUP_DELAY_SECONDS + 1,
+    ],
+)
+def test_stream_bridge_config_rejects_invalid_recovered_stream_cleanup_delay(cleanup_delay):
+    with pytest.raises(ValidationError, match="recovered_stream_cleanup_delay_seconds"):
+        StreamBridgeConfig(recovered_stream_cleanup_delay_seconds=cleanup_delay)
+
+
+@pytest.mark.parametrize("cleanup_delay", [0, 60, MAX_RECOVERED_STREAM_CLEANUP_DELAY_SECONDS])
+def test_stream_bridge_config_accepts_valid_recovered_stream_cleanup_delay(cleanup_delay):
+    """A delay of 0 is a valid 'delete as soon as END is published' setting."""
+    config = StreamBridgeConfig(recovered_stream_cleanup_delay_seconds=cleanup_delay)
+
+    assert config.recovered_stream_cleanup_delay_seconds == float(cleanup_delay)
 
 
 @pytest.mark.parametrize("heartbeat_interval", [True, MAX_HEARTBEAT_INTERVAL_SECONDS + 1])

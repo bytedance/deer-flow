@@ -118,6 +118,15 @@ _PLACEHOLDER_VALUES = {"", "x", "xx", "xxx", "xxxx", "changeme", "change-me", "e
 # analyzed from its AST instead, because a regex cannot tell an annotation from a value.
 _SECRET_ASSIGNMENT_RE = re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)")
 _SECRET_ASSIGNMENT_NAME_RE = re.compile(r"(?i)^(?:token|password|passwd|api[_-]?key|secret|credential)s?$")
+_SECRET_TOKEN_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
+        r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b",
+        r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b",
+        r"\bsk-[A-Za-z0-9]{20,}\b",
+    )
+)
 _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
 _EXTERNAL_HTTP_RE = re.compile(r"http://([A-Za-z0-9.-]+)(?::\d+)?(?:/|\b)")
 _URL_RE = re.compile(r"https?://[^\s)'\"<>]+")
@@ -315,14 +324,8 @@ def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
     if private_key:
         findings.append(_finding_from_match("secret-private-key", rel_path, text, private_key))
 
-    token_patterns = [
-        r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
-        r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b",
-        r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b",
-        r"\bsk-[A-Za-z0-9]{20,}\b",
-    ]
-    for pattern in token_patterns:
-        match = re.search(pattern, text)
+    for pattern in _SECRET_TOKEN_PATTERNS:
+        match = pattern.search(text)
         if match and not _looks_like_placeholder(match.group(0)):
             findings.append(_finding_from_match("secret-cloud-token", rel_path, text, match))
             break
@@ -355,18 +358,71 @@ def _python_secret_assignment_target(node: ast.expr) -> str | None:
     return None
 
 
+def _python_secret_unpacked_span(elts: list[ast.expr]) -> tuple[int, int, bool]:
+    """Fixed head, fixed tail and star presence of one side of an unpacking.
+
+    Python aligns everything before the first ``*`` and everything after the last one; only
+    the elements between stars share a runtime-determined slice. A side without a star has
+    its whole length fixed, so its head is every element and its tail is none.
+    """
+    stars = [index for index, element in enumerate(elts) if isinstance(element, ast.Starred)]
+    if not stars:
+        return len(elts), 0, False
+    return stars[0], len(elts) - stars[-1] - 1, True
+
+
+def _python_secret_unpacked_pairs(target: ast.expr, value: ast.expr) -> list[tuple[ast.expr, ast.expr]] | None:
+    """Target-and-value pairs of an unpacking assignment, or None when it is not one.
+
+    ``host, api_key = endpoint, "…"`` binds each name to the value written in the same
+    position, so the two sides have to be read together. Pairs come only from the fixed
+    head and tail of the two element lists (``_python_secret_unpacked_span``): what falls
+    between two stars is a runtime slice. An unpacking with no star on either side binds
+    only when the lengths match, so a mismatch -- which raises before binding anything --
+    contributes none. Nested targets align positionally too, so they are read the same way.
+    """
+    if not isinstance(target, (ast.Tuple, ast.List)):
+        return None
+    if not isinstance(value, (ast.Tuple, ast.List)):
+        return []
+    target_head, target_tail, target_starred = _python_secret_unpacked_span(target.elts)
+    value_head, value_tail, value_starred = _python_secret_unpacked_span(value.elts)
+    if not target_starred and not value_starred:
+        if len(target.elts) != len(value.elts):
+            return []
+        head, tail = len(target.elts), 0
+    else:
+        # A star-free side is fully fixed, so its tail is whatever its head did not consume.
+        head = min(target_head, value_head)
+        tail = min(len(target.elts) - head if not target_starred else target_tail, len(value.elts) - head if not value_starred else value_tail)
+    pairs = list(zip(target.elts[:head], value.elts[:head], strict=True))
+    if tail:
+        pairs += list(zip(target.elts[len(target.elts) - tail :], value.elts[len(value.elts) - tail :], strict=True))
+    expanded: list[tuple[ast.expr, ast.expr]] = []
+    for paired_target, paired_value in pairs:
+        nested = _python_secret_unpacked_pairs(paired_target, paired_value)
+        expanded.extend(nested or [(paired_target, paired_value)])
+    return expanded
+
+
 def _python_secret_bindings(tree: ast.AST) -> list[tuple[str | None, ast.expr]]:
     """Every ``(bound name, value expression)`` pair the tree binds, in walk order.
 
     Assignment statements are not the only place a skill can park a credential:
     a keyword argument, a parameter default and a walrus all read as
     ``name=value`` to the line-oriented sweep this rule replaced, so a caller
-    that merely moves the assignment into a call escapes the gate.
+    that merely moves the assignment into a call escapes the gate. An unpacking
+    assignment reads the same way once its targets are paired with values.
     """
     bindings: list[tuple[str | None, ast.expr]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
-            bindings.extend((_python_secret_assignment_target(target), node.value) for target in node.targets)
+            for target in node.targets:
+                pairs = _python_secret_unpacked_pairs(target, node.value)
+                if pairs is None:
+                    bindings.append((_python_secret_assignment_target(target), node.value))
+                    continue
+                bindings.extend((_python_secret_assignment_target(paired_target), paired_value) for paired_target, paired_value in pairs)
         elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
             # A bare annotation binds no value at all, so ``AnnAssign.value`` is None.
             bindings.append((_python_secret_assignment_target(node.target), node.value))
@@ -441,6 +497,57 @@ def _python_secret_literal_atom(node: ast.expr) -> str | None:
     return None
 
 
+def _python_secret_literal_members(expr: ast.expr) -> list[ast.expr]:
+    """Values held inside a container or a conditional, in the order they are written.
+
+    ``api_key = ["…"]``, ``api_key = {"live": "…"}`` and ``api_key = "…" if prod else
+    "…"`` are each a finding for the line-oriented sweep this rule replaced: its value
+    capture stops at the first quote after the name, so it reports the line even when the
+    token it grabbed is only a bracket. This names the literal instead of the bracket.
+    Each member is asserted on by itself, because joining a container's members would
+    describe a string that no Python program ever binds.
+
+    Mapping keys are structural labels, so they need independent evidence from a
+    recognized token format; the enclosing secret-like name is evidence only for values.
+    """
+    if isinstance(expr, (ast.List, ast.Tuple, ast.Set)):
+        return list(expr.elts)
+    if isinstance(expr, ast.Dict):
+        # A ``{**spread}`` entry carries a None key and names nothing of its own.
+        members: list[ast.expr] = []
+        for key, value in zip(expr.keys, expr.values, strict=True):
+            if key is not None:
+                literal = _python_secret_literal(key)
+                if literal is not None and any(pattern.search(literal) for pattern in _SECRET_TOKEN_PATTERNS):
+                    members.append(key)
+            members.append(value)
+        return members
+    if isinstance(expr, ast.IfExp):
+        return [expr.body, expr.orelse]
+    return []
+
+
+def _python_secret_literal_candidates(expr: ast.expr) -> list[tuple[ast.expr, str]]:
+    """Every ``(node, literal)`` pair this binding can assert on, in source order.
+
+    A concatenation yields the whole value, because ``"sk-" + "a1b2"`` binds one
+    string; a container or a conditional yields its members. A work list rather than
+    recursion, matching ``_python_secret_literal_parts``: an expression tree holds each
+    node once, so a node queued from its parent is never queued again.
+    """
+    candidates: list[tuple[ast.expr, str]] = []
+    pending: list[ast.expr] = [expr]
+    while pending:
+        node = pending.pop()
+        literal = _python_secret_literal(node)
+        if literal is not None:
+            candidates.append((node, literal))
+            continue
+        pending.extend(_python_secret_literal_members(node))
+    candidates.sort(key=lambda candidate: (candidate[0].lineno, candidate[0].col_offset))
+    return candidates
+
+
 def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFinding]:
     """Report embedded Python secrets from real literal bindings, not from raw text.
 
@@ -449,13 +556,18 @@ def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFi
     (``api_key = os.getenv("X")``) from a literal, and it points at an annotated
     assignment's annotation rather than at its value.
 
-    What it gains is precision, never less coverage: every binding form the
-    sweep reported stays reported, per ``_python_secret_bindings``, and so does
-    every literal value shape it saw, per ``_python_secret_literal``.
+    ``_python_secret_bindings`` preserves the sweep's binding forms, and
+    ``_python_secret_literal_candidates`` covers literal values inside containers
+    and conditionals. Mapping labels do not inherit credential evidence from the
+    enclosing name; only keys matching a recognized token format are candidates.
 
     A file Python cannot parse falls back to that sweep: the AST is only an
     improvement, and returning nothing would let one syntax error (or a NUL byte)
-    silence a HIGH-severity rule for the whole file.
+    silence a HIGH-severity rule for the whole file. That sweep reads the run of
+    characters that follows ``name[:=]``, so it never reaches a credential an earlier
+    element of the same line precedes (``host, api_key = "https://…", "…"``) or a bracket
+    separates from its name (``[token, version] = ["…", 2]``): those two shapes are
+    reported while the file parses and go quiet once it carries a syntax error.
     """
     try:
         tree = ast.parse(text)
@@ -463,11 +575,12 @@ def _scan_python_secret_assignments(rel_path: str, text: str) -> list[SecurityFi
         return _scan_secret_assignments_by_text(rel_path, text)
 
     for name, value in _python_secret_bindings(tree):
-        literal = _python_secret_literal(value)
-        if literal is None or _looks_like_placeholder(literal):
+        if not _SECRET_ASSIGNMENT_NAME_RE.match(name or ""):
             continue
-        if _SECRET_ASSIGNMENT_NAME_RE.match(name or ""):
-            return [_finding_for_node("secret-env-assignment", rel_path, value, literal)]
+        for node, literal in _python_secret_literal_candidates(value):
+            if _looks_like_placeholder(literal):
+                continue
+            return [_finding_for_node("secret-env-assignment", rel_path, node, literal)]
     return []
 
 

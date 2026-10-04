@@ -50,9 +50,10 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results, rewrite_messages_tool_call_args
-from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result, stamp_exception_meta
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normalize_tool_result, stamp_exception_meta
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
+from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY, READ_FILE_NO_CONTENT_RESULTS, count_file_lines
 from deerflow.sandbox.tools import (
     read_current_file_content,
     sandbox_authorization_scope,
@@ -82,12 +83,7 @@ _ELIDED_PAYLOAD_TEMPLATE = "[payload elided: {chars} chars; this {tool_name} cal
 # treated as "cannot inspect" — the gate fails open and no mark is stamped.
 _UNINSPECTABLE_CONTENT_PREFIX = "Error:"
 
-_BLOCK_MESSAGE = (
-    "Error: {tool_name} blocked — {path} already exists and you have not read its current version. "
-    "Any write invalidates earlier reads, so re-read before every modification. "
-    "Call read_file on it (a ranged read of the relevant section is enough, e.g. the last ~30 lines "
-    "before an append), check what is already there, then retry."
-)
+_BLOCK_MESSAGE = "Error: {tool_name} blocked — {path} already exists ({line_desc}) and you have not read its current version. Any write invalidates earlier reads, so re-read before every modification. {read_hint}"
 
 # Per-(scope, path) locks serializing gate check + tool execution. Same
 # WeakValueDictionary pattern as sandbox/file_operation_lock.py, but a
@@ -315,13 +311,38 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         if self._latest_mark_hash(request.state, norm_path) == _content_hash(current):
             return None
         tool_name = str(tool_call.get("name", "write"))
-        return ToolMessage(
-            content=_BLOCK_MESSAGE.format(tool_name=tool_name, path=path),
+        # count_file_lines matches LocalSandbox.read_file line numbering and the
+        # truncation-marker formula in _truncate_read_file_output, so the number
+        # reported here agrees with start_line/end_line the model can pass back.
+        line_count = count_file_lines(current)
+        line_desc = f"{line_count} line" if line_count == 1 else f"{line_count} lines"
+        if line_count == 0:
+            # Empty file: there is nothing to range-read; keep the hint simple.
+            read_hint = "Call read_file on it first, check what is already there, then retry."
+        else:
+            start = max(1, line_count - 29)
+            read_hint = f"Call read_file on it first (e.g. start_line={start}, end_line={line_count}), check what is already there, then retry."
+        blocked = ToolMessage(
+            content=_BLOCK_MESSAGE.format(tool_name=tool_name, path=path, line_desc=line_desc, read_hint=read_hint),
             tool_call_id=str(tool_call.get("id", "")),
             name=tool_name,
             status="error",
-            additional_kwargs={WRITE_BLOCK_KEY: {"path": norm_path, "tool": tool_name}},
+            additional_kwargs={
+                WRITE_BLOCK_KEY: {"path": norm_path, "tool": tool_name},
+                # Pre-stamp gate metadata so normalize_tool_result's text heuristics
+                # cannot misclassify a numeric line count (e.g. 401, 403, 500) as an
+                # HTTP error code.  normalize_tool_message returns early when an
+                # existing TOOL_META_KEY entry is found (idempotency guard).
+                TOOL_META_KEY: {
+                    "status": "error",
+                    "error_type": None,
+                    "recoverable_by_model": True,
+                    "recommended_next_action": "try_alternative",
+                    "source": "tool_return",
+                },
+            },
         )
+        return blocked
 
     @staticmethod
     def _requested_path(request: ToolCallRequest) -> str | None:
@@ -383,6 +404,20 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             return
         message = self._extract_tool_message(result)
         if message is None or message.status == "error":
+            return
+        # In-band contract errors (invalid range, start_line exceeds file length, etc.)
+        # are returned with status="success" by LangChain even though the model received
+        # no real file content. Stamping a hash in that case would open the write gate
+        # for files the model has never actually read — the root cause of issue #6019.
+        # READ_FILE_EMPTY is a successful read of an empty file or a valid range
+        # containing only blank lines. Like any successful ranged read, it stamps
+        # the current full-file hash and can satisfy the gate.
+        tool_content = message.content if isinstance(message.content, str) else ""
+        if tool_content.strip() in READ_FILE_NO_CONTENT_RESULTS - {READ_FILE_EMPTY}:
+            logger.debug(
+                "read-before-write mark skipped for %r: in-band no-content result from read_file",
+                path,
+            )
             return
         try:
             content = self._content_reader(request.runtime, path)

@@ -74,6 +74,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
     - [Sandbox 与文件系统](#sandbox-与文件系统)
     - [Agentic Browser Control](#agentic-browser-control)
     - [Context Engineering](#context-engineering)
+    - [当前任务笔记](#当前任务笔记)
     - [长期记忆](#长期记忆)
   - [推荐模型](#推荐模型)
   - [内嵌 Python Client](#内嵌-python-client)
@@ -318,6 +319,22 @@ make down   # 停止并移除容器
 
 5. **访问地址**：http://localhost:2026
 
+#### 启动模式
+
+DeerFlow 将 Agent 运行时内嵌在 Gateway API 中运行。开发模式支持热更新；生产模式使用预构建的前端。
+
+| | **本地前台** | **本地守护进程** | **Docker 开发** | **Docker 生产** |
+|---|---|---|---|---|
+| **开发模式** | `./scripts/serve.sh --dev`<br/>`make dev` | `./scripts/serve.sh --dev --daemon`<br/>`make dev-daemon` | `./scripts/docker.sh start`<br/>`make docker-start` | — |
+| **生产模式** | `./scripts/serve.sh --prod`<br/>`make start` | `./scripts/serve.sh --prod --daemon`<br/>`make start-daemon` | — | `./scripts/deploy.sh`<br/>`make up` |
+
+| 操作 | 本地 | Docker 开发 | Docker 生产 |
+|---|---|---|---|
+| **停止** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
+| **重启** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
+
+`make start` 与 `make start-daemon` 每次运行都会用 `next build` 重新构建前端。如需复用上一次的构建结果，可传入 `SKIP_FRONTEND_BUILD=1`（或在直接调用 `./scripts/serve.sh --prod` 时附加 `--skip-frontend-build`）。该选项为可选行为：当 `frontend/.next` 中没有已完成的构建时会快速失败。
+
 #### LangGraph Studio（可选）
 
 默认的 `make dev` 拓扑使用 DeerFlow 内嵌于 Gateway 的运行时，无需 LangGraph Studio。
@@ -375,7 +392,7 @@ DeerFlow 支持可配置的 MCP Server 和 skills，用来扩展能力。
 
 DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应渠道会自动启动，而且都不需要公网 IP。
 
-DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。启用 `channel_connections` 后，已登录用户可以从侧边栏 / Settings > Channels 绑定 Telegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat 或 WeCom。它复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。入站 IM 消息会以所连接的 DeerFlow 用户身份运行。设置和安全注意事项参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
+DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。启用 `channel_connections` 后，已登录用户可以从侧边栏 / Settings > Channels 绑定 Telegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat、WeCom、QQ 或 Buzz。它复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。入站 IM 消息会以所连接的 DeerFlow 用户身份运行。设置和安全注意事项参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
 
 | 渠道 | 传输方式 | 上手难度 |
 |---------|-----------|------------|
@@ -385,6 +402,8 @@ DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。�
 | WeChat | Tencent iLink（long-polling） | 中等 |
 | 企业微信智能机器人 | WebSocket | 中等 |
 | 钉钉 | Stream Push（WebSocket） | 中等 |
+| QQ | WebSocket（仅文本私聊及群 @；每条来源消息最多回复 4 / 5 条） | 中等 |
+| Buzz | Nostr relay（WebSocket，NIP-42） | 中等 |
 
 **`config.yaml` 中的配置示例：**
 
@@ -426,7 +445,7 @@ channels:
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
-    allowed_users: []               # 留空表示允许所有人
+    allowed_users: []               # 填数字用户 ID，不是 @用户名；留空表示允许所有人
 
     # 可选：按渠道 / 按用户单独覆盖 session 配置
     session:
@@ -753,6 +772,8 @@ lead agent 只会在委派具有明确净收益时动态拉起 sub-agents，例�
 
 ### Sandbox 与文件系统
 
+上传文档的转换大纲和预览会校验原文件版本，包括修改时间戳。检测到原文件版本变化后，即使大小不变，也不会再使用旧转换结果。缺少原文件时间戳的旧归属记录同样会被拒绝；可在启用 `uploads.auto_convert_documents: true` 后重新上传原文件以恢复转换大纲。文件都会保留，未通过校验的转换 Markdown 会在 Agent 的历史文件列表中作为独立文件显示。Windows 上的 `st_ctime_ns` 可能表示创建时间，因此等长度覆盖后若恢复原 `mtime`，校验可能无法识别变化。时间戳校验是保守的元数据校验，不能保证文件内容完全一致。
+
 DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电脑”。
 
 每个任务都运行在隔离的 Docker 容器里，里面有完整的文件系统，包括 skills、workspace、uploads、outputs。agent 可以读写和编辑文件，可以执行 bash 命令和代码，也可以查看图片。整个过程都在 sandbox 内完成，可审计、会隔离，不会在不同 session 之间互相污染。
@@ -771,7 +792,7 @@ DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电�
 
 读取页面和真正“使用”页面不是一回事。除了只读的 `web_fetch` 和 `web_capture` 工具外，DeerFlow 还提供一组可选的 agentic browser 工具，为每次对话保持一个实时浏览器会话，让 agent 真正操作页面——导航、读取可交互元素、点击、输入、提交表单，并在重度 JavaScript 站点上完成多步流程。
 
-每次操作都会返回页面可交互元素的最新快照，每个元素用稳定的 `[ref]` 编号寻址，因此 agent 基于刚观察到的内容行动，而不是猜测选择器。出站 URL 默认会经过 SSRF 筛查。该能力由 Playwright 提供，作为 optional extra 发布，以保持核心安装精简：
+每次操作都会返回页面可交互元素的最新快照，每个元素用稳定的 `[ref]` 编号寻址，因此 agent 基于刚观察到的内容行动，而不是猜测选择器。出站 URL 默认会经过 SSRF 筛查，浏览器的 TCP 连接也都经过一个本地代理，该代理把每个连接固定到筛查通过的地址，因此检查之后才改变的 DNS 应答无法把连接引向内网主机（WebRTC UDP 不在覆盖范围内）。该能力由 Playwright 提供，作为 optional extra 发布，以保持核心安装精简：
 
 ```bash
 cd backend
@@ -796,6 +817,15 @@ workspace 的 Browser Live 客户端通过二进制 JPEG WebSocket 帧协商画�
 Gateway API 调用方可以启用 `read_conversation`，并在一次 run 中提交 `conversation_references` 列表。主 agent 随后可以分页读取这些归属会话当前可见文本的有界页面。读取权限随该次 run 结束而失效，旧消息中的文本不会授予访问权限。访问权限失效或来源被删除后，agent 已经读过的文本仍会保留在目标会话中。一条消息如果单次读取放不下，会带有续接，agent 可以继续读取剩余部分；只有在那次读取不可用时，它才会请求缺失的部分。
 
 无法在请求顶层添加字段的 SDK 客户端可以把同样的列表放在 `context.conversation_references` 中发送，`GET /api/features` 会报告该工具是否启用。启用后，Web UI 输入框会在附件按钮旁边显示一个"引用会话"按钮：最多选择你最近的三个会话，它们只附加到下一条消息上，以 chips 的形式显示在输入框与对话记录里。不会自动搜索历史。参见[配置](backend/docs/CONFIGURATION.md#reading-referenced-conversations)与[请求契约](backend/docs/API.md#referencing-a-previous-conversation)。
+
+### 当前任务笔记
+
+当前任务可通过 `task_continuity.enabled: true` 开启[任务笔记与历史回查](docs/task-continuity.md)。
+任务笔记最多八条；并行新增超出剩余名额时返回 `note_capacity`，保留原有笔记。
+启用资源句柄解析时按解析后的实际 key 计数，指向同一笔记的别名共用名额。
+同批调用中格式异常的非字典参数不会占用名额或影响正常笔记调用。
+无效 key、超过 750 字符的内容、超过四个引用或格式无效的引用 ID 也不会占用名额。
+已有 key 仍可替换或删除；同批删除及运行时失败（如来源不可读或策略拒绝）释放的名额在下一批可用，可届时重试。
 
 ### 长期记忆
 
@@ -895,21 +925,61 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 当某次执行处于 `queued`、`launching` 或 `running` 时冻结任务定义，避免持久化的执行意外换用新的 prompt、thread 或调度；将任务切换为暂停或删除任务会取消已在等待的执行，而 `launching`/`running` 执行结束后才能重试这些变更；显式手动触发在调度已暂停时仍可等待并执行，且不会自动恢复调度
 - 支持暂停、恢复、手动触发、查看历史和删除任务
 - 定时任务通过正常的 DeerFlow run 生命周期执行
+- 当 `channel_connections.enabled: true` 时，定时运行以成功或失败结束时，会把摘要推送到任务所有者已绑定的 IM 身份（outbox + 投递 worker）。手动「立即运行」和中断不推送；没有跑完一次运行就结束的执行记录（启动失败、排队超时、重启恢复）也不推送。渠道/传输宕机时会停车且不耗尽重试，最长约一天；平台拒绝大约重试 15 分钟后落为 `failed`。等待期间被你解绑的身份不会再收到推送：该条投递直接落为 `failed`。目前主动推送由企业微信实现；其它已绑定渠道会入队，但在实现 `send_notification` 前会失败。
 - 按每页 50 条浏览执行历史；历史页暂停自动刷新，可随时返回最新记录。 仅在读取成功后显示条数，加载中或失败不会误显示为零条。
 
 **通过 API 筛选执行历史**
 
-排查失败记录时，无需先下载所有成功记录。已认证且具有 `threads:read` 权限的客户端，可以针对自己的任务请求 `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0`。可选的 `status` 支持 `queued`、`launching`、`running`、`success`、`failed`、`skipped`、`interrupted`；这些是执行记录的状态，`completed` 等任务状态会被拒绝（422）。
+排查失败记录时，无需先下载所有成功记录。已认证且具有 `threads:read` 权限的客户端，可以针对自己的任务请求 `GET /api/scheduled-tasks/{task_id}/runs?status=failed&limit=50&offset=0`。可选的 `status` 支持 `queued`、`launching`、`running`、`success`、`failed`、`skipped`、`interrupted`、`unmet`；这些是执行记录的状态，`completed` 等任务状态会被拒绝（422）。
 
 筛选先于分页执行。`limit`（1–200，默认 50）和 `offset`（非负整数，默认 0）作用于匹配记录，按创建时间、ID 依次降序排列。不传 `status` 时保留原有的混合历史数组，无匹配项返回 `[]`。此 API 不改变任务执行行为，workspace 历史界面仍展示未筛选的记录。
 
 当前 MVP 限制：
 
-- 暂时还没有可在对话中创建任务的 `schedule_task` 工具
 - 没有纯文本通知任务
-- 没有渠道或 GitHub 分发目标
+- 没有渠道或 GitHub 分发目标（上面的结果推送不是分发目标）
 
 通过 `config.yaml -> scheduler.enabled` 开启后台轮询。手动触发使用同样的 scheduled-task 资源和执行路径。
+
+### 在对话中创建定时任务
+
+同时设置 `scheduler.enabled: true` 和 `scheduler.tool_enabled: true`，重启
+Gateway 后，具有权限的交互式对话可以通过 `schedule_task` 创建、列出、暂停或
+删除属于该会话的任务。例如：“未来四周，每周一北京时间上午九点准备会议报告。”
+工具回显实际保存的提示词、调度、可选目标和停止方法。周期性报告或文件任务可以
+提出手动试跑，只有用户提出试跑要求才执行，且不计入自动调度次数上限。
+
+新任务默认每次创建独立会话。`goal_objective` 只验证当次执行，达成它不会结束
+周期性调度。运行中的 Agent 在用户的总体结束条件满足后，可以请求
+`stop_scheduled_task` 停止自己的调度，请求在执行终结时生效。`max_runs` 只计算
+自动启动次数，`end_at` 指定结束时间；结束条件优先于暂停请求。工具创建的每小时
+多次调度必须带结束条件，每位用户最多保留 20 个活动工具任务，暂停任务也占名额。
+
+未达目标的执行记为 `unmet`，与执行故障区分。周期任务连续三次符合条件的自动
+执行未达目标后会暂停。成功会重置计数，包括依赖已声明假设的成功；手动试跑、
+中断、执行故障和等待外部条件不递增计数。恢复不重置计数，下一次符合条件的
+未达目标可能再次暂停。目标未达成及自动暂停通知复用现有绑定和持久化 outbox，
+手动试跑不通知。
+
+用户可以在来源会话明确要求保存今后执行的备注，最多 10 条、每条 500 字符。
+新会话中的周期任务可以通过按需开启的 `read_conversation` 回查上一次已执行的
+会话，仍须满足属主和读取权限检查。这是来源引用，不会自动生成记忆，也不会把
+结果回写到来源会话。
+
+试跑时请直接说“先跑一次”或“Run this task now”。宿主只接受本轮用户消息中
+限定的中英文直接执行请求；单独提到任务、引用、条件句或仅回答“好”不会启动
+付费运行。需要时，Agent 会请用户给出直接请求。
+
+一次目标执行最多包含九轮智能体回合，每轮后可以有一次评估器请求。运行用量
+包含评估器请求及服务商返回的 token；缺少用量时，对应费用估算为未知。
+`token_budget` 限制主图，并在模型调用后检查；评估器用量另行计入，因此它
+不是严格的整个运行用量上限，也不是金额上限。
+
+**目标评估升级：** 现有 scheduled、webhook、autonomous 模式的目标运行可以
+接受已声明的低风险、可逆假设，并将 `relied_on_assumption` 记录到评估结果。
+交互式目标评估仍保持严格。即使未启用对话调度工具，此策略也适用；它不授予
+敏感操作权限，也不代替用户授权。
+
 
 定时任务运行会读取 `config.yaml` 中的 `scheduler.recursion_limit`（默认 `1000`，与 Web UI 的交互式预算一致）。超过 `max_recursion_limit` 的值会被截断。该字段在 dispatch 时读取，因此下一次定时运行即可生效，无需重启 Gateway。
 
