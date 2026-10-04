@@ -318,7 +318,7 @@ class Teams:
 
     async def resume(self, payload, context):
         fields(payload, "team_id job_id response request_id")
-        if payload["response"] is None or len(json.dumps(payload["response"]).encode()) > 8000:
+        if payload["response"] is None or len(json.dumps(payload["response"], ensure_ascii=False).encode()) > 8000:
             raise ValueError("An explicit response of at most 8 KiB is required")
         text(payload, "request_id", 128)
         return await self.control(payload, context, cancel=False)

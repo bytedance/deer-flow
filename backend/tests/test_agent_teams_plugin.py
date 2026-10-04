@@ -872,3 +872,37 @@ async def test_cancel_reconciles_a_clarification_response_with_lost_admission_ac
     view = await actions["get"]({"team_id": team["id"]}, context(runs))
     assert view["jobs"][0]["status"] == "cancelled"
     assert len(view["jobs"]) == 1 and len(runs.starts) == 2
+
+
+async def interrupted_job(actions, service, runs):
+    """A job parked in ``waiting_input`` by an interrupt, so only the size gate can refuse the answer."""
+    team = await create(actions, runs)
+    sent = await actions["send"]({"team_id": team["id"], "member_id": team["members"][0]["id"], "text": "Check release", "request_id": "one"}, context(runs))
+    await service.tick()
+    runs.finish(sent["id"], interrupted=True)
+    await service.tick()
+    assert (await actions["get"]({"team_id": team["id"]}, context(runs)))["jobs"][0]["status"] == "waiting_input"
+    return team, sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [pytest.param("漢" * 2000, id="cjk-2000-chars"), pytest.param("🙂" * 1000, id="emoji-1000-chars"), pytest.param("a" * 4000, id="ascii-4000-chars")])
+async def test_a_clarification_answer_within_the_documented_bounds_is_accepted(plugin, answer):
+    # README: tasks and clarification answers accept up to 4,000 characters / 8,000 UTF-8 bytes,
+    # and the UI validates exactly those two bounds before submitting.
+    _, actions, service = plugin
+    runs = Runs()
+    team, sent = await interrupted_job(actions, service, runs)
+    await actions["resume"]({"team_id": team["id"], "job_id": sent["id"], "response": answer, "request_id": "answer"}, context(runs))
+    assert (await actions["get"]({"team_id": team["id"]}, context(runs)))["jobs"][0]["status"] == "resuming"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["漢" * 3000, {"text": "x" * 9000}])
+async def test_an_oversized_clarification_answer_is_still_refused(plugin, answer):
+    _, actions, service = plugin
+    runs = Runs()
+    team, sent = await interrupted_job(actions, service, runs)
+    with pytest.raises(ValueError, match="8 KiB"):
+        await actions["resume"]({"team_id": team["id"], "job_id": sent["id"], "response": answer, "request_id": "answer"}, context(runs))
+    assert (await actions["get"]({"team_id": team["id"]}, context(runs)))["jobs"][0]["status"] == "waiting_input"
