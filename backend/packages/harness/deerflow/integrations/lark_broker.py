@@ -21,6 +21,7 @@ import base64
 import json
 import logging
 import os
+import tempfile
 import shutil
 import subprocess
 import sys
@@ -450,6 +451,33 @@ def serve(config: BrokerConfig) -> ThreadingHTTPServer:
     return server
 
 
+def _write_text_atomically(path: str, content: str) -> None:
+    """Publish *content* at *path* without ever exposing a partial file.
+
+    The sandbox chmods the launcher 0o755 and execs it, so a crash between the
+    truncating open and the final write left an executable fragment behind; the
+    runtime marker is parsed as JSON and had the same problem. The storage
+    backends already publish through a temporary file plus ``os.replace``.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(
+        dir=directory, prefix=f".{os.path.basename(path)}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
 def install_shim(dest_dir: str, *, version: str | None = None) -> str:
     """Write the launcher + shim + runtime marker into the sandbox runtime dir.
 
@@ -470,16 +498,13 @@ def install_shim(dest_dir: str, *, version: str | None = None) -> str:
     bin_dir = os.path.join(dest, "bin")
     os.makedirs(bin_dir, exist_ok=True)
     shim_body = os.path.join(bin_dir, LARK_CLI_BROKER_SHIM_FILENAME)
-    with open(shim_body, "w", encoding="utf-8") as handle:
-        handle.write(LARK_CLI_BROKER_SHIM_SCRIPT)
+    _write_text_atomically(shim_body, LARK_CLI_BROKER_SHIM_SCRIPT)
     os.chmod(shim_body, 0o755)
     launcher = os.path.join(bin_dir, "lark-cli")
-    with open(launcher, "w", encoding="utf-8") as handle:
-        handle.write(render_launcher_script(shim_body))
+    _write_text_atomically(launcher, render_launcher_script(shim_body))
     os.chmod(launcher, 0o755)
     marker = os.path.join(dest, ".deerflow-lark-cli-runtime.json")
-    with open(marker, "w", encoding="utf-8") as handle:
-        json.dump({"version": version or "unknown", "kind": "shim"}, handle)
+    _write_text_atomically(marker, json.dumps({"version": version or "unknown", "kind": "shim"}))
     return launcher
 
 
