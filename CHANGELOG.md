@@ -475,7 +475,7 @@ This release closes that milestone with **301 merged pull requests**.
   run under `failure_policy.read: fail_closed`), and a full index rebuild counted
   the fact as failed. A fact that vanishes after the listing is now treated as
   deleted; an entry that is still present but unreadable, such as a dangling
-  symlink, is still reported as corruption.
+  symlink, is still reported as corruption. ([#6255])
 - **memory:** A DeerMem memory reload no longer pins an older document in the
   cache. `reload()` read the document before computing its cache signature, so
   a write committed in between (for example by the background memory updater)
@@ -7697,3 +7697,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6229]: https://github.com/bytedance/deer-flow/pull/6229
 [#6230]: https://github.com/bytedance/deer-flow/pull/6230
 [#6238]: https://github.com/bytedance/deer-flow/pull/6238
+[#6255]: https://github.com/bytedance/deer-flow/pull/6255
