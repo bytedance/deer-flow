@@ -1636,10 +1636,37 @@ def test_uppercase_local_host_is_classified_local(tmp_path: Path) -> None:
     skill_dir = tmp_path / "skill"
     _write_skill(skill_dir)
     (skill_dir / "run.py").write_text(
-        'import urllib.request\n'
-        'urllib.request.urlopen("http://LOCALHOST:8080/config")\n',
+        'import urllib.request\nurllib.request.urlopen("http://LOCALHOST:8080/config")\n',
         encoding="utf-8",
     )
     findings = scan_skill_dir(skill_dir)["findings"]
     assert _finding_by_rule(findings, "network-local-http")
     assert not [finding for finding in findings if finding["rule_id"] == "network-cleartext-http"]
+
+
+@pytest.mark.parametrize("host, external", [("localhost", False), ("LOCALHOST", False), ("LocalHost", False), ("Example.COM", True)])
+def test_declared_http_host_case_classification(tmp_path: Path, host: str, external: bool) -> None:
+    skill_dir = tmp_path / "skill"
+    _write_skill(skill_dir, f"Endpoint: http://{host}:8080/api\n")
+
+    findings = scan_skill_dir(skill_dir)["findings"]
+
+    assert bool([finding for finding in findings if finding["rule_id"] == "declaration-external-endpoint"]) is external
+    assert bool([finding for finding in findings if finding["rule_id"] == "network-local-http"]) is (not external)
+
+
+@pytest.mark.parametrize("host, external", [("localhost", False), ("LOCALHOST", False), ("LocalHost", False), ("Example.COM", True)])
+def test_sensitive_path_http_host_case_classification(tmp_path: Path, host: str, external: bool) -> None:
+    skill_dir = tmp_path / "skill"
+    _write_skill(skill_dir)
+    (skill_dir / "run.py").write_text(f'ENDPOINT = "http://{host}:8080/api"\nopen("/etc/passwd").read()\n', encoding="utf-8")
+
+    result = scan_skill_dir(skill_dir)
+    findings = result["findings"]
+
+    if external:
+        assert _finding_by_rule(findings, "python-sensitive-exfil")["severity"] == "CRITICAL"
+    else:
+        assert _finding_by_rule(findings, "python-sensitive-path-read")["severity"] == "HIGH"
+        assert not [finding for finding in findings if finding["rule_id"] == "python-sensitive-exfil"]
+    assert result["blocked"] is external
