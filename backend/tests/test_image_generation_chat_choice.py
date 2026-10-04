@@ -160,7 +160,7 @@ async def test_im_answer_is_adapted_before_agent_stream(image_choice, monkeypatc
         bridge,
         manager,
         record,
-        ctx=worker.RunContext(checkpointer=SimpleNamespace(), app_config=config),
+        ctx=worker.RunContext(checkpointer=InMemorySaver(), app_config=config),
         agent_factory=lambda *, config: Agent(),
         graph_input={"messages": convert_to_messages([_human_input_message("2")])},
         config={"context": context},
@@ -483,6 +483,128 @@ async def test_real_agent_graph_replaces_image_tool_with_inline_choice(image_cho
     assert any(isinstance(item, ToolMessage) and item.id == card.id for item in checkpoint.values["messages"])
     assert isinstance(checkpoint.values["messages"][-1], ToolMessage)
     assert checkpoint.values["messages"][-1].id == card.id
+
+
+def _embedded_choice_client(image_choice, monkeypatch, environment=None):
+    from deerflow.client import DeerFlowClient
+    from deerflow.config.image_generation import selected_image_generation_source
+
+    environment = environment or image_choice[2]
+    config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": environment}})
+    monkeypatch.setattr("deerflow.client.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.agents.middlewares.clarification_middleware.get_app_config", lambda: config)
+    executed = []
+
+    @tool("generate_image")
+    def fake_generate_image(prompt_file: str) -> str:
+        """Record which image source the embedded tool actually sees."""
+        executed.append((prompt_file, selected_image_generation_source()))
+        return "synthetic-image-created"
+
+    class FakeModel(BaseChatModel):
+        @property
+        def _llm_type(self):
+            return "fake-embedded-image-choice"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            if any(isinstance(message, ToolMessage) and message.name == "generate_image" for message in messages):
+                answer = AIMessage(content="Image ready")
+            else:
+                answer = AIMessage(content="", tool_calls=[{"name": "generate_image", "args": {"prompt_file": "/mnt/user-data/prompt.txt"}, "id": "call-image"}])
+            return ChatResult(generations=[ChatGeneration(message=answer)])
+
+    checkpointer = InMemorySaver()
+    agent = create_agent(model=FakeModel(), tools=[ask_clarification_tool, fake_generate_image], middleware=[ClarificationMiddleware()], checkpointer=checkpointer)
+    client = DeerFlowClient(checkpointer=checkpointer)
+    client._agent = agent
+    monkeypatch.setattr(client, "_ensure_agent", lambda *_args, **_kwargs: None)
+    return client, agent, executed
+
+
+@pytest.mark.parametrize("reply,expected_source", [("1", "managed"), ("2", "sandbox_environment"), ("server_label", "sandbox_environment")])
+def test_embedded_client_resumes_image_choice_from_checkpoint(image_choice, monkeypatch, reply, expected_source):
+    from deerflow.config.image_generation import selected_image_generation_source
+    from deerflow.tui.runtime import stream_actions
+    from deerflow.tui.view_state import AssistantDelta, ToolResult
+
+    client, agent, executed = _embedded_choice_client(image_choice, monkeypatch)
+
+    first = list(stream_actions(client, "Create an image", thread_id="synthetic-embedded-thread"))
+    assert any(isinstance(action, ToolResult) and "Which image model" in action.content for action in first)
+    assert executed == []
+    checkpoint_config = {"configurable": {"thread_id": "synthetic-embedded-thread"}}
+    card = agent.get_state(checkpoint_config).values["messages"][-1]
+    assert isinstance(card, ToolMessage)
+    if reply == "server_label":
+        reply = card.artifact["human_input"]["options"][1]["value"]
+
+    second = []
+    for action in stream_actions(client, reply, thread_id="synthetic-embedded-thread"):
+        assert selected_image_generation_source() is None
+        second.append(action)
+    assert executed == [("/mnt/user-data/prompt.txt", expected_source)]
+    assert any(isinstance(action, AssistantDelta) and action.text == "Image ready" for action in second)
+    checkpoint_messages = agent.get_state(checkpoint_config).values["messages"]
+    assert any(isinstance(message, HumanMessage) and message.additional_kwargs.get("human_input_response", {}).get("request_id") == card.id for message in checkpoint_messages)
+    assert selected_image_generation_source() is None
+
+
+def test_embedded_client_rejects_choice_after_server_endpoint_changes(image_choice, monkeypatch):
+    from deerflow.tui.runtime import stream_actions
+
+    old_environment = {
+        "IMAGE_GENERATION_PROVIDER": "openai",
+        "IMAGE_GENERATION_API_KEY": "synthetic-server-key",
+        "IMAGE_GENERATION_MODEL": "same-model",
+        "IMAGE_GENERATION_BASE_URL": "https://endpoint-a.example/v1",
+    }
+    client, agent, executed = _embedded_choice_client(image_choice, monkeypatch, old_environment)
+    thread_id = "synthetic-endpoint-change-thread"
+    list(stream_actions(client, "Create an image", thread_id=thread_id))
+    checkpoint_config = {"configurable": {"thread_id": thread_id}}
+    old_card = agent.get_state(checkpoint_config).values["messages"][-1]
+    assert isinstance(old_card, ToolMessage)
+
+    new_environment = {**old_environment, "IMAGE_GENERATION_BASE_URL": "https://endpoint-b.example/v1"}
+    new_config = AppConfig.model_validate({"sandbox": {"use": "test", "environment": new_environment}})
+    monkeypatch.setattr("deerflow.client.get_app_config", lambda: new_config)
+    monkeypatch.setattr("deerflow.agents.middlewares.clarification_middleware.get_app_config", lambda: new_config)
+    list(stream_actions(client, "2", thread_id=thread_id))
+
+    assert executed == []
+    new_card = agent.get_state(checkpoint_config).values["messages"][-1]
+    assert isinstance(new_card, ToolMessage)
+    assert new_card.id != old_card.id
+
+
+@pytest.mark.parametrize("case", ["no_card", "channel_card", "old_card", "changed_model", "other_text", "extra_metadata", "wrong_card_type"])
+def test_embedded_image_choice_requires_current_unbound_valid_card(image_choice, case):
+    from deerflow.agents.image_generation_choice import adapt_embedded_image_choice_reply
+
+    _, _, environment = image_choice
+    card = _choice_card({"channel_name": "feishu", "channel_user_id": "synthetic-user"} if case == "channel_card" else {})
+    prior = (card,)
+    message = HumanMessage(content="2", additional_kwargs={"run_id": "synthetic-run"})
+    if case == "no_card":
+        prior = ()
+    elif case == "old_card":
+        prior = (card, HumanMessage(content="another turn"))
+    elif case == "changed_model":
+        environment = {**environment, "GEMINI_IMAGE_MODEL": "later-model"}
+    elif case == "other_text":
+        message = HumanMessage(content="Please explain option 2", additional_kwargs={"run_id": "synthetic-run"})
+    elif case == "extra_metadata":
+        message = HumanMessage(content="2", additional_kwargs={"run_id": "synthetic-run", "files": []})
+    elif case == "wrong_card_type":
+        card.artifact["human_input"]["clarification_type"] = "ordinary_question"
+
+    graph_input = {"messages": [message]}
+    adapted, source = adapt_embedded_image_choice_reply(graph_input, prior, environment)
+    assert adapted is graph_input
+    assert source is None
 
 
 def test_aio_image_choice_acquires_another_identity_without_destroying_old_container(image_choice, monkeypatch):

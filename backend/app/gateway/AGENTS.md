@@ -1,7 +1,5 @@
 ### Gateway API (`app/gateway/`)
 
-`routers/image_generation.py`: admin profiles, redacted off-loop probes.
-
 Reject external run/state writes with `sandbox`, `thread_data`, or `viewed_images`.
 
 Studio retains sanitized creation metadata.
