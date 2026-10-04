@@ -17,5 +17,8 @@ A terminal-native UI over the embedded harness, exposed as the `deerflow` consol
 `None` when history navigation is inactive; the app must then leave the composer
 untouched, including its cursor and undo state.
 An empty string is a valid saved draft and must still be restored after history.
+History navigation may advance its index without changing the input text. When
+the recalled value equals the composer value, skip loading the document so its
+cursor and undo state survive.
 
 **Tests**: `tests/test_tui_*.py` — pure layers via plain pytest, the app/palette/overlays via Textual's pilot harness with a fake in-process session, and `test_tui_persistence.py` for the `threads_meta` round-trip.

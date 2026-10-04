@@ -331,6 +331,8 @@ class DeerFlowTUI(App):
 
     def _history_move(self, value: str) -> None:
         composer = self.query_one("#composer", ComposerInput)
+        if composer.value == value:
+            return
         composer.value = value
         composer.cursor_position = len(value)
 

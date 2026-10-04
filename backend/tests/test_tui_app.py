@@ -735,6 +735,30 @@ _LONG_PROMPT = " ".join(f"word{i}" for i in range(60))  # one logical line that 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["up", "down"])
+async def test_equal_history_recall_preserves_cursor_and_undo(direction):
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._history.add("same prompt")
+        if direction == "down":
+            # Down will restore the same draft that Up saved.
+            app._history.up("same prompt")
+        app.post_message(events.Paste("same prompt"))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        composer.move_cursor((0, 2))
+
+        await pilot.press(direction)
+        await pilot.pause()
+        assert composer.cursor_location == (0, 2)
+        await pilot.press("ctrl+z")
+        await pilot.pause()
+        assert composer.value == ""
+
+
+@pytest.mark.asyncio
 async def test_up_inside_a_soft_wrapped_line_moves_the_cursor_not_history():
     app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
 

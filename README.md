@@ -2422,6 +2422,8 @@ saved draft.
 
 At the first composer row, `Up` also leaves the draft, cursor, and undo history
 untouched when no input history is available.
+Recalling identical history text or a saved draft also preserves the cursor and
+undo history.
 
 See [backend/docs/TUI.md](backend/docs/TUI.md) for the full guide.
 
