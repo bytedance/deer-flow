@@ -55,7 +55,7 @@ O DeerFlow passou a integrar o conjunto de ferramentas de busca e crawling intel
   - [Coding Plan da ByteDance Volcengine](#coding-plan-da-bytedance-volcengine)
   - [InfoQuest](#infoquest)
   - [Índice](#índice)
-  - [Configuração por agente em uma linha](#configuração-por-agente-em-uma-linha)
+  - [Configuração do agente em uma linha](#configuração-do-agente-em-uma-linha)
   - [Início rápido](#início-rápido)
     - [Configuração](#configuração)
     - [Executando a aplicação](#executando-a-aplicação)
@@ -117,7 +117,7 @@ O DeerFlow passou a integrar o conjunto de ferramentas de busca e crawling intel
     - [Principais contribuidores](#principais-contribuidores)
   - [Histórico de estrelas](#histórico-de-estrelas)
 
-## Configuração por agente em uma linha
+## Configuração do agente em uma linha
 
 Se você usa Claude Code, Codex, Cursor, Windsurf ou outro agente de código, dá para passar as instruções de configuração em uma única frase:
 
