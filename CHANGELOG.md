@@ -487,7 +487,7 @@ This release closes that milestone with **301 merged pull requests**.
   append had been offloaded. Those steps now run in worker threads, matching the
   rollback route. The custom-skill delete and archive-install routes and the
   agent's `skill_manage` tool, whose storage lookup stats `config.yaml` on every
-  call, also build their storage off the loop.
+  call, also build their storage off the loop. ([#6332])
 - **gateway:** Deleting a thread with a large workspace no longer freezes every
   other Gateway request while its files are removed. `DELETE /api/threads/{id}`
   ran `shutil.rmtree` over the thread directory on the event loop, so other
@@ -7798,3 +7798,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6307]: https://github.com/bytedance/deer-flow/pull/6307
 [#6319]: https://github.com/bytedance/deer-flow/pull/6319
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
+[#6332]: https://github.com/bytedance/deer-flow/pull/6332
