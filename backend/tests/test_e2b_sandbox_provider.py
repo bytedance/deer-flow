@@ -3232,7 +3232,6 @@ async def test_shutdown_defers_teardown_and_fences_cached_acquire_while_maintena
     assert client.killed is True
 
 
-
 def test_atexit_shutdown_logs_pending_cleanup_without_raising(monkeypatch, caplog):
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     p = _make_provider()
