@@ -5635,6 +5635,36 @@ def _rs_search(sb, op: str, root: str):
 
 
 @_RS_POSIX
+@pytest.mark.parametrize(
+    ("pattern", "non_match"),
+    [("alpha.beta", "alphaXbeta"), ("hello world", "helloworld"), ("x[0]", "x0"), (r"path\file", "pathfile"), ("[", "plain"), ("plain", "other"), ("-n", "plain")],
+)
+def test_remote_grep_literal_matches_original_text(tmp_path, pattern, non_match):
+    target = tmp_path / "sample.txt"
+    target.write_text(f"{non_match}\n{pattern}\n", encoding="utf-8")
+
+    matches, truncated = _rs_sandbox(tmp_path).grep(str(tmp_path), pattern, literal=True)
+
+    assert [(match.path, match.line_number, match.line) for match in matches] == [(str(target), 2, pattern)]
+    assert truncated is False
+
+
+@_RS_POSIX
+@pytest.mark.parametrize("case_sensitive", [False, True])
+def test_remote_grep_regex_keeps_regex_and_case_semantics(tmp_path, case_sensitive):
+    target = tmp_path / "sample.txt"
+    target.write_text("alpha.beta\nalphaXbeta\nALPHA.BETA\nno match\n", encoding="utf-8")
+
+    matches, truncated = _rs_sandbox(tmp_path).grep(str(tmp_path), "^alpha.beta$", case_sensitive=case_sensitive)
+
+    expected = [(1, "alpha.beta"), (2, "alphaXbeta")]
+    if not case_sensitive:
+        expected.append((3, "ALPHA.BETA"))
+    assert [(match.line_number, match.line) for match in matches] == expected
+    assert truncated is False
+
+
+@_RS_POSIX
 @pytest.mark.parametrize("op", ["grep", "glob"])
 def test_remote_search_missing_root_raises_file_not_found(tmp_path, op):
     with pytest.raises(FileNotFoundError):
