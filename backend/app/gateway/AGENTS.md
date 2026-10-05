@@ -181,9 +181,7 @@ without changed outputs keep ordinary chat behavior. Journal mechanics
 `packages/harness/deerflow/runtime/AGENTS.md`. Multi-worker deployments
 require `run_events.backend: db` for shared, ordered delivery events; the
 startup gate rejects process-local memory and JSONL event stores when
-`GATEWAY_WORKERS > 1` or when the deployment declares peers with
-`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1` (Kubernetes
-replicas run one worker per Pod, which the worker count cannot see).
+`GATEWAY_WORKERS > 1` or `deployment.multi_instance: true`.
 
 **RunManager / RunStore contract**:
 - LangGraph-compatible run requests validate their supported subset before creating a run. `runtime/stream_modes.py` is the shared backend contract for public stream modes and the worker's `graph.astream` mapping; the public `messages-tuple` mode maps to LangGraph's internal `messages` mode, while public `messages`, `events`, and other unsupported modes are rejected instead of being dropped or replaced with `values`. `app/gateway/run_models.py::RunCreateRequest` is shared by HTTP and internal scheduled launch paths, retains only truthful compatibility defaults for unimplemented options (`if_not_exists="create"` plus `None` placeholders), returns 422 for unsupported values including `on_completion="complete"`, `on_completion="continue"`, and `multitask_strategy="enqueue"`, and forbids undeclared SDK options so fields such as `checkpoint_during` and `durability` cannot be silently discarded. A placeholder must still accept the stock SDK's own default: `langgraph_sdk` drops only `None` from its run payload, so `stream_resumable=False` reaches every request and means "non-resumable", which is what DeerFlow serves — rejecting it 422'd every IM channel run (#4466). `tests/test_run_request_validation.py::test_gateway_accepts_langgraph_sdk_default_payload` pins the real SDK payload against this boundary; channel tests mock the SDK client and cannot catch this class of drift.
