@@ -399,7 +399,7 @@ class JsonlRunEventStore(RunEventStore):
             events = [e for e in events if e.get("seq", 0) > after_seq]
         return events[:limit]
 
-    async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None):
+    async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         events = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
         filtered = [e for e in events if e.get("category") == "message"]
         if before_seq is not None:

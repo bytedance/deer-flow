@@ -476,6 +476,17 @@ This release closes that milestone with **301 merged pull requests**.
   lock is held only to revalidate the row and atomically rename the output
   into place, so a document trashed or purged meanwhile still publishes
   nothing. ([#6305])
+- **gateway:** Per-run reads now return the rows of IM-channel owners.
+  `start_run` stamps run rows and run events with the raw trusted owner id (for
+  example `feishu:owner-777`), but several run-scoped routes filtered by the
+  internal caller's normalized id, so on the SQL stores any owner id containing
+  characters outside `[A-Za-z0-9_-]` matched nothing:
+  `GET /api/threads/{id}/runs/{rid}/messages` and `/events` returned an empty
+  list, `/workspace-changes` reported no changes, `/artifacts/archive` answered
+  404, and the regenerate source-run lookup fell back or failed with 409. These
+  reads now use the same data identity as the thread message routes (#5448),
+  and every event store accepts `user_id` on `list_messages_by_run()`. Browser
+  and API sessions keep their per-user filter. ([#6282])
 - **runtime:** A multi-worker run that finished successfully is no longer
   reclaimed as an orphan `error` while its worker is still finalizing. With an
   event store, the worker records the terminal status in memory first and
@@ -7732,4 +7743,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6238]: https://github.com/bytedance/deer-flow/pull/6238
 [#6255]: https://github.com/bytedance/deer-flow/pull/6255
 [#6263]: https://github.com/bytedance/deer-flow/pull/6263
+[#6282]: https://github.com/bytedance/deer-flow/pull/6282
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305

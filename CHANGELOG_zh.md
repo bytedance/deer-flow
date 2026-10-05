@@ -429,6 +429,15 @@
   元数据与调度器的写入都要等待整个转换完成，超过 30 秒即报 `database is locked`。
   现在转换在任何事务之外写入 `.staging/`，只在重新校验文档行并原子重命名输出时
   持锁，期间被移入回收站或彻底删除的文档仍不会发布任何内容。([#6305])
+- **网关：** 单次运行的读取现在能返回 IM 渠道所有者的数据。`start_run` 用原始
+  受信所有者 ID（例如 `feishu:owner-777`）标记运行行与运行事件，但多个运行级路由
+  按内部调用方规范化后的 ID 过滤，因此在 SQL 存储上，只要所有者 ID 含有
+  `[A-Za-z0-9_-]` 以外的字符就匹配不到任何数据：
+  `GET /api/threads/{id}/runs/{rid}/messages` 与 `/events` 返回空列表，
+  `/workspace-changes` 报告没有变更，`/artifacts/archive` 返回 404，重新生成的
+  源运行查找退回兜底路径或返回 409。这些读取现在使用与线程消息路由（#5448）相同
+  的数据身份，所有事件存储的 `list_messages_by_run()` 都接受 `user_id`。浏览器与
+  API 会话仍保留按用户过滤。([#6282])
 - **运行时：** 多 worker 部署中已成功结束的运行，不会再在其 worker 仍在收尾时被
   当作孤儿运行回收为 `error`。配置了事件存储时，worker 先在内存中记录终态，直到
   journal 刷新、交付回执、工作区扫描与时长 checkpoint 写入完成后才写入运行存储。
@@ -6451,4 +6460,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6238]: https://github.com/bytedance/deer-flow/pull/6238
 [#6255]: https://github.com/bytedance/deer-flow/pull/6255
 [#6263]: https://github.com/bytedance/deer-flow/pull/6263
+[#6282]: https://github.com/bytedance/deer-flow/pull/6282
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
