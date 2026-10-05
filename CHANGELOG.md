@@ -475,6 +475,17 @@ This release closes that milestone with **301 merged pull requests**.
   `pg_try_advisory_lock`: the wait lasts as long as the holder's migration,
   each attempt stays bounded by `command_timeout`, and the wait is logged once.
   ([#6306])
+- **projects:** Reading a shelf document for the first time no longer blocks
+  every other database write on SQLite while the document converts. Lazy
+  conversion ran pymupdf/markitdown inside the `BEGIN IMMEDIATE` transaction
+  that serializes the publish against trash and purge, and on SQLite that lock
+  is database-wide, so run status, thread metadata and scheduler writes waited
+  for the whole conversion and failed with `database is locked` after 30
+  seconds. Conversion now writes into `.staging/` outside any transaction; the
+  lock is held only to revalidate the row and atomically rename the output
+  into place, so a document trashed or purged meanwhile still publishes
+  nothing. Concurrent first reads of one document share a single conversion
+  rather than each holding a file-IO worker. ([#6305])
 - **gateway:** Per-run reads now return the rows of IM-channel owners.
   `start_run` stamps run rows and run events with the raw trusted owner id (for
   example `feishu:owner-777`), but several run-scoped routes filtered by the
@@ -7743,4 +7754,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6255]: https://github.com/bytedance/deer-flow/pull/6255
 [#6263]: https://github.com/bytedance/deer-flow/pull/6263
 [#6282]: https://github.com/bytedance/deer-flow/pull/6282
+[#6305]: https://github.com/bytedance/deer-flow/pull/6305
 [#6306]: https://github.com/bytedance/deer-flow/pull/6306
