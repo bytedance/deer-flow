@@ -24,6 +24,16 @@ else
     REPO_ROOT_WIN="$REPO_ROOT"
 fi
 
+# serve.sh deliberately supports un-installed checkouts and calls this script
+# before its own dependency-install step, but `uv run --no-sync` never
+# bootstraps an environment. When the environment the upgrade needs is not
+# there yet, degrade to a warning instead of aborting `make dev`: this run's
+# install step proceeds, and the next start upgrades the config normally.
+if ! (cd "$REPO_ROOT/backend" && uv run --no-sync python -c "import deerflow" >/dev/null 2>&1); then
+    echo "⚠ Backend environment not installed yet — skipping the config upgrade (the next start upgrades normally)."
+    exit 0
+fi
+
 # Upgrade the config.yaml the Gateway loads. Ask the harness resolver rather
 # than copying its order: with both <checkout>/config.yaml and
 # backend/config.yaml present, `make dev` reads the checkout copy. The import

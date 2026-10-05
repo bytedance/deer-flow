@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -32,6 +34,7 @@ def test_knowledge_base_config_is_provider_agnostic() -> None:
 # Only the upgrade-script test shells out; it needs Git Bash on Windows (the
 # WSL launcher and Store alias stubs cannot run the repo scripts).
 SCRIPT_BASH = find_script_bash()
+REPO_ROOT_BACKEND = Path(__file__).resolve().parents[2] / "backend"
 
 
 def _make_config_files(tmpdir: Path, user_config: dict, example_config: dict) -> Path:
@@ -627,6 +630,7 @@ def test_version_46_pii_disabled_config_upgrade_skips_token_secret(tmp_path):
     AppConfig.model_validate(upgraded)
 
 
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_config_upgrade_runs_without_consulting_the_package_index(tmp_path):
     """The upgrade must not re-resolve dependencies: hostile index config stays irrelevant.
 
@@ -651,6 +655,40 @@ def test_config_upgrade_runs_without_consulting_the_package_index(tmp_path):
     expected_version = yaml.safe_load((checkout / "config.example.yaml").read_text(encoding="utf-8"))["config_version"]
     upgraded = yaml.safe_load((checkout / "config.yaml").read_text(encoding="utf-8"))
     assert upgraded["config_version"] == expected_version
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_skips_with_a_warning_when_the_environment_is_absent(tmp_path):
+    """serve.sh supports un-installed checkouts: degrade to a warning, never abort.
+
+    `--no-sync` never bootstraps an environment, so a checkout without one
+    cannot run the upgrade. Skipping (exit 0, config untouched) lets the
+    caller's own install step proceed; the next start upgrades normally.
+    """
+    checkout = tmp_path / "checkout"
+    original_config = _write_outdated_config(checkout / "config.yaml")
+    (checkout / "backend").mkdir()
+    (checkout / "scripts").mkdir()
+    shutil.copy2(Path(__file__).resolve().parents[2] / "scripts" / "config-upgrade.sh", checkout / "scripts" / "config-upgrade.sh")
+
+    # Simulate "environment absent" deterministically: point uv at the real
+    # backend project but at a venv path that does not exist. The probe's
+    # --no-sync then fails instead of falling back to the runner's own venv.
+    env = os.environ.copy()
+    env["UV_PROJECT"] = str(REPO_ROOT_BACKEND)
+    env["UV_PROJECT_ENVIRONMENT"] = str(tmp_path / "absent-venv")
+    env.pop("VIRTUAL_ENV", None)
+    result = subprocess.run(
+        [SCRIPT_BASH, str(checkout / "scripts" / "config-upgrade.sh")],
+        cwd=str(checkout),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "skipping the config upgrade" in result.stdout
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == original_config
 
 
 def _run_config_upgrade_in_checkout(checkout: Path, **env_overrides: str):
