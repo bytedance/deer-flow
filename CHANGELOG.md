@@ -29,8 +29,10 @@ This release closes that milestone with **301 merged pull requests**.
   conversation-created tasks. Run history shows whether a goal was met,
   including when it relied on stated assumptions; an unmet run shows a readable
   reason in neutral styling instead of a raw code in the error style; and the
-  run whose agent asked to stop the schedule is marked. Tasks without a goal
-  render as before; no API change. ([#6326])
+  run whose agent asked to stop the schedule is marked. Agent-stop,
+  auto-pause and unmet values in a task's last error appear as text in the UI
+  language, and goal-unmet/auto-pause IM notices state the reason in words.
+  Tasks without a goal render as before; no API change. ([#6326])
 
 - **scheduler:** Scheduled tasks can be searched by title or prompt. Finding a
   task previously meant scanning every title or opening details to read its
