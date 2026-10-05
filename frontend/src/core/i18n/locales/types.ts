@@ -787,6 +787,10 @@ export interface Translations {
       met: string;
       metAssumed: string;
       stopRequested: string;
+      lastPause: string;
+      agentStopped: string;
+      autoPaused: string;
+      lastUnmet: string;
       reasons: {
         missingEvidence: string;
         needsUserInput: string;

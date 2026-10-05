@@ -2,6 +2,7 @@ import { expect, test } from "@rstest/core";
 
 import {
   describeGoalOutcome,
+  describeTaskLastError,
   requestedScheduleStop,
 } from "@/core/scheduled-tasks/goal-outcome";
 import type { ScheduledTaskRun } from "@/core/scheduled-tasks/types";
@@ -89,3 +90,29 @@ test.each([
     ).toBe(expected);
   },
 );
+
+test.each([
+  [
+    "stopped by the agent in run 3f2a9c1e-8b47-4d2a-9e61-5c0b7a1d4e93",
+    { kind: "agentStop" },
+  ],
+  ["paused after 3 unmet scheduled goal runs", { kind: "autoPause" }],
+  [
+    "blocked:missing_evidence",
+    { kind: "goalUnmet", reasonKey: "missingEvidence" },
+  ],
+  ["no_verdict", { kind: "goalUnmet", reasonKey: "noVerdict" }],
+])("host-written last_error %s is recognized", (lastError, expected) => {
+  expect(describeTaskLastError(lastError)).toEqual(expected);
+});
+
+test.each([
+  [null],
+  [""],
+  ["Connection reset by peer"],
+  ["stopped by the agent in run "],
+  ["Paused after 3 unmet scheduled goal runs"],
+  ["stopped by the agent in run abc; then failed"],
+])("other last_error %s stays a plain error message", (lastError) => {
+  expect(describeTaskLastError(lastError)).toBeNull();
+});

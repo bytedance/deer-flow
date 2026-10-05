@@ -141,9 +141,12 @@ def test_unmet_and_pause_notifications_have_distinct_safe_text():
     unmet = render_notification_text({"event": "run_unmet", "task_id": "task-a", "payload": {"reason_code": "blocked:needs_user_input", "error": "private raw failure"}})
     paused = render_notification_text({"event": "task_paused", "task_id": "task-a", "payload": {"reason_code": "consecutive_unmet"}})
     assert "goal was not met" in unmet
-    assert "needs_user_input" in unmet
+    assert "Reason: it needs your input." in unmet
+    assert "needs_user_input" not in unmet
     assert "private raw failure" not in unmet
     assert "automatically paused" in paused
+    assert "Reason: 3 scheduled runs in a row did not meet the goal." in paused
+    assert "consecutive_unmet" not in paused
     assert "completed" not in unmet + paused
 
 
@@ -186,7 +189,25 @@ async def test_external_wait_does_not_advance_unmet_streak(scheduler, outcomes):
         assert status == ("paused" if index == 3 else "enabled")
 
 
-@pytest.mark.parametrize("reason", ["token_capped", "no_durable_end_of_turn", "thread_changed_after_evaluation", "thread_changed_before_continuation"])
-def test_known_host_stand_down_reasons_are_reported(reason):
+@pytest.mark.parametrize(
+    ("reason", "readable"),
+    [
+        ("token_capped", "the token budget was reached"),
+        ("no_durable_end_of_turn", "no final reply was saved"),
+        ("thread_changed_after_evaluation", "the conversation changed during the goal check"),
+        ("thread_changed_before_continuation", "the conversation changed during the goal check"),
+        ("blocked:missing_evidence", "the goal check found evidence missing"),
+        ("missing_evidence", "the goal check found evidence missing"),
+        ("no_verdict", "no goal verdict was recorded"),
+    ],
+)
+def test_known_host_stand_down_reasons_are_reported_readably(reason, readable):
     text = render_notification_text({"event": "run_unmet", "task_id": "task-a", "payload": {"reason_code": reason}})
-    assert f"Reason: `{reason}`" in text
+    assert f"Reason: {readable}." in text
+    assert reason not in text
+
+
+def test_unknown_reason_code_is_not_forwarded():
+    text = render_notification_text({"event": "run_unmet", "task_id": "task-a", "payload": {"reason_code": "provider said: secret"}})
+    assert "Reason: unknown." in text
+    assert "secret" not in text

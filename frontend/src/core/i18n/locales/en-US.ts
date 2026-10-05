@@ -951,6 +951,10 @@ export const enUS: Translations = {
       met: "Goal met",
       metAssumed: "Goal met, relying on stated assumptions",
       stopRequested: "This run asked to stop the schedule",
+      lastPause: "Last pause reason",
+      agentStopped: "The agent stopped its own schedule",
+      autoPaused: "3 scheduled runs in a row did not meet the goal",
+      lastUnmet: "Last unmet reason",
       reasons: {
         missingEvidence: "Goal check: evidence missing",
         needsUserInput: "Needs your input",

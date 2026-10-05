@@ -61,3 +61,29 @@ export function requestedScheduleStop(
 ): boolean {
   return Boolean(run.run_id) && run.stop_requested_run_id === run.run_id;
 }
+
+export type TaskLastNote =
+  | { kind: "agentStop" }
+  | { kind: "autoPause" }
+  | { kind: "goalUnmet"; reasonKey: GoalReasonKey };
+
+/**
+ * Recognize the host-written `last_error` values from goal and stop
+ * finalization (backend `scheduled_task_runs/finalization.py`). Anything else
+ * is a real error message and returns null.
+ */
+export function describeTaskLastError(
+  lastError: string | null,
+): TaskLastNote | null {
+  if (!lastError) {
+    return null;
+  }
+  if (/^stopped by the agent in run \S+$/.test(lastError)) {
+    return { kind: "agentStop" };
+  }
+  if (lastError === "paused after 3 unmet scheduled goal runs") {
+    return { kind: "autoPause" };
+  }
+  const reasonKey = REASON_KEYS[lastError];
+  return reasonKey ? { kind: "goalUnmet", reasonKey } : null;
+}

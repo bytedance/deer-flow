@@ -39,6 +39,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { hasScheduleSpec } from "@/core/scheduled-tasks/cron";
 import {
   describeGoalOutcome,
+  describeTaskLastError,
   requestedScheduleStop,
 } from "@/core/scheduled-tasks/goal-outcome";
 import {
@@ -197,6 +198,7 @@ export default function ScheduledTasksPage() {
   const selectedTask =
     filteredData.find((task) => task.id === selectedTaskId) ?? filteredData[0];
   const taskRunsQuery = useScheduledTaskRunHistory(selectedTask?.id);
+  const lastNote = describeTaskLastError(selectedTask?.last_error ?? null);
   const createTask = useCreateScheduledTask();
   const updateTask = useUpdateScheduledTask(selectedTask?.id ?? "");
   const pauseTask = usePauseScheduledTask();
@@ -667,8 +669,20 @@ export default function ScheduledTasksPage() {
                   <div className="text-muted-foreground text-sm">
                     {st.detail.lastRunId}: {selectedTask.last_run_id ?? NONE}
                   </div>
-                  <div className="text-muted-foreground text-sm">
-                    {st.detail.lastError}: {selectedTask.last_error ?? NONE}
+                  <div
+                    className="text-muted-foreground text-sm"
+                    data-testid="scheduled-task-last-error"
+                    title={
+                      lastNote
+                        ? (selectedTask.last_error ?? undefined)
+                        : undefined
+                    }
+                  >
+                    {lastNote === null
+                      ? `${st.detail.lastError}: ${selectedTask.last_error ?? NONE}`
+                      : lastNote.kind === "goalUnmet"
+                        ? `${st.goal.lastUnmet}: ${st.goal.reasons[lastNote.reasonKey]}`
+                        : `${st.goal.lastPause}: ${lastNote.kind === "agentStop" ? st.goal.agentStopped : st.goal.autoPaused}`}
                   </div>
                   {editing ? (
                     <div className="flex flex-col gap-2 rounded-lg border p-3">

@@ -25,8 +25,14 @@ const goalTask = {
   goal_objective: "status.md lists every unchecked item",
   max_runs: 5,
   end_at: null,
+  last_error: "stopped by the agent in run execution-stop",
 };
-const plainTask = { ...baseTask, id: "plain-task", title: "Plain task" };
+const plainTask = {
+  ...baseTask,
+  id: "plain-task",
+  title: "Plain task",
+  last_error: "boom",
+};
 
 const run = (
   id: string,
@@ -112,6 +118,9 @@ test("goal runs show their outcome and the unmet reason is not styled as an erro
     "Goal per run: status.md lists every unchecked item",
   );
   await expect(detail.getByText("Automatic runs: up to 5")).toBeVisible();
+  await expect(page.getByTestId("scheduled-task-last-error")).toHaveText(
+    "Last pause reason: The agent stopped its own schedule",
+  );
 
   await expect(rowOf(list, "execution-met")).toContainText("Goal met");
   await expect(rowOf(list, "execution-assumed")).toContainText(
@@ -139,6 +148,9 @@ test("tasks without a goal render their runs as before", async ({ page }) => {
   const list = await openTask(page, plainTask, plainRuns);
   await expect(list.getByText("execution-plain-ok")).toBeVisible();
   await expect(page.getByTestId("scheduled-task-goal")).toHaveCount(0);
+  await expect(page.getByTestId("scheduled-task-last-error")).toHaveText(
+    "Last error: boom",
+  );
   await expect(list.getByTestId("scheduled-run-goal")).toHaveCount(0);
   await expect(list.getByTestId("scheduled-run-stop-requested")).toHaveCount(0);
   await expect(
@@ -152,6 +164,9 @@ test("goal outcomes use the Chinese copy", async ({ page }) => {
     "每次执行的目标: status.md lists every unchecked item",
   );
   await expect(rowOf(list, "execution-met")).toContainText("目标已达成");
+  await expect(page.getByTestId("scheduled-task-last-error")).toHaveText(
+    "上次暂停原因: Agent 主动停止了该定时任务",
+  );
   await expect(
     rowOf(list, "execution-unmet").getByTestId("scheduled-run-goal"),
   ).toHaveText("目标检查：缺少证据");
