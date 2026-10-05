@@ -932,6 +932,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 3. When `bot_token` is absent and QR bootstrap is enabled, watch backend logs for the QR content returned by iLink and complete the binding flow.
 4. After the QR flow succeeds, DeerFlow persists the acquired token under `state_dir` for later restarts.
 5. For Docker Compose deployments, keep `state_dir` on a persistent volume so the `get_updates_buf` cursor and saved auth state survive restarts.
+6. Outbound images/files enforce `max_outbound_image_bytes` / `max_outbound_file_bytes` (20 MiB / 50 MiB defaults) while reading, including files that grow after resolution. Non-positive limits disable the corresponding cap.
 
 **WeCom Setup**
 

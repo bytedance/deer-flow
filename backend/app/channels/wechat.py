@@ -73,6 +73,12 @@ def _md5_hex(content: bytes) -> str:
     return hashlib.md5(content).hexdigest()
 
 
+def _read_outbound_bytes(path: Path, max_bytes: int) -> bytes:
+    # Read one extra byte so growth beyond the limit is rejected, not truncated.
+    with path.open("rb") as stream:
+        return stream.read(max_bytes + 1 if max_bytes > 0 else -1)
+
+
 def _encrypted_size_for_aes_128_ecb(plaintext_size: int) -> int:
     if plaintext_size < 0:
         raise ValueError("plaintext_size must be non-negative")
@@ -415,9 +421,13 @@ class WechatChannel(Channel):
             return False
 
         try:
-            plaintext = await asyncio.to_thread(attachment.actual_path.read_bytes)
+            plaintext = await asyncio.to_thread(_read_outbound_bytes, attachment.actual_path, self._max_outbound_image_bytes)
         except OSError:
             logger.exception("[WeChat] failed to read outbound image %s", attachment.actual_path)
+            return False
+
+        if self._max_outbound_image_bytes > 0 and len(plaintext) > self._max_outbound_image_bytes:
+            logger.warning("[WeChat] outbound image exceeds %d bytes read limit, skipping: %s", self._max_outbound_image_bytes, attachment.filename)
             return False
 
         aes_key = secrets.token_bytes(16)
@@ -505,9 +515,13 @@ class WechatChannel(Channel):
             return False
 
         try:
-            plaintext = await asyncio.to_thread(attachment.actual_path.read_bytes)
+            plaintext = await asyncio.to_thread(_read_outbound_bytes, attachment.actual_path, self._max_outbound_file_bytes)
         except OSError:
             logger.exception("[WeChat] failed to read outbound file %s", attachment.actual_path)
+            return False
+
+        if self._max_outbound_file_bytes > 0 and len(plaintext) > self._max_outbound_file_bytes:
+            logger.warning("[WeChat] outbound file exceeds %d bytes read limit, skipping: %s", self._max_outbound_file_bytes, attachment.filename)
             return False
 
         aes_key = secrets.token_bytes(16)
