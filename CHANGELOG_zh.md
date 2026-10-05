@@ -422,7 +422,12 @@
   用任何东西。([#5497])
 
 ### 修复
-
+- **网关：** 知识检索目录加载自定义 Agent 配置时不再阻塞网关事件循环。
+  `GET /api/knowledge/retrieval-catalog/datasets` 与 `.../datasets/{id}/documents`
+  此前在事件循环上通过同步 Agent 存储读取 Agent：`file` 后端为文件 IO，`db` 后端
+  为一次同步 SQLAlchemy 往返，磁盘或数据库变慢时会拖住所有其他请求。现在与其他
+  读取 Agent 配置的网关路由一样，在 `asyncio.to_thread` 中加载；响应内容以及未知
+  Agent 返回的 404 保持不变。([#6313])
 - **沙箱：** 中风险审计警告不再让子智能体证据丢失失败的 shell 退出码。
   `SandboxAuditMiddleware` 原先把警告追加在结尾的 `Exit Code: N` 标记之后，并只用
   四个字段重建 `ToolMessage`，导致 `_bash_evidence_status` 找不到标记，退回到报告
