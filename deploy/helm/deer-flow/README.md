@@ -268,16 +268,19 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   rewrite the DSN in a user-managed Secret.
 
 - **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 45s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s). The grace period MUST exceed the Gateway's graceful-shutdown work — channel stop (~5s) plus the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s) plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (channel stop + drain + buffer).
-- **Gateway replicas.** Postgres + the Redis stream bridge together make the
-  gateway's *persisted* state (checkpointer + run/thread metadata) and *live
-  stream* path cross-pod-safe. The default is still 1 replica: **do not raise
-  `gateway.replicas` past 1 yet.** Run control — `create_or_reject` dedup,
-  `cancel`, and orphan reconciliation — is still worker-local (in-process
-  `asyncio.Lock` + in-memory `record.task`), tracked by [issue
-  #3948](https://github.com/bytedance/deer-flow/issues/3948). With >1 replica a
-  double-submit can create two runs on one thread (checkpoint corruption), a
-  cancel can land on a non-owner pod (409), and a crashed pod's runs stay
-  `pending`/`running` forever. Stay on 1 replica until that work lands.
+- **Gateway replicas.** The chart defaults to one Gateway replica. Setting
+  `gateway.replicas > 1` automatically exports `DEER_FLOW_MULTI_INSTANCE=true`
+  to every Gateway Pod, so the runtime applies its multi-instance startup gate
+  instead of treating one-worker-per-Pod Kubernetes replicas as single-process.
+  Scale-out therefore fails closed unless the mounted `config:` uses shared
+  Postgres, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true`,
+  and the Redis stream bridge. The gate also rejects process-local browser tools,
+  an explicit memory sandbox-ownership store, and an enabled scheduler unless
+  `scheduler.multi_instance: true`. The chart's default `config:` intentionally
+  does not enable run ownership heartbeats or the DB run-event store, so changing
+  only `gateway.replicas` is rejected rather than silently starting an unsafe
+  topology. IM channel state and other process-local services still need their
+  own multi-instance coordination.
 - **Scheduled task recovery.** If a deployment explicitly enables
   `scheduler.multi_instance: true`, it must use shared Postgres,
   `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`.
