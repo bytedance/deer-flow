@@ -1369,7 +1369,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if thread.is_alive():
             thread.join(timeout=5)
         if thread.is_alive():
-            raise RuntimeError("Sandbox lease-renewal thread did not stop within 5 seconds")
+            raise RuntimeError("Sandbox lease-renewal thread is still running after stop timeout")
 
     def _lease_renewal_loop(self) -> None:
         interval = self._ownership_config.renewal_interval_seconds
@@ -1561,7 +1561,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._original_sighup = signal.getsignal(signal.SIGHUP) if hasattr(signal, "SIGHUP") else None
 
         def signal_handler(signum, frame):
-            self.shutdown()
+            try:
+                self.shutdown()
+            except Exception:
+                logger.exception("Sandbox shutdown failed while handling signal %s; forwarding signal", signum)
             if signum == signal.SIGTERM:
                 original = self._original_sigterm
             elif hasattr(signal, "SIGHUP") and signum == signal.SIGHUP:
