@@ -474,6 +474,7 @@ This release closes that milestone with **301 merged pull requests**.
   the waiting instance. Acquisition now polls the non-blocking
   `pg_try_advisory_lock`: the wait lasts as long as the holder's migration,
   each attempt stays bounded by `command_timeout`, and the wait is logged once.
+  ([#6306])
 - **gateway:** Per-run reads now return the rows of IM-channel owners.
   `start_run` stamps run rows and run events with the raw trusted owner id (for
   example `feishu:owner-777`), but several run-scoped routes filtered by the
@@ -7742,3 +7743,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6255]: https://github.com/bytedance/deer-flow/pull/6255
 [#6263]: https://github.com/bytedance/deer-flow/pull/6263
 [#6282]: https://github.com/bytedance/deer-flow/pull/6282
+[#6306]: https://github.com/bytedance/deer-flow/pull/6306
