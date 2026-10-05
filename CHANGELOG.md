@@ -481,6 +481,14 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **gateway:** Deleting a thread with a large workspace no longer freezes every
+  other Gateway request while its files are removed. `DELETE /api/threads/{id}`
+  ran `shutil.rmtree` over the thread directory on the event loop, so other
+  requests and live SSE streams stalled until the whole tree was gone (about
+  0.7 seconds for 20,000 small files on a local SSD, longer on mounted
+  volumes). The removal now runs on the file-IO pool, and a cancelled request
+  keeps its thread reservation until the removal finishes, so no new run can
+  start on a thread whose files are still being deleted. ([#6319])
 - **sandbox:** Medium-risk audit warnings no longer hide a failed shell exit from
   subagent evidence. `SandboxAuditMiddleware` appended its warning after the
   trailing `Exit Code: N` marker and rebuilt the `ToolMessage` from four fields,
@@ -7781,4 +7789,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
 [#6306]: https://github.com/bytedance/deer-flow/pull/6306
 [#6307]: https://github.com/bytedance/deer-flow/pull/6307
+[#6319]: https://github.com/bytedance/deer-flow/pull/6319
 [#6328]: https://github.com/bytedance/deer-flow/pull/6328
