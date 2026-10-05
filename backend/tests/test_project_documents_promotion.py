@@ -203,6 +203,29 @@ class TestFromThread:
             assert source.read_bytes() == b"user document"
             assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 0
 
+    @pytest.mark.parametrize("filename", ["report\x00.txt", "CON.txt", "com³.txt", "report.txt."])
+    def test_invalid_explicit_name_rejected_before_shelf_upload(self, tmp_path, filename):
+        app = _build_app(tmp_path)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            pid = _create_project(client)["id"]
+            response = client.post(f"/api/projects/{pid}/documents", files={"file": ("safe.txt", b"user document")}, data={"name": filename})
+            assert response.status_code == 400
+            assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 0
+            assert not (get_paths().project_documents_dir(_USER, pid) / ".staging").exists()
+
+    @pytest.mark.parametrize("filename", ["report\x00.txt", "CON.txt", "com³.txt", "report.txt."])
+    def test_invalid_explicit_name_rejected_before_shelf_promotion(self, tmp_path, filename):
+        app = _build_app(tmp_path)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            pid = _create_project(client)["id"]
+            _seed_thread(app, "thread-1")
+            source = _thread_file("thread-1", "output", "notes.txt", b"user document")
+            response = _promote(client, pid, thread_id="thread-1", kind="output", name="notes.txt", shelf_name=filename)
+            assert response.status_code == 400
+            assert source.read_bytes() == b"user document"
+            assert client.get(f"/api/projects/{pid}/documents").json()["total"] == 0
+            assert not (get_paths().project_documents_dir(_USER, pid) / ".staging").exists()
+
     def test_promote_upload_with_default_name_records_provenance(self, tmp_path):
         app = _build_app(tmp_path)
         with TestClient(app) as client:
