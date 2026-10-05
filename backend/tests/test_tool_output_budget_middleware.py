@@ -124,6 +124,25 @@ class TestMessageText:
     def test_non_string_non_list(self):
         assert _message_text(42) is None
 
+    def test_json_block_is_rendered(self):
+        assert _message_text([{"type": "json", "json": {"a": 1}}]) == '{"a": 1}'
+
+    def test_json_block_mixed_with_text(self):
+        assert _message_text([{"text": "rows:"}, {"type": "json", "json": [1, 2]}]) == "rows:\n[1, 2]"
+
+    def test_json_block_non_serializable_falls_back_to_str(self):
+        assert _message_text([{"type": "json", "json": {"bad": {1}}}]) == "{'bad': {1}}"
+
+    def test_json_block_circular_falls_back_to_str(self):
+        payload: dict = {}
+        payload["self"] = payload
+        result = _message_text([{"type": "json", "json": payload}])
+        # repr of a recursive dict differs across versions ("..." vs "{...}")
+        assert result is not None and result.startswith("{'self': ") and "..." in result
+
+    def test_json_block_without_json_key_returns_none(self):
+        assert _message_text([{"type": "json"}]) is None
+
 
 class TestSnapToLineBoundary:
     def test_snaps_to_newline(self):
@@ -323,6 +342,11 @@ class TestNeedsBudget:
         config = ToolOutputConfig(externalize_min_chars=10)
         msg = ToolMessage(content=[{"type": "image", "data": "x" * 100}], name="tool", tool_call_id="tc-1")
         assert _needs_budget(msg, config) is False
+
+    def test_structured_json_output_needs_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=50)
+        msg = ToolMessage(content=[{"type": "json", "json": {"rows": ["x" * 100]}}], name="query_rows", tool_call_id="tc-1")
+        assert _needs_budget(msg, config) is True
 
 
 class TestBuildPreview:
@@ -887,6 +911,32 @@ class TestWrapToolCallFallback:
 
         assert isinstance(result, ToolMessage)
         assert "omitted from tool output" in result.content
+
+    def test_structured_json_output_budgeted_before_provider(self):
+        # Review feedback on #6208: the MindIE adapter serializes {"type": "json"}
+        # blocks to text, so a large structured result must hit the budget here,
+        # not sail through to provider normalization at full size.
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            fallback_max_chars=200,
+            fallback_head_chars=80,
+            fallback_tail_chars=40,
+        )
+        mw = ToolOutputBudgetMiddleware(config=config)
+        msg = ToolMessage(
+            content=[{"type": "json", "json": {"rows": ["x" * 500]}}],
+            name="query_rows",
+            tool_call_id="tc-1",
+        )
+        req = _make_request(outputs_path=None)
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        assert result is not msg
+        assert isinstance(result.content, str)
+        assert "omitted from query_rows output" in result.content
+        assert len(result.content) <= 200
 
 
 class TestWrapToolCallExemption:
@@ -1458,6 +1508,14 @@ class TestPatchModelMessages:
         result = _patch_model_messages(messages, config)
         assert result is not None
         assert len(result) == 1
+        assert "omitted" in result[0].content
+
+    def test_patches_oversized_structured_json_history(self):
+        config = ToolOutputConfig(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
+        messages = [ToolMessage(content=[{"type": "json", "json": {"rows": ["x" * 1000]}}], name="query_rows", tool_call_id="tc-1")]
+        result = _patch_model_messages(messages, config)
+        assert result is not None
+        assert isinstance(result[0].content, str)
         assert "omitted" in result[0].content
 
 

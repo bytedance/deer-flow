@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import posixpath
@@ -99,8 +100,12 @@ def _default_config() -> ToolOutputConfig:
 def _message_text(content: Any) -> str | None:
     """Extract a plain-text representation from a ToolMessage content field.
 
-    Returns ``None`` for non-string / multimodal content so the caller
-    can skip budget enforcement (images, structured blocks, etc.).
+    Returns ``None`` for content with no model-bound text rendering (images
+    and other non-textual blocks) so the caller can skip budget enforcement.
+    ``{"type": "json"}`` blocks do have one: provider adapters such as
+    ``mindie_provider._fix_messages`` serialize them onto the text channel,
+    so they are rendered here with that same serialization and count toward
+    the budget before provider normalization.
     """
     if isinstance(content, str):
         return content
@@ -113,6 +118,12 @@ def _message_text(content: Any) -> str | None:
                 pieces.append(part)
             elif isinstance(part, dict) and isinstance(part.get("text"), str):
                 pieces.append(part["text"])
+            elif isinstance(part, dict) and part.get("type") == "json" and "json" in part:
+                # Keep this serialization in sync with mindie_provider._fix_messages.
+                try:
+                    pieces.append(json.dumps(part["json"], ensure_ascii=False))
+                except (TypeError, ValueError):
+                    pieces.append(str(part["json"]))
             else:
                 return None
         return "\n".join(pieces) if pieces else None
