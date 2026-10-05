@@ -527,6 +527,10 @@ is opt-in: it fails fast when `frontend/.next` has no completed build.
 
 Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
 
+Cold agent imports during run creation use a dedicated worker pool, keeping
+unrelated Gateway requests responsive while the agent stack loads. A failed
+factory import prevents the run from being admitted.
+
 For a read-only demo without the Gateway, run `make build-static` from `frontend/`,
 then `HOSTNAME=127.0.0.1 PORT=3000 node --env-file=.env .next/standalone/server.js`
 from the same directory. The build includes public demo assets and resolves
