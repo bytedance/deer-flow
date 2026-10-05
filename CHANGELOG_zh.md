@@ -427,7 +427,7 @@
   `DELETE /api/threads/{id}` 此前在事件循环上对线程目录执行 `shutil.rmtree`，
   因此其他请求与进行中的 SSE 流都要等到整棵目录树删除完毕（本地 SSD 上 20,000 个
   小文件约 0.7 秒，挂载卷上更久）。现在移除在文件 IO 线程池中执行；请求被取消时，
-  线程预留会保持到移除完成，因此文件仍在删除的线程上不会启动新的运行。
+  线程预留会保持到移除完成，因此文件仍在删除的线程上不会启动新的运行。([#6319])
 - **持久化：** 另一个实例正在执行 PostgreSQL 模式迁移时，第二个 Gateway 实例不再
   因 `TimeoutError` 启动失败。引导期 advisory lock 此前在应用引擎上以阻塞的
   `pg_advisory_lock` 获取，而该引擎的 asyncpg `database.command_timeout`（默认
@@ -6475,3 +6475,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6282]: https://github.com/bytedance/deer-flow/pull/6282
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
 [#6306]: https://github.com/bytedance/deer-flow/pull/6306
+[#6319]: https://github.com/bytedance/deer-flow/pull/6319

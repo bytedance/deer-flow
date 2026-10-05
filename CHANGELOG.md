@@ -473,7 +473,7 @@ This release closes that milestone with **301 merged pull requests**.
   0.7 seconds for 20,000 small files on a local SSD, longer on mounted
   volumes). The removal now runs on the file-IO pool, and a cancelled request
   keeps its thread reservation until the removal finishes, so no new run can
-  start on a thread whose files are still being deleted.
+  start on a thread whose files are still being deleted. ([#6319])
 - **persistence:** A second Gateway instance no longer fails startup with
   `TimeoutError` while another instance runs a PostgreSQL schema migration. The
   bootstrap advisory lock was taken with a blocking `pg_advisory_lock` on the
@@ -7764,3 +7764,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6282]: https://github.com/bytedance/deer-flow/pull/6282
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
 [#6306]: https://github.com/bytedance/deer-flow/pull/6306
+[#6319]: https://github.com/bytedance/deer-flow/pull/6319
