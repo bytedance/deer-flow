@@ -235,7 +235,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             async with spawn_agent_process(client, cmd, *args, env=agent_env, cwd=physical_cwd) as (conn, proc):
                 logger.info("Spawning ACP agent '%s' with command '%s' and args %s in cwd %s", agent, cmd, args, physical_cwd)
                 try:
-                    async with asyncio.timeout(agent_config.timeout_seconds):
+                    async with asyncio.timeout(agent_config.timeout_seconds) as deadline:
                         await conn.initialize(
                             protocol_version=PROTOCOL_VERSION,
                             client_capabilities=ClientCapabilities(),
@@ -250,6 +250,8 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                             prompt=[text_block(prompt)],
                         )
                 except TimeoutError:
+                    if not deadline.expired():
+                        raise
                     logger.error(
                         "ACP agent '%s' timed out after %s seconds during initialization, session creation, or prompt; terminating subprocess",
                         agent,

@@ -976,3 +976,19 @@ async def test_invoke_acp_agent_cancellation_closes_subprocess(acp_subprocess_to
             invocation.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await invocation
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", ["initialize", "new_session", "prompt"])
+async def test_invoke_acp_agent_preserves_sdk_timeout_errors(acp_subprocess_tool, monkeypatch, phase):
+    from acp.client.connection import ClientSideConnection
+
+    async def raise_sdk_timeout(self, *args, **kwargs):
+        raise TimeoutError("SDK transport timed out")
+
+    monkeypatch.setattr(ClientSideConnection, phase, raise_sdk_timeout)
+    tool = acp_subprocess_tool.build_tool(timeout_seconds=60)
+    result = await asyncio.wait_for(tool.coroutine(agent="test", prompt="do work"), timeout=15)
+    assert result == "Error invoking ACP agent 'test': SDK transport timed out"
+    assert "timeout_seconds" not in result
+    assert acp_subprocess_tool.captured["proc"].returncode is not None
