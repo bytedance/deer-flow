@@ -99,6 +99,8 @@ own teams. Sharing a host conversation does **not** share its team's private dat
   fairness and finer-grained locking are outside this example's current scope.
   Each conversation is serialized, including result
   receipts. A busy host conversation stays queued without cancelling its run.
+  Queued jobs blocked by an unanswered question or interrupt do not consume the
+  active-job budget before admission; an unknown admission outcome still does.
 - Each owner can have 20 teams. A team accepts at most 100 requests, with separate
   space for up to 100 result receipts (200 total job entries); a handoff chain
   accepts at most 12 requests. Start a new user request for another chain, or a
@@ -107,7 +109,11 @@ own teams. Sharing a host conversation does **not** share its team's private dat
 - Team names accept up to 80 characters / 160 UTF-8 bytes; goals accept up to
   2,000 characters / 4,000 UTF-8 bytes. Tasks and clarification answers accept
   up to 4,000 characters / 8,000 UTF-8 bytes. The UI validates both bounds before
-  submission and preserves oversized text for editing. Native mention labels
+  submission and preserves oversized text for editing. String answers count their
+  raw UTF-8 bytes, including the 8,000-byte ceiling; JSON quotes and escapes do not
+  reduce that allowance. Structured graph-interrupt responses retain an 8,000-byte
+  UTF-8 JSON limit. Responses with unpaired Unicode surrogates are rejected through
+  the normal response validation. Native mention labels
   fall back to the member name when the combined team/member label exceeds the
   host's 120 UTF-16-unit limit; selection still routes by team/member IDs.
   Shared context contains
@@ -149,7 +155,9 @@ creation), request capacity independent of receipts, ambiguous admission, and
 lifecycle locking. Host-run transport is controlled for deterministic tests.
 Clarification tests execute the host's real tool and middleware in an Agent graph,
 including repeated questions, peer/mention/result-receipt paths, lost response
-acknowledgements and restart. Queued-request regressions pin handoff attribution
+acknowledgements and restart. Response regressions cover the 7,999/8,000/8,001-byte
+boundaries for both input paths, structured JSON, escaping and malformed Unicode.
+Queued-request regressions pin handoff attribution
 and the chain limit while the first request is running or awaiting admission acknowledgement.
 
 For a browser check, install the repo's frontend dependencies, then start the
