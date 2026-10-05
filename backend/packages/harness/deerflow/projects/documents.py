@@ -494,6 +494,7 @@ _TEXT_READ_CHUNK = 65536
 #: an entry until LRU eviction — no invalidation hook needed.
 _CHAR_COUNT_CACHE: OrderedDict[tuple[str, str], int] = OrderedDict()
 _CHAR_COUNT_CACHE_MAX = 256
+_CHAR_COUNT_CACHE_LOCK = threading.Lock()
 
 
 def _read_text_window(path: Path, *, offset: int, limit: int) -> str:
@@ -538,14 +539,17 @@ def _count_text_chars(path: Path) -> int:
 def _cached_char_count(document_id: str, sha256: str, path: Path) -> int:
     """Worker-thread: character count of an immutable document, cached by content identity."""
     key = (document_id, sha256)
-    cached = _CHAR_COUNT_CACHE.get(key)
-    if cached is not None:
-        _CHAR_COUNT_CACHE.move_to_end(key)
-        return cached
+    with _CHAR_COUNT_CACHE_LOCK:
+        cached = _CHAR_COUNT_CACHE.get(key)
+        if cached is not None:
+            _CHAR_COUNT_CACHE.move_to_end(key)
+            return cached
+    # Only cache metadata is serialized; scans of unrelated files stay concurrent.
     total = _count_text_chars(path)
-    _CHAR_COUNT_CACHE[key] = total
-    while len(_CHAR_COUNT_CACHE) > _CHAR_COUNT_CACHE_MAX:
-        _CHAR_COUNT_CACHE.popitem(last=False)
+    with _CHAR_COUNT_CACHE_LOCK:
+        _CHAR_COUNT_CACHE[key] = total
+        while len(_CHAR_COUNT_CACHE) > _CHAR_COUNT_CACHE_MAX:
+            _CHAR_COUNT_CACHE.popitem(last=False)
     return total
 
 

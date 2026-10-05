@@ -2331,6 +2331,9 @@ run from the pinned snapshot (capped by `projects.shelf_index_max_entries` and
 `projects.shelf_index_max_bytes`), and the agent can page the shelf and read
 documents with the `list_project_documents` and `read_project_document` tools.
 
+Document character counts use a bounded, thread-safe cache; concurrent reads
+do not serialize full file scans behind its cache lock.
+
 ### Archive read semantics
 
 Archiving a project freezes writes but keeps reads. Threads in an archived

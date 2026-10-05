@@ -69,6 +69,12 @@ the old operation starts does not catch SQLite SELECT/ORM-flush races. Keep the
 old completion timestamp within its original lease so expiry cannot mask a
 missing token fence; always drain paused tasks and restore session patches.
 
+## Project document cache
+
+`test_project_document_char_cache.py` pauses real file-IO workers between cache
+lookup and promotion to exercise concurrent eviction. Keep cache metadata
+operations atomic, and verify that a full scan does not hold the cache lock.
+
 ## Executor starvation tests
 
 `test_executor_starvation.py` covers the deterministic starvation semantics from RFC #4560:
