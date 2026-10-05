@@ -944,6 +944,27 @@ export const enUS: Translations = {
       skipped: "Skipped",
       interrupted: "Interrupted",
     },
+    goal: {
+      objective: "Goal per run",
+      maxRuns: "Automatic runs: up to {count}",
+      endAt: "Ends at",
+      met: "Goal met",
+      metAssumed: "Goal met, relying on stated assumptions",
+      stopRequested: "This run asked to stop the schedule",
+      reasons: {
+        missingEvidence: "Goal check: evidence missing",
+        needsUserInput: "Needs your input",
+        externalWait: "Goal check: waiting on something external",
+        runFailed: "Goal check: the run did not finish the work",
+        maxContinuations: "Continuation limit reached",
+        noProgress: "No progress between turns",
+        tokenCapped: "Token budget reached",
+        evaluatorFailed: "Goal check could not run",
+        noDurableEndOfTurn: "No final reply was saved",
+        threadChanged: "Conversation changed during the goal check",
+        noVerdict: "No goal verdict",
+      },
+    },
     recipes: {
       label: "Quick create",
       trending: {

@@ -54,6 +54,7 @@ page zero polls or refreshes on focus/reconnect. Task switches reset to page zer
 and consumed AbortSignals cancel obsolete reads. Live offsets are not snapshots;
 explicit mutations or navigation may observe newly inserted runs.
 Run status `unmet` identifies a finished occurrence whose scheduled goal was not satisfied; keep it distinct from execution failure.
+`core/scheduled-tasks/goal-outcome.ts` maps goal verdicts and host reason codes for run history; show unknown codes verbatim, and leave runs without a goal unchanged.
 
 ## Architecture
 

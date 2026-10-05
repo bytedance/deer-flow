@@ -38,6 +38,10 @@ import { useAgentsApiEnabled } from "@/core/agents/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { hasScheduleSpec } from "@/core/scheduled-tasks/cron";
 import {
+  describeGoalOutcome,
+  requestedScheduleStop,
+} from "@/core/scheduled-tasks/goal-outcome";
+import {
   useCreateScheduledTask,
   useUpdateScheduledTask,
   useDeleteScheduledTask,
@@ -630,6 +634,28 @@ export default function ScheduledTasksPage() {
                     {st.detail.schedule}:{" "}
                     {scheduleTypeLabel(selectedTask.schedule_type)}
                   </div>
+                  {selectedTask.goal_objective && (
+                    <div
+                      className="text-muted-foreground text-sm break-words whitespace-pre-wrap"
+                      data-testid="scheduled-task-goal"
+                    >
+                      {st.goal.objective}: {selectedTask.goal_objective}
+                    </div>
+                  )}
+                  {selectedTask.max_runs != null && (
+                    <div className="text-muted-foreground text-sm">
+                      {st.goal.maxRuns.replace(
+                        "{count}",
+                        String(selectedTask.max_runs),
+                      )}
+                    </div>
+                  )}
+                  {selectedTask.end_at && (
+                    <div className="text-muted-foreground text-sm">
+                      {st.goal.endAt}:{" "}
+                      {formatTimestamp(selectedTask.end_at, locale)}
+                    </div>
+                  )}
                   <div className="text-muted-foreground text-sm">
                     {st.detail.nextRun}:{" "}
                     {formatTimestamp(selectedTask.next_run_at, locale)}
@@ -826,25 +852,57 @@ export default function ScheduledTasksPage() {
                     data-testid="scheduled-task-run-list"
                   >
                     {(taskRunsQuery.data ?? []).length > 0 ? (
-                      (taskRunsQuery.data ?? []).map((run) => (
-                        <div
-                          key={run.id}
-                          className="rounded-md border p-3 text-sm"
-                        >
-                          <div className="font-medium">{runSummary(run)}</div>
-                          <div className="text-muted-foreground text-xs">
-                            {run.run_id ?? NONE}
-                          </div>
-                          <div className="text-muted-foreground text-xs">
-                            {formatTimestamp(run.scheduled_for, locale)}
-                          </div>
-                          {run.error && (
-                            <div className="text-destructive text-xs">
-                              {run.error}
+                      (taskRunsQuery.data ?? []).map((run) => {
+                        const goal = describeGoalOutcome(run);
+                        return (
+                          <div
+                            key={run.id}
+                            className="rounded-md border p-3 text-sm"
+                          >
+                            <div className="font-medium">{runSummary(run)}</div>
+                            <div className="text-muted-foreground text-xs">
+                              {run.run_id ?? NONE}
                             </div>
-                          )}
-                        </div>
-                      ))
+                            <div className="text-muted-foreground text-xs">
+                              {formatTimestamp(run.scheduled_for, locale)}
+                            </div>
+                            {goal?.kind === "met" && (
+                              <div
+                                className="text-xs"
+                                data-testid="scheduled-run-goal"
+                              >
+                                {goal.reliedOnAssumption
+                                  ? st.goal.metAssumed
+                                  : st.goal.met}
+                              </div>
+                            )}
+                            {goal?.kind === "unmet" ? (
+                              <div
+                                className="text-xs text-amber-700 dark:text-amber-400"
+                                data-testid="scheduled-run-goal"
+                              >
+                                {goal.reasonKey
+                                  ? `${st.goal.reasons[goal.reasonKey]} · ${goal.code}`
+                                  : (goal.code ?? NONE)}
+                              </div>
+                            ) : (
+                              run.error && (
+                                <div className="text-destructive text-xs">
+                                  {run.error}
+                                </div>
+                              )
+                            )}
+                            {requestedScheduleStop(run) && (
+                              <div
+                                className="text-muted-foreground text-xs"
+                                data-testid="scheduled-run-stop-requested"
+                              >
+                                {st.goal.stopRequested}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })
                     ) : !taskRunsQuery.isPending && !taskRunsQuery.isError ? (
                       <div className="text-muted-foreground text-sm">
                         {st.detail.noRuns}

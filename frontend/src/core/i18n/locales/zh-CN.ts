@@ -885,6 +885,27 @@ export const zhCN: Translations = {
       skipped: "跳过",
       interrupted: "已中断",
     },
+    goal: {
+      objective: "每次执行的目标",
+      maxRuns: "自动执行：最多 {count} 次",
+      endAt: "截止时间",
+      met: "目标已达成",
+      metAssumed: "目标已达成（依赖已声明的假设）",
+      stopRequested: "本次执行请求停止调度",
+      reasons: {
+        missingEvidence: "目标检查：缺少证据",
+        needsUserInput: "需要你的输入",
+        externalWait: "目标检查：等待外部条件",
+        runFailed: "目标检查：本次运行未完成工作",
+        maxContinuations: "已达续跑上限",
+        noProgress: "多轮之间没有进展",
+        tokenCapped: "已达 token 预算",
+        evaluatorFailed: "目标检查未能运行",
+        noDurableEndOfTurn: "未保存最终回复",
+        threadChanged: "目标检查期间对话发生了变化",
+        noVerdict: "没有目标判定",
+      },
+    },
     recipes: {
       label: "快速创建",
       trending: {
