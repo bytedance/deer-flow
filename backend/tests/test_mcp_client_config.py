@@ -282,7 +282,7 @@ def test_fxmacrodata_example_is_explicitly_opt_in_and_uses_anonymous_http_transp
     import json
     from pathlib import Path
 
-    example = json.loads((Path(__file__).parents[2] / "extensions_config.example.json").read_text())
+    example = json.loads((Path(__file__).parents[2] / "extensions_config.example.json").read_text(encoding="utf-8"))
     fxmacrodata = example["mcpServers"]["fxmacrodata"]
 
     assert fxmacrodata["enabled"] is False

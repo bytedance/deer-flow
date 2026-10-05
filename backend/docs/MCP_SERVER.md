@@ -200,7 +200,7 @@ full value `Bearer <your-fxmacrodata-api-key>`, then restart DeerFlow. As with
 the other servers, DeerFlow expands only whole-string `$ENV_VAR` references, so
 `Bearer ` belongs in the environment variable. Keep the key out of committed
 files. See the
-[FXMacroData MCP documentation](https://fxmacrodata.com/documentation/mcp-server?utm_source=github&utm_medium=referral&utm_campaign=deer-flow&utm_content=docs)
+[FXMacroData MCP documentation](https://fxmacrodata.com/documentation/mcp-server)
 for the full tool list.
 
 ## Routing Hints
