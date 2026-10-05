@@ -778,6 +778,14 @@ DeerFlow can also expose user-owned IM channel connections in the workspace UI. 
 
 **Configuration in `config.yaml`:**
 
+Discord's `channels.discord.allowed_guilds` accepts one positive numeric guild
+ID (quoted or unquoted) or a YAML list. Unset, `null`, `[]`, or a blank string
+allows all guilds. Invalid entries are ignored with a warning; any other
+configured value yielding no valid ID denies every guild and logs an error.
+`allowed_channels` accepts one channel ID (quoted or unquoted) or a YAML list
+of IDs exempt from `mention_only`, within allowed guilds. An empty value gives
+no exemptions, so `mention_only` applies everywhere when enabled.
+
 ```yaml
 channels:
   # LangGraph-compatible Gateway API base URL (default: http://localhost:8001/api)
