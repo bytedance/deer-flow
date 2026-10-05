@@ -662,6 +662,14 @@ atexit.register(_shutdown_isolated_subagent_loop)
 def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
     """Return the persistent event loop used by isolated subagent executions."""
     global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started, _isolated_subagent_loop_shutdown_pending
+
+    # A startup/shutdown timeout retains ownership while the worker is alive.
+    # Ordinary dispatch is also the retry path once that worker has actually
+    # exited: reap the retained loop under the shutdown lifecycle lock before
+    # deciding whether replacement is still fenced.
+    if _isolated_subagent_loop_shutdown_pending:
+        _shutdown_isolated_subagent_loop()
+
     with _isolated_subagent_loop_lock:
         if _isolated_subagent_loop_shutdown_pending:
             raise RuntimeError("Isolated subagent event loop shutdown is still pending")
