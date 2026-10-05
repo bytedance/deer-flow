@@ -475,7 +475,7 @@ This release closes that milestone with **301 merged pull requests**.
   seconds. Conversion now writes into `.staging/` outside any transaction; the
   lock is held only to revalidate the row and atomically rename the output
   into place, so a document trashed or purged meanwhile still publishes
-  nothing.
+  nothing. ([#6305])
 - **runtime:** A multi-worker run that finished successfully is no longer
   reclaimed as an orphan `error` while its worker is still finalizing. With an
   event store, the worker records the terminal status in memory first and
@@ -7732,3 +7732,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6238]: https://github.com/bytedance/deer-flow/pull/6238
 [#6255]: https://github.com/bytedance/deer-flow/pull/6255
 [#6263]: https://github.com/bytedance/deer-flow/pull/6263
+[#6305]: https://github.com/bytedance/deer-flow/pull/6305
