@@ -793,7 +793,8 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         # a backslash plus a distinct following character), avoiding nested
         # overlapping repeats when a download command has no pipe.
         r"\b(?:curl|wget)\b(?:[^\\\r\n|;]|\\\r?\n|\\[^\r\n])*"
-        r"\|(?:\s|\\\r?\n)*(?:sudo\s+(?:-\S+\s+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
+        r"\|(?:\s|\\\r?\n)*(?:sudo(?:\s|\\\r?\n)+"
+        r"(?:-\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
         r"(?:bash|zsh|dash|fish|sh)\b",
         text,
     ):
