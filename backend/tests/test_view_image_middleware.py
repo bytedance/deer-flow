@@ -309,6 +309,79 @@ class TestCreateImageDetailsMessage:
         assert image_blocks[0]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
         assert reads == [ref]
 
+    def test_blob_store_factory_failure_falls_back_to_validated_host_copy(self, tmp_path, monkeypatch):
+        image_bytes = b"\x89PNG\r\n\x1a\nlocal-fallback"
+        img_path = tmp_path / "fallback.png"
+        img_path.write_bytes(image_bytes)
+        ref = BlobRef(
+            sha256=hashlib.sha256(image_bytes).hexdigest(),
+            size=len(image_bytes),
+            kind="viewed-image",
+            content_type="image/png",
+        )
+
+        def fail_to_resolve_store():
+            raise ValueError("misconfigured backend")
+
+        monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", fail_to_resolve_store)
+        state = {
+            "viewed_images": {
+                "/mnt/user-data/outputs/fallback.png": {
+                    "mime_type": "image/png",
+                    "size": len(image_bytes),
+                    "actual_path": str(img_path),
+                    "sha256": ref.sha256,
+                    "blob_ref": ref.model_dump(exclude_none=True),
+                }
+            }
+        }
+
+        blocks = ViewImageMiddleware()._create_image_details_message(
+            state,
+            host_path_allowed=lambda _virtual, actual: actual == str(img_path),
+        )
+
+        image_blocks = [block for block in blocks if isinstance(block, dict) and block.get("type") == "image_url"]
+        assert len(image_blocks) == 1
+        assert image_blocks[0]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+
+    def test_raw_blob_read_failure_falls_back_to_validated_host_copy(self, tmp_path, monkeypatch):
+        image_bytes = b"\x89PNG\r\n\x1a\nlocal-fallback"
+        img_path = tmp_path / "fallback.png"
+        img_path.write_bytes(image_bytes)
+        ref = BlobRef(
+            sha256=hashlib.sha256(image_bytes).hexdigest(),
+            size=len(image_bytes),
+            kind="viewed-image",
+            content_type="image/png",
+        )
+
+        class FailingStore:
+            def get_bytes(self, requested: BlobRef) -> bytes:
+                raise RuntimeError("raw SDK failure")
+
+        monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: FailingStore())
+        state = {
+            "viewed_images": {
+                "/mnt/user-data/outputs/fallback.png": {
+                    "mime_type": "image/png",
+                    "size": len(image_bytes),
+                    "actual_path": str(img_path),
+                    "sha256": ref.sha256,
+                    "blob_ref": ref.model_dump(exclude_none=True),
+                }
+            }
+        }
+
+        blocks = ViewImageMiddleware()._create_image_details_message(
+            state,
+            host_path_allowed=lambda _virtual, actual: actual == str(img_path),
+        )
+
+        image_blocks = [block for block in blocks if isinstance(block, dict) and block.get("type") == "image_url"]
+        assert len(image_blocks) == 1
+        assert image_blocks[0]["image_url"]["url"] == "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+
     def test_malformed_blob_ref_falls_back_to_validated_host_copy(self, tmp_path):
         image_bytes = b"\x89PNG\r\n\x1a\nlocal-fallback"
         img_path = tmp_path / "fallback.png"

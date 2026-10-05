@@ -326,9 +326,12 @@ def test_resource_graph_link_scan_stays_linear(make_payload):
 
 
 def _elapsed(fn, payload):
-    started = time.monotonic()
+    # perf_counter, not monotonic: on Windows monotonic ticks at ~15.6 ms, the
+    # linear scan finishes inside one tick, and small_elapsed can measure as
+    # exactly 0.0 — a zero divisor for the ratio assertion below.
+    started = time.perf_counter()
     fn(payload)
-    return time.monotonic() - started
+    return time.perf_counter() - started
 
 
 @pytest.mark.parametrize(
@@ -446,6 +449,20 @@ def test_skillscan_high_findings_are_review_errors(tmp_path):
     finding = next(f for f in facts["findings"] if f["source"] == "skillscan" and f["rule_id"] == "declaration-prompt-override")
     assert finding["severity"] == "error"
     assert finding["skillscan_severity"] == "HIGH"
+
+
+@pytest.mark.parametrize("hardcoded", [False, True])
+def test_cli_mapping_credentials_gate_on_values(tmp_path, capsys, hardcoded):
+    _write(tmp_path / "SKILL.md", _valid_skill() + "\nRead [loader](scripts/load.py).\n")
+    value = '"9f8e7d6c5b4a3210ff"' if hardcoded else 'os.getenv("ACCESS_TOKEN")'
+    _write(tmp_path / "scripts" / "load.py", f'import os\ntokens = {{"access_token": {value}, "refresh_token": os.getenv("REFRESH_TOKEN")}}\n')
+
+    exit_code = review_cli_main([str(tmp_path), "--format", "json", "--fail-on", "error", "--fail-on-incomplete"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert exit_code == (1 if hardcoded else 0)
+    assert any(finding["rule_id"] == "secret-env-assignment" for finding in report["findings"]) is hardcoded
+    assert "9f8e7d6c5b4a3210ff" not in repr(report)
 
 
 def test_skillscan_ignores_eval_fixture_skill_markdown(tmp_path):

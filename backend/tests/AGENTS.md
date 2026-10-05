@@ -2,6 +2,14 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Browser-asset confinement tests use `support.symlinks.symlink_or_skip` for real
+file and directory symlinks. Keep missing-file, duplicate-key, and size-limit
+checks separate so they still run when the host cannot create symlinks.
+
+The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
+`ast`, checking both `encoding` and `errors`; module-wide literal counts can
+hide unpinned calls behind unrelated settings.
+
 ## Router auth fixtures
 
 For owner-scoped route assertions, pass a stable `user_factory` and

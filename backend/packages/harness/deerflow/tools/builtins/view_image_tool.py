@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import mimetypes
 from collections.abc import Mapping
 from pathlib import Path
@@ -12,6 +13,8 @@ from langgraph.types import Command
 from deerflow.agents.thread_state import ThreadDataState, ViewedImageData
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.tools.types import Runtime
+
+logger = logging.getLogger(__name__)
 
 _ALLOWED_IMAGE_VIRTUAL_ROOTS = (
     f"{VIRTUAL_PATH_PREFIX}/workspace",
@@ -294,29 +297,30 @@ def _view_image_authorized(runtime: Runtime, image_path: str, tool_call_id: str)
         "actual_path": str(actual_path),
         "sha256": hashlib.sha256(image_data).hexdigest(),
     }
-    from deerflow.storage import BlobStoreError, get_blob_store_if_enabled
+    from deerflow.storage import get_blob_store_if_enabled
 
-    blob_store = get_blob_store_if_enabled()
-    if blob_store is not None:
-        try:
+    try:
+        blob_store = get_blob_store_if_enabled()
+        if blob_store is not None:
             blob_ref = blob_store.put_bytes(
                 image_data,
                 kind="viewed-image",
                 content_type=mime_type,
                 thread_id=_get_thread_id(runtime),
             )
-        except BlobStoreError:
-            return Command(
-                update={
-                    "messages": [
-                        ToolMessage(
-                            "Error: Failed to persist image in shared blob storage",
-                            tool_call_id=tool_call_id,
-                        )
-                    ]
-                },
-            )
-        image_metadata["blob_ref"] = blob_ref.model_dump(mode="json", exclude_none=True)
+            image_metadata["blob_ref"] = blob_ref.model_dump(mode="json", exclude_none=True)
+    except Exception:
+        logger.warning("Failed to persist viewed image in shared blob storage", exc_info=True)
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        "Error: Failed to persist image in shared blob storage",
+                        tool_call_id=tool_call_id,
+                    )
+                ]
+            },
+        )
     if read_source_sandbox_id is not None:
         image_metadata["source_sandbox_id"] = read_source_sandbox_id
     new_viewed_images = {image_path: image_metadata}

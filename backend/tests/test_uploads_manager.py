@@ -83,7 +83,7 @@ class TestNormalizeFilename:
         with pytest.raises(ValueError, match="reserved upload staging"):
             normalize_filename(filename)
 
-    @pytest.mark.parametrize("filename", [".upload-notes.txt", "notes.part", ".env"])
+    @pytest.mark.parametrize("filename", [".upload-notes.txt", "notes.part", ".env", ".UPLOAD-notes.txt", "notes.PART"])
     def test_keeps_non_staging_names(self, filename):
         assert normalize_filename(filename) == filename
 
@@ -94,13 +94,22 @@ class TestNormalizeFilename:
 
     @pytest.mark.parametrize(
         "filename",
-        ["CON", "con.txt", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9", "file.txt.", "file.txt ", "a.", "folder/CON"],
+        ["CON", "con.txt", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9", "COM¹", "com².txt", "COM³.log", "LPT¹", "lpt².md", "LPT³.pdf", "file.txt.", "file.txt ", "a.", "folder/CON"],
     )
     def test_rejects_windows_incompatible_names(self, filename):
         with pytest.raises(ValueError, match="not portable to Windows"):
             normalize_filename(filename)
 
-    @pytest.mark.parametrize("filename", ["report.pdf", "contour.txt", "console.log", "COM0", "COM10", ".gitignore"])
+    @pytest.mark.parametrize("filename", ["CONIN$", "conin$", "CONOUT$", "conout$", "CONIN$.txt", "folder/CONOUT$.log"])
+    def test_rejects_windows_console_device_names(self, filename):
+        with pytest.raises(ValueError, match="reserved Windows device name"):
+            normalize_filename(filename)
+
+    @pytest.mark.parametrize("filename", ["CONIN", "CONOUT", "CONIN$notes.txt", "CONOUT$notes.log"])
+    def test_allows_names_resembling_console_devices(self, filename):
+        assert normalize_filename(filename) == filename
+
+    @pytest.mark.parametrize("filename", ["report.pdf", "contour.txt", "console.log", "COM0", "COM10", "COM⁴.txt", "LPT⁵", "COM¹notes.txt", "LPT²0.md", ".gitignore"])
     def test_allows_portable_names(self, filename):
         assert normalize_filename(filename) == filename
 

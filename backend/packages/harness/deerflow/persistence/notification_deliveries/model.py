@@ -37,6 +37,9 @@ class NotificationDeliveryRow(Base):
     # pending -> sending -> sent | failed. A failure with retries remaining
     # returns the row to pending with a backoff ``available_at``.
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    # Unique fencing token for the current sending claim. Completion writes
+    # must present the token they received when claiming the row.
+    claim_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # Incremented on channel-down / transport parking (``count_attempt=False``)
     # so permanently absent channels eventually reach a terminal ``failed``

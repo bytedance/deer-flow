@@ -23,6 +23,18 @@ export interface Translations {
     deploymentHint: string;
     moduleUnavailable: string;
     noResults: string;
+    catalogEntry: string;
+    catalogHint: string;
+    installationGuide: string;
+    catalog: Record<
+      | "agentTeams"
+      | "bookmarks"
+      | "context"
+      | "classify"
+      | "screening"
+      | "example",
+      { title: string; description: string }
+    >;
     pageUnavailable: string;
     pageUnavailableHint: string;
     viewAll: string;
@@ -305,6 +317,8 @@ export interface Translations {
     mentionSearch: string;
     mentionSkills: string;
     mentionFiles: string;
+    mentionExtensions: string;
+    mentionExtensionsLimit: string;
     mentionConversations: string;
     mentionUpload: string;
     mentionEmpty: string;
@@ -316,7 +330,6 @@ export interface Translations {
     mentionAttachFailed: string;
     mentionMultipleSkills: string;
     mentionNoProject: string;
-    mentionRemoveSkill: string;
     mentionUnavailable: string;
     mentionClose: string;
 
@@ -762,6 +775,7 @@ export interface Translations {
       launching: string;
       running: string;
       success: string;
+      unmet: string;
       failed: string;
       skipped: string;
       interrupted: string;

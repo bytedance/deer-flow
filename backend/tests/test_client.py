@@ -2849,10 +2849,11 @@ class TestUploads:
         with pytest.raises(FileNotFoundError):
             client.upload_files("thread-1", ["/nonexistent/file.txt"])
 
-    def test_upload_files_rejects_reserved_name_before_copying_batch(self, client, tmp_path):
+    @pytest.mark.parametrize("filename", [".upload-notes.part", ".UPLOAD-NOTES.PART", ".Upload-NoTeS.Part"])
+    def test_upload_files_rejects_reserved_name_before_copying_batch(self, client, tmp_path, filename):
         normal = tmp_path / "normal.txt"
         normal.write_bytes(b"normal document")
-        reserved = tmp_path / ".upload-notes.part"
+        reserved = tmp_path / filename
         reserved.write_bytes(b"reserved document")
         uploads_dir = tmp_path / "uploads"
         uploads_dir.mkdir()
@@ -2953,6 +2954,25 @@ class TestUploads:
             assert result["files"][1]["markdown_file"] == "a_1.md"
             assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.docx"
             assert (uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM:a.pdf"
+            from deerflow.uploads.companions import resolve_companion
+
+            assert resolve_companion(uploads_dir / "a.docx") == uploads_dir / "a.md"
+            assert resolve_companion(uploads_dir / "a.pdf") == uploads_dir / "a_1.md"
+
+            authored = tmp_path / "replacement" / "a_1.md"
+            authored.parent.mkdir()
+            authored.write_text("# My notes", encoding="utf-8")  # same byte length as FROM:a.pdf
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+            ):
+                client.upload_files("thread-1", [authored])
+
+            from deerflow.utils.file_outline import extract_outline_for_file
+
+            assert resolve_companion(uploads_dir / "a.pdf") is None
+            assert extract_outline_for_file(uploads_dir / "a.pdf") == ([], [])
+            assert extract_outline_for_file(uploads_dir / "a_1.md")[0] == [{"title": "My notes", "line": 1}]
 
     def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(self, client):
         """A conversion that writes nothing must not reserve stem.md against a later companion.

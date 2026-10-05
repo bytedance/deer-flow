@@ -17,6 +17,7 @@ from app.gateway import upload_ingestion
 from app.gateway.deps import get_config
 from app.gateway.routers import uploads
 from deerflow.sandbox.lease import get_sandbox_lease_manager
+from deerflow.uploads.companions import resolve_companion
 
 
 class ChunkedUpload:
@@ -266,6 +267,7 @@ def test_upload_files_syncs_non_local_sandbox_and_marks_markdown_file(tmp_path):
 
     assert (thread_uploads_dir / "report.pdf").read_bytes() == b"pdf-bytes"
     assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "converted"
+    assert resolve_companion(thread_uploads_dir / "report.pdf") == thread_uploads_dir / "report.md"
 
     sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.pdf", b"pdf-bytes")
     sandbox.update_file.assert_any_call("/mnt/user-data/uploads/report.md", b"converted")

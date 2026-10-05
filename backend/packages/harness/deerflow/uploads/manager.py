@@ -74,7 +74,7 @@ def normalize_filename(filename: str) -> str:
         raise ValueError(f"Filename contains backslash: {filename!r}")
     if len(safe.encode("utf-8")) > _MAX_FILENAME_BYTES:
         raise ValueError(f"Filename too long: {len(safe)} chars")
-    if is_upload_staging_file(safe):
+    if is_reserved_upload_filename(safe):
         raise ValueError(f"Filename uses reserved upload staging pattern: {filename!r}")
     reason = windows_incompatible_segment(safe)
     if reason:
@@ -133,6 +133,16 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
 def is_upload_staging_file(filename: str) -> bool:
     """Return whether *filename* is a transient Gateway upload staging file."""
     return filename.startswith(UPLOAD_STAGING_PREFIX) and filename.endswith(UPLOAD_STAGING_SUFFIX)
+
+
+def is_reserved_upload_filename(filename: str) -> bool:
+    """Check a new basename against the staging namespace, including Win32 aliases.
+
+    Win32 trims trailing dots and spaces and normally ignores case when opening
+    a path. Reject those aliases on every host, without changing the name or
+    the on-disk staging predicate used by listings and cleanup of existing files.
+    """
+    return is_upload_staging_file(filename.rstrip(" .").lower())
 
 
 def validate_path_traversal(path: Path, base: Path) -> None:

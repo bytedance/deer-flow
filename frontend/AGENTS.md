@@ -53,6 +53,7 @@ Fetch 51 rows to display 50 plus a next-page sentinel; never append pages. Only
 page zero polls or refreshes on focus/reconnect. Task switches reset to page zero,
 and consumed AbortSignals cancel obsolete reads. Live offsets are not snapshots;
 explicit mutations or navigation may observe newly inserted runs.
+Run status `unmet` identifies a finished occurrence whose scheduled goal was not satisfied; keep it distinct from execution failure.
 
 ## Architecture
 
@@ -194,6 +195,12 @@ lists from the server instead of inserting those snapshots into either view.
 
 CSV/TSV previews share `artifact-table-preview.tsx` between the panel and standalone viewer. Papa Parse runs only inside `delimited-preview.worker.ts`; `use-delimited-preview.ts` bounds input before transfer, cancels stale work, and enforces a five-second timeout. The parser detects the first record separator outside quoted fields and passes it explicitly to Papa Parse, so embedded newlines in an incomplete quoted field cannot corrupt newline detection. It retains at most 202 logical records and 50 columns, discarding an incomplete final record from truncated input. UI pagination displays at most 200 data rows in pages of 50. Keep the table mounted but inactive when switching to source so header/pagination state survives; changing file identity resets it. Pending `write_file` content stays in source mode until success.
 
+For a truncated sample whose first separator is LF or CRLF, strip a terminal CR
+before parsing so a split CRLF separator cannot make a quoted final field
+invalidate the whole preview, including LF-first files with later CRLF records.
+The terminal record remains incomplete and is discarded; complete CR-only files
+and malformed quotes retain their existing behavior.
+
 Custom skill export is admin-only and disabled in static demos. The lazy
 `skill-export-dialog.tsx` must abort requests and ignore stale callbacks on close
 or user/skill changes. `core/skills/export.ts` owns the revision-bound Blob download;
@@ -297,8 +304,14 @@ Both honor the backend base and prefixes; transport and cache semantics are docu
 Conversation action factories, shapes and availability callbacks are guarded per plugin;
 only validated value snapshots reach the toolbar/sidebar render paths.
 `PluginNavigation` and the dynamic workspace extension route consume page declarations;
-Capability Center details only show metadata and status. Conversation action slots augment
-normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
+Capability Center defaults to the repository examples in `core/extensions/catalog.ts`,
+merged by explicit namespace with runtime descriptors. Catalog-only entries are discovery
+metadata, never module-loader inputs or proof of installation. Backend-only examples may
+have no plugin descriptor; keep their runtime status unasserted. Details link to package
+installation instructions. Keep the catalog aligned with `examples/deerflow-extension-*`.
+Agent teams uses `community.agent-teams`; merge its installed descriptor into the
+localized catalog entry without asserting runtime status for a catalog-only row.
+Conversation action slots augment normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
 Plugin views use mount/dispose and abort signals; Shadow DOM is CSS isolation, not a sandbox.
 Descriptors are user-keyed page snapshots, refreshed manually. Backend calls bind the plugin's
 namespace, action allowlist and expected viewer identity. See `docs/full-stack-plugins.md`.
@@ -314,7 +327,9 @@ conversation-action callbacks reject Promise returns while consuming rejections.
 and atomic references. Render labels as DOM text, never HTML; canonical tokens
 preserve draft positions. Submission expands tokens to `@label` and sends up to
 16 unique skill IDs in `additional_kwargs.skill_references`; the backend checks
-each against the user registry and agent allowlist. Legacy slash input remains.
+each against the user registry and agent allowlist. The web slash picker lists
+only `/goal` and `/compact`; skill selection uses `@`. Legacy typed slash text
+continues through normal message submission for backend and channel compatibility.
 Project files require confirmed `additional_kwargs.files`. Conversation context
 is reconciled from tokens against the current capability and limit. Only successful
 discovery may flatten references; pending/errors preserve IDs and block reference

@@ -30,7 +30,7 @@ from deerflow.uploads.manager import (
     enrich_file_listing,
     ensure_uploads_dir,
     get_uploads_dir,
-    is_upload_staging_file,
+    is_reserved_upload_filename,
     list_files_in_dir,
     normalize_filename,
     upload_artifact_url,
@@ -411,11 +411,11 @@ async def upload_files(
     if len(files) > limits.max_files:
         raise HTTPException(status_code=413, detail=f"Too many files: maximum is {limits.max_files}")
 
-    # Check reserved staging basenames using either path separator before
+    # Check reserved staging basenames and Win32 aliases using either separator before
     # opening storage or a sandbox, so a later reserved name cannot partially
     # upload the batch. Other unsafe filenames keep ingestion's skip behavior.
     for file in files:
-        if file.filename and is_upload_staging_file(Path(file.filename.replace("\\", "/")).name):
+        if file.filename and is_reserved_upload_filename(Path(file.filename.replace("\\", "/")).name):
             raise HTTPException(
                 status_code=400,
                 detail=f"Filename uses reserved upload staging pattern: {file.filename!r}. Rename the file and upload it again.",

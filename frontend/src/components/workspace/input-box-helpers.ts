@@ -1,14 +1,8 @@
-import {
-  parseSlashSkillReference,
-  RESERVED_SLASH_SKILL_NAMES,
-  type Skill,
-} from "@/core/skills";
+import type { Skill } from "@/core/skills";
 export {
   SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN,
   findSuggestionTemplatePlaceholder,
 } from "@/core/suggestions/placeholders";
-
-export const MAX_SKILL_SUGGESTIONS = 6;
 
 // Mirror of the backend raw request limit (`ThreadGoalRequest.objective`
 // max_length and `MAX_GOAL_OBJECTIVE_CHARS` in backend goal.py). Kept here so
@@ -56,10 +50,9 @@ export function getGoalObjectiveCounter(
   };
 }
 
-export type SlashSuggestion = {
+export type SlashCommandSuggestion = {
   name: string;
   description: string;
-  kind: "builtin" | "skill";
 };
 
 export type GoalCommand =
@@ -152,7 +145,7 @@ export function isAbortError(error: unknown): boolean {
   );
 }
 
-export function getLeadingSlashSkillQuery(value: string): string | null {
+export function getLeadingSlashCommandQuery(value: string): string | null {
   if (!value.startsWith("/")) {
     return null;
   }
@@ -177,64 +170,16 @@ export function filterSkillsForAgent(
   return skills.filter((skill) => allowedNames.has(skill.name));
 }
 
-export function getMatchingSkillSuggestions(
-  skills: Skill[],
+export function getMatchingSlashCommands(
   query: string,
-  builtinCommands: SlashSuggestion[],
-): SlashSuggestion[] {
+  commands: SlashCommandSuggestion[],
+): SlashCommandSuggestion[] {
   const normalizedQuery = query.toLowerCase();
-  // A name the slash parser refuses must not be offered here either. Builtin
-  // names remain unavailable, while `context` is only reserved for the exact
-  // `/context compact` alias and can therefore still be a skill suggestion.
-  const reservedNames = new Set([
-    ...RESERVED_SLASH_SKILL_NAMES,
-    ...builtinCommands.map(({ name }) => name.toLowerCase()),
-  ]);
-
-  const builtinMatches = builtinCommands.filter(({ name, description }) => {
-    if (!normalizedQuery) {
-      return true;
-    }
-    return (
+  return commands.filter(
+    ({ name, description }) =>
       name.toLowerCase().includes(normalizedQuery) ||
-      description.toLowerCase().includes(normalizedQuery)
-    );
-  });
-
-  const skillMatches = skills
-    .map((skill, index) => ({
-      skill,
-      index,
-      name: skill.name.toLowerCase(),
-    }))
-    .filter(({ skill, name }) => {
-      if (
-        !skill.enabled ||
-        parseSlashSkillReference(`/${skill.name}`)?.name !== skill.name
-      ) {
-        return false;
-      }
-      if (reservedNames.has(name) && name !== "context") {
-        return false;
-      }
-      return !normalizedQuery || name.includes(normalizedQuery);
-    })
-    .sort((a, b) => {
-      const aStartsWith = a.name.startsWith(normalizedQuery);
-      const bStartsWith = b.name.startsWith(normalizedQuery);
-      if (aStartsWith !== bStartsWith) {
-        return aStartsWith ? -1 : 1;
-      }
-      return a.index - b.index;
-    })
-    .slice(0, MAX_SKILL_SUGGESTIONS)
-    .map(({ skill }) => ({
-      name: skill.name,
-      description: skill.description,
-      kind: "skill" as const,
-    }));
-
-  return [...skillMatches, ...builtinMatches].slice(0, MAX_SKILL_SUGGESTIONS);
+      description.toLowerCase().includes(normalizedQuery),
+  );
 }
 
 export function parseGoalCommand(value: string): GoalCommand | null {

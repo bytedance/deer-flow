@@ -14,6 +14,10 @@
 
 ### 新增
 
+- **调度器：** 按需启用对话工具创建及管理属主绑定的定时任务，支持自动启动上限、
+  每次执行的目标评估，以及 Agent 请求停止自身调度。目标未达成与自动暂停复用
+  现有通知 outbox；明确备注和获授权的上次执行引用延续上下文，不增加 goal 状态。([#6229])
+
 #### 调度器
 
 - **调度器：** 定时任务现在可以按标题或 prompt 搜索。此前找一个任
@@ -419,6 +423,103 @@
 
 ### 修复
 
+- **网关：** 单次运行的读取现在能返回 IM 渠道所有者的数据。`start_run` 用原始
+  受信所有者 ID（例如 `feishu:owner-777`）标记运行行与运行事件，但多个运行级路由
+  按内部调用方规范化后的 ID 过滤，因此在 SQL 存储上，只要所有者 ID 含有
+  `[A-Za-z0-9_-]` 以外的字符就匹配不到任何数据：
+  `GET /api/threads/{id}/runs/{rid}/messages` 与 `/events` 返回空列表，
+  `/workspace-changes` 报告没有变更，`/artifacts/archive` 返回 404，重新生成的
+  源运行查找退回兜底路径或返回 409。这些读取现在使用与线程消息路由（#5448）相同
+  的数据身份，所有事件存储的 `list_messages_by_run()` 都接受 `user_id`。浏览器与
+  API 会话仍保留按用户过滤。([#6282])
+- **运行时：** 多 worker 部署中已成功结束的运行，不会再在其 worker 仍在收尾时被
+  当作孤儿运行回收为 `error`。配置了事件存储时，worker 先在内存中记录终态，直到
+  journal 刷新、交付回执、工作区扫描与时长 checkpoint 写入完成后才写入运行存储。
+  此前租约续期会跳过本地状态已是终态的运行，收尾一旦超过租约加宽限期（默认约
+  30–40 秒），其他 worker 或本 worker 自己的回收器就会接管这条仍处于活动状态的
+  记录。心跳现在会持续续期直到这次延迟写入被执行，若期间被其他 worker 接管则隔离
+  本地运行。仅影响启用 `run_ownership.heartbeat_enabled` 的部署。([#6263])
+- **渠道：** 通过 `/connect` 绑定的 Buzz 作者在已参与的话题中回复时，无需再次提及
+  机器人。开启 `channel_connections.enabled` 后，管理器只在连接仓库中记录已绑定作者
+  的话题映射，而 Buzz 的话题跟随判断只读取 JSON 渠道存储，导致机器人正在回复的话题
+  中所有未提及的回复都被静默丢弃。现在 Buzz 会在提及判断之前解析连接，并通过与管理器
+  相同的辅助函数（`lookup_thread_id`）查找话题，因此已绑定作者的已参与话题就是管理器
+  将复用的话题，旧的 JSON 映射也不再对该作者生效。管理器的斜杠技能白名单检查中有同一读取逻辑
+  的副本，也一并修复：尚无话题的已绑定用户此前会按同一会话旧 JSON 话题的智能体进行检查，
+  可能被告知已启用的技能不可用。([#6232])
+- **记忆：** 读取 DeerMem 智能体记忆时，不再因另一写入同时删除事实而失败。
+  `load()`、`reload()` 与全量 `rebuild_index()` 扫描在不持有存储锁的情况下列
+  出事实文件，若删除恰好在列出之后、打开文件之前提交，就会对完好的数据抛出
+  `MemoryStorageCorruption`：记忆 API 返回 HTTP 500（"Stored memory data is
+  corrupted"），提示词注入在该轮丢弃整个记忆块（在 `failure_policy.read:
+  fail_closed` 下则使运行失败），全量索引重建则把该事实计为失败。列出后消失的事实现在被视为已删除；仍然存在但无法读取的条目（例如悬空符
+  号链接）仍会报告为损坏。([#6255])
+- **记忆：** DeerMem 记忆重新加载不再把旧文档固定在缓存中。`reload()`
+  此前先读取文档、后计算缓存签名，若两者之间有写入提交（例如后台记忆更
+  新器），旧文档就会以新签名写入缓存，之后每次 `load()` 都返回过时的记
+  忆，直到下一次写入。`reload()` 现在与 `load()` 一样先计算签名，竞争写
+  入只会触发重新读取。([#6238])
+- **渠道：** Discord 的渠道连接数据库操作现在在 Gateway 事件循环上执行。
+  discord.py 在客户端线程的私有事件循环上投递消息，而 Discord 适配器此前就在该
+  循环上 await 连接仓库，但仓库的 SQLAlchemy 引擎与连接池属于 Gateway 循环。在
+  PostgreSQL 上开启 `channel_connections.enabled` 时，Gateway 使用过连接池之后的
+  第一条 Discord 消息会以 `got Future … attached to a different loop` 失败并被
+  丢弃；在 SQLite 上，耗尽连接池的突发流量会以
+  `Queue … is bound to a different event loop` 失败，且等待队列会一直绑定在
+  Discord 循环上，导致 Gateway 自身的查询随后也以同样方式失败。现在身份查询与入站
+  提交一起执行，`/connect` 绑定单独执行，二者都与 Telegram、飞书、钉钉一样经由
+  `_submit_threadsafe_coroutine` 在 Gateway 循环上运行；绑定回复经 Discord 循环
+  发回，`stop()` 也会在关闭客户端前排空这些任务。输入中提示仍在交接前注册，查询失败时会跳过确认表情，
+  并在同一目标没有其他消息依赖时停止该提示，被丢弃的消息不会让机器人显示为仍在处理。([#6214])
+
+- **社区工具：** 共享 SSRF 校验现在拒绝所有非全局地址，包括原先的标志位检查放行的
+  `100.64.0.0/10` 共享地址段。该地址段包含 CGNAT 与 Tailscale 主机以及阿里云
+  `100.100.100.200` 实例元数据端点，因此 `web_fetch`（crawl4ai、Browserless、
+  fastcrw）、`web_capture`、智能浏览器和个人 MCP 连接此前都能访问它们，包括 DNS
+  应答可以携带的 IPv4 映射形式 `::ffff:100.100.100.200`。原有的标志位检查仍然保留，
+  因为部分非公网形式（例如元数据地址的 NAT64 写法）依然被判定为全局地址。有意通过这些
+  工具访问 tailnet 或 CGNAT 主机的运维人员现在需要设置 `allow_private_addresses: true`。([#6202])
+- **浏览器：** 智能浏览器不会再因为 SSRF 检查之后发生变化的 DNS 应答而被引向
+  内网或云元数据主机。导航检查和逐请求守卫会解析主机名进行筛查，但 Chromium
+  建立连接时会再次解析，因此重绑定 DNS 服务器可以对检查返回公网地址、对连接返回
+  内网地址。现在每个启动的浏览器的所有 TCP 连接都经过一个按会话创建的本地回环 SOCKS5 代理：
+  Chromium 把主机名交给代理，代理按相同的 `allow_private_addresses` 策略只解析一次，
+  并且只连接筛查通过的地址。回环流量同样经过代理。WebRTC UDP 不经过代理，不在覆盖范围内。
+  通过 CDP 连接的 Chrome 不受影响；
+  委托抓取服务（crawl4ai、Browserless、fastcrw）仍在其自身一侧解析，Gateway 无法固定。([#6201])
+- **渠道：** Discord 现在会在智能体生成回复期间真正显示"正在输入"提示。`_start_typing()` 调用的
+  `channel.trigger_typing()` 已在 discord.py 2.0 中移除（项目要求 `>=2.7.0`），而其循环吞掉了
+  所有异常，因此每次都抛出 `AttributeError`，提示从未发送。现在改为 await 2.x 的
+  `channel.typing()` 发送一次提示。每个输入提示循环的首次失败以 WARNING 级别记录（缺少权限或持续限流
+  在默认日志级别下即可见），之后的失败以 DEBUG 级别记录，而不是直接丢弃。([#6138])
+- **社区工具：** SSRF URL 校验在解析主机名时不再阻塞 Gateway 事件循环。
+  `validate_public_http_url` 通过阻塞的 `socket.getaddrinfo` 解析主机名，而
+  crawl4ai 与 Browserless 的 `web_fetch`、`web_capture`、`browser_navigate`、
+  Gateway 浏览器导航路由以及 Live 流的导航输入和 seed 都在异步代码中直接调用它，
+  因此模型或用户选择的 URL 一旦遇到缓慢的 DNS 响应，整个查询期间其他请求和流都会停滞。
+  逐个检查重定向和子资源的 Playwright 请求守卫也在共享的浏览器事件循环上同步解析，
+  会让所有浏览器会话的 Live 画面与输入一同停滞。这些调用方现在通过 `asyncio.to_thread` 运行校验，放行与拒绝的结果不变。
+  严格的阻塞 IO 检测新增 `socket.getaddrinfo` 规则，因为 Blockbuster
+  默认只包装 socket 方法，不包装模块级解析函数。([#6140])
+- **智能体：** 循环检测的整数阈值现在会拒绝 YAML 布尔值，而不是把
+  `true` 静默转换为 `1`。此前若配置 `warn_threshold: true` 和
+  `hard_limit: true`，第一组工具调用就会达到硬上限并强制终止智能体；
+  跟踪窗口、工具频率和按工具覆盖项中的布尔值也会把对应限制缩小为
+  1。现在所有整数阈值字段都会在配置加载阶段按字段名报错，同时保持
+  有效整数和数字字符串的既有行为。([#6017])
+- **智能体：** 应用配置的整数设置现在会拒绝 YAML 布尔值，而不是把 `true`
+  静默转换为 `1`。此前若配置 `recursion_limit: true`，所有未自带递归上限的
+  Gateway 运行都会在第一个 LangGraph 超级步就触达递归上限；`llm_call` 下的
+  整数字段（`retry_max_attempts`、`max_concurrent_calls` 与两个退避延迟）中的
+  布尔值也会把重试次数和并发上限缩小为 1。现在全部七个整数字段都会在配置
+  加载阶段按字段名报错，同时保持有效整数和数字字符串的既有行为。([#6171])
+- **上传：** 文档转换时现在会记录原文件与 Markdown 的归属关系。
+  `list_uploaded_files` 只隐藏归属已验证的转换文件，文档大纲也只读取
+  记录中指定的 Markdown；用户自行上传的同名文件会正常显示，不会被
+  误用作其他文档的大纲。旧版本生成的转换文件没有归属记录，无法与
+  用户自行上传的 Markdown 安全地区分。升级后，它们会作为独立文件
+  出现在历史列表中，原文档也不再从同名文件推断大纲或预览。启用
+  自动转换后重新上传原文件，可以生成有归属记录的新转换文件。([#6101])
 - **智能体：** 计划模式下被重试的模型调用不再丢失 `TodoMiddleware`
   已为其排队的待办完成提醒。该中间件在 `wrap_model_call` 中取出提醒；由于
   `LLMErrorHandlingMiddleware` 包裹着它并通过再次调用自己的 handler 来重试，
@@ -1474,6 +1575,12 @@
   器现在通过共享的 `file_signature.read_config_with_signature()`
   helper 只读取一次，并对返回的字节精确签名；竞态编辑最多
   只多付出一次重载。([#5848])
+- **沙箱：** `glob` 与 `grep` 不再在搜索根目录（或其任一祖先目录）命中忽略模式（如 `build`、
+  `dist`、`logs`、`node_modules`、`coverage`、`target`）时返回空结果。此前各远端沙箱把
+  `should_ignore_path` 用在**绝对路径**上，而该函数会检查路径的每一段，于是树上任意位置的忽略名
+  都会把整份结果隐藏，智能体刚 `ls` 出来的目录却被搜索告知“无匹配”。现在忽略模式按**搜索根的
+  相对路径**生效，与 `list_dir` 已有的做法一致：忽略名依然隐藏自己的子孙目录，但以被忽略目录
+  为根、或位于被忽略祖先之下的搜索会正常返回其内容。([#5667])
 
 - **sandbox：** HTTP 上传路由获取的临时 sandbox 租约现在会释放。在
   remote/provisioner 部署中，`POST /api/threads/{id}/uploads` 会临时获取线
@@ -2282,6 +2389,23 @@
   提示，provider 错误遵循既有的 fail-closed/fail-open 配置。被拒绝的
   `read_file` 读取 `SKILL.md` 时会打上 `skill_context_denied` 标记，持久上
   下文、技能 allowed-tools 与自主密钥绑定都不会激活被拒绝的技能。([#4541])
+
+- **Lark：** 可选的 Lark broker 子命令拒绝列表
+  （`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`）不再能被以独立 token 传入的选项
+  值绕过。此前匹配只去掉以 `-` 开头的 token 并从头比较剩余部分，因此
+  `--profile work config show` 中的 `work` 成为首个位置参数，`config show`
+  规则永远匹配不上——而真实的 `lark-cli` 1.0.65 在这种写法下仍会执行
+  `config show`。broker 无法得知哪些选项带值，因此规则现在只要其 token 按顺序
+  出现在非选项 token 中即视为匹配——这也覆盖了值夹在中间的情形
+  （`config --profile work show`），而连续匹配仍会漏掉这种情况。参数值恰好按
+  顺序拼出被拒绝路径的调用也会被拒绝（fail-closed）。([#6212])
+
+- **渠道：** Telegram 的 `allowed_users` 列表中若没有任何数字用户 ID，现在会拒绝
+  所有用户，而不是静默放行所有人。此前无法通过 `int()` 的条目会被直接丢弃且不
+  记录日志，而结果为空又被视为"未配置白名单"，因此 `["@alice", "bob"]` 会让机器
+  人对所有人开放。单个 ID 现在视为只有一项的列表，而不再被当作字符串逐位拆成多个
+  用户（`"123456"` 曾放行用户 1–6 并拦截 123456）；`null` 或单个整数也不再导致
+  渠道启动时崩溃；每个被丢弃的条目（`@用户名`、浮点数、布尔值）都会记录警告。([#6230])
 
 ### 文档
 
@@ -6116,6 +6240,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5662]: https://github.com/bytedance/deer-flow/pull/5662
 [#5663]: https://github.com/bytedance/deer-flow/pull/5663
 [#5664]: https://github.com/bytedance/deer-flow/pull/5664
+[#5667]: https://github.com/bytedance/deer-flow/pull/5667
 [#5669]: https://github.com/bytedance/deer-flow/pull/5669
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
 [#5676]: https://github.com/bytedance/deer-flow/pull/5676
@@ -6311,7 +6436,22 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6089]: https://github.com/bytedance/deer-flow/pull/6089
 [#6091]: https://github.com/bytedance/deer-flow/pull/6091
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
+[#6101]: https://github.com/bytedance/deer-flow/pull/6101
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135
+[#6138]: https://github.com/bytedance/deer-flow/pull/6138
+[#6140]: https://github.com/bytedance/deer-flow/pull/6140
+[#6171]: https://github.com/bytedance/deer-flow/pull/6171
+[#6201]: https://github.com/bytedance/deer-flow/pull/6201
+[#6202]: https://github.com/bytedance/deer-flow/pull/6202
+[#6212]: https://github.com/bytedance/deer-flow/pull/6212
+[#6214]: https://github.com/bytedance/deer-flow/pull/6214
+[#6229]: https://github.com/bytedance/deer-flow/pull/6229
+[#6230]: https://github.com/bytedance/deer-flow/pull/6230
+[#6232]: https://github.com/bytedance/deer-flow/pull/6232
+[#6238]: https://github.com/bytedance/deer-flow/pull/6238
+[#6255]: https://github.com/bytedance/deer-flow/pull/6255
+[#6263]: https://github.com/bytedance/deer-flow/pull/6263
+[#6282]: https://github.com/bytedance/deer-flow/pull/6282

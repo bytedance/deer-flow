@@ -21,6 +21,7 @@ from deerflow.runtime.runs.store.base import (
     RunIdempotencyConflict,
     RunStore,
     StatusFinalization,
+    canonical_run_created_at,
     normalize_run_created_at_iso,
 )
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
@@ -120,6 +121,7 @@ class RunRepository(RunStore):
         kwargs=None,
         error=None,
         stop_reason: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
         created_at=None,
         follow_up_to_run_id=None,
         owner_worker_id: str | None = None,
@@ -148,6 +150,7 @@ class RunRepository(RunStore):
             "kwargs_json": self._safe_json(kwargs) or {},
             "error": error,
             "stop_reason": stop_reason,
+            "goal_verdict": self._safe_json(goal_verdict),
             "follow_up_to_run_id": follow_up_to_run_id,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
@@ -236,6 +239,12 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
+    async def list_by_thread_created_at(self, thread_id, *, user_id, created_at):
+        timestamp = datetime.fromisoformat(canonical_run_created_at(created_at))
+        async with self._sf() as session:
+            result = await session.execute(select(RunRow).where(RunRow.thread_id == thread_id, RunRow.user_id == user_id, RunRow.created_at == timestamp))
+            return [self._row_to_dict(row) for row in result.scalars()]
+
     async def list_successful_regenerate_sources(
         self,
         thread_id,
@@ -296,12 +305,14 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return {row.run_id: self._row_to_dict(row) for row in result.scalars()}
 
-    async def update_status(self, run_id, status, *, error=None, stop_reason=None) -> bool:
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None, goal_verdict=None) -> bool:
         values: dict[str, Any] = {"status": status, "updated_at": datetime.now(UTC)}
         if error is not None:
             values["error"] = error
         if stop_reason is not None:
             values["stop_reason"] = stop_reason
+        if goal_verdict is not None:
+            values["goal_verdict"] = self._safe_json(goal_verdict)
         # Guard: only transition rows that are still active. ``interrupted`` is
         # included because the rollback path goes ``running → interrupted``
         # (cancel acknowledged) then ``interrupted → error`` (task finalize).
@@ -449,6 +460,7 @@ class RunRepository(RunStore):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
     ) -> bool:
         """Update status + token usage + convenience fields on run completion.
 
@@ -474,6 +486,8 @@ class RunRepository(RunStore):
             values["first_human_message"] = first_human_message[:2000]
         if error is not None:
             values["error"] = error
+        if goal_verdict is not None:
+            values["goal_verdict"] = self._safe_json(goal_verdict)
         allowed_sources = ["pending", "running"]
         if status not in allowed_sources:
             allowed_sources.append(status)
@@ -704,6 +718,7 @@ class RunRepository(RunStore):
         status: str,
         error: str | None = None,
         stop_reason: str | None = None,
+        goal_verdict: dict[str, Any] | None = None,
     ) -> StatusFinalization:
         """Atomically let completion win only before cancellation."""
         values: dict[str, Any] = {
@@ -714,6 +729,8 @@ class RunRepository(RunStore):
             values["error"] = error
         if stop_reason is not None:
             values["stop_reason"] = stop_reason
+        if goal_verdict is not None:
+            values["goal_verdict"] = self._safe_json(goal_verdict)
 
         async with self._sf() as session:
             values["change_seq"] = await self._next_change_seq(session)

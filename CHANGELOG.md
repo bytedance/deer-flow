@@ -13,6 +13,12 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Added
 
+- **scheduler:** Opt-in conversation tools create and manage owner-bound schedules,
+  support bounded automatic launches and per-occurrence goals, and let a scheduled
+  agent request stopping its own schedule. Unmet goals and automatic pause use
+  the existing notification outbox; explicit notes and authorized previous-run
+  references carry context forward without changing the goal lifecycle. ([#6229])
+
 #### Scheduler
 
 - **scheduler:** Scheduled tasks can be searched by title or prompt. Finding a
@@ -460,6 +466,144 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **gateway:** Per-run reads now return the rows of IM-channel owners.
+  `start_run` stamps run rows and run events with the raw trusted owner id (for
+  example `feishu:owner-777`), but several run-scoped routes filtered by the
+  internal caller's normalized id, so on the SQL stores any owner id containing
+  characters outside `[A-Za-z0-9_-]` matched nothing:
+  `GET /api/threads/{id}/runs/{rid}/messages` and `/events` returned an empty
+  list, `/workspace-changes` reported no changes, `/artifacts/archive` answered
+  404, and the regenerate source-run lookup fell back or failed with 409. These
+  reads now use the same data identity as the thread message routes (#5448),
+  and every event store accepts `user_id` on `list_messages_by_run()`. Browser
+  and API sessions keep their per-user filter. ([#6282])
+- **runtime:** A multi-worker run that finished successfully is no longer
+  reclaimed as an orphan `error` while its worker is still finalizing. With an
+  event store, the worker records the terminal status in memory first and
+  writes it to the run store only after the journal flush, delivery receipt,
+  workspace scan and duration checkpoint. Lease renewal skipped runs whose
+  local status was already terminal, so a finalization longer than the lease
+  plus grace (about 30–40 seconds by default) let a peer, or the worker's own
+  reconciler, claim the still-active row. The heartbeat now keeps renewing
+  until that deferred write is attempted, and fences the run if a peer claims
+  it. Affects only `run_ownership.heartbeat_enabled` deployments. ([#6263])
+- **channels:** Buzz now follows a thread without a fresh mention for authors
+  bound with `/connect`. With `channel_connections.enabled`, the manager maps a
+  bound author's threads only in the connection repository, but Buzz's
+  thread-follow gate read only the JSON channel store, so every unmentioned
+  reply in a thread the bot was already answering was silently dropped. Buzz
+  now resolves the connection before the mention gate and looks the thread up
+  through the same helper as the manager (`lookup_thread_id`), so a bound
+  author's engaged thread is the one the manager will reuse, and a legacy JSON
+  mapping no longer counts for that author. The manager's slash-skill whitelist
+  check had its own copy of the same read and is fixed with it: a bound user
+  with no thread yet was checked against the agent of a legacy JSON thread for
+  the same chat and could be told an enabled skill was not available. ([#6232])
+- **memory:** Reading DeerMem agent memory no longer fails while another write
+  deletes a fact. `load()`, `reload()`, and the full `rebuild_index()` scan list
+  the fact files without the storage locks, so a delete committed between the
+  listing and opening a file raised `MemoryStorageCorruption` for data that was
+  intact: the memory API returned HTTP 500 ("Stored memory data is corrupted"),
+  prompt injection dropped the whole memory block for that turn (or failed the
+  run under `failure_policy.read: fail_closed`), and a full index rebuild counted
+  the fact as failed. A fact that vanishes after the listing is now treated as
+  deleted; an entry that is still present but unreadable, such as a dangling
+  symlink, is still reported as corruption. ([#6255])
+- **memory:** A DeerMem memory reload no longer pins an older document in the
+  cache. `reload()` read the document before computing its cache signature, so
+  a write committed in between (for example by the background memory updater)
+  cached the old document under the new signature, and every later `load()`
+  returned the outdated memory until the next write. `reload()` now computes
+  the signature first, as `load()` already did, so a racing write forces a
+  re-read instead. ([#6238])
+- **channels:** Discord now runs its channel-connection database work on the
+  Gateway event loop. discord.py delivers messages on a private loop in the
+  client thread, and the Discord adapter awaited the connection repository there
+  even though its SQLAlchemy engine and pool belong to the Gateway loop. With
+  `channel_connections.enabled` on PostgreSQL, the first Discord message after
+  the Gateway had used the pool failed with `got Future … attached to a
+  different loop` and was dropped. With SQLite, a burst that exhausted the pool
+  failed with `Queue … is bound to a different event loop`, and the wait queue
+  stayed bound to the Discord loop, so the Gateway's own queries then failed the
+  same way. The identity lookup now runs together with the intake commit, and
+  `/connect` binding runs separately, both on the Gateway loop through
+  `_submit_threadsafe_coroutine` like Telegram, Feishu, and DingTalk. Bind
+  replies go back through the Discord loop, and `stop()` now drains that work
+  before tearing the client down. The typing indicator still registers before
+  the hand-off, and a failed lookup skips the ack reaction and stops the
+  indicator unless another message to the same target still relies on it, so a
+  dropped message never shows the bot as working. ([#6214])
+
+- **community:** The shared SSRF guard now refuses every non-global address,
+  including the `100.64.0.0/10` shared address space that its flag checks let
+  through. That range holds CGNAT and Tailscale hosts and Alibaba Cloud's
+  `100.100.100.200` instance metadata endpoint, so `web_fetch` (crawl4ai,
+  Browserless, fastcrw), `web_capture`, the agentic browser, and personal MCP
+  connections could reach them, including through the IPv4-mapped
+  `::ffff:100.100.100.200` form a DNS answer can carry. The existing flag
+  checks stay, because some non-public forms such as the NAT64 spelling of a
+  metadata address still report as global. Operators who intentionally fetch
+  tailnet or CGNAT hosts with these tools must now set
+  `allow_private_addresses: true`. ([#6202])
+- **browser:** The agentic browser can no longer be steered to a private or
+  cloud-metadata host by a DNS answer that changes after the SSRF check. The
+  navigate screen and the per-request guard resolve a hostname to vet it, but
+  Chromium resolved it again to connect, so a rebinding DNS server could answer
+  the checks with a public address and the connection with a private one. Each
+  launched browser now sends every TCP connection through a per-session
+  loopback SOCKS5 proxy: Chromium hands it the hostname, and the proxy resolves
+  it once under the same `allow_private_addresses` policy and connects to
+  exactly the vetted addresses. Loopback traffic goes through the proxy too.
+  WebRTC UDP does not traverse the proxy and is not covered. CDP-attached Chrome
+  is unchanged, and delegated fetch services (crawl4ai, Browserless, fastcrw)
+  still resolve on their own side, which the Gateway cannot pin. ([#6201])
+- **channels:** The Discord typing indicator is now actually sent while the
+  agent works on a reply. `_start_typing()` called `channel.trigger_typing()`, which
+  discord.py removed in 2.0 (the project requires `>=2.7.0`), and its loop
+  swallowed every exception, so each tick raised `AttributeError` and nothing
+  was ever sent. It now awaits `channel.typing()`, the 2.x API that sends one
+  indicator. A typing loop's first failed tick is logged at WARNING (a missing
+  permission or sustained rate limiting is visible at the default level) and
+  later ticks at DEBUG, instead of being dropped. ([#6138])
+- **community:** The SSRF URL guard no longer stalls the Gateway event loop
+  while it resolves a hostname. `validate_public_http_url` resolves with
+  blocking `socket.getaddrinfo`, and the crawl4ai and Browserless `web_fetch`,
+  `web_capture`, `browser_navigate`, the Gateway browser navigate route, and
+  the Live stream's navigate input and seed called it directly from async code,
+  so a slow DNS answer for a model- or user-chosen URL froze every other request
+  and stream for the length of the lookup. The Playwright request guard, which
+  screens every redirect hop and subresource, did the same on the shared browser
+  loop and stalled Live frames and input for every browser session. These
+  callers now run the guard
+  through `asyncio.to_thread`; what it allows and rejects is unchanged. The
+  strict blocking-IO gate gains a `socket.getaddrinfo` rule, because
+  Blockbuster's defaults wrap socket methods but not the module-level resolver.
+  ([#6140])
+- **agents:** Loop-detection integer thresholds now reject YAML booleans instead
+  of coercing `true` to `1`. A configuration such as `warn_threshold: true`
+  and `hard_limit: true` previously made the first tool-call set meet the hard
+  limit and forced the agent to stop; booleans on the tracking-window,
+  per-tool-frequency, and per-tool override fields similarly collapsed their
+  limits to one. All integer threshold fields now fail configuration loading
+  with a field-specific error while valid integers and numeric strings retain
+  their existing behavior.([#6017])
+- **agents:** App-config integer settings now reject YAML booleans instead of
+  coercing `true` to `1`. A configuration such as `recursion_limit: true`
+  previously made every Gateway run that does not supply its own limit hit the
+  LangGraph recursion ceiling at the first super-step, and booleans on the
+  `llm_call` integers (`retry_max_attempts`, `max_concurrent_calls`, the two
+  backoff delays) collapsed retries and the concurrency cap to one. All seven
+  integer fields now fail configuration loading with a field-specific error
+  while valid integers and numeric strings retain their existing behavior.([#6171])
+- **uploads:** Converted Markdown ownership is now recorded when a document is
+  converted. `list_uploaded_files` hides only verified conversion outputs, and
+  document outlines use only the recorded companion; a user-uploaded Markdown
+  file with the same stem stays visible and cannot become another document's
+  outline. Existing conversions have no ownership record and cannot be safely
+  distinguished from user-authored Markdown. After upgrading, those Markdown
+  files appear separately in historical listings and their source documents
+  have no inferred outline or preview. Re-uploading the source creates a new
+  verified conversion when automatic conversion is enabled. ([#6101])
 - **agents:** A retried model call in plan mode no longer loses the todo
   completion reminder that `TodoMiddleware` had queued for it. The middleware
   drained the reminder inside `wrap_model_call`; because
@@ -1660,6 +1804,16 @@ This release closes that milestone with **301 merged pull requests**.
   `uv-lock-check` hook. The script now refreshes the lock with `uv lock` and exits
   before editing anything when `uv` is missing, instead of leaving a half-bumped
   working tree behind. Only the root package's version line moves. ([#5859])
+- **sandbox:** Stop `glob` and `grep` from returning nothing when the search
+  root — or one of its ancestors — matches an ignore pattern such as `build`,
+  `dist`, `logs`, `node_modules`, `coverage` or `target`. The remote sandboxes
+  applied `should_ignore_path` to the absolute path, which tests every segment,
+  so one ignored name anywhere up the tree hid the whole result and the agent
+  was told "no matches" for a directory `ls` had just listed. Ignore patterns
+  are now applied to the path relative to the search root, as `list_dir` already
+  did: an ignored name still hides its own descendants, but searching an
+  ignored root — or a path below an ignored ancestor — returns its contents.
+  ([#5667])
 
 - **sandbox:** The temporary sandbox lease acquired by the HTTP upload route is
   now released. In remote/provisioner deployments,
@@ -2679,6 +2833,27 @@ This release closes that milestone with **301 merged pull requests**.
   fail-closed/fail-open policy. A denied `read_file` of a `SKILL.md` is
   stamped `skill_context_denied`, so durable context, skill allowed-tools,
   and autonomous secret bindings never activate the denied skill. ([#4541])
+
+- **lark:** The opt-in Lark broker subcommand denylist
+  (`DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS`) can no longer be bypassed by an
+  option value passed as its own token. Matching dropped only `-`-prefixed
+  tokens and compared the rest from the start, so the `work` in `--profile work
+  config show` became the leading positional and a `config show` rule never
+  matched — real `lark-cli` 1.0.65 still runs `config show` there. The broker
+  cannot know which options take a value, so a rule now matches when its tokens
+  appear in order among the non-flag tokens — which also catches values placed
+  between them (`config --profile work show`), a case a contiguous match would
+  still miss. Argument values that spell a denied path in order are refused too
+  (fail-closed). ([#6212])
+
+- **channels:** A Telegram `allowed_users` list that contains no numeric user ID
+  now denies every user instead of silently allowing all of them. Entries that
+  failed `int()` were dropped without a log line, and an empty result meant "no
+  allowlist", so `["@alice", "bob"]` opened the bot to everyone. A single ID is
+  now a one-entry list rather than a string whose digits each became an allowed
+  user (`"123456"` allowed users 1–6 and blocked 123456), `null` or a bare
+  integer no longer crashes the channel at startup, and every dropped entry —
+  `@usernames`, floats, booleans — is logged as a warning. ([#6230])
 
 ### Documentation
 
@@ -7344,6 +7519,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5662]: https://github.com/bytedance/deer-flow/pull/5662
 [#5663]: https://github.com/bytedance/deer-flow/pull/5663
 [#5664]: https://github.com/bytedance/deer-flow/pull/5664
+[#5667]: https://github.com/bytedance/deer-flow/pull/5667
 [#5669]: https://github.com/bytedance/deer-flow/pull/5669
 [#5673]: https://github.com/bytedance/deer-flow/pull/5673
 [#5676]: https://github.com/bytedance/deer-flow/pull/5676
@@ -7539,8 +7715,22 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6089]: https://github.com/bytedance/deer-flow/pull/6089
 [#6091]: https://github.com/bytedance/deer-flow/pull/6091
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
+[#6101]: https://github.com/bytedance/deer-flow/pull/6101
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135
-
+[#6138]: https://github.com/bytedance/deer-flow/pull/6138
+[#6140]: https://github.com/bytedance/deer-flow/pull/6140
+[#6171]: https://github.com/bytedance/deer-flow/pull/6171
+[#6201]: https://github.com/bytedance/deer-flow/pull/6201
+[#6202]: https://github.com/bytedance/deer-flow/pull/6202
+[#6212]: https://github.com/bytedance/deer-flow/pull/6212
+[#6214]: https://github.com/bytedance/deer-flow/pull/6214
+[#6229]: https://github.com/bytedance/deer-flow/pull/6229
+[#6230]: https://github.com/bytedance/deer-flow/pull/6230
+[#6232]: https://github.com/bytedance/deer-flow/pull/6232
+[#6238]: https://github.com/bytedance/deer-flow/pull/6238
+[#6255]: https://github.com/bytedance/deer-flow/pull/6255
+[#6263]: https://github.com/bytedance/deer-flow/pull/6263
+[#6282]: https://github.com/bytedance/deer-flow/pull/6282

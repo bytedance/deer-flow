@@ -249,12 +249,13 @@ class BrokerConfig:
     port: int = LARK_BROKER_DEFAULT_PORT
     timeout_seconds: int = LARK_BROKER_DEFAULT_TIMEOUT_SECONDS
     # Opt-in denylist of ``lark-cli`` subcommand paths the broker refuses to run
-    # (issue #4338 hardening). Each entry is a space-joined command prefix, e.g.
-    # "config show" or "auth token", matched against the leading non-flag tokens
-    # of the request. Narrows the command surface a prompt-injected agent can
-    # reach — the broker already removes the credential *files*, but the full
-    # command surface stays reachable unless a secret-dumping subcommand is denied
-    # here. Empty by default (no behavior change).
+    # (issue #4338 hardening). Each entry is a space-joined command path, e.g.
+    # "config show" or "auth token", matched in order against the non-flag
+    # tokens of the request (see ``_denied_subcommand``). Narrows the command
+    # surface a prompt-injected agent can reach — the broker already removes the
+    # credential *files*, but the full command surface stays reachable unless a
+    # secret-dumping subcommand is denied here. Empty by default (no behavior
+    # change).
     deny_subcommands: tuple[tuple[str, ...], ...] = ()
 
     def credential_env(self) -> dict[str, str]:
@@ -272,33 +273,42 @@ class BrokerConfig:
 
 
 def parse_deny_subcommands(raw: str | None) -> tuple[tuple[str, ...], ...]:
-    """Parse the comma-separated denylist env into command-prefix tuples.
+    """Parse the comma-separated denylist env into command-path tuples.
 
     ``"config show, auth token"`` → ``(("config", "show"), ("auth", "token"))``.
     Blank/whitespace-only entries are dropped.
     """
     if not raw:
         return ()
-    prefixes: list[tuple[str, ...]] = []
+    paths: list[tuple[str, ...]] = []
     for entry in raw.split(","):
         tokens = tuple(entry.split())
         if tokens:
-            prefixes.append(tokens)
-    return tuple(prefixes)
+            paths.append(tokens)
+    return tuple(paths)
 
 
 def _denied_subcommand(deny: tuple[tuple[str, ...], ...], args: list[str]) -> tuple[str, ...] | None:
-    """Return the matched denylist prefix if ``args`` is a denied subcommand.
+    """Return the matched denylist rule if ``args`` may run a denied subcommand.
 
-    Matches against the leading non-flag tokens (options and their values are
-    skipped) so ``config --json show`` is still caught by a ``config show`` rule.
+    The broker cannot know which ``lark-cli`` options take a value, so a value
+    passed as its own token (``--profile work``) is indistinguishable from a
+    subcommand name and may sit before or between the command-path tokens. A
+    rule therefore matches when its tokens appear *in order* among the non-flag
+    tokens, with anything in between: the command path the CLI resolves is
+    always such a subsequence, so ``--profile work config show`` and
+    ``config --profile work show`` are both caught by a ``config show`` rule.
+    The cost is a fail-closed refusal when argument values happen to spell a
+    denied path in order.
     """
     if not deny:
         return None
     positional = [token for token in args if not token.startswith("-")]
-    for prefix in deny:
-        if positional[: len(prefix)] == list(prefix):
-            return prefix
+    for rule in deny:
+        # ``in`` advances the shared iterator: an ordered-subsequence test.
+        remaining = iter(positional)
+        if all(token in remaining for token in rule):
+            return rule
     return None
 
 
@@ -315,7 +325,8 @@ def run_lark_cli(config: BrokerConfig, args: list[str], stdin: bytes) -> ExecRes
 
     ``args`` is passed as an argv list with ``shell=False`` so a sandbox-supplied
     argument can never be shell-interpreted into a second command. A configured
-    ``deny_subcommands`` prefix is refused before the binary is ever spawned.
+    ``deny_subcommands`` command path is refused before the binary is ever
+    spawned.
     """
     denied = _denied_subcommand(config.deny_subcommands, args)
     if denied is not None:

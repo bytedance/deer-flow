@@ -145,6 +145,55 @@ def test_view_image_does_not_claim_success_when_configured_blob_write_fails(
     assert "backend detail" not in _message_content(result)
 
 
+def test_view_image_returns_generic_error_when_blob_store_factory_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_data = _make_thread_data(tmp_path)
+    image_path = Path(thread_data["uploads_path"]) / "shared.png"
+    image_path.write_bytes(PNG_BYTES)
+
+    def fail_to_resolve_store():
+        raise ValueError("misconfigured backend detail must not reach the model")
+
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", fail_to_resolve_store)
+
+    result = view_image_tool.func(
+        runtime=_make_runtime(thread_data),
+        image_path="/mnt/user-data/uploads/shared.png",
+        tool_call_id="tc-shared-factory-failure",
+    )
+
+    assert _message_content(result) == "Error: Failed to persist image in shared blob storage"
+    assert "viewed_images" not in result.update
+    assert "misconfigured backend detail" not in _message_content(result)
+
+
+def test_view_image_returns_generic_error_when_backend_leaks_raw_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_data = _make_thread_data(tmp_path)
+    image_path = Path(thread_data["uploads_path"]) / "shared.png"
+    image_path.write_bytes(PNG_BYTES)
+
+    class FailingStore:
+        def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+            raise RuntimeError("raw SDK detail must not reach the model")
+
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: FailingStore())
+
+    result = view_image_tool.func(
+        runtime=_make_runtime(thread_data),
+        image_path="/mnt/user-data/uploads/shared.png",
+        tool_call_id="tc-shared-raw-failure",
+    )
+
+    assert _message_content(result) == "Error: Failed to persist image in shared blob storage"
+    assert "viewed_images" not in result.update
+    assert "raw SDK detail" not in _message_content(result)
+
+
 def test_view_image_reads_gif(tmp_path: Path) -> None:
     thread_data = _make_thread_data(tmp_path)
     image_path = Path(thread_data["uploads_path"]) / "animation.gif"

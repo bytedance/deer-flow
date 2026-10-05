@@ -179,7 +179,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         if blob_ref_data is None or expected_sha256 is None:
             return None
 
-        from deerflow.storage import BlobRef, BlobStoreError, get_blob_store_if_enabled
+        from deerflow.storage import BlobRef, get_blob_store_if_enabled
 
         try:
             ref = BlobRef.model_validate(dict(blob_ref_data))
@@ -188,12 +188,12 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         if ref.kind != "viewed-image" or ref.sha256 != expected_sha256 or ref.size != expected_size or ref.content_type != mime_type:
             return None
 
-        store = get_blob_store_if_enabled()
-        if store is None:
-            return None
         try:
+            store = get_blob_store_if_enabled()
+            if store is None:
+                return None
             image_bytes = store.get_bytes(ref)
-        except BlobStoreError:
+        except Exception:
             logger.warning(
                 "Failed to resolve viewed image blob %s",
                 ref.sha256[:12],

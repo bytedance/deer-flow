@@ -34,7 +34,43 @@ export const enUS: Translations = {
     deploymentHint:
       "Interface and browser features update on manual reload. Installation, activation and configuration are managed through deployment configuration or the CLI.",
     moduleUnavailable: "Page module unavailable",
-    noResults: "No matching installed extensions.",
+    noResults: "No matching extensions.",
+    catalogEntry: "Catalog extension",
+    catalogHint:
+      "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
+    installationGuide: "Installation guide",
+    catalog: {
+      agentTeams: {
+        title: "Agent teams",
+        description:
+          "Let full Custom Agents collaborate through @mentions, shared records and task handoffs.",
+      },
+      bookmarks: {
+        title: "Bookmarks",
+        description:
+          "Save useful answers and find and organize your own bookmarks on a dedicated page.",
+      },
+      context: {
+        title: "Context pruning",
+        description:
+          "Shorten older read-only tool results while preserving recent messages and native summaries.",
+      },
+      classify: {
+        title: "Text classification",
+        description:
+          "Label a list of texts with supplied categories using the deployment-configured classification service.",
+      },
+      screening: {
+        title: "Content risk warnings",
+        description:
+          "Screen fetched content and add advisory warnings to suspicious tool results without blocking tools.",
+      },
+      example: {
+        title: "Extension development example",
+        description:
+          "Explore middleware, task lifecycle, model observers, services and HTTP route contributions.",
+      },
+    },
     pageUnavailable: "Extension page unavailable",
     pageUnavailableHint:
       "This page is not registered, or its plugin is disabled or unavailable.",
@@ -348,9 +384,11 @@ export const enUS: Translations = {
   // Input Box
   inputBox: {
     mentionPicker: "Add a reference",
-    mentionSearch: "Search skills, project files and conversations",
+    mentionSearch: "Search skills, project files, conversations and plugins",
     mentionSkills: "Skills",
     mentionFiles: "Project files",
+    mentionExtensions: "Plugins",
+    mentionExtensionsLimit: "Select up to 16 plugin references.",
     mentionConversations: "Conversations",
     mentionUpload: "Upload a file",
     mentionEmpty: "No matching references in loaded results",
@@ -363,7 +401,6 @@ export const enUS: Translations = {
     mentionMultipleSkills:
       "Select up to 16 skills per message; select a checked skill again to remove it.",
     mentionNoProject: "Open a project chat to reference its documents.",
-    mentionRemoveSkill: "Remove skill",
     mentionUnavailable: "File unavailable",
     mentionClose: "Close references",
 
@@ -902,6 +939,7 @@ export const enUS: Translations = {
       launching: "Launching",
       running: "Running",
       success: "Success",
+      unmet: "Goal unmet",
       failed: "Failed",
       skipped: "Skipped",
       interrupted: "Interrupted",
@@ -1190,6 +1228,7 @@ export const enUS: Translations = {
     saveChanges: "Save changes",
     descriptions: {
       buzz: "Buzz channels and direct messages through your DeerFlow agent.",
+      qq: "QQ direct messages and group @mentions over WebSocket.",
       telegram: "Telegram direct messages through your DeerFlow bot.",
       slack: "Slack workspace messages and mentions.",
       discord: "Discord server messages through your DeerFlow bot.",
