@@ -1,6 +1,8 @@
 """Configuration for the read-before-write file gate middleware (issue #3857)."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 
 class ReadBeforeWriteConfig(BaseModel):
@@ -35,3 +37,8 @@ class ReadBeforeWriteConfig(BaseModel):
             "placeholder's elided-size figure is the same character count."
         ),
     )
+
+    @field_validator("elide_min_chars", mode="before")
+    @classmethod
+    def _reject_boolean_elide_min_chars(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")

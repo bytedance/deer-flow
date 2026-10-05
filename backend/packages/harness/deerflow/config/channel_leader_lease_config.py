@@ -23,7 +23,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 #: The key under ``channels`` that holds this section.
 CHANNEL_LEADER_LEASE_KEY = "leader_lease"
@@ -58,6 +60,17 @@ class ChannelLeaderLeaseConfig(BaseModel):
         ge=0,
         description="Extra time after lease_expires_at before a peer may take an expired lease, absorbing a slow renewal. Worst-case failover is lease_seconds + grace_seconds.",
     )
+
+    @field_validator("lease_seconds", "grace_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_lease_settings(cls, value: object, info: ValidationInfo) -> object:
+        """A boolean here is a typo, not a duration: ``true`` would coerce to 1.
+
+        ``grace_seconds: false`` would silently drop the post-expiry grace
+        window, and ``lease_seconds: true`` only fails by accident because the
+        coerced 1 falls below the ``ge=3`` bound.
+        """
+        return reject_boolean(value, info, kind="an integer")
 
     @property
     def explicitly_disabled(self) -> bool:
