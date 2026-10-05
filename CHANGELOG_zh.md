@@ -432,6 +432,11 @@
 
 ### 修复
 
+- **网关：** 删除工作区较大的线程时，移除文件期间不再冻结 Gateway 的其他所有请求。
+  `DELETE /api/threads/{id}` 此前在事件循环上对线程目录执行 `shutil.rmtree`，
+  因此其他请求与进行中的 SSE 流都要等到整棵目录树删除完毕（本地 SSD 上 20,000 个
+  小文件约 0.7 秒，挂载卷上更久）。现在移除在文件 IO 线程池中执行；请求被取消时，
+  线程预留会保持到移除完成，因此文件仍在删除的线程上不会启动新的运行。([#6319])
 - **沙箱：** 中风险审计警告不再让子智能体证据丢失失败的 shell 退出码。
   `SandboxAuditMiddleware` 原先把警告追加在结尾的 `Exit Code: N` 标记之后，并只用
   四个字段重建 `ToolMessage`，导致 `_bash_evidence_status` 找不到标记，退回到报告
@@ -6487,4 +6492,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
 [#6306]: https://github.com/bytedance/deer-flow/pull/6306
 [#6307]: https://github.com/bytedance/deer-flow/pull/6307
+[#6319]: https://github.com/bytedance/deer-flow/pull/6319
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326

@@ -170,7 +170,7 @@ make stop       # Stop all services
 make install            # Install backend dependencies
 make dev                # Gateway API, reload (port 8001)
 make gateway            # Gateway API only (port 8001)
-make test               # offline tests (no live/blocking-io)
+make test               # four offline workers; TEST_JOBS=1 for serial
 make test-live          # live tests (real APIs)
 make test-blocking-io   # strict Blockbuster gate on tests/blocking_io/
 make test-shard SPLITS=4 GROUP=2  # one duration-aware shard
@@ -252,14 +252,13 @@ only `AUTH_SOURCE_INTERNAL` run input may retain them.
 - If a module causes circular import issues in tests, add a `sys.modules` mock in `tests/conftest.py` (see existing example for `deerflow.subagents.executor`)
 
 ```bash
-# Run default offline tests
+# Four duration-balanced offline shards
 make test
 
 # Run strict blocking-I/O tests
 make test-blocking-io
 
-# Explicit live integration tests (requires config.yaml and credentials;
-# calls real APIs and may create local side effects)
+# Live API tests: require config.yaml, credentials, and explicit opt-in
 make test-live
 
 # Run a specific test file
