@@ -1,6 +1,7 @@
 """Team extension contracts exercised through the installed contribution."""
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -874,25 +875,40 @@ async def test_cancel_reconciles_a_clarification_response_with_lost_admission_ac
     assert len(view["jobs"]) == 1 and len(runs.starts) == 2
 
 
-async def interrupted_job(actions, service, runs):
-    """A job parked in ``waiting_input`` by an interrupt, so only the size gate can refuse the answer."""
+async def waiting_job(actions, service, runs, *, clarification=False):
+    """Park a job for either an explicit interrupt or an ordinary clarification."""
     team = await create(actions, runs)
     sent = await actions["send"]({"team_id": team["id"], "member_id": team["members"][0]["id"], "text": "Check release", "request_id": "one"}, context(runs))
     await service.tick()
-    runs.finish(sent["id"], interrupted=True)
+    runs.finish(sent["id"], interrupted=not clarification)
+    if clarification:
+        from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+
+        request = SimpleNamespace(tool_call={"name": "ask_clarification", "id": "question", "args": {"question": "Which environment?", "clarification_type": "missing_info"}}, runtime=None)
+        command = ClarificationMiddleware().wrap_tool_call(request, lambda _: pytest.fail("intercept clarification"))
+        runs.threads[team["members"][0]["thread_id"]]["values"]["messages"].extend(m.model_dump() for m in command.update["messages"])
     await service.tick()
     assert (await actions["get"]({"team_id": team["id"]}, context(runs)))["jobs"][0]["status"] == "waiting_input"
     return team, sent
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("answer", [pytest.param("漢" * 2000, id="cjk-2000-chars"), pytest.param("🙂" * 1000, id="emoji-1000-chars"), pytest.param("a" * 4000, id="ascii-4000-chars")])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param("漢" * 2000, id="cjk-2000-chars"),
+        pytest.param("🙂" * 1000, id="emoji-1000-chars"),
+        pytest.param("a" * 4000, id="ascii-4000-chars"),
+        pytest.param('"' * 4000, id="json-quotes"),
+        pytest.param("\n" * 3999 + "a", id="json-newlines"),
+    ],
+)
 async def test_a_clarification_answer_within_the_documented_bounds_is_accepted(plugin, answer):
     # README: tasks and clarification answers accept up to 4,000 characters / 8,000 UTF-8 bytes,
     # and the UI validates exactly those two bounds before submitting.
     _, actions, service = plugin
     runs = Runs()
-    team, sent = await interrupted_job(actions, service, runs)
+    team, sent = await waiting_job(actions, service, runs)
     await actions["resume"]({"team_id": team["id"], "job_id": sent["id"], "response": answer, "request_id": "answer"}, context(runs))
     assert (await actions["get"]({"team_id": team["id"]}, context(runs)))["jobs"][0]["status"] == "resuming"
 
@@ -902,7 +918,62 @@ async def test_a_clarification_answer_within_the_documented_bounds_is_accepted(p
 async def test_an_oversized_clarification_answer_is_still_refused(plugin, answer):
     _, actions, service = plugin
     runs = Runs()
-    team, sent = await interrupted_job(actions, service, runs)
+    team, sent = await waiting_job(actions, service, runs)
     with pytest.raises(ValueError, match="8 KiB"):
         await actions["resume"]({"team_id": team["id"], "job_id": sent["id"], "response": answer, "request_id": "answer"}, context(runs))
     assert (await actions["get"]({"team_id": team["id"]}, context(runs)))["jobs"][0]["status"] == "waiting_input"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("clarification", [False, True], ids=["interrupt", "clarification"])
+@pytest.mark.parametrize("size", [7999, 8000, 8001])
+async def test_string_response_uses_the_raw_utf8_byte_boundary(plugin, clarification, size):
+    _, actions, service = plugin
+    runs = Runs()
+    team, sent = await waiting_job(actions, service, runs, clarification=clarification)
+    answer = "漢" * 2666 + "a" * (size - 7998)
+    payload = {"team_id": team["id"], "job_id": sent["id"], "response": answer, "request_id": "answer"}
+    if size > 8000:
+        with pytest.raises(ValueError, match="8 KiB"):
+            await actions["resume"](payload, context(runs))
+    else:
+        await actions["resume"](payload, context(runs))
+    job = (await service.db("get", "alice", team["id"]))["jobs"][0]
+    assert job["status"] == ("waiting_input" if size > 8000 else "resuming")
+    if size <= 8000:
+        assert job["resume"]["response"] == answer
+        if clarification:
+            assert job["resume"]["input"]["messages"][0]["content"] == answer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("size", [7999, 8000, 8001])
+async def test_structured_response_keeps_the_utf8_json_byte_boundary(plugin, size):
+    _, actions, service = plugin
+    runs = Runs()
+    team, sent = await waiting_job(actions, service, runs)
+    # The JSON object adds 12 bytes around its string value.
+    answer = {"text": "漢" * 2660 + "a" * (size - 7980 - 12)}
+    payload = {"team_id": team["id"], "job_id": sent["id"], "response": answer, "request_id": "answer"}
+    if size > 8000:
+        with pytest.raises(ValueError, match="8 KiB"):
+            await actions["resume"](payload, context(runs))
+    else:
+        await actions["resume"](payload, context(runs))
+    job = (await service.db("get", "alice", team["id"]))["jobs"][0]
+    assert job["status"] == ("waiting_input" if size > 8000 else "resuming")
+    if size <= 8000:
+        assert job["resume"]["response"] == answer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_json", ['"\\ud800"', '"\\udc00"', '{"text": "\\ud800"}', '{"\\udc00": true}'])
+async def test_malformed_unicode_response_uses_the_friendly_validation_error(plugin, response_json):
+    _, actions, service = plugin
+    runs = Runs()
+    team, sent = await waiting_job(actions, service, runs)
+    with pytest.raises(ValueError, match="^An explicit response of at most 8 KiB is required$"):
+        await actions["resume"]({"team_id": team["id"], "job_id": sent["id"], "response": json.loads(response_json), "request_id": "answer"}, context(runs))
+    job = (await service.db("get", "alice", team["id"]))["jobs"][0]
+    assert job["status"] == "waiting_input"
+    assert job["resume"] is None
