@@ -58,6 +58,13 @@ the same policy first so run metadata reports the effective values. Design note:
 `tests/test_reasoning_contract.py`, the contract section of
 `tests/test_model_factory.py`, `tests/test_models_router_reasoning.py`.
 
+### CLI credential files (`packages/harness/deerflow/models/credential_loader.py`)
+
+CLI credential JSON uses `utf-8-sig` for locale-independent reads with optional
+BOM. Decode failures follow the existing unreadable-source path, preserving
+Claude's override-to-default fallback. Doctor's mirrored JSON reader must accept
+the same optional BOM. Tests: `test_credential_file_encoding.py`.
+
 ### Codex tool-call/result serialization (`packages/harness/deerflow/models/openai_codex_provider.py`)
 
 `_convert_messages` uses `_is_valid_call_id` for both assistant tool calls

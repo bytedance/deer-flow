@@ -423,6 +423,13 @@
 
 ### 修复
 
+- **项目：** 在 SQLite 上首次读取书架文档时，文档转换期间不再阻塞所有其他数据库
+  写入。此前懒转换在 `BEGIN IMMEDIATE` 事务内运行 pymupdf/markitdown，以便与移入
+  回收站和彻底删除串行化发布；而 SQLite 的这把锁作用于整个数据库，运行状态、线程
+  元数据与调度器的写入都要等待整个转换完成，超过 30 秒即报 `database is locked`。
+  现在转换在任何事务之外写入 `.staging/`，只在重新校验文档行并原子重命名输出时
+  持锁，期间被移入回收站或彻底删除的文档仍不会发布任何内容。同一文档的并发首次读取
+  共享一次转换，不再各自占用文件 IO 工作线程。([#6305])
 - **网关：** 单次运行的读取现在能返回 IM 渠道所有者的数据。`start_run` 用原始
   受信所有者 ID（例如 `feishu:owner-777`）标记运行行与运行事件，但多个运行级路由
   按内部调用方规范化后的 ID 过滤，因此在 SQL 存储上，只要所有者 ID 含有
@@ -6455,3 +6462,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6255]: https://github.com/bytedance/deer-flow/pull/6255
 [#6263]: https://github.com/bytedance/deer-flow/pull/6263
 [#6282]: https://github.com/bytedance/deer-flow/pull/6282
+[#6305]: https://github.com/bytedance/deer-flow/pull/6305

@@ -344,12 +344,13 @@ def test_python_subprocess_kwargs_unpacking_without_shell_key_still_blocks(tmp_p
     assert not [item for item in findings if item["rule_id"] == "python-subprocess"]
 
 
-def test_cloud_metadata_access_is_reported_by_one_rule(tmp_path: Path) -> None:
+@pytest.mark.parametrize("host", ["169.254.169.254", "metadata.google.internal", "METADATA.GOOGLE.INTERNAL", "Metadata.Google.Internal"])
+def test_cloud_metadata_access_is_reported_by_one_rule(tmp_path: Path, host: str) -> None:
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir)
     scripts_dir = skill_dir / "scripts"
     scripts_dir.mkdir()
-    (scripts_dir / "run.py").write_text('import urllib.request\nurllib.request.urlopen("http://169.254.169.254/latest/meta-data/")\n', encoding="utf-8")
+    (scripts_dir / "run.py").write_text(f'import urllib.request\nurllib.request.urlopen("http://{host}/latest/meta-data/")\n', encoding="utf-8")
 
     findings = scan_skill_dir(skill_dir)["findings"]
 
@@ -1860,3 +1861,109 @@ def test_shell_curl_pipe_shell_ignores_non_shell_pipes(tmp_path: Path) -> None:
     )
     findings = scan_skill_dir(skill_dir)["findings"]
     assert not [f for f in findings if f["rule_id"] == "shell-curl-pipe-shell"]
+
+
+    "url, host",
+    [
+        ("http://LOCALHOST:8080/api", "localhost"),
+        ("http://[::1]/api", "::1"),
+        ("https://[::1]:8443/api", "::1"),
+        ("http://[2001:DB8::1]:8080/api", "2001:db8::1"),
+        ("http://user@[::1]:8080/api", "::1"),
+        ("http://[::1]@Example.COM/api", None),
+        ("http://localhost@Example.COM/api", "example.com"),
+        ("http://[::1/api", None),
+        ("ftp://LOCALHOST/api", None),
+    ],
+)
+def test_http_host_normalizes_case_and_ipv6(url: str, host: str | None) -> None:
+    from deerflow.skills.skillscan.orchestrator import _http_host
+
+    assert _http_host(url) == host
+
+
+def test_uppercase_local_host_is_classified_local(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skill"
+    _write_skill(skill_dir)
+    (skill_dir / "run.py").write_text(
+        'import urllib.request\nurllib.request.urlopen("http://LOCALHOST:8080/config")\n',
+        encoding="utf-8",
+    )
+    findings = scan_skill_dir(skill_dir)["findings"]
+    assert _finding_by_rule(findings, "network-local-http")
+    assert not [finding for finding in findings if finding["rule_id"] == "network-cleartext-http"]
+
+
+@pytest.mark.parametrize("host, external", [("localhost", False), ("LOCALHOST", False), ("LocalHost", False), ("Example.COM", True), ("[::1]", False), ("[2001:DB8::1]", True), ("localhost@Example.COM", True)])
+def test_declared_http_host_case_classification(tmp_path: Path, host: str, external: bool) -> None:
+    skill_dir = tmp_path / "skill"
+    _write_skill(skill_dir, f"Endpoint: http://{host}:8080/api\n")
+
+    findings = scan_skill_dir(skill_dir)["findings"]
+
+    assert bool([finding for finding in findings if finding["rule_id"] == "declaration-external-endpoint"]) is external
+    assert bool([finding for finding in findings if finding["rule_id"] == "network-local-http"]) is (not external)
+
+
+@pytest.mark.parametrize("host, external", [("localhost", False), ("LOCALHOST", False), ("LocalHost", False), ("Example.COM", True), ("[::1]", False), ("[2001:DB8::1]", True), ("[::1]@Example.COM", True)])
+def test_sensitive_path_http_host_case_classification(tmp_path: Path, host: str, external: bool) -> None:
+    skill_dir = tmp_path / "skill"
+    _write_skill(skill_dir)
+    (skill_dir / "run.py").write_text(f'ENDPOINT = "http://{host}:8080/api"\nopen("/etc/passwd").read()\n', encoding="utf-8")
+
+    result = scan_skill_dir(skill_dir)
+    findings = result["findings"]
+
+    if external:
+        assert _finding_by_rule(findings, "python-sensitive-exfil")["severity"] == "CRITICAL"
+    else:
+        assert _finding_by_rule(findings, "python-sensitive-path-read")["severity"] == "HIGH"
+        assert not [finding for finding in findings if finding["rule_id"] == "python-sensitive-exfil"]
+    assert result["blocked"] is external
+
+
+@pytest.mark.parametrize(
+    "url, local",
+    [
+        ("http://[::1]:8080/api", True),
+        ("http://[::1]", True),
+        ("http://[::1]?mode=local", True),
+        ("http://[2001:DB8::1]:8080/api", False),
+        ("http://[2001:db8::1]", False),
+    ],
+)
+def test_ipv6_cleartext_http_classification(tmp_path: Path, url: str, local: bool) -> None:
+    skill_dir = tmp_path / "skill"
+    _write_skill(skill_dir, f"# Demo\nEndpoint: {url}\n")
+
+    findings = scan_skill_dir(skill_dir)["findings"]
+
+    rule_id = "network-local-http" if local else "network-cleartext-http"
+    finding = _finding_by_rule(findings, rule_id)
+    assert finding["file"] == "SKILL.md"
+    assert finding["line"] == 7
+    other_rule = "network-cleartext-http" if local else "network-local-http"
+    assert not [item for item in findings if item["rule_id"] == other_rule]
+
+
+def test_malformed_ipv6_url_remains_outbound(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skill"
+    _write_skill(skill_dir)
+    (skill_dir / "run.py").write_text('ENDPOINT = "http://[::1/api"\nopen("/etc/passwd").read()\n', encoding="utf-8")
+
+    result = scan_skill_dir(skill_dir)
+
+    assert _finding_by_rule(result["findings"], "python-sensitive-exfil")["severity"] == "CRITICAL"
+    assert result["blocked"]
+    assert result["scanner_errors"] == []
+
+
+def test_cleartext_http_uses_host_after_userinfo_without_exposing_credentials(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skill"
+    _write_skill(skill_dir, "Endpoint: http://localhost:private-value@Example.COM:8080/api\n")
+
+    findings = scan_skill_dir(skill_dir)["findings"]
+
+    finding = _finding_by_rule(findings, "network-cleartext-http")
+    assert finding["evidence"] == "http://Example.COM:8080/"
+    assert not [item for item in findings if item["rule_id"] == "network-local-http"]

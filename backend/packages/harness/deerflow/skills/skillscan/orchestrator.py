@@ -21,6 +21,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+from urllib.parse import urlsplit
 
 from deerflow.skills.package_files import is_code_file, is_executable_binary_prefix
 from deerflow.skills.package_paths import is_eval_fixture_skill_md
@@ -134,7 +135,7 @@ _SECRET_TOKEN_PATTERNS = tuple(
     )
 )
 _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
-_EXTERNAL_HTTP_RE = re.compile(r"http://([A-Za-z0-9.-]+)(?::\d+)?(?:/|\b)")
+_EXTERNAL_HTTP_RE = re.compile(r"http://(?:[^/?#\s)'\"<>]*@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::\d+)?(?:/|\b|(?=$|[\s)'\"<>?#]))")
 _URL_RE = re.compile(r"https?://[^\s)'\"<>]+")
 _LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 # `rm` with a recursive flag (any order/combination, optional --no-preserve-root)
@@ -805,16 +806,20 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
 
 def _scan_network_and_resource(rel_path: str, text: str) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
-    if match := re.search(r"(169\.254\.169\.254|metadata\.google\.internal)", text):
+    if match := re.search(r"(169\.254\.169\.254|metadata\.google\.internal)", text, re.IGNORECASE):
         findings.append(_finding_from_match("network-cloud-metadata", rel_path, text, match))
     if match := re.search(r":\(\)\{\s*:\|:&\s*\};:", text):
         findings.append(_finding_from_match("resource-fork-bomb", rel_path, text, match))
     for match in _EXTERNAL_HTTP_RE.finditer(text):
-        host = match.group(1)
+        host = _http_host(match.group(0)) or ""
         if host in _LOCAL_HTTP_HOSTS or host.startswith("10.") or host.startswith("192.168.") or re.match(r"172\.(1[6-9]|2\d|3[01])\.", host):
-            findings.append(_finding_from_match("network-local-http", rel_path, text, match))
+            rule_id = "network-local-http"
         else:
-            findings.append(_finding_from_match("network-cleartext-http", rel_path, text, match))
+            rule_id = "network-cleartext-http"
+        finding = _finding_from_match(rule_id, rel_path, text, match)
+        if "@" in match.group(0):
+            finding["evidence"] = "http://" + match.group(0).rsplit("@", 1)[1]
+        findings.append(finding)
         break
     return findings
 
@@ -1008,8 +1013,15 @@ def _looks_like_placeholder(value: str) -> bool:
 
 
 def _http_host(url: str) -> str | None:
-    match = re.match(r"https?://\[?([^]/:]+)", url)
-    return match.group(1) if match else None
+    if not url.startswith(("http://", "https://")):
+        return None
+    try:
+        # Parse the authority so IPv6 brackets and userinfo cannot be mistaken
+        # for the host. Malformed URLs remain outbound in _is_outbound_url.
+        host = urlsplit(url).hostname
+    except ValueError:
+        return None
+    return host.lower() if host else None
 
 
 def _is_outbound_url(value: str) -> bool:
