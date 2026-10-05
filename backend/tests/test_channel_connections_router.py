@@ -26,6 +26,7 @@ def _stub_app_config(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "0")
     monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
     monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.delenv("DEER_FLOW_MULTI_INSTANCE", raising=False)
     set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
     yield
     reset_app_config()
@@ -1452,6 +1453,8 @@ def test_wechat_qr_confirmation_preserves_bot_id_unless_replaced(monkeypatch, re
         {"GATEWAY_WORKERS": "invalid"},
         # A blank GATEWAY_WORKERS is unset, so WEB_CONCURRENCY still decides.
         {"GATEWAY_WORKERS": "", "WEB_CONCURRENCY": "2"},
+        # Kubernetes replicas run one worker each and declare their peers instead.
+        {"GATEWAY_WORKERS": "1", "DEER_FLOW_MULTI_INSTANCE": "1"},
     ],
 )
 @pytest.mark.parametrize("method,suffix", [("POST", ""), ("POST", "/session/poll"), ("DELETE", "/session")])
