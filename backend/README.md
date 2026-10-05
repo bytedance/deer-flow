@@ -517,8 +517,11 @@ the only execution path, which keeps operational mistakes off the table. See
 ### Testing
 
 ```bash
-# Default offline backend suite (live external-API and blocking-I/O tests are excluded)
+# Default offline backend suite (four parallel shards; excludes live and blocking-I/O tests)
 make test
+
+# Run the same shards sequentially
+make test TEST_JOBS=1
 
 # Strict blocking-I/O suite
 make test-blocking-io

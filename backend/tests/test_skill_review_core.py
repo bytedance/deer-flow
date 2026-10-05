@@ -529,13 +529,21 @@ def test_skillscan_scans_eval_fixture_files_other_than_skill_markdown(tmp_path, 
     assert f"{fixture_dir}/SKILL.md" not in scanned_paths
 
 
+def test_case_sensitivity_probe_preserves_existing_files(tmp_path):
+    existing = tmp_path / "CaseProbe"
+    _write(existing, "keep this file")
+
+    _is_case_insensitive_directory(tmp_path)
+
+    assert existing.read_text(encoding="utf-8") == "keep this file"
+    assert list(tmp_path.iterdir()) == [existing]
+
+
 def _is_case_insensitive_directory(path: Path) -> bool:
-    probe = path / "CaseProbe"
-    probe.touch()
-    try:
-        return (path / "caseprobe").exists()
-    finally:
-        probe.unlink()
+    with tempfile.TemporaryDirectory(dir=path) as probe_dir:
+        directory = Path(probe_dir)
+        (directory / "CaseProbe").touch()
+        return (directory / "caseprobe").exists()
 
 
 @pytest.mark.parametrize(

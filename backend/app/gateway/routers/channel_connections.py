@@ -21,6 +21,7 @@ from app.channels.wechat_qr_login import QRLoginError, WechatQRLogin
 from app.gateway.deps import require_admin_user
 from app.gateway.persistent_writes import run_drained_write
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+from deerflow.config.deployment_config import multi_instance_declaration
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
 from deerflow.persistence.engine import get_session_factory
 from deerflow.utils.file_io import await_drained
@@ -772,10 +773,14 @@ async def _require_wechat_qr_login(request: Request) -> ChannelConnectionsConfig
         workers = int(os.environ.get("GATEWAY_WORKERS") or os.environ.get("WEB_CONCURRENCY") or "1")
     except ValueError:
         workers = 0
-    if workers != 1:
+    # Kubernetes replicas run one worker each; they declare their peers instead.
+    if workers != 1 or multi_instance_declaration(_get_app_config()) is not None:
         raise HTTPException(
             status_code=503,
-            detail="WeChat QR login requires a single Gateway worker. Set GATEWAY_WORKERS=1 (or WEB_CONCURRENCY=1 when using Uvicorn directly), or enter a bot token manually.",
+            detail=(
+                "WeChat QR login requires a single Gateway worker. Set GATEWAY_WORKERS=1 (or WEB_CONCURRENCY=1 when using Uvicorn directly), "
+                "run one Gateway instance without deployment.multi_instance / DEER_FLOW_MULTI_INSTANCE, or enter a bot token manually."
+            ),
         )
     return config
 

@@ -17,9 +17,22 @@ This release closes that milestone with **301 merged pull requests**.
   support bounded automatic launches and per-occurrence goals, and let a scheduled
   agent request stopping its own schedule. Unmet goals and automatic pause use
   the existing notification outbox; explicit notes and authorized previous-run
-  references carry context forward without changing the goal lifecycle. ([#6229])
+  references carry context forward without changing the goal lifecycle.
+  Independent of these tools, existing scheduled, webhook and autonomous goal
+  runs may now accept disclosed low-risk, reversible assumptions, recorded as
+  `relied_on_assumption`; interactive goal evaluation stays strict. Goal
+  evaluator calls and tokens now count toward run usage. ([#6229])
 
 #### Scheduler
+
+- **scheduler:** The tasks page shows the per-run goal and end conditions of
+  conversation-created tasks. Run history shows whether a goal was met,
+  including when it relied on stated assumptions; an unmet run shows a readable
+  reason in neutral styling instead of a raw code in the error style; and the
+  run whose agent asked to stop the schedule is marked. Agent-stop,
+  auto-pause and unmet values in a task's last error appear as text in the UI
+  language, and goal-unmet/auto-pause IM notices state the reason in words.
+  Tasks without a goal render as before; no API change. ([#6326])
 
 - **scheduler:** Scheduled tasks can be searched by title or prompt. Finding a
   task previously meant scanning every title or opening details to read its
@@ -122,6 +135,21 @@ This release closes that milestone with **301 merged pull requests**.
   duplicate keys, and syntactically valid large numbers are allowed; a UTF-8 BOM
   is rejected. Syntax only — no schema or business-field checks; existing
   criteria and verdict semantics are unchanged. ([#5947])
+- **gateway:** The multi-process startup gate now fires on an explicit
+  `deployment.multi_instance: true` (or `DEER_FLOW_MULTI_INSTANCE=1`) as well
+  as `GATEWAY_WORKERS > 1`. The worker-count variables only see one process
+  tree, so a Kubernetes Deployment with several one-worker Pods passed every
+  check while each Pod's startup orphan reconciliation wrote the other Pods'
+  lease-less runs off as crashed on every rolling update. Both paths require
+  Postgres, `run_events.backend: db`, `run_ownership.heartbeat_enabled: true`
+  and now also a Redis stream bridge, and refuse an explicit
+  `sandbox.ownership.type: memory`, process-local browser tools and a
+  scheduler without `scheduler.multi_instance`. The agent-storage divergence
+  warning, the inbound webhook dedupe warning and the WeChat QR-login guard
+  honor the same declaration. **Behavior change:** `GATEWAY_WORKERS > 1` with
+  the memory stream bridge no longer starts; configure `stream_bridge.type:
+  redis` or `DEER_FLOW_STREAM_BRIDGE_REDIS_URL` (docker-compose and the Helm
+  chart already inject it). ([#6328])
 
 #### Memory
 
@@ -466,6 +494,32 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **gateway:** The knowledge retrieval catalog no longer blocks the Gateway event
+  loop while it loads a custom agent's config. Both
+  `GET /api/knowledge/retrieval-catalog/datasets` and
+  `.../datasets/{id}/documents` read the agent through the sync agent store on
+  the loop, which means file IO on the `file` backend and a synchronous
+  SQLAlchemy round trip on the `db` backend, so a slow disk or database stalled
+  every other request. The load now runs in `asyncio.to_thread`, like the other
+  Gateway routes that read agent configs; responses and the 404 for an unknown
+  agent are unchanged. ([#6313])
+- **gateway:** Deleting a thread with a large workspace no longer freezes every
+  other Gateway request while its files are removed. `DELETE /api/threads/{id}`
+  ran `shutil.rmtree` over the thread directory on the event loop, so other
+  requests and live SSE streams stalled until the whole tree was gone (about
+  0.7 seconds for 20,000 small files on a local SSD, longer on mounted
+  volumes). The removal now runs on the file-IO pool, and a cancelled request
+  keeps its thread reservation until the removal finishes, so no new run can
+  start on a thread whose files are still being deleted. ([#6319])
+- **sandbox:** Medium-risk audit warnings no longer hide a failed shell exit from
+  subagent evidence. `SandboxAuditMiddleware` appended its warning after the
+  trailing `Exit Code: N` marker and rebuilt the `ToolMessage` from four fields,
+  so `_bash_evidence_status` could not find the marker and fell back to
+  `deerflow_tool_meta`, which reports `success`; a failed `sudo pytest -q` could
+  satisfy a `tests_passed` acceptance criterion. The warning is now inserted
+  before a trailing `Exit Code: N` or `Command exited with code N`, an output
+  that is only `Command exited with code N` is left unchanged, and the result
+  keeps `deerflow_tool_meta`, `artifact` and `id`. ([#6307])
 - **persistence:** A second Gateway instance no longer fails startup with
   `TimeoutError` while another instance runs a PostgreSQL schema migration. The
   bootstrap advisory lock was taken with a blocking `pg_advisory_lock` on the
@@ -7756,3 +7810,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6282]: https://github.com/bytedance/deer-flow/pull/6282
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
 [#6306]: https://github.com/bytedance/deer-flow/pull/6306
+[#6307]: https://github.com/bytedance/deer-flow/pull/6307
+[#6313]: https://github.com/bytedance/deer-flow/pull/6313
+[#6319]: https://github.com/bytedance/deer-flow/pull/6319
+[#6326]: https://github.com/bytedance/deer-flow/pull/6326
+[#6328]: https://github.com/bytedance/deer-flow/pull/6328
