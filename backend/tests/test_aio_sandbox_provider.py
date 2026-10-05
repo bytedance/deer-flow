@@ -2207,7 +2207,7 @@ def test_shutdown_keeps_aio_warm_entries_owned_when_lease_renewal_stop_times_out
     provider._ownership.close = MagicMock()
 
     renewal_thread = MagicMock()
-    renewal_thread.is_alive.side_effect = [True, True, False]
+    renewal_thread.is_alive.side_effect = [True, True, False, False]
     provider._renewal_thread = renewal_thread
 
     with pytest.raises(RuntimeError, match="lease-renewal thread did not stop"):
