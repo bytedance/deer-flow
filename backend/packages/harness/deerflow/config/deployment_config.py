@@ -16,7 +16,8 @@ database, and the gate then enforces the same prerequisites it enforces for
 from __future__ import annotations
 
 import os
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -43,6 +44,35 @@ class DeploymentConfig(BaseModel):
     )
 
 
+@dataclass(frozen=True)
+class MultiInstanceDeclaration:
+    """An explicit multi-instance declaration and the knob that made it.
+
+    Callers branch on ``source`` and compose messages from ``knob`` and
+    ``rollback``; the display text is never the thing to inspect.
+    """
+
+    source: Literal["env", "config"]
+    value: str
+
+    @property
+    def knob(self) -> str:
+        """The setting as the operator spelled it, for refusal and warning text."""
+        if self.source == "env":
+            return f"{MULTI_INSTANCE_ENV_VAR}={self.value}"
+        return "deployment.multi_instance=true"
+
+    @property
+    def rollback(self) -> str:
+        """The one step that withdraws this declaration, as a lower-case imperative."""
+        if self.source == "env":
+            return f"unset {MULTI_INSTANCE_ENV_VAR}"
+        return "set deployment.multi_instance=false"
+
+    def __str__(self) -> str:
+        return self.knob
+
+
 def multi_instance_declared_by_env() -> str | None:
     """Return the ``DEER_FLOW_MULTI_INSTANCE`` value when it declares a multi-instance deployment.
 
@@ -60,18 +90,18 @@ def multi_instance_declared_by_env() -> str | None:
     return value
 
 
-def multi_instance_declaration(config: Any) -> str | None:
+def multi_instance_declaration(config: Any) -> MultiInstanceDeclaration | None:
     """Return the explicit multi-instance declaration in effect, or ``None``.
 
     The environment is consulted first because deploy tooling that sets it
     knows the actual topology; ``deployment.multi_instance`` in config.yaml is
-    the operator's manual spelling. The returned text names the knob that made the
+    the operator's manual spelling. The result carries the knob that made the
     declaration so a refusal message tells the operator what to change.
     """
     env_value = multi_instance_declared_by_env()
     if env_value is not None:
-        return f"{MULTI_INSTANCE_ENV_VAR}={env_value}"
+        return MultiInstanceDeclaration(source="env", value=env_value)
     deployment = getattr(config, "deployment", None)
     if bool(getattr(deployment, "multi_instance", False)):
-        return "deployment.multi_instance=true"
+        return MultiInstanceDeclaration(source="config", value="true")
     return None

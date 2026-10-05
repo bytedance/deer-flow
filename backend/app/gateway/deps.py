@@ -29,7 +29,7 @@ from langgraph.types import Checkpointer
 
 from deerflow.community.browser_automation.session import browser_multi_worker_error
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.config.deployment_config import MULTI_INSTANCE_ENV_VAR, multi_instance_declaration
+from deerflow.config.deployment_config import multi_instance_declaration
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
@@ -93,20 +93,25 @@ def _multi_process_signal(config: AppConfig) -> tuple[str, str] | None:
     ``reason`` names the knob that established the topology (``GATEWAY_WORKERS=2``,
     ``DEER_FLOW_MULTI_INSTANCE=1`` or ``deployment.multi_instance=true``) and
     ``rollback`` is the single-instance remediation a refusal message offers.
+    When the worker count and a declaration are both active, ``rollback``
+    withdraws both: resetting only the worker count would bounce the operator
+    through a second refusal on the declaration at the next start.
 
     The worker-count variables only see one process tree, so a Kubernetes
     Deployment with ``replicas > 1`` and one worker per Pod is invisible to
     them; the explicit declaration exists for exactly that topology.
     """
     workers, worker_env = _gateway_worker_count()
-    if workers > 1:
-        return f"{worker_env}={workers}", f"Set {worker_env}=1"
     declaration = multi_instance_declaration(config)
+    if workers > 1:
+        rollback = f"Set {worker_env}=1"
+        if declaration is not None:
+            rollback = f"{rollback} and {declaration.rollback}"
+        return f"{worker_env}={workers}", rollback
     if declaration is None:
         return None
-    if declaration.startswith(MULTI_INSTANCE_ENV_VAR):
-        return declaration, f"Unset {MULTI_INSTANCE_ENV_VAR} and run a single Gateway instance"
-    return declaration, "Set deployment.multi_instance=false and run a single Gateway instance"
+    step = declaration.rollback
+    return declaration.knob, f"{step[0].upper()}{step[1:]} and run a single Gateway instance"
 
 
 def _stream_bridge_is_cross_process(config: AppConfig) -> bool:
@@ -182,7 +187,7 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
 
     if _browser_tools_enabled_in_config(config):
         workers, _worker_env = _gateway_worker_count()
-        if workers > 1:
+        if workers > 1 and multi_instance_declaration(config) is None:
             raise SystemExit(browser_multi_worker_error(workers))
         raise SystemExit(f"{reason} cannot enable agentic browser tools: browser sessions are process-local and a request can land on any instance. {rollback} or disable the browser_navigate tool.")
 

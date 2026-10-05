@@ -623,6 +623,69 @@ def test_worker_count_is_reported_over_the_declaration(monkeypatch):
     assert "GATEWAY_WORKERS=2" in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    ("declared_by", "expected_rollback"),
+    [
+        ("env", f"Set GATEWAY_WORKERS=1 and unset {MULTI_INSTANCE_ENV_VAR}"),
+        ("config", "Set GATEWAY_WORKERS=1 and set deployment.multi_instance=false"),
+    ],
+)
+def test_worker_count_rollback_also_withdraws_the_declaration(monkeypatch, declared_by, expected_rollback):
+    """With both knobs active, a rollback that only resets the worker count is not enough.
+
+    Following ``Set GATEWAY_WORKERS=1`` alone leaves the declaration tripping the
+    gate at the next start, so the operator would bounce through a second
+    refusal before learning about the other knob. The message names both.
+    """
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    if declared_by == "env":
+        monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "1")
+    config = _config_with_backend("sqlite", deployment_multi_instance=declared_by == "config")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(config)
+    assert expected_rollback in str(exc_info.value)
+
+
+def test_offered_env_rollback_clears_the_gate(monkeypatch):
+    """The remediation a refusal offers must make the next start succeed."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "1")
+    sqlite = _config_with_backend("sqlite")
+    with pytest.raises(SystemExit):
+        _enforce_postgres_for_multi_worker(sqlite)
+
+    # Resetting only the worker count is the half-step the message must not suggest.
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(sqlite)
+    assert f"{MULTI_INSTANCE_ENV_VAR}=1" in str(exc_info.value)
+
+    # The full rollback the message offered clears the gate.
+    monkeypatch.delenv(MULTI_INSTANCE_ENV_VAR)
+    _enforce_postgres_for_multi_worker(sqlite)
+
+
+def test_offered_config_rollback_clears_the_gate(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite", deployment_multi_instance=True))
+    assert "Set GATEWAY_WORKERS=1 and set deployment.multi_instance=false" in str(exc_info.value)
+
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    _enforce_postgres_for_multi_worker(_config_with_backend("sqlite", deployment_multi_instance=False))
+
+
+def test_browser_refusal_names_the_declaration_when_both_knobs_are_active(monkeypatch):
+    """The browser refusal must not send the operator through the same double bounce."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "1")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_cluster_ready(browser_enabled=True))
+    msg = str(exc_info.value)
+    assert "browser" in msg
+    assert f"Set GATEWAY_WORKERS=1 and unset {MULTI_INSTANCE_ENV_VAR}" in msg
+
+
 def test_agent_storage_warning_fires_for_a_declared_multi_instance_deployment(caplog):
     with caplog.at_level("WARNING"):
         _validate_agent_storage(_cluster_ready(deployment_multi_instance=True))
@@ -630,7 +693,17 @@ def test_agent_storage_warning_fires_for_a_declared_multi_instance_deployment(ca
     assert messages and "deployment.multi_instance=true" in messages[0]
 
 
-def test_deployment_declaration_helpers():
+def test_deployment_declaration_helpers(monkeypatch):
     assert DeploymentConfig().multi_instance is False
     assert multi_instance_declaration(None) is None
-    assert multi_instance_declaration(SimpleNamespace(deployment=DeploymentConfig(multi_instance=True))) == "deployment.multi_instance=true"
+
+    by_config = multi_instance_declaration(SimpleNamespace(deployment=DeploymentConfig(multi_instance=True)))
+    assert by_config is not None
+    assert (by_config.source, by_config.knob, by_config.rollback) == ("config", "deployment.multi_instance=true", "set deployment.multi_instance=false")
+    assert str(by_config) == by_config.knob
+
+    # The environment wins over config.yaml and keeps the operator's spelling.
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "replicas")
+    by_env = multi_instance_declaration(SimpleNamespace(deployment=DeploymentConfig(multi_instance=True)))
+    assert by_env is not None
+    assert (by_env.source, by_env.knob, by_env.rollback) == ("env", f"{MULTI_INSTANCE_ENV_VAR}=replicas", f"unset {MULTI_INSTANCE_ENV_VAR}")

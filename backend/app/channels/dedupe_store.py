@@ -275,7 +275,7 @@ def make_inbound_dedupe_store(app_config: Any | None = None) -> InboundDedupeSto
     # themselves through deployment.multi_instance / DEER_FLOW_MULTI_INSTANCE.
     declaration = multi_instance_declaration(app_config)
     multi_worker = workers > 1 or declaration is not None
-    topology = f"{worker_env}>1" if workers > 1 else declaration
+    topology = f"{worker_env}>1" if workers > 1 else getattr(declaration, "knob", None)
 
     if backend == "postgres":
         if not db_is_postgres:
