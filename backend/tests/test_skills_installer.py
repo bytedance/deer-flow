@@ -110,6 +110,14 @@ class TestCodeFileClassification:
             ("hooks/install.vbs", b'CreateObject("WScript.Shell")\r\n', True),
             ("hooks/install.wsf", b"<job></job>\r\n", True),
             ("hooks/module.psm1", b"Export-ModuleMember -Function *", True),
+            ("hooks/install.jse", b"plain", True),
+            ("hooks/install.JSE", b"plain", True),
+            ("hooks/install.vbe", b"plain", True),
+            ("hooks/install.VBE", b"plain", True),
+            ("assets/setup.hta", b"<html></html>", True),
+            ("assets/setup.HTA", b"<html></html>", True),
+            ("policy/install.sct", b"<scriptlet></scriptlet>", True),
+            ("policy/install.SCT", b"<scriptlet></scriptlet>", True),
             ("references/notes.txt", b"plain", False),
         ],
     )
@@ -577,17 +585,20 @@ class TestInstallSkillFromArchive:
 
         assert sniffed == ["tool"]
 
-    def test_code_file_outside_scripts_warn_prevents_install(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("rel_path", ["lib/run.py", "hooks/install.jse", "hooks/install.vbe", "assets/setup.hta", "policy/install.sct"])
+    def test_code_file_outside_scripts_warn_prevents_install(self, tmp_path, monkeypatch, rel_path):
         zip_path = tmp_path / "test-skill.skill"
         with zipfile.ZipFile(zip_path, "w") as zf:
             zf.writestr("test-skill/SKILL.md", "---\nname: test-skill\ndescription: A test skill\n---\n\n# test-skill\n")
             # Benign payload on purpose: the native scanner must stay quiet so the
             # test exercises the LLM executable policy (warn != allow) on its own.
-            zf.writestr("test-skill/lib/run.py", "print('needs human review')\n")
+            zf.writestr(f"test-skill/{rel_path}", "print('needs human review')\n")
         skills_root = tmp_path / "skills"
         skills_root.mkdir()
+        calls = []
 
         async def _scan(*args, executable, **kwargs):
+            calls.append((kwargs["location"], executable))
             if executable:
                 return ScanResult(decision="warn", reason="code needs review")
             return ScanResult(decision="allow", reason="ok")
@@ -597,6 +608,7 @@ class TestInstallSkillFromArchive:
         with pytest.raises(SkillSecurityScanError, match="rejected executable.*code needs review"):
             get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
 
+        assert (f"test-skill/{rel_path}", True) in calls
         assert not (skills_root / "custom" / "test-skill").exists()
 
     def test_executable_binary_prevents_install(self, tmp_path):
