@@ -2,6 +2,8 @@
 Unit tests for MindIEChatModel adapter.
 """
 
+import html
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -309,6 +311,77 @@ class TestPatchResult:
         assert msg.content == ""
         assert len(msg.tool_calls) == 1
         assert msg.tool_calls[0]["name"] == "calc"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            {"text": "line1\nline2"},
+            {"text": r"line1\nline2"},
+            {"items": ["line1\nline2", {"text": "<&>\nend"}]},
+            ["line1\nline2", r"literal\n"],
+        ],
+        ids=["object-newline", "literal-backslash", "nested-object", "array"],
+    )
+    def test_xml_json_arguments_preserve_escapes(self, value):
+        encoded = html.escape(json.dumps(value), quote=False)
+        content = f"before\\n<tool_call><function=process><parameter=data>{encoded}</parameter></function></tool_call>\\nafter"
+
+        msg = self._model()._patch_result_with_tools(_make_chat_result(content)).generations[0].message
+
+        assert msg.tool_calls[0]["args"]["data"] == value
+        assert msg.content == "before\n\nafter"
+
+    def test_multiple_xml_calls_preserve_payloads_and_native_calls(self):
+        value = {"text": "line1\nline2"}
+        literal = r"print('a\nb')"
+        content = f"<tool_call><function=process><parameter=data>{json.dumps(value)}</parameter></function></tool_call><tool_call><function=write><parameter=content>{literal}</parameter></function></tool_call>"
+        native = {"name": "native", "args": {"text": r"a\nb"}, "id": "native-id"}
+
+        msg = self._model()._patch_result_with_tools(_make_chat_result(content, tool_calls=[native])).generations[0].message
+
+        assert msg.tool_calls[0] == native
+        assert msg.tool_calls[1]["args"] == {"data": value}
+        assert msg.tool_calls[2]["args"] == {"content": literal}
+        assert msg.content == ""
+
+    def test_unparseable_xml_keeps_content_and_newline_compatibility(self):
+        content = "before\\n<tool_call>not a function</tool_call>\\nafter"
+
+        msg = self._model()._patch_result_with_tools(_make_chat_result(content)).generations[0].message
+
+        assert msg.content == "before\n<tool_call>not a function</tool_call>\nafter"
+        assert msg.tool_calls == []
+
+    def test_xml_call_keeps_surrounding_escaped_whitespace_trimmed(self):
+        content = "\\n<tool_call><function=process><parameter=data>{}</parameter></function></tool_call>\\n"
+
+        msg = self._model()._patch_result_with_tools(_make_chat_result(content)).generations[0].message
+
+        assert msg.content == ""
+        assert msg.tool_calls[0]["args"]["data"] == {}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["sync", "async", "tool-stream"])
+    async def test_generation_paths_preserve_xml_json_arguments(self, mode):
+        value = {"text": "line1\nline2"}
+        content = f"<tool_call><function=process><parameter=data>{json.dumps(value)}</parameter></function></tool_call>"
+        result = _make_chat_result(content)
+        model = self._model()
+        messages = [HumanMessage(content="process the data")]
+
+        if mode == "sync":
+            with patch("deerflow.models.mindie_provider.ChatOpenAI._generate", return_value=result):
+                calls = model._generate(messages).generations[0].message.tool_calls
+        else:
+            with patch("deerflow.models.mindie_provider.ChatOpenAI._agenerate", new_callable=AsyncMock, return_value=result):
+                if mode == "async":
+                    calls = (await model._agenerate(messages)).generations[0].message.tool_calls
+                else:
+                    chunks = [chunk async for chunk in model._astream(messages, tools=[{"name": "process"}])]
+                    calls = [call for chunk in chunks for call in chunk.message.tool_calls]
+
+        assert len(calls) == 1
+        assert calls[0]["args"]["data"] == value
 
     def test_patch_result_appends_to_existing_tool_calls(self):
         model = self._model()

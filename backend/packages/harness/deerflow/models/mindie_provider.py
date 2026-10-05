@@ -199,17 +199,18 @@ class MindIEChatModel(ChatOpenAI):
             msg = gen.message
 
             if isinstance(msg.content, str):
-                # Keep escaped newlines inside fenced code blocks untouched.
-                msg.content = _decode_escaped_newlines_outside_fences(msg.content)
+                # Parse the original payload before display-only newline fixes:
+                # replacing escapes inside JSON can corrupt its syntax or values.
+                clean_content, extracted_tools = _parse_xml_tool_call_to_dict(msg.content)
 
-                if "<tool_call>" in msg.content:
-                    clean_content, extracted_tools = _parse_xml_tool_call_to_dict(msg.content)
-
-                    if extracted_tools:
-                        msg.content = clean_content
-                        if getattr(msg, "tool_calls", None) is None:
-                            msg.tool_calls = []
-                        msg.tool_calls.extend(extracted_tools)
+                if extracted_tools:
+                    msg.content = _decode_escaped_newlines_outside_fences(clean_content).strip()
+                    if getattr(msg, "tool_calls", None) is None:
+                        msg.tool_calls = []
+                    msg.tool_calls.extend(extracted_tools)
+                else:
+                    # Preserve unparseable XML and the existing prose/code behavior.
+                    msg.content = _decode_escaped_newlines_outside_fences(msg.content)
         return result
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):

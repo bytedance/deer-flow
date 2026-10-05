@@ -1,3 +1,14 @@
+### MindIE XML tool arguments (`packages/harness/deerflow/models/mindie_provider.py`)
+
+Parse XML tool calls from the original model response before applying escaped-newline
+compatibility fixes to the remaining prose. JSON objects/arrays and literal string
+parameters must retain their escapes; decoding `\n` before JSON parsing can turn an
+object into a fallback string or silently change a literal backslash value. Keep
+the existing content path when no tool calls can be parsed, preserve native tool
+calls, and retain surrounding-whitespace trimming after successful extraction.
+This contract is shared by sync/async generation and tool-enabled simulated streaming; no-tool native
+streaming has its own chunk handling. Coverage: `tests/test_mindie_provider.py`.
+
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 
 Request-admission waits follow the next scheduled admission and configured
