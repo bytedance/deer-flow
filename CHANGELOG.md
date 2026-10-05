@@ -466,6 +466,16 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **projects:** Reading a shelf document for the first time no longer blocks
+  every other database write on SQLite while the document converts. Lazy
+  conversion ran pymupdf/markitdown inside the `BEGIN IMMEDIATE` transaction
+  that serializes the publish against trash and purge, and on SQLite that lock
+  is database-wide, so run status, thread metadata and scheduler writes waited
+  for the whole conversion and failed with `database is locked` after 30
+  seconds. Conversion now writes into `.staging/` outside any transaction; the
+  lock is held only to revalidate the row and atomically rename the output
+  into place, so a document trashed or purged meanwhile still publishes
+  nothing.
 - **runtime:** A multi-worker run that finished successfully is no longer
   reclaimed as an orphan `error` while its worker is still finalizing. With an
   event store, the worker records the terminal status in memory first and
