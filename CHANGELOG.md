@@ -466,6 +466,14 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **persistence:** A second Gateway instance no longer fails startup with
+  `TimeoutError` while another instance runs a PostgreSQL schema migration. The
+  bootstrap advisory lock was taken with a blocking `pg_advisory_lock` on the
+  app engine, whose asyncpg `database.command_timeout` (30s by default) also
+  applies to that statement, so any migration longer than the timeout aborted
+  the waiting instance. Acquisition now polls the non-blocking
+  `pg_try_advisory_lock`: the wait lasts as long as the holder's migration,
+  each attempt stays bounded by `command_timeout`, and the wait is logged once.
 - **gateway:** Per-run reads now return the rows of IM-channel owners.
   `start_run` stamps run rows and run events with the raw trusted owner id (for
   example `feishu:owner-777`), but several run-scoped routes filtered by the

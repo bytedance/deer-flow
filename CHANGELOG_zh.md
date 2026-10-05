@@ -423,6 +423,12 @@
 
 ### 修复
 
+- **持久化：** 另一个实例正在执行 PostgreSQL 模式迁移时，第二个 Gateway 实例不再
+  因 `TimeoutError` 启动失败。引导期 advisory lock 此前在应用引擎上以阻塞的
+  `pg_advisory_lock` 获取，而该引擎的 asyncpg `database.command_timeout`（默认
+  30 秒）同样作用于这条语句，因此任何超过该时限的迁移都会让等待中的实例中止。
+  现在获取改为轮询非阻塞的 `pg_try_advisory_lock`：等待时长与持锁方的迁移一致，
+  每次尝试仍受 `command_timeout` 约束，等待只记录一次日志。
 - **网关：** 单次运行的读取现在能返回 IM 渠道所有者的数据。`start_run` 用原始
   受信所有者 ID（例如 `feishu:owner-777`）标记运行行与运行事件，但多个运行级路由
   按内部调用方规范化后的 ID 过滤，因此在 SQL 存储上，只要所有者 ID 含有
