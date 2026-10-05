@@ -8,7 +8,6 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from deerflow.agents.middlewares.sandbox_audit_middleware import (
-    _EXIT_MARKER_TAIL_RE,
     SandboxAuditMiddleware,
     _classify_command,
     _split_compound_command,
@@ -796,6 +795,8 @@ class TestMediumRiskWarningPreservesEvidence:
 
     def test_exit_marker_regex_covers_the_truncation_tail_shapes(self):
         """Every tail shape truncation keeps last is one the warning is inserted before."""
+        from deerflow.agents.middlewares.sandbox_audit_middleware import _EXIT_MARKER_TAIL_RE
+
         for content in ("out\nExit Code: 1", "out\nExit Code: -9 \n", "out\nCommand exited with code 3", "Command exited with code 3"):
             ours = _EXIT_MARKER_TAIL_RE.search(content)
             theirs = _BASH_EXIT_MARKER_TAIL_RE.search(content)
