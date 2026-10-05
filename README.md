@@ -2609,7 +2609,9 @@ immediately after starting any deployment that is not loopback-only.
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
 
-Backend `make test` excludes live external-API and blocking-I/O coverage.
+Backend `make test` runs four duration-balanced shards concurrently and reports
+failure if any shard fails. Use `make test TEST_JOBS=1` to run the shards sequentially.
+It excludes live external-API and blocking-I/O coverage.
 Run `cd backend && make test-blocking-io` for strict blocking-I/O checks.
 Maintainers can run the real `DeerFlowClient` suite with `cd backend && make test-live`.
 This command requires a valid root `config.yaml` and API credentials.
