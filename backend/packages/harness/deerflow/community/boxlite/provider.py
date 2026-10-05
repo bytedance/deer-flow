@@ -142,9 +142,7 @@ class _EventLoopThread:
             wake()
         self._thread.join(timeout=5)
         if self._thread.is_alive():
-            raise _BoxliteLoopShutdownTimeout(
-                "BoxLite event-loop thread is still running after stop timeout"
-            )
+            raise _BoxliteLoopShutdownTimeout("BoxLite event-loop thread is still running after stop timeout")
         if not loop.is_running():
             loop.close()
 

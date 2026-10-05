@@ -1150,9 +1150,7 @@ def test_shutdown_retries_only_private_loop_cleanup_after_join_timeout(monkeypat
         def close(self) -> None:
             self.close_calls += 1
             if self.close_calls == 1:
-                raise _BoxliteLoopShutdownTimeout(
-                    "BoxLite event-loop thread is still running after stop timeout"
-                )
+                raise _BoxliteLoopShutdownTimeout("BoxLite event-loop thread is still running after stop timeout")
 
     retry_loop = RetryLoop()
     provider._loop = retry_loop
