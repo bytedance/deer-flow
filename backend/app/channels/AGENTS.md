@@ -2,8 +2,8 @@
 
 Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk, GitHub) to the DeerFlow agent via Gateway's LangGraph-compatible API.
 
-WeChat outbound reads stay off-loop: read cap + 1 byte and reject oversize before
-encryption/upload. Resolved sizes may be stale; non-positive caps stay unlimited.
+WeChat's off-loop `_read_outbound_bytes` owns cap + 1 reads and rejects overflow
+with `None` before encryption/upload. Non-positive caps stay unlimited.
 
 **Architecture**: Channels communicate with Gateway through the `langgraph-sdk` HTTP client (same as the frontend), ensuring threads are created and managed server-side. The internal SDK client injects process-local internal auth plus a matching CSRF cookie/header pair so Gateway accepts state-changing thread/run requests from channel workers without relying on browser session cookies.
 
