@@ -4,7 +4,7 @@ Resolves the multi-instance half of [#4189](https://github.com/bytedance/deer-fl
 
 | Producer | Write | Reads |
 |---|---|---|
-| Viewed images | `view_image_tool` → `ViewedImageData.actual_path` (`deerflow/agents/thread_state.py:52`) | `ViewImageMiddleware._read_image_as_data_url`, gateway artifact routes, IM channels, `present_file_tool` |
+| Viewed images | `view_image_tool` → `ViewedImageData.blob_ref` plus compatibility `actual_path` | `ViewImageMiddleware._read_image_as_data_url`, gateway artifact routes, IM channels, `present_file_tool` |
 | Externalized tool results | `ToolOutputBudgetMiddleware` → server-owned `tool-output` ref beside the virtual path | pre-model restoration into the current thread-data mount, then model `read_file` |
 
 On a single gateway both are correct. Behind a load balancer, the instance handling the read is frequently not the instance that wrote the file. The blob store replaces **"where on this machine"** with **"which content"**, so every instance that can reach the backing store resolves the same bytes.
@@ -59,10 +59,14 @@ key behaves exactly as before.
 
 The producer migrations are independently revertible:
 
-1. **Viewed images — pending.** `ViewedImageData` will gain an optional
-   `blob_ref` (`actual_path` is kept); `view_image_tool` will write the blob
-   when the store is enabled; `ViewImageMiddleware._read_image_as_data_url`
-   will resolve blob-first, path-second.
+1. **Viewed images — migrated.** `ViewedImageData` carries an optional
+   `blob_ref` while retaining `actual_path`; `view_image_tool` writes validated
+   bytes when the store is enabled, and `ViewImageMiddleware` resolves the
+   digest-bound blob before the sandbox/local compatibility paths. The gateway
+   artifact routes and IM channels keep their local-path reads until they can be
+   exercised against a multi-instance deployment. Store initialization or write
+   failures return a generic tool error; read failures fall through to the
+   validated sandbox/host compatibility paths.
 2. **Externalized tool results — migrated.** Host externalization stores the
    exact UTF-8 bytes as `kind="tool-output"` and checkpoints a versioned,
    server-owned ref beside the virtual `read_file` path. Before a model call,

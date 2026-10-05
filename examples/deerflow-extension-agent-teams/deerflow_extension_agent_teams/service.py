@@ -392,7 +392,8 @@ class Teams:
                     if job["status"] in TERMINAL or job["thread_id"] in occupied:
                         continue
                     occupied.add(job["thread_id"])
-                    if job["status"] == "queued" and job["input"] is None:
+                    reserved = job["status"] == "queued" and job["input"] is None
+                    if reserved:
                         if active >= 8:
                             continue
                         active += 1
@@ -414,6 +415,11 @@ class Teams:
                         # Disconnect rather than releasing the member's slot.
                         self.handles.pop((owner, team_id), None)
                         break
+                    finally:
+                        # A conversation wait did not attempt admission. Frozen
+                        # inputs retain the slot, including unknown outcomes.
+                        if reserved and job["input"] is None:
+                            active -= 1
 
     async def save_job(self, owner, team_id, job):
         def update(team):
@@ -443,6 +449,7 @@ class Teams:
                 "Use the exact registered tool names in your tool list. Your final answer is automatically returned to the requester; "
                 "do not send a separate peer request just to report completion. Do not wait in a polling loop.\n"
             ) + json.dumps({"request": job["text"], "your_member_id": job["member_id"], "source_thread": job["source"], "kind": job["kind"], **shared(team)}, ensure_ascii=False)
+            # Freeze and persist input before start(): tick releases reservations only while input is None.
             job["input"] = {"messages": [{"role": "user", "id": "team-" + job["id"], "content": content}]}
             await self.save_job(owner, team["id"], job)
         if job["run_id"] is None:

@@ -15,6 +15,9 @@ Unknown admission outcomes must retain ownership of the pending job. Never
 automatically approve interruptions, infer success from a terminal run alone, or
 serialize a host capability. Only an authenticated action or native mention
 rebinds after restart.
+Release a new job's temporary active-budget reservation only if its input remains
+unfrozen after advancement; conversation waits must not block unrelated teams.
+Keep frozen inputs charged even when admission acknowledgement is lost.
 
 Reconnect ensures every member thread before persisting readiness, serialized
 with deletion and task updates. Count only requests toward the 100-request cap;

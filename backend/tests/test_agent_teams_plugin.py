@@ -258,6 +258,77 @@ async def test_ambiguous_admission_retries_same_key_and_frozen_input(plugin, mon
     assert len(runs.starts) == 1
 
 
+async def queue_active_budget_jobs(actions, runs):
+    jobs = []
+    for index in range(5):
+        owner = "bob" if index == 4 else "alice"
+        team = await actions["create"](
+            {"request_id": f"team-{index}", "name": "Release", "goal": "Check readiness", "members": [{"name": "Research", "agent": "researcher"}, {"name": "Review", "agent": "reviewer"}]},
+            context(runs, owner),
+        )
+        for member in team["members"]:
+            if len(jobs) == 9:
+                break
+            payload = {"team_id": team["id"], "member_id": member["id"], "text": "Check", "request_id": f"job-{len(jobs)}"}
+            sent = await actions["send"](payload, context(runs, owner))
+            jobs.append({**sent, "owner": owner, "team_id": team["id"], "member_id": member["id"], "thread_id": member["thread_id"]})
+    return jobs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wait_kind", ["interrupt", "clarification"])
+async def test_unadmitted_conversation_waits_do_not_consume_other_teams_active_budget(plugin, wait_kind):
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+
+    _, actions, service = plugin
+    runs = Runs()
+    jobs = await queue_active_budget_jobs(actions, runs)
+    for job in jobs[:8]:
+        state = runs.threads[job["thread_id"]]
+        if wait_kind == "interrupt":
+            state.update(next=["tools"], interrupts=[{"value": "Approve?"}])
+        else:
+            request = SimpleNamespace(tool_call={"name": "ask_clarification", "id": "outside", "args": {"question": "Which environment?", "clarification_type": "missing_info"}}, runtime=None)
+            command = ClarificationMiddleware().wrap_tool_call(request, lambda _: pytest.fail("tool handler should be intercepted"))
+            state["values"]["messages"].extend(m.model_dump() for m in command.update["messages"])
+    # A later request on the same waiting conversation must still remain queued.
+    blocked = jobs[0]
+    await actions["send"]({"team_id": blocked["team_id"], "member_id": blocked["member_id"], "text": "Later", "request_id": "later"}, context(runs))
+    for _ in range(2):
+        await service.tick()
+        assert [thread for thread, _ in runs.starts] == [jobs[-1]["thread_id"]]
+        for job in jobs[:8]:
+            stored = await service.db("get", job["owner"], job["team_id"])
+            assert all(item["status"] == "queued" and item["input"] is None for item in stored["jobs"])
+    healthy = await actions["get"]({"team_id": jobs[-1]["team_id"]}, context(runs, "bob"))
+    assert healthy["jobs"][0]["status"] == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost_ack", [False, True])
+async def test_active_budget_retains_real_and_ambiguous_admissions(plugin, monkeypatch, lost_ack):
+    _, actions, service = plugin
+    runs = Runs()
+    jobs = await queue_active_budget_jobs(actions, runs)
+    if lost_ack:
+        start = runs.start
+
+        async def uncertain(**kwargs):
+            await start(**kwargs)
+            raise TimeoutError("admitted but acknowledgement lost")
+
+        monkeypatch.setattr(runs, "start", uncertain)
+    for _ in range(2):
+        await service.tick()
+        assert len(runs.starts) == 8
+        assert jobs[-1]["id"] not in runs.runs
+        for job in jobs[:8]:
+            stored = await service.db("get", job["owner"], job["team_id"])
+            assert all(item["input"] is not None for item in stored["jobs"])
+    healthy = await service.db("get", "bob", jobs[-1]["team_id"])
+    assert healthy["jobs"][0]["status"] == "queued" and healthy["jobs"][0]["input"] is None
+
+
 @pytest.mark.asyncio
 async def test_cancel_stops_a_running_request_and_pending_delete_is_rejected(plugin):
     _, actions, service = plugin
