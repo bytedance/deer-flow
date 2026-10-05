@@ -1,16 +1,20 @@
-"""Regression anchor: the custom-skill rollback route must keep its history reads off the loop.
+"""Regression anchors: the custom-skill mutation routes must keep their filesystem IO off the loop.
 
 ``rollback_custom_skill`` offloads storage construction, existence probes and
 the ``custom/.history/<name>.jsonl`` read through ``asyncio.to_thread``, matching
 the adjacent ``get_custom_skill_history`` handler. History entries contain the
 full previous and new skill content, so reading and parsing the entire history
-on the Gateway loop would stall other requests. The post-scan current-content
-read is outside this anchor's coverage and remains a separate blocking-IO fix.
+on the Gateway loop would stall other requests.
 
-The two branches driven here both return before the awaited security scan, so
-the anchor needs no scanner or model stub: the 404 branch covers construction
-plus the existence probes, and the out-of-range branch covers the full
-history-file read and parse.
+``update_custom_skill`` follows the same rule for its pre-scan checks (storage
+construction, the editability probes, and the frontmatter validation that
+round-trips the draft through a temporary directory) and for the read of the
+content being replaced. ``delete_custom_skill`` builds its storage in a worker
+too, since a cold user-scoped storage resolves the project root on construction.
+
+The rollback 404 and out-of-range branches return before the awaited security
+scan, so they need no scanner or model stub; the accepted-path anchors stub the
+LLM scan and keep the real static scan, which already runs in a worker.
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from uuid import UUID
 import pytest
 from fastapi import HTTPException, Request
 
-from app.gateway.routers.skills import SkillRollbackRequest, rollback_custom_skill
+from app.gateway.routers.skills import CustomSkillUpdateRequest, SkillRollbackRequest, delete_custom_skill, rollback_custom_skill, update_custom_skill
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -105,3 +109,40 @@ async def test_rollback_accepted_path_does_not_block_event_loop(monkeypatch) -> 
     response = await rollback_custom_skill(_SKILL_NAME, SkillRollbackRequest(history_index=0), _admin_request(), config)
 
     assert response.content == _SKILL_MD
+
+
+async def test_edit_accepted_path_does_not_block_event_loop(monkeypatch) -> None:
+    """The accepted-edit path (editability check → validate → scan → read of
+    the replaced content → write → append → response read) must keep every
+    filesystem operation off the loop."""
+    await asyncio.to_thread(_install_skill)
+    monkeypatch.setattr(
+        "app.gateway.routers.skills.scan_skill_content",
+        AsyncMock(return_value=SimpleNamespace(decision="allow", reason="ok", static_findings=[])),
+    )
+    config = AppConfig.model_validate({"sandbox": {"use": "test"}})
+    edited = _SKILL_MD + "\nEdited.\n"
+
+    response = await update_custom_skill(_SKILL_NAME, CustomSkillUpdateRequest(content=edited), _admin_request(), config)
+
+    assert response.content == edited
+
+
+async def test_edit_missing_skill_does_not_block_event_loop() -> None:
+    """The editability check's 404 branch probes the public, legacy and
+    integration roots before refusing; none of that may run on the loop."""
+    config = AppConfig.model_validate({"sandbox": {"use": "test"}})
+
+    with pytest.raises(HTTPException) as excinfo:
+        await update_custom_skill(_SKILL_NAME, CustomSkillUpdateRequest(content=_SKILL_MD), _admin_request(), config)
+
+    assert excinfo.value.status_code == 404
+
+
+async def test_delete_does_not_block_event_loop() -> None:
+    """Delete builds its user-scoped storage off the loop before the drained removal."""
+    await asyncio.to_thread(_install_skill)
+    config = AppConfig.model_validate({"sandbox": {"use": "test"}})
+
+    assert await delete_custom_skill(_SKILL_NAME, _admin_request(), config) == {"success": True}
+    assert not await asyncio.to_thread(lambda: (_custom_dir() / _SKILL_NAME).exists())

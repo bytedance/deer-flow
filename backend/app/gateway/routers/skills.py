@@ -573,14 +573,23 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
-        storage.ensure_custom_skill_is_editable(skill_name)
-        storage.validate_skill_markdown_content(skill_name, body.content)
+
+        def _check_editable_content() -> SkillStorage:
+            # Worker thread: storage construction, the editability probes, and
+            # the frontmatter validation (which round-trips the draft through a
+            # temporary directory) are blocking filesystem IO — the same rule
+            # rollback_custom_skill applies before its scan.
+            storage = _get_user_skill_storage(config)
+            storage.ensure_custom_skill_is_editable(skill_name)
+            storage.validate_skill_markdown_content(skill_name, body.content)
+            return storage
+
+        storage = await asyncio.to_thread(_check_editable_content)
         static_findings = await _scan_static_skill_markdown_or_raise(skill_name, body.content, app_config=config)
         scan = await scan_skill_content(body.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
-        prev_content = storage.read_custom_skill(skill_name)
+        prev_content = await asyncio.to_thread(storage.read_custom_skill, skill_name)
 
         async def _persist_edit() -> None:
             # The write and its history entry must settle together, and the
@@ -620,7 +629,9 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
+        # A cold user-scoped storage resolves the project root and builds
+        # absolute paths on construction: blocking filesystem IO.
+        storage = await asyncio.to_thread(_get_user_skill_storage, config)
 
         async def _persist_delete() -> None:
             # Same cancellation contract as the edit and rollback tails: the
