@@ -105,6 +105,12 @@ class TestCodeFileClassification:
             ("bin/notes.txt", b"#!/bin/sh\n", False),
             ("bin/scripts", b"echo", False),
             ("assets/logo.png", b"\x89PNG", False),
+            ("hooks/install.bat", b"@echo off\r\n", True),
+            ("hooks/install.CMD", b"@echo off\r\n", True),
+            ("hooks/install.vbs", b'CreateObject("WScript.Shell")\r\n', True),
+            ("hooks/install.wsf", b"<job></job>\r\n", True),
+            ("hooks/module.psm1", b"Export-ModuleMember -Function *", True),
+            ("references/notes.txt", b"plain", False),
         ],
     )
     def test_installer_applies_the_shared_code_file_rule(self, tmp_path, rel_path, content, expected):

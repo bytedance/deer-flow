@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import PurePath, PurePosixPath
 
-CODE_SUFFIXES = frozenset({".bash", ".cjs", ".js", ".mjs", ".php", ".pl", ".ps1", ".py", ".rb", ".sh", ".ts", ".zsh"})
+CODE_SUFFIXES = frozenset({".bash", ".bat", ".cjs", ".cmd", ".js", ".mjs", ".php", ".pl", ".ps1", ".psm1", ".py", ".rb", ".sh", ".ts", ".vbs", ".wsf", ".zsh"})
 # Full magics per variant — a shorter shared prefix would also match
 # non-executable data files.
 _EXECUTABLE_MAGIC_PREFIXES = (
