@@ -449,6 +449,7 @@ class Teams:
                 "Use the exact registered tool names in your tool list. Your final answer is automatically returned to the requester; "
                 "do not send a separate peer request just to report completion. Do not wait in a polling loop.\n"
             ) + json.dumps({"request": job["text"], "your_member_id": job["member_id"], "source_thread": job["source"], "kind": job["kind"], **shared(team)}, ensure_ascii=False)
+            # Freeze and persist input before start(): tick releases reservations only while input is None.
             job["input"] = {"messages": [{"role": "user", "id": "team-" + job["id"], "content": content}]}
             await self.save_job(owner, team["id"], job)
         if job["run_id"] is None:
