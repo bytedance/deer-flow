@@ -675,6 +675,10 @@ report `Exit Code: 124`; unsuccessful health checks cannot reclaim a warm sandbo
 Health probes tolerate login-shell output around the `ok` line, and failures log
 the sandbox ID and probe output before replacing the sandbox.
 
+BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
+in-flight acquisitions finish. If they cannot drain within five seconds,
+shutdown fails with resources still owned and can be retried.
+
 #### MCP Server
 
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.

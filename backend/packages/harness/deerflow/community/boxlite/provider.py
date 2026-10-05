@@ -211,6 +211,8 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._acquire_condition = threading.Condition(self._lock)
+        self._pending_acquires = 0
         self._boxes: dict[str, BoxliteBox] = {}
         self._thread_boxes: dict[tuple[str, str], str] = {}
         self._warm_pool: dict[str, tuple[BoxliteBox, float]] = {}
@@ -380,22 +382,33 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
     # ── Acquire / release ────────────────────────────────────────────────
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
-        with self._lock:
+        with self._acquire_condition:
             if self._shutdown_called:
                 raise RuntimeError("BoxLite provider is shutting down; cannot acquire sandbox")
+            self._pending_acquires += 1
 
-        if thread_id is None:
-            sandbox_id = str(uuid.uuid4())[:8]
-            box = self._create_box(sandbox_id)
-            with self._lock:
-                self._boxes[box.id] = box
-                self._active_box_identity[box.id] = None
-            return box.id
+        try:
+            if thread_id is None:
+                sandbox_id = str(uuid.uuid4())[:8]
+                box = self._create_box(sandbox_id)
+                with self._lock:
+                    shutting_down = self._shutdown_called
+                    if not shutting_down:
+                        self._boxes[box.id] = box
+                        self._active_box_identity[box.id] = None
+                if shutting_down:
+                    box.close()
+                    raise RuntimeError("BoxLite provider is shutting down; cannot acquire sandbox")
+                return box.id
 
-        key = self._thread_key(thread_id, user_id)
-        sandbox_id = self._sandbox_id(thread_id, user_id)
-        with self._acquire_serializer.hold(sandbox_id):
-            return self._acquire_scope_locked(key, sandbox_id)
+            key = self._thread_key(thread_id, user_id)
+            sandbox_id = self._sandbox_id(thread_id, user_id)
+            with self._acquire_serializer.hold(sandbox_id):
+                return self._acquire_scope_locked(key, sandbox_id)
+        finally:
+            with self._acquire_condition:
+                self._pending_acquires -= 1
+                self._acquire_condition.notify_all()
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire without blocking the event loop.
@@ -411,6 +424,8 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
     def _acquire_scope_locked(self, key: tuple[str, str], sandbox_id: str) -> str:
         with self._lock:
+            if self._shutdown_called:
+                raise RuntimeError("BoxLite provider is shutting down; cannot acquire sandbox")
             existing = self._thread_boxes.get(key)
             if existing is not None and existing in self._boxes:
                 return existing
@@ -428,20 +443,27 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         reclaimed = self._reclaim_warm_pool(sandbox_id, key)
         if reclaimed is not None:
             with self._lock:
+                if self._shutdown_called:
+                    raise RuntimeError("BoxLite provider is shutting down; cannot acquire sandbox")
                 self._thread_boxes[key] = reclaimed
             return reclaimed
 
         box = self._create_box(sandbox_id)
         conflict: tuple[str, str] | None | object = _NO_ACTIVE_IDENTITY
         with self._lock:
-            if box.id in self._boxes:
-                conflict = self._active_box_identity.get(box.id)
-                if conflict == key:
+            shutting_down = self._shutdown_called
+            if not shutting_down:
+                if box.id in self._boxes:
+                    conflict = self._active_box_identity.get(box.id)
+                    if conflict == key:
+                        self._thread_boxes[key] = box.id
+                else:
+                    self._boxes[box.id] = box
+                    self._active_box_identity[box.id] = key
                     self._thread_boxes[key] = box.id
-            else:
-                self._boxes[box.id] = box
-                self._active_box_identity[box.id] = key
-                self._thread_boxes[key] = box.id
+        if shutting_down:
+            box.close()
+            raise RuntimeError("BoxLite provider is shutting down; cannot acquire sandbox")
         if conflict is not _NO_ACTIVE_IDENTITY:
             box.close()
             if conflict != key:
@@ -542,6 +564,8 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             # health-check round trip, but never return an adapter that this
             # process already knows is closed.
             with self._lock:
+                if self._shutdown_called:
+                    raise RuntimeError("BoxLite provider is shutting down; cannot acquire sandbox")
                 current = self._warm_pool.get(sandbox_id)
                 stored_key = self._warm_pool_identity.get(sandbox_id)
                 if stored_key is not None and stored_key != expected_key:
@@ -617,6 +641,8 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
         # Promote from warm pool to active
         with self._lock:
+            if self._shutdown_called:
+                raise RuntimeError("BoxLite provider is shutting down; cannot acquire sandbox")
             current = self._warm_pool.get(sandbox_id)
             stored_key = self._warm_pool_identity.get(sandbox_id)
             if stored_key is not None and stored_key != expected_key:
@@ -685,6 +711,11 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
 
         try:
             self._stop_idle_checker()
+            # In-flight acquires own late-created boxes until they can reject
+            # registration and stop them on the still-running private loop.
+            with self._acquire_condition:
+                if not self._acquire_condition.wait_for(lambda: self._pending_acquires == 0, timeout=5):
+                    raise RuntimeError("BoxLite in-flight acquisitions did not finish before shutdown timeout")
         except Exception:
             with self._lock:
                 self._shutdown_called = False

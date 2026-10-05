@@ -1132,6 +1132,143 @@ def test_replica_enforcement_counts_active_and_warm(monkeypatch):
 # ── Task 8: Shutdown and reset including warm pool ────────────────────
 
 
+@pytest.mark.parametrize("thread_id", [None, "thread-late"])
+def test_shutdown_rejects_and_closes_box_created_by_inflight_acquire(monkeypatch, thread_id):
+    monkeypatch.setattr("deerflow.community.boxlite.provider.get_app_config", lambda: _stub_config({"idle_timeout": 0}))
+    monkeypatch.setattr("deerflow.community.boxlite.provider._import_simplebox", lambda: _FakeBox)
+    provider = BoxliteProvider()
+    created = threading.Event()
+    resume_create = threading.Event()
+    shutdown_started = threading.Event()
+    boxes = []
+    acquired = []
+    acquire_errors = []
+    shutdown_errors = []
+    closed_before_loop = []
+    original_create = provider._create_box
+    original_stop = provider._stop_idle_checker
+    original_close_loop = provider._loop.close
+
+    def paused_create(sandbox_id):
+        box = original_create(sandbox_id)
+        boxes.append(box)
+        created.set()
+        assert resume_create.wait(10)
+        return box
+
+    def signal_shutdown():
+        original_stop()
+        shutdown_started.set()
+
+    def close_loop():
+        closed_before_loop.append(boxes[0]._box._stopped)
+        original_close_loop()
+
+    def acquire():
+        try:
+            acquired.append(provider.acquire(thread_id, user_id="u1"))
+        except Exception as error:
+            acquire_errors.append(error)
+
+    def shutdown():
+        try:
+            provider.shutdown()
+        except Exception as error:
+            shutdown_errors.append(error)
+
+    monkeypatch.setattr(provider, "_create_box", paused_create)
+    monkeypatch.setattr(provider, "_stop_idle_checker", signal_shutdown)
+    monkeypatch.setattr(provider._loop, "close", close_loop)
+    acquirer = threading.Thread(target=acquire)
+    closer = threading.Thread(target=shutdown)
+    try:
+        acquirer.start()
+        assert created.wait(5)
+        closer.start()
+        assert shutdown_started.wait(5)
+        resume_create.set()
+        acquirer.join(5)
+        closer.join(5)
+        assert not acquirer.is_alive()
+        assert not closer.is_alive()
+        assert acquired == []
+        assert len(acquire_errors) == 1
+        assert isinstance(acquire_errors[0], RuntimeError)
+        assert "shutting down" in str(acquire_errors[0])
+        assert shutdown_errors == []
+        assert boxes[0].is_closed
+        assert boxes[0]._box._stopped
+        assert closed_before_loop == [True]
+        assert provider._boxes == {}
+        assert provider._thread_boxes == {}
+        assert provider._active_box_identity == {}
+        assert provider._warm_pool == {}
+        assert provider._loop._loop.is_closed()
+        provider.shutdown()
+        assert closed_before_loop == [True]
+    finally:
+        resume_create.set()
+        acquirer.join(5)
+        if closer.ident is not None:
+            closer.join(5)
+        provider.shutdown()
+
+
+def test_shutdown_acquire_drain_timeout_keeps_resources_owned_for_retry(monkeypatch):
+    monkeypatch.setattr("deerflow.community.boxlite.provider.get_app_config", lambda: _stub_config({"idle_timeout": 0}))
+    monkeypatch.setattr("deerflow.community.boxlite.provider._import_simplebox", lambda: _FakeBox)
+    provider = BoxliteProvider()
+    existing_id = provider.acquire("thread-existing", user_id="u1")
+    existing_box = provider.get(existing_id)
+    created = threading.Event()
+    resume_create = threading.Event()
+    acquired = []
+    errors = []
+    original_create = provider._create_box
+
+    def paused_create(sandbox_id):
+        box = original_create(sandbox_id)
+        created.set()
+        assert resume_create.wait(10)
+        return box
+
+    def acquire():
+        try:
+            acquired.append(provider.acquire("thread-late", user_id="u1"))
+        except Exception as error:
+            errors.append(error)
+
+    monkeypatch.setattr(provider, "_create_box", paused_create)
+    acquirer = threading.Thread(target=acquire)
+    try:
+        acquirer.start()
+        assert created.wait(5)
+        with monkeypatch.context() as timeout:
+            timeout.setattr(threading.Condition, "wait_for", lambda self, predicate, timeout=None: False)
+            with pytest.raises(RuntimeError, match="in-flight acquisitions"):
+                provider.shutdown()
+        assert not provider._shutdown_called
+        assert provider.get(existing_id) is existing_box
+        assert not existing_box.is_closed
+        assert provider._loop._loop.is_running()
+        resume_create.set()
+        acquirer.join(5)
+        assert not acquirer.is_alive()
+        assert errors == []
+        assert len(acquired) == 1
+        late_box = provider.get(acquired[0])
+        assert late_box is not None
+        provider.shutdown()
+        assert existing_box._box._stopped
+        assert late_box._box._stopped
+        assert provider._boxes == {}
+        assert provider._loop._loop.is_closed()
+    finally:
+        resume_create.set()
+        acquirer.join(5)
+        provider.shutdown()
+
+
 def test_shutdown_retries_only_private_loop_cleanup_after_join_timeout(monkeypatch):
     from deerflow.community.boxlite.provider import _BoxliteLoopShutdownTimeout
 
