@@ -32,11 +32,12 @@ def loopback_dns(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     calls: list[str] = []
     native_getaddrinfo = _socket.getaddrinfo
 
-    def getaddrinfo(host, port, *args, **kwargs):
+    def getaddrinfo(host, port, family=socket.AF_UNSPEC, *args, **kwargs):
         if host == _LOOPBACK_HOST:
+            assert family in (socket.AF_UNSPEC, socket.AF_INET), f"unsupported address family: {family}"
             calls.append(host)
             return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port or 0))]
-        return native_getaddrinfo(host, port, *args, **kwargs)
+        return native_getaddrinfo(host, port, family, *args, **kwargs)
 
     # Patch below socket.getaddrinfo, not over Blockbuster's instrumented wrapper.
     monkeypatch.setattr(_socket, "getaddrinfo", getaddrinfo)
@@ -46,6 +47,21 @@ def loopback_dns(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 async def test_loopback_dns_keeps_on_loop_resolution_blocked(loopback_dns: list[str]) -> None:
     with pytest.raises(BlockingError, match="socket.getaddrinfo"):
         resolve_host_addresses(_LOOPBACK_HOST)
+
+    assert loopback_dns == []
+
+
+@pytest.mark.parametrize("family", [socket.AF_UNSPEC, socket.AF_INET])
+async def test_loopback_dns_accepts_ipv4_compatible_families(loopback_dns: list[str], family: int) -> None:
+    addresses = await asyncio.to_thread(socket.getaddrinfo, _LOOPBACK_HOST, 80, family, socket.SOCK_STREAM)
+
+    assert addresses == [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 80))]
+    assert loopback_dns == [_LOOPBACK_HOST]
+
+
+async def test_loopback_dns_rejects_ipv6_requests(loopback_dns: list[str]) -> None:
+    with pytest.raises(AssertionError, match="unsupported address family"):
+        await asyncio.to_thread(socket.getaddrinfo, _LOOPBACK_HOST, 80, socket.AF_INET6, socket.SOCK_STREAM)
 
     assert loopback_dns == []
 
