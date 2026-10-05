@@ -210,6 +210,20 @@ async def test_insufficient_backoff_budget_returns_last_http_error(requests, mon
     sleep.assert_not_awaited()
 
 
+async def test_insufficient_connection_retry_budget_reports_budget_exhaustion(requests, monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(random, "uniform", lambda low, high: 1.0)
+    requests.side_effect = httpx.ConnectError("offline")
+
+    result = await JinaClient().crawl("https://example.com", max_retries=1, retry_budget_seconds=0.1)
+
+    assert "retry time budget exhausted" in result
+    assert "TimeoutError: " not in result
+    assert requests.await_count == 1
+    sleep.assert_not_awaited()
+
+
 @pytest.mark.parametrize("during_backoff", [False, True])
 async def test_shared_deadline(requests, monkeypatch, during_backoff):
     monkeypatch.setattr(random, "uniform", lambda low, high: 1.0)

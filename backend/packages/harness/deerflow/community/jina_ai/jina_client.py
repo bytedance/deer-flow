@@ -53,6 +53,7 @@ class JinaClient:
             _api_key_warned = True
             logger.warning("Jina API key is not set. Provide your own key to access a higher rate limit. See https://jina.ai/reader for more information.")
         data = {"url": url}
+        retry_budget_exhausted = False
         try:
             if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
                 raise ValueError("max_retries must be a non-negative integer")
@@ -112,11 +113,12 @@ class JinaClient:
                             if last_http_error is not None:
                                 logger.error(last_http_error)
                                 return f"Error: {last_http_error}"
+                            retry_budget_exhausted = True
                             raise TimeoutError
                         await asyncio.sleep(wait_seconds)
                         delay = min(delay * 2, 4.0)
         except Exception as e:
-            if isinstance(e, TimeoutError) and max_retries and asyncio.get_running_loop().time() >= deadline:
+            if isinstance(e, TimeoutError) and max_retries and (retry_budget_exhausted or asyncio.get_running_loop().time() >= deadline):
                 error_message = "Request to Jina API failed: retry time budget exhausted"
             else:
                 error_message = f"Request to Jina API failed: {type(e).__name__}: {e}"
