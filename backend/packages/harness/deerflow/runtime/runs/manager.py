@@ -230,6 +230,10 @@ class RunRecord:
     goal_verdict: dict[str, Any] | None = None
     # Process-local finalization barrier for a worker-installed scheduled goal.
     scheduled_goal_cleanup_pending: bool = False
+    # Process-local renewal barrier: the worker stages its terminal status in
+    # memory and commits it only at the end of finalization, so the durable row
+    # stays active and its lease must keep renewing until that commit.
+    terminal_commit_pending: bool = False
     idempotency_key: str | None = None
     # True only on the caller that recovered an existing idempotent admission;
     # that caller must not attach a second worker to the durable run.
@@ -2111,6 +2115,8 @@ class RunManager:
             if record.ownership_lost:
                 return True
             record.ownership_lost = True
+            # A fenced worker must not keep the peer-recoverable row alive.
+            record.terminal_commit_pending = False
             record.abort_event.set()
             record.status = RunStatus.error
             record.error = reason
@@ -2198,13 +2204,18 @@ class RunManager:
             if cycle % 3 == 0:
                 self._schedule_orphan_reconciliation()
 
-    async def _scheduled_terminal_write_confirmed(self, record: RunRecord) -> bool:
+    @staticmethod
+    def _awaits_terminal_commit(record: RunRecord) -> bool:
+        """Whether a run keeps its active durable row until a deferred terminal commit."""
+        return record.scheduled_goal_cleanup_pending or record.terminal_commit_pending
+
+    async def _terminal_write_confirmed(self, record: RunRecord) -> bool:
         """Recognize this worker's acknowledged outcome at the commit boundary.
 
         A peer takeover may preserve owner_worker_id, so compare every terminal
         outcome field rather than accepting any terminal row with that owner.
         """
-        if not record.scheduled_goal_cleanup_pending or record.status in (RunStatus.pending, RunStatus.running) or self._store is None:
+        if not self._awaits_terminal_commit(record) or record.status in (RunStatus.pending, RunStatus.running) or self._store is None:
             return False
         row = await self._store.get(record.run_id, user_id=record.user_id)
         return (
@@ -2218,16 +2229,17 @@ class RunManager:
             and row.get("goal_verdict") == record.goal_verdict
         )
 
-    async def _release_confirmed_scheduled_barrier(self, record: RunRecord, *, timeout: float) -> bool:
-        if not record.scheduled_goal_cleanup_pending or record.status in (RunStatus.pending, RunStatus.running):
+    async def _release_confirmed_terminal_barrier(self, record: RunRecord, *, timeout: float) -> bool:
+        if not self._awaits_terminal_commit(record) or record.status in (RunStatus.pending, RunStatus.running):
             return False
         try:
             async with asyncio.timeout(timeout):
-                if await self._scheduled_terminal_write_confirmed(record):
+                if await self._terminal_write_confirmed(record):
                     record.scheduled_goal_cleanup_pending = False
+                    record.terminal_commit_pending = False
                     return True
         except Exception:
-            logger.warning("Unable to verify scheduled terminal commit for run %s", record.run_id, exc_info=True)
+            logger.warning("Unable to verify terminal commit for run %s", record.run_id, exc_info=True)
         return False
 
     async def _renew_leases(self) -> None:
@@ -2254,30 +2266,32 @@ class RunManager:
             # saturation, slow checkpoint hydrate on a fresh worker), peer
             # reconciliation will reclaim the run as an orphan and mark it
             # ``error`` even though this worker still intends to execute it.
+            # The same holds for a locally terminal run whose worker is still
+            # finalizing before its deferred terminal commit.
             active_runs = [
                 (rid, record)
                 for rid, record in self._runs.items()
-                if (record.status in (RunStatus.pending, RunStatus.running) or record.scheduled_goal_cleanup_pending) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())
+                if (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record)) and record.owner_worker_id == self._worker_id and (record.task is None or not record.task.done())
             ]
 
         for run_id, record in active_runs:
-            if record.status not in (RunStatus.pending, RunStatus.running) and not record.scheduled_goal_cleanup_pending:
+            if record.status not in (RunStatus.pending, RunStatus.running) and not self._awaits_terminal_commit(record):
                 continue
             confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
-            if record.scheduled_goal_cleanup_pending and record.status not in (RunStatus.pending, RunStatus.running):
+            if self._awaits_terminal_commit(record) and record.status not in (RunStatus.pending, RunStatus.running):
                 # The DB may have committed the terminal CAS while the worker
                 # is still receiving its acknowledgement. It no longer needs
                 # renewal and must not be mistaken for a peer takeover.
                 remaining = (confirmed_deadline - datetime.now(UTC)).total_seconds() if confirmed_deadline is not None else 0
-                if await self._release_confirmed_scheduled_barrier(record, timeout=remaining if remaining > 0 else lease_seconds):
+                if await self._release_confirmed_terminal_barrier(record, timeout=remaining if remaining > 0 else lease_seconds):
                     continue
             if confirmed_deadline is None or confirmed_deadline <= datetime.now(UTC):
-                if await self._release_confirmed_scheduled_barrier(record, timeout=lease_seconds):
+                if await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
                     continue
                 await self._mark_ownership_lost(
                     record,
                     reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
-                    require_active=not record.scheduled_goal_cleanup_pending,
+                    require_active=not self._awaits_terminal_commit(record),
                 )
                 continue
 
@@ -2296,12 +2310,12 @@ class RunManager:
                     )
                 if renewal.renewed:
                     if confirmed_deadline <= datetime.now(UTC):
-                        if await self._release_confirmed_scheduled_barrier(record, timeout=lease_seconds):
+                        if await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
                             continue
                         await self._mark_ownership_lost(
                             record,
                             reason="Lease renewal completed after the last confirmed lease had already expired.",
-                            require_active=not record.scheduled_goal_cleanup_pending,
+                            require_active=not self._awaits_terminal_commit(record),
                         )
                         continue
                     # Unsynced write is benign: ``lease_expires_at`` is the
@@ -2330,7 +2344,7 @@ class RunManager:
                     async with self._lock:
                         still_active = (
                             self._runs.get(run_id) is record
-                            and (record.status in (RunStatus.pending, RunStatus.running) or record.scheduled_goal_cleanup_pending)
+                            and (record.status in (RunStatus.pending, RunStatus.running) or self._awaits_terminal_commit(record))
                             and record.owner_worker_id == self._worker_id
                             and (record.task is None or not record.task.done())
                         )
@@ -2338,7 +2352,7 @@ class RunManager:
                         # A detached precheck may have observed running just
                         # before our terminal CAS committed. Re-read before
                         # treating the rejected renewal as lost ownership.
-                        if await self._release_confirmed_scheduled_barrier(record, timeout=lease_seconds):
+                        if await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
                             continue
                         logger.warning(
                             "Run %s lease renewal failed (status=%s,owner=%s) – worker likely taken over; aborting local task",
@@ -2349,16 +2363,16 @@ class RunManager:
                         await self._mark_ownership_lost(
                             record,
                             reason="The durable store rejected lease renewal for this worker.",
-                            require_active=not record.scheduled_goal_cleanup_pending,
+                            require_active=not self._awaits_terminal_commit(record),
                         )
             except Exception:
                 if confirmed_deadline <= datetime.now(UTC):
-                    if await self._release_confirmed_scheduled_barrier(record, timeout=lease_seconds):
+                    if await self._release_confirmed_terminal_barrier(record, timeout=lease_seconds):
                         continue
                     await self._mark_ownership_lost(
                         record,
                         reason="Lease ownership could not be confirmed before the last confirmed lease expired.",
-                        require_active=not record.scheduled_goal_cleanup_pending,
+                        require_active=not self._awaits_terminal_commit(record),
                     )
                 else:
                     logger.warning(

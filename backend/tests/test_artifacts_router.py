@@ -110,6 +110,73 @@ def _artifact_sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
+@pytest.mark.parametrize("mutation", ["grow", "replace"])
+def test_load_editable_artifact_bounds_read_after_size_probe(tmp_path, monkeypatch, mutation) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"before")
+    limit = artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES
+    oversized = b"x" * (2 * limit)
+    replacement_path = tmp_path / "replacement.txt"
+    replacement_path.write_bytes(oversized)
+    original_lstat = os.lstat
+    original_open = Path.open
+    read_calls = []
+    handles = []
+
+    def mutate_after_size_probe(path, *args, **kwargs):
+        file_stat = original_lstat(path, *args, **kwargs)
+        if Path(path) == artifact_path:
+            if mutation == "grow":
+                artifact_path.write_bytes(oversized)
+            else:
+                os.replace(replacement_path, artifact_path)
+        return file_stat
+
+    class RecordingReader:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def __enter__(self):
+            self.handle.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.handle.__exit__(*args)
+
+        def read(self, size=-1):
+            content = self.handle.read(size)
+            read_calls.append((size, len(content)))
+            return content
+
+    def record_open(path, mode="r", *args, **kwargs):
+        handle = original_open(path, mode, *args, **kwargs)
+        if path == artifact_path and mode == "rb":
+            handles.append(handle)
+            return RecordingReader(handle)
+        return handle
+
+    monkeypatch.setattr(os, "lstat", mutate_after_size_probe)
+    monkeypatch.setattr(Path, "open", record_open)
+    with pytest.raises(HTTPException) as exc_info:
+        artifacts_router._load_editable_artifact(artifact_path, "mnt/user-data/outputs/note.txt", _artifact_sha256("before"))
+
+    assert exc_info.value.status_code == 413
+    assert read_calls == [(limit + 1, limit + 1)]
+    assert all(handle.closed for handle in handles)
+
+
+@pytest.mark.parametrize("size", [0, 6, artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES])
+def test_load_editable_artifact_accepts_text_up_to_size_limit(tmp_path, size) -> None:
+    artifact_path = tmp_path / "note.txt"
+    content = b"x" * size
+    artifact_path.write_bytes(content)
+
+    loaded, file_stat = artifacts_router._load_editable_artifact(artifact_path, "mnt/user-data/outputs/note.txt", hashlib.sha256(content).hexdigest())
+
+    assert loaded == content
+    assert file_stat.st_size == size
+
+
 def _patch_artifact_update_dependencies(monkeypatch, artifact_path: Path, provider=None) -> None:
     monkeypatch.setattr(artifacts_router, "resolve_outputs_confined_path", lambda _thread_id, _path, user_id=None: artifact_path)
     monkeypatch.setattr(artifacts_router, "reserve_artifact_write", _allow_artifact_write)

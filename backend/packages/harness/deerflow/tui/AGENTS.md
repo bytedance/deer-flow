@@ -13,6 +13,18 @@ A terminal-native UI over the embedded harness, exposed as the `deerflow` consol
 
 **Web UI visibility**: the Web UI lists threads from the `threads_meta` SQL table (user-scoped), not the checkpointer. `persistence.py` writes a `threads_meta` row under the default user (`"default"`) into the same DB the Gateway reads — via the harness-only `deerflow.persistence.engine.init_engine_from_config()` — so TUI sessions appear in the Web UI sidebar **without** running the Gateway. Best-effort: a no-op on the `memory` backend. All DB work runs on one long-lived background event loop (a SQLAlchemy async engine is bound to its creating loop).
 
+Thread switching must reject active runs both before resolving/opening a picker
+and when applying the picker callback, which may outlive the idle state in which
+it opened. Keep the current thread and transcript unchanged when rejecting a
+switch. Report invalid resume references as error rows without relaxing the
+canonical thread-id validation or terminating the app.
+Worker actions must carry their originating thread id into the UI callback.
+Check it against the displayed thread on delivery, not just before scheduling:
+an interrupt/switch can race with the worker's cancellation check. Drop actions
+for another thread before they reach the reducer or change streaming state.
+
+`InputHistory.down()` returns `None` when history navigation is inactive; the
+app must then leave the composer untouched, including its cursor and undo state.
 `InputHistory.up()` returns `None` when history is empty, and `down()` returns
 `None` when history navigation is inactive; the app must then leave the composer
 untouched, including its cursor and undo state.
