@@ -25,6 +25,13 @@ This release closes that milestone with **301 merged pull requests**.
 
 #### Scheduler
 
+- **scheduler:** The tasks page shows the per-run goal and end conditions of
+  conversation-created tasks. Run history shows whether a goal was met,
+  including when it relied on stated assumptions; an unmet run shows its reason
+  with the host code in neutral styling instead of the error style; and the run
+  whose agent asked to stop the schedule is marked. Tasks without a goal render
+  as before; no API change. ([#6326])
+
 - **scheduler:** Scheduled tasks can be searched by title or prompt. Finding a
   task previously meant scanning every title or opening details to read its
   prompt. A search field above the existing filters matches a literal, trimmed,
@@ -7760,3 +7767,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6282]: https://github.com/bytedance/deer-flow/pull/6282
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
 [#6306]: https://github.com/bytedance/deer-flow/pull/6306
+[#6326]: https://github.com/bytedance/deer-flow/pull/6326
