@@ -3210,6 +3210,124 @@ class TestThreadSafety:
         assert executor_module._isolated_subagent_loop_started is None
         assert executor_module._isolated_subagent_loop_shutdown_pending is False
 
+    def test_concurrent_pending_recovery_does_not_stop_replacement(self, executor_module, monkeypatch):
+        """A stale recovery getter must not tear down a replacement loop."""
+
+        class GateLock:
+            def __init__(self):
+                self._lock = threading.Lock()
+                self._count_lock = threading.Lock()
+                self._release = threading.Event()
+                self.both_waiting = threading.Event()
+                self._attempts = 0
+
+            def __enter__(self):
+                with self._count_lock:
+                    self._attempts += 1
+                    gated = self._attempts <= 2
+                    if self._attempts == 2:
+                        self.both_waiting.set()
+                if gated and not self._release.wait(timeout=5):
+                    raise RuntimeError("timed out waiting to release lifecycle contenders")
+                self._lock.acquire()
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                self._lock.release()
+
+            def release_waiters(self):
+                self._release.set()
+
+        class FakeLoop:
+            def __init__(self, *, running):
+                self.running = running
+                self.closed = False
+
+            def is_running(self):
+                return self.running
+
+            def stop(self):
+                self.running = False
+
+            def call_soon_threadsafe(self, callback, *args):
+                callback(*args)
+
+            def is_closed(self):
+                return self.closed
+
+            def close(self):
+                assert not self.running
+                self.closed = True
+
+        class DeadThread:
+            def is_alive(self):
+                return False
+
+            def join(self, timeout=None):
+                return None
+
+        class ReplacementThread:
+            def __init__(self, *, target, args, name, daemon):
+                self.args = args
+                self.alive = False
+
+            def start(self):
+                self.alive = True
+                self.args[1].set()
+
+            def is_alive(self):
+                return self.alive
+
+            def join(self, timeout=None):
+                self.alive = False
+
+        retained = FakeLoop(running=False)
+        retained_thread = DeadThread()
+        replacement = FakeLoop(running=True)
+        started = threading.Event()
+
+        executor_module._isolated_subagent_loop = retained
+        executor_module._isolated_subagent_loop_thread = retained_thread
+        executor_module._isolated_subagent_loop_started = started
+        executor_module._isolated_subagent_loop_shutdown_pending = True
+
+        gate = GateLock()
+        real_thread = threading.Thread
+        monkeypatch.setattr(executor_module, "_isolated_subagent_loop_shutdown_lock", gate)
+        monkeypatch.setattr(executor_module.asyncio, "new_event_loop", MagicMock(return_value=replacement))
+        monkeypatch.setattr(executor_module.threading, "Thread", ReplacementThread)
+
+        results = []
+        errors = []
+
+        def recover():
+            try:
+                results.append(executor_module._get_isolated_subagent_loop())
+            except BaseException as exc:
+                errors.append(exc)
+
+        first = real_thread(target=recover)
+        second = real_thread(target=recover)
+        first.start()
+        second.start()
+
+        assert gate.both_waiting.wait(timeout=5)
+        gate.release_waiters()
+        first.join(timeout=5)
+        second.join(timeout=5)
+
+        assert not first.is_alive()
+        assert not second.is_alive()
+        assert errors == []
+        assert results == [replacement, replacement]
+        assert retained.closed is True
+        assert replacement.closed is False
+        assert replacement.is_running()
+        assert executor_module._isolated_subagent_loop is replacement
+        assert executor_module._isolated_subagent_loop_shutdown_pending is False
+
+        executor_module._shutdown_isolated_subagent_loop()
+        assert replacement.closed is True
 
     def test_multiple_executors_in_parallel(self, classes, base_config, msg):
         """Test multiple executors running in parallel via thread pool."""

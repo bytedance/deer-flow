@@ -615,12 +615,16 @@ def _run_isolated_subagent_loop(
         started_event.clear()
 
 
-def _shutdown_isolated_subagent_loop() -> None:
+def _shutdown_isolated_subagent_loop(*, only_if_pending: bool = False) -> None:
     """Stop and close the persistent isolated subagent loop."""
     global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started, _isolated_subagent_loop_shutdown_pending
 
     with _isolated_subagent_loop_shutdown_lock:
         with _isolated_subagent_loop_lock:
+            # Dispatch recovery can become stale while waiting for this lock.
+            # Recheck the fence before touching the current loop generation.
+            if only_if_pending and not _isolated_subagent_loop_shutdown_pending:
+                return
             loop = _isolated_subagent_loop
             thread = _isolated_subagent_loop_thread
             if loop is None:
@@ -668,7 +672,7 @@ def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
     # exited: reap the retained loop under the shutdown lifecycle lock before
     # deciding whether replacement is still fenced.
     if _isolated_subagent_loop_shutdown_pending:
-        _shutdown_isolated_subagent_loop()
+        _shutdown_isolated_subagent_loop(only_if_pending=True)
 
     with _isolated_subagent_loop_lock:
         if _isolated_subagent_loop_shutdown_pending:
