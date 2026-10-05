@@ -428,7 +428,7 @@
   此前在事件循环上通过同步 Agent 存储读取 Agent：`file` 后端为文件 IO，`db` 后端
   为一次同步 SQLAlchemy 往返，磁盘或数据库变慢时会拖住所有其他请求。现在与其他
   读取 Agent 配置的网关路由一样，在 `asyncio.to_thread` 中加载；响应内容以及未知
-  Agent 返回的 404 保持不变。
+  Agent 返回的 404 保持不变。([#6313])
 - **项目：** 在 SQLite 上首次读取书架文档时，文档转换期间不再阻塞所有其他数据库
   写入。此前懒转换在 `BEGIN IMMEDIATE` 事务内运行 pymupdf/markitdown，以便与移入
   回收站和彻底删除串行化发布；而 SQLite 的这把锁作用于整个数据库，运行状态、线程
@@ -6469,3 +6469,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6263]: https://github.com/bytedance/deer-flow/pull/6263
 [#6282]: https://github.com/bytedance/deer-flow/pull/6282
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
+[#6313]: https://github.com/bytedance/deer-flow/pull/6313

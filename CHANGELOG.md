@@ -474,7 +474,7 @@ This release closes that milestone with **301 merged pull requests**.
   SQLAlchemy round trip on the `db` backend, so a slow disk or database stalled
   every other request. The load now runs in `asyncio.to_thread`, like the other
   Gateway routes that read agent configs; responses and the 404 for an unknown
-  agent are unchanged.
+  agent are unchanged. ([#6313])
 - **projects:** Reading a shelf document for the first time no longer blocks
   every other database write on SQLite while the document converts. Lazy
   conversion ran pymupdf/markitdown inside the `BEGIN IMMEDIATE` transaction
@@ -7755,3 +7755,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6263]: https://github.com/bytedance/deer-flow/pull/6263
 [#6282]: https://github.com/bytedance/deer-flow/pull/6282
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
+[#6313]: https://github.com/bytedance/deer-flow/pull/6313
