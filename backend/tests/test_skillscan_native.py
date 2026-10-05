@@ -1529,6 +1529,206 @@ def test_secret_assignment_still_flags_python_walrus_binding(tmp_path: Path) -> 
     assert _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")["line"] == 1
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        'host, api_key = "internal", "9f8e7d6c5b4a3210ff"\n',
+        'host, api_key = "https://internal.example", "9f8e7d6c5b4a3210ff"\n',
+    ],
+)
+def test_secret_assignment_still_flags_python_tuple_unpacking(tmp_path: Path, source: str) -> None:
+    """``host, api_key = "internal", "…"`` binds the literal to ``api_key``.
+
+    The sweep reported that form (it matched the line and took the first quoted value),
+    so unpacking was a way to walk out of a HIGH-severity gate; ``_python_secret_assignment_target``
+    only understood a single target node. The second case goes further: there the sweep
+    took the URL as the value, read it as a placeholder and stayed silent too, so neither
+    implementation saw it.
+    """
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["line"] == 1
+    assert finding["evidence"] == "[redacted]"
+    assert "9f8e7d6c5b4a3210ff" not in repr(finding)
+
+
+def test_secret_assignment_still_flags_python_list_target_unpacking(tmp_path: Path) -> None:
+    """A list target unpacks the same way a tuple target does; the brackets are syntax."""
+    source = '[token, version] = ["9f8e7d6c5b4a3210ff", 2]\n'
+
+    assert _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")["line"] == 1
+
+
+def test_secret_assignment_ignores_python_unpacking_of_environment_lookups(tmp_path: Path) -> None:
+    """The precision gain has to survive the unpacked form too.
+
+    ``api_key, url = os.getenv("K"), endpoint`` binds both values at runtime, so neither
+    is a literal this rule can assert on.
+    """
+    source = 'api_key, url = os.getenv("DEERFLOW_TOKEN"), "https://api.example"\n'
+
+    assert _secret_assignments(_scan_python_sample(tmp_path, source)) == []
+
+
+def test_secret_assignment_still_flags_python_conditional_literal(tmp_path: Path) -> None:
+    """``api_key = "…" if prod else "x"`` ships the literal in the file."""
+    source = 'api_key = "9f8e7d6c5b4a3210ff" if prod else "x"\n'
+
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["line"] == 1
+    assert "9f8e7d6c5b4a3210ff" not in repr(finding)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'api_key = ["9f8e7d6c5b4a3210ff"]\n',
+        'api_key = ("https://internal.example", "9f8e7d6c5b4a3210ff")\n',
+        'api_key = {"live": "9f8e7d6c5b4a3210ff"}\n',
+    ],
+)
+def test_secret_assignment_still_flags_python_container_literal(tmp_path: Path, source: str) -> None:
+    """A credential inside a list, tuple or dict literal is still in the package."""
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["line"] == 1
+    assert "9f8e7d6c5b4a3210ff" not in repr(finding)
+
+
+def test_secret_assignment_ignores_python_container_without_literal(tmp_path: Path) -> None:
+    """Only values Python resolves from source are asserted on: a container of runtime
+    data (a call, a variable) binds nothing this rule can name."""
+    source = 'api_key = [os.getenv("DEERFLOW_TOKEN"), token_from_config]\n'
+
+    assert _secret_assignments(_scan_python_sample(tmp_path, source)) == []
+
+
+@pytest.mark.parametrize("key", ['"ghp_a1b2c3d4e5f6g7h8i9j0"', '"ghp_" + "a1b2c3d4e5f6g7h8i9j0"'])
+def test_secret_assignment_still_flags_python_dict_key_literal(tmp_path: Path, key: str) -> None:
+    """A mapping key needs credential evidence of its own: a known token format,
+    including one spelled as a concatenation of literals.
+
+    The key and the value are put on separate lines so the reported line says which of the
+    two was asserted on: a value-only reader would name line 3.
+    """
+    source = f'api_key = {{\n    {key}:\n        "live",\n}}\n'
+
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["line"] == 2
+    assert finding["evidence"] == "[redacted]"
+    assert "a1b2c3d4e5f6g7h8i9j0" not in repr(finding)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'tokens = {"access_token": os.getenv("ACCESS_TOKEN"), "refresh_token": os.getenv("REFRESH_TOKEN")}\n',
+        'credentials = {"api_key": token_from_config, "password": config["password"]}\n',
+        'tokens = {"outer": {"access_token": os.environ["ACCESS_TOKEN"]}}\n',
+        'connect(tokens={"access_token": os.getenv("ACCESS_TOKEN")})\n',
+        'tokens = {("access_token", "refresh_token"): runtime_tokens}\n',
+        'api_key = {123456: os.getenv("API_KEY")}\n',
+        'tokens = {"9f8e7d6c5b4a3210ff": runtime_token}\n',
+    ],
+)
+def test_secret_assignment_ignores_python_mapping_labels_with_runtime_values(tmp_path: Path, source: str) -> None:
+    """Mapping labels do not become credentials because the enclosing name is secret-like."""
+    findings = _scan_python_sample(tmp_path, source)
+
+    assert [finding for finding in findings if finding["rule_id"].startswith("secret-")] == []
+
+
+@pytest.mark.parametrize("value", ['"9f8e7d6c5b4a3210ff"', 'os.getenv("ACCESS_TOKEN") if prod else "9f8e7d6c5b4a3210ff"'])
+def test_secret_assignment_reports_python_mapping_credential_value(tmp_path: Path, value: str) -> None:
+    """A label must neither hide a hardcoded value nor take its source location."""
+    source = f'tokens = {{\n    "access_token":\n        {value},\n}}\n'
+
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
+
+    assert finding["line"] == 3
+    assert finding["severity"] == "HIGH"
+    assert finding["evidence"] == "[redacted]"
+    assert "9f8e7d6c5b4a3210ff" not in repr(finding)
+
+
+def test_secret_assignment_reports_python_container_members_in_source_order(tmp_path: Path) -> None:
+    """Two literals in one container point at the first one written, so the finding's
+    location does not depend on how the value expression happens to be traversed."""
+    source = 'api_key = [\n    "9f8e7d6c5b4a3210ff",\n    "7d6c5b4a3210ff9e8",\n]\n'
+
+    assert _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")["line"] == 2
+
+
+def test_secret_assignment_still_flags_python_starred_target_prefix(tmp_path: Path) -> None:
+    """``api_key, *rest = "…", "b"`` binds ``api_key`` to the first element: the star only
+    absorbs the tail, so the prefix keeps its fixed position."""
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, 'api_key, *rest = "9f8e7d6c5b4a3210ff", "b"\n'), "secret-env-assignment")
+
+    assert finding["line"] == 1
+    assert finding["evidence"] == "[redacted]"
+    assert "9f8e7d6c5b4a3210ff" not in repr(finding)
+
+
+def test_secret_assignment_starred_element_value_stays_unreported(tmp_path: Path) -> None:
+    """The mirror case of the one above: here the credential lands in ``rest``, a list
+    Python builds at runtime, so no name on that line has a fixed position for it.
+    Pinned so the limitation is checked, not assumed."""
+    source = 'mode, *rest = "prod", "9f8e7d6c5b4a3210ff"\n'
+
+    assert _secret_assignments(_scan_python_sample(tmp_path, source)) == []
+
+
+def test_secret_assignment_still_flags_python_starred_value_suffix(tmp_path: Path) -> None:
+    """``mode, api_key = *pair, "…"`` aligns from the right: the element after the star is
+    the last one, so it reaches the last name whatever the starred sequence's length is."""
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, 'mode, api_key = *pair, "9f8e7d6c5b4a3210ff"\n'), "secret-env-assignment")
+
+    assert finding["line"] == 1
+    assert finding["evidence"] == "[redacted]"
+    assert "9f8e7d6c5b4a3210ff" not in repr(finding)
+
+
+def test_secret_assignment_star_on_both_sides_stays_unreported(tmp_path: Path) -> None:
+    """With a star on both sides the head and the tail can be read, but neither name in
+    ``api_key, *rest`` has a position that matches the literal on the right. Pinned so the
+    limitation is checked, not assumed."""
+    source = 'api_key, *rest = *pair, "9f8e7d6c5b4a3210ff"\n'
+
+    assert _secret_assignments(_scan_python_sample(tmp_path, source)) == []
+
+
+def test_secret_assignment_value_star_on_the_last_name_stays_unreported(tmp_path: Path) -> None:
+    """``api_key, mode = *pair, "…"`` does pair the literal, with ``mode``: the credential
+    reaches a name this rule is not about, so nothing is reported."""
+    source = 'api_key, mode = *pair, "9f8e7d6c5b4a3210ff"\n'
+
+    assert _secret_assignments(_scan_python_sample(tmp_path, source)) == []
+
+
+def test_secret_assignment_still_flags_python_nested_unpacking(tmp_path: Path) -> None:
+    """A parenthesised target element unpacks positionally too, so the credential reaches
+    the name written at its own position rather than the tuple around it."""
+    finding = _finding_by_rule(_scan_python_sample(tmp_path, 'host, (user, api_key) = "https://internal.example", ("u", "9f8e7d6c5b4a3210ff")\n'), "secret-env-assignment")
+
+    assert finding["line"] == 1
+    assert "9f8e7d6c5b4a3210ff" not in repr(finding)
+
+
+def test_secret_assignment_unpacking_with_mismatched_lengths_stays_unreported(tmp_path: Path) -> None:
+    """``host, api_key = "a", "b", "c"`` cannot run at all, so there is no position to read
+    the literal from. Pinned together with a second assignment because the pairing builds
+    tuples elementwise: a mismatch must skip its own line, not raise and cost the file its
+    other findings.
+    """
+    source = 'host, api_key = "9f8e7d6c5b4a3210ff", "b", "c"\ntoken = "7d6c5b4a3210ff9e8"\n'
+
+    findings = _secret_assignments(_scan_python_sample(tmp_path, source))
+
+    assert [finding["line"] for finding in findings] == [2]
+
+
 def test_secret_assignment_ignores_python_keyword_environment_lookup(tmp_path: Path) -> None:
     """The precision gain must survive the new binding forms: a keyword whose
     value is read from the environment is the documented remediation."""

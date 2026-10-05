@@ -53,6 +53,7 @@ Fetch 51 rows to display 50 plus a next-page sentinel; never append pages. Only
 page zero polls or refreshes on focus/reconnect. Task switches reset to page zero,
 and consumed AbortSignals cancel obsolete reads. Live offsets are not snapshots;
 explicit mutations or navigation may observe newly inserted runs.
+Run status `unmet` identifies a finished occurrence whose scheduled goal was not satisfied; keep it distinct from execution failure.
 
 ## Architecture
 
@@ -308,6 +309,8 @@ merged by explicit namespace with runtime descriptors. Catalog-only entries are 
 metadata, never module-loader inputs or proof of installation. Backend-only examples may
 have no plugin descriptor; keep their runtime status unasserted. Details link to package
 installation instructions. Keep the catalog aligned with `examples/deerflow-extension-*`.
+Agent teams uses `community.agent-teams`; merge its installed descriptor into the
+localized catalog entry without asserting runtime status for a catalog-only row.
 Conversation action slots augment normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
 Plugin views use mount/dispose and abort signals; Shadow DOM is CSS isolation, not a sandbox.
 Descriptors are user-keyed page snapshots, refreshed manually. Backend calls bind the plugin's

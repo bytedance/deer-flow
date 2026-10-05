@@ -14,6 +14,10 @@
 
 ### 新增
 
+- **调度器：** 按需启用对话工具创建及管理属主绑定的定时任务，支持自动启动上限、
+  每次执行的目标评估，以及 Agent 请求停止自身调度。目标未达成与自动暂停复用
+  现有通知 outbox；明确备注和获授权的上次执行引用延续上下文，不增加 goal 状态。([#6229])
+
 #### 调度器
 
 - **调度器：** 定时任务现在可以按标题或 prompt 搜索。此前找一个任
@@ -418,6 +422,62 @@
   用任何东西。([#5497])
 
 ### 修复
+
+- **项目：** 在 SQLite 上首次读取书架文档时，文档转换期间不再阻塞所有其他数据库
+  写入。此前懒转换在 `BEGIN IMMEDIATE` 事务内运行 pymupdf/markitdown，以便与移入
+  回收站和彻底删除串行化发布；而 SQLite 的这把锁作用于整个数据库，运行状态、线程
+  元数据与调度器的写入都要等待整个转换完成，超过 30 秒即报 `database is locked`。
+  现在转换在任何事务之外写入 `.staging/`，只在重新校验文档行并原子重命名输出时
+  持锁，期间被移入回收站或彻底删除的文档仍不会发布任何内容。同一文档的并发首次读取
+  共享一次转换，不再各自占用文件 IO 工作线程。([#6305])
+- **网关：** 单次运行的读取现在能返回 IM 渠道所有者的数据。`start_run` 用原始
+  受信所有者 ID（例如 `feishu:owner-777`）标记运行行与运行事件，但多个运行级路由
+  按内部调用方规范化后的 ID 过滤，因此在 SQL 存储上，只要所有者 ID 含有
+  `[A-Za-z0-9_-]` 以外的字符就匹配不到任何数据：
+  `GET /api/threads/{id}/runs/{rid}/messages` 与 `/events` 返回空列表，
+  `/workspace-changes` 报告没有变更，`/artifacts/archive` 返回 404，重新生成的
+  源运行查找退回兜底路径或返回 409。这些读取现在使用与线程消息路由（#5448）相同
+  的数据身份，所有事件存储的 `list_messages_by_run()` 都接受 `user_id`。浏览器与
+  API 会话仍保留按用户过滤。([#6282])
+- **运行时：** 多 worker 部署中已成功结束的运行，不会再在其 worker 仍在收尾时被
+  当作孤儿运行回收为 `error`。配置了事件存储时，worker 先在内存中记录终态，直到
+  journal 刷新、交付回执、工作区扫描与时长 checkpoint 写入完成后才写入运行存储。
+  此前租约续期会跳过本地状态已是终态的运行，收尾一旦超过租约加宽限期（默认约
+  30–40 秒），其他 worker 或本 worker 自己的回收器就会接管这条仍处于活动状态的
+  记录。心跳现在会持续续期直到这次延迟写入被执行，若期间被其他 worker 接管则隔离
+  本地运行。仅影响启用 `run_ownership.heartbeat_enabled` 的部署。([#6263])
+- **渠道：** 通过 `/connect` 绑定的 Buzz 作者在已参与的话题中回复时，无需再次提及
+  机器人。开启 `channel_connections.enabled` 后，管理器只在连接仓库中记录已绑定作者
+  的话题映射，而 Buzz 的话题跟随判断只读取 JSON 渠道存储，导致机器人正在回复的话题
+  中所有未提及的回复都被静默丢弃。现在 Buzz 会在提及判断之前解析连接，并通过与管理器
+  相同的辅助函数（`lookup_thread_id`）查找话题，因此已绑定作者的已参与话题就是管理器
+  将复用的话题，旧的 JSON 映射也不再对该作者生效。管理器的斜杠技能白名单检查中有同一读取逻辑
+  的副本，也一并修复：尚无话题的已绑定用户此前会按同一会话旧 JSON 话题的智能体进行检查，
+  可能被告知已启用的技能不可用。([#6232])
+- **记忆：** 读取 DeerMem 智能体记忆时，不再因另一写入同时删除事实而失败。
+  `load()`、`reload()` 与全量 `rebuild_index()` 扫描在不持有存储锁的情况下列
+  出事实文件，若删除恰好在列出之后、打开文件之前提交，就会对完好的数据抛出
+  `MemoryStorageCorruption`：记忆 API 返回 HTTP 500（"Stored memory data is
+  corrupted"），提示词注入在该轮丢弃整个记忆块（在 `failure_policy.read:
+  fail_closed` 下则使运行失败），全量索引重建则把该事实计为失败。列出后消失的事实现在被视为已删除；仍然存在但无法读取的条目（例如悬空符
+  号链接）仍会报告为损坏。([#6255])
+- **记忆：** DeerMem 记忆重新加载不再把旧文档固定在缓存中。`reload()`
+  此前先读取文档、后计算缓存签名，若两者之间有写入提交（例如后台记忆更
+  新器），旧文档就会以新签名写入缓存，之后每次 `load()` 都返回过时的记
+  忆，直到下一次写入。`reload()` 现在与 `load()` 一样先计算签名，竞争写
+  入只会触发重新读取。([#6238])
+- **渠道：** Discord 的渠道连接数据库操作现在在 Gateway 事件循环上执行。
+  discord.py 在客户端线程的私有事件循环上投递消息，而 Discord 适配器此前就在该
+  循环上 await 连接仓库，但仓库的 SQLAlchemy 引擎与连接池属于 Gateway 循环。在
+  PostgreSQL 上开启 `channel_connections.enabled` 时，Gateway 使用过连接池之后的
+  第一条 Discord 消息会以 `got Future … attached to a different loop` 失败并被
+  丢弃；在 SQLite 上，耗尽连接池的突发流量会以
+  `Queue … is bound to a different event loop` 失败，且等待队列会一直绑定在
+  Discord 循环上，导致 Gateway 自身的查询随后也以同样方式失败。现在身份查询与入站
+  提交一起执行，`/connect` 绑定单独执行，二者都与 Telegram、飞书、钉钉一样经由
+  `_submit_threadsafe_coroutine` 在 Gateway 循环上运行；绑定回复经 Discord 循环
+  发回，`stop()` 也会在关闭客户端前排空这些任务。输入中提示仍在交接前注册，查询失败时会跳过确认表情，
+  并在同一目标没有其他消息依赖时停止该提示，被丢弃的消息不会让机器人显示为仍在处理。([#6214])
 
 - **社区工具：** 共享 SSRF 校验现在拒绝所有非全局地址，包括原先的标志位检查放行的
   `100.64.0.0/10` 共享地址段。该地址段包含 CGNAT 与 Tailscale 主机以及阿里云
@@ -2346,6 +2406,13 @@
   出现在非选项 token 中即视为匹配——这也覆盖了值夹在中间的情形
   （`config --profile work show`），而连续匹配仍会漏掉这种情况。参数值恰好按
   顺序拼出被拒绝路径的调用也会被拒绝（fail-closed）。([#6212])
+
+- **渠道：** Telegram 的 `allowed_users` 列表中若没有任何数字用户 ID，现在会拒绝
+  所有用户，而不是静默放行所有人。此前无法通过 `int()` 的条目会被直接丢弃且不
+  记录日志，而结果为空又被视为"未配置白名单"，因此 `["@alice", "bob"]` 会让机器
+  人对所有人开放。单个 ID 现在视为只有一项的列表，而不再被当作字符串逐位拆成多个
+  用户（`"123456"` 曾放行用户 1–6 并拦截 123456）；`null` 或单个整数也不再导致
+  渠道启动时崩溃；每个被丢弃的条目（`@用户名`、浮点数、布尔值）都会记录警告。([#6230])
 
 ### 文档
 
@@ -6387,3 +6454,12 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6201]: https://github.com/bytedance/deer-flow/pull/6201
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
 [#6212]: https://github.com/bytedance/deer-flow/pull/6212
+[#6214]: https://github.com/bytedance/deer-flow/pull/6214
+[#6229]: https://github.com/bytedance/deer-flow/pull/6229
+[#6230]: https://github.com/bytedance/deer-flow/pull/6230
+[#6232]: https://github.com/bytedance/deer-flow/pull/6232
+[#6238]: https://github.com/bytedance/deer-flow/pull/6238
+[#6255]: https://github.com/bytedance/deer-flow/pull/6255
+[#6263]: https://github.com/bytedance/deer-flow/pull/6263
+[#6282]: https://github.com/bytedance/deer-flow/pull/6282
+[#6305]: https://github.com/bytedance/deer-flow/pull/6305

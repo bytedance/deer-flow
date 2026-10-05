@@ -803,7 +803,7 @@ wheels = [
 
 [[package]]
 name = "deer-flow"
-version = "2.2.0dev"
+version = "2.2.0.dev0"
 source = { virtual = "." }
 dependencies = [
     { name = "bcrypt" },
@@ -920,7 +920,7 @@ extensions = []
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.2.4"
+version = "0.2.5"
 source = { editable = "packages/extension-api" }
 
 [[package]]

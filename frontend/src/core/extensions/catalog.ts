@@ -5,6 +5,11 @@ import type { LoadedContribution } from "./registry";
 // Discovery metadata only: catalog entries never enter the runtime module loader.
 export const extensionCatalog = [
   {
+    key: "agentTeams",
+    package: "deerflow-extension-agent-teams",
+    namespace: "community.agent-teams",
+  },
+  {
     key: "bookmarks",
     package: "deerflow-extension-bookmarks",
     namespace: "community.bookmarks",

@@ -317,7 +317,9 @@ class DeerFlowTUI(App):
         if self._palette_open:
             self.action_palette_up()
         else:
-            self._history_move(self._history.up(self.query_one("#composer", ComposerInput).value))
+            value = self._history.up(self.query_one("#composer", ComposerInput).value)
+            if value is not None:
+                self._history_move(value)
 
     def action_nav_down(self) -> None:
         if self._palette_open:
@@ -329,6 +331,8 @@ class DeerFlowTUI(App):
 
     def _history_move(self, value: str) -> None:
         composer = self.query_one("#composer", ComposerInput)
+        if composer.value == value:
+            return
         composer.value = value
         composer.cursor_position = len(value)
 
@@ -491,6 +495,9 @@ class DeerFlowTUI(App):
         self.push_screen(SelectScreen("Select model", options), on_choice)
 
     def _open_thread_switcher(self) -> None:
+        if self._streaming:
+            self._dispatch_still_working()
+            return
         try:
             threads = self.session.recent_threads(limit=20)
         except Exception:  # noqa: BLE001
@@ -514,13 +521,24 @@ class DeerFlowTUI(App):
 
     def _resume_thread(self, ref: str) -> None:
         """/resume [id-or-title]: switch to a thread, or open the picker if blank."""
+        if self._streaming:
+            self._dispatch_still_working()
+            return
         ref = ref.strip()
         if not ref:
             self._open_thread_switcher()
             return
-        self._switch_to_thread(self.session.resolve_ref(ref))
+        try:
+            thread_id = self.session.resolve_ref(ref)
+        except ValueError as exc:
+            self._dispatch(SystemMessage(str(exc), tone="error"))
+            return
+        self._switch_to_thread(thread_id)
 
     def _switch_to_thread(self, thread_id: str) -> None:
+        if self._streaming:
+            self._dispatch_still_working()
+            return
         self._conv_thread_id = thread_id
         self.state = initial_state()
         self._dispatch(SystemMessage(f"Resumed thread {thread_id[:8]}."))
@@ -653,12 +671,19 @@ class DeerFlowTUI(App):
                 break
             if isinstance(action, ThreadTitle):
                 latest_title = action.title
-            self.call_from_thread(self._on_action, action)
+            self.call_from_thread(self._on_stream_action, thread_id, action)
 
         # Only persist a title for a run that completed normally — an interrupted
         # run may only have emitted the title middleware's first, truncated guess.
         if writer is not None and latest_title and not self._cancelled:
             writer.set_title(thread_id, latest_title)
+
+    def _on_stream_action(self, thread_id: str, action) -> None:
+        # Interrupt/switch may happen after the worker's cancellation check.
+        # Validate the destination when Textual delivers the action to the UI.
+        if thread_id != self._conv_thread_id:
+            return
+        self._on_action(action)
 
     def _on_action(self, action) -> None:
         self.state = reduce(self.state, action)

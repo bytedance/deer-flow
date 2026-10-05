@@ -12,11 +12,10 @@ This **monorepo orientation layer** maps the repo. For module details, read its 
 
 ## What is DeerFlow
 
-DeerFlow is a LangGraph-based AI super-agent system with a full-stack architecture. The
-backend runs a "super agent" with sandboxed execution, persistent memory, subagent
-delegation, and extensible tools (built-in, MCP, community), all per-thread isolated. The
-frontend is a Next.js chat UI. External IM platforms (Feishu, Slack, Telegram, Discord,
-DingTalk) bridge into the same agent through the Gateway.
+DeerFlow pairs a LangGraph super agent with a Next.js chat UI. The backend provides
+sandboxed execution, persistent memory, subagents, and extensible built-in, MCP,
+and community tools, isolated per thread. Feishu, Slack, Telegram, Discord, and
+DingTalk connect through the Gateway.
 
 ## Service Topology
 
@@ -64,23 +63,22 @@ deer-flow/
 │                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
 │                                    # Integration credentials and enabled state remain per-user
 ├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
-├── examples/                       # Extension examples: deerflow-extension-{example,bookmarks}
+├── examples/                       # Extension examples: deerflow-extension-{example,bookmarks,agent-teams}
 ├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
 
-Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
-(operator-controlled on purpose — that list causes code to be imported, so it is deliberately
-kept out of the API-writable `extensions_config.json`). Packaged extensions can contribute
-middleware, lifecycle observers, Gateway services, FastAPI HTTP routers, and experimental
-full-stack plugins. Manage them with `deerflow extensions install/upgrade/list/enable/disable/remove` or the root
-`make extension-*` wrappers. Every mutation requires a Gateway restart, and both build
-hooks and extension code execute with Gateway privileges, so only trusted operator sources
-belong in this path. The manager transaction, accepted source forms, lock discipline, and
-contribution contract live in
-[the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md); the user manual
-is `frontend/src/content/{en,zh}/harness/extensions/`.
+Third-party extensions load from operator-controlled `config.yaml -> plugins:`.
+This imports code, so the list stays outside API-writable `extensions_config.json`.
+Extensions contribute middleware, lifecycle observers, Gateway services, FastAPI
+routers, and experimental full-stack plugins. Use
+`deerflow extensions install/upgrade/list/enable/disable/remove` or root
+`make extension-*` wrappers. Restart Gateway after every mutation. Build hooks
+and extension code run with Gateway privileges; use only trusted operator sources.
+Transactions, accepted source forms, locking, and contribution contracts:
+[extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md).
+User manual: `frontend/src/content/{en,zh}/harness/extensions/`.
 
 **Extension-first evaluation** — before implementing a feature by editing core code,
 evaluate whether it can ship as a packaged extension through the contribution points
@@ -88,7 +86,7 @@ above. Stay in core for bug fixes and for changes to the agent loop, memory, con
 compaction, or authentication. If existing hooks cannot express the feature, add a
 generic hook to the extension contract plus an extension that uses it — do not
 hard-code business logic into core. Working examples:
-`examples/deerflow-extension-{example,bookmarks}`.
+`examples/deerflow-extension-{example,bookmarks,agent-teams}`.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
@@ -106,6 +104,10 @@ Skill quality review note:
   revision can suppress a run, and blocker findings can never be waived.
 
 Scheduled-task note:
+- `scheduler.tool_enabled` (default off) offers owner-bound schedule tools only
+  through Gateway capability admission. Interactive turns create/manage their
+  schedules; scheduled turns can request stopping only their own schedule.
+  Per-occurrence goal success does not end a recurring schedule.
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a
   background scheduler gated by `config.yaml -> scheduler.enabled`.
 - Scheduled runs are non-interactive: `ask_clarification` is excluded. `non_interactive`,
@@ -210,7 +212,7 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 - Frontend work → **[frontend/AGENTS.md](frontend/AGENTS.md)**
 - Setup & install → **[Install.md](Install.md)**, **[CONTRIBUTING.md](CONTRIBUTING.md)**
 - Project overview & usage → **[README.md](README.md)** (translations: `README_zh.md`,
-  `README_ja.md`, `README_fr.md`, `README_ru.md`)
+  `README_ja.md`, `README_fr.md`, `README_ru.md`, `README_pt.md`)
 - Security policy → **[SECURITY.md](SECURITY.md)**
 - Changes → **[CHANGELOG.md](CHANGELOG.md)**
 - Cutting a release → **[RELEASING.md](RELEASING.md)**

@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 51
+config_version: 52
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -917,6 +917,8 @@ tools:
   #   group: web
   #   use: deerflow.community.serper.tools:web_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
+  #   include_domains: []  # Optional domain-only lists, at most 10 entries each
+  #   exclude_domains: []  # Exclusion wins; see backend/docs/CONFIGURATION.md
   #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
 
   # Web search tool (uses Serply - Google Search API, requires SERPLY_API_KEY)
@@ -1127,7 +1129,9 @@ tools:
   #   #                                # CDP handshake. If so, use headless: false to launch
   #   #                                # Playwright's own visible browser instead.
   #   # Multi-worker note: browser sessions live in one Gateway worker's memory.
-  #   # Keep GATEWAY_WORKERS=1 while this tool group is enabled.
+  #   # Keep the Gateway to one worker process while this tool group is enabled:
+  #   # GATEWAY_WORKERS=1, and WEB_CONCURRENCY unset or 1 on the launches that pass
+  #   # uvicorn no --workers (backend/Dockerfile, scripts/serve.sh).
   # - name: browser_snapshot
   #   group: browser
   #   use: deerflow.community.browser_automation.tools:browser_snapshot_tool
@@ -2712,6 +2716,7 @@ agent_storage:
 #   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
   enabled: false
+  tool_enabled: false          # Offer schedule tools to authorized Gateway conversations
   multi_instance: false       # Opt into lease-aware recovery across Gateway instances
   poll_interval_seconds: 5
   lease_seconds: 120
@@ -2938,7 +2943,7 @@ run_ownership:
 #   telegram:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
-#     allowed_users: []               # empty = allow all
+#     allowed_users: []               # numeric user IDs, not @usernames; empty = allow all
 #     rich_messages: false             # Bot API 10.1 Rich Messages for final Markdown responses
 #
 #   wechat:

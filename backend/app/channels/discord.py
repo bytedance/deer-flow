@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import threading
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,10 @@ class DiscordChannel(Channel):
 
         # Typing indicator management
         self._typing_tasks: dict[str, asyncio.Task] = {}
+        # Messages whose hand-off is pending or committed, per typing task. A
+        # failed hand-off may stop the indicator only when no other message
+        # still relies on it (see ``_acknowledge_after_handoff``).
+        self._typing_dependents: dict[asyncio.Task, int] = {}
 
         # Strong references for this channel's in-flight ack-reaction tasks.
         # The event loop keeps only weak references to scheduled tasks, so a
@@ -127,6 +132,7 @@ class DiscordChannel(Channel):
         self._client = client
         self._discord_module = discord
         self._main_loop = asyncio.get_event_loop()
+        self._open_threadsafe_future_intake()
 
         @client.event
         async def on_message(message) -> None:
@@ -208,6 +214,7 @@ class DiscordChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+        await self._close_and_drain_threadsafe_futures()
 
         # Best-effort durability: flush in-memory thread mappings so the most
         # recent channel->thread mapping survives a hard shutdown (process
@@ -358,13 +365,17 @@ class DiscordChannel(Channel):
             logger.exception("[Discord] failed to upload file: %s", attachment.filename)
             return False
 
-    async def _start_typing(self, channel, chat_id: str, thread_ts: str | None = None) -> None:
-        """Starts a loop to send periodic typing indicators."""
+    async def _start_typing(self, channel, chat_id: str, thread_ts: str | None = None) -> asyncio.Task[None] | None:
+        """Starts a loop to send periodic typing indicators.
+
+        Returns the loop's task when this call started it, ``None`` when the
+        channel is stopping or the target already shows typing.
+        """
         if not self._running:
-            return
+            return None
         target_id = thread_ts or chat_id
         if target_id in self._typing_tasks:
-            return  # Already typing for this target
+            return None  # Already typing for this target
 
         async def _typing_loop():
             # The loop's first failure logs at WARNING, so an indicator that
@@ -386,6 +397,8 @@ class DiscordChannel(Channel):
 
         task = asyncio.create_task(_typing_loop())
         self._typing_tasks[target_id] = task
+        task.add_done_callback(lambda done: self._typing_dependents.pop(done, None))
+        return task
 
     async def _cancel_typing_tasks(self) -> None:
         """Cancel and await every typing task on their owning event loop."""
@@ -397,6 +410,7 @@ class DiscordChannel(Channel):
         if typing_tasks:
             await asyncio.gather(*(task for _, task in typing_tasks), return_exceptions=True)
         self._typing_tasks.clear()
+        self._typing_dependents.clear()
 
     def _discard_typing_tasks(self) -> None:
         """Forget stale typing tasks after their owning event loop has stopped."""
@@ -407,6 +421,7 @@ class DiscordChannel(Channel):
                     target_id,
                 )
         self._typing_tasks.clear()
+        self._typing_dependents.clear()
 
     async def _cancel_ack_reaction_tasks(self) -> None:
         """Cancel in-flight ack reactions so stop() does not strand them.
@@ -585,14 +600,11 @@ class DiscordChannel(Channel):
                         },
                     )
                     inbound.topic_id = thread_id
-                    inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
-                    if not self._publish_reserved(inbound, reservation):
+                    handoff = self._publish_reserved(inbound, reservation, guild_id=str(guild.id) if guild else None)
+                    if handoff is None:
                         return
                     reservation_transferred = True
-                    # Start typing indicator in the thread
-                    if typing_target:
-                        await self._start_typing(typing_target, chat_id, thread_id)
-                    self._schedule_ack_reaction(message)
+                    await self._acknowledge_after_handoff(message, handoff, typing_target=typing_target, chat_id=chat_id, thread_id=thread_id)
                     return
 
                 # Thread not tracked (orphaned) — create new thread and handle below
@@ -694,31 +706,98 @@ class DiscordChannel(Channel):
                 },
             )
             inbound.topic_id = thread_id
-            inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
 
-            if not self._publish_reserved(inbound, reservation):
+            handoff = self._publish_reserved(inbound, reservation, guild_id=str(guild.id) if guild else None)
+            if handoff is None:
                 return
             reservation_transferred = True
-
-            # Start typing/reaction only after bounded admission succeeds.
-            if typing_target:
-                await self._start_typing(typing_target, chat_id, thread_id)
-            self._schedule_ack_reaction(message)
+            await self._acknowledge_after_handoff(message, handoff, typing_target=typing_target, chat_id=chat_id, thread_id=thread_id)
         finally:
             if not reservation_transferred:
                 reservation.release()
 
-    def _publish_reserved(self, inbound: InboundMessage, reservation: InboundReservation) -> bool:
-        """Transfer an already-reserved message to the Gateway loop."""
-        if self._main_loop and self._main_loop.is_running():
-            try:
-                # This is called from discord.py's private event-loop thread.
-                self._main_loop.call_soon_threadsafe(self._commit_reserved_inbound, reservation, inbound)
-                return True
-            except RuntimeError:
-                logger.info("[Discord] main loop stopped before reserved inbound could be scheduled")
-        reservation.release()
-        return False
+    def _publish_reserved(self, inbound: InboundMessage, reservation: InboundReservation, *, guild_id: str | None) -> Future[bool] | None:
+        """Transfer an already-reserved message to the Gateway loop.
+
+        Called from discord.py's private event-loop thread. The connection
+        identity is resolved on the Gateway loop as well, because the
+        repository's SQLAlchemy engine and pool belong to that loop: awaiting
+        them from the Discord loop fails under asyncpg ("attached to a
+        different loop") and binds the pool's wait queue to the wrong loop
+        under aiosqlite, breaking the Gateway's own queries.
+
+        Returns the hand-off's completion future (``True`` once committed), or
+        ``None`` when the Gateway loop refused it.
+        """
+        handoff = self._submit_threadsafe_coroutine_future(
+            self._commit_reserved_inbound_with_identity(inbound, reservation, guild_id=guild_id),
+            self._main_loop,
+            name="commit_reserved_inbound",
+            msg_id=inbound.metadata.get("message_id"),
+            reservation=reservation,
+        )
+        if handoff is None:
+            logger.info("[Discord] main loop stopped before reserved inbound could be scheduled")
+        return handoff
+
+    async def _acknowledge_after_handoff(
+        self,
+        message,
+        handoff: Future[bool],
+        *,
+        typing_target,
+        chat_id: str,
+        thread_id: str | None,
+    ) -> None:
+        """Show progress for a handed-off message, undoing it if the hand-off fails.
+
+        Typing starts before the hand-off resolves, as it did before the
+        identity lookup moved to the Gateway loop: ``_start_typing`` registers
+        without yielding, so a fast reply's ``_stop_typing`` cannot run first
+        and leave an indicator behind. The ack reaction waits for the commit.
+        If identity resolution or the commit fails, or ``stop()`` drains the
+        hand-off, the message was dropped and gets no ack. Another message to
+        the same target may have reused the indicator meanwhile, pending or
+        already committed, so a failed hand-off stops it only when this message
+        started it and no other message still depends on it.
+        """
+        target_id = thread_id or chat_id
+        started_task = await self._start_typing(typing_target, chat_id, thread_id) if typing_target else None
+        typing_task = self._typing_tasks.get(target_id) if typing_target else None
+        if typing_task is not None:
+            self._typing_dependents[typing_task] = self._typing_dependents.get(typing_task, 0) + 1
+        try:
+            committed = await asyncio.shield(asyncio.wrap_future(handoff))
+        except asyncio.CancelledError:
+            if not handoff.cancelled():
+                raise
+            committed = False  # drained by stop()
+        except Exception:
+            committed = False  # the submission finalizer already logged it
+        if committed:
+            # Keep this message's hold until a reply stops the indicator.
+            self._schedule_ack_reaction(message)
+            return
+        if typing_task is None:
+            return
+        remaining = self._typing_dependents.get(typing_task, 1) - 1
+        if remaining > 0:
+            self._typing_dependents[typing_task] = remaining
+            return
+        self._typing_dependents.pop(typing_task, None)
+        if typing_task is started_task and self._typing_tasks.get(target_id) is typing_task:
+            await self._stop_typing(chat_id, thread_id)
+
+    async def _commit_reserved_inbound_with_identity(
+        self,
+        inbound: InboundMessage,
+        reservation: InboundReservation,
+        *,
+        guild_id: str | None,
+    ) -> bool:
+        """Attach connection identity and commit the reservation on the Gateway loop."""
+        inbound = await self._attach_connection_identity(inbound, guild_id=guild_id)
+        return self._commit_reserved_inbound(reservation, inbound)
 
     async def _attach_connection_identity(self, inbound: InboundMessage, guild_id: str | None = None) -> InboundMessage:
         return await attach_connection_identity(
@@ -730,12 +809,28 @@ class DiscordChannel(Channel):
         )
 
     async def _bind_connection_from_connect_code(self, message, code: str) -> bool:
+        """Dispatch the bind flow to the Gateway loop, where the repository's engine lives."""
         if self._connection_repo is None or not code:
             return False
 
+        scheduled = self._submit_threadsafe_coroutine(
+            self._bind_connection_from_connect_code_on_main(message, code),
+            self._main_loop,
+            name="bind_connection",
+            msg_id=getattr(message, "id", None),
+        )
+        if not scheduled:
+            logger.warning("[Discord] main loop not running, cannot bind channel connection")
+        # Handled either way so a bind attempt never reaches the agent as a chat
+        # turn; an unscheduled bind leaves the code unconsumed, so the user can
+        # retry it after the Gateway restarts.
+        return True
+
+    async def _bind_connection_from_connect_code_on_main(self, message, code: str) -> bool:
+        """Run the bind flow on the Gateway loop; replies go back through the Discord loop."""
         state = await self._connection_repo.consume_oauth_state(provider="discord", state=code)
         if state is None:
-            await self._send_connection_reply(message, "Discord connection code is invalid or expired.")
+            await self._run_on_discord_loop(self._send_connection_reply(message, "Discord connection code is invalid or expired."))
             return True
 
         guild = getattr(message, "guild", None)
@@ -743,7 +838,7 @@ class DiscordChannel(Channel):
         author = getattr(message, "author", None)
         user_id = str(getattr(author, "id", "") or "")
         if not user_id:
-            await self._send_connection_reply(message, "Discord connection could not be completed from this message.")
+            await self._run_on_discord_loop(self._send_connection_reply(message, "Discord connection could not be completed from this message."))
             return True
 
         guild_id = str(getattr(guild, "id", "") or "") or None
@@ -760,7 +855,7 @@ class DiscordChannel(Channel):
             },
             status="connected",
         )
-        await self._send_connection_reply(message, "Discord connected to DeerFlow.")
+        await self._run_on_discord_loop(self._send_connection_reply(message, "Discord connected to DeerFlow."))
         return True
 
     @staticmethod
