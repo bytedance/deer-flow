@@ -58,6 +58,13 @@ the same policy first so run metadata reports the effective values. Design note:
 `tests/test_reasoning_contract.py`, the contract section of
 `tests/test_model_factory.py`, `tests/test_models_router_reasoning.py`.
 
+### CLI credential files (`packages/harness/deerflow/models/credential_loader.py`)
+
+CLI credential JSON uses `utf-8-sig` for locale-independent reads with optional
+BOM. Decode failures follow the existing unreadable-source path, preserving
+Claude's override-to-default fallback. Doctor's mirrored JSON reader must accept
+the same optional BOM. Tests: `test_credential_file_encoding.py`.
+
 ### Codex tool-call/result serialization (`packages/harness/deerflow/models/openai_codex_provider.py`)
 
 `_convert_messages` uses `_is_valid_call_id` for both assistant tool calls
@@ -83,7 +90,7 @@ Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
 ### Claude Code Credentials (`packages/harness/deerflow/models/credential_loader.py`)
 
 - `ClaudeChatModel.model_post_init` calls `load_claude_code_credential()` for every instance, and `create_chat_model` builds fresh instances per run (lead agent, title, summarization, subagents)
-- `$CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` is a one-shot handoff: a pipe returns EOF and a file keeps its advanced offset. `_read_secret_from_file_descriptor` therefore caches a non-empty secret per `(env_var, fd)` under a lock held across the read. Do not drop the cache or the lock — later instances would get no credential, and the Anthropic SDK raises `TypeError: Could not resolve authentication method` before sending. Empty reads and `OSError` are not cached. The key is the descriptor number on purpose — a closed handoff keeps serving its token, and a secret placed on a recycled number in-process is not re-read unless the cache is cleared. The cache is per process, so a new process (e.g. a uvicorn `--reload` worker) cannot recover a drained descriptor. Pinned by `tests/test_credential_loader.py`, including a two-instance `ClaudeChatModel` test
+- `$CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` is a one-shot handoff: a pipe returns EOF and a file keeps its advanced offset. `_read_secret_from_file_descriptor` therefore caches a non-empty secret per `(env_var, fd)` under a lock held across the read. Do not drop the cache or the lock — later instances would get no credential, and the Anthropic SDK raises `TypeError: Could not resolve authentication method` before sending. Empty reads, `OSError`, and UTF-8 decode failures are not cached; unreadable handoffs return `None` so the loader can try credential files. Warnings must not include token contents. The key is the descriptor number on purpose — a closed handoff keeps serving its token, and a secret placed on a recycled number in-process is not re-read unless the cache is cleared. The cache is per process, so a new process (e.g. a uvicorn `--reload` worker) cannot recover a drained descriptor. Pinned by `tests/test_credential_loader.py` and `tests/test_claude_fd_encoding.py`, including two-instance `ClaudeChatModel` tests
 
 ### Claude Prompt Caching (`packages/harness/deerflow/models/claude_provider.py`)
 

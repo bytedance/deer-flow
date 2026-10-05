@@ -423,6 +423,19 @@
 
 ### 修复
 
+- **沙箱：** 中风险审计警告不再让子智能体证据丢失失败的 shell 退出码。
+  `SandboxAuditMiddleware` 原先把警告追加在结尾的 `Exit Code: N` 标记之后，并只用
+  四个字段重建 `ToolMessage`，导致 `_bash_evidence_status` 找不到标记，退回到报告
+  `success` 的 `deerflow_tool_meta`，失败的 `sudo pytest -q` 可能满足 `tests_passed`
+  验收条件。现在警告插在结尾的 `Exit Code: N` 或 `Command exited with code N`
+  之前，整段只有 `Command exited with code N` 的输出保持原样，结果保留
+  `deerflow_tool_meta`、`artifact` 与 `id`。([#6307])
+- **持久化：** 另一个实例正在执行 PostgreSQL 模式迁移时，第二个 Gateway 实例不再
+  因 `TimeoutError` 启动失败。引导期 advisory lock 此前在应用引擎上以阻塞的
+  `pg_advisory_lock` 获取，而该引擎的 asyncpg `database.command_timeout`（默认
+  30 秒）同样作用于这条语句，因此任何超过该时限的迁移都会让等待中的实例中止。
+  现在获取改为轮询非阻塞的 `pg_try_advisory_lock`：等待时长与持锁方的迁移一致，
+  每次尝试仍受 `command_timeout` 约束，等待只记录一次日志。([#6306])
 - **项目：** 在 SQLite 上首次读取书架文档时，文档转换期间不再阻塞所有其他数据库
   写入。此前懒转换在 `BEGIN IMMEDIATE` 事务内运行 pymupdf/markitdown，以便与移入
   回收站和彻底删除串行化发布；而 SQLite 的这把锁作用于整个数据库，运行状态、线程
@@ -6463,3 +6476,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6263]: https://github.com/bytedance/deer-flow/pull/6263
 [#6282]: https://github.com/bytedance/deer-flow/pull/6282
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
+[#6306]: https://github.com/bytedance/deer-flow/pull/6306
+[#6307]: https://github.com/bytedance/deer-flow/pull/6307

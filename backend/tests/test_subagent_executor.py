@@ -3210,6 +3210,90 @@ class TestThreadSafety:
         assert executor_module._isolated_subagent_loop_started is None
         assert executor_module._isolated_subagent_loop_shutdown_pending is False
 
+    def test_startup_timeout_retains_ownership_until_worker_exits(self, executor_module, caplog):
+        """A startup timeout must retain the worker and allow later reaping."""
+
+        class StartupEvent:
+            def wait(self, timeout=None):
+                return False
+
+        class StartupThread:
+            def __init__(self, *args, **kwargs):
+                self.alive = False
+                self.join_calls = 0
+
+            def start(self):
+                self.alive = True
+
+            def is_alive(self):
+                return self.alive
+
+            def join(self, timeout=None):
+                self.join_calls += 1
+
+        class StartupLoop:
+            def __init__(self):
+                self.running = True
+                self.closed = False
+
+            def is_running(self):
+                return self.running
+
+            def stop(self):
+                self.running = False
+
+            def call_soon_threadsafe(self, callback, *args):
+                callback(*args)
+
+            def is_closed(self):
+                return self.closed
+
+            def close(self):
+                assert not self.running
+                self.closed = True
+
+        retained = StartupLoop()
+        startup_thread = StartupThread()
+        startup_event = StartupEvent()
+
+        with (
+            caplog.at_level("WARNING"),
+            patch.object(executor_module.asyncio, "new_event_loop", return_value=retained),
+            patch.object(executor_module.threading, "Event", return_value=startup_event),
+            patch.object(executor_module.threading, "Thread", return_value=startup_thread),
+        ):
+            with pytest.raises(RuntimeError, match="Timed out starting isolated subagent event loop"):
+                executor_module._get_isolated_subagent_loop()
+
+        assert executor_module._isolated_subagent_loop is retained
+        assert executor_module._isolated_subagent_loop_thread is startup_thread
+        assert executor_module._isolated_subagent_loop_started is startup_event
+        assert executor_module._isolated_subagent_loop_shutdown_pending is True
+        assert startup_thread.join_calls == 1
+        assert retained.closed is False
+        assert "Retaining isolated subagent loop ownership after startup timeout" in caplog.text
+
+        with patch.object(executor_module.asyncio, "new_event_loop") as new_event_loop:
+            with pytest.raises(RuntimeError, match="retained worker is still exiting"):
+                executor_module._get_isolated_subagent_loop()
+            new_event_loop.assert_not_called()
+
+        # Dispatch-side recovery is only a liveness probe while ownership is
+        # retained; it must not block on another bounded join for every caller.
+        assert startup_thread.join_calls == 1
+
+        startup_thread.alive = False
+        retained.running = False
+        replacement = executor_module._get_isolated_subagent_loop()
+
+        assert retained.closed is True
+        assert replacement is not retained
+        assert executor_module._isolated_subagent_loop is replacement
+        assert executor_module._isolated_subagent_loop_thread is not startup_thread
+        assert executor_module._isolated_subagent_loop_shutdown_pending is False
+
+        executor_module._shutdown_isolated_subagent_loop()
+
     def test_concurrent_pending_recovery_does_not_stop_replacement(self, executor_module, monkeypatch):
         """A stale recovery getter must not tear down a replacement loop."""
 

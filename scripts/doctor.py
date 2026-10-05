@@ -108,7 +108,7 @@ def _load_json_object(path: Path) -> dict | None:
     if not path.is_file():
         return None
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         return None
     return value if isinstance(value, dict) else None

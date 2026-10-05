@@ -632,6 +632,13 @@ def _shutdown_isolated_subagent_loop(*, only_if_pending: bool = False) -> None:
                 return
             _isolated_subagent_loop_shutdown_pending = True
 
+            # A previous bounded shutdown/startup attempt already requested
+            # loop.stop. Dispatch-side recovery should only probe whether the
+            # retained worker has exited; repeatedly joining here would stall
+            # every caller for up to one second while the worker remains live.
+            if only_if_pending and thread is not None and thread.is_alive():
+                return
+
         if loop.is_running():
             loop.call_soon_threadsafe(loop.stop)
 
@@ -676,7 +683,7 @@ def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
 
     with _isolated_subagent_loop_lock:
         if _isolated_subagent_loop_shutdown_pending:
-            raise RuntimeError("Isolated subagent event loop shutdown is still pending")
+            raise RuntimeError("Isolated subagent event loop shutdown is still pending; retained worker is still exiting")
 
         thread_is_alive = _isolated_subagent_loop_thread is not None and _isolated_subagent_loop_thread.is_alive()
         loop_is_usable = _isolated_subagent_loop is not None and not _isolated_subagent_loop.is_closed() and _isolated_subagent_loop.is_running() and thread_is_alive
