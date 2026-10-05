@@ -29,6 +29,7 @@ from langgraph.types import Checkpointer
 
 from deerflow.community.browser_automation.session import browser_multi_worker_error
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.config.deployment_config import MULTI_INSTANCE_ENV_VAR, multi_instance_declaration
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
 from deerflow.runtime.events.store.base import RunEventStore
@@ -86,9 +87,50 @@ def _gateway_worker_count() -> tuple[int, str]:
     return 1, _WORKER_COUNT_ENV_VARS[0]
 
 
+def _multi_process_signal(config: AppConfig) -> tuple[str, str] | None:
+    """Return ``(reason, rollback)`` when this process must assume peer Gateway processes.
+
+    ``reason`` names the knob that established the topology (``GATEWAY_WORKERS=2``,
+    ``DEER_FLOW_MULTI_INSTANCE=1`` or ``deployment.multi_instance=true``) and
+    ``rollback`` is the single-instance remediation a refusal message offers.
+
+    The worker-count variables only see one process tree, so a Kubernetes
+    Deployment with ``replicas > 1`` and one worker per Pod is invisible to
+    them; the explicit declaration exists for exactly that topology.
+    """
+    workers, worker_env = _gateway_worker_count()
+    if workers > 1:
+        return f"{worker_env}={workers}", f"Set {worker_env}=1"
+    declaration = multi_instance_declaration(config)
+    if declaration is None:
+        return None
+    if declaration.startswith(MULTI_INSTANCE_ENV_VAR):
+        return declaration, f"Unset {MULTI_INSTANCE_ENV_VAR} and run a single Gateway instance"
+    return declaration, "Set deployment.multi_instance=false and run a single Gateway instance"
+
+
+def _stream_bridge_is_cross_process(config: AppConfig) -> bool:
+    """Return whether live run events can reach SSE clients on every instance.
+
+    Mirrors ``runtime/stream_bridge/async_provider.py::_resolve_config``: the
+    config.yaml section wins, and an omitted section falls back to the
+    ``DEER_FLOW_STREAM_BRIDGE_REDIS_URL`` variable the Docker and Helm
+    deployments inject.
+    """
+    bridge = getattr(config, "stream_bridge", None)
+    if bridge is not None:
+        return getattr(bridge, "type", None) == "redis"
+    return bool((os.environ.get("DEER_FLOW_STREAM_BRIDGE_REDIS_URL") or "").strip())
+
+
 def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     """Refuse unsafe multi-process configurations before persistence starts.
 
+    A deployment counts as multi-process when ``GATEWAY_WORKERS`` /
+    ``WEB_CONCURRENCY`` is above 1, or when the operator declares peers with
+    ``deployment.multi_instance: true`` / ``DEER_FLOW_MULTI_INSTANCE=1`` (the
+    worker count cannot see other Pods, and a Pod that starts next to a peer
+    without these prerequisites writes the peer's live runs off as orphans).
     Multi-instance scheduler recovery also needs the durable run ownership
     contract even when each Pod runs a single Gateway worker.
 
@@ -105,13 +147,16 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
        every run has a NULL lease, so reconciliation treats all inflight
        runs as orphans and Worker B would kill Worker A's live runs on
        every rolling update or scale-up.
+    6. The stream bridge must be Redis. The memory bridge is process-local,
+       so SSE streams, reconnects and ``/wait`` only work on the owner.
+    7. ``sandbox.ownership.type`` must not be an explicit ``memory``: an
+       in-process ownership store cannot see peers, so reconciliation would
+       adopt and idle-destroy another instance's live containers (#4206).
 
     This gate runs once at startup before any persistence engine is
     initialised so the error message is clear and the process exits
     immediately.
     """
-    workers, worker_env = _gateway_worker_count()
-
     scheduler = getattr(config, "scheduler", None)
     multi_instance_requested = bool(getattr(scheduler, "multi_instance", False))
     multi_instance_scheduler = bool(getattr(scheduler, "enabled", False) and multi_instance_requested)
@@ -127,32 +172,52 @@ def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     if multi_instance_requested and (run_ownership is None or not run_ownership.heartbeat_enabled):
         raise SystemExit("scheduler.multi_instance=true requires run_ownership.heartbeat_enabled=true so peer runs retain a valid lease. Set scheduler.multi_instance=false or enable run ownership heartbeats.")
 
-    if workers <= 1:
+    signal = _multi_process_signal(config)
+    if signal is None:
         return
+    reason, rollback = signal
 
     if config.scheduler.enabled and not multi_instance_scheduler:
-        raise SystemExit(f"{worker_env}={workers} cannot run with scheduler.enabled=true because each worker starts its own scheduler. Set {worker_env}=1, scheduler.multi_instance=true, or scheduler.enabled=false.")
+        raise SystemExit(f"{reason} cannot run with scheduler.enabled=true because each worker starts its own scheduler. {rollback}, scheduler.multi_instance=true, or scheduler.enabled=false.")
 
     if _browser_tools_enabled_in_config(config):
-        raise SystemExit(browser_multi_worker_error(workers))
+        workers, _worker_env = _gateway_worker_count()
+        if workers > 1:
+            raise SystemExit(browser_multi_worker_error(workers))
+        raise SystemExit(f"{reason} cannot enable agentic browser tools: browser sessions are process-local and a request can land on any instance. {rollback} or disable the browser_navigate tool.")
 
     if backend != "postgres":
-        raise SystemExit(f"{worker_env}={workers} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. Set {worker_env}=1 or switch to Postgres.")
+        raise SystemExit(f"{reason} requires database.backend='postgres', but database.backend is '{backend}'. SQLite cannot support concurrent multi-process access. {rollback} or switch to Postgres.")
 
     if run_events_backend != "db":
         raise SystemExit(
-            f"{worker_env}={workers} requires run_events.backend='db', but run_events.backend is '{run_events_backend}'. "
+            f"{reason} requires run_events.backend='db', but run_events.backend is '{run_events_backend}'. "
             "Memory and JSONL event stores are process-local, so delivery receipt singleton guarantees cannot hold across workers. "
-            f"Set {worker_env}=1 or configure run_events.backend: db."
+            f"{rollback} or configure run_events.backend: db."
         )
 
     if run_ownership is None or not run_ownership.heartbeat_enabled:
         raise SystemExit(
-            f"{worker_env}={workers} requires run_ownership.heartbeat_enabled=true. "
+            f"{reason} requires run_ownership.heartbeat_enabled=true. "
             "Without heartbeat, every run has a NULL lease, so reconciliation "
-            "treats all inflight runs as orphans — Worker B would kill Worker A's "
-            "live runs on every rolling update or scale-up. "
+            "treats all inflight runs as orphans — a starting instance would kill its "
+            "peers' live runs on every rolling update or scale-up. "
             "Set run_ownership.heartbeat_enabled=true in config.yaml."
+        )
+
+    if not _stream_bridge_is_cross_process(config):
+        raise SystemExit(
+            f"{reason} requires stream_bridge.type='redis' (or DEER_FLOW_STREAM_BRIDGE_REDIS_URL), "
+            "but the stream bridge is the process-local memory bridge: SSE streams, reconnects and /wait "
+            f"only work on the instance that owns the run. {rollback} or configure the redis stream bridge."
+        )
+
+    ownership = getattr(getattr(config, "sandbox", None), "ownership", None)
+    if ownership is not None and getattr(ownership, "type", None) == "memory":
+        raise SystemExit(
+            f"{reason} cannot run with sandbox.ownership.type='memory': an in-process ownership store cannot see "
+            "peer instances, so startup reconciliation would adopt and idle-destroy containers another instance is "
+            "using (#4206). Set sandbox.ownership.type='redis', or omit the section so it is inferred from the redis stream bridge."
         )
 
 
@@ -178,14 +243,13 @@ def _validate_agent_storage(config: AppConfig) -> None:
             f"but database.backend is '{db_backend}'. A 'memory' database is per-process and cannot "
             "share agent definitions across nodes. Set database.backend, or use agent_storage.backend='file'."
         )
-    workers, worker_env = _gateway_worker_count()
-    if workers > 1 and db_backend == "postgres" and backend == "file":
+    signal = _multi_process_signal(config)
+    if signal is not None and db_backend == "postgres" and backend == "file":
         logger.warning(
-            "%s=%s with database.backend='postgres' but agent_storage.backend='file': "
+            "%s with database.backend='postgres' but agent_storage.backend='file': "
             "custom agents and managed subagents are stored per-node on local disk and are not visible "
             "across workers/nodes. Set agent_storage.backend='db' to share them.",
-            worker_env,
-            workers,
+            signal[0],
         )
 
 

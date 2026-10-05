@@ -17,6 +17,8 @@ from typing import Any, Protocol
 
 from sqlalchemy import text
 
+from deerflow.config.deployment_config import multi_instance_declaration
+
 logger = logging.getLogger(__name__)
 
 INBOUND_DEDUPE_TTL_SECONDS = 10 * 60
@@ -269,7 +271,11 @@ def make_inbound_dedupe_store(app_config: Any | None = None) -> InboundDedupeSto
         db_is_postgres = db_backend == "postgres"
 
     workers, worker_env = _gateway_workers()
-    multi_worker = workers > 1
+    # The worker count only sees one process tree; Kubernetes replicas declare
+    # themselves through deployment.multi_instance / DEER_FLOW_MULTI_INSTANCE.
+    declaration = multi_instance_declaration(app_config)
+    multi_worker = workers > 1 or declaration is not None
+    topology = f"{worker_env}>1" if workers > 1 else declaration
 
     if backend == "postgres":
         if not db_is_postgres:
@@ -282,7 +288,7 @@ def make_inbound_dedupe_store(app_config: Any | None = None) -> InboundDedupeSto
     if backend == "memory":
         if multi_worker:
             logger.warning(
-                f"dedupe_storage=memory with {worker_env}>1: inbound webhook dedupe "
+                f"dedupe_storage=memory with {topology}: inbound webhook dedupe "
                 "is per-pod and will NOT drop redeliveries routed to a different replica. "
                 "Use dedupe_storage=postgres (or remove the setting to let 'auto' pick it) "
                 "for multi-worker deployments. See issue #4120."
