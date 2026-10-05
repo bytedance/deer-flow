@@ -1836,6 +1836,9 @@ For example, independent read-only research can run concurrently when the wall-c
 ### Sandbox & File System
 
 Host-externalized tool outputs use the Gateway's normal file-creation umask.
+Host and sandbox outputs use deterministic filenames hashed from the raw tool
+call ID and output content. Missing, colliding, or oversized IDs cannot overwrite
+different output or make the filename too long; identical output can reuse its path.
 `tool_output` character/count budgets, including per-tool overrides, require
 non-negative integers; YAML booleans are rejected rather than treated as 0 or 1.
 An explicit zero per-tool override disables externalization while preserving

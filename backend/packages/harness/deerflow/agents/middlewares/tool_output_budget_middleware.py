@@ -173,16 +173,7 @@ def _sanitize_tool_name(name: str) -> str:
     return safe or "unknown"
 
 
-def _sanitize_tool_call_id(tool_call_id: str) -> str:
-    """Make a tool call id safe to use inside a filename.
-
-    The id reaches us from the model/provider, so it gets the same treatment as
-    a tool name: no separators and no traversal components.
-    """
-    return _sanitize_tool_name(tool_call_id)
-
-
-def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
+def _build_externalized_filename(*, tool_name: str, tool_call_id: str, content: str) -> str:
     """Build the on-disk filename for an externalized tool output.
 
     Shared by the host-disk and sandbox externalization paths so both
@@ -190,11 +181,15 @@ def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
     """
     safe_name = _sanitize_tool_name(tool_name)
     ext = _EXT_MAP.get(tool_name, "txt")
-    # Derived from the call id so the host-disk and sandbox paths agree on one
-    # name for a given call, and so externalizing the same output twice is
-    # idempotent instead of leaving two files behind.
-    safe_id = _sanitize_tool_call_id(tool_call_id)
-    return f"{safe_name}-{safe_id}.{ext}"
+    # Hash the raw ID and content so missing IDs, sanitization collisions and
+    # oversized IDs cannot overwrite distinct output. Frame the ID length to
+    # keep the boundary unambiguous, including when either value contains NUL.
+    call_id_bytes = tool_call_id.encode("utf-8")
+    digest = hashlib.sha256()
+    digest.update(len(call_id_bytes).to_bytes(8, "big"))
+    digest.update(call_id_bytes)
+    digest.update(content.encode("utf-8"))
+    return f"{safe_name}-{digest.hexdigest()}.{ext}"
 
 
 def _externalize(
@@ -214,7 +209,7 @@ def _externalize(
     except OSError:
         return None
 
-    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id)
+    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
     filepath = os.path.join(storage_dir, filename)
 
     if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
@@ -299,7 +294,7 @@ def _externalize_to_sandbox(
     """
     if os.path.isabs(storage_subdir) or ".." in storage_subdir:
         return None
-    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id)
+    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
     virtual_dir = f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}"
     virtual_path = f"{virtual_dir}/{filename}"
     try:
