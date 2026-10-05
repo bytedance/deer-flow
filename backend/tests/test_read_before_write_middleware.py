@@ -868,7 +868,7 @@ def test_lock_scope_resolves_overwrite_wrapped_sandbox():
         ("write_file", "", "0 lines"),
         ("str_replace", "line1\nline2\n", "2 lines"),
         # Exotic separators: \f and \u2028 are NOT line boundaries in LocalSandbox
-        # (Python text-mode iterates only \n/\r\n/\r), so count must match LocalSandbox.
+        # (it ends lines only at \n), so count must match LocalSandbox.
         ("write_file", "x\fx\n", "1 line"),
         ("write_file", "x\u2028x\n", "1 line"),
     ],

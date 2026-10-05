@@ -494,6 +494,17 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **sandbox:** The local sandbox no longer rewrites line endings. `read_file`
+  translated CRLF to LF, so `str_replace` on a CRLF file wrote every line back as
+  LF, and the read-before-write gate could not see a change that only touched
+  line endings; on Windows, `write_file` turned LF content into CRLF, breaking
+  scripts such as `bash run.sh`. Local reads and writes now keep line endings as
+  stored, like the remote providers, and `str_replace` spells a `\n`-written
+  `old_str`/`new_str` with CRLF when the file uses it, which also lets
+  multi-line edits match CRLF files on remote providers. On Windows, oversized
+  tool output saved under `outputs/.tool-results/` was likewise written as CRLF,
+  no longer matched its stamped blob reference, and was deleted on the next
+  model call when no blob store was configured; it is now written byte-exact.
 - **skills:** Editing a custom skill no longer runs filesystem work on the event
   loop. `PUT /api/skills/custom/{name}` built the user-scoped skill storage,
   probed the custom, public, legacy and integration roots, validated the

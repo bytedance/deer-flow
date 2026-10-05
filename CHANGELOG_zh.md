@@ -432,6 +432,13 @@
 
 ### 修复
 
+- **沙箱：** 本地沙箱不再改写换行符。`read_file` 此前把 CRLF 转成 LF，导致
+  `str_replace` 编辑 CRLF 文件后整份文件都变成 LF，且读后写校验无法察觉仅改动换行符的
+  变更；在 Windows 上 `write_file` 会把 LF 内容写成 CRLF，使 `bash run.sh` 等脚本失败。
+  现在本地读写与远程沙箱一致，按原样保留换行符；当文件使用 CRLF 时，`str_replace` 会把
+  以 `\n` 书写的 `old_str`/`new_str` 转为 CRLF，远程沙箱上的多行编辑也因此能匹配 CRLF 文件。
+  同样在 Windows 上，保存到 `outputs/.tool-results/` 的超长工具输出此前也被写成 CRLF，与其 blob
+  引用不再一致，未配置 blob 存储时会在下一次模型调用时被删除；现在按原样逐字节写入。
 - **技能：** 编辑自定义技能时，不再在事件循环上执行文件系统操作。
   `PUT /api/skills/custom/{name}` 此前在事件循环上构建用户级技能存储、探测自定义、
   内置、旧版共享与集成目录、把草稿写入临时目录以校验 frontmatter，并读取将被替换的
