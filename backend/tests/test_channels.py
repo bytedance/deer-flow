@@ -8760,6 +8760,129 @@ class TestChannelService:
         assert stopped  # old channel was stopped
         assert not started  # _start_channel was NOT called
 
+    def test_concurrent_restart_channel_serializes(self):
+        """Concurrent restart_channel calls serialize per channel rather than racing stop/start."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"telegram": {"enabled": True, "token": "test"}})
+        service._running = True
+
+        class FakeChannel:
+            def __init__(self):
+                self.is_running = True
+                self.stop_count = 0
+
+            async def stop(self):
+                self.stop_count += 1
+                self.is_running = False
+
+        current_instance = FakeChannel()
+        service._channels["telegram"] = current_instance
+
+        starts = 0
+        active_starts = 0
+        max_concurrent_starts = 0
+
+        async def mock_start(name, config):
+            nonlocal starts, active_starts, max_concurrent_starts
+            active_starts += 1
+            max_concurrent_starts = max(max_concurrent_starts, active_starts)
+            await asyncio.sleep(0.02)
+            service._channels[name] = FakeChannel()
+            active_starts -= 1
+            starts += 1
+            return True
+
+        service._start_channel = mock_start
+
+        async def go():
+            results = await asyncio.gather(
+                service.restart_channel("telegram", reload_config=False),
+                service.restart_channel("telegram", reload_config=False),
+            )
+            assert all(results)
+
+        _run(go())
+
+        assert max_concurrent_starts == 1
+        assert starts == 2
+
+    def test_concurrent_ensure_channel_ready_and_restart(self):
+        """ensure_channel_ready and restart_channel serialize without collision."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"telegram": {"enabled": True, "token": "test"}})
+        service._running = True
+
+        class FakeChannel:
+            def __init__(self):
+                self.is_running = True
+
+            async def stop(self):
+                self.is_running = False
+
+        service._channels["telegram"] = FakeChannel()
+
+        events = []
+
+        async def mock_start(name, config):
+            events.append("start_begin")
+            await asyncio.sleep(0.03)
+            service._channels[name] = FakeChannel()
+            events.append("start_end")
+            return True
+
+        service._start_channel = mock_start
+
+        async def go():
+            results = await asyncio.gather(
+                service.ensure_channel_ready("telegram"),
+                service.restart_channel("telegram", reload_config=False),
+            )
+            assert all(results)
+
+        _run(go())
+
+        # Because ensure_channel_ready runs first and sees is_running=True, it succeeds quickly.
+        # Then restart_channel runs serialized. No concurrent operations overlap.
+        assert events == ["start_begin", "start_end"]
+
+    def test_concurrent_remove_and_ensure_channel_ready(self):
+        """remove_channel and ensure_channel_ready serialize cleanly without zombie respawns."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"telegram": {"enabled": True, "token": "test"}})
+        service._running = True
+
+        class FakeChannel:
+            def __init__(self):
+                self.is_running = False
+
+            async def stop(self):
+                pass
+
+        service._channels["telegram"] = FakeChannel()
+
+        async def mock_start(name, config):
+            await asyncio.sleep(0.02)
+            service._channels[name] = FakeChannel()
+            return True
+
+        service._start_channel = mock_start
+
+        async def go():
+            results = await asyncio.gather(
+                service.remove_channel("telegram"),
+                service.ensure_channel_ready("telegram"),
+            )
+            return results
+
+        results = _run(go())
+        # remove_channel succeeds; ensure_channel_ready serialized after it returns False because config was removed
+        assert results == [True, False]
+        assert "telegram" not in service._channels
+        assert "telegram" not in service._config
+
 
 # ---------------------------------------------------------------------------
 # Slack send retry tests

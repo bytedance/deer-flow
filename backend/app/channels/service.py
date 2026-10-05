@@ -239,13 +239,13 @@ class ChannelService:
             logger.warning("ChannelService is not running; cannot ensure channel readiness")
             return False
 
-        if config is not None:
-            self._config[name] = dict(config)
+        async with self._channel_lock(name):
+            if not self._running:
+                return False
 
-        # Serialize per channel: readiness is polled from request handlers, so
-        # concurrent calls must not stop/start the same channel worker twice.
-        lock = self._readiness_locks.setdefault(name, asyncio.Lock())
-        async with lock:
+            if config is not None:
+                self._config[name] = dict(config)
+
             channel_config = self._config.get(name)
             if not channel_config or not isinstance(channel_config, dict):
                 logger.warning("No config for requested channel")
@@ -270,6 +270,8 @@ class ChannelService:
 
             max_attempts = max(1, attempts)
             for attempt in range(max_attempts):
+                if not self._running:
+                    return False
                 if attempt > 0:
                     logger.info("Retrying channel startup after readiness check")
                 if await self._start_channel(name, channel_config):
@@ -343,8 +345,16 @@ class ChannelService:
             logger.exception("Failed to reload config for channel %s, using cached version", name)
         return self._config.get(name)
 
+    def _channel_lock(self, name: str) -> asyncio.Lock:
+        """Return the per-channel lifecycle lock ensuring serialized mutations."""
+        return self._readiness_locks.setdefault(name, asyncio.Lock())
+
     async def restart_channel(self, name: str, *, reload_config: bool = True) -> bool:
         """Restart a specific channel. Returns True if successful."""
+        async with self._channel_lock(name):
+            return await self._restart_channel_locked(name, reload_config=reload_config)
+
+    async def _restart_channel_locked(self, name: str, *, reload_config: bool = True) -> bool:
         if name in self._channels:
             channel = self._channels[name]
             # Same ownership rule as readiness retries: retain an instance
@@ -373,29 +383,31 @@ class ChannelService:
 
     async def configure_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Apply runtime config for a channel and restart it if the service is running."""
-        self._config[name] = dict(config)
-        if not self._running:
-            return True
-        # The caller just supplied the authoritative config (e.g. credentials
-        # entered in the browser that are never written to config.yaml) — a
-        # file reload here would clobber it with the stale on-disk entry.
-        return await self.restart_channel(name, reload_config=False)
+        async with self._channel_lock(name):
+            self._config[name] = dict(config)
+            if not self._running:
+                return True
+            # The caller just supplied the authoritative config (e.g. credentials
+            # entered in the browser that are never written to config.yaml) — a
+            # file reload here would clobber it with the stale on-disk entry.
+            return await self._restart_channel_locked(name, reload_config=False)
 
     async def remove_channel(self, name: str) -> bool:
         """Remove runtime config for a channel and stop it if currently running."""
-        self._config.pop(name, None)
-        channel = self._channels.get(name)
-        if channel is None:
+        async with self._channel_lock(name):
+            self._config.pop(name, None)
+            channel = self._channels.get(name)
+            if channel is None:
+                return True
+            # Stop-then-drop with the shared ownership rule: a channel whose
+            # stop() fails stays tracked (and returns False) instead of being
+            # popped first and leaking its subscribed listener on failure.
+            await self._stop_and_discard_channel(name, channel)
+            if self._channels.get(name) is channel:
+                logger.warning("Removal incomplete: %s channel failed to stop and remains tracked", name)
+                return False
+            logger.info("Channel stopped and removed")
             return True
-        # Stop-then-drop with the shared ownership rule: a channel whose
-        # stop() fails stays tracked (and returns False) instead of being
-        # popped first and leaking its subscribed listener on failure.
-        await self._stop_and_discard_channel(name, channel)
-        if self._channels.get(name) is channel:
-            logger.warning("Removal incomplete: %s channel failed to stop and remains tracked", name)
-            return False
-        logger.info("Channel stopped and removed")
-        return True
 
     async def _stop_and_discard_channel(self, name: str, channel: Channel) -> None:
         """Stop a channel and drop it only once its ``stop()`` has completed.
@@ -421,8 +433,10 @@ class ChannelService:
         resources nobody can clean up anymore. Callers check for retention
         (``self._channels.get(name) is channel``) and defer starting or
         removing a replacement for that round, so startup cannot silently
-        overwrite a still-listening retained instance; ``ensure_channel_ready``
-        additionally serializes on the per-channel readiness lock.
+        overwrite a still-listening retained instance; all per-channel
+        lifecycle mutations (``ensure_channel_ready``, ``restart_channel``,
+        ``configure_channel``, ``remove_channel``) additionally serialize on
+        the per-channel lock.
         """
         try:
             await channel.stop()
