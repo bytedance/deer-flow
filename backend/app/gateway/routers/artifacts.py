@@ -38,6 +38,7 @@ router = APIRouter(prefix="/api", tags=["artifacts"])
 MAX_SKILL_ARCHIVE_MEMBER_BYTES = 16 * 1024 * 1024
 _SKILL_ARCHIVE_READ_CHUNK_SIZE = 64 * 1024
 MAX_EDITABLE_ARTIFACT_BYTES = 2 * 1024 * 1024
+MAX_VIEWED_IMAGE_BLOB_BYTES = 20 * 1024 * 1024
 _ARTIFACT_EDIT_TEMP_PREFIX = ".artifact-edit-"
 
 
@@ -496,7 +497,15 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
     # Offload path stat + MIME sniff (blocking filesystem IO). Every regular
     # artifact response is streamed by FileResponse; the worker only reports
     # disposition and media type.
-    kind, mime_type = await asyncio.to_thread(_read_artifact_payload, actual_path, path, download)
+    try:
+        kind, mime_type = await asyncio.to_thread(_read_artifact_payload, actual_path, path, download)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        blob_response = await _get_viewed_image_blob_response(thread_id, path, request, download=download)
+        if blob_response is not None:
+            return blob_response
+        raise
 
     if kind == "file":
         # Always force download for active content types to prevent script
@@ -521,6 +530,86 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         )
 
     raise AssertionError(f"Unhandled artifact response kind: {kind!r}")
+
+
+async def _get_viewed_image_blob_response(
+    thread_id: str,
+    path: str,
+    request: Request,
+    *,
+    download: bool,
+) -> Response | None:
+    """Resolve a checkpointed viewed-image blob when this Gateway lacks the file.
+
+    The checkpoint binds the content-addressed reference to the authorized
+    thread and virtual path. Metadata and bytes are revalidated before serving;
+    an absent or unusable reference leaves the normal artifact 404 in place.
+    """
+    from deerflow.storage import BlobRef, get_blob_store_if_enabled
+
+    virtual_path = f"/{path.lstrip('/')}"
+    try:
+        from app.gateway.services import build_thread_checkpoint_state_accessor
+
+        accessor, config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+        snapshot = await accessor.aget(config)
+        values = getattr(snapshot, "values", None)
+        viewed_images = values.get("viewed_images") if isinstance(values, dict) else None
+        metadata = viewed_images.get(virtual_path) if isinstance(viewed_images, dict) else None
+        if metadata is None and isinstance(viewed_images, dict):
+            metadata = viewed_images.get(path)
+        if not isinstance(metadata, dict):
+            return None
+
+        expected_size = metadata.get("size")
+        expected_sha256 = metadata.get("sha256")
+        mime_type = metadata.get("mime_type")
+        if (
+            isinstance(expected_size, bool)
+            or not isinstance(expected_size, int)
+            or not 0 <= expected_size <= MAX_VIEWED_IMAGE_BLOB_BYTES
+            or not isinstance(expected_sha256, str)
+            or not isinstance(mime_type, str)
+            or not mime_type.startswith("image/")
+        ):
+            return None
+        path_mime_type, _ = mimetypes.guess_type(virtual_path)
+        if path_mime_type != mime_type:
+            return None
+        blob_ref_data = metadata.get("blob_ref")
+        if not isinstance(blob_ref_data, dict):
+            return None
+        blob_ref = BlobRef.model_validate(blob_ref_data)
+        if blob_ref.kind != "viewed-image" or blob_ref.sha256 != expected_sha256 or blob_ref.size != expected_size or blob_ref.content_type != mime_type:
+            return None
+        store = await asyncio.to_thread(get_blob_store_if_enabled)
+        if store is None:
+            return None
+        content = await asyncio.to_thread(store.get_bytes, blob_ref)
+        if len(content) != expected_size or hashlib.sha256(content).hexdigest() != expected_sha256:
+            return None
+    except Exception:
+        logger.debug("Could not resolve viewed-image blob for thread artifact", exc_info=True)
+        return None
+
+    etag = f'"{expected_sha256}"'
+    headers = {
+        "ETag": etag,
+        "X-Content-Type-Options": "nosniff",
+        "Accept-Ranges": "bytes",
+    }
+    if download or _is_active_content_mime_type(mime_type):
+        headers.update(_build_attachment_headers(Path(virtual_path).name, headers))
+    else:
+        headers["Content-Disposition"] = _build_content_disposition("inline", Path(virtual_path).name)
+
+    range_header = request.headers.get("range") if request is not None else None
+    if_range = request.headers.get("if-range") if request is not None else None
+    if if_range and if_range != etag:
+        range_header = None
+    ranged_content, status_code, range_headers = _slice_byte_range(content, range_header)
+    headers.update(range_headers)
+    return Response(content=ranged_content, status_code=status_code, media_type=mime_type, headers=headers)
 
 
 @router.put(
