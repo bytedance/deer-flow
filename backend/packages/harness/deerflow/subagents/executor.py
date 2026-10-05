@@ -597,7 +597,9 @@ def _harvest_bash_executions(
 _isolated_subagent_loop: asyncio.AbstractEventLoop | None = None
 _isolated_subagent_loop_thread: threading.Thread | None = None
 _isolated_subagent_loop_started: threading.Event | None = None
+_isolated_subagent_loop_shutdown_pending = False
 _isolated_subagent_loop_lock = threading.Lock()
+_isolated_subagent_loop_shutdown_lock = threading.Lock()
 
 
 def _run_isolated_subagent_loop(
@@ -615,36 +617,43 @@ def _run_isolated_subagent_loop(
 
 def _shutdown_isolated_subagent_loop() -> None:
     """Stop and close the persistent isolated subagent loop."""
-    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started
+    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started, _isolated_subagent_loop_shutdown_pending
 
-    with _isolated_subagent_loop_lock:
-        loop = _isolated_subagent_loop
-        thread = _isolated_subagent_loop_thread
-        _isolated_subagent_loop = None
-        _isolated_subagent_loop_thread = None
-        _isolated_subagent_loop_started = None
+    with _isolated_subagent_loop_shutdown_lock:
+        with _isolated_subagent_loop_lock:
+            loop = _isolated_subagent_loop
+            thread = _isolated_subagent_loop_thread
+            if loop is None:
+                _isolated_subagent_loop_shutdown_pending = False
+                return
+            _isolated_subagent_loop_shutdown_pending = True
 
-    if loop is None:
-        return
+        if loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
 
-    if loop.is_running():
-        loop.call_soon_threadsafe(loop.stop)
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=1)
 
-    if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-        thread.join(timeout=1)
+        thread_stopped = thread is None or not thread.is_alive()
+        loop_stopped = not loop.is_running()
 
-    thread_stopped = thread is None or not thread.is_alive()
-    loop_stopped = not loop.is_running()
-
-    if not loop.is_closed():
-        if thread_stopped and loop_stopped:
-            loop.close()
-        else:
+        if not thread_stopped or not loop_stopped:
             logger.warning(
-                "Skipping close of isolated subagent loop because shutdown did not complete within timeout (thread_alive=%s, loop_running=%s)",
+                "Retaining isolated subagent loop ownership because shutdown did not complete within timeout (thread_alive=%s, loop_running=%s)",
                 thread is not None and thread.is_alive(),
                 loop.is_running(),
             )
+            return
+
+        if not loop.is_closed():
+            loop.close()
+
+        with _isolated_subagent_loop_lock:
+            if _isolated_subagent_loop is loop and _isolated_subagent_loop_thread is thread:
+                _isolated_subagent_loop = None
+                _isolated_subagent_loop_thread = None
+                _isolated_subagent_loop_started = None
+                _isolated_subagent_loop_shutdown_pending = False
 
 
 atexit.register(_shutdown_isolated_subagent_loop)
@@ -652,8 +661,11 @@ atexit.register(_shutdown_isolated_subagent_loop)
 
 def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
     """Return the persistent event loop used by isolated subagent executions."""
-    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started
+    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started, _isolated_subagent_loop_shutdown_pending
     with _isolated_subagent_loop_lock:
+        if _isolated_subagent_loop_shutdown_pending:
+            raise RuntimeError("Isolated subagent event loop shutdown is still pending")
+
         thread_is_alive = _isolated_subagent_loop_thread is not None and _isolated_subagent_loop_thread.is_alive()
         loop_is_usable = _isolated_subagent_loop is not None and not _isolated_subagent_loop.is_closed() and _isolated_subagent_loop.is_running() and thread_is_alive
 
@@ -670,7 +682,18 @@ def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
             if not started_event.wait(timeout=5):
                 loop.call_soon_threadsafe(loop.stop)
                 thread.join(timeout=1)
-                loop.close()
+                if thread.is_alive() or loop.is_running():
+                    _isolated_subagent_loop = loop
+                    _isolated_subagent_loop_thread = thread
+                    _isolated_subagent_loop_started = started_event
+                    _isolated_subagent_loop_shutdown_pending = True
+                    logger.warning(
+                        "Retaining isolated subagent loop ownership after startup timeout (thread_alive=%s, loop_running=%s)",
+                        thread.is_alive(),
+                        loop.is_running(),
+                    )
+                elif not loop.is_closed():
+                    loop.close()
                 raise RuntimeError("Timed out starting isolated subagent event loop")
             _isolated_subagent_loop = loop
             _isolated_subagent_loop_thread = thread

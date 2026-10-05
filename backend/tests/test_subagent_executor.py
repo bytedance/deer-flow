@@ -3134,6 +3134,74 @@ class TestThreadSafety:
         # it returns only once the coroutine ran and the future resolved.
         assert handles[0].result(timeout=10) is None
 
+    def test_shutdown_retains_isolated_loop_ownership_until_worker_exits(self, executor_module):
+        """A bounded join must not detach a still-live persistent loop."""
+
+        class StubbornThread:
+            def __init__(self):
+                self.alive = True
+                self.join_calls = 0
+
+            def is_alive(self):
+                return self.alive
+
+            def join(self, timeout=None):
+                self.join_calls += 1
+
+        class DeferredStopLoop:
+            def __init__(self):
+                self.running = True
+                self.closed = False
+                self.stop_calls = 0
+
+            def is_running(self):
+                return self.running
+
+            def call_soon_threadsafe(self, callback, *args):
+                self.stop_calls += 1
+
+            def is_closed(self):
+                return self.closed
+
+            def close(self):
+                assert not self.running
+                self.closed = True
+
+        loop = DeferredStopLoop()
+        thread = StubbornThread()
+        started = threading.Event()
+        started.set()
+
+        executor_module._isolated_subagent_loop = loop
+        executor_module._isolated_subagent_loop_thread = thread
+        executor_module._isolated_subagent_loop_started = started
+        executor_module._isolated_subagent_loop_shutdown_pending = False
+
+        executor_module._shutdown_isolated_subagent_loop()
+
+        assert executor_module._isolated_subagent_loop is loop
+        assert executor_module._isolated_subagent_loop_thread is thread
+        assert executor_module._isolated_subagent_loop_started is started
+        assert executor_module._isolated_subagent_loop_shutdown_pending is True
+        assert loop.closed is False
+        assert thread.join_calls == 1
+
+        with patch.object(executor_module.asyncio, "new_event_loop") as new_event_loop:
+            with pytest.raises(RuntimeError, match="shutdown is still pending"):
+                executor_module._get_isolated_subagent_loop()
+            new_event_loop.assert_not_called()
+
+        thread.alive = False
+        loop.running = False
+        executor_module._shutdown_isolated_subagent_loop()
+
+        assert loop.closed is True
+        assert executor_module._isolated_subagent_loop is None
+        assert executor_module._isolated_subagent_loop_thread is None
+        assert executor_module._isolated_subagent_loop_started is None
+        assert executor_module._isolated_subagent_loop_shutdown_pending is False
+
+
     def test_multiple_executors_in_parallel(self, classes, base_config, msg):
         """Test multiple executors running in parallel via thread pool."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
