@@ -960,6 +960,7 @@ export const enUS: Translations = {
         needsUserInput: "Needs your input",
         externalWait: "Goal check: waiting on something external",
         runFailed: "Goal check: the run did not finish the work",
+        goalNotMetYet: "Goal check: not met yet",
         maxContinuations: "Continuation limit reached",
         noProgress: "No progress between turns",
         tokenCapped: "Token budget reached",

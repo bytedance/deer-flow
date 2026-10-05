@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { expect, test } from "@rstest/core";
 
 import {
@@ -8,6 +11,22 @@ import {
 import type { ScheduledTaskRun } from "@/core/scheduled-tasks/types";
 
 type OutcomeInput = Pick<ScheduledTaskRun, "status" | "error" | "goal_verdict">;
+
+type ContractFile = {
+  agent_stop_last_error_prefix: string;
+  auto_pause_last_error: string;
+  unmet_reason_codes: string[];
+};
+
+const CONTRACT = JSON.parse(
+  readFileSync(
+    resolve(
+      __dirname,
+      "../../../../../contracts/scheduled_goal_notes_contract.json",
+    ),
+    "utf-8",
+  ),
+) as ContractFile;
 
 const run = (overrides: Partial<OutcomeInput>): OutcomeInput => ({
   status: "success",
@@ -47,6 +66,7 @@ test.each([
   ["blocked:needs_user_input", "needsUserInput"],
   ["blocked:external_wait", "externalWait"],
   ["blocked:run_failed", "runFailed"],
+  ["blocked:goal_not_met_yet", "goalNotMetYet"],
   ["max_continuations_reached", "maxContinuations"],
   ["no_progress_detected", "noProgress"],
   ["token_capped", "tokenCapped"],
@@ -115,4 +135,24 @@ test.each([
   ["stopped by the agent in run abc; then failed"],
 ])("other last_error %s stays a plain error message", (lastError) => {
   expect(describeTaskLastError(lastError)).toBeNull();
+});
+
+test("every contract reason code has a label in run history and task detail", () => {
+  for (const code of CONTRACT.unmet_reason_codes) {
+    const outcome = describeGoalOutcome(run({ status: "unmet", error: code }));
+    expect(outcome?.kind).toBe("unmet");
+    expect(outcome?.kind === "unmet" ? outcome.reasonKey : null).not.toBeNull();
+    expect(describeTaskLastError(code)?.kind).toBe("goalUnmet");
+  }
+});
+
+test("contract last_error strings are recognized", () => {
+  expect(
+    describeTaskLastError(
+      `${CONTRACT.agent_stop_last_error_prefix}3f2a9c1e-8b47-4d2a-9e61-5c0b7a1d4e93`,
+    ),
+  ).toEqual({ kind: "agentStop" });
+  expect(describeTaskLastError(CONTRACT.auto_pause_last_error)).toEqual({
+    kind: "autoPause",
+  });
 });

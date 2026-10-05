@@ -5,6 +5,7 @@ export type GoalReasonKey =
   | "needsUserInput"
   | "externalWait"
   | "runFailed"
+  | "goalNotMetYet"
   | "maxContinuations"
   | "noProgress"
   | "tokenCapped"
@@ -13,13 +14,16 @@ export type GoalReasonKey =
   | "threadChanged"
   | "noVerdict";
 
-// Host-defined codes an `unmet` occurrence stores in `error`. They are the same
-// codes the goal-unmet IM notice prints, so unknown codes stay visible verbatim.
+// Host-defined codes an `unmet` occurrence stores in `error`, keyed without
+// the `blocked:` prefix like the IM notice map (`_GOAL_REASON_TEXT`).
+// contracts/scheduled_goal_notes_contract.json pins the codes the backend
+// writes; unknown codes stay visible verbatim.
 const REASON_KEYS: Record<string, GoalReasonKey> = {
-  "blocked:missing_evidence": "missingEvidence",
-  "blocked:needs_user_input": "needsUserInput",
-  "blocked:external_wait": "externalWait",
-  "blocked:run_failed": "runFailed",
+  missing_evidence: "missingEvidence",
+  needs_user_input: "needsUserInput",
+  external_wait: "externalWait",
+  run_failed: "runFailed",
+  goal_not_met_yet: "goalNotMetYet",
   max_continuations_reached: "maxContinuations",
   no_progress_detected: "noProgress",
   token_capped: "tokenCapped",
@@ -29,6 +33,14 @@ const REASON_KEYS: Record<string, GoalReasonKey> = {
   thread_changed_before_continuation: "threadChanged",
   no_verdict: "noVerdict",
 };
+
+// Host-written task `last_error` values, pinned by the same contract.
+const AGENT_STOP_LAST_ERROR_PREFIX = "stopped by the agent in run ";
+const AUTO_PAUSE_LAST_ERROR = "paused after 3 unmet scheduled goal runs";
+
+function reasonKeyOf(code: string): GoalReasonKey | null {
+  return REASON_KEYS[code.replace(/^blocked:/, "")] ?? null;
+}
 
 export type GoalOutcome =
   | { kind: "met"; reliedOnAssumption: boolean }
@@ -40,11 +52,7 @@ export function describeGoalOutcome(
 ): GoalOutcome | null {
   if (run.status === "unmet") {
     const code = run.error ?? null;
-    return {
-      kind: "unmet",
-      code,
-      reasonKey: code ? (REASON_KEYS[code] ?? null) : null,
-    };
+    return { kind: "unmet", code, reasonKey: code ? reasonKeyOf(code) : null };
   }
   if (run.status === "success" && run.goal_verdict?.satisfied === true) {
     return {
@@ -78,12 +86,15 @@ export function describeTaskLastError(
   if (!lastError) {
     return null;
   }
-  if (/^stopped by the agent in run \S+$/.test(lastError)) {
+  if (
+    lastError.startsWith(AGENT_STOP_LAST_ERROR_PREFIX) &&
+    /^\S+$/.test(lastError.slice(AGENT_STOP_LAST_ERROR_PREFIX.length))
+  ) {
     return { kind: "agentStop" };
   }
-  if (lastError === "paused after 3 unmet scheduled goal runs") {
+  if (lastError === AUTO_PAUSE_LAST_ERROR) {
     return { kind: "autoPause" };
   }
-  const reasonKey = REASON_KEYS[lastError];
+  const reasonKey = reasonKeyOf(lastError);
   return reasonKey ? { kind: "goalUnmet", reasonKey } : null;
 }

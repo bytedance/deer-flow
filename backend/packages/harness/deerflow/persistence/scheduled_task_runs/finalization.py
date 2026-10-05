@@ -19,6 +19,11 @@ if TYPE_CHECKING:
 
 FinalizationObserver = Callable[..., Awaitable[None]]
 
+# Host-written task ``last_error`` values that the tasks page translates;
+# contracts/scheduled_goal_notes_contract.json pins them for the frontend.
+AGENT_STOP_LAST_ERROR_PREFIX = "stopped by the agent in run "
+AUTO_PAUSE_LAST_ERROR = "paused after 3 unmet scheduled goal runs"
+
 
 def utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
@@ -117,11 +122,11 @@ async def finalize_occurrence(
         task.next_run_at = None
     elif occurrence.stop_requested_run_id is not None and occurrence.stop_requested_run_id == run_id:
         task.status = "paused"
-        task.last_error = f"stopped by the agent in run {run_id}"
+        task.last_error = f"{AGENT_STOP_LAST_ERROR_PREFIX}{run_id}"
     elif occurrence.goal_objective is not None and await _unmet_streak(session, occurrence):
         was_paused = task.status == "paused"
         task.status = "paused"
-        task.last_error = "paused after 3 unmet scheduled goal runs"
+        task.last_error = AUTO_PAUSE_LAST_ERROR
         if not was_paused:
             events += ("task_paused",)
     task.updated_at = finished_at

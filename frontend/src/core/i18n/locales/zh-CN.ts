@@ -901,6 +901,7 @@ export const zhCN: Translations = {
         needsUserInput: "需要你补充信息",
         externalWait: "目标检查：正在等待外部条件",
         runFailed: "目标检查：本次执行未完成任务",
+        goalNotMetYet: "目标检查：尚未达成",
         maxContinuations: "已达到续跑次数上限",
         noProgress: "连续多轮没有进展",
         tokenCapped: "已达到 token 预算",

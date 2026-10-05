@@ -796,6 +796,7 @@ export interface Translations {
         needsUserInput: string;
         externalWait: string;
         runFailed: string;
+        goalNotMetYet: string;
         maxContinuations: string;
         noProgress: string;
         tokenCapped: string;
