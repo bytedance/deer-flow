@@ -438,6 +438,12 @@
   内容；只有最后的写入与历史追加已移出事件循环。现在这些步骤都在工作线程中执行，
   与回滚路由一致。自定义技能的删除与归档安装路由，以及智能体的 `skill_manage`
   工具（其存储查找每次调用都会 stat `config.yaml`）也改为在工作线程中构建存储。([#6332])
+- **网关：** 知识检索目录加载自定义 Agent 配置时不再阻塞网关事件循环。
+  `GET /api/knowledge/retrieval-catalog/datasets` 与 `.../datasets/{id}/documents`
+  此前在事件循环上通过同步 Agent 存储读取 Agent：`file` 后端为文件 IO，`db` 后端
+  为一次同步 SQLAlchemy 往返，磁盘或数据库变慢时会拖住所有其他请求。现在与其他
+  读取 Agent 配置的网关路由一样，在 `asyncio.to_thread` 中加载；响应内容以及未知
+  Agent 返回的 404 保持不变。([#6313])
 - **网关：** 删除工作区较大的线程时，移除文件期间不再冻结 Gateway 的其他所有请求。
   `DELETE /api/threads/{id}` 此前在事件循环上对线程目录执行 `shutil.rmtree`，
   因此其他请求与进行中的 SSE 流都要等到整棵目录树删除完毕（本地 SSD 上 20,000 个
@@ -6498,6 +6504,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
 [#6306]: https://github.com/bytedance/deer-flow/pull/6306
 [#6307]: https://github.com/bytedance/deer-flow/pull/6307
+[#6313]: https://github.com/bytedance/deer-flow/pull/6313
 [#6319]: https://github.com/bytedance/deer-flow/pull/6319
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
 [#6332]: https://github.com/bytedance/deer-flow/pull/6332

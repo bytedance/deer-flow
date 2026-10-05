@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.channels.base import ChannelStopTimeout
 from app.channels.message_bus import MessageBus
 from app.channels.telegram import TelegramChannel
 
@@ -220,3 +221,40 @@ async def test_bind_on_main_replies_via_telegram_loop(repo):
     assert "connected" in update.message.reply_text.call_args.args[0].lower()
     connections = await repo.list_connections("deerflow-user-1")
     assert len(connections) == 1
+
+
+@pytest.mark.anyio
+async def test_stop_retains_polling_worker_ownership_until_thread_exits():
+    """A bounded Telegram stop must retain a still-live polling worker for retry."""
+
+    class PollingThread:
+        def __init__(self):
+            self.alive = True
+            self.join_calls = 0
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout=None):
+            self.join_calls += 1
+
+    channel = TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token"})
+    worker = PollingThread()
+    application = object()
+    channel._thread = worker
+    channel._application = application
+    channel._tg_loop = None
+    channel._running = True
+
+    with pytest.raises(ChannelStopTimeout, match="Telegram polling thread is still running"):
+        await channel.stop()
+
+    assert channel._thread is worker
+    assert channel._application is application
+    assert worker.join_calls == 1
+
+    worker.alive = False
+    await channel.stop()
+
+    assert channel._thread is None
+    assert channel._application is None
