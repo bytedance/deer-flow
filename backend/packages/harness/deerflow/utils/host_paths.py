@@ -4,7 +4,9 @@ from __future__ import annotations
 
 # Windows also treats the ISO-8859-1 superscript digits ¹, ² and ³ as device numbers.
 # https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
-_WINDOWS_RESERVED_NAMES = frozenset({"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in "123456789¹²³"} | {f"LPT{i}" for i in "123456789¹²³"})
+# CONIN$ and CONOUT$ open the console input and output buffers, not ordinary files.
+# https://learn.microsoft.com/en-us/windows/console/console-handles
+_WINDOWS_RESERVED_NAMES = frozenset({"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} | {f"COM{i}" for i in "123456789¹²³"} | {f"LPT{i}" for i in "123456789¹²³"})
 
 
 def windows_incompatible_segment(segment: str) -> str | None:

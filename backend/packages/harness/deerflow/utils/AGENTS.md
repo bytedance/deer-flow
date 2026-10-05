@@ -57,6 +57,9 @@ lives in `tests/test_file_conversion_cancellation.py`.
 
 `host_paths.py` rejects Windows device names for host-visible creation paths on
 every platform, including the `COM`/`LPT` aliases with superscript ¹, ² and ³.
+The console aliases `CONIN$` and `CONOUT$` are reserved too; match them
+case-insensitively before the first dot, without rejecting longer ordinary
+names such as `CONIN$notes.txt`.
 Do not normalize arbitrary Unicode digits into device numbers: names such as
 `COM⁴.txt` and `COM¹notes.txt` are ordinary portable names. Read/removal callers
 retain their existing portability exemptions.
