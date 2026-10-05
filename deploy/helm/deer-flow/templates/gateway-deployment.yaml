@@ -113,6 +113,10 @@ spec:
               value: 0.0.0.0
             - name: GATEWAY_PORT
               value: "8001"
+            {{- if gt (int .Values.gateway.replicas) 1 }}
+            - name: DEER_FLOW_MULTI_INSTANCE
+              value: "true"
+            {{- end }}
             - name: DEER_FLOW_INTERNAL_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
