@@ -789,8 +789,11 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
     if re.search(r"(/etc/shadow|/etc/passwd)", text) and re.search(r"\b(curl|wget|nc|scp)\b", text):
         findings.append(_finding_for_text("shell-sensitive-exfil", rel_path, text, "/etc"))
     if match := re.search(
-        r"\b(?:curl|wget)\b[^\n|;]*(?:\\n[^\n|;]*)*"
-        r"\|\s*(?:sudo\s+(?:-\S+\s+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
+        # Each repeated alternative consumes a distinct first character (or
+        # a backslash plus a distinct following character), avoiding nested
+        # overlapping repeats when a download command has no pipe.
+        r"\b(?:curl|wget)\b(?:[^\\\r\n|;]|\\\r?\n|\\[^\r\n])*"
+        r"\|(?:\s|\\\r?\n)*(?:sudo\s+(?:-\S+\s+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
         r"(?:bash|zsh|dash|fish|sh)\b",
         text,
     ):
