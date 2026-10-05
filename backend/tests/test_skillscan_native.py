@@ -1863,8 +1863,9 @@ def test_shell_curl_pipe_shell_ignores_non_shell_pipes(tmp_path: Path) -> None:
     assert not [f for f in findings if f["rule_id"] == "shell-curl-pipe-shell"]
 
 
-    "url, host",
-    [
+    @pytest.mark.parametrize(
+        "url, host",
+        [
         ("http://LOCALHOST:8080/api", "localhost"),
         ("http://[::1]/api", "::1"),
         ("https://[::1]:8443/api", "::1"),
