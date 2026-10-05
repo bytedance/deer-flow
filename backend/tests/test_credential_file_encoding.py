@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import doctor
 import pytest
 
 from deerflow.models.credential_loader import load_claude_code_credential, load_codex_cli_credential
@@ -11,7 +12,9 @@ from deerflow.models.credential_loader import load_claude_code_credential, load_
 @pytest.fixture(autouse=True)
 def isolate_credential_sources(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     for name in (
+        "ANTHROPIC_API_KEY",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
@@ -47,6 +50,23 @@ def test_cli_credentials_accept_utf8_with_or_without_bom(credential_file, encodi
     assert credential.access_token == "synthetic-token"
     if hasattr(credential, "account_id"):
         assert credential.account_id == "synthetic-account"
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_doctor_accepts_the_same_utf8_credential_files(credential_file, encoding):
+    path, payload, loader = credential_file
+    path.write_text(json.dumps(payload), encoding=encoding)
+    provider = "claude_provider:ClaudeChatModel" if loader is load_claude_code_credential else "openai_codex_provider:CodexChatModel"
+    config = path.parent / "config.yaml"
+    config.write_text(f"config_version: 5\nmodels:\n  - name: synthetic\n    use: deerflow.models.{provider}\n    model: synthetic\n", encoding="utf-8")
+
+    assert loader() is not None
+    results = doctor.check_llm_auth(config)
+
+    assert len(results) == 1
+    assert results[0].status == "ok"
+    assert results[0].detail == str(path)
+    assert "synthetic-token" not in results[0].detail
 
 
 def test_cli_credentials_do_not_use_the_host_text_encoding(credential_file, monkeypatch):

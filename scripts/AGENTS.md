@@ -54,6 +54,12 @@ Gateway's error, and the config-dependent checks skip. Any failure to import
 the harness is reported, never raised: doctor diagnoses broken environments.
 Pinned by `backend/tests/test_doctor.py::TestMainConfigResolution`.
 
+CLI credential JSON checks accept UTF-8 with or without a leading BOM, matching
+the runtime credential loader. Keep `_load_json_object` on `utf-8-sig`; malformed
+JSON and invalid encoding remain missing/invalid sources without exposing tokens.
+Public doctor/runtime agreement is pinned by
+`backend/tests/test_credential_file_encoding.py`.
+
 Root `make install` runs pre-commit through uv, so uv's tool bin directory
 need not be on `PATH`.
 
