@@ -72,6 +72,13 @@ answers for paginated history. See `docs/skill-usage-ui.md`.
 
 **Run delivery receipts:** Journal artifact evidence and terminal status must finalize before an ordinary satisfied goal is cleared. That cleanup uses a durable checkpoint-write reservation; delivery failure retains the ordinary goal without another continuation. The scheduled-only exception is described below. Details: `backend/docs/runtime-guidance-details.md`.
 
+**Deferred terminal commit:** With an event store, the worker stages its terminal
+status locally and commits it only after finalization's receipt and duration
+writes. `RunRecord.terminal_commit_pending` keeps `_renew_leases()` renewing that
+still-active row until the commit is attempted; a renewal rejected by the worker's
+own commit is confirmed by re-reading the row, while a peer claim fences the run.
+Never select runs for renewal by local status alone.
+
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
 `tool_search` Sends read the same pre-step state, so state diffing alone can
