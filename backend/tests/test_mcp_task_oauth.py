@@ -380,6 +380,27 @@ async def test_hot_reloadable_servers_do_not_reuse_task_oauth_state(task_config,
 
 
 @pytest.mark.asyncio
+async def test_snapshot_and_oauth_sharing_follow_the_same_server_selection(task_config, rotating_server, monkeypatch):
+    _path, startup = task_config
+    startup.mcp_servers["other"] = startup.mcp_servers["reports"].model_copy(deep=True)
+    # Simulate a narrower task-server policy. A server excluded by that policy
+    # must stay outside both the frozen snapshot and the shared OAuth lifetime.
+    monkeypatch.setattr(task_runtime, "_task_enabled_servers", lambda config: {"reports": config.mcp_servers["reports"]}, raising=False)
+    set_mcp_task_config_snapshot(startup)
+    first = task_runtime.get_mcp_task_oauth_token_manager(startup)
+    assert await first.get_authorization_header("reports") == "Bearer access-1"
+    changed = startup.model_copy(deep=True)
+    changed.mcp_servers["other"].oauth.refresh_token = "replacement-seed"
+    validate_mcp_task_config_snapshot(changed)
+    rotating_server.refresh_token = "replacement-seed"
+    second = task_runtime.get_mcp_task_oauth_token_manager(changed)
+
+    assert await second.get_authorization_header("reports") == "Bearer access-1"
+    assert await second.get_authorization_header("other") == "Bearer access-2"
+    assert rotating_server.refresh_requests == ["refresh-0", "replacement-seed"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["discovery", "durable_call"])
 async def test_personal_connection_cannot_reuse_same_named_deployment_oauth(task_config, rotating_server, tmp_path, monkeypatch, operation):
     _path, startup = task_config

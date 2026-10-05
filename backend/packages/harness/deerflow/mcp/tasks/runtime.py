@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths, normalize_mcp_server_config
 from deerflow.mcp.oauth import OAuthTokenManager
 from deerflow.mcp.tasks.models import TaskSubmitRequest
@@ -49,11 +49,14 @@ _task_server_config_snapshot: _TaskServerConfigSnapshot | None = None
 _task_oauth_token_manager: OAuthTokenManager | None = None
 
 
+def _task_enabled_servers(extensions_config: ExtensionsConfig) -> dict[str, McpServerConfig]:
+    """Select the deployment connections frozen and shared by the task runtime."""
+    return {name: server for name, server in extensions_config.get_enabled_mcp_servers().items() if server.task_toolsets}
+
+
 def _task_server_configs(extensions_config: ExtensionsConfig) -> _TaskServerConfigSnapshot:
     servers: dict[str, dict[str, Any]] = {}
-    for server_name, server in extensions_config.get_enabled_mcp_servers().items():
-        if not server.task_toolsets:
-            continue
+    for server_name, server in _task_enabled_servers(extensions_config).items():
         servers[server_name] = normalize_mcp_server_config(server, task_runtime=True)
     raw_interceptors = (extensions_config.model_extra or {}).get("mcpInterceptors")
     interceptors = normalize_mcp_interceptor_paths(raw_interceptors) if servers else None
@@ -69,7 +72,7 @@ def set_mcp_task_config_snapshot(extensions_config: ExtensionsConfig | None) -> 
     # for hot-reloadable non-task servers or owner-scoped personal connections.
     _task_oauth_token_manager = None
     if extensions_config is not None:
-        task_servers = {name: server for name, server in extensions_config.get_enabled_mcp_servers().items() if server.task_toolsets}
+        task_servers = _task_enabled_servers(extensions_config)
         _task_oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config.model_copy(update={"mcp_servers": task_servers}))
 
 
