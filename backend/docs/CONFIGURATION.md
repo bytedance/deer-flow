@@ -492,6 +492,7 @@ The scheduled-task MVP adds a scheduler section to `config.yaml`:
 ```yaml
 scheduler:
   enabled: false
+  tool_enabled: false
   multi_instance: false
   poll_interval_seconds: 5
   lease_seconds: 120
@@ -504,6 +505,7 @@ scheduler:
 Notes:
 
 - `enabled: false` keeps background polling off by default.
+- `tool_enabled: false` keeps conversation schedule tools off. Set it together with `enabled: true` and restart Gateway to offer `schedule_task` in authorized interactive conversations and `stop_scheduled_task` in their scheduled runs (see "Create schedules in a conversation" in the README).
 - `multi_instance: true` opts into lease-aware scheduler recovery across Gateway instances. It requires Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; otherwise startup fails fast. Leave it false for the default single-instance scheduler.
 - `max_concurrent_runs` is a shared global execution cap in multi-instance mode. Waiting `queued` rows do not consume capacity; an atomic `queued` → `launching` claim counts `launching`/`running` rows under a Postgres advisory lock so concurrent Pods cannot exceed the cap.
 - `queue_timeout_seconds` limits how long a persisted occurrence may wait for capacity or a reused thread to become available. Expired occurrences are marked `failed`; queued rows otherwise survive Gateway restarts.
@@ -522,7 +524,7 @@ Notes:
 - Create/update accept `once`, `cron`, and `interval`. Interval uses `schedule_spec.every_seconds` (UTC `now + N`, no missed-beat catch-up). N is at least `min_once_delay_seconds` (default 60) and at most 30 days.
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
-- With `channel_connections.enabled: true`, the scheduler enqueues IM outcome notifications for the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them. Only runs that finish as success or failed notify: manual triggers and interrupts stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, restart recovery). Channel/transport outages park rows without consuming the retry budget, for up to about a day; platform rejections exhaust ~15 minutes of counted retries then settle `failed`. The worker re-checks the binding right before sending: a target the owner has disconnected since enqueue is dropped as `failed`, never pushed. Only WeCom currently implements proactive `send_notification`.
+- With `channel_connections.enabled: true`, the scheduler enqueues IM outcome notifications for the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them. Scheduled runs that finish as success or failed notify. For goal tasks, an `unmet` scheduled occurrence sends a goal-unmet notice instead, and an automatic pause after three unmet occurrences sends an auto-pause notice; a stop requested by the agent adds no separate notice. Manual triggers and interrupts stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, restart recovery). Channel/transport outages park rows without consuming the retry budget, for up to about a day; platform rejections exhaust ~15 minutes of counted retries then settle `failed`. The worker re-checks the binding right before sending: a target the owner has disconnected since enqueue is dropped as `failed`, never pushed. Only WeCom currently implements proactive `send_notification`.
 
 ### Agent Storage
 

@@ -17,7 +17,11 @@ This release closes that milestone with **301 merged pull requests**.
   support bounded automatic launches and per-occurrence goals, and let a scheduled
   agent request stopping its own schedule. Unmet goals and automatic pause use
   the existing notification outbox; explicit notes and authorized previous-run
-  references carry context forward without changing the goal lifecycle. ([#6229])
+  references carry context forward without changing the goal lifecycle.
+  Independent of these tools, existing scheduled, webhook and autonomous goal
+  runs may now accept disclosed low-risk, reversible assumptions, recorded as
+  `relied_on_assumption`; interactive goal evaluation stays strict. Goal
+  evaluator calls and tokens now count toward run usage. ([#6229])
 
 #### Scheduler
 
