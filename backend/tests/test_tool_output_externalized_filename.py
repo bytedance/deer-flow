@@ -2,15 +2,19 @@
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from langchain_core.messages import ToolMessage
 
 from deerflow.agents.middlewares.tool_output_budget_middleware import (
+    ToolOutputBudgetMiddleware,
     _build_externalized_filename,
     _externalize,
     _externalize_to_sandbox,
 )
+from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.sandbox.sandbox import Sandbox
 
 
@@ -96,3 +100,58 @@ def test_host_and_sandbox_use_the_same_bounded_filename(tmp_path: Path, tool_cal
     assert len(filename.encode("utf-8")) < 255
     assert (tmp_path / ".tool-results" / filename).read_text(encoding="utf-8") == content
     sandbox.write_file.assert_called_once_with(host_path, content)
+
+
+@pytest.mark.parametrize("invalid_field", ["content", "tool_call_id"])
+def test_sandbox_externalization_handles_filename_encoding_failure(invalid_field: str):
+    sandbox = MagicMock(spec=Sandbox)
+    kwargs = dict(content="output", tool_call_id="call_1")
+    kwargs[invalid_field] += "\ud800"
+
+    result = _externalize_to_sandbox(tool_name="bash", storage_subdir=".tool-results", sandbox=sandbox, **kwargs)
+
+    assert result is None
+    sandbox.execute_command.assert_not_called()
+    sandbox.write_file.assert_not_called()
+
+
+@pytest.mark.parametrize("async_wrapper", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("invalid_field", ["content", "tool_call_id"])
+@pytest.mark.asyncio
+async def test_sandbox_filename_encoding_failure_uses_bounded_fallback(monkeypatch, tmp_path: Path, async_wrapper: bool, invalid_field: str):
+    from deerflow.agents.middlewares import tool_output_budget_middleware as mw
+
+    sandbox = MagicMock(spec=Sandbox)
+    provider = SimpleNamespace(uses_thread_data_mounts=False, get=lambda _: sandbox)
+    monkeypatch.setattr(mw, "get_sandbox_provider", lambda: provider)
+    content = "A" * 16_000 + ("\ud800" if invalid_field == "content" else "X") + "B" * 16_000
+    call_id = "call_1" + ("\ud800" if invalid_field == "tool_call_id" else "")
+    message = ToolMessage(content=content, name="remote_executor", tool_call_id=call_id, id="message_1", artifact={"original": True})
+    request = SimpleNamespace(
+        tool_call={"name": "remote_executor", "id": call_id},
+        runtime=SimpleNamespace(state={"thread_data": {"outputs_path": str(tmp_path)}, "sandbox": {"sandbox_id": "sb-1"}}, context={"thread_id": "thread-1"}),
+    )
+    config = ToolOutputConfig()
+    middleware = ToolOutputBudgetMiddleware(config=config)
+    if async_wrapper:
+
+        async def handler(_):
+            return message
+
+        result = await middleware.awrap_tool_call(request, handler)
+    else:
+        result = middleware.wrap_tool_call(request, lambda _: message)
+
+    assert isinstance(result, ToolMessage)
+    assert "Persistent storage unavailable" in result.content
+    assert result.content.startswith("A" * config.fallback_head_chars)
+    assert result.content.endswith("B" * config.fallback_tail_chars)
+    assert len(result.content) <= config.fallback_max_chars
+    result.content.encode("utf-8")
+    assert result.tool_call_id == call_id
+    assert result.id == message.id
+    assert result.artifact == message.artifact
+    assert message.content == content
+    sandbox.execute_command.assert_not_called()
+    sandbox.write_file.assert_not_called()
+    assert list(tmp_path.iterdir()) == []

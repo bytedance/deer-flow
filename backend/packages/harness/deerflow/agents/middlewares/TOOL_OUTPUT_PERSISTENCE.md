@@ -6,6 +6,10 @@ boundary. Repeating the same call ID and content reuses one path; changed conten
 or distinct raw IDs use distinct paths, including missing IDs and IDs that would
 collide after sanitization. Provider IDs never appear directly in filenames.
 
+For non-mounted sandboxes, filename hashing stays inside the write failure
+boundary. Invalid UTF-8 text or call IDs return `None` before sandbox I/O,
+allowing the tool wrappers to use the configured inline fallback.
+
 `_externalize` creates a unique sibling `.tool-output-*.tmp` with exclusive
 creation (`open(..., "x")`). Its mode is `0o666 & ~umask`, preserving ordinary
 file-creation permissions without reading or changing the process-wide umask.

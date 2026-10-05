@@ -294,10 +294,12 @@ def _externalize_to_sandbox(
     """
     if os.path.isabs(storage_subdir) or ".." in storage_subdir:
         return None
-    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
-    virtual_dir = f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}"
-    virtual_path = f"{virtual_dir}/{filename}"
     try:
+        # Hashing encodes provider text too; keep encoding errors within the
+        # same failure boundary as sandbox writes so callers can truncate.
+        filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
+        virtual_dir = f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}"
+        virtual_path = f"{virtual_dir}/{filename}"
         # AIO sandbox write_file does NOT create parent directories, so create
         # them explicitly before writing. execute_command returns its stdout
         # verbatim (including an "Error: ..." string on failure) rather than
