@@ -136,7 +136,7 @@ This release closes that milestone with **301 merged pull requests**.
   honor the same declaration. **Behavior change:** `GATEWAY_WORKERS > 1` with
   the memory stream bridge no longer starts; configure `stream_bridge.type:
   redis` or `DEER_FLOW_STREAM_BRIDGE_REDIS_URL` (docker-compose and the Helm
-  chart already inject it).
+  chart already inject it). ([#6328])
 
 #### Memory
 
@@ -7771,3 +7771,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6282]: https://github.com/bytedance/deer-flow/pull/6282
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
 [#6306]: https://github.com/bytedance/deer-flow/pull/6306
+[#6328]: https://github.com/bytedance/deer-flow/pull/6328
