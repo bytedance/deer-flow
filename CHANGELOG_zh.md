@@ -427,9 +427,9 @@
   `SandboxAuditMiddleware` 原先把警告追加在结尾的 `Exit Code: N` 标记之后，并只用
   四个字段重建 `ToolMessage`，导致 `_bash_evidence_status` 找不到标记，退回到报告
   `success` 的 `deerflow_tool_meta`，失败的 `sudo pytest -q` 可能满足 `tests_passed`
-  验收条件。现在警告插在结尾的 `Exit Code: N` 之前，整段只有
-  `Command exited with code N` 的输出保持原样，结果保留 `deerflow_tool_meta`、
-  `artifact` 与 `id`。([#6307])
+  验收条件。现在警告插在结尾的 `Exit Code: N` 或 `Command exited with code N`
+  之前，整段只有 `Command exited with code N` 的输出保持原样，结果保留
+  `deerflow_tool_meta`、`artifact` 与 `id`。([#6307])
 - **持久化：** 另一个实例正在执行 PostgreSQL 模式迁移时，第二个 Gateway 实例不再
   因 `TimeoutError` 启动失败。引导期 advisory lock 此前在应用引擎上以阻塞的
   `pg_advisory_lock` 获取，而该引擎的 asyncpg `database.command_timeout`（默认

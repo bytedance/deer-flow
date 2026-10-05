@@ -472,9 +472,9 @@ This release closes that milestone with **301 merged pull requests**.
   so `_bash_evidence_status` could not find the marker and fell back to
   `deerflow_tool_meta`, which reports `success`; a failed `sudo pytest -q` could
   satisfy a `tests_passed` acceptance criterion. The warning is now inserted
-  before a trailing `Exit Code: N`, an output that is only
-  `Command exited with code N` is left unchanged, and the result keeps
-  `deerflow_tool_meta`, `artifact` and `id`. ([#6307])
+  before a trailing `Exit Code: N` or `Command exited with code N`, an output
+  that is only `Command exited with code N` is left unchanged, and the result
+  keeps `deerflow_tool_meta`, `artifact` and `id`. ([#6307])
 - **persistence:** A second Gateway instance no longer fails startup with
   `TimeoutError` while another instance runs a PostgreSQL schema migration. The
   bootstrap advisory lock was taken with a blocking `pg_advisory_lock` on the

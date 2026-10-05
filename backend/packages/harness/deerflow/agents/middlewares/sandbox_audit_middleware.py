@@ -114,10 +114,12 @@ _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\bPATH\s*="),
 ]
 
-# Shell exit markers as providers emit them (mirrors
-# ``sandbox.tools._BASH_EXIT_MARKER_TAIL_RE``): local ``Exit Code: N`` at the
-# end of the output, remote ``Command exited with code N`` as the whole output.
-_EXIT_MARKER_TAIL_RE = re.compile(r"(?:^|\n)Exit Code: -?\d+\s*$")
+# Shell exit markers at the end of the output (mirrors
+# ``sandbox.tools._BASH_EXIT_MARKER_TAIL_RE``, plus a bare ``Exit Code: N``):
+# local ``Exit Code: N`` and remote ``Command exited with code N``. Remote
+# providers emit the latter as the whole output; it is matched after other
+# output too, so the warning never lands after either form.
+_EXIT_MARKER_TAIL_RE = re.compile(r"(?:(?:^|\n)Exit Code: -?\d+|\n?Command exited with code -?\d+)\s*$")
 _SILENT_EXIT_MARKER_RE = re.compile(r"Command exited with code -?\d+")
 
 

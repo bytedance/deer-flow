@@ -8,10 +8,12 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from deerflow.agents.middlewares.sandbox_audit_middleware import (
+    _EXIT_MARKER_TAIL_RE,
     SandboxAuditMiddleware,
     _classify_command,
     _split_compound_command,
 )
+from deerflow.sandbox.tools import _BASH_EXIT_MARKER_TAIL_RE
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -782,6 +784,23 @@ class TestMediumRiskWarningPreservesEvidence:
         """Remote providers emit this as the whole output; consumers fullmatch it."""
         inner = ToolMessage(content="Command exited with code 3", tool_call_id="call-123", name="bash")
         assert self._call(inner).content == "Command exited with code 3"
+
+    def test_remote_exit_marker_after_output_stays_at_the_end(self):
+        """Same shape ``sandbox.tools._BASH_EXIT_MARKER_TAIL_RE`` preserves on truncation."""
+        inner = ToolMessage(content="progress...\nCommand exited with code 3", tool_call_id="call-123", name="bash")
+        result = self._call(inner)
+        assert result.content.startswith("progress...")
+        assert "warning" in result.content.lower()
+        assert result.content.endswith("\nCommand exited with code 3")
+        assert result.content.count("Command exited with code 3") == 1
+
+    def test_exit_marker_regex_covers_the_truncation_tail_shapes(self):
+        """Every tail shape truncation keeps last is one the warning is inserted before."""
+        for content in ("out\nExit Code: 1", "out\nExit Code: -9 \n", "out\nCommand exited with code 3", "Command exited with code 3"):
+            ours = _EXIT_MARKER_TAIL_RE.search(content)
+            theirs = _BASH_EXIT_MARKER_TAIL_RE.search(content)
+            assert ours is not None and theirs is not None
+            assert ours.start() == theirs.start(), content
 
     def test_output_without_marker_still_gets_warning_at_the_end(self):
         inner = ToolMessage(content="Successfully installed requests", tool_call_id="call-123", name="bash")
