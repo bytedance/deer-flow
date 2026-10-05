@@ -103,6 +103,23 @@ class TestMem0Config:
         assert getattr(cfg, key) == _NUMERIC_DEFAULTS[key]
 
     @pytest.mark.parametrize(
+        ("backend_config", "attr", "default"),
+        [
+            ({"api_key_env": None}, "api_key_env", "MEM0_API_KEY"),
+            ({"base_url": None}, "base_url", "https://api.mem0.ai"),
+            ({"startup_policy": None}, "startup_policy", "fail_fast"),
+            ({"failure_policy": {"read": None}}, "read_policy", "fail_open"),
+            ({"failure_policy": {"write": None}}, "write_policy", "log_and_drop"),
+        ],
+    )
+    def test_string_knob_written_without_a_value_keeps_its_default(self, backend_config: dict, attr: str, default: str) -> None:
+        """``api_key_env:`` with no value parses as None, which str() used to turn
+        into a lookup of an environment variable literally named "None"."""
+        cfg = Mem0Config.from_backend_config(backend_config)
+
+        assert getattr(cfg, attr) == default
+
+    @pytest.mark.parametrize(
         ("key", "value"),
         [
             ("top_k", "eight"),

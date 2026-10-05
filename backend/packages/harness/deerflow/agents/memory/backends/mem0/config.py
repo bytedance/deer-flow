@@ -24,6 +24,17 @@ _READ_POLICIES = frozenset({"fail_open", "fail_closed"})
 _WRITE_POLICIES = frozenset({"log_and_drop", "raise"})
 
 
+def _text(value: Any, default: str) -> str:
+    """Read a string knob, treating a value-less key as unset.
+
+    ``key:`` with nothing after it in YAML arrives as ``None``, and ``str(None)``
+    would carry on as the literal ``"None"`` -- a peer, user or directory named
+    "None" -- instead of the default. A key carrying no value keeps its default,
+    the same line ``_number`` draws for numeric knobs.
+    """
+    return default if value is None else str(value)
+
+
 def _number[T](cfg: dict[str, Any], key: str, default: T, cast: Callable[[Any], T]) -> T:
     """Read a numeric knob, treating a value-less key as unset.
 
@@ -104,16 +115,16 @@ class Mem0Config:
             raise ValueError("mem0 allow_insecure_http must be a boolean")
 
         config = cls(
-            api_key_env=str(cfg.get("api_key_env", "MEM0_API_KEY")),
-            base_url=str(cfg.get("base_url", "https://api.mem0.ai")).rstrip("/"),
+            api_key_env=_text(cfg.get("api_key_env"), "MEM0_API_KEY"),
+            base_url=_text(cfg.get("base_url"), "https://api.mem0.ai").rstrip("/"),
             allow_insecure_http=allow_insecure_http,
             top_k=_number(cfg, "top_k", 8, int),
             score_threshold=_number(cfg, "score_threshold", 0.1, float),
             max_injection_chars=_number(cfg, "max_injection_chars", 12000, int),
             timeout_seconds=_number(cfg, "timeout_seconds", 10.0, float),
-            startup_policy=str(cfg.get("startup_policy", "fail_fast")),
-            read_policy=str(failure_policy.get("read", "fail_open")),
-            write_policy=str(failure_policy.get("write", "log_and_drop")),
+            startup_policy=_text(cfg.get("startup_policy"), "fail_fast"),
+            read_policy=_text(failure_policy.get("read"), "fail_open"),
+            write_policy=_text(failure_policy.get("write"), "log_and_drop"),
         )
         if config.startup_policy not in _STARTUP_POLICIES:
             raise ValueError(f"mem0 startup_policy must be one of {sorted(_STARTUP_POLICIES)}")

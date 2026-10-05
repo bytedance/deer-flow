@@ -41,6 +41,17 @@ def _mapping(value: Any, name: str) -> dict[str, Any]:
     return value
 
 
+def _text(value: Any, default: str) -> str:
+    """Read a string knob, treating a value-less key as unset.
+
+    ``key:`` with nothing after it in YAML arrives as ``None``, and ``str(None)``
+    would carry on as the literal ``"None"`` -- a peer, user or directory named
+    "None" -- instead of the default. A key carrying no value keeps its default,
+    the same line ``_number`` draws for numeric knobs.
+    """
+    return default if value is None else str(value)
+
+
 def _number[T](cfg: dict[str, Any], key: str, default: T, cast: Callable[[Any], T]) -> T:
     """Narrow an operator-supplied numeric knob.
 
@@ -138,7 +149,7 @@ class HonchoConfig:
     def from_backend_config(cls, backend_config: dict[str, Any] | None) -> HonchoConfig:
         cfg = dict(backend_config or {})
         failure_policy = _mapping(cfg.get("failure_policy"), "failure_policy")
-        base_url = str(cfg.get("base_url", "http://localhost:8000")).rstrip("/")
+        base_url = _text(cfg.get("base_url"), "http://localhost:8000").rstrip("/")
         api_key = cfg.get("api_key") or None
         allow_insecure = _bool(cfg, "allow_insecure_http", False)
         # The parsed scheme, not startswith("http://"): a caller can write
@@ -149,10 +160,10 @@ class HonchoConfig:
         return cls(
             base_url=base_url,
             api_key=api_key,
-            workspace_prefix=str(cfg.get("workspace_prefix", "deerflow-u-")),
+            workspace_prefix=_text(cfg.get("workspace_prefix"), "deerflow-u-"),
             workspace_overrides=_parse_override_map(cfg, "workspace_overrides"),
             user_peer_overrides=_parse_override_map(cfg, "user_peer_overrides"),
-            assistant_peer=str(cfg.get("assistant_peer", "deerflow")),
+            assistant_peer=_text(cfg.get("assistant_peer"), "deerflow"),
             timeout_seconds=_number(cfg, "timeout_seconds", 10.0, float),
             connect_timeout_seconds=_number(cfg, "connect_timeout_seconds", 3.0, float),
             message_char_limit=_number(cfg, "message_char_limit", 8000, int),
