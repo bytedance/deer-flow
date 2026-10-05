@@ -145,6 +145,25 @@ _DESTRUCTIVE_RM_RE = (
     r"(?:-\S+\s+|--no-preserve-root\s+)*"
     r"/(?:\*|\s|$|(?:bin|boot|dev|etc|home|lib|lib64|opt|proc|root|run|sbin|srv|sys|usr|var)(?:/\*?)?(?:\s|$))"
 )
+# `env`, `printenv` and `export -p` dump the environment only when they run as a
+# command: at the start of a line, right after a `;`, `&`, `|`, `(`, `)` or
+# backtick separator, after the `{` that opens a brace group (`{ env; }`, which
+# bash requires to be followed by whitespace), or after a reserved word that must
+# introduce a command (`then`, `do`, `exec`, ...). An `NAME=value` assignment
+# prefix may come first. Anywhere else the word names something else -- a path in
+# `#!/usr/bin/env bash`, a host in `https://env.example.com`, a flag in
+# `--env FOO=1`, an argument in `echo env`, a variable in `${env}`, or comment
+# text in `# export -p` -- and dumps nothing. The text this is matched against is
+# first reduced to shell code by `_shell_code_only`, so a `;` inside a comment and
+# a command-looking line inside a heredoc body do not count either.
+_SHELL_ENV_DUMP_RE = re.compile(
+    r"(?m)(?:^|(?<=[;&|()`])|\{(?=[ \t])|(?<![\w/.-])(?:if|then|elif|else|while|until|do|exec)\b[ \t]+)"
+    r"[ \t]*(?:[A-Za-z_]\w*=[^ \t]*[ \t]+)*(?P<cmd>env\b|printenv\b|export[ \t]+-p\b)"
+)
+# The head of a heredoc redirection: `<<` or `<<-`, an optional quoted delimiter,
+# then the delimiter word. Requiring a leading letter/underscore keeps arithmetic
+# shifts such as `$((1 << 2))` from being read as a heredoc opener.
+_HEREDOC_HEAD_RE = re.compile(r"<<(-?)[ \t]*([\"']?)([A-Za-z_]\w*)\2")
 
 
 def skill_scan_enabled(app_config: Any | None = None) -> bool:
@@ -692,6 +711,72 @@ def _scan_python(rel_path: str, text: str) -> list[SecurityFinding]:
     return findings
 
 
+def _split_shell_line(line: str) -> tuple[str, list[tuple[str, bool]]]:
+    """Split one shell line into its code part and the heredocs it declares.
+
+    Quote-aware: a `#` outside quotes starts a comment only at a word start, and
+    `<<` outside quotes opens a heredoc. Returns the code text (comment stripped)
+    together with the `(delimiter, strip_tabs)` pairs the line opens.
+
+    A `{` or `}` immediately before the `#` is not a word start: bash reads
+    `${#HOME}` as the length operator and `}#` as part of a word, while a brace
+    group needs the space of `{ # ...`. Those two characters are therefore left
+    out of the set that admits a comment.
+    """
+    heredocs: list[tuple[str, bool]] = []
+    in_single = in_double = False
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if in_single:
+            in_single = ch != "'"
+        elif in_double:
+            if ch == "\\":
+                i += 2
+                continue
+            in_double = ch != '"'
+        elif ch == "\\":
+            i += 2
+            continue
+        elif ch == "'":
+            in_single = True
+        elif ch == '"':
+            in_double = True
+        elif ch == "#" and (i == 0 or line[i - 1] in " \t;&|()<>"):
+            return line[:i], heredocs
+        elif ch == "<" and line.startswith("<<", i) and not line.startswith("<<<", i) and (i == 0 or not (line[i - 1].isalnum() or line[i - 1] == "_")):
+            if head := _HEREDOC_HEAD_RE.match(line, i):
+                heredocs.append((head.group(3), head.group(1) == "-"))
+                i = head.end()
+                continue
+        i += 1
+    return line, heredocs
+
+
+def _shell_code_only(text: str) -> str:
+    """Blank out comment text and heredoc bodies, preserving line structure.
+
+    `_SHELL_ENV_DUMP_RE` matches at a command position, but a `;` inside a
+    comment (`# documentation; env is only an example`) and a bare `env` line
+    inside heredoc data are not commands. Replacing them with blanks -- one
+    output line per input line, so `_line_number` stays correct -- leaves the
+    matcher looking only at shell code.
+    """
+    lines: list[str] = []
+    pending: list[tuple[str, bool]] = []
+    for raw in text.split("\n"):
+        if pending:
+            delimiter, strip_tabs = pending[0]
+            if (raw.lstrip("\t") if strip_tabs else raw) == delimiter:
+                pending.pop(0)
+            lines.append("")
+            continue
+        code, heredocs = _split_shell_line(raw)
+        pending.extend(heredocs)
+        lines.append(code)
+    return "\n".join(lines)
+
+
 def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
     # Unmistakable reverse-shell signals hard-block; weaker idioms (bash -i,
@@ -706,8 +791,10 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, text, match))
     if match := re.search(_DESTRUCTIVE_RM_RE + r"|:\(\)\{\s*:\|:&\s*\};:|dd\s+[^#\n]*\bof=/dev/", text):
         findings.append(_finding_from_match("shell-destructive-command", rel_path, text, match))
-    if match := re.search(r"\b(env|printenv|export\s+-p)\b", text):
-        findings.append(_finding_from_match("shell-env-dump", rel_path, text, match))
+    # Only a command position counts, and only in shell code: see `_shell_code_only`.
+    code = _shell_code_only(text)
+    if match := _SHELL_ENV_DUMP_RE.search(code):
+        findings.append(_finding("shell-env-dump", file=rel_path, line=_line_number(code, match.start("cmd")), evidence=match.group("cmd")))
     return findings
 
 

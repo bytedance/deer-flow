@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md)
+English | [中文](./README_zh.md) | [日本語](./README_ja.md) | [Français](./README_fr.md) | [Русский](./README_ru.md) | [Português](./README_pt.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -675,6 +675,10 @@ report `Exit Code: 124`; unsuccessful health checks cannot reclaim a warm sandbo
 Health probes tolerate login-shell output around the `ok` line, and failures log
 the sandbox ID and probe output before replacing the sandbox.
 
+BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
+in-flight acquisitions finish. If they cannot drain within five seconds,
+shutdown fails with resources still owned and can be retried.
+
 #### MCP Server
 
 In the chat UI, enable **Token Usage → Debug** to inspect generic/MCP tool calls.
@@ -687,6 +691,8 @@ Consecutive generated markers at an array's end share one ellipsis indicating an
 Text results retain their original representation, including large numeric IDs and duplicate JSON keys, without reparsing. Text exceeding the limit is shown as a prefix with a truncation notice; structured objects and arrays are formatted separately.
 Copy actions copy only the displayed preview. This is a frontend view of data
 already received by the browser, without an additional secret-redaction layer.
+
+In plan mode, malformed TODO statuses return normal tool-validation errors without aborting token attribution, so the agent can correct the call.
 
 Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Detected file URLs preserve their query strings and fragments. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
 
@@ -874,6 +880,7 @@ Notes:
 - IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
 - Inbound work is bounded to `inbound_queue_maxsize` pending messages plus `max_concurrency` active workers. When capacity is exhausted, socket/polling providers drop new messages before sending DeerFlow's working acknowledgment and emit a rate-limited warning. Buzz leaves its replay cursor unchanged and reconnects for relay replay; GitHub webhooks return `503`, marking the delivery failed for manual/API redelivery. Shutdown closes admission immediately, keeps channel transports available while accepted messages drain for up to `shutdown_grace_period_seconds`, then cancels and awaits active handlers before closing provider resources; the Gateway's outer timeout can cancel an incomplete shutdown without detaching those resources.
 - Feishu/Lark now queues rapid follow-up messages per mapped DeerFlow `thread_id` instead of immediately surfacing the generic busy reply, and topic replies keep a per-message card with a compact source-message preview across queued/running/final patches.
+- Streaming IM channels treat backend `error` events like transport failures and follow the same reply and retry path. The channel logs the error type and message for diagnosis.
 
 Set the corresponding API keys in your `.env` file:
 
@@ -1915,6 +1922,9 @@ unknown outcome without replaying the operation; later calls use a fresh session
 
 Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip fenced and indented code examples, so hashtags and code comments do not
 crowd out real document sections from the agent's heading preview. Indented bold examples are also excluded; PDF-style bold headings with up to three leading spaces remain supported.
+Split-bold numeric table rows, including parenthesized years, signed values, and
+currency-prefixed amounts, are excluded when any block after the section number
+is a numeric column, so they do not consume the outline's heading budget.
 UTF-8 Markdown files with or without a byte-order mark (BOM) produce the same
 outlines and fallback previews, with original line numbers preserved.
 Outline titles are limited to 200 characters and fallback previews to 2,000
@@ -2002,9 +2012,10 @@ Once the file is published, a temporary-file cleanup failure is logged without
 failing the upload; hidden staging files are left for the startup sweep.
 
 Uploads, new skill support files, and new local sandbox paths reject Windows
-reserved device names on every platform, including `COM¹`, `LPT²` and names with
-extensions such as `com³.txt`. Rename these files before creating or uploading
-them so the same file tree remains usable on Windows.
+reserved device names on every platform, including `COM¹`, `LPT²`, the console
+aliases `CONIN$` and `CONOUT$`, and names with extensions such as `com³.txt`.
+Rename these files before creating or uploading them so the same file tree
+remains usable on Windows.
 
 Uploaded filenames matching `.upload-*.part` are rejected because that pattern is
 reserved for temporary staging files. Rename such a file before uploading it.

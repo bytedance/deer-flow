@@ -366,7 +366,7 @@ class E2BSandboxProvider(SandboxProvider):
         if not self._ownership.supports_cross_process:
             logger.warning("E2B sandbox ownership is process-local. Multi-worker gateways must configure sandbox.ownership.type: redis for safe reconciliation.")
 
-        atexit.register(self.shutdown)
+        atexit.register(self._shutdown_at_exit)
         self._register_signal_handlers()
         self._start_maintenance_threads()
 
@@ -535,6 +535,16 @@ class E2BSandboxProvider(SandboxProvider):
         return token if isinstance(token, str) and token else None
 
     # ── Signal / shutdown handling ───────────────────────────────────────
+
+    def _shutdown_at_exit(self) -> None:
+        """Best-effort process-exit cleanup without turning a retryable timeout into an atexit error."""
+        try:
+            self.shutdown()
+        except _E2BMaintenanceShutdownTimeout as exc:
+            logger.warning(
+                "E2B shutdown cleanup is still pending at interpreter exit: %s",
+                exc,
+            )
 
     def _register_signal_handlers(self) -> None:
         try:
@@ -2971,10 +2981,7 @@ class E2BSandboxProvider(SandboxProvider):
         if live_threads:
             with self._lock:
                 self._shutdown_cleanup_pending = True
-            raise _E2BMaintenanceShutdownTimeout(
-                "E2B maintenance thread shutdown timed out: "
-                + ", ".join(live_threads)
-            )
+            raise _E2BMaintenanceShutdownTimeout("E2B maintenance thread shutdown timed out: " + ", ".join(live_threads))
 
         with self._lock:
             active = list(self._sandboxes.items())

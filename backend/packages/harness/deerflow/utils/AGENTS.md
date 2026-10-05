@@ -38,6 +38,12 @@ headings. Keep legitimate bold headings with up to three spaces and the shared
 conversion-companion path working. Regression coverage lives in
 `tests/test_file_outline_indented_bold.py`.
 
+Split-bold headings reject numeric/punctuation/currency-only blocks after the
+section number, including parentheses, signs, leading whitespace, and `$€£¥`.
+Apply the check to the second through fourth blocks; preserve the four-block
+limit, punctuated titles containing text, and non-ASCII titles. Coverage lives
+in `tests/test_file_outline_split_bold.py`.
+
 ### Active Content MIME Types
 
 `text_detection.py::_is_active_content_mime_type` is the shared download-safety
@@ -57,6 +63,9 @@ lives in `tests/test_file_conversion_cancellation.py`.
 
 `host_paths.py` rejects Windows device names for host-visible creation paths on
 every platform, including the `COM`/`LPT` aliases with superscript ¹, ² and ³.
+The console aliases `CONIN$` and `CONOUT$` are reserved too; match them
+case-insensitively before the first dot, without rejecting longer ordinary
+names such as `CONIN$notes.txt`.
 Do not normalize arbitrary Unicode digits into device numbers: names such as
 `COM⁴.txt` and `COM¹notes.txt` are ordinary portable names. Read/removal callers
 retain their existing portability exemptions.
