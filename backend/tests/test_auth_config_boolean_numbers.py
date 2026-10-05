@@ -27,8 +27,8 @@ def test_throttle_policy_rejects_booleans(field: str, kind: str, value: bool) ->
         LocalAuthConfig(**{field: value})
 
 
-@pytest.mark.parametrize(("field", "_kind"), THROTTLE_FIELDS)
-def test_throttle_policy_keeps_numeric_inputs(field: str, _kind: str) -> None:
+@pytest.mark.parametrize("field", [field for field, _ in THROTTLE_FIELDS])
+def test_throttle_policy_keeps_numeric_inputs(field: str) -> None:
     config = LocalAuthConfig(**{field: 60})
     assert getattr(config, field) == 60
     config = LocalAuthConfig(**{field: "90"})
