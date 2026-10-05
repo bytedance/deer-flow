@@ -280,7 +280,10 @@ async def _parse_skill_archive_form(request: Request) -> FormData:
 
 async def _install_skill_archive(archive_path: Path, config: AppConfig) -> SkillInstallResponse:
     async def _persist_install() -> SkillInstallResponse:
-        result = await _get_user_skill_storage(config).ainstall_skill_from_archive(archive_path)
+        # A cold user-scoped storage resolves the project root and builds
+        # absolute paths on construction: blocking filesystem IO.
+        storage = await asyncio.to_thread(_get_user_skill_storage, config)
+        result = await storage.ainstall_skill_from_archive(archive_path)
         # The install and its prompt-cache refresh settle as one drained unit:
         # a cancelled caller must not leave the freshly installed skill absent
         # from (or a stale one still present in) the skills prompt cache.

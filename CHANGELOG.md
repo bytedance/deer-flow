@@ -479,14 +479,15 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
-- **gateway:** Saving an edit to a custom skill no longer runs filesystem work on
-  the event loop. `PUT /api/skills/custom/{name}` built the user-scoped skill
-  storage, probed the custom, public, legacy and integration roots, validated the
+- **skills:** Editing a custom skill no longer runs filesystem work on the event
+  loop. `PUT /api/skills/custom/{name}` built the user-scoped skill storage,
+  probed the custom, public, legacy and integration roots, validated the
   frontmatter by writing the draft into a temporary directory, and read the
   content being replaced, all on the loop; only the final write and history
   append had been offloaded. Those steps now run in worker threads, matching the
-  rollback route, and `DELETE /api/skills/custom/{name}` builds its storage off
-  the loop too.
+  rollback route. The custom-skill delete and archive-install routes and the
+  agent's `skill_manage` tool, whose storage lookup stats `config.yaml` on every
+  call, also build their storage off the loop.
 - **gateway:** Deleting a thread with a large workspace no longer freezes every
   other Gateway request while its files are removed. `DELETE /api/threads/{id}`
   ran `shutil.rmtree` over the thread directory on the event loop, so other
