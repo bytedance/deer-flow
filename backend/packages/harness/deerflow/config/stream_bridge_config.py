@@ -64,6 +64,21 @@ class StreamBridgeConfig(BaseModel):
         ),
     )
 
+    @field_validator("queue_maxsize", "stream_ttl_seconds", mode="before")
+    @classmethod
+    def reject_boolean_counts(cls, value: Any, info: ValidationInfo) -> Any:
+        """Reject booleans before Pydantic coerces them to 1 / 0.
+
+        ``stream_ttl_seconds: true`` would expire redis replay buffers after
+        one second, and ``false`` (0) would disable expiry outright.
+        """
+        return reject_boolean(value, info, kind="an integer")
+
+    @field_validator("max_connections", mode="before")
+    @classmethod
+    def reject_boolean_max_connections(cls, value: Any, info: ValidationInfo) -> Any:
+        return reject_boolean(value, info, kind="an integer or null")
+
     @field_validator("heartbeat_interval_seconds", "recovered_stream_cleanup_delay_seconds", mode="before")
     @classmethod
     def reject_boolean_seconds(cls, value: Any, info: ValidationInfo) -> Any:
