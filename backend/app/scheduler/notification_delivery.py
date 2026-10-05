@@ -86,6 +86,26 @@ def redact_egress_text(text: str) -> str:
     return redacted
 
 
+# Readable text for host-defined goal reason codes (``blocked:`` prefix
+# removed). Keys mirror the goal blockers and stand-down reasons.
+_GOAL_REASON_TEXT = {
+    "missing_evidence": "the goal check found evidence missing",
+    "needs_user_input": "it needs your input",
+    "run_failed": "the goal check found the work unfinished",
+    "external_wait": "it is waiting on something external",
+    "goal_not_met_yet": "the goal is not met yet",
+    "no_verdict": "no goal verdict was recorded",
+    "consecutive_unmet": "3 scheduled runs in a row did not meet the goal",
+    "evaluator_failed": "the goal check could not run",
+    "max_continuations_reached": "the continuation limit was reached",
+    "no_progress_detected": "no progress was made between turns",
+    "token_capped": "the token budget was reached",
+    "no_durable_end_of_turn": "no final reply was saved",
+    "thread_changed_after_evaluation": "the conversation changed during the goal check",
+    "thread_changed_before_continuation": "the conversation changed during the goal check",
+}
+
+
 def render_notification_text(delivery: dict[str, Any]) -> str:
     """Render a bounded markdown summary of the run outcome for IM push."""
     payload = delivery.get("payload") or {}
@@ -94,15 +114,12 @@ def render_notification_text(delivery: dict[str, Any]) -> str:
     if event in {"run_unmet", "task_paused"}:
         label = "Scheduled task goal was not met" if event == "run_unmet" else "Scheduled task automatically paused"
         lines = [f"**{label}**", f"Task: `{task_label}`"]
-        # These are host-defined result codes, never model/provider error text.
+        # Only host-defined result codes are translated; model/provider error
+        # text and unknown codes are never forwarded.
         reason = payload.get("reason_code")
-        blockers = {"missing_evidence", "needs_user_input", "run_failed", "external_wait", "goal_not_met_yet"}
-        allowed = (
-            blockers
-            | {f"blocked:{blocker}" for blocker in blockers}
-            | {"no_verdict", "consecutive_unmet", "evaluator_failed", "max_continuations_reached", "no_progress_detected", "token_capped", "no_durable_end_of_turn", "thread_changed_after_evaluation", "thread_changed_before_continuation"}
-        )
-        lines.append(f"Reason: `{reason if isinstance(reason, str) and reason in allowed else 'unknown'}`")
+        if isinstance(reason, str):
+            reason = reason.removeprefix("blocked:")
+        lines.append(f"Reason: {_GOAL_REASON_TEXT.get(reason, 'unknown') if isinstance(reason, str) else 'unknown'}.")
         lines.append("See the DeerFlow workspace for the result and next steps.")
     elif event == "run_failed":
         lines = ["**Scheduled task failed**", f"Task: `{task_label}`"]

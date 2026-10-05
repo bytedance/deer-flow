@@ -17,9 +17,22 @@ This release closes that milestone with **301 merged pull requests**.
   support bounded automatic launches and per-occurrence goals, and let a scheduled
   agent request stopping its own schedule. Unmet goals and automatic pause use
   the existing notification outbox; explicit notes and authorized previous-run
-  references carry context forward without changing the goal lifecycle. ([#6229])
+  references carry context forward without changing the goal lifecycle.
+  Independent of these tools, existing scheduled, webhook and autonomous goal
+  runs may now accept disclosed low-risk, reversible assumptions, recorded as
+  `relied_on_assumption`; interactive goal evaluation stays strict. Goal
+  evaluator calls and tokens now count toward run usage. ([#6229])
 
 #### Scheduler
+
+- **scheduler:** The tasks page shows the per-run goal and end conditions of
+  conversation-created tasks. Run history shows whether a goal was met,
+  including when it relied on stated assumptions; an unmet run shows a readable
+  reason in neutral styling instead of a raw code in the error style; and the
+  run whose agent asked to stop the schedule is marked. Agent-stop,
+  auto-pause and unmet values in a task's last error appear as text in the UI
+  language, and goal-unmet/auto-pause IM notices state the reason in words.
+  Tasks without a goal render as before; no API change. ([#6326])
 
 - **scheduler:** Scheduled tasks can be searched by title or prompt. Finding a
   task previously meant scanning every title or opening details to read its
@@ -7790,4 +7803,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6306]: https://github.com/bytedance/deer-flow/pull/6306
 [#6307]: https://github.com/bytedance/deer-flow/pull/6307
 [#6319]: https://github.com/bytedance/deer-flow/pull/6319
+[#6326]: https://github.com/bytedance/deer-flow/pull/6326
 [#6328]: https://github.com/bytedance/deer-flow/pull/6328
