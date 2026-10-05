@@ -114,6 +114,7 @@ ask you to wait instead of switching away from in-flight output. An invalid
 After an interrupt, late stream actions from the previous run are discarded when
 they reach the UI, even if the next prompt uses the same conversation. Its final
 usage, title, and completion event cannot replace those of the new run.
+If a run cannot start, the TUI reports an error and returns to idle so you can retry.
 
 Use `/goal <condition>` to set the active thread goal, `/goal` to show it, and
 `/goal clear` to clear it.

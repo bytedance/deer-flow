@@ -659,12 +659,18 @@ class DeerFlowTUI(App):
         self._run = run
         self._streaming = True
         self._dispatch(UserSubmitted(text))
-        self.run_worker(
-            partial(self._stream_worker, text, run),
-            thread=True,
-            exclusive=True,
-            group="agent",
-        )
+        try:
+            self.run_worker(
+                partial(self._stream_worker, text, run),
+                thread=True,
+                exclusive=True,
+                group="agent",
+            )
+        except Exception:  # noqa: BLE001 - worker creation must release the busy reservation
+            run.cancelled.set()
+            self._run = None
+            self._streaming = False
+            self._dispatch(SystemMessage("Could not start the run. Please try again.", tone="error"))
 
     def _stream_worker(self, text: str, run: _Run) -> None:
         if run.cancelled.is_set():

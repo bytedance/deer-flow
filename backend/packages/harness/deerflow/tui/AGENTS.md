@@ -20,6 +20,8 @@ switch. Report invalid resume references as error rows without relaxing the
 canonical thread-id validation or terminating the app.
 Reserve the run identity and busy state when accepting input, before its worker
 starts. Each run owns its cancellation flag; a later send must not reset it.
+If worker creation fails, cancel and clear that reserved run, restore idle state,
+and show a retryable error. Do not cancel a previously completed run's title write.
 Worker callbacks check both run identity and thread id on UI delivery, rejecting
 cancelled, completed, or superseded runs before updating the reducer. Keep the
 completed run's state available for its worker's title persistence check. An

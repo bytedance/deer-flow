@@ -213,6 +213,49 @@ async def test_send_reserves_busy_state_before_worker_starts(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_worker_start_failure_restores_idle_state_and_allows_retry(monkeypatch):
+    client, writer = _Client(), _Writer()
+    client.release_new.set()
+    app = DeerFlowTUI(Session(client=client, writer=writer), LaunchPlan(mode="tui", thread_id="thread-a"))
+    failed_runs = []
+    original_start = app.run_worker
+
+    def fail_first_agent_worker(*args, **kwargs):
+        if kwargs.get("group") == "agent" and not failed_runs:
+            failed_runs.append(app._run)
+            raise RuntimeError("private worker startup detail")
+        return original_start(*args, **kwargs)
+
+    monkeypatch.setattr(app, "run_worker", fail_first_agent_worker)
+    async with app.run_test() as pilot:
+        app.query_one("#composer").value = "old question"
+        await pilot.press("enter")
+        assert not app._streaming
+        assert not app.state.streaming
+        assert app._run is None
+        assert failed_runs[0].cancelled.is_set()
+        assert any(row.kind == "system" and row.tone == "error" for row in app.state.rows)
+        assert "private worker startup detail" not in str(app.state.rows)
+        assert client.calls == []
+
+        idle_state = app.state
+        for action in [RunStarted(), AssistantDelta(id="failed-answer", text="stale"), ThreadTitle("Failed title"), RunEnded(usage={"total_tokens": 999})]:
+            assert not app._on_stream_action(failed_runs[0], action)
+            assert app.state == idle_state
+            assert not app._streaming
+        app._stream_worker("old question", failed_runs[0])
+        assert client.calls == []
+
+        app.query_one("#composer").value = "new question"
+        await pilot.press("enter")
+        await _settle(pilot, lambda: writer.titles and not app._streaming)
+        assert client.calls == [("new question", "thread-a")]
+        assert app.state.usage == {"total_tokens": 222}
+        assert any(row.kind == "assistant" and row.text == "new-before new-tail" for row in app.state.rows)
+        assert not any(row.kind == "system" and "Still working" in row.text for row in app.state.rows)
+
+
+@pytest.mark.asyncio
 async def test_completed_run_rejects_a_duplicate_terminal_callback(monkeypatch):
     client, writer = _Client(), _Writer()
     client.release_old.set()
@@ -242,7 +285,7 @@ async def test_completed_run_rejects_a_duplicate_terminal_callback(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("next_action", ["switch", "send"])
+@pytest.mark.parametrize("next_action", ["switch", "send", "failed-send"])
 async def test_completed_run_keeps_title_write_after_ui_moves_on(monkeypatch, next_action):
     client, writer = _Client(), _Writer()
     client.release_old.set()
@@ -276,8 +319,19 @@ async def test_completed_run_keeps_title_write_after_ui_moves_on(monkeypatch, ne
             await pilot.press("enter")
             await _settle(pilot, terminal_delivered.is_set)
             assert not app._streaming
+            if next_action == "failed-send":
+
+                def fail_to_start(*args, **kwargs):
+                    raise RuntimeError("Cannot start the next worker")
+
+                monkeypatch.setattr(app, "run_worker", fail_to_start)
             app.query_one("#composer").value = "/resume thread-b" if next_action == "switch" else "new question"
             await pilot.press("enter")
+            if next_action == "failed-send":
+                assert not app._streaming
+                assert not app.state.streaming
+                assert app._run is None
+                assert app.state.usage == {"total_tokens": 111}
             if next_action == "send":
                 await _settle(pilot, client.new_started.is_set)
             release.set()
