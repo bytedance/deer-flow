@@ -29,6 +29,7 @@ import json
 import logging
 import os
 import posixpath
+import re
 import shlex
 import tempfile
 import uuid
@@ -80,6 +81,15 @@ _MAX_TOOL_OUTPUT_BLOB_BYTES = 64 * 1024 * 1024
 # A configured shared store must never fail back to an unbounded model payload,
 # even when the operator disabled the ordinary disk-unavailable fallback.
 _DURABLE_FAILURE_FALLBACK_MAX_CHARS = 30_000
+
+# Mirrors ``sandbox.tools._BASH_EXIT_MARKER_TAIL_RE`` (pinned by a test). The
+# subagent executor reads the exit status only from the end of a bash result
+# (trailing ``Exit Code: N``, or whole-output ``Command exited with code N``),
+# so a budget rewrite must keep the marker last or a failed command is harvested
+# as success. Restricted to the same names ``executor._BASH_EVIDENCE_TOOL_NAMES``
+# uses; other tools may print the phrase as ordinary text.
+_BASH_EXIT_MARKER_TAIL_RE = re.compile(r"(?:\nExit Code: -?\d+|\n?Command exited with code -?\d+)\s*$")
+_EXIT_MARKER_TOOL_NAMES = frozenset({"bash", "bash_tool"})
 
 
 class _BudgetedContent(NamedTuple):
@@ -352,6 +362,32 @@ def _externalize_to_sandbox(
 # ---------------------------------------------------------------------------
 
 
+def _canonical_exit_marker(content: str) -> str | None:
+    """Return the trailing bash exit marker as a single line, or ``None``."""
+    match = _BASH_EXIT_MARKER_TAIL_RE.search(content)
+    if match is None:
+        return None
+    return match.group(0).strip()
+
+
+def _keep_exit_marker_last(original: str, rewritten: str, *, tool_name: str) -> str:
+    """Re-append the original trailing exit marker after a budget rewrite.
+
+    Preview construction always ends with an Access footer, so the harvest
+    regex (``Exit Code: N`` anchored at the end) would otherwise miss the
+    status and fall back to ``deerflow_tool_meta``'s success. Restricted to
+    bash-family tools; other tools' text is left alone.
+    """
+    if tool_name not in _EXIT_MARKER_TOOL_NAMES:
+        return rewritten
+    marker = _canonical_exit_marker(original)
+    if marker is None:
+        return rewritten
+    if rewritten.rstrip().endswith(marker):
+        return rewritten
+    return f"{rewritten.rstrip()}\n{marker}"
+
+
 def _build_preview(
     content: str,
     *,
@@ -361,13 +397,14 @@ def _build_preview(
     tail_chars: int,
 ) -> str:
     """Build a typed synopsis preview with a file reference for externalized output."""
-    return render_tool_output_preview(
+    preview = render_tool_output_preview(
         content,
         tool_name=tool_name,
         virtual_path=virtual_path,
         head_chars=head_chars,
         tail_chars=tail_chars,
     )
+    return _keep_exit_marker_last(content, preview, tool_name=tool_name)
 
 
 def _build_fallback(
@@ -381,26 +418,44 @@ def _build_fallback(
     """Build a head+tail truncation when disk persistence is unavailable.
 
     The returned string is guaranteed to be no longer than *max_chars*.
+    A trailing bash exit marker (``Exit Code: N`` / ``Command exited with
+    code N``) is reserved from the budget the way sandbox truncation does,
+    so harvest can still recover the shell status. Only when *max_chars*
+    is smaller than the marker itself does the marker drop.
     """
     total = len(content)
     if max_chars <= 0 or total <= max_chars:
         return content
 
+    preserved = ""
+    body = content
+    if tool_name in _EXIT_MARKER_TOOL_NAMES:
+        match = _BASH_EXIT_MARKER_TAIL_RE.search(content)
+        if match is not None:
+            line = f"\n{match.group(0).strip()}"
+            if len(line) < max_chars:
+                body = content[: match.start()]
+                preserved = line
+                max_chars -= len(preserved)
+                if len(body) <= max_chars:
+                    return body + preserved
+                total = len(body)
+
     marker_template = "\n\n[... {n} chars omitted from {tn} output. Persistent storage unavailable. Consider narrowing the query or using more specific parameters.]\n\n"
     marker_overhead = len(marker_template.format(n=total, tn=tool_name))
 
     if marker_overhead >= max_chars:
-        return content[:max_chars]
+        return body[:max_chars] + preserved
 
     budget = max_chars - marker_overhead
     effective_head = min(head_chars, budget)
     effective_tail = min(tail_chars, max(0, budget - effective_head))
 
-    head_end = _snap_to_line_boundary(content, min(effective_head, total))
-    tail_start = _snap_start_to_line_boundary(content, max(head_end, total - effective_tail))
+    head_end = _snap_to_line_boundary(body, min(effective_head, total))
+    tail_start = _snap_start_to_line_boundary(body, max(head_end, total - effective_tail))
 
-    head = content[:head_end]
-    tail = content[tail_start:] if tail_start < total else ""
+    head = body[:head_end]
+    tail = body[tail_start:] if tail_start < total else ""
     omitted = total - len(head) - len(tail)
 
     marker = marker_template.format(n=omitted, tn=tool_name)
@@ -408,7 +463,7 @@ def _build_fallback(
     parts = [head, marker]
     if tail:
         parts.append(tail)
-    return "".join(parts)
+    return "".join(parts) + preserved
 
 
 # ---------------------------------------------------------------------------

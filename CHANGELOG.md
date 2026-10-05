@@ -623,6 +623,17 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **middleware:** Tool-output budgeting no longer hides a failed shell exit from
+  subagent evidence. A bash result between `externalize_min_chars` (12,000) and
+  the sandbox limit (20,000) was replaced by a preview ending in its `Access:`
+  footer, so the trailing `Exit Code: N` was no longer last,
+  `_bash_evidence_status` fell back to `deerflow_tool_meta` (`success`), and a
+  failed `pytest` whose output still said `12 passed` could satisfy a
+  `tests_passed` acceptance criterion. `ToolOutputBudgetMiddleware` now
+  re-appends the original trailing `Exit Code: N` / `Command exited with code N`
+  after the preview, and the storage-unavailable fallback reserves it from the
+  `fallback_max_chars` budget the way sandbox truncation does. Only `bash` and
+  `bash_tool` results are affected; the persisted full output is unchanged.
 - **make:** `make clean` now says what it deletes and refuses to run under a live
   Docker Gateway. `make help` described it as cleaning up "temporary files", but
   it deletes `backend/.deer-flow`: the local database, users, threads, uploads,
