@@ -16,9 +16,18 @@
 
 - **调度器：** 按需启用对话工具创建及管理属主绑定的定时任务，支持自动启动上限、
   每次执行的目标评估，以及 Agent 请求停止自身调度。目标未达成与自动暂停复用
-  现有通知 outbox；明确备注和获授权的上次执行引用延续上下文，不增加 goal 状态。([#6229])
+  现有通知 outbox；明确备注和获授权的上次执行引用延续上下文，不增加 goal 状态。
+  与这些工具是否启用无关：已有的定时、webhook 和 autonomous goal 运行现在可以接受
+  已声明的低风险、可逆假设，并记录为 `relied_on_assumption`；交互式 goal 评估仍保持
+  严格。goal 评估器的调用和 token 现在计入运行用量。([#6229])
 
 #### 调度器
+
+- **调度器：** 任务页显示对话创建任务的每次执行目标和结束条件。执行记录显示目标
+  是否达成（含依赖已声明假设的情况）；未达成的执行以中性样式显示可读的原因，不再
+  按执行错误标红显示原始代码；请求停止调度的那次执行会被标出。任务详情里由 Agent
+  停止、自动暂停和目标未达成写入的信息按界面语言显示；目标未达成和自动暂停的 IM
+  通知改为用文字说明原因。没有目标的任务显示不变；没有 API 变更。([#6326])
 
 - **调度器：** 定时任务现在可以按标题或 prompt 搜索。此前找一个任
   务只能逐个扫标题或打开详情读 prompt。现有过滤器上方新增的搜索框
@@ -422,12 +431,18 @@
   用任何东西。([#5497])
 
 ### 修复
+
 - **网关：** 知识检索目录加载自定义 Agent 配置时不再阻塞网关事件循环。
   `GET /api/knowledge/retrieval-catalog/datasets` 与 `.../datasets/{id}/documents`
   此前在事件循环上通过同步 Agent 存储读取 Agent：`file` 后端为文件 IO，`db` 后端
   为一次同步 SQLAlchemy 往返，磁盘或数据库变慢时会拖住所有其他请求。现在与其他
   读取 Agent 配置的网关路由一样，在 `asyncio.to_thread` 中加载；响应内容以及未知
   Agent 返回的 404 保持不变。([#6313])
+- **网关：** 删除工作区较大的线程时，移除文件期间不再冻结 Gateway 的其他所有请求。
+  `DELETE /api/threads/{id}` 此前在事件循环上对线程目录执行 `shutil.rmtree`，
+  因此其他请求与进行中的 SSE 流都要等到整棵目录树删除完毕（本地 SSD 上 20,000 个
+  小文件约 0.7 秒，挂载卷上更久）。现在移除在文件 IO 线程池中执行；请求被取消时，
+  线程预留会保持到移除完成，因此文件仍在删除的线程上不会启动新的运行。([#6319])
 - **沙箱：** 中风险审计警告不再让子智能体证据丢失失败的 shell 退出码。
   `SandboxAuditMiddleware` 原先把警告追加在结尾的 `Exit Code: N` 标记之后，并只用
   四个字段重建 `ToolMessage`，导致 `_bash_evidence_status` 找不到标记，退回到报告
@@ -6484,3 +6499,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6306]: https://github.com/bytedance/deer-flow/pull/6306
 [#6307]: https://github.com/bytedance/deer-flow/pull/6307
 [#6313]: https://github.com/bytedance/deer-flow/pull/6313
+[#6319]: https://github.com/bytedance/deer-flow/pull/6319
+[#6326]: https://github.com/bytedance/deer-flow/pull/6326

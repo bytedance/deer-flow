@@ -333,9 +333,12 @@ before review.
 ## Testing
 
 ```bash
-# Default backend tests (excludes live and blocking-I/O tests)
+# Default backend tests (four parallel shards; excludes live and blocking-I/O tests)
 cd backend
 make test
+
+# Run the same shards sequentially
+make test TEST_JOBS=1
 
 # Strict blocking-I/O tests
 make test-blocking-io

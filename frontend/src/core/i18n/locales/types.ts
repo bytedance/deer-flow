@@ -780,6 +780,32 @@ export interface Translations {
       skipped: string;
       interrupted: string;
     };
+    goal: {
+      objective: string;
+      maxRuns: string;
+      endAt: string;
+      met: string;
+      metAssumed: string;
+      stopRequested: string;
+      lastPause: string;
+      agentStopped: string;
+      autoPaused: string;
+      lastUnmet: string;
+      reasons: {
+        missingEvidence: string;
+        needsUserInput: string;
+        externalWait: string;
+        runFailed: string;
+        goalNotMetYet: string;
+        maxContinuations: string;
+        noProgress: string;
+        tokenCapped: string;
+        evaluatorFailed: string;
+        noDurableEndOfTurn: string;
+        threadChanged: string;
+        noVerdict: string;
+      };
+    };
     recipes: {
       label: string;
       trending: { title: string; desc: string };
