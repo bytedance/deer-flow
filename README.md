@@ -309,6 +309,7 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
    ```
 
    - Codex CLI reads `~/.codex/auth.json`
+   - Claude prompt caching preserves thinking and redacted-thinking history without placing cache breakpoints directly on those blocks, so extended-thinking tool follow-ups can keep using prompt caching.
    - The Codex model provider returns completed responses without waiting for the SSE connection to close. Failed or incomplete responses report the provider's error or reason; partial output is not returned as a successful answer. Non-object error details are reported as text.
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
    - `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` accepts a UTF-8 token handoff and reuses it for later model instances in the same process. Undecodable handoffs are skipped so Claude Code can still try its override or default credentials file.
