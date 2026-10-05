@@ -73,7 +73,7 @@ from deerflow.runtime.runs.worker import RUN_MESSAGE_IDS_METADATA_KEY, valid_dur
 from deerflow.runtime.secret_context import redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.companions import register_companion, resolve_companion
-from deerflow.utils.file_io import run_file_io
+from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.thread_id import ThreadId, resolve_thread_id, validate_thread_id
 from deerflow.utils.time import coerce_iso, now_iso
 
@@ -778,7 +778,11 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
             message="Skipped local data cleanup for legacy thread ID",
         )
     else:
-        response = _delete_thread_data(thread_id, user_id=user_id)
+        # rmtree over a large workspace must not stall the loop. Drained, not
+        # bare-awaited: cancelling the await abandons the worker, not the
+        # removal, so the reservation would release while files are still
+        # being deleted under a run that has just been admitted.
+        response = await await_drained(run_file_io(_delete_thread_data, thread_id, user_id=user_id))
 
     # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)

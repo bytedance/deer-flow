@@ -466,6 +466,14 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **gateway:** Deleting a thread with a large workspace no longer freezes every
+  other Gateway request while its files are removed. `DELETE /api/threads/{id}`
+  ran `shutil.rmtree` over the thread directory on the event loop, so other
+  requests and live SSE streams stalled until the whole tree was gone (about
+  0.7 seconds for 20,000 small files on a local SSD, longer on mounted
+  volumes). The removal now runs on the file-IO pool, and a cancelled request
+  keeps its thread reservation until the removal finishes, so no new run can
+  start on a thread whose files are still being deleted.
 - **persistence:** A second Gateway instance no longer fails startup with
   `TimeoutError` while another instance runs a PostgreSQL schema migration. The
   bootstrap advisory lock was taken with a blocking `pg_advisory_lock` on the

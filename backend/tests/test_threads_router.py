@@ -1,5 +1,6 @@
 import asyncio
 import re
+import threading
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -745,6 +746,55 @@ def test_delete_thread_route_rejects_active_thread_operation_without_deleting_me
 
     assert response.status_code == 409
     assert asyncio.run(store.aget(THREADS_NS, "thread-active-delete")) is not None
+
+
+def test_delete_thread_route_holds_reservation_until_cancelled_removal_finishes(tmp_path):
+    """A cancelled delete must not release its reservation mid-rmtree.
+
+    The removal runs on a file-IO worker. Cancelling the request abandons the
+    await, not the worker, so a bare await would let ``reserve_thread_operation``
+    exit -- and admit a new run on the thread -- while its files are still
+    being deleted. The stalled removal below makes that window observable.
+    """
+    events: list[str] = []
+    removal_started = threading.Event()
+    release_removal = threading.Event()
+
+    class RecordingRunManager(_ThreadTestRunManager):
+        @asynccontextmanager
+        async def reserve_thread_operation(self, _thread_id: str, **_kwargs):
+            try:
+                yield
+            finally:
+                events.append("reservation released")
+
+    def stalled_delete_thread_dir(_thread_id, *, user_id=None):
+        removal_started.set()
+        release_removal.wait(timeout=5)
+        events.append("removal finished")
+
+    paths = Paths(tmp_path)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=RecordingRunManager(), checkpointer=None)))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(threads.delete_thread_data.__wrapped__("thread-cancelled-delete", request))
+        assert await asyncio.to_thread(removal_started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        # Cancellation is deferred while the removal is still running.
+        assert not task.done()
+        assert events == []
+        release_removal.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch.object(paths, "delete_thread_dir", side_effect=stalled_delete_thread_dir),
+    ):
+        asyncio.run(scenario())
+
+    assert events == ["removal finished", "reservation released"]
 
 
 def test_branch_thread_route_rejects_concurrent_source_operation_without_creating_child():
