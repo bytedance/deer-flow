@@ -3157,6 +3157,9 @@ class TestThreadSafety:
             def is_running(self):
                 return self.running
 
+            def stop(self):
+                self.stop_calls += 1
+
             def call_soon_threadsafe(self, callback, *args):
                 self.stop_calls += 1
 
@@ -3193,9 +3196,15 @@ class TestThreadSafety:
 
         thread.alive = False
         loop.running = False
-        executor_module._shutdown_isolated_subagent_loop()
+        replacement = executor_module._get_isolated_subagent_loop()
 
         assert loop.closed is True
+        assert replacement is not loop
+        assert executor_module._isolated_subagent_loop is replacement
+        assert executor_module._isolated_subagent_loop_thread is not thread
+        assert executor_module._isolated_subagent_loop_shutdown_pending is False
+
+        executor_module._shutdown_isolated_subagent_loop()
         assert executor_module._isolated_subagent_loop is None
         assert executor_module._isolated_subagent_loop_thread is None
         assert executor_module._isolated_subagent_loop_started is None
