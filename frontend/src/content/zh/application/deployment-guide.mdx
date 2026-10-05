@@ -142,6 +142,19 @@ run_events:
 
 SQLite 部署应限制在本地、单节点或短期评估场景。
 
+### 运行多个 Gateway 副本
+
+Helm chart 默认 `gateway.replicas: 1`。当所有副本共享同一个 Postgres 与 Redis 时，Web 与 API 路径支持调高副本数。chart 默认的 `config` 已经设置了 Gateway 启动检查所要求的项：
+
+- `database.backend: postgres`，且 `checkpointer` 段指向同一个数据库
+- `run_events.backend: db`，消息历史与投递回执跨 Pod 共享
+- `run_ownership.heartbeat_enabled: true`，新启动的 Pod 只回收属主确实已死的 run
+- `stream_bridge.type: redis`，SSE 流与断线重连在任意 Pod 上都可用（沙箱所有权租约由此推断）
+
+当 `gateway.replicas > 1` 时，chart 会导出 `DEER_FLOW_MULTI_INSTANCE=true`，缺少上述任一项时 Gateway 会拒绝启动。多节点集群还需要把 `persistence.home.accessMode` 设为 `ReadWriteMany`（上传、产物、记忆与 `extensions_config.json` 都在该卷上），并设置 `agent_storage.backend: db` 让自定义 agent 在每个 Pod 上可见。
+
+仍然只能单实例运行的部分：IM 通道（每个 Pod 都会连接所有平台）、WeChat 扫码登录、浏览器工具。启用这些功能时请保持 1 个副本。
+
 ### K8s Provisioner 配置
 
 <Steps>

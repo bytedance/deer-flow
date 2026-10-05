@@ -267,17 +267,36 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `%40`). The chart uses an external `databaseUrl` verbatim and does not
   rewrite the DSN in a user-managed Secret.
 
-- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 45s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s). The grace period MUST exceed the Gateway's graceful-shutdown work — channel stop (~5s) plus the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s) plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (channel stop + drain + buffer).
-- **Gateway replicas.** Postgres + the Redis stream bridge together make the
-  gateway's *persisted* state (checkpointer + run/thread metadata) and *live
-  stream* path cross-pod-safe. The default is still 1 replica: **do not raise
-  `gateway.replicas` past 1 yet.** Run control — `create_or_reject` dedup,
-  `cancel`, and orphan reconciliation — is still worker-local (in-process
-  `asyncio.Lock` + in-memory `record.task`), tracked by [issue
-  #3948](https://github.com/bytedance/deer-flow/issues/3948). With >1 replica a
-  double-submit can create two runs on one thread (checkpoint corruption), a
-  cancel can land on a non-owner pod (409), and a crashed pod's runs stay
-  `pending`/`running` forever. Stay on 1 replica until that work lands.
+- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 90s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s), and bounds uvicorn's `--timeout-graceful-shutdown` (`gateway.uvicornGracefulShutdownSeconds`, default 10s) so an idle SSE connection cannot hold up lifespan shutdown indefinitely. The grace period MUST exceed the Gateway's graceful-shutdown work — the preStop sleep, the uvicorn timeout, channel stop (~5s), the in-flight run drain (5s) and the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s) plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (preStop + uvicorn timeout + channel stop + run drain + memory drain + buffer).
+- **Gateway replicas.** Run control is cross-pod-safe since the work tracked
+  by [issue #3948](https://github.com/bytedance/deer-flow/issues/3948) landed
+  (#4003, #4064, #4500): admission is a durable one-active-run-per-thread
+  constraint with `Idempotency-Key` reuse, a cancel that lands on a non-owner
+  Pod is recorded durably and executed by the owner on its next lease renewal,
+  and a crashed Pod's runs are reclaimed by a peer once their lease expires.
+  The chart's default `config` enables what that needs — Postgres for
+  `database` and `checkpointer`, `run_events.backend: db`,
+  `run_ownership.heartbeat_enabled: true`, and the Redis stream bridge
+  (sandbox ownership leases are inferred from it) — and exports
+  `DEER_FLOW_MULTI_INSTANCE=true` whenever `gateway.replicas > 1`, so the
+  Gateway's startup gate verifies those prerequisites instead of staying inert
+  (its worker count only sees one Pod). `gateway.replicas: 1` stays the
+  default because the following are still single-instance: **IM channels**
+  (every Pod would connect to every platform — Telegram polling conflicts and
+  Discord double-processes; keep 1 replica while channels are enabled), the
+  WeChat QR login, and browser tools. Before raising replicas, also set
+  `persistence.home.accessMode: ReadWriteMany` on multi-node clusters (thread
+  uploads, outputs, memory and `extensions_config.json` live on that volume)
+  and `agent_storage.backend: db` so custom agents are visible on every Pod.
+  A `PodDisruptionBudget` (`minAvailable: 1`) is rendered automatically when
+  replicas > 1, and the rollout strategy is surge-then-drain (`maxSurge: 1`,
+  `maxUnavailable: 0`).
+- **App secret.** `<release>-app` holds `BETTER_AUTH_SECRET`,
+  `DEER_FLOW_INTERNAL_AUTH_TOKEN` and `AUTH_JWT_SECRET` (the session-cookie
+  signing key), each generated once and preserved across upgrades via
+  `lookup`. With `existingAppSecret`, add an `AUTH_JWT_SECRET` key so every
+  Pod signs sessions with the same key; the env is optional, and a single Pod
+  without it falls back to a `.jwt_secret` file on the home volume.
 - **Scheduled task recovery.** If a deployment explicitly enables
   `scheduler.multi_instance: true`, it must use shared Postgres,
   `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`.
@@ -285,8 +304,8 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   atomically takes over only expired leases, and fences stale post-launch
   bookkeeping. `max_concurrent_runs` is a shared global cap across Pods,
   including pre-launch dispatch reservations. Restart all Gateway Pods after
-  changing these startup-only settings. This does not remove the broader
-  Gateway replica limitations described above.
+  changing these startup-only settings. IM channels remain single-instance
+  regardless (see Gateway replicas above).
 - **Redis stream bridge.** A bundled single-instance redis StatefulSet
   (`redis.enabled: true`, `redis:7-alpine`) runs in the namespace and the
   gateway connects via the in-cluster Service. Per-run SSE events are stored in

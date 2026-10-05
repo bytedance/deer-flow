@@ -109,13 +109,19 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-}
         LARK_CLI_NPM_VERSION: ${LARK_CLI_NPM_VERSION:-1.0.65}
     container_name: deer-flow-gateway
-    # Gateway hosts the agent runtime with in-process RunManager + StreamBridge
-    # singletons -- run state lives in this worker's memory. Default to a single
-    # worker: the Redis stream bridge solves cross-worker SSE delivery and
-    # reconnect, but run cancel, request dedup, and per-worker IM channel
-    # services remain worker-local. Override GATEWAY_WORKERS only when the
-    # Redis stream bridge is enabled and those limitations are acceptable.
-    command: sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
+    # Gateway hosts the agent runtime (RunManager + StreamBridge) in process.
+    # Default to a single worker: GATEWAY_WORKERS > 1 is supported only with
+    # Postgres (database.backend: postgres, run_events.backend: db,
+    # run_ownership.heartbeat_enabled: true) and the Redis stream bridge wired
+    # below -- the Gateway refuses to start otherwise. IM channels, the WeChat
+    # QR login and browser tools stay worker-local, so keep one worker while
+    # they are enabled. --timeout-graceful-shutdown bounds how long open SSE
+    # connections may delay lifespan shutdown (memory flush, run drain) after
+    # SIGTERM; stop_grace_period below must cover that bound plus the drain.
+    command: sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1} --timeout-graceful-shutdown 10"
+    # Docker's 10s default SIGKILLed the 30s memory queue flush
+    # (memory.shutdown_flush_timeout_seconds) on every restart.
+    stop_grace_period: 60s
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       # Writable on purpose: the Gateway edits this file at runtime (MCP

@@ -43,3 +43,22 @@ def test_gateway_worker_count_remains_overridable():
     """The worker count must stay configurable, not hard-coded to 1."""
     command = _gateway_command()
     assert "${GATEWAY_WORKERS:-1}" in command, f"worker count must use ${{GATEWAY_WORKERS:-1}} so operators can override it; got: {command}"
+
+
+def test_gateway_bounds_uvicorn_graceful_shutdown():
+    """Open SSE connections must not hold lifespan shutdown (memory flush, run drain) past the stop grace period."""
+    command = _gateway_command()
+    match = re.search(r"--timeout-graceful-shutdown (\d+)", command)
+    assert match is not None, f"gateway command must bound uvicorn's graceful shutdown; got: {command}"
+    assert int(match.group(1)) <= 30
+
+
+def test_gateway_stop_grace_period_covers_the_shutdown_work():
+    """Docker's 10s default SIGKILLed the 30s memory queue flush on every restart."""
+    compose = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+    grace = compose["services"]["gateway"]["stop_grace_period"]
+    match = re.fullmatch(r"(\d+)s", str(grace))
+    assert match is not None, f"stop_grace_period must be expressed in seconds, got {grace!r}"
+    uvicorn_timeout = int(re.search(r"--timeout-graceful-shutdown (\d+)", _gateway_command()).group(1))
+    channel_stop, run_drain, memory_flush = 5, 5, 30
+    assert int(match.group(1)) >= uvicorn_timeout + channel_stop + run_drain + memory_flush

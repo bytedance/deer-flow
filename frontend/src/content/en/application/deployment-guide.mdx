@@ -145,6 +145,19 @@ run_events:
 
 Keep SQLite deployments to local, single-node, or short-lived evaluation environments.
 
+### Running more than one Gateway replica
+
+The Helm chart ships `gateway.replicas: 1`. Raising it is supported for the web and API path once every replica shares Postgres and Redis. The chart's default `config` already sets what the Gateway's startup gate checks:
+
+- `database.backend: postgres`, with the `checkpointer` section pointing at the same database
+- `run_events.backend: db`, so message history and delivery receipts are shared
+- `run_ownership.heartbeat_enabled: true`, so a starting Pod only reclaims runs whose owner is really gone
+- `stream_bridge.type: redis`, so SSE streams and reconnects work from any Pod (sandbox ownership leases are inferred from it)
+
+The chart exports `DEER_FLOW_MULTI_INSTANCE=true` when `gateway.replicas > 1`, and the Gateway refuses to start if any of these is missing. On multi-node clusters also set `persistence.home.accessMode: ReadWriteMany` (uploads, outputs, memory and `extensions_config.json` live on that volume) and `agent_storage.backend: db` so custom agents are visible on every Pod.
+
+Still single-instance: IM channels (every Pod would connect to every platform), the WeChat QR login, and browser tools. Keep one replica while those are enabled.
+
 ### K8s Provisioner setup
 
 The provisioner manages sandbox Pods in a Kubernetes cluster. It is included in `docker/docker-compose-dev.yaml`.
