@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths, normalize_mcp_server_config
+from deerflow.mcp.oauth import OAuthTokenManager
 from deerflow.mcp.tasks.models import TaskSubmitRequest
 
 
@@ -45,6 +46,7 @@ class McpTaskSubmitter(Protocol):
 _submitter: McpTaskSubmitter | None = None
 _TaskServerConfigSnapshot = tuple[dict[str, dict[str, Any]], Any]
 _task_server_config_snapshot: _TaskServerConfigSnapshot | None = None
+_task_oauth_token_manager: OAuthTokenManager | None = None
 
 
 def _task_server_configs(extensions_config: ExtensionsConfig) -> _TaskServerConfigSnapshot:
@@ -60,8 +62,15 @@ def _task_server_configs(extensions_config: ExtensionsConfig) -> _TaskServerConf
 
 def set_mcp_task_config_snapshot(extensions_config: ExtensionsConfig | None) -> None:
     """Freeze task-enabled server settings for one Gateway process lifetime."""
-    global _task_server_config_snapshot
+    global _task_server_config_snapshot, _task_oauth_token_manager
     _task_server_config_snapshot = None if extensions_config is None else _task_server_configs(extensions_config)
+    # Keep rotating credentials for task-enabled deployment servers for this
+    # Gateway lifetime, including tool-cache resets. Do not retain OAuth state
+    # for hot-reloadable non-task servers or owner-scoped personal connections.
+    _task_oauth_token_manager = None
+    if extensions_config is not None:
+        task_servers = {name: server for name, server in extensions_config.get_enabled_mcp_servers().items() if server.task_toolsets}
+        _task_oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config.model_copy(update={"mcp_servers": task_servers}))
 
 
 def validate_mcp_task_config_snapshot(extensions_config: ExtensionsConfig) -> None:
@@ -78,6 +87,12 @@ def validate_mcp_task_config_snapshot(extensions_config: ExtensionsConfig) -> No
         changed.append("mcpInterceptors")
     names = ", ".join(changed) or "<unknown>"
     raise McpTaskConfigurationError(f"MCP task-enabled server configuration changed after Gateway startup ({names}); restart DeerFlow before using durable task tools")
+
+
+def get_mcp_task_oauth_token_manager(extensions_config: ExtensionsConfig) -> OAuthTokenManager:
+    """Share OAuth state only for the matching frozen deployment connections."""
+    validate_mcp_task_config_snapshot(extensions_config)
+    return OAuthTokenManager.from_extensions_config(extensions_config, shared_manager=_task_oauth_token_manager)
 
 
 def set_mcp_task_submitter(submitter: McpTaskSubmitter | None) -> None:

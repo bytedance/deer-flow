@@ -21,6 +21,7 @@ from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
 from deerflow.mcp.personal_access import require_personal_mcp_access
 from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
+from deerflow.mcp.tasks.runtime import get_mcp_task_oauth_token_manager
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, load_user_mcp_config_if_changed
 from deerflow.mcp_scope import mcp_session_scope_key
 from deerflow.runtime.user_context import reset_current_user, set_current_user
@@ -72,7 +73,7 @@ class McpTaskToolCaller:
         self._extensions_config = extensions_config
         self._personal_callers: OrderedDict[str, tuple[PersonalMcpConfigSnapshot, McpTaskToolCaller | None]] = OrderedDict()
         self._personal_callers_lock = threading.Lock()
-        self._oauth_token_manager = oauth_token_manager or OAuthTokenManager.from_extensions_config(extensions_config)
+        self._oauth_token_manager = oauth_token_manager or get_mcp_task_oauth_token_manager(extensions_config)
         context_headers_interceptor = build_context_headers_interceptor(extensions_config)
         # Built once so the two chains keep an identical interceptor order and a
         # custom ``mcpInterceptors`` builder is invoked exactly once.
@@ -155,7 +156,9 @@ class McpTaskToolCaller:
             if server is None or not server.enabled:
                 raise LookupError("Personal MCP task connection is missing, disabled or changed")
             if caller is None:
-                caller = McpTaskToolCaller(snapshot.config)
+                # A personal name can equal a deployment name. Never consult
+                # the deployment OAuth state or startup snapshot for this path.
+                caller = McpTaskToolCaller(snapshot.config, oauth_token_manager=OAuthTokenManager.from_extensions_config(snapshot.config))
                 self._personal_callers[user_id] = (snapshot, caller)
             return caller
 

@@ -21,11 +21,12 @@ from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
-from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
+from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import call_pooled_session_tool, get_session_pool
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
+    get_mcp_task_oauth_token_manager,
     get_mcp_task_submitter,
     validate_mcp_task_config_snapshot,
 )
@@ -892,7 +893,8 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
         logger.info(f"Initializing MCP client with {len(servers_config)} server(s)")
 
         # Inject initial OAuth headers for server connections (tool discovery/session init)
-        initial_oauth_headers = await get_initial_oauth_headers(extensions_config)
+        oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config) if personal_user_id is not None else get_mcp_task_oauth_token_manager(extensions_config)
+        initial_oauth_headers = await get_initial_oauth_headers(extensions_config, token_manager=oauth_token_manager)
         for server_name, auth_header in initial_oauth_headers.items():
             if server_name not in servers_config:
                 continue
@@ -906,7 +908,7 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
 
         tool_interceptors = build_mcp_tool_interceptors(
             extensions_config,
-            oauth_builder=build_oauth_tool_interceptor,
+            oauth_builder=lambda config: build_oauth_tool_interceptor(config, token_manager=oauth_token_manager),
             resolver=resolve_variable,
             target_logger=logger,
         )
