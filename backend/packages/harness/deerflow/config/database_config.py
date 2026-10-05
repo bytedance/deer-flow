@@ -83,6 +83,11 @@ class CheckpointDeltaConfig(BaseModel):
         ),
     )
 
+    @field_validator("snapshot_frequency", mode="before")
+    @classmethod
+    def _reject_boolean_snapshot_frequency(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
+
 
 class CheckpointGraphCacheConfig(BaseModel):
     """Size cap for the process-local compiled checkpoint graph cache.

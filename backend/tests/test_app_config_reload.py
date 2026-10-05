@@ -134,6 +134,12 @@ def test_checkpoint_delta_rejects_non_positive_snapshot_frequency(value: int) ->
         DatabaseConfig(checkpoint_delta={"snapshot_frequency": value})
 
 
+@pytest.mark.parametrize("value", [True, False])
+def test_checkpoint_delta_rejects_boolean_snapshot_frequency(value: bool) -> None:
+    with pytest.raises(ValidationError, match="snapshot_frequency must be an integer, not a boolean"):
+        DatabaseConfig(checkpoint_delta={"snapshot_frequency": value})
+
+
 def test_legacy_snapshot_frequency_maps_to_nested_key(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level("WARNING"):
         config = DatabaseConfig(checkpoint_delta_snapshot_frequency=1000)
@@ -154,6 +160,12 @@ def test_nested_snapshot_frequency_wins_over_legacy_key(caplog: pytest.LogCaptur
 @pytest.mark.parametrize("value", [0, -1])
 def test_legacy_snapshot_frequency_rejects_non_positive_value(value: int) -> None:
     with pytest.raises(ValidationError):
+        DatabaseConfig(checkpoint_delta_snapshot_frequency=value)
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_legacy_snapshot_frequency_rejects_boolean(value: bool) -> None:
+    with pytest.raises(ValidationError, match="snapshot_frequency must be an integer, not a boolean"):
         DatabaseConfig(checkpoint_delta_snapshot_frequency=value)
 
 
