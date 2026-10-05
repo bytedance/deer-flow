@@ -68,6 +68,7 @@ const goalRuns = [
     goal_verdict: { satisfied: true },
     stop_requested_run_id: "execution-stop",
   }),
+  run("unknown", { ...goal, status: "unmet", error: "future_reason" }),
   run("failed", { ...goal, status: "failed", error: "boom" }),
 ];
 const plainRuns = [
@@ -119,10 +120,12 @@ test("goal runs show their outcome and the unmet reason is not styled as an erro
   const unmet = rowOf(list, "execution-unmet").getByTestId(
     "scheduled-run-goal",
   );
-  await expect(unmet).toHaveText(
-    "Goal check: evidence missing · blocked:missing_evidence",
-  );
+  await expect(unmet).toHaveText("Goal check: evidence missing");
+  await expect(unmet).toHaveAttribute("title", "blocked:missing_evidence");
   await expect(unmet).not.toHaveClass(/text-destructive/);
+  await expect(
+    rowOf(list, "execution-unknown").getByTestId("scheduled-run-goal"),
+  ).toHaveText("future_reason");
   await expect(
     rowOf(list, "execution-stop").getByTestId("scheduled-run-stop-requested"),
   ).toHaveText("This run asked to stop the schedule");
@@ -151,5 +154,5 @@ test("goal outcomes use the Chinese copy", async ({ page }) => {
   await expect(rowOf(list, "execution-met")).toContainText("目标已达成");
   await expect(
     rowOf(list, "execution-unmet").getByTestId("scheduled-run-goal"),
-  ).toHaveText("目标检查：缺少证据 · blocked:missing_evidence");
+  ).toHaveText("目标检查：缺少证据");
 });

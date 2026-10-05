@@ -876,22 +876,23 @@ export default function ScheduledTasksPage() {
                                   : st.goal.met}
                               </div>
                             )}
-                            {goal?.kind === "unmet" ? (
-                              <div
-                                className="text-xs text-amber-700 dark:text-amber-400"
-                                data-testid="scheduled-run-goal"
-                              >
-                                {goal.reasonKey
-                                  ? `${st.goal.reasons[goal.reasonKey]} · ${goal.code}`
-                                  : (goal.code ?? NONE)}
-                              </div>
-                            ) : (
-                              run.error && (
-                                <div className="text-destructive text-xs">
-                                  {run.error}
-                                </div>
-                              )
-                            )}
+                            {goal?.kind === "unmet"
+                              ? goal.code && (
+                                  <div
+                                    className="text-xs text-amber-700 dark:text-amber-400"
+                                    data-testid="scheduled-run-goal"
+                                    title={goal.code}
+                                  >
+                                    {goal.reasonKey
+                                      ? st.goal.reasons[goal.reasonKey]
+                                      : goal.code}
+                                  </div>
+                                )
+                              : run.error && (
+                                  <div className="text-destructive text-xs">
+                                    {run.error}
+                                  </div>
+                                )}
                             {requestedScheduleStop(run) && (
                               <div
                                 className="text-muted-foreground text-xs"
