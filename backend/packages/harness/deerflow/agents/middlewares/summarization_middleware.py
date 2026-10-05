@@ -176,6 +176,8 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         self._extensions = extensions
         self.summary_call_count = 0
         self.summary_noop_count = 0
+        self.summary_skip_count = 0
+        self._summary_counters_lock = threading.Lock()
         # P1: exact prompt fingerprints whose summarizer output equalled the existing summary.
         self._noop_prompt_cache: OrderedDict[str, str] = OrderedDict()
         self._noop_prompt_cache_lock = threading.Lock()
@@ -335,7 +337,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         for index, name in enumerate(names):
             text = self._invoke_summary(self._model_for(name), prompt, last=index == len(names) - 1)
             if text is not None:
-                self._remember_noop_summary(noop_key, text, previous_summary)
+                # A fallback no-op must not suppress retrying a failed earlier candidate.
+                if index == 0:
+                    self._remember_noop_summary(noop_key, text, previous_summary)
                 return text
         return None
 
@@ -364,7 +368,8 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 task_store=task_store,
             )
             if text is not None:
-                self._remember_noop_summary(noop_key, text, previous_summary)
+                if index == 0:
+                    self._remember_noop_summary(noop_key, text, previous_summary)
                 return text
         return None
 
@@ -381,7 +386,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     def _reuse_noop_summary(self, key: str | None, previous_summary: str | None) -> str | None:
         """Return the existing summary instead of calling the LLM for a proven no-op input.
 
-        Only an input whose earlier summarizer run produced output byte-identical to
+        Only an input whose first candidate produced output byte-identical to
         ``previous_summary`` is cached, and reuse additionally requires today's
         ``previous_summary`` to equal that cached output, so the reused value is exactly
         the existing ``summary_text``. Any failure falls through to the normal LLM call.
@@ -394,7 +399,6 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 if cached is None or cached != previous_summary:
                     return None
                 self._noop_prompt_cache.move_to_end(key)
-            self.summary_skip_count = getattr(self, "summary_skip_count", 0) + 1
             logger.info("Summarization skipped: identical input previously produced an unchanged summary")
             return _ReusedSummary(cached)
         except Exception:
@@ -730,16 +734,22 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         notify_context_compacted(event, extensions=self._extensions)
 
     def _record_summary_telemetry(self, runtime: Runtime, previous_summary: str | None, summary: str, summarized_count: int, *, llm_call_skipped: bool = False) -> None:
-        """P0 measurement: count summarizer calls whose output equals the prior ``summary_text``.
+        """Count successful summary results, unchanged results, and no-op cache reuse.
 
-        Observation only (``llm_call_skipped`` reports P1 reuse); fails soft.
+        ``call_count`` includes reuse and canned results, not individual LLM requests.
+        Counters and event snapshots update atomically; telemetry failures stay soft.
         """
         try:
             noop = previous_summary is not None and summary.encode("utf-8") == previous_summary.encode("utf-8")
-            self.summary_call_count = self.summary_call_count + 1
+            with self._summary_counters_lock:
+                self.summary_call_count += 1
+                self.summary_noop_count += int(noop)
+                self.summary_skip_count += int(llm_call_skipped)
+                call_count = self.summary_call_count
+                noop_count = self.summary_noop_count
+                skip_count = self.summary_skip_count
             if noop:
-                self.summary_noop_count = self.summary_noop_count + 1
-                logger.info("Summarization no-op: summarizer output identical to existing summary_text (%d chars)", len(summary))
+                logger.info("Summarization no-op: result identical to existing summary_text (%d chars)", len(summary))
             context = getattr(runtime, "context", None)
             journal = context.get("__run_journal") if isinstance(context, dict) else None
             if journal is None:
@@ -755,8 +765,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                     "summary_chars": len(summary),
                     "previous_summary_chars": len(previous_summary) if previous_summary is not None else None,
                     "summarized_message_count": summarized_count,
-                    "noop_count": self.summary_noop_count,
-                    "call_count": self.summary_call_count,
+                    "noop_count": noop_count,
+                    "call_count": call_count,
+                    "skip_count": skip_count,
                 },
             )
         except Exception:
