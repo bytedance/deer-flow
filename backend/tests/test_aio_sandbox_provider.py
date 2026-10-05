@@ -2210,7 +2210,7 @@ def test_shutdown_keeps_aio_warm_entries_owned_when_lease_renewal_stop_times_out
     renewal_thread.is_alive.side_effect = [True, True, False, False]
     provider._renewal_thread = renewal_thread
 
-    with pytest.raises(RuntimeError, match="lease-renewal thread did not stop"):
+    with pytest.raises(RuntimeError, match="lease-renewal thread is still running after stop timeout"):
         provider.shutdown()
 
     assert provider._shutdown_called is False
