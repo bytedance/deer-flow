@@ -161,6 +161,7 @@ class ChannelService:
         self._config = config
         self._running = False
         self._readiness_locks: dict[str, asyncio.Lock] = {}
+        self._config_epochs: dict[str, int] = {}
 
     @classmethod
     def from_app_config(
@@ -239,13 +240,19 @@ class ChannelService:
             logger.warning("ChannelService is not running; cannot ensure channel readiness")
             return False
 
+        epoch = self._config_epochs.get(name, 0)
         async with self._channel_lock(name):
             if not self._running:
                 return False
 
             if config is not None:
-                self._config[name] = dict(config)
-
+                if self._config_epochs.get(name, 0) == epoch:
+                    self._config[name] = dict(config)
+                else:
+                    logger.info(
+                        "Ignoring stale config snapshot for channel %s after concurrent reconfiguration",
+                        name,
+                    )
             channel_config = self._config.get(name)
             if not channel_config or not isinstance(channel_config, dict):
                 logger.warning("No config for requested channel")
@@ -349,12 +356,21 @@ class ChannelService:
         """Return the per-channel lifecycle lock ensuring serialized mutations."""
         return self._readiness_locks.setdefault(name, asyncio.Lock())
 
+    def _bump_config_epoch(self, name: str) -> int:
+        """Bump and return the configuration epoch for a channel.
+
+        Invalidates queued readiness checks carrying an earlier config snapshot.
+        """
+        self._config_epochs[name] = self._config_epochs.get(name, 0) + 1
+        return self._config_epochs[name]
+
     async def restart_channel(self, name: str, *, reload_config: bool = True) -> bool:
         """Restart a specific channel. Returns True if successful."""
         async with self._channel_lock(name):
             return await self._restart_channel_locked(name, reload_config=reload_config)
 
     async def _restart_channel_locked(self, name: str, *, reload_config: bool = True) -> bool:
+        """Restart a specific channel. The caller must already hold ``_channel_lock(name)``."""
         if name in self._channels:
             channel = self._channels[name]
             # Same ownership rule as readiness retries: retain an instance
@@ -369,6 +385,7 @@ class ChannelService:
             # Reading config.yaml and the runtime store is disk IO; keep it
             # off the event loop.
             config = await asyncio.to_thread(self._load_channel_config, name)
+            self._bump_config_epoch(name)
         else:
             config = self._config.get(name)
         if not config or not isinstance(config, dict):
@@ -384,30 +401,38 @@ class ChannelService:
     async def configure_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Apply runtime config for a channel and restart it if the service is running."""
         async with self._channel_lock(name):
-            self._config[name] = dict(config)
-            if not self._running:
-                return True
-            # The caller just supplied the authoritative config (e.g. credentials
-            # entered in the browser that are never written to config.yaml) — a
-            # file reload here would clobber it with the stale on-disk entry.
-            return await self._restart_channel_locked(name, reload_config=False)
+            self._bump_config_epoch(name)
+            try:
+                self._config[name] = dict(config)
+                if not self._running:
+                    return True
+                # The caller just supplied the authoritative config (e.g. credentials
+                # entered in the browser that are never written to config.yaml) — a
+                # file reload here would clobber it with the stale on-disk entry.
+                return await self._restart_channel_locked(name, reload_config=False)
+            finally:
+                self._bump_config_epoch(name)
 
     async def remove_channel(self, name: str) -> bool:
         """Remove runtime config for a channel and stop it if currently running."""
         async with self._channel_lock(name):
-            self._config.pop(name, None)
-            channel = self._channels.get(name)
-            if channel is None:
+            self._bump_config_epoch(name)
+            try:
+                self._config.pop(name, None)
+                channel = self._channels.get(name)
+                if channel is None:
+                    return True
+                # Stop-then-drop with the shared ownership rule: a channel whose
+                # stop() fails stays tracked (and returns False) instead of being
+                # popped first and leaking its subscribed listener on failure.
+                await self._stop_and_discard_channel(name, channel)
+                if self._channels.get(name) is channel:
+                    logger.warning("Removal incomplete: %s channel failed to stop and remains tracked", name)
+                    return False
+                logger.info("Channel stopped and removed")
                 return True
-            # Stop-then-drop with the shared ownership rule: a channel whose
-            # stop() fails stays tracked (and returns False) instead of being
-            # popped first and leaking its subscribed listener on failure.
-            await self._stop_and_discard_channel(name, channel)
-            if self._channels.get(name) is channel:
-                logger.warning("Removal incomplete: %s channel failed to stop and remains tracked", name)
-                return False
-            logger.info("Channel stopped and removed")
-            return True
+            finally:
+                self._bump_config_epoch(name)
 
     async def _stop_and_discard_channel(self, name: str, channel: Channel) -> None:
         """Stop a channel and drop it only once its ``stop()`` has completed.

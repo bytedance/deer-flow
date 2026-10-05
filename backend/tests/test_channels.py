@@ -8819,33 +8819,41 @@ class TestChannelService:
                 self.is_running = True
 
             async def stop(self):
+                # Suspend in stop to yield control to concurrent coroutines
+                await asyncio.sleep(0.02)
                 self.is_running = False
 
         service._channels["telegram"] = FakeChannel()
 
-        events = []
+        starts = 0
+        active_starts = 0
+        max_concurrent_starts = 0
 
         async def mock_start(name, config):
-            events.append("start_begin")
+            nonlocal starts, active_starts, max_concurrent_starts
+            active_starts += 1
+            max_concurrent_starts = max(max_concurrent_starts, active_starts)
             await asyncio.sleep(0.03)
             service._channels[name] = FakeChannel()
-            events.append("start_end")
+            active_starts -= 1
+            starts += 1
             return True
 
         service._start_channel = mock_start
 
         async def go():
+            # restart_channel suspends in stop(), so ensure_channel_ready must wait on
+            # _channel_lock rather than observing is_running=False and racing _start_channel.
             results = await asyncio.gather(
-                service.ensure_channel_ready("telegram"),
                 service.restart_channel("telegram", reload_config=False),
+                service.ensure_channel_ready("telegram"),
             )
             assert all(results)
 
         _run(go())
 
-        # Because ensure_channel_ready runs first and sees is_running=True, it succeeds quickly.
-        # Then restart_channel runs serialized. No concurrent operations overlap.
-        assert events == ["start_begin", "start_end"]
+        assert max_concurrent_starts == 1
+        assert starts == 1
 
     def test_concurrent_remove_and_ensure_channel_ready(self):
         """remove_channel and ensure_channel_ready serialize cleanly without zombie respawns."""
@@ -8856,14 +8864,19 @@ class TestChannelService:
 
         class FakeChannel:
             def __init__(self):
-                self.is_running = False
+                self.is_running = True
 
             async def stop(self):
-                pass
+                await asyncio.sleep(0.02)
+                self.is_running = False
 
         service._channels["telegram"] = FakeChannel()
 
+        starts = 0
+
         async def mock_start(name, config):
+            nonlocal starts
+            starts += 1
             await asyncio.sleep(0.02)
             service._channels[name] = FakeChannel()
             return True
@@ -8871,17 +8884,61 @@ class TestChannelService:
         service._start_channel = mock_start
 
         async def go():
+            # Pass config to ensure_channel_ready (the router pattern) while remove_channel is in flight.
             results = await asyncio.gather(
                 service.remove_channel("telegram"),
-                service.ensure_channel_ready("telegram"),
+                service.ensure_channel_ready("telegram", config={"enabled": True, "token": "test"}),
             )
             return results
 
         results = _run(go())
-        # remove_channel succeeds; ensure_channel_ready serialized after it returns False because config was removed
+        # remove_channel succeeds; ensure_channel_ready serialized after it returns False
+        # because the channel was removed and the stale pre-wait config snapshot is discarded.
         assert results == [True, False]
+        assert starts == 0
         assert "telegram" not in service._channels
         assert "telegram" not in service._config
+
+    def test_concurrent_configure_and_ensure_channel_ready_keeps_authoritative_config(self):
+        """ensure_channel_ready does not overwrite authoritative credentials from configure_channel."""
+        from app.channels.service import ChannelService
+
+        service = ChannelService(channels_config={"telegram": {"enabled": True, "token": "old"}})
+        service._running = True
+
+        class FakeChannel:
+            def __init__(self):
+                self.is_running = True
+
+            async def stop(self):
+                await asyncio.sleep(0.01)
+                self.is_running = False
+
+        service._channels["telegram"] = FakeChannel()
+
+        started_configs = []
+
+        async def mock_start(name, config):
+            started_configs.append(dict(config))
+            await asyncio.sleep(0.02)
+            service._channels[name] = FakeChannel()
+            return True
+
+        service._start_channel = mock_start
+
+        async def go():
+            # configure_channel applies new credentials. A concurrent readiness check
+            # carrying a stale snapshot must not revert self._config to "stale".
+            results = await asyncio.gather(
+                service.configure_channel("telegram", {"enabled": True, "token": "new"}),
+                service.ensure_channel_ready("telegram", config={"enabled": True, "token": "stale"}),
+            )
+            return results
+
+        results = _run(go())
+        assert results == [True, True]
+        assert service._config["telegram"]["token"] == "new"
+        assert all(c["token"] == "new" for c in started_configs)
 
 
 # ---------------------------------------------------------------------------
