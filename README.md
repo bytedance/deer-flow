@@ -1909,8 +1909,9 @@ unknown outcome without replaying the operation; later calls use a fresh session
 
 Uploaded Markdown outlines recognize ATX heading syntax, clean closing markers with a linear suffix scan, and skip fenced and indented code examples, so hashtags and code comments do not
 crowd out real document sections from the agent's heading preview. Indented bold examples are also excluded; PDF-style bold headings with up to three leading spaces remain supported.
-Split-bold numeric table rows, including parenthesized years and signed values,
-are excluded so they do not consume the outline's heading budget.
+Split-bold numeric table rows, including parenthesized years, signed values, and
+currency-prefixed amounts, are excluded when any block after the section number
+is a numeric column, so they do not consume the outline's heading budget.
 UTF-8 Markdown files with or without a byte-order mark (BOM) produce the same
 outlines and fallback previews, with original line numbers preserved.
 Outline titles are limited to 200 characters and fallback previews to 2,000
