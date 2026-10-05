@@ -714,3 +714,102 @@ class TestConversionSerialization:
         assert called is False
         assert not derived.exists()
         assert self._no_temp_left(env, row)
+
+
+class TestConversionSingleFlight:
+    """Concurrent first reads of one document share a single conversion.
+
+    Conversion occupies a bounded file-IO pool thread for its whole duration,
+    so duplicates would starve unrelated offloaded file work. Followers wait
+    on the leader without holding a pool thread — from any event loop, since
+    the tool also runs on the isolated subagent loop — and a cancelled leader
+    hands the work to a follower instead of failing it."""
+
+    @staticmethod
+    def _counting_gated_convert(started: threading.Event, finish: threading.Event, calls: list[str]):
+        async def fake_convert(file_path, output_path=None):
+            calls.append(str(file_path))
+            started.set()
+            assert finish.wait(10)
+            output_path.write_text("# converted markdown", encoding="utf-8")
+            return output_path
+
+        return fake_convert
+
+    async def test_concurrent_first_reads_share_one_conversion_across_event_loops(self, env, monkeypatch):
+        from deerflow.projects import documents as documents_mod
+
+        started = threading.Event()
+        finish = threading.Event()
+        calls: list[str] = []
+        monkeypatch.setattr(documents_mod, "convert_file_to_markdown", self._counting_gated_convert(started, finish, calls))
+        row = await _shelve(env, name="report.docx", data=b"\x00docx-bytes")
+        derived = converted_markdown_path(env.paths, user_id=_USER, row=row)
+
+        def read() -> asyncio.Task:
+            return asyncio.create_task(ensure_converted_markdown(env.docs, env.paths, user_id=_USER, row=row, auto_convert=True))
+
+        leader = read()
+        try:
+            assert await asyncio.to_thread(started.wait, 10)
+            followers = [read(), read()]
+            # A follower on another event loop, like the isolated subagent loop.
+            other_loop = asyncio.create_task(asyncio.to_thread(asyncio.run, ensure_converted_markdown(env.docs, env.paths, user_id=_USER, row=row, auto_convert=True)))
+            await asyncio.sleep(0.2)
+            assert len(calls) == 1
+        finally:
+            finish.set()
+        results = await asyncio.gather(leader, *followers, other_loop)
+        assert results == [(derived, None)] * 4
+        assert len(calls) == 1
+        assert documents_mod._inflight_conversions == {}
+
+    async def test_cancelled_follower_leaves_the_shared_conversion_running(self, env, monkeypatch):
+        from deerflow.projects import documents as documents_mod
+
+        started = threading.Event()
+        finish = threading.Event()
+        calls: list[str] = []
+        monkeypatch.setattr(documents_mod, "convert_file_to_markdown", self._counting_gated_convert(started, finish, calls))
+        row = await _shelve(env, name="report.docx", data=b"\x00docx-bytes")
+        derived = converted_markdown_path(env.paths, user_id=_USER, row=row)
+
+        leader = asyncio.create_task(ensure_converted_markdown(env.docs, env.paths, user_id=_USER, row=row, auto_convert=True))
+        try:
+            assert await asyncio.to_thread(started.wait, 10)
+            follower = asyncio.create_task(ensure_converted_markdown(env.docs, env.paths, user_id=_USER, row=row, auto_convert=True))
+            await asyncio.sleep(0.2)
+            follower.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await follower
+        finally:
+            finish.set()
+        assert await leader == (derived, None)
+        assert len(calls) == 1
+        assert documents_mod._inflight_conversions == {}
+
+    async def test_follower_takes_over_when_the_leader_is_cancelled(self, env, monkeypatch):
+        from deerflow.projects import documents as documents_mod
+
+        started = threading.Event()
+        finish = threading.Event()
+        calls: list[str] = []
+        monkeypatch.setattr(documents_mod, "convert_file_to_markdown", self._counting_gated_convert(started, finish, calls))
+        row = await _shelve(env, name="report.docx", data=b"\x00docx-bytes")
+        derived = converted_markdown_path(env.paths, user_id=_USER, row=row)
+
+        leader = asyncio.create_task(ensure_converted_markdown(env.docs, env.paths, user_id=_USER, row=row, auto_convert=True))
+        try:
+            assert await asyncio.to_thread(started.wait, 10)
+            follower = asyncio.create_task(ensure_converted_markdown(env.docs, env.paths, user_id=_USER, row=row, auto_convert=True))
+            await asyncio.sleep(0.2)
+            leader.cancel()
+        finally:
+            finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+        # The cancelled leader published nothing; the follower converted again
+        # instead of inheriting the cancellation.
+        assert await follower == (derived, None)
+        assert len(calls) == 2
+        assert documents_mod._inflight_conversions == {}

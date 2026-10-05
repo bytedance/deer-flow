@@ -23,13 +23,15 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import concurrent.futures
 import hashlib
 import logging
 import os
 import shutil
+import threading
 import uuid
 from collections import OrderedDict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -318,6 +320,44 @@ def _convert_in_thread(original: Path, output_path: Path) -> Path | None:
     return asyncio.run(convert_file_to_markdown(original, output_path=output_path))
 
 
+#: First-read conversions in flight, keyed by ``(user_id, document_id,
+#: project_id)``. A conversion holds a bounded file-IO pool thread for its
+#: whole duration, so concurrent first reads of one document share it instead
+#: of each pinning a thread. The tool also runs on the isolated subagent loop,
+#: so this is a lock-guarded map of ``concurrent.futures.Future`` rather than
+#: a per-loop asyncio primitive. A ``None`` result means the leader was
+#: cancelled or raised: its followers retry and one of them leads.
+_inflight_conversions: dict[tuple[str, str, str], concurrent.futures.Future[tuple[Path | None, str | None] | None]] = {}
+_inflight_conversions_lock = threading.Lock()
+
+
+async def _single_flight_conversion(key: tuple[str, str, str], convert: Callable[[], Awaitable[tuple[Path | None, str | None]]]) -> tuple[Path | None, str | None]:
+    """Run *convert* once per *key* across concurrent callers on any event loop."""
+    while True:
+        with _inflight_conversions_lock:
+            shared = _inflight_conversions.get(key)
+            leading = shared is None
+            if leading:
+                shared = _inflight_conversions[key] = concurrent.futures.Future()
+        if not leading:
+            # Shielded: a cancelled follower must not cancel the shared future
+            # the leader still has to resolve.
+            outcome = await asyncio.shield(asyncio.wrap_future(shared))
+            if outcome is not None:
+                return outcome
+            continue
+        outcome = None
+        try:
+            outcome = await convert()
+            return outcome
+        finally:
+            # Unregister before resolving, so a follower that retries after a
+            # ``None`` outcome cannot find this finished future again.
+            with _inflight_conversions_lock:
+                del _inflight_conversions[key]
+            shared.set_result(outcome)
+
+
 def _convert_to_staging(original: Path, staging_path: Path) -> bool:
     """Worker-thread body: convert *original* into its ``.staging/`` file.
 
@@ -361,8 +401,10 @@ async def ensure_converted_markdown(repo: ProjectDocumentRepository, paths: Path
     conversion makes the locked revalidation decline, so the staged output is
     discarded and nothing is published; one arriving during the publish
     blocks on the row lock and then proceeds. The atomic ``os.replace``
-    publish exposes no partial converted text, and concurrent first reads
-    may each convert but publish identical bytes. The published companion is
+    publish exposes no partial converted text. Concurrent first reads of one
+    document share a single conversion (``_single_flight_conversion``); one
+    from another process may still convert again and publish identical
+    bytes. The published companion is
     valid for the lifetime of the row's immutable original and never needs
     invalidation (§6.2, §10.9). ``reason`` is one of
     ``"conversion_disabled"`` (auto-convert off, §7.3), ``"content_missing"``
@@ -376,6 +418,12 @@ async def ensure_converted_markdown(repo: ProjectDocumentRepository, paths: Path
         return None, "binary"
     if await run_file_io(derived.is_file):
         return derived, None
+    key = (user_id, row["id"], row["project_id"])
+    return await _single_flight_conversion(key, lambda: _convert_and_publish(repo, paths, user_id=user_id, row=row, original=original, derived=derived))
+
+
+async def _convert_and_publish(repo: ProjectDocumentRepository, paths: Paths, *, user_id: str, row: dict, original: Path, derived: Path) -> tuple[Path | None, str | None]:
+    """Convert into ``.staging/`` outside any transaction, then publish under the row lock (§6.3)."""
     # Read-only probe: skips converting a row that is already gone. It decides
     # nothing — the locked revalidation before the publish does (§15.5).
     live = await repo.get(row["id"], user_id=user_id)

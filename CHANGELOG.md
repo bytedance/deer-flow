@@ -475,7 +475,8 @@ This release closes that milestone with **301 merged pull requests**.
   seconds. Conversion now writes into `.staging/` outside any transaction; the
   lock is held only to revalidate the row and atomically rename the output
   into place, so a document trashed or purged meanwhile still publishes
-  nothing. ([#6305])
+  nothing. Concurrent first reads of one document share a single conversion
+  rather than each holding a file-IO worker. ([#6305])
 - **gateway:** Per-run reads now return the rows of IM-channel owners.
   `start_run` stamps run rows and run events with the raw trusted owner id (for
   example `feishu:owner-777`), but several run-scoped routes filtered by the
