@@ -290,6 +290,7 @@ async def test_browser_stream_cancellation_during_disconnect_cleanup_releases_se
 
     assert lease_released.is_set()
 
+
 @pytest.mark.asyncio
 async def test_browser_stream_preserves_first_cancellation_across_cleanup_cancellation(monkeypatch):
     config = AuthorizationConfig(enabled=False)
