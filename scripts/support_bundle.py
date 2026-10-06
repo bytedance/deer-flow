@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import re
 import subprocess
@@ -180,6 +181,11 @@ def _run_command(args: list[str], cwd: Path, timeout_s: int = 10) -> dict[str, A
             cwd=cwd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            # Python helpers (doctor, pnpm) must emit the encoding we capture,
+            # even when the host or inherited stdio setting is not UTF-8.
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             timeout=timeout_s,
             check=False,
         )

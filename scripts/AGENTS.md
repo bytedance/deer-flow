@@ -347,3 +347,10 @@ receive a JSON error and close code 1008.
 The support bundle's `extensions_config.json` reader accepts UTF-8 with or
 without a leading BOM, matching the runtime loader. Preserve redaction and
 avoid flagging a valid BOM-prefixed file as a syntax error in triage output.
+
+Support-bundle subprocess capture explicitly decodes UTF-8 with replacement
+for invalid bytes. Set `PYTHONIOENCODING=utf-8` only in the copied child
+environment so Python helpers can print Unicode without changing the parent.
+Keep exit codes, timeouts and redaction intact; do not rely on the host locale.
+Regressions use real local children, including ASCII/GBK capture defaults,
+nonzero exits and malformed output, without invoking provider diagnostics.

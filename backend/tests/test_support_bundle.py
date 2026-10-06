@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import zipfile
 
@@ -13,6 +14,52 @@ import support_bundle
 def _zip_text(zip_path, name: str) -> str:
     with zipfile.ZipFile(zip_path) as zf:
         return zf.read(name).decode("utf-8")
+
+
+@pytest.mark.parametrize("host_encoding", ["ascii", "cp936"])
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_run_command_decodes_utf8_independently_of_host_locale(tmp_path, monkeypatch, host_encoding, returncode):
+    monkeypatch.setattr(support_bundle.subprocess, "_text_encoding", lambda: host_encoding)
+    stdout = "✓ 检查通过 Bearer fake.stdout.secret"
+    stderr = "✗ 检查失败 Bearer fake.stderr.secret"
+    code = f"import sys; sys.stdout.buffer.write({stdout.encode('utf-8')!r}); sys.stderr.buffer.write({stderr.encode('utf-8')!r}); sys.exit({returncode})"
+
+    result = support_bundle._run_command([sys.executable, "-c", code], cwd=tmp_path)
+
+    assert result == {
+        "ok": returncode == 0,
+        "returncode": returncode,
+        "stdout": "✓ 检查通过 Bearer <redacted>",
+        "stderr": "✗ 检查失败 Bearer <redacted>",
+    }
+
+
+def test_run_command_gives_python_children_utf8_stdio_without_mutating_parent(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTHONIOENCODING", "ascii")
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    monkeypatch.setenv("DEER_SUPPORT_TEST_MARKER", "inherited")
+    monkeypatch.setattr(support_bundle.subprocess, "_text_encoding", lambda: "ascii")
+    parent_env = dict(os.environ)
+    code = f"import os, sys; assert os.environ['DEER_SUPPORT_TEST_MARKER'] == 'inherited'; assert os.getcwd() == {str(tmp_path)!r}; sys.stdout.write({ascii('✓ 检查通过')}); sys.stderr.write({ascii('✗ 检查失败')})"
+
+    result = support_bundle._run_command([sys.executable, "-c", code], cwd=tmp_path)
+
+    assert result == {"ok": True, "returncode": 0, "stdout": "✓ 检查通过", "stderr": "✗ 检查失败"}
+    assert dict(os.environ) == parent_env
+
+
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_run_command_preserves_diagnostics_with_invalid_utf8(tmp_path, returncode):
+    code = f"import sys; sys.stdout.buffer.write(b'out \\xff Bearer fake.stdout.secret'); sys.stderr.buffer.write(b'err \\xff Bearer fake.stderr.secret'); sys.exit({returncode})"
+
+    result = support_bundle._run_command([sys.executable, "-c", code], cwd=tmp_path)
+
+    assert result == {
+        "ok": returncode == 0,
+        "returncode": returncode,
+        "stdout": "out \ufffd Bearer <redacted>",
+        "stderr": "err \ufffd Bearer <redacted>",
+    }
 
 
 def test_collect_environment_routes_pnpm_through_shared_runner(tmp_path, monkeypatch):
