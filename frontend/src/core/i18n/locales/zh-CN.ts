@@ -34,7 +34,39 @@ export const zhCN: Translations = {
     deploymentHint:
       "界面和浏览器功能在手动刷新后更新；安装、启停和配置由部署管理员通过配置文件或 CLI 管理。",
     moduleUnavailable: "当前页面加载失败",
-    noResults: "没有匹配的已安装扩展。",
+    noResults: "没有匹配的扩展。",
+    catalogEntry: "扩展目录",
+    catalogHint:
+      "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。",
+    installationGuide: "查看安装说明",
+    catalog: {
+      agentTeams: {
+        title: "Agent 团队",
+        description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
+      },
+      bookmarks: {
+        title: "会话书签",
+        description: "收藏有用的回答，在独立页面查找与整理自己的书签。",
+      },
+      context: {
+        title: "上下文裁剪",
+        description: "按需缩短旧的只读工具结果，保留近期消息与原生摘要。",
+      },
+      classify: {
+        title: "文本分类",
+        description: "按给定类别为文本列表打标签，使用部署方配置的分类服务。",
+      },
+      screening: {
+        title: "内容风险提示",
+        description:
+          "检查获取的外部内容，为可疑工具结果添加提示，不阻断工具执行。",
+      },
+      example: {
+        title: "扩展开发示例",
+        description:
+          "演示中间件、任务生命周期、模型观察器、服务和 HTTP 路由的扩展方式。",
+      },
+    },
     pageUnavailable: "扩展页面不可用",
     pageUnavailableHint: "此页面未注册，或插件已停用、未能加载。",
     viewAll: "查看扩展",
@@ -194,7 +226,7 @@ export const zhCN: Translations = {
   runDuration: {
     reasoning: "思考过程",
     working: "执行中…",
-    completedIn: (duration) => `本次任务耗时 ${duration}`,
+    completedIn: (duration) => `用时 ${duration}`,
     description: "任务总耗时，包括模型推理、工具调用和等待时间。",
     lessThanSecond: "不足 1 秒",
     hours: (value) => `${value} 小时`,
@@ -330,6 +362,27 @@ export const zhCN: Translations = {
 
   // Input Box
   inputBox: {
+    mentionPicker: "添加引用",
+    mentionSearch: "搜索技能、项目文件、对话和插件",
+    mentionSkills: "技能",
+    mentionFiles: "项目文件",
+    mentionExtensions: "插件",
+    mentionExtensionsLimit: "最多选择 16 个插件引用。",
+    mentionConversations: "对话",
+    mentionUpload: "上传文件",
+    mentionEmpty: "已加载的内容中没有匹配的引用",
+    mentionLoadMore: "加载更多",
+    mentionLoading: "正在加载引用…",
+    mentionFailed: "引用加载失败，请重试。",
+    mentionRetry: "重试",
+    mentionAttaching: "正在添加文件…",
+    mentionAttachFailed: "文件添加失败，请重试。",
+    mentionMultipleSkills:
+      "每条消息最多选择 16 个技能，再次选择已勾选技能可移除。",
+    mentionNoProject: "在项目对话中可引用该项目的文档。",
+    mentionUnavailable: "文件不可用",
+    mentionClose: "关闭引用面板",
+
     placeholder: "今天我能为你做些什么？",
     disclaimer: "内容由AI生成，重要信息请务必核查",
     createSkillPrompt:
@@ -827,9 +880,36 @@ export const zhCN: Translations = {
       launching: "启动中",
       running: "运行中",
       success: "成功",
+      unmet: "目标未达成",
       failed: "失败",
       skipped: "跳过",
       interrupted: "已中断",
+    },
+    goal: {
+      objective: "每次执行的目标",
+      maxRuns: "自动执行上限：{count} 次",
+      endAt: "截止时间",
+      met: "目标已达成",
+      metAssumed: "目标已达成（基于已声明的假设）",
+      stopRequested: "本次执行请求停止该定时任务",
+      lastPause: "上次暂停原因",
+      agentStopped: "Agent 主动停止了该定时任务",
+      autoPaused: "连续 3 次定时执行未达成目标",
+      lastUnmet: "上次未达成原因",
+      reasons: {
+        missingEvidence: "目标检查：缺少证据",
+        needsUserInput: "需要你补充信息",
+        externalWait: "目标检查：正在等待外部条件",
+        runFailed: "目标检查：本次执行未完成任务",
+        goalNotMetYet: "目标检查：尚未达成",
+        maxContinuations: "已达到续跑次数上限",
+        noProgress: "连续多轮没有进展",
+        tokenCapped: "已达到 token 预算",
+        evaluatorFailed: "目标检查未能完成",
+        noDurableEndOfTurn: "没有保存最终回复",
+        threadChanged: "目标检查期间对话发生了变化",
+        noVerdict: "未得到目标判定",
+      },
     },
     recipes: {
       label: "快速创建",
@@ -857,6 +937,14 @@ export const zhCN: Translations = {
     title: "智能体",
     description: "创建和管理具有专属 Prompt 与能力的自定义智能体。",
     newAgent: "新建智能体",
+    importAgent: "导入智能体",
+    importTitle: "导入自定义智能体",
+    importDescription: "为该智能体选择本地名称。已有智能体不会被覆盖。",
+    importName: "智能体名称",
+    importInvalidFile: "该文件不是有效的 JSON",
+    importSuccess: "智能体已导入",
+    exportAgent: "导出智能体",
+    exportSuccess: "智能体包已下载",
     emptyTitle: "还没有自定义智能体",
     emptyDescription: "创建你的第一个自定义智能体，设置专属系统提示词。",
     featureDisabledTitle: "智能体功能未启用",
@@ -1094,6 +1182,7 @@ export const zhCN: Translations = {
     saveChanges: "保存修改",
     descriptions: {
       buzz: "通过 DeerFlow 智能体接收 Buzz 频道消息和私聊。",
+      qq: "通过 WebSocket 接收 QQ 私聊和群聊 @机器人消息。",
       telegram: "通过 DeerFlow Bot 接收 Telegram 私聊消息。",
       slack: "接收 Slack 工作区消息和提及。",
       discord: "通过 DeerFlow Bot 接收 Discord 服务器消息。",

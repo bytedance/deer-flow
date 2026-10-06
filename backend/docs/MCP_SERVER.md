@@ -74,7 +74,12 @@ authentication fails and DeerFlow skips that MCP server, so no OpenViking tools
 appear. Changing only the environment variable does not invalidate DeerFlow's
 already-populated, file-signature-based MCP tool cache; after setting or fixing
 the key, restart DeerFlow, modify and re-save the extensions config, or call the
-MCP cache-reset endpoint at `POST /api/mcp/cache/reset`.
+MCP cache-reset endpoint at `POST /api/mcp/cache/reset`. In a multi-worker
+deployment whose workers share the writable extensions-config directory, that
+endpoint publishes a shared generation so every worker refreshes before its
+next MCP lookup. The response reports `scope: shared_config` to identify that
+transport (it reaches only workers mounting that directory), or `scope: process`
+if no config path can be resolved.
 
 OpenViking owns the tool schemas and behavior. DeerFlow performs the standard
 MCP initialization and discovery flow, prefixes the discovered names with
@@ -391,7 +396,19 @@ the task alive and recognize its ID after DeerFlow reconnects. A stdio server
 must therefore persist its own tasks; multi-instance deployments should
 normally use an independently running HTTP/SSE service.
 
-Server-level OAuth works during background polling and refreshes normally.
+For deployment-level HTTP/SSE servers with `task_toolsets`, discovery, ordinary
+tool calls, and background submit/status/cancel calls share the cached access
+token, rotated refresh token, and refresh lock for one Gateway process lifetime.
+Tool-cache resets and rediscovery keep that state. Token rotation does not
+modify the parsed configuration or trigger the startup-snapshot drift guard;
+real operator configuration changes still require a restart.
+
+This state is process-local and is never written back to `extensions_config.json`
+or an environment variable. A restarted Gateway needs a valid configured
+refresh token, and separate Gateway workers do not coordinate token rotation.
+Personal MCP connections remain owner-scoped and do not use this deployment
+state, even if their runtime names match a deployment server.
+
 When `user_auth` is enabled on an HTTP/SSE server, background status and
 cancellation calls use the persisted task owner's configured credential,
 including after a Gateway restart.

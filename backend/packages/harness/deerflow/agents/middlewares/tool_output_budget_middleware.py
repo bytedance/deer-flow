@@ -25,14 +25,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import posixpath
 import shlex
+import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import replace as dc_replace
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, Any, NamedTuple, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -51,7 +53,9 @@ from deerflow.community.ragflow.sources import budget_source_artifact
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.sandbox.lease import run_sync_lifecycle_operation
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.storage import BlobRef, BlobStoreError, get_blob_store_if_enabled
 
 if TYPE_CHECKING:
     from deerflow.sandbox.sandbox import Sandbox
@@ -64,6 +68,25 @@ logger = logging.getLogger(__name__)
 # ``read_file`` tool can read it back (issue #3416).
 _VIRTUAL_OUTPUTS_BASE = "/mnt/user-data/outputs"
 
+# Checkpointed capability added only by this middleware. The Gateway strips
+# client-supplied copies before they can enter state.
+TOOL_OUTPUT_BLOB_KEY = "deerflow_tool_output_blob"
+_TOOL_OUTPUT_BLOB_VERSION = 1
+_TOOL_OUTPUT_BLOB_KIND = "tool-output"
+_TOOL_OUTPUT_CONTENT_TYPE = "text/plain; charset=utf-8"
+# Matches the default local_fs backend object limit. A producer must not create
+# a reference that another default-configured Gateway cannot read.
+_MAX_TOOL_OUTPUT_BLOB_BYTES = 64 * 1024 * 1024
+# A configured shared store must never fail back to an unbounded model payload,
+# even when the operator disabled the ordinary disk-unavailable fallback.
+_DURABLE_FAILURE_FALLBACK_MAX_CHARS = 30_000
+
+
+class _BudgetedContent(NamedTuple):
+    replacement: str
+    transform_kind: str
+    blob_metadata: dict[str, Any] | None = None
+
 
 def _default_config() -> ToolOutputConfig:
     return ToolOutputConfig()
@@ -74,27 +97,41 @@ def _default_config() -> ToolOutputConfig:
 # ---------------------------------------------------------------------------
 
 
-def _message_text(content: Any) -> str | None:
-    """Extract a plain-text representation from a ToolMessage content field.
+def _split_budgetable_content(content: Any) -> tuple[str | None, list[Any]]:
+    """Render text/JSON for budgeting, retaining other blocks for the provider.
 
-    Returns ``None`` for non-string / multimodal content so the caller
-    can skip budget enforcement (images, structured blocks, etc.).
+    JSON blocks count even when mixed with media. Legacy text/image results
+    without JSON keep their existing pass-through behavior.
     """
     if isinstance(content, str):
-        return content
-    if content is None:
-        return None
+        return content, []
     if isinstance(content, list):
         pieces: list[str] = []
+        retained: list[Any] = []
+        has_json = False
         for part in content:
             if isinstance(part, str):
                 pieces.append(part)
+            elif isinstance(part, dict) and part.get("type") == "json" and "json" in part:
+                # Keep this serialization in sync with mindie_provider._fix_messages.
+                has_json = True
+                try:
+                    pieces.append(json.dumps(part["json"], ensure_ascii=False))
+                except (TypeError, ValueError):
+                    pieces.append(str(part["json"]))
             elif isinstance(part, dict) and isinstance(part.get("text"), str):
                 pieces.append(part["text"])
             else:
-                return None
-        return "\n".join(pieces) if pieces else None
-    return None
+                retained.append(part)
+        if retained and not has_json:
+            return None, retained
+        return ("\n".join(pieces) if pieces else None), retained
+    return None, []
+
+
+def _message_text(content: Any) -> str | None:
+    """Return the text/JSON representation eligible for output budgeting."""
+    return _split_budgetable_content(content)[0]
 
 
 def _snap_to_line_boundary(text: str, pos: int) -> int:
@@ -151,7 +188,7 @@ def _sanitize_tool_name(name: str) -> str:
     return safe or "unknown"
 
 
-def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
+def _build_externalized_filename(*, tool_name: str, tool_call_id: str, content: str) -> str:
     """Build the on-disk filename for an externalized tool output.
 
     Shared by the host-disk and sandbox externalization paths so both
@@ -159,8 +196,15 @@ def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
     """
     safe_name = _sanitize_tool_name(tool_name)
     ext = _EXT_MAP.get(tool_name, "txt")
-    short_id = uuid.uuid4().hex[:12]
-    return f"{safe_name}-{short_id}.{ext}"
+    # Hash the raw ID and content so missing IDs, sanitization collisions and
+    # oversized IDs cannot overwrite distinct output. Frame the ID length to
+    # keep the boundary unambiguous, including when either value contains NUL.
+    call_id_bytes = tool_call_id.encode("utf-8")
+    digest = hashlib.sha256()
+    digest.update(len(call_id_bytes).to_bytes(8, "big"))
+    digest.update(call_id_bytes)
+    digest.update(content.encode("utf-8"))
+    return f"{safe_name}-{digest.hexdigest()}.{ext}"
 
 
 def _externalize(
@@ -180,19 +224,72 @@ def _externalize(
     except OSError:
         return None
 
-    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id)
-    filepath = os.path.join(storage_dir, filename)
-
-    if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
-        return None
-
+    # Each writer owns a unique sibling temp file, so concurrent calls cannot
+    # truncate or clean up each other's pending output. Publish only after close
+    # (also required on Windows), keeping the final filename deterministic.
+    tmp_path = None
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
+        filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
+        filepath = os.path.join(storage_dir, filename)
+        if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
+            return None
+
+        candidate_path = os.path.join(storage_dir, f".tool-output-{uuid.uuid4().hex}.tmp")
+        # Exclusive creation keeps per-writer ownership while honoring umask,
+        # unlike NamedTemporaryFile's fixed 0600 mode on mounted outputs.
+        # newline="" keeps the bytes equal to the stamped blob ref; Windows
+        # text mode would write CRLF and restore would discard the file.
+        with open(candidate_path, "x", encoding="utf-8", newline="") as f:
+            tmp_path = candidate_path
             f.write(content)
-    except OSError:
+        os.replace(tmp_path, filepath)
+    except (OSError, UnicodeEncodeError):
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
         return None
 
     return f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}/{filename}"
+
+
+def _host_path_for_externalized_output(
+    virtual_path: str,
+    *,
+    outputs_path: str,
+    storage_subdir: str,
+) -> str | None:
+    """Map one middleware-owned virtual path into the current thread root.
+
+    Blob metadata is durable capability data. Even though external callers are
+    stripped at the Gateway, validate it again before a store read or host write
+    so a malformed legacy checkpoint cannot escape the tool-results directory.
+    """
+    if not isinstance(virtual_path, str) or not virtual_path:
+        return None
+    if not storage_subdir or storage_subdir in {".", ".."} or os.path.isabs(storage_subdir) or "/" in storage_subdir or "\\" in storage_subdir:
+        return None
+    virtual_dir = f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}"
+    if posixpath.normpath(virtual_path) != virtual_path or posixpath.dirname(virtual_path) != virtual_dir:
+        return None
+    filename = posixpath.basename(virtual_path)
+    if not filename or filename in {".", ".."}:
+        return None
+
+    outputs_root = os.path.realpath(os.path.abspath(outputs_path))
+    storage_root = os.path.realpath(os.path.join(outputs_root, storage_subdir))
+    candidate = os.path.realpath(os.path.join(storage_root, filename))
+    try:
+        if os.path.commonpath([outputs_root, storage_root]) != outputs_root:
+            return None
+        if os.path.commonpath([storage_root, candidate]) != storage_root:
+            return None
+    except ValueError:
+        return None
+    if os.path.dirname(candidate) != storage_root:
+        return None
+    return candidate
 
 
 def _externalize_to_sandbox(
@@ -213,24 +310,30 @@ def _externalize_to_sandbox(
     """
     if os.path.isabs(storage_subdir) or ".." in storage_subdir:
         return None
-    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id)
-    virtual_dir = f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}"
-    virtual_path = f"{virtual_dir}/{filename}"
     try:
+        # Hashing encodes provider text too; keep encoding errors within the
+        # same failure boundary as sandbox writes so callers can truncate.
+        filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
+        virtual_dir = f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}"
+        virtual_path = f"{virtual_dir}/{filename}"
         # AIO sandbox write_file does NOT create parent directories, so create
         # them explicitly before writing. execute_command returns its stdout
         # verbatim (including an "Error: ..." string on failure) rather than
         # raising, so we cannot rely on exception propagation here.
         sandbox.execute_command(f"mkdir -p {shlex.quote(virtual_dir)}")
         sandbox.write_file(virtual_path, content)
-        # Validate the file landed: execute_command may have silently failed
-        # to create the directory, and write_file backends differ. Refuse to
-        # hand the model an unreadable read_file path.
-        check = sandbox.execute_command(f"test -s {shlex.quote(virtual_path)} && echo OK || echo MISSING")
+        # Validate the file landed completely: execute_command may have silently
+        # failed to create the directory, or write_file may have truncated the
+        # content (disk full, backend pipe error). Refuse to hand the model an
+        # incomplete or unreadable read_file path.
+        expected_bytes = len(content.encode("utf-8"))
+        quoted_path = shlex.quote(virtual_path)
+        check = sandbox.execute_command(f'test -f {quoted_path} && test "$(wc -c < {quoted_path})" -eq {expected_bytes} && echo OK || echo MISSING')
         if not isinstance(check, str) or check.strip() != "OK":
             logger.warning(
-                "Sandbox externalize validation failed: path=%s, check=%r",
+                "Sandbox externalize validation failed: path=%s, expected_bytes=%d, check=%r",
                 virtual_path,
+                expected_bytes,
                 check,
             )
             return None
@@ -328,6 +431,20 @@ def _resolve_outputs_path(request: ToolCallRequest) -> str | None:
     return outputs_path if isinstance(outputs_path, str) else None
 
 
+def _resolve_thread_id(request: ToolCallRequest) -> str | None:
+    """Resolve advisory blob provenance from runtime context or config."""
+    runtime = getattr(request, "runtime", None)
+    context = getattr(runtime, "context", None)
+    if isinstance(context, Mapping):
+        thread_id = context.get("thread_id")
+        if isinstance(thread_id, str) and thread_id:
+            return thread_id
+    runtime_config = getattr(runtime, "config", None)
+    configurable = runtime_config.get("configurable") if isinstance(runtime_config, Mapping) else None
+    thread_id = configurable.get("thread_id") if isinstance(configurable, Mapping) else None
+    return thread_id if isinstance(thread_id, str) and thread_id else None
+
+
 def _resolve_sandbox(request: ToolCallRequest) -> Sandbox | None:
     """Resolve the active sandbox for the current tool call, or ``None``.
 
@@ -342,7 +459,9 @@ def _resolve_sandbox(request: ToolCallRequest) -> Sandbox | None:
     state = getattr(runtime, "state", None)
     if not isinstance(state, dict):
         return None
-    sandbox_state = state.get("sandbox")
+    from deerflow.sandbox.overwrite import unwrap_sandbox
+
+    sandbox_state, _ = unwrap_sandbox(state.get("sandbox"))
     if not isinstance(sandbox_state, dict):
         return None
     sandbox_id = sandbox_state.get("sandbox_id")
@@ -363,11 +482,12 @@ def _budget_content(
     outputs_path: str | None,
     config: ToolOutputConfig,
     sandbox: Sandbox | None = None,
-) -> tuple[str, str] | None:
+    thread_id: str | None = None,
+) -> _BudgetedContent | None:
     """Apply budget to *content* and name the applied transform.
 
-    Returns ``(replacement, transform_kind)`` — ``"externalized"`` or
-    ``"truncated"`` — or ``None`` if no change was needed.
+    Returns the replacement, transform kind, and optional durable blob
+    metadata, or ``None`` if no change was needed.
     """
     threshold = config.tool_overrides.get(tool_name, config.externalize_min_chars)
     if threshold <= 0 and config.fallback_max_chars <= 0:
@@ -377,6 +497,9 @@ def _budget_content(
 
     if threshold > 0 and len(content) > threshold:
         virtual_path: str | None = None
+        blob_metadata: dict[str, Any] | None = None
+        host_outputs_path: str | None = None
+        durable_fallback_required = False
         # Decide persistence target based on what's available, without touching
         # the sandbox provider unless a sandbox was actually resolved for this
         # call. This keeps the legacy host-disk path provider-free, so callers
@@ -394,13 +517,7 @@ def _budget_content(
                 # equivalent. Preserve the original behavior to avoid extra
                 # sandbox round-trips.
                 if outputs_path:
-                    virtual_path = _externalize(
-                        content,
-                        tool_name=tool_name,
-                        tool_call_id=tool_call_id,
-                        outputs_path=outputs_path,
-                        storage_subdir=config.storage_subdir,
-                    )
+                    host_outputs_path = outputs_path
             else:
                 virtual_path = _externalize_to_sandbox(
                     content,
@@ -412,13 +529,58 @@ def _budget_content(
         elif outputs_path:
             # No sandbox in this call (legacy / non-sandbox tools): write to
             # host outputs path directly, no provider needed.
-            virtual_path = _externalize(
-                content,
-                tool_name=tool_name,
-                tool_call_id=tool_call_id,
-                outputs_path=outputs_path,
-                storage_subdir=config.storage_subdir,
-            )
+            host_outputs_path = outputs_path
+
+        if host_outputs_path is not None:
+            blob_store = get_blob_store_if_enabled()
+            try:
+                blob_bytes = content.encode("utf-8") if blob_store is not None else None
+            except UnicodeEncodeError:
+                blob_bytes = None
+                durable_fallback_required = True
+                logger.warning("Tool output cannot be encoded as UTF-8 for durable blob externalization")
+            if blob_bytes is not None and len(blob_bytes) > _MAX_TOOL_OUTPUT_BLOB_BYTES:
+                durable_fallback_required = True
+                logger.warning(
+                    "Tool output is too large for durable blob externalization: %d bytes > %d",
+                    len(blob_bytes),
+                    _MAX_TOOL_OUTPUT_BLOB_BYTES,
+                )
+            elif not durable_fallback_required:
+                virtual_path = _externalize(
+                    content,
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                    outputs_path=host_outputs_path,
+                    storage_subdir=config.storage_subdir,
+                )
+                if virtual_path is not None and blob_store is not None and blob_bytes is not None:
+                    try:
+                        ref = blob_store.put_bytes(
+                            blob_bytes,
+                            kind=_TOOL_OUTPUT_BLOB_KIND,
+                            content_type=_TOOL_OUTPUT_CONTENT_TYPE,
+                            thread_id=thread_id,
+                        )
+                    except BlobStoreError:
+                        durable_fallback_required = True
+                        logger.warning(
+                            "Failed to persist externalized %s output in shared blob storage",
+                            tool_name,
+                            exc_info=True,
+                        )
+                        # A concurrent publisher may already have replaced the
+                        # deterministic host path. Do not unlink a file that
+                        # may belong to another successful blob checkpoint.
+                        virtual_path = None
+                    else:
+                        blob_metadata = {
+                            "version": _TOOL_OUTPUT_BLOB_VERSION,
+                            "ref": ref.model_dump(mode="json", exclude_none=True),
+                            "virtual_path": virtual_path,
+                            "storage_subdir": config.storage_subdir,
+                            "encoding": "utf-8",
+                        }
         if virtual_path is not None:
             logger.info(
                 "Externalized %s output (%d chars) to %s",
@@ -426,7 +588,7 @@ def _budget_content(
                 len(content),
                 virtual_path,
             )
-            return (
+            return _BudgetedContent(
                 _build_preview(
                     content,
                     tool_name=tool_name,
@@ -435,20 +597,29 @@ def _budget_content(
                     tail_chars=config.preview_tail_chars,
                 ),
                 "externalized",
+                blob_metadata,
             )
 
-    if config.fallback_max_chars > 0 and len(content) > config.fallback_max_chars:
+        if durable_fallback_required:
+            configured_limit = config.fallback_max_chars if config.fallback_max_chars > 0 else _DURABLE_FAILURE_FALLBACK_MAX_CHARS
+            fallback_max_chars = min(configured_limit, _DURABLE_FAILURE_FALLBACK_MAX_CHARS)
+        else:
+            fallback_max_chars = config.fallback_max_chars
+    else:
+        fallback_max_chars = config.fallback_max_chars
+
+    if fallback_max_chars > 0 and len(content) > fallback_max_chars:
         logger.warning(
             "Fallback-truncating %s output: %d chars → %d max",
             tool_name,
             len(content),
-            config.fallback_max_chars,
+            fallback_max_chars,
         )
-        return (
+        return _BudgetedContent(
             _build_fallback(
                 content,
                 tool_name=tool_name,
-                max_chars=config.fallback_max_chars,
+                max_chars=fallback_max_chars,
                 head_chars=config.fallback_head_chars,
                 tail_chars=config.fallback_tail_chars,
             ),
@@ -468,13 +639,14 @@ def _patch_tool_message(
     config: ToolOutputConfig,
     outputs_path: str | None,
     sandbox: Sandbox | None = None,
+    thread_id: str | None = None,
 ) -> ToolMessage:
     """Apply budget to a single ToolMessage. Returns the original if unchanged."""
     tool_name = msg.name or "unknown"
     if tool_name in config.exempt_tools:
         return msg
 
-    text = _message_text(msg.content)
+    text, retained_blocks = _split_budgetable_content(msg.content)
     if text is None:
         return msg
 
@@ -485,6 +657,7 @@ def _patch_tool_message(
         outputs_path=outputs_path,
         config=config,
         sandbox=sandbox,
+        thread_id=thread_id,
     )
     update: dict[str, Any] = {}
     trigger = _effective_trigger(tool_name, config)
@@ -495,14 +668,18 @@ def _patch_tool_message(
         replacement, update["artifact"] = citation_result
         transform_kind = "truncated"
     elif budgeted is not None:
-        replacement, transform_kind = budgeted
+        replacement = budgeted.replacement
+        transform_kind = budgeted.transform_kind
     else:
         return msg
-    update["content"] = replacement
+    update["content"] = [{"type": "text", "text": replacement}, *retained_blocks] if retained_blocks else replacement
     if getattr(msg, "response_metadata", None):
         update["response_metadata"] = dict(msg.response_metadata)
     new_kwargs = dict(getattr(msg, "additional_kwargs", None) or {})
-    if citation_result is not None and budgeted is not None and budgeted[1] == "externalized":
+    new_kwargs.pop(TOOL_OUTPUT_BLOB_KEY, None)
+    if budgeted is not None and budgeted.blob_metadata is not None:
+        new_kwargs[TOOL_OUTPUT_BLOB_KEY] = budgeted.blob_metadata
+    if citation_result is not None and budgeted is not None and budgeted.transform_kind == "externalized":
         append_tool_transform(new_kwargs, "externalized", by="ToolOutputBudgetMiddleware")
     append_tool_transform(new_kwargs, transform_kind, by="ToolOutputBudgetMiddleware")
     update["additional_kwargs"] = new_kwargs
@@ -555,10 +732,11 @@ def _patch_result(
     config: ToolOutputConfig,
     outputs_path: str | None,
     sandbox: Sandbox | None = None,
+    thread_id: str | None = None,
 ) -> ToolMessage | Command:
     """Apply budget to a tool call result (ToolMessage or Command)."""
     if isinstance(result, ToolMessage):
-        return _patch_tool_message(result, config, outputs_path, sandbox)
+        return _patch_tool_message(result, config, outputs_path, sandbox, thread_id)
 
     update = getattr(result, "update", None)
     if not isinstance(update, dict):
@@ -566,7 +744,7 @@ def _patch_result(
 
     messages = update.get("messages")
     if isinstance(messages, ToolMessage):
-        patched = _patch_tool_message(messages, config, outputs_path, sandbox)
+        patched = _patch_tool_message(messages, config, outputs_path, sandbox, thread_id)
         return result if patched is messages else dc_replace(result, update={**update, "messages": patched})
     if not isinstance(messages, (list, tuple)):
         return result
@@ -575,7 +753,7 @@ def _patch_result(
     changed = False
     for msg in messages:
         if isinstance(msg, ToolMessage):
-            patched = _patch_tool_message(msg, config, outputs_path, sandbox)
+            patched = _patch_tool_message(msg, config, outputs_path, sandbox, thread_id)
             if patched is not msg:
                 changed = True
             new_messages.append(patched)
@@ -667,6 +845,135 @@ def _patch_model_messages(messages: list[Any], config: ToolOutputConfig) -> list
         else:
             updated.append(msg)
     return updated if changed else None
+
+
+def _model_outputs_path(request: ModelRequest) -> str | None:
+    state = getattr(request, "state", None)
+    if not isinstance(state, Mapping):
+        return None
+    thread_data = state.get("thread_data")
+    if not isinstance(thread_data, Mapping):
+        return None
+    outputs_path = thread_data.get("outputs_path")
+    return outputs_path if isinstance(outputs_path, str) and outputs_path else None
+
+
+def _has_tool_output_blob_refs(messages: list[Any]) -> bool:
+    """Cheap pre-scan used to keep normal async model calls on the event loop."""
+    return any(isinstance(message, ToolMessage) and isinstance(getattr(message, "additional_kwargs", None), dict) and TOOL_OUTPUT_BLOB_KEY in message.additional_kwargs for message in messages)
+
+
+def _write_restored_output(filepath: str, data: bytes) -> bool:
+    """Atomically publish restored bytes without exposing a partial file."""
+    directory = os.path.dirname(filepath)
+    tmp_path: str | None = None
+    try:
+        os.makedirs(directory, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=f".{os.path.basename(filepath)}.", suffix=".tmp", dir=directory)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, filepath)
+        return True
+    except OSError:
+        logger.warning("Failed to restore externalized tool output on this Gateway", exc_info=True)
+        return False
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.warning("Failed to clean up tool-output restore temp file", exc_info=True)
+
+
+def _discard_mismatched_output(filepath: str) -> None:
+    """Do not leave known-wrong bytes behind a trusted read_file reference."""
+    try:
+        os.unlink(filepath)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning("Failed to remove mismatched externalized tool output", exc_info=True)
+
+
+def _restore_tool_output_blobs(messages: list[Any], *, outputs_path: str) -> None:
+    """Materialize durable host-externalized results under this Gateway.
+
+    Existing digest-matching files are reused without touching the blob store.
+    Invalid metadata and unavailable blobs are ignored so a transient storage
+    outage does not prevent the model from using the inline preview.
+    """
+    store_resolved = False
+    blob_store = None
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        payload = (message.additional_kwargs or {}).get(TOOL_OUTPUT_BLOB_KEY)
+        if not isinstance(payload, Mapping):
+            continue
+        if payload.get("version") != _TOOL_OUTPUT_BLOB_VERSION or payload.get("encoding") != "utf-8":
+            continue
+        ref_data = payload.get("ref")
+        virtual_path = payload.get("virtual_path")
+        storage_subdir = payload.get("storage_subdir")
+        if not isinstance(ref_data, Mapping) or not isinstance(virtual_path, str) or not isinstance(storage_subdir, str):
+            continue
+        try:
+            ref = BlobRef.model_validate(dict(ref_data))
+        except (TypeError, ValueError):
+            continue
+        if ref.kind != _TOOL_OUTPUT_BLOB_KIND or ref.content_type != _TOOL_OUTPUT_CONTENT_TYPE:
+            continue
+        filepath = _host_path_for_externalized_output(
+            virtual_path,
+            outputs_path=outputs_path,
+            storage_subdir=storage_subdir,
+        )
+        if filepath is None:
+            continue
+
+        local_mismatch = False
+        try:
+            if os.stat(filepath).st_size != ref.size:
+                local_mismatch = True
+            else:
+                with open(filepath, "rb") as handle:
+                    if ref.matches(handle.read()):
+                        continue
+                    local_mismatch = True
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("Failed to inspect local externalized tool output", exc_info=True)
+
+        if not store_resolved:
+            blob_store = get_blob_store_if_enabled()
+            store_resolved = True
+        if blob_store is None:
+            if local_mismatch:
+                _discard_mismatched_output(filepath)
+            continue
+        try:
+            data = blob_store.get_bytes(ref)
+        except BlobStoreError:
+            logger.warning(
+                "Failed to resolve externalized tool output blob %s",
+                ref.sha256[:12],
+                exc_info=True,
+            )
+            if local_mismatch:
+                _discard_mismatched_output(filepath)
+            continue
+        if not ref.matches(data):
+            logger.warning("Blob backend returned mismatched tool output %s", ref.sha256[:12])
+            if local_mismatch:
+                _discard_mismatched_output(filepath)
+            continue
+        if not _write_restored_output(filepath, data) and local_mismatch:
+            _discard_mismatched_output(filepath)
 
 
 # ---------------------------------------------------------------------------
@@ -824,7 +1131,13 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         if self._config.enabled and _needs_budget(result, self._config):
             outputs_path = _resolve_outputs_path(request)
             sandbox = _resolve_sandbox(request)
-            result = _patch_result(result, self._config, outputs_path, sandbox)
+            result = _patch_result(
+                result,
+                self._config,
+                outputs_path,
+                sandbox,
+                _resolve_thread_id(request),
+            )
         return _record_visible_skill_usage(result, request, skill_read_tool_names=self._skill_read_tool_names, skills_root=self._skills_root)
 
     @override
@@ -840,7 +1153,14 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
             # in-memory sandbox registry, so it is safe to call on the event
             # loop. The actual sandbox I/O happens in the worker thread.
             sandbox = _resolve_sandbox(request)
-            result = await asyncio.to_thread(_patch_result, result, self._config, outputs_path, sandbox)
+            result = await asyncio.to_thread(
+                _patch_result,
+                result,
+                self._config,
+                outputs_path,
+                sandbox,
+                _resolve_thread_id(request),
+            )
         return _record_visible_skill_usage(result, request, skill_read_tool_names=self._skill_read_tool_names, skills_root=self._skills_root)
 
     # -- model call hooks (historical context budgeting) -------------------
@@ -859,15 +1179,25 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        # Pure in-memory rewrite: no sandbox or file I/O, so it stays on the loop.
-        return await handler(self._budget_model_request(request))
+        messages = getattr(request, "messages", None)
+        outputs_path = _model_outputs_path(request)
+        if isinstance(messages, list) and outputs_path is not None and _has_tool_output_blob_refs(messages):
+            # A blob read and atomic host write may outlive cancellation. Drain
+            # the worker before the request boundary releases its resources.
+            prepared = await run_sync_lifecycle_operation(self._budget_model_request, request)
+        else:
+            prepared = self._budget_model_request(request)
+        return await handler(prepared)
 
     def _budget_model_request(self, request: ModelRequest) -> ModelRequest:
         """Truncate oversized historical tool output and elide superseded write payloads in the request copy only."""
-        if not self._config.enabled:
-            return request
         original = getattr(request, "messages", None)
         if not isinstance(original, list):
+            return request
+        outputs_path = _model_outputs_path(request)
+        if outputs_path is not None and _has_tool_output_blob_refs(original):
+            _restore_tool_output_blobs(original, outputs_path=outputs_path)
+        if not self._config.enabled:
             return request
         messages = original
         patched = _patch_model_messages(messages, self._config)

@@ -202,6 +202,9 @@ class ClaudeChatModel(ChatAnthropic):
         placed on the *last* eligible blocks because later breakpoints cover a
         larger prefix and yield better cache hit rates.
 
+        Thinking and redacted-thinking blocks cannot carry cache_control.
+        Preserve them in the cached prefix, but exclude them as breakpoints.
+
         The budget covers the whole request, so markers already present are
         dropped first.  Checkpoints written before breakpoints were placed on
         copies can still carry markers on old blocks, and those would otherwise
@@ -245,7 +248,7 @@ class ClaudeChatModel(ChatAnthropic):
             content = msg.get("content")
             if isinstance(content, list):
                 for index, block in enumerate(content):
-                    if isinstance(block, dict):
+                    if isinstance(block, dict) and block.get("type") not in ("thinking", "redacted_thinking"):
                         candidates.append((content, index))
             elif isinstance(content, str) and content:
                 msg["content"] = [{"type": "text", "text": content}]

@@ -23,6 +23,18 @@ export interface Translations {
     deploymentHint: string;
     moduleUnavailable: string;
     noResults: string;
+    catalogEntry: string;
+    catalogHint: string;
+    installationGuide: string;
+    catalog: Record<
+      | "agentTeams"
+      | "bookmarks"
+      | "context"
+      | "classify"
+      | "screening"
+      | "example",
+      { title: string; description: string }
+    >;
     pageUnavailable: string;
     pageUnavailableHint: string;
     viewAll: string;
@@ -301,6 +313,26 @@ export interface Translations {
 
   // Input Box
   inputBox: {
+    mentionPicker: string;
+    mentionSearch: string;
+    mentionSkills: string;
+    mentionFiles: string;
+    mentionExtensions: string;
+    mentionExtensionsLimit: string;
+    mentionConversations: string;
+    mentionUpload: string;
+    mentionEmpty: string;
+    mentionLoadMore: string;
+    mentionLoading: string;
+    mentionFailed: string;
+    mentionRetry: string;
+    mentionAttaching: string;
+    mentionAttachFailed: string;
+    mentionMultipleSkills: string;
+    mentionNoProject: string;
+    mentionUnavailable: string;
+    mentionClose: string;
+
     placeholder: string;
     disclaimer: string;
     createSkillPrompt: string;
@@ -743,9 +775,36 @@ export interface Translations {
       launching: string;
       running: string;
       success: string;
+      unmet: string;
       failed: string;
       skipped: string;
       interrupted: string;
+    };
+    goal: {
+      objective: string;
+      maxRuns: string;
+      endAt: string;
+      met: string;
+      metAssumed: string;
+      stopRequested: string;
+      lastPause: string;
+      agentStopped: string;
+      autoPaused: string;
+      lastUnmet: string;
+      reasons: {
+        missingEvidence: string;
+        needsUserInput: string;
+        externalWait: string;
+        runFailed: string;
+        goalNotMetYet: string;
+        maxContinuations: string;
+        noProgress: string;
+        tokenCapped: string;
+        evaluatorFailed: string;
+        noDurableEndOfTurn: string;
+        threadChanged: string;
+        noVerdict: string;
+      };
     };
     recipes: {
       label: string;
@@ -761,6 +820,14 @@ export interface Translations {
     title: string;
     description: string;
     newAgent: string;
+    importAgent: string;
+    importTitle: string;
+    importDescription: string;
+    importName: string;
+    importInvalidFile: string;
+    importSuccess: string;
+    exportAgent: string;
+    exportSuccess: string;
     emptyTitle: string;
     emptyDescription: string;
     featureDisabledTitle: string;

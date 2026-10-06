@@ -65,14 +65,14 @@ from deerflow.typesafe.validation import criteria_entry, defaulted_text, finite_
 _QUESTION_ID = "risky_tool_call"
 _DIGEST_CHARS = 16
 
-_DEFAULT_INSTRUCTIONS = "Does executing this tool call risk an irreversible or out-of-scope side effect? Judge the call from its text alone."
-_DEFAULT_CRITERIA_TRUE = (
+DEFAULT_INSTRUCTIONS = "Does executing this tool call risk an irreversible or out-of-scope side effect? Judge the call from its text alone."
+DEFAULT_CRITERIA_TRUE = (
     "Any of: deletes or overwrites data; changes permissions or access control; publishes, pushes, or sends anything outside the task; "
     "spends money or places an order; reads or writes credentials or secrets; executes content that the call text does not show "
     "(bash ./script.sh, curl ... | sh, base64 or compressed payloads, python -c on decoded input); the arguments are too thin to tell "
     "how far the effect reaches. These take precedence over the false criteria."
 )
-_DEFAULT_CRITERIA_FALSE = "Read-only or retrieval-only; or a change that the call text shows to be local and reversible."
+DEFAULT_CRITERIA_FALSE = "Read-only or retrieval-only; or a change that the call text shows to be local and reversible."
 
 _CONFIGURATION_SOURCE = "guardrails.provider.config"
 
@@ -168,9 +168,9 @@ class TypeSafeGuardrailProvider:
         self._connection = connection
         self._client = TypeSafeClient(connection, transport_factory=transport_factory)
         self._threshold = finite_float("threshold", threshold, minimum=0.0, maximum=1.0)
-        self._instructions = defaulted_text("instructions", instructions, _DEFAULT_INSTRUCTIONS)
-        self._criteria_true = defaulted_text("criteria.true", criteria_entry(criteria, True), _DEFAULT_CRITERIA_TRUE)
-        self._criteria_false = defaulted_text("criteria.false", criteria_entry(criteria, False), _DEFAULT_CRITERIA_FALSE)
+        self._instructions = defaulted_text("instructions", instructions, DEFAULT_INSTRUCTIONS)
+        self._criteria_true = defaulted_text("criteria.true", criteria_entry(criteria, True), DEFAULT_CRITERIA_TRUE)
+        self._criteria_false = defaulted_text("criteria.false", criteria_entry(criteria, False), DEFAULT_CRITERIA_FALSE)
         self._tools = _tool_names("tools", tools)
         self._allowed_tools = _tool_names("allowed_tools", allowed_tools)
         self._max_state_chars = whole_number("max_state_chars", max_state_chars, minimum=1)
@@ -430,4 +430,4 @@ def _tool_names(name: str, value: object) -> frozenset[str] | None:
     return frozenset(value)
 
 
-__all__ = ["DEFAULT_API_KEY_ENV", "DEFAULT_BASE_URL", "TypeSafeGuardrailError", "TypeSafeGuardrailProvider"]
+__all__ = ["DEFAULT_API_KEY_ENV", "DEFAULT_BASE_URL", "DEFAULT_CRITERIA_FALSE", "DEFAULT_CRITERIA_TRUE", "DEFAULT_INSTRUCTIONS", "TypeSafeGuardrailError", "TypeSafeGuardrailProvider"]

@@ -285,7 +285,7 @@ def test_get_initial_oauth_headers_one_failing_server_does_not_drop_others(monke
 
     def _client_factory(**kwargs):
         # The first call is for the failing server, second for the healthy one,
-        # because OAuthTokenManager iterates _oauth_by_server in dict order
+        # because OAuthTokenManager iterates the configured servers in dict order
         # ('broken-http' < 'secure-http').
         if not hasattr(_client_factory, "_count"):
             _client_factory._count = 0  # type: ignore[attr-defined]
@@ -561,7 +561,7 @@ def test_get_authorization_header_cancelled_while_waiting_does_not_leak_lock(mon
     )
 
     manager = OAuthTokenManager.from_extensions_config(config)
-    lock = manager._locks["secure-http"]
+    lock = manager._states["secure-http"].lock
 
     async def scenario() -> None:
         # Simulate another in-flight caller already holding the per-server lock

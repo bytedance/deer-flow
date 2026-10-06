@@ -410,6 +410,26 @@ def _parse_fact_markdown(path: Path) -> dict[str, Any]:
         raise MemoryStorageCorruption(f"Failed to parse canonical fact {path}: {exc}") from exc
 
 
+def _parse_listed_fact(path: Path) -> dict[str, Any] | None:
+    """Parse a fact found by a directory scan that ran without the scope locks.
+
+    A commit can delete a listed fact before it is opened; that vanished entry
+    returns ``None``. An entry that is still present but unreadable (such as a
+    dangling symlink) remains corruption.
+
+    The ``lexists`` re-check is a best-effort heuristic, not an exact test: a
+    delete followed by a recreate of the same id before the check still raises
+    (the conservative side), and an ``lstat`` failure on a parent directory
+    (such as ``EACCES``) reads as vanished, so that entry is skipped.
+    """
+    try:
+        return _parse_fact_markdown(path)
+    except MemoryStorageCorruption:
+        if os.path.lexists(path):
+            raise
+        return None
+
+
 def _fsync_parent_directory(directory: Path) -> None:
     """Make a completed rename durable on POSIX filesystems."""
     if os.name == "nt":
@@ -869,7 +889,12 @@ class FileMemoryStorage(MemoryStorage):
             return []
         facts: list[dict[str, Any]] = []
         for fact_path in sorted(agent_facts_directory(path, agent_name).glob("**/*.md")):
-            fact = _parse_fact_markdown(fact_path)
+            # Reached both unlocked (load()/reload()) and under the scope locks
+            # (save(), clear_all(), default-bucket migration); the vanished-entry
+            # skip only ever fires on the unlocked paths.
+            fact = _parse_listed_fact(fact_path)
+            if fact is None:
+                continue
             facts.append(self._validate_loaded_fact(fact, fact_path, user_id=user_id, agent_name=agent_name))
         # Shard directories are an internal layout detail and must not change
         # the stable fact order observed by callers.
@@ -1396,8 +1421,11 @@ class FileMemoryStorage(MemoryStorage):
                 migration_notifications = self._run_read_migrations_locked(path, agent_name, user_id=user_id)
         for notification_agent, notifications in migration_notifications:
             self._dispatch_retrieval_notifications(notifications, user_id=user_id, agent_name=notification_agent)
-        document = self._read_document(path, agent_name, user_id=user_id)
+        # Sign before reading, as load() does: a write landing in between then
+        # leaves a stale signature that forces a re-read, never a stale
+        # document cached under the new signature.
         signature = self._scope_signature(path, agent_name)
+        document = self._read_document(path, agent_name, user_id=user_id)
         with self._cache_lock:
             self._memory_cache[key] = (copy.deepcopy(document), signature)
         if _rebuild_retrieval and agent_name is not None and self._retrieval is not None:
@@ -1840,7 +1868,9 @@ class FileMemoryStorage(MemoryStorage):
             candidates = root.glob("**/facts/**/*.md")
             for path in candidates:
                 try:
-                    fact = _parse_fact_markdown(path)
+                    fact = _parse_listed_fact(path)
+                    if fact is None:
+                        continue
                     relative_parts = path.relative_to(root).parts
                     agents_index = relative_parts.index("agents")
                     expected_agent = relative_parts[agents_index + 1]

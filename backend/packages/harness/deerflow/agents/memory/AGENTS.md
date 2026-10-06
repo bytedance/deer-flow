@@ -63,7 +63,22 @@ The legacy shared agent layout is read-only fallback data.
 
 DeerMem maps a missing agent name to `__default__`.
 That name is reserved and cannot identify a custom agent.
-Public agent names use lowercase canonical form.
+DeerMem canonicalizes public agent names to lowercase for local storage.
+Remote backends may preserve the case-sensitive identity used when facts were
+written.
+
+Gateway management reads, reload, import/export, clear, and single-fact CRUD
+accept an optional `agent_name`. A backend must opt in with
+`supports_agent_scoped_management = True`; otherwise a scoped request returns
+501 instead of silently operating on user-global or default-bucket data.
+Omitting the parameter preserves the legacy default bucket for reads, reload,
+import/export, and fact CRUD; omitting it from clear preserves the legacy
+user-wide clear. Gateway validates the public agent-name grammar but preserves
+the caller's spelling so case-sensitive remote identities remain reachable;
+each backend owns any storage-specific canonicalization.
+Scoped import replaces only the selected agent's facts. It always preserves the
+user's shared `user` and `history` summaries, including when an older or
+fact-only import payload supplies empty summary defaults.
 
 #### Operating modes
 
@@ -119,6 +134,8 @@ Use the typed conflict classes instead of matching exception text.
 
 The weak lock cache must not retain inactive user scopes.
 Cache validation uses the manifest metadata and persisted revision.
+Unlocked `load()`/`reload()` compute that signature before reading the document.
+Unlocked fact scans skip entries deleted after listing; present unreadable entries are corruption.
 Out-of-band Markdown edits require `reload()`.
 POSIX atomic replacement must sync the parent directory.
 

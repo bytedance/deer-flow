@@ -181,7 +181,7 @@ class FakeEventStore:
     def __init__(self, rows):
         self.rows = rows
 
-    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None):
+    async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id=None):
         return self.rows[-limit:]
 
 
@@ -352,7 +352,11 @@ def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
 
     thread_result, stateless_result = asyncio.run(_scenario())
 
-    expected = {"status": "error", "error": "run failed before checkpoint"}
+    expected = {
+        "status": "error",
+        "error": "run failed before checkpoint",
+        "__error__": {"error": "RunError", "message": "run failed before checkpoint"},
+    }
     assert thread_result == expected
     assert stateless_result == expected
 
@@ -400,7 +404,12 @@ def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(ro
 
     result = asyncio.run(_scenario())
 
-    assert result == {"status": "error", "error": "run failed before checkpoint"}
+    expected = {
+        "status": "error",
+        "error": "run failed before checkpoint",
+        "__error__": {"error": "RunError", "message": "run failed before checkpoint"},
+    }
+    assert result == expected
 
 
 def test_prepare_regenerate_payload_returns_clean_input_and_base_checkpoint():

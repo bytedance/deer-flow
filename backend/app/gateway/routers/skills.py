@@ -1,9 +1,9 @@
 import asyncio
 import logging
 import tempfile
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from pathlib import Path
-from typing import BinaryIO, Literal
+from typing import Any, BinaryIO, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
@@ -44,6 +44,7 @@ from deerflow.skills.security_static_scanner import (
 )
 from deerflow.skills.storage import SkillStorage, get_or_new_user_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -187,6 +188,27 @@ def _get_user_skill_storage(config: AppConfig) -> SkillStorage:
     return get_or_new_user_skill_storage(get_effective_user_id(), app_config=config)
 
 
+async def _drain_skill_mutation[T](op: str, persist: Callable[[], Coroutine[Any, Any, T]]) -> T:
+    """Run one skill mutation tail drained, logging failures cancellation would swallow.
+
+    ``await_drained`` consumes the drained task's exception before re-raising a
+    caller cancellation, which would make a cancelled-then-failed mutation
+    silent (the managed-models precedent). Skill archives and history records
+    carry user data, so only the exception type is logged — full detail is
+    re-raised to the endpoint handlers for connected callers. Caller-facing
+    4xx ``HTTPException`` contracts stay unlogged.
+    """
+    try:
+        return await persist()
+    except HTTPException as exc:
+        if exc.status_code >= 500:
+            logger.error("Skills %s failed inside the drained mutation tail (HTTP %d)", op, exc.status_code)
+        raise
+    except Exception as exc:
+        logger.error("Skills %s failed inside the drained mutation tail (%s)", op, type(exc).__name__)
+        raise
+
+
 def _load_user_skills(config: AppConfig) -> list[Skill]:
     """Load every skill visible to the caller's storage, enabled or not.
 
@@ -257,10 +279,19 @@ async def _parse_skill_archive_form(request: Request) -> FormData:
 
 
 async def _install_skill_archive(archive_path: Path, config: AppConfig) -> SkillInstallResponse:
-    try:
-        result = await _get_user_skill_storage(config).ainstall_skill_from_archive(archive_path)
+    async def _persist_install() -> SkillInstallResponse:
+        # A cold user-scoped storage resolves the project root and builds
+        # absolute paths on construction: blocking filesystem IO.
+        storage = await asyncio.to_thread(_get_user_skill_storage, config)
+        result = await storage.ainstall_skill_from_archive(archive_path)
+        # The install and its prompt-cache refresh settle as one drained unit:
+        # a cancelled caller must not leave the freshly installed skill absent
+        # from (or a stale one still present in) the skills prompt cache.
         await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
         return SkillInstallResponse(**result)
+
+    try:
+        return await await_drained(_drain_skill_mutation("install", _persist_install))
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except SkillAlreadyExistsError as e:
@@ -545,29 +576,45 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
-        storage.ensure_custom_skill_is_editable(skill_name)
-        storage.validate_skill_markdown_content(skill_name, body.content)
+
+        def _check_editable_content() -> SkillStorage:
+            # Worker thread: storage construction, the editability probes, and
+            # the frontmatter validation (which round-trips the draft through a
+            # temporary directory) are blocking filesystem IO — the same rule
+            # rollback_custom_skill applies before its scan.
+            storage = _get_user_skill_storage(config)
+            storage.ensure_custom_skill_is_editable(skill_name)
+            storage.validate_skill_markdown_content(skill_name, body.content)
+            return storage
+
+        storage = await asyncio.to_thread(_check_editable_content)
         static_findings = await _scan_static_skill_markdown_or_raise(skill_name, body.content, app_config=config)
         scan = await scan_skill_content(body.content, executable=False, location=f"{skill_name}/{SKILL_MD_FILE}", app_config=config, static_findings=static_findings)
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
-        prev_content = storage.read_custom_skill(skill_name)
-        await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, body.content)
-        await asyncio.to_thread(
-            storage.append_history,
-            skill_name,
-            {
-                "action": "human_edit",
-                "author": "human",
-                "thread_id": None,
-                "file_path": SKILL_MD_FILE,
-                "prev_content": prev_content,
-                "new_content": body.content,
-                "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
-            },
-        )
-        await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+        prev_content = await asyncio.to_thread(storage.read_custom_skill, skill_name)
+
+        async def _persist_edit() -> None:
+            # The write and its history entry must settle together, and the
+            # prompt cache must not stay stale behind them: a cancelled caller
+            # drains the whole mutation tail instead of cutting it mid-sequence.
+            await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, body.content)
+            await asyncio.to_thread(
+                storage.append_history,
+                skill_name,
+                {
+                    "action": "human_edit",
+                    "author": "human",
+                    "thread_id": None,
+                    "file_path": SKILL_MD_FILE,
+                    "prev_content": prev_content,
+                    "new_content": body.content,
+                    "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
+                },
+            )
+            await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+
+        await await_drained(_drain_skill_mutation("edit", _persist_edit))
         return await _read_custom_skill_response(skill_name, config)
     except HTTPException:
         raise
@@ -585,21 +632,30 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
-        await asyncio.to_thread(
-            storage.delete_custom_skill,
-            skill_name,
-            history_meta={
-                "action": "human_delete",
-                "author": "human",
-                "thread_id": None,
-                "file_path": SKILL_MD_FILE,
-                "prev_content": None,
-                "new_content": None,
-                "scanner": {"decision": "allow", "reason": "Deletion requested."},
-            },
-        )
-        await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+        # A cold user-scoped storage resolves the project root and builds
+        # absolute paths on construction: blocking filesystem IO.
+        storage = await asyncio.to_thread(_get_user_skill_storage, config)
+
+        async def _persist_delete() -> None:
+            # Same cancellation contract as the edit and rollback tails: the
+            # deletion and its history record settle before a cancelled caller
+            # unwinds, and the prompt cache reflects the removal.
+            await asyncio.to_thread(
+                storage.delete_custom_skill,
+                skill_name,
+                history_meta={
+                    "action": "human_delete",
+                    "author": "human",
+                    "thread_id": None,
+                    "file_path": SKILL_MD_FILE,
+                    "prev_content": None,
+                    "new_content": None,
+                    "scanner": {"decision": "allow", "reason": "Deletion requested."},
+                },
+            )
+            await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+
+        await await_drained(_drain_skill_mutation("delete", _persist_delete))
         return {"success": True}
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -683,9 +739,16 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
         if scan.decision == "block":
             await asyncio.to_thread(storage.append_history, skill_name, history_entry)
             raise HTTPException(status_code=400, detail=f"Rollback blocked by security scanner: {scan.reason}")
-        await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, target_content)
-        await asyncio.to_thread(storage.append_history, skill_name, history_entry)
-        await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+
+        async def _persist_rollback() -> None:
+            # The restore write and its history entry must settle together, and
+            # the prompt cache must reflect the restored content, before a
+            # cancelled caller unwinds.
+            await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, target_content)
+            await asyncio.to_thread(storage.append_history, skill_name, history_entry)
+            await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+
+        await await_drained(_drain_skill_mutation("rollback", _persist_rollback))
         return await _read_custom_skill_response(skill_name, config)
     except HTTPException:
         raise
@@ -785,13 +848,14 @@ def _write_extensions_skill_state(
     "/skills/{skill_name}",
     response_model=SkillResponse,
     summary="Update Skill",
-    description="Update a skill's enabled status by modifying the extensions_config.json file.",
+    description=("Update a skill's enabled status (admin only). Public skills persist to the shared extensions_config.json; custom/legacy skills persist to per-user storage when available, otherwise to the shared configuration."),
 )
 async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Request, config: AppConfig = Depends(get_config)) -> SkillResponse:
-    # Enabling/disabling a skill writes the shared extensions_config.json and
-    # refreshes the system prompt for every tenant, so it is a global mutation
-    # (there is no per-user skill state). Guard it as admin-only like the other
-    # global config writes, matching the MCP router.
+    # Keep skill toggles admin-only, including user-scoped custom/legacy skills.
+    # Public state uses shared extensions_config.json; custom/legacy state uses
+    # per-user storage when available, falling back to shared config otherwise.
+    # Public toggles clear all users' caches; custom/legacy refresh only the caller,
+    # even in the shared-config fallback (other users' cached state may be stale).
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
@@ -808,47 +872,53 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
         if skill is None:
             raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
 
-        # PUBLIC skills → global extensions_config.json (shared state).
-        # CUSTOM / LEGACY skills → per-user _skill_states.json (isolated state)
-        # so that two users with same-named custom skills can toggle independently.
-        if skill.category == SkillCategory.PUBLIC:
-            await asyncio.to_thread(
-                _write_extensions_skill_state,
-                storage,
-                skill_name,
-                body.enabled,
-                rebuild_public_projection=True,
-            )
-        else:
-            # CUSTOM / LEGACY: write per-user state
-            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
-
-            if isinstance(storage, UserScopedSkillStorage):
-                await asyncio.to_thread(storage.set_skill_enabled_state, skill_name, body.enabled)
-            else:
-                # Fallback for non-user-scoped storage (unlikely in practice):
-                # same shared-file RMW as the PUBLIC branch, without a public
-                # projection rebuild for this non-public skill.
+        async def _persist_state() -> None:
+            # PUBLIC skills → global extensions_config.json (shared state).
+            # CUSTOM / LEGACY skills → per-user _skill_states.json (isolated state)
+            # so that two users with same-named custom skills can toggle independently.
+            if skill.category == SkillCategory.PUBLIC:
                 await asyncio.to_thread(
                     _write_extensions_skill_state,
                     storage,
                     skill_name,
                     body.enabled,
-                    rebuild_public_projection=False,
+                    rebuild_public_projection=True,
                 )
+            else:
+                # CUSTOM / LEGACY: write per-user state
+                from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
-        # PUBLIC skill enabled state lives in the global extensions_config.json
-        # and affects every user, so the prompt cache for ALL users must be
-        # invalidated. CUSTOM/LEGACY skill state is per-user so only that
-        # user's cache needs to be dropped.
-        if skill.category == SkillCategory.PUBLIC:
-            # clear_skills_system_prompt_cache is sync; run it in a worker
-            # thread to avoid blocking the event loop. The lock inside it is
-            # cheap, but the async drop also keeps the test mock surface
-            # consistent (tests patch the async variant).
-            await asyncio.to_thread(clear_skills_system_prompt_cache)
-        else:
-            await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+                if isinstance(storage, UserScopedSkillStorage):
+                    await asyncio.to_thread(storage.set_skill_enabled_state, skill_name, body.enabled)
+                else:
+                    # Fallback for non-user-scoped storage (unlikely in practice):
+                    # same shared-file RMW as the PUBLIC branch, without a public
+                    # projection rebuild for this non-public skill.
+                    await asyncio.to_thread(
+                        _write_extensions_skill_state,
+                        storage,
+                        skill_name,
+                        body.enabled,
+                        rebuild_public_projection=False,
+                    )
+
+            # PUBLIC skill enabled state lives in the global extensions_config.json
+            # and affects every user, so the prompt cache for ALL users must be
+            # invalidated. CUSTOM/LEGACY drops only the caller's cache, including the
+            # non-user-scoped fallback above, where other users' entries may stay stale.
+            # The state write and its cache
+            # invalidation settle as one drained unit: a cancelled caller must
+            # not leave the prompt cache serving the previous enablement.
+            if skill.category == SkillCategory.PUBLIC:
+                # clear_skills_system_prompt_cache is sync; run it in a worker
+                # thread to avoid blocking the event loop. The lock inside it is
+                # cheap, but the async drop also keeps the test mock surface
+                # consistent (tests patch the async variant).
+                await asyncio.to_thread(clear_skills_system_prompt_cache)
+            else:
+                await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+
+        await await_drained(_drain_skill_mutation("state update", _persist_state))
 
         skills = await asyncio.to_thread(_load_user_skills, config)
         updated_skill = next((s for s in skills if s.name == skill_name), None)

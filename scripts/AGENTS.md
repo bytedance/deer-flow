@@ -1,3 +1,13 @@
+## Manual Claude OAuth Export
+
+`export_claude_code_oauth.py` validates Keychain JSON as an object containing an
+object `claudeAiOauth` and a nonblank string `accessToken` before any export action.
+Malformed containers use the existing token-missing error without exposing their
+contents. The loader returns the full container together with the validated token;
+export actions use that token without repeating credential-shape assumptions or
+trimming its contents. Offline CLI coverage:
+`backend/tests/test_claude_keychain_export.py`.
+
 ## Service Startup Contracts
 
 Optional browser dependency detection reads the top-level `tools:` sequence
@@ -40,8 +50,36 @@ where `make up` replaced the operator's secret with a generated one.
 its real-Compose cases run against the installed `docker` CLI and against any
 standalone binaries listed in `DEER_FLOW_TEST_COMPOSE_BINARIES`.
 
+`doctor.py` checks the config file the Gateway would load, not a fixed
+`<checkout>/config.yaml`. It mirrors how `serve.sh` hands the two
+config-location variables to the Gateway: `.env` values for
+`DEER_FLOW_CONFIG_PATH` / `DEER_FLOW_PROJECT_ROOT` override the shell (other
+keys stay shell-first), an unquoted leading `~` in them expands as `source`
+does (a quoted one stays literal), and an unset or empty
+`DEER_FLOW_PROJECT_ROOT` becomes the checkout. It then asks the harness
+(`AppConfig.resolve_config_path`) instead of re-implementing its order. An
+override the Gateway would reject (`DEER_FLOW_CONFIG_PATH` missing,
+`DEER_FLOW_PROJECT_ROOT` not a directory) fails `config.yaml found` with the
+Gateway's error, and the config-dependent checks skip. Any failure to import
+the harness is reported, never raised: doctor diagnoses broken environments.
+Pinned by `backend/tests/test_doctor.py::TestMainConfigResolution`.
+
+CLI credential JSON checks accept UTF-8 with or without a leading BOM, matching
+the runtime credential loader. Keep `_load_json_object` on `utf-8-sig`; malformed
+JSON and invalid encoding remain missing/invalid sources without exposing tokens.
+Public doctor/runtime agreement is pinned by
+`backend/tests/test_credential_file_encoding.py`.
+
 Root `make install` runs pre-commit through uv, so uv's tool bin directory
 need not be on `PATH`.
+
+`config-upgrade.sh` upgrades the file the Gateway loads by asking the harness
+(`AppConfig.resolve_config_path`) rather than copying its lookup order. It
+defaults `DEER_FLOW_PROJECT_ROOT` to the checkout, as `serve.sh` does, so
+`<checkout>/config.yaml` wins over a legacy `backend/config.yaml`. A missing
+`DEER_FLOW_CONFIG_PATH` or invalid project root is an error, never a fallback.
+Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
+`backend/tests/test_config_version.py::test_config_upgrade_*` pins this.
 
 ## Shell Script Invocation Contract
 
@@ -51,6 +89,14 @@ Git Bash wrapper. Shell scripts that invoke sibling repository scripts must
 likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
+
+`make clean` deletes `backend/.deer-flow` (database, users, threads, uploads,
+secrets), which both compose stacks mount into `deer-flow-gateway`. Its recipe
+runs `check-data-not-in-use.sh` before `make stop` (which would stop a live
+stack's sandboxes) and refuses while that container runs; an absent or
+unreachable Docker passes. `make stop` must still run before the delete: it
+stops `deer-flow-sandbox*` containers, whose thread mounts live in that tree.
+`RUNTIME_DATA_CONTENTS` feeds both the help line and the deletion notice.
 
 Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
 Python (`os.name == "nt"`), it checks `pnpm.cmd` before the generic `pnpm`
@@ -284,10 +330,12 @@ Memory backend async boundary:
 
 CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
 
-Agentic browser sessions are process-local. The Gateway startup safety gate rejects
-`GATEWAY_WORKERS > 1` when `browser_navigate` is configured, because ordinary
-uvicorn worker dispatch does not provide thread affinity for browser tools, REST
-navigation, and the Live WebSocket.
+Agentic browser sessions are process-local. Browser use is refused when the Gateway runs
+more than one worker process, because ordinary uvicorn worker dispatch does not provide
+thread affinity for browser tools, REST navigation, and the Live WebSocket. Keep
+`GATEWAY_WORKERS=1`, and on the launchers that pass uvicorn no `--workers`
+(`scripts/serve.sh`, `backend/Dockerfile`) keep `WEB_CONCURRENCY` unset or `1` too — that
+is where uvicorn takes the process count from.
 
 Browser Live screenshots remain JPEG bytes inside the harness and the Gateway's
 bounded, drop-oldest frame queue. WebSocket clients that request
