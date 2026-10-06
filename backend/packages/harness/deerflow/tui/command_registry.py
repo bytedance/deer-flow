@@ -3,8 +3,9 @@
 Normalizes two command sources into one searchable list:
 
 * **Built-ins** — TUI-owned affordances (``/help``, ``/model``, ``/threads`` …).
-* **Skills** — one ``/<skill-name>`` per enabled skill, preserving DeerFlow's
-  existing slash-skill activation semantics.
+* **Skills** — one ``/<skill-name>`` per enabled skill whose name the shared
+  slash grammar accepts, preserving DeerFlow's existing slash-skill activation
+  semantics.
 
 The picker filters this list; :func:`resolve` classifies a submitted line as a
 built-in command, a skill activation, an unknown command, or a plain message.
@@ -71,7 +72,7 @@ def format_command_help() -> str:
 
 
 def build_registry(skills: list[dict]) -> list[Command]:
-    """Merge built-ins with one command per enabled skill.
+    """Merge built-ins with one command per grammar-activatable enabled skill.
 
     Mounted skill roots bypass install/edit name validation, so a loaded,
     enabled skill can still carry a name the shared slash grammar rejects (for
