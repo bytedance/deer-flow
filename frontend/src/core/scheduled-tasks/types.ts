@@ -99,7 +99,7 @@ export type ScheduledTaskRun = {
   /** Number of a launched scheduled run, counted like the safety cap; null for trials and never-launched rows. */
   run_number?: number | null;
   total_tokens?: number | null;
-  /** First line of the agent's final reply. */
+  /** First line of the agent's final reply; a lead-in line ending in a colon carries the list after it. */
   summary?: string | null;
 };
 

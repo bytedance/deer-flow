@@ -2152,16 +2152,16 @@ describe("scheduled task cards and run prompts", () => {
   });
 
   test("a scheduled launch stays a human group with its origin and is not editable", () => {
-    const fixture = loadScheduledThread("en-3-run-thread");
+    const fixture = loadScheduledThread("minute-run");
     const groups = getMessageGroups(fixture.messages);
     const humans = groups.filter((group) => group.type === "human");
     expect(humans).toHaveLength(1);
     const origin = humans[0]?.type === "human" && humans[0].scheduledOrigin;
     expect(origin).toMatchObject({
-      task_title: "Release checklist status watcher",
+      task_title: "发布清单未完成项提醒",
       run_number: 2,
       trigger: "scheduled",
-      stop_condition: "every item on the checklist is checked",
+      stop_condition: "清单中所有条目都已完成（没有未勾选项）",
     });
     expect(getLatestEditableTurn(groups, false)).toBeNull();
     // The same thread with an ordinary user message is editable.
@@ -2210,7 +2210,7 @@ describe("scheduled task cards and run prompts", () => {
   });
 
   test("a run thread's turn usage and branching match an ordinary turn", () => {
-    const fixture = loadScheduledThread("en-3-run-thread");
+    const fixture = loadScheduledThread("minute-run");
     const scheduled = getMessageGroups(fixture.messages);
     const ordinary = getMessageGroups(withOrdinaryHumanTurn(fixture.messages));
     expect(scheduled.map((group) => group.type)).toEqual(
@@ -2227,30 +2227,38 @@ describe("scheduled task cards and run prompts", () => {
   });
 
   test("a card group does not split the turn's usage or hide its final answer", () => {
-    const fixture = loadScheduledThread("en-3-chat-thread");
+    // Live: create (after a read_file), trial, edit, pause and resume.
+    const fixture = loadScheduledThread("weekday-chat");
     const groups = getMessageGroups(fixture.messages);
-    expect(groups.map((group) => group.type)).toEqual([
+    const turn = [
       "human",
       "assistant:processing",
       "assistant:scheduled-task",
       "assistant",
-      "human",
-      "assistant:processing",
-      "assistant:scheduled-task",
-      "assistant",
-    ]);
+    ];
+    expect(groups.map((group) => group.type)).toEqual(
+      Array.from({ length: 5 }, () => turn).flat(),
+    );
     const usage = getAssistantTurnUsageMessages(groups);
     expect(usage[2]).toBeNull();
+    // The create turn: the read_file call, the schedule_task call, the reply.
     expect(usage[3]?.map((message) => message.id)).toEqual([
-      "ai-create-call",
-      "ai-create-reply",
+      "lc_run--01a11061-400e-7982-8069-f72fa84b8751",
+      "lc_run--01a11061-4b2d-7c70-9d7a-22394f32b6c9",
+      "lc_run--01a11062-4f24-70a3-a118-57c8024d40bd",
     ]);
-    expect([...getBranchableAssistantGroupIds(groups, false)]).toEqual([
-      "ai-create-reply",
-      "ai-trial-reply",
-    ]);
+    // Every turn's final answer stays branchable, one per turn.
+    const replies = fixture.messages
+      .filter(
+        (message) =>
+          message.type === "ai" &&
+          !(message as { tool_calls?: unknown[] }).tool_calls?.length,
+      )
+      .map((message) => message.id);
+    expect(replies).toHaveLength(5);
+    expect([...getBranchableAssistantGroupIds(groups, false)]).toEqual(replies);
     expect(getLatestEditableTurn(groups, false)?.humanMessage.id).toBe(
-      "human-trial",
+      "local-human-5735ca25-a414-4b81-b042-4bf61c8eeaa8",
     );
   });
 });

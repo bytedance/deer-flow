@@ -88,3 +88,48 @@ def test_summary_is_bounded():
     assert len(summary) == 160 and summary.endswith("…")
     assert run_summary("---\n\n   ") is None
     assert run_summary(None) is None
+
+
+# The final reply of run 1 of the live acceptance task (ux-audit/impl/live/S5-runs.json,
+# task-run-f83bbe9076644db0b7cf4907e9911d08, thread c18ee7af-…), recorded on DeepSeek Flash.
+# Demo data; the names are fictional.
+LIVE_RUN_1_REPLY = (
+    "清单中还有 2 项未完成：\n\n"
+    "- **Publish the Docker image** — 负责人：Sam Okafor\n"
+    "- **Post the release notes** — 负责人：Nora Lind\n\n"
+    "其余 3 项（冻结发布分支、更新变更日志、运行完整测试套件）均已完成。由于仍有未勾选条目，停止条件未满足，本次不暂停计划。"
+)
+LIVE_RUN_2_REPLY = "已按停止规则暂停该定时任务：清单中所有条目均已完成，没有未勾选项，无需继续轮询。如需恢复，可在界面中重新启用该计划。"
+
+
+def test_a_lead_in_line_carries_the_list_that_follows_it():
+    from deerflow.persistence.scheduled_task_runs.sql import run_summary
+
+    # Recorded live: the first line alone ("清单中还有 2 项未完成：") said nothing.
+    assert run_summary(LIVE_RUN_1_REPLY) == "清单中还有 2 项未完成：Publish the Docker image — 负责人：Sam Okafor；Post the release notes — 负责人：Nora Lind"
+    # A first line that is a full sentence (colon inside, not at the end) stays as it is.
+    assert run_summary(LIVE_RUN_2_REPLY) == LIVE_RUN_2_REPLY
+
+
+def test_lead_in_list_variants():
+    from deerflow.persistence.scheduled_task_runs.sql import run_summary
+
+    # No list after the colon: the line is returned unchanged.
+    assert run_summary("Two items are still open:\n\nSee the checklist for details.") == "Two items are still open:"
+    assert run_summary("还有 2 项未完成：") == "还有 2 项未完成："
+    # Numbered list, English: "; " between items, a space after the colon.
+    assert run_summary("Still open:\n1. Publish the image — Sam\n2) Post the notes — Nora\n\nNothing else changed.") == "Still open: Publish the image — Sam; Post the notes — Nora"
+    # Markdown bold, links, code and task checkboxes are stripped from the items; the list ends at the first prose line.
+    assert run_summary("**Open items:**\n\n- [ ] **Publish** the [image](https://example.test) — `Sam`\n* [x] Post the notes — Nora\nThat is all.\n- not part of it") == "Open items: Publish the image — Sam; Post the notes — Nora"
+    # The script of the summary text picks the separator, also with an ASCII colon,
+    # which keeps a space after it (a full-width "：" does not need one).
+    assert run_summary("未完成的条目:\n- 发布镜像\n- 发布说明") == "未完成的条目: 发布镜像；发布说明"
+
+
+def test_a_long_lead_in_list_is_capped_with_an_ellipsis():
+    from deerflow.persistence.scheduled_task_runs.sql import run_summary
+
+    reply = "还有这些未完成：\n" + "\n".join(f"- 第 {n} 项任务，负责人是一位很忙的同事" for n in range(1, 20))
+    summary = run_summary(reply)
+    assert len(summary) == 160 and summary.endswith("…")
+    assert summary.startswith("还有这些未完成：第 1 项任务，负责人是一位很忙的同事；第 2 项任务")

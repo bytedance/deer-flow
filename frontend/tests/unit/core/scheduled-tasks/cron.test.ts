@@ -332,6 +332,62 @@ describe("describeSchedule", () => {
   });
 });
 
+describe("interval wording for one unit and for more", () => {
+  const cases: [number, "seconds" | "minutes" | "hours", string, string][] = [
+    [1, "minutes", "Every minute", "每分钟"],
+    [2, "minutes", "Every 2 minutes", "每 2 分钟"],
+    [1, "hours", "Every hour", "每小时"],
+    [3, "hours", "Every 3 hours", "每 3 小时"],
+    [1, "seconds", "Every second", "每秒"],
+    [45, "seconds", "Every 45 seconds", "每 45 秒"],
+  ];
+  for (const [amount, unit, en, zh] of cases) {
+    test(`${amount} ${unit}: "${en}" / "${zh}"`, () => {
+      const state = {
+        scheduleType: "interval" as const,
+        intervalAmount: amount,
+        intervalUnit: unit,
+        timezone: "Asia/Shanghai",
+      };
+      expect(describeSchedule(state, "en")).toBe(en);
+      expect(describeSchedule(state, "zh")).toBe(zh);
+    });
+  }
+
+  const saved = (every_seconds: number) => ({
+    schedule_type: "interval" as const,
+    schedule_spec: { every_seconds },
+    timezone: "Asia/Shanghai",
+  });
+
+  test("a saved task's interval of one unit has no number in Chinese", () => {
+    expect(describeTaskSchedule(saved(60), "zh-CN").text).toBe("每分钟");
+    expect(describeTaskSchedule(saved(3600), "zh-CN").text).toBe("每小时");
+    expect(describeTaskSchedule(saved(86400), "zh-CN").text).toBe("每天");
+    expect(describeTaskSchedule(saved(60), "en-US").text).toBe("Every minute");
+    expect(describeTaskSchedule(saved(3600), "en-US").text).toBe("Every hour");
+    expect(describeTaskSchedule(saved(86400), "en-US").text).toBe("Every day");
+  });
+
+  test("a saved task's interval of several units keeps the number", () => {
+    expect(describeTaskSchedule(saved(120), "zh-CN").text).toBe("每 2 分钟");
+    expect(describeTaskSchedule(saved(7200), "zh-CN").text).toBe("每 2 小时");
+    expect(describeTaskSchedule(saved(2 * 86400), "zh-CN").text).toBe(
+      "每 2 天",
+    );
+    expect(describeTaskSchedule(saved(120), "en-US").text).toBe(
+      "Every 2 minutes",
+    );
+    expect(describeTaskSchedule(saved(2 * 86400), "en-US").text).toBe(
+      "Every 2 days",
+    );
+    // 36 hours is not a whole number of days: it stays in hours.
+    expect(describeTaskSchedule(saved(36 * 3600), "zh-CN").text).toBe(
+      "每 36 小时",
+    );
+  });
+});
+
 describe("interval conversion", () => {
   test("minutes and hours convert to seconds", () => {
     expect(intervalToSeconds(90, "seconds")).toBe(90);

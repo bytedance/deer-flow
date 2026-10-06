@@ -870,7 +870,7 @@ export const zhCN: Translations = {
     },
     stop: {
       pausesItself: "{condition}，满足后自动暂停",
-      reached: "已于{time}满足",
+      reached: "已于{time} 满足",
       noRule: "会一直运行，直到你暂停",
       afterRuns: "自动运行 {max} 次后结束",
       atTime: "{time} 结束",
@@ -886,7 +886,7 @@ export const zhCN: Translations = {
     notice: {
       pausedByAgentTitle: "已由智能体暂停",
       pausedByAgentBody:
-        "在{time}的运行中，智能体判断停止条件已满足，暂停了任务。如需继续运行，可以恢复。",
+        "在{time} 的运行中，智能体判断停止条件已满足，暂停了任务。如需继续运行，可以恢复。",
       seeThatRun: "查看那次运行",
       autoPausedTitle: "已暂停：连续 3 次未达成目标",
       autoPausedBody:

@@ -1311,7 +1311,9 @@ waiting and no trial was added.
 **Runs** rows add `run_number` (the automatic-run number counted like
 `max_runs`; null for trials and runs that never launched), `total_tokens` of the
 launched run (null if none), and `summary` (first line of the agent's final
-reply, at most 160 characters).
+reply as plain text; when that line ends with a colon, the list items that
+follow it are appended, joined with `；` for CJK text and `; ` otherwise; at
+most 160 characters).
 
 **Errors (breaking change).** Every error these routes raise for a well-typed
 request is coded:

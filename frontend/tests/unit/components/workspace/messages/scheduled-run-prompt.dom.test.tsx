@@ -33,12 +33,13 @@ afterEach(() => {
 const NOTE = "Mention Sam by name";
 
 /**
- * The recorded run thread's launch, with a standing note added so the
+ * The live-recorded run thread's launch (scheduled run 2 of the per-minute
+ * checklist task), with a standing note added so the
  * launched text carries both host-written parts (stop-rule paragraph and the
  * notes wrapper), as a real launch with notes does.
  */
-function launch(name: "en-3-run-thread" | "zh-1-run-thread") {
-  const { messages } = loadScheduledThread(name);
+function launch() {
+  const { messages } = loadScheduledThread("minute-run");
   const human = messages.find((message) => message.type === "human")!;
   const kwargs = human.additional_kwargs as {
     deerflow_scheduled_origin: ScheduledOrigin;
@@ -73,16 +74,14 @@ function renderPrompt(origin: ScheduledOrigin, locale: "en-US" | "zh-CN") {
 
 describe("ScheduledRunPrompt", () => {
   test("shows the run header and only the user-language parts of the launch", () => {
-    const { text, origin } = launch("en-3-run-thread");
+    const { text, origin } = launch();
     expect(text).toContain("stop_scheduled_task");
     expect(text).toContain("<standing_notes>");
     renderPrompt(origin, "en-US");
 
     const block = screen.getByTestId("scheduled-run-prompt");
     expect(block.textContent).toContain("Scheduled run");
-    expect(block.textContent).toContain(
-      "Release checklist status watcher · run 2",
-    );
+    expect(block.textContent).toContain("发布清单未完成项提醒 · run 2");
     expect(
       screen.getByRole("link", { name: /Open task/ }).getAttribute("href"),
     ).toBe(`/workspace/scheduled-tasks?task_id=${origin.task_id}`);
@@ -98,7 +97,7 @@ describe("ScheduledRunPrompt", () => {
       origin.instructions,
     );
     expect(block.textContent).toContain(
-      "Stops when: every item on the checklist is checked",
+      "Stops when: 清单中所有条目都已完成（没有未勾选项）",
     );
     expect(block.textContent).toContain("Notes from chat");
     expect(block.textContent).toContain(NOTE);
@@ -110,7 +109,7 @@ describe("ScheduledRunPrompt", () => {
   });
 
   test("reads naturally in Chinese and labels a trial run", () => {
-    const { origin } = launch("zh-1-run-thread");
+    const { origin } = launch();
     renderPrompt({ ...origin, trigger: "manual", run_number: null }, "zh-CN");
     const block = screen.getByTestId("scheduled-run-prompt");
     expect(block.textContent).toContain("试运行");
@@ -118,18 +117,20 @@ describe("ScheduledRunPrompt", () => {
     fireEvent.click(
       screen.getByRole("button", { name: /任务指令（自动发送）/ }),
     );
-    expect(block.textContent).toContain("何时停止：清单上的所有项都已勾选");
+    expect(block.textContent).toContain(
+      "何时停止：清单中所有条目都已完成（没有未勾选项）",
+    );
     expect(block.textContent).toContain("对话中保存的备注");
     expect(block.textContent).not.toContain("Stop rule");
     expectNoRawIdentifiers(block);
   });
 
   test("numbers a Chinese scheduled run", () => {
-    const { origin } = launch("zh-1-run-thread");
+    const { origin } = launch();
     renderPrompt(origin, "zh-CN");
     const block = screen.getByTestId("scheduled-run-prompt");
     expect(block.textContent).toContain("定时运行");
-    expect(block.textContent).toContain("发布清单未完成项监控 · 第 2 次");
+    expect(block.textContent).toContain("发布清单未完成项提醒 · 第 2 次");
     expect(block.textContent).toContain("查看任务");
   });
 
@@ -163,7 +164,7 @@ describe("ScheduledRunPrompt", () => {
 
     test("an interval task's placeholder UTC reads in the viewer's zone", () => {
       viewerIn("Asia/Shanghai");
-      const { origin } = launch("en-3-run-thread");
+      const { origin } = launch();
       renderPrompt(
         at({ ...origin, schedule_type: "interval", timezone: "UTC" }),
         "en-US",
@@ -175,7 +176,7 @@ describe("ScheduledRunPrompt", () => {
 
     test("a cron task saved in UTC reads in UTC, with the viewer's time beside it", () => {
       viewerIn("Asia/Shanghai");
-      const { origin } = launch("en-3-run-thread");
+      const { origin } = launch();
       renderPrompt(
         at({ ...origin, schedule_type: "cron", timezone: "UTC" }),
         "en-US",

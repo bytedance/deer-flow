@@ -96,16 +96,9 @@ function view(messages: Message[], isLoading: boolean) {
   );
 }
 
-/** The recorded run thread with a persisted duration on its final answer. */
+/** The live-recorded run thread; its final answer carries the run's recorded duration. */
 function runThread(): Message[] {
-  return loadScheduledThread("en-3-run-thread").messages.map((message) =>
-    message.id === "ai-final"
-      ? ({
-          ...message,
-          additional_kwargs: { turn_duration: 11 },
-        } as Message)
-      : message,
-  );
+  return loadScheduledThread("minute-run").messages;
 }
 
 function snapshot(messages: Message[], isLoading: boolean) {
@@ -148,8 +141,9 @@ describe("MessageList with scheduled runs", () => {
   });
 
   it("renders one card per schedule result and keeps the replies", () => {
-    render(view(loadScheduledThread("en-3-chat-thread").messages, false));
-    expect(screen.getAllByTestId("card")).toHaveLength(2);
-    expect(screen.getAllByTestId("item-ai")).toHaveLength(2);
+    // Live: create, trial, edit, pause and resume, each with its reply.
+    render(view(loadScheduledThread("weekday-chat").messages, false));
+    expect(screen.getAllByTestId("card")).toHaveLength(5);
+    expect(screen.getAllByTestId("item-ai")).toHaveLength(5);
   });
 });

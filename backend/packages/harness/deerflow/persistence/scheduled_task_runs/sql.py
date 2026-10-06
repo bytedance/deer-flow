@@ -41,19 +41,62 @@ _SUMMARY_MAX_CHARS = 160
 _MARKDOWN_PREFIX = re.compile(r"^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)+")
 _MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
 _MARKDOWN_MARKERS = re.compile(r"(\*\*|__|~~|`+)")
+_LIST_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+_TASK_CHECKBOX = re.compile(r"^\[[ xX]\]\s*")
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uff00-\uffef]")
+
+
+def _summary_line(line: str) -> str:
+    """One reply line as plain text: no list/heading/quote prefix, checkbox, links or emphasis markers."""
+    text = _MARKDOWN_PREFIX.sub("", line.strip())
+    text = _TASK_CHECKBOX.sub("", text)
+    text = _MARKDOWN_MARKERS.sub("", _MARKDOWN_LINK.sub(r"\1", text)).strip()
+    if text.startswith(("*", "_")) and text.endswith(("*", "_")) and len(text) > 2:
+        text = text[1:-1].strip()
+    return text
+
+
+def _lead_in_items(lines: list[str]) -> list[str]:
+    """The list that follows a lead-in line ("Two items are still open:"), as plain text.
+
+    Blank lines before and between items are skipped; the first other line ends the list.
+    """
+    items: list[str] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        if not _LIST_ITEM.match(line.strip()):
+            break
+        item = _summary_line(line)
+        if item:
+            items.append(item)
+    return items
 
 
 def run_summary(last_ai_message: str | None) -> str | None:
-    """First non-empty line of the agent's final reply, without markdown markers."""
+    """One readable line from the agent's final reply, without markdown markers.
+
+    It is the reply's first non-empty line. When that line only introduces a
+    list (it ends with ":" or "："), the list items follow it, joined with
+    "；" for CJK text and "; " otherwise, so the line still says something.
+    The result is capped at ``_SUMMARY_MAX_CHARS`` with an ellipsis.
+    """
     if not isinstance(last_ai_message, str):
         return None
-    for line in last_ai_message.splitlines():
-        text = _MARKDOWN_PREFIX.sub("", line.strip())
-        text = _MARKDOWN_MARKERS.sub("", _MARKDOWN_LINK.sub(r"\1", text)).strip()
-        if text.startswith(("*", "_")) and text.endswith(("*", "_")) and len(text) > 2:
-            text = text[1:-1].strip()
-        if text and set(text) - set("-*_=|: "):
-            return text if len(text) <= _SUMMARY_MAX_CHARS else text[: _SUMMARY_MAX_CHARS - 1].rstrip() + "…"
+    lines = last_ai_message.splitlines()
+    for index, line in enumerate(lines):
+        text = _summary_line(line)
+        if not (text and set(text) - set("-*_=|: ")):
+            continue
+        if text.endswith((":", "：")):
+            items = _lead_in_items(lines[index + 1 :])
+            if items:
+                if _CJK.search(text):
+                    # "：" needs no space after it; an ASCII ":" does.
+                    text = f"{text}{' ' if text.endswith(':') else ''}{'；'.join(items)}"
+                else:
+                    text = f"{text} {'; '.join(items)}"
+        return text if len(text) <= _SUMMARY_MAX_CHARS else text[: _SUMMARY_MAX_CHARS - 1].rstrip() + "…"
     return None
 
 

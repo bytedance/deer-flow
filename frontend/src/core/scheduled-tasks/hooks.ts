@@ -1,3 +1,4 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import {
   useMutation,
   useQuery,
@@ -30,6 +31,10 @@ import {
   shouldReportScheduledTaskError,
 } from "./errors";
 import { ACTIVE_POLL_MS, IDLE_POLL_MS } from "./polling";
+import {
+  parseScheduleToolResult,
+  SCHEDULE_TASK_TOOL_NAME,
+} from "./tool-result";
 import {
   hasActiveRun,
   type ScheduledTask,
@@ -126,6 +131,65 @@ export function useScheduledTask(
     wasLive.current = live;
   }, [enabled, live, refetch, taskId]);
   return query;
+}
+
+/**
+ * Refresh this chat's scheduled-task queries as soon as a `schedule_task`
+ * result (create, update, pause, resume, trial, delete) arrives, so the
+ * header button and the cards do not wait for the next idle poll.
+ *
+ * The first non-empty message list of a thread (its loaded history) is the
+ * baseline: results already in it were fetched with the page, so only
+ * results that arrive afterwards invalidate the thread's task list, the
+ * tasks list and the tasks they name.
+ */
+export function useScheduleToolResultRefresh(
+  threadId: string | null | undefined,
+  messages: readonly Message[],
+) {
+  const queryClient = useQueryClient();
+  const seen = useRef<{ threadId: string; ids: Set<string> } | null>(null);
+  useEffect(() => {
+    if (!threadId || messages.length === 0) {
+      return;
+    }
+    const baseline = seen.current?.threadId !== threadId;
+    if (baseline) {
+      seen.current = { threadId, ids: new Set() };
+    }
+    const ids = seen.current!.ids;
+    const taskIds = new Set<string>();
+    for (const message of messages) {
+      if (message.type !== "tool" || message.name !== SCHEDULE_TASK_TOOL_NAME) {
+        continue;
+      }
+      const key = message.id ?? message.tool_call_id;
+      if (!key || ids.has(key)) {
+        continue;
+      }
+      const result = parseScheduleToolResult(message.content);
+      if (!result) {
+        continue;
+      }
+      ids.add(key);
+      taskIds.add(result.task.id);
+    }
+    if (baseline || taskIds.size === 0) {
+      return;
+    }
+    void queryClient.invalidateQueries({
+      queryKey: [...SCHEDULED_TASKS_KEY, "thread", threadId],
+    });
+    void queryClient.invalidateQueries({
+      queryKey: SCHEDULED_TASKS_KEY,
+      exact: true,
+    });
+    for (const taskId of taskIds) {
+      void queryClient.invalidateQueries({
+        queryKey: [...SCHEDULED_TASKS_KEY, "task", taskId],
+      });
+    }
+  }, [messages, queryClient, threadId]);
 }
 
 /** True while the element is on screen (and the page is visible). */
