@@ -108,7 +108,7 @@ def test_both_pods_read_the_key_from_the_same_app_secret() -> None:
     assert provisioner.get("optional", False) is False, "a provisioner without the key rejects every request"
     assert gateway["name"] == provisioner["name"], "the middleware compares the two values byte for byte"
     assert gateway["key"] == ENV_NAME
-    assert gateway["optional"] is False, "the default config references $PROVISIONER_API_KEY and the harness fails on an unset variable"
+    assert gateway.get("optional", False) is False, "the default config references $PROVISIONER_API_KEY and the harness fails on an unset variable"
 
 
 def test_existing_app_secret_is_honored_by_the_provisioner() -> None:
@@ -118,8 +118,12 @@ def test_existing_app_secret_is_honored_by_the_provisioner() -> None:
     assert _secret_ref(_container(documents, "-gateway", "gateway"), ENV_NAME)["name"] == "my-app-secret"
 
 
-def test_gateway_key_is_optional_only_while_the_provisioner_is_disabled() -> None:
-    """A user-managed Secret for a non-provisioner deployment need not carry the key."""
-    documents = _render_chart("provisioner.enabled=false")
+def test_gateway_key_is_omitted_while_the_bundled_provisioner_is_disabled() -> None:
+    """An explicit env entry wins over envFrom, so rendering it would override the key an operator
+    supplies through ``secrets`` for an external provisioner with the generated, unrelated value."""
+    documents = _render_chart("provisioner.enabled=false", "secrets.PROVISIONER_API_KEY=external-provisioner-key")
     assert not any(document.get("kind") == "Deployment" and document["metadata"]["name"].endswith("-provisioner") for document in documents)
-    assert _secret_ref(_container(documents, "-gateway", "gateway"), ENV_NAME)["optional"] is True
+    gateway = _container(documents, "-gateway", "gateway")
+    assert ENV_NAME not in _env(gateway)
+    assert any(source["secretRef"]["name"].endswith("-provider") for source in gateway["envFrom"]), "the external key still arrives through the provider Secret"
+    assert _by_kind(documents, "Secret", "-provider")["stringData"][ENV_NAME] == "external-provisioner-key"

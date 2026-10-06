@@ -309,15 +309,18 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   sandbox provisioner), each generated once and preserved across upgrades via
   `lookup`. `existingAppSecret` points the gateway, frontend and provisioner
   at a Secret you manage instead (no `<release>-app` is generated); it must
-  carry all four keys. `PROVISIONER_API_KEY` is required whenever
-  `provisioner.enabled` is true: the provisioner's `verify_api_key`
-  middleware answers 401 to every `/api/*` request while its key is empty or
-  differs from the one the gateway sends, so a deployment without it cannot
-  create a single sandbox. The chart injects the same Secret value into both
-  Pods and the default `config` references it as
-  `sandbox.provisioner_api_key: $PROVISIONER_API_KEY` (keep that line when
-  you override `config:`; the harness refuses to start when a referenced
-  variable is unset). `AUTH_JWT_SECRET` is required whenever the gateway is
+  carry the first three keys and, while `provisioner.enabled` is true, also
+  `PROVISIONER_API_KEY`: the provisioner's `verify_api_key` middleware
+  answers 401 to every `/api/*` request while its key is empty or differs
+  from the one the gateway sends, so a deployment without it cannot create a
+  single sandbox. The chart injects the same Secret value into both Pods and
+  the default `config` references it as `sandbox.provisioner_api_key:
+  $PROVISIONER_API_KEY` (keep that line when you override `config:`; the
+  harness refuses to start when a referenced variable is unset). With
+  `provisioner.enabled: false` the chart does not render the gateway's
+  `PROVISIONER_API_KEY` at all, so an external provisioner keeps taking its
+  key from `secrets` (an explicit `env` entry would otherwise win over
+  `envFrom`). `AUTH_JWT_SECRET` is required whenever the gateway is
   multi-instance — without it, concurrently booting Pods race to write their
   own `.jwt_secret` on the home volume and sign sessions with different keys —
   and only a single Pod may omit it and fall back to that file. **Upgrading a

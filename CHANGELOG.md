@@ -636,7 +636,10 @@ This release closes that milestone with **439 merged pull requests**.
   `existingAppSecret` must carry it while `provisioner.enabled` is true), and
   the default `config` sets `sandbox.provisioner_api_key:
   $PROVISIONER_API_KEY`, which the chart README's config example now keeps
-  too. docker-compose was unaffected: it reads the key from `.env`. ([#6365])
+  too. With `provisioner.enabled: false` the gateway env is not rendered, so
+  an external provisioner keeps the key an operator supplies through
+  `secrets`. docker-compose was unaffected: it reads the key from `.env`.
+  ([#6365])
 - **sandbox:** With host bash enabled, the local sandbox no longer keeps a
   thread on the skill view of the last restricted Agent that ran there. That
   view is only maintained while host bash is off, but `LocalSandboxProvider`

@@ -136,7 +136,9 @@ provisioner:
   # which the chart generates into the `<release>-app` Secret (see
   # existingAppSecret) and injects into both Pods; `config.sandbox` below
   # references it as `provisioner_api_key: $PROVISIONER_API_KEY`. The
-  # provisioner rejects every /api/* request without a matching key.
+  # provisioner rejects every /api/* request without a matching key. With
+  # `enabled: false` the chart leaves the gateway's PROVISIONER_API_KEY
+  # alone, so an external provisioner keeps taking its key from `secrets`.
   resources:
     requests:
       cpu: 50m

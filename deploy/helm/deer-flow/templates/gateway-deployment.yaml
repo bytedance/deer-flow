@@ -139,19 +139,23 @@ spec:
                   name: {{ include "deer-flow.appSecret" . }}
                   key: AUTH_JWT_SECRET
                   optional: {{ ne (include "deer-flow.gatewayMultiInstance" .) "true" }}
-            # Shared gateway -> sandbox-provisioner key. config.yaml references
+            {{- if .Values.provisioner.enabled }}
+            # Shared gateway -> bundled-provisioner key. config.yaml references
             # it as sandbox.provisioner_api_key: $PROVISIONER_API_KEY, and the
             # harness refuses to start when a referenced variable is unset, so
-            # the env is required while the provisioner is enabled (it rejects
-            # every /api/* request without the key anyway). A user-managed
-            # existingAppSecret may omit it only with the provisioner disabled
-            # and a `config` that no longer references it.
+            # the key is required here (the provisioner rejects every /api/*
+            # request without it anyway) and a user-managed existingAppSecret
+            # must carry it. Rendered only for the bundled provisioner: an
+            # explicit env entry wins over envFrom, so emitting it with
+            # provisioner.enabled=false would override the PROVISIONER_API_KEY
+            # an operator supplies through `secrets` for an external
+            # provisioner with the generated, unrelated value.
             - name: PROVISIONER_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ include "deer-flow.appSecret" . }}
                   key: PROVISIONER_API_KEY
-                  optional: {{ not .Values.provisioner.enabled }}
+            {{- end }}
             # Tells the Gateway's startup gate that peers share the database;
             # its GATEWAY_WORKERS count only sees this Pod. Derived from
             # gateway.replicas unless gateway.multiInstance is set explicitly:
