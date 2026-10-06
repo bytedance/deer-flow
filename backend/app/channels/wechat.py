@@ -654,7 +654,7 @@ class WechatChannel(Channel):
                     if errcode == -14:
                         self._bot_token = ""
                         self._get_updates_buf = ""
-                        await asyncio.to_thread(self._save_state)
+                        await await_drained(asyncio.to_thread(self._save_state))
                         await asyncio.to_thread(self._save_auth_state, status="expired", bot_token="")
                         logger.error("[WeChat] bot token expired; scan again or update bot_token and restart the channel")
                         self._running = False
@@ -693,7 +693,7 @@ class WechatChannel(Channel):
                 next_buf = data.get("get_updates_buf")
                 if isinstance(next_buf, str) and next_buf != self._get_updates_buf:
                     self._get_updates_buf = next_buf
-                    await asyncio.to_thread(self._save_state)
+                    await await_drained(asyncio.to_thread(self._save_state))
             except asyncio.CancelledError:
                 raise
             except Exception:
