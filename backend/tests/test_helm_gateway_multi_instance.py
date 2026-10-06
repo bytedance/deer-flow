@@ -30,11 +30,7 @@ def _gateway_env(*settings: str) -> dict[str, dict]:
         command.extend(["--set", setting])
     rendered = subprocess.run(command, check=True, capture_output=True, text=True).stdout
     deployment = yaml.safe_load(rendered)
-    gateway = next(
-        container
-        for container in deployment["spec"]["template"]["spec"]["containers"]
-        if container["name"] == "gateway"
-    )
+    gateway = next(container for container in deployment["spec"]["template"]["spec"]["containers"] if container["name"] == "gateway")
     return {item["name"]: item for item in gateway["env"]}
 
 
