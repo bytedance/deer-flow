@@ -12,7 +12,9 @@ _api_key_warned = False
 
 
 class JinaClient:
-    async def crawl(self, url: str, return_format: str = "html", timeout: int = 10, proxy: str | None = None, trust_env: bool = True, *, max_retries: int = 0, retry_budget_seconds: float = 30.0) -> str:
+    async def crawl(
+        self, url: str, return_format: str = "html", timeout: int = 10, proxy: str | None = None, trust_env: bool = True, *, max_retries: int = 0, retry_budget_seconds: float = 30.0, max_response_bytes: int | None = None
+    ) -> str:
         """Fetch with optional bounded retries; cancellation always propagates."""
         global _api_key_warned
         headers = {
@@ -27,6 +29,8 @@ class JinaClient:
             logger.warning("Jina API key is not set. Provide your own key to access a higher rate limit. See https://jina.ai/reader for more information.")
         data = {"url": url}
         try:
+            if max_response_bytes is not None and (isinstance(max_response_bytes, bool) or not isinstance(max_response_bytes, int) or max_response_bytes <= 0):
+                raise ValueError("max_response_bytes must be a positive integer or null")
             if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
                 raise ValueError("max_retries must be a non-negative integer")
             if isinstance(retry_budget_seconds, bool) or not isinstance(retry_budget_seconds, (int, float)) or not math.isfinite(retry_budget_seconds) or retry_budget_seconds <= 0:
@@ -47,19 +51,33 @@ class JinaClient:
                             raise TimeoutError
                         request_timeout = min(timeout, remaining) if remaining is not None else timeout
                         try:
-                            response = await client.post("https://r.jina.ai/", headers=headers, json=data, timeout=request_timeout)
+                            if max_response_bytes is None:
+                                response = await client.post("https://r.jina.ai/", headers=headers, json=data, timeout=request_timeout)
+                                response_text = response.text
+                            else:
+                                async with client.stream("POST", "https://r.jina.ai/", headers=headers, json=data, timeout=request_timeout) as response:
+                                    content = bytearray()
+                                    # aiter_bytes decodes Content-Encoding once. Check before
+                                    # retaining each chunk; HTTPX decoder allocations are outside this cap.
+                                    async for chunk in response.aiter_bytes():
+                                        if len(content) + len(chunk) > max_response_bytes:
+                                            return f"Error: Jina API response exceeds max_response_bytes ({max_response_bytes})"
+                                        content.extend(chunk)
+                                    # Match HTTPX text semantics without decompressing again or
+                                    # mutating the response's private buffered-content state.
+                                    response_text = content.decode(response.encoding or "utf-8", errors="replace")
                         except (httpx.ConnectError, httpx.ConnectTimeout):
                             if attempt == max_retries:
                                 raise
                         else:
                             if response.status_code == 200:
-                                if response.text and response.text.strip():
-                                    return response.text
+                                if response_text and response_text.strip():
+                                    return response_text
                                 error_message = "Jina API returned empty response"
                                 logger.error(error_message)
                                 return f"Error: {error_message}"
                             if response.status_code not in {502, 503, 504} or attempt == max_retries:
-                                error_message = f"Jina API returned status {response.status_code}: {response.text}"
+                                error_message = f"Jina API returned status {response.status_code}: {response_text}"
                                 logger.error(error_message)
                                 return f"Error: {error_message}"
 
