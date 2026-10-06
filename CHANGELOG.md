@@ -623,6 +623,13 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **memory:** DeerMem relevance ranking no longer counts punctuation as query
+  terms when jieba is installed (`memory-zh` extra). `tokenize()` dropped only
+  whitespace from `jieba.cut`, which emits `，`, `。`, `,` and `!` as standalone
+  tokens, so a query and an unrelated fact that both contained a comma scored
+  above zero, near-duplicate similarity was inflated, and punctuation used up the
+  128-token budget before later query terms. Tokens without a letter or digit are
+  now dropped, as the no-jieba fallback and the FTS5 query filter already did.
 - **middleware:** Tool-output budgeting no longer hides a failed shell exit from
   subagent evidence. A bash result between `externalize_min_chars` (12,000) and
   the sandbox limit (20,000) was replaced by a preview ending in its `Access:`
