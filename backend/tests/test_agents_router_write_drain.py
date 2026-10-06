@@ -65,7 +65,7 @@ async def test_agent_persistent_writes_route_through_write_drain(_agent_env, mon
     monkeypatch.setattr(router, "run_drained_write", drained)
 
     await create_agent_endpoint(AgentCreateRequest(name="planner", model="agent-model"))
-    await router.import_agent_package(router.AgentPackage(format="deerflow.custom-agent", version=1, agent=router.AgentPackageAgent(name="imported-planner", model="agent-model")))
+    await router.import_agent_package(router.AgentPackage(format="deerflow.custom-agent", version=1, agent={"name": "imported", "soul": "imported soul"}))
     await update_agent("planner", AgentUpdateRequest(description="later"))
     await get_agent("planner")
     await update_user_profile(UserProfileUpdateRequest(content="prefs"))
@@ -74,8 +74,48 @@ async def test_agent_persistent_writes_route_through_write_drain(_agent_env, mon
     assert calls == ["Create agent", "Create agent", "Update agent", "Update user profile", "Delete agent"]
 
 
-@pytest.mark.parametrize("import_package", [False, True], ids=["create", "import"])
-async def test_agent_creation_drains_store_write_across_repeated_cancellation(_agent_env, monkeypatch, import_package):
+async def test_agent_import_drains_started_store_write_across_repeated_cancellation(_agent_env, monkeypatch):
+    from app.gateway.routers import agents as router
+
+    store = router.get_agent_store()
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingStore:
+        def create(self, *args, **kwargs):
+            started.set()
+            assert release.wait(timeout=5)
+            return store.create(*args, **kwargs)
+
+    monkeypatch.setattr(router, "get_agent_store", lambda: BlockingStore())
+    package = router.AgentPackage(
+        format="deerflow.custom-agent",
+        version=1,
+        agent={"name": "imported", "soul": "imported soul", "memory_enabled": False},
+    )
+    task = asyncio.create_task(router.import_agent_package(package))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        imported = await get_agent("imported")
+        assert imported.soul == "imported soul"
+        assert router.load_agent_config("imported", user_id=router.get_effective_user_id()).memory_enabled is False
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_agent_creation_drains_store_write_across_repeated_cancellation(_agent_env, monkeypatch):
     from app.gateway.routers import agents as router
 
     store = router.get_agent_store()
@@ -92,18 +132,7 @@ async def test_agent_creation_drains_store_write_across_repeated_cancellation(_a
     monkeypatch.setattr(store, "create", blocked_create)
     monkeypatch.setattr(router, "get_agent_store", lambda: store)
 
-    if import_package:
-        request = router.import_agent_package(
-            router.AgentPackage(
-                format="deerflow.custom-agent",
-                version=1,
-                agent=router.AgentPackageAgent(name="planner", model="agent-model", soul="Keep working.", memory_enabled=False),
-            )
-        )
-    else:
-        request = create_agent_endpoint(AgentCreateRequest(name="planner", model="agent-model", soul="Keep working."))
-
-    task = asyncio.create_task(request)
+    task = asyncio.create_task(create_agent_endpoint(AgentCreateRequest(name="planner", model="agent-model", soul="Keep working.")))
     try:
         assert await asyncio.to_thread(started.wait, 5)
         task.cancel()
@@ -122,7 +151,7 @@ async def test_agent_creation_drains_store_write_across_repeated_cancellation(_a
         await asyncio.gather(task, return_exceptions=True)
 
     config = router.load_agent_config("planner", user_id=user_id)
-    assert config.memory_enabled is (not import_package)
+    assert config.memory_enabled is True
     assert router.load_agent_soul("planner", user_id=user_id) == "Keep working."
 
 
