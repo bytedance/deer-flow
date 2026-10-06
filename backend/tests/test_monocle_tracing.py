@@ -344,6 +344,7 @@ def test_gateway_lifespan_initializes_monocle():
         patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
         patch("app.channels.service.start_channel_service", side_effect=fake_start),
         patch("app.channels.service.stop_channel_service", AsyncMock()),
+        patch("deerflow.knowledge.projection.reducer.prewarm_umap", return_value=True),
     ):
 
         async def drive() -> None:
@@ -387,6 +388,7 @@ def test_gateway_lifespan_survives_monocle_setup_failure(caplog):
         patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
         patch("app.channels.service.start_channel_service", side_effect=fake_start),
         patch("app.channels.service.stop_channel_service", AsyncMock()),
+        patch("deerflow.knowledge.projection.reducer.prewarm_umap", return_value=True),
     ):
 
         async def drive() -> None:

@@ -1,0 +1,7 @@
+name: rag
+description: 知识库问答专家——基于当前绑定的知识库做混合检索（向量召回与重排），强制引用溯源，检索不到如实拒答
+tool_groups:
+  - rag
+skills: []
+model_settings:
+  temperature: 0.1

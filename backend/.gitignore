@@ -20,6 +20,8 @@ venv/
 
 # User config file
 config.yaml
+# ...except the bundled rag agent asset (ships with the knowledge extension)
+!packages/harness/deerflow/agents/assets/rag/config.yaml
 
 # Langgraph
 .langgraph_api
