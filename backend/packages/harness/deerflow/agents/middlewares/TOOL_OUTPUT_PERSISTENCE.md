@@ -14,7 +14,10 @@ file publication, allowing the tool wrappers to use the configured inline fallba
 creation (`open(..., "x")`). Its mode is `0o666 & ~umask`, preserving ordinary
 file-creation permissions without reading or changing the process-wide umask.
 This matters when a mounted sandbox reads the output under a different UID.
-Restrictive operator umasks remain restrictive.
+Restrictive operator umasks remain restrictive. It also passes `newline=""`, so
+the file holds exactly the bytes of the stamped blob ref on every platform;
+Windows text mode would write CRLF, and restore discards a file whose size or
+digest does not match.
 
 The writer closes its file before atomically replacing the deterministic final
 path. Concurrent publishers of identical output can safely reuse that path;
@@ -29,6 +32,16 @@ not advertise the host path. It also must not unlink the deterministic final
 path: a concurrent publisher may already have replaced it and durably
 checkpointed that content. Remove published files only as part of inactive
 thread-data maintenance.
+
+## Structured tool results
+
+`type=json` payloads count toward the configured text budget, including results
+that also carry media or other non-text blocks. Externalization saves the full
+text/JSON rendering and replaces that portion with a synopsis; other blocks stay
+in the result for providers that support them. Historical results use the same
+configured fallback. Disabled budgets, raised limits and tool exemptions apply
+before provider normalization. Pure text/media results without JSON retain their
+existing pass-through behavior.
 
 ## Unclean shutdown
 

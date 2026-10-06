@@ -124,6 +124,104 @@ class TestMessageText:
     def test_non_string_non_list(self):
         assert _message_text(42) is None
 
+    def test_json_block_is_rendered(self):
+        assert _message_text([{"type": "json", "json": {"a": 1}}]) == '{"a": 1}'
+
+    def test_json_block_mixed_with_text(self):
+        assert _message_text([{"text": "rows:"}, {"type": "json", "json": [1, 2]}]) == "rows:\n[1, 2]"
+
+    def test_json_block_non_serializable_falls_back_to_str(self):
+        assert _message_text([{"type": "json", "json": {"bad": {1}}}]) == "{'bad': {1}}"
+
+    def test_json_block_circular_falls_back_to_str(self):
+        payload: dict = {}
+        payload["self"] = payload
+        result = _message_text([{"type": "json", "json": payload}])
+        # repr of a recursive dict differs across versions ("..." vs "{...}")
+        assert result is not None and result.startswith("{'self': ") and "..." in result
+
+    def test_json_block_without_json_key_returns_none(self):
+        assert _message_text([{"type": "json"}]) is None
+
+
+class TestStructuredJsonMindIEBudget:
+    def test_mixed_json_media_externalizes_without_losing_media(self, tmp_path):
+        from deerflow.models.mindie_provider import _fix_messages
+
+        payload = {"rows": ["x" * 10_000], "answer": "TAIL_SENTINEL"}
+        media = {"type": "image", "base64": "BINARY_SENTINEL", "mime_type": "image/png"}
+        message = ToolMessage(
+            content=[{"type": "json", "json": payload}, media, {"type": "json"}],
+            name="query_rows",
+            tool_call_id="call_rows",
+            artifact={"source": "rows"},
+        )
+        middleware = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=100, preview_head_chars=20, preview_tail_chars=10))
+
+        result = middleware.wrap_tool_call(_make_request(tool_name="query_rows", outputs_path=str(tmp_path)), lambda _: message)
+
+        assert result is not message
+        assert isinstance(result.content, list)
+        assert media in result.content
+        assert result.artifact == message.artifact
+        files = list((tmp_path / ".tool-results").iterdir())
+        assert len(files) == 1
+        assert json.loads(files[0].read_text(encoding="utf-8")) == payload
+        visible = _fix_messages([result])[0].content
+        assert "Full query_rows output saved to" in visible
+        assert "BINARY_SENTINEL" not in visible
+        assert "x" * 10_000 not in visible
+        assert message.content[0]["json"] == payload
+
+    @pytest.mark.anyio
+    async def test_mixed_json_media_history_is_budgeted_before_mindie(self):
+        from deerflow.models.mindie_provider import _fix_messages
+
+        payload = {"rows": "x" * 2000, "answer": "TAIL_SENTINEL"}
+        media = {"type": "image", "base64": "BINARY_SENTINEL", "mime_type": "image/png"}
+        message = ToolMessage(content=[{"type": "json", "json": payload}, media], name="query_rows", tool_call_id="call_history")
+        request = ModelRequest(model=None, messages=[message], tools=[], state={})
+        middleware = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=100, fallback_max_chars=300, fallback_head_chars=80, fallback_tail_chars=40))
+        captured = {}
+
+        async def handler(req):
+            captured["request"] = req
+            return []
+
+        await middleware.awrap_model_call(request, handler)
+
+        forwarded = captured["request"]
+        assert forwarded is not request
+        assert media in forwarded.messages[0].content
+        visible = _fix_messages(forwarded.messages)[0].content
+        assert len(visible) <= 333  # Configured text limit plus XML framing.
+        assert "TAIL_SENTINEL" in visible
+        assert "BINARY_SENTINEL" not in visible
+        assert message.content[0]["json"] == payload
+
+    @pytest.mark.parametrize("structured", [False, True], ids=["plain-text", "json"])
+    @pytest.mark.parametrize(
+        "config,tool_name",
+        [
+            (ToolOutputConfig(enabled=False), "query_rows"),
+            (ToolOutputConfig(externalize_min_chars=60_000, fallback_max_chars=60_000), "query_rows"),
+            (ToolOutputConfig(), "read_file"),
+        ],
+        ids=["disabled", "increased-limits", "exempt-read"],
+    )
+    def test_configured_passthrough_survives_provider_normalization(self, config, tool_name, structured):
+        from deerflow.models.mindie_provider import _fix_messages
+
+        payload = "x" * 35_000 + "TAIL_SENTINEL"
+        content = [{"type": "json", "json": {"rows": payload}}] if structured else payload
+        message = ToolMessage(content=content, name=tool_name, tool_call_id="call_passthrough")
+        middleware = ToolOutputBudgetMiddleware(config=config)
+
+        result = middleware.wrap_tool_call(_make_request(tool_name=tool_name), lambda _: message)
+
+        assert result is message
+        assert payload in _fix_messages([result])[0].content
+
 
 class TestSnapToLineBoundary:
     def test_snaps_to_newline(self):
@@ -323,6 +421,11 @@ class TestNeedsBudget:
         config = ToolOutputConfig(externalize_min_chars=10)
         msg = ToolMessage(content=[{"type": "image", "data": "x" * 100}], name="tool", tool_call_id="tc-1")
         assert _needs_budget(msg, config) is False
+
+    def test_structured_json_output_needs_budget(self):
+        config = ToolOutputConfig(externalize_min_chars=50)
+        msg = ToolMessage(content=[{"type": "json", "json": {"rows": ["x" * 100]}}], name="query_rows", tool_call_id="tc-1")
+        assert _needs_budget(msg, config) is True
 
 
 class TestBuildPreview:
@@ -731,6 +834,37 @@ class TestToolOutputBlobPersistence:
             }
         ]
 
+    def test_host_externalized_file_keeps_its_blob_ref_bytes_under_windows_newlines(self, monkeypatch, tmp_path):
+        # Windows text mode wrote "\n" as "\r\n", so the file no longer matched
+        # the ref stamped from content.encode() and the next model call on this
+        # Gateway deleted it as a mismatch when no blob store was configured.
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        content = "first line\nsecond line\n" * 20
+        builtin_open = open
+
+        def windows_open(file, mode="r", *args, **kwargs):
+            if "b" not in mode and any(flag in mode for flag in "wax+"):
+                kwargs.setdefault("newline", "\r\n")
+            return builtin_open(file, mode, *args, **kwargs)
+
+        class RecordingStore:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                return BlobRef(sha256=hashlib.sha256(data).hexdigest(), size=len(data), kind=kwargs["kind"], content_type=kwargs["content_type"])
+
+        monkeypatch.setattr(mod, "open", windows_open, raising=False)
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: RecordingStore())
+        mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10))
+        result = mw.wrap_tool_call(_make_request(outputs_path=str(tmp_path)), lambda _: _tm(content, name="remote_executor"))
+        saved = tmp_path / ".tool-results" / os.path.basename(result.additional_kwargs[TOOL_OUTPUT_BLOB_KEY]["virtual_path"])
+        assert saved.read_bytes() == content.encode()
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: None)
+        request = ModelRequest(model=None, messages=[result], tools=[], state={"thread_data": {"outputs_path": str(tmp_path)}})
+        mw.wrap_model_call(request, lambda prepared: [])
+
+        assert saved.read_bytes() == content.encode()
+
     def test_configured_blob_write_failure_falls_back_inline(self, monkeypatch, tmp_path):
         from deerflow.agents.middlewares import tool_output_budget_middleware as mod
 
@@ -887,6 +1021,32 @@ class TestWrapToolCallFallback:
 
         assert isinstance(result, ToolMessage)
         assert "omitted from tool output" in result.content
+
+    def test_structured_json_output_budgeted_before_provider(self):
+        # Review feedback on #6208: the MindIE adapter serializes {"type": "json"}
+        # blocks to text, so a large structured result must hit the budget here,
+        # not sail through to provider normalization at full size.
+        config = ToolOutputConfig(
+            externalize_min_chars=50,
+            fallback_max_chars=200,
+            fallback_head_chars=80,
+            fallback_tail_chars=40,
+        )
+        mw = ToolOutputBudgetMiddleware(config=config)
+        msg = ToolMessage(
+            content=[{"type": "json", "json": {"rows": ["x" * 500]}}],
+            name="query_rows",
+            tool_call_id="tc-1",
+        )
+        req = _make_request(outputs_path=None)
+
+        result = mw.wrap_tool_call(req, lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        assert result is not msg
+        assert isinstance(result.content, str)
+        assert "omitted from query_rows output" in result.content
+        assert len(result.content) <= 200
 
 
 class TestWrapToolCallExemption:
@@ -1458,6 +1618,14 @@ class TestPatchModelMessages:
         result = _patch_model_messages(messages, config)
         assert result is not None
         assert len(result) == 1
+        assert "omitted" in result[0].content
+
+    def test_patches_oversized_structured_json_history(self):
+        config = ToolOutputConfig(fallback_max_chars=500, fallback_head_chars=100, fallback_tail_chars=50)
+        messages = [ToolMessage(content=[{"type": "json", "json": {"rows": ["x" * 1000]}}], name="query_rows", tool_call_id="tc-1")]
+        result = _patch_model_messages(messages, config)
+        assert result is not None
+        assert isinstance(result[0].content, str)
         assert "omitted" in result[0].content
 
 

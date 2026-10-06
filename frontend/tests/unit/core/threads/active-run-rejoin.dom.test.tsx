@@ -10,7 +10,10 @@ import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
 import { useThreadStream } from "@/core/threads/hooks";
 
 type StreamOptions = {
-  onError?: (error: unknown) => void;
+  onError?: (
+    error: unknown,
+    run?: { thread_id: string; run_id: string },
+  ) => void;
   onFinish?: (
     state: {
       values: { artifacts: never[]; messages: never[]; title: string };
@@ -58,6 +61,10 @@ const ACTIVE_RUN = {
   run_id: "run-active",
   status: "running",
 } as Run;
+const ACTIVE_RUN_META = {
+  thread_id: "thread-1",
+  run_id: "run-active",
+};
 
 function createWrapper(queryClient: QueryClient) {
   return function ActiveRunRejoinTestWrapper({
@@ -107,6 +114,13 @@ function renderThread(threadId = "thread-1") {
     },
   );
   return { queryClient, ...rendered };
+}
+
+function failActiveRecoveredStream() {
+  streamMockState.options?.onError?.(
+    new Error("disconnected"),
+    ACTIVE_RUN_META,
+  );
 }
 
 beforeEach(() => {
@@ -162,12 +176,42 @@ test("leaves a matching reconnect pointer to the SDK without joining twice", asy
   unmount();
 });
 
+test.each([
+  ["has no run metadata", undefined],
+  [
+    "belongs to another thread",
+    { thread_id: "thread-2", run_id: "run-active" },
+  ],
+  ["belongs to another run", { thread_id: "thread-1", run_id: "run-other" }],
+])(
+  "keeps the recovered-run pointer when an error %s",
+  async (_caseName, run) => {
+    const { unmount } = renderThread();
+    await flushFrames();
+    expect(streamMockState.joinStream).toHaveBeenCalledTimes(1);
+
+    act(() =>
+      streamMockState.options?.onError?.(new Error("history failed"), run),
+    );
+    expect(window.sessionStorage.getItem("lg:stream:thread-1")).toBe(
+      "run-active",
+    );
+
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(10_000);
+    });
+    expect(streamMockState.joinStream).toHaveBeenCalledTimes(1);
+
+    unmount();
+  },
+);
+
 test("retries a failed recovered stream twice with bounded backoff", async () => {
   const { unmount } = renderThread();
   await flushFrames();
   expect(streamMockState.joinStream).toHaveBeenCalledTimes(1);
 
-  act(() => streamMockState.options?.onError?.(new Error("disconnected")));
+  act(() => failActiveRecoveredStream());
   await act(async () => {
     await rs.advanceTimersByTimeAsync(999);
   });
@@ -177,7 +221,7 @@ test("retries a failed recovered stream twice with bounded backoff", async () =>
   });
   expect(streamMockState.joinStream).toHaveBeenCalledTimes(2);
 
-  act(() => streamMockState.options?.onError?.(new Error("disconnected")));
+  act(() => failActiveRecoveredStream());
   await act(async () => {
     await rs.advanceTimersByTimeAsync(1_999);
   });
@@ -187,7 +231,7 @@ test("retries a failed recovered stream twice with bounded backoff", async () =>
   });
   expect(streamMockState.joinStream).toHaveBeenCalledTimes(3);
 
-  act(() => streamMockState.options?.onError?.(new Error("disconnected")));
+  act(() => failActiveRecoveredStream());
   await act(async () => {
     await rs.advanceTimersByTimeAsync(10_000);
   });
@@ -219,7 +263,7 @@ test("cancels a pending retry when the recovered stream unmounts", async () => {
   await flushFrames();
   expect(streamMockState.joinStream).toHaveBeenCalledTimes(1);
 
-  act(() => streamMockState.options?.onError?.(new Error("disconnected")));
+  act(() => failActiveRecoveredStream());
   unmount();
   await act(async () => {
     await rs.advanceTimersByTimeAsync(10_000);
@@ -234,7 +278,7 @@ test("clears the old retry when the active run changes", async () => {
   await flushFrames();
   expect(streamMockState.joinStream).toHaveBeenCalledWith("run-active");
 
-  act(() => streamMockState.options?.onError?.(new Error("disconnected")));
+  act(() => failActiveRecoveredStream());
   act(() => {
     queryClient.setQueryData(
       ["thread", "thread-1"],

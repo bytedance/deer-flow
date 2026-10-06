@@ -618,13 +618,29 @@ request timeout is capped by the remaining budget; the outer deadline also bound
 responses that keep delivering data. The existing `timeout` remains Jina's
 `X-Timeout` header and the per-request HTTP timeout limit.
 
-Only HTTP 502/503/504 and HTTPX connection-establishment errors (`ConnectError`,
-`ConnectTimeout`) are retried. Authentication/client errors, 429, other statuses,
-empty successful responses, read/write timeouts and arbitrary exceptions are not
-retried. `Retry-After` is not interpreted. Backoff ceilings start at 0.5 seconds,
-double to 1 and 2 seconds, then stay at 4 seconds. Each asynchronous wait caps its
-ceiling by the remaining budget and independently samples a uniform factor from
-0.5 to 1.0, reducing synchronized retries without increasing the wait cap.
+HTTP 502/503/504 and HTTPX connection-establishment errors (`ConnectError`,
+`ConnectTimeout`) are retryable. HTTP 429 is retried **only** with a valid
+`Retry-After` header; missing or malformed hints leave it terminal. HTTP 503
+uses the same hints, falling back to local backoff when they are absent or invalid.
+Authentication, payment/credit and other statuses remain terminal even with hints;
+error-body prose never enables retries. Empty successful responses, read/write
+timeouts and arbitrary exceptions are not retried.
+
+`Retry-After` accepts non-negative ASCII integer seconds or an HTTP-date
+(including obsolete HTTP date forms); past dates mean a zero server floor.
+Signed/fractional delays and non-HTTP dates are invalid. Local backoff ceilings
+start at 0.5 seconds, double to 1 and 2, then stay at 4. Each wait caps the local
+ceiling by the remaining budget and samples a uniform factor from 0.5 to 1.0.
+The actual wait is the greater of that local pacing and the server floor. A
+server floor is never reduced by jitter or the 4-second local ceiling. If the
+hinted wait equals or exceeds the remaining budget (including enormous valid
+integers), the last HTTP status error is returned without another request.
+Dates use wall time to compute a delay; requests and waits share one monotonic
+deadline. Each attempt uses only its own hint.
+
+Offline mocked regressions cover these policies; they do not establish that
+Jina's hosted service always supplies recovery hints. No paid-provider testing
+is required to enable this option.
 Cancellation propagates during requests and waits. This stops local work; it
 cannot cancel work already started by Jina. Enabling retries can send up to `1 + max_retries` upstream requests
 and incur additional cost. Successful content and final `Error:` results retain

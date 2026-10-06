@@ -8,6 +8,10 @@ metadata:
     app.kubernetes.io/component: gateway
 spec:
   replicas: {{ .Values.gateway.replicas }}
+  {{- with .Values.gateway.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "deer-flow.selectorLabels" . | nindent 6 }}
@@ -24,10 +28,14 @@ spec:
         checksum/extensions: {{ include "deer-flow.extensionsChecksum" . }}
     spec:
       {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
-      # MUST exceed channel stop (~5s) + memory shutdown_flush_timeout_seconds
-      # (default 30s) + buffer, or K8s SIGKILLs the memory drain mid-flight
-      # (values.yaml gateway.terminationGracePeriodSeconds). K8s defaults to 30s.
-      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | default 45 }}
+      # MUST exceed preStop sleep + uvicorn --timeout-graceful-shutdown + the
+      # lifespan's worst case -- five hooks bounded at 5s each (trash sweep,
+      # notification worker, channel service, browser sessions, MCP session
+      # pool), the 1s retrieval-warm wait, the 5s run drain and the memory
+      # shutdown_flush_timeout_seconds (default 30s): ~61s -- plus buffer, or
+      # K8s SIGKILLs the memory drain mid-flight (values.yaml
+      # gateway.terminationGracePeriodSeconds). K8s defaults to 30s.
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | default 90 }}
       securityContext:
         # Non-root: the gateway image has no USER directive and would otherwise
         # run as root. uid/gid 1000; fsGroup 1000 so the .deer-flow PVC is
@@ -83,7 +91,7 @@ spec:
           workingDir: /app
           command: ["sh", "-c"]
           args:
-            - cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1
+            - cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1 --timeout-graceful-shutdown {{ .Values.gateway.uvicornGracefulShutdownSeconds | int }}
           env:
             - name: CI
               value: "true"
@@ -118,6 +126,26 @@ spec:
                 secretKeyRef:
                   name: {{ include "deer-flow.appSecret" . }}
                   key: DEER_FLOW_INTERNAL_AUTH_TOKEN
+            # Session-cookie signing key shared by every Pod. Without it each
+            # Pod runs _load_or_create_secret(), which read-then-writes
+            # .jwt_secret on the home volume: concurrently booting replicas race
+            # and sign sessions with different keys. The key is therefore
+            # required whenever more than one instance runs; only a single Pod
+            # with a user-managed existingAppSecret that lacks it may fall back
+            # to the file.
+            - name: AUTH_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: AUTH_JWT_SECRET
+                  optional: {{ ne (include "deer-flow.gatewayMultiInstance" .) "true" }}
+            # Tells the Gateway's startup gate that peers share the database;
+            # its GATEWAY_WORKERS count only sees this Pod. Derived from
+            # gateway.replicas unless gateway.multiInstance is set explicitly:
+            # kubectl scale and HPAs change the replica count without a Helm
+            # upgrade, so set multiInstance: true before scaling that way.
+            - name: DEER_FLOW_MULTI_INSTANCE
+              value: {{ include "deer-flow.gatewayMultiInstance" . | quote }}
             {{- /* PostgreSQL DSN — only mounted when postgres is configured
                   (bundled StatefulSet, external databaseUrl, or an existing
                   Secret). In sqlite/memory mode the env is omitted and

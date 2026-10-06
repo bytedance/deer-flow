@@ -832,7 +832,11 @@ class LocalSandbox(Sandbox):
         resolved_path = self._resolve_path(path)
         should_slice = start_line is not None or end_line is not None
         try:
-            with open(resolved_path, encoding="utf-8") as f:
+            # newline="\n" returns line endings as stored, like the remote
+            # providers (a translated read hid CRLF from str_replace, which then
+            # wrote the whole file back as LF), and ends lines only at "\n", the
+            # rule count_file_lines and read_file's truncation marker count by.
+            with open(resolved_path, encoding="utf-8", newline="\n") as f:
                 if not should_slice:
                     content = f.read()
 
@@ -892,7 +896,9 @@ class LocalSandbox(Sandbox):
             # using the content-specific resolver (forward-slash safe)
             resolved_content = self._resolve_paths_in_content(content)
             mode = "a" if append else "w"
-            with open(resolved_path, mode, encoding="utf-8") as f:
+            # newline="" writes the content as given; the default would turn
+            # every "\n" into "\r\n" on Windows (breaking `bash run.sh`).
+            with open(resolved_path, mode, encoding="utf-8", newline="") as f:
                 f.write(resolved_content)
             # Track this path so read_file knows to reverse-resolve on read.
             # Only agent-written files get reverse-resolved; user uploads and

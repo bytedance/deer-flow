@@ -90,6 +90,14 @@ likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
 
+`make clean` deletes `backend/.deer-flow` (database, users, threads, uploads,
+secrets), which both compose stacks mount into `deer-flow-gateway`. Its recipe
+runs `check-data-not-in-use.sh` before `make stop` (which would stop a live
+stack's sandboxes) and refuses while that container runs; an absent or
+unreachable Docker passes. `make stop` must still run before the delete: it
+stops `deer-flow-sandbox*` containers, whose thread mounts live in that tree.
+`RUNTIME_DATA_CONTENTS` feeds both the help line and the deletion notice.
+
 Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
 Python (`os.name == "nt"`), it checks `pnpm.cmd` before the generic `pnpm`
 lookup, which uses `PATH`/`PATHEXT` and may select an `.exe` or `.bat` in the

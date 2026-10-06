@@ -83,6 +83,7 @@ FastAPI application providing REST endpoints plus the public LangGraph-compatibl
 
 **Routers**:
 - `models.py` - `/api/models` - Model listing and details
+- `agents.py` - `/api/agents` - User-scoped Custom Agent CRUD and versioned definition import/export
 - `thread_runs.py` / `runs.py` - `/api/threads/{id}/runs`, `/api/runs/*` - LangGraph-compatible runs and streaming
 - `mcp.py` - `/api/mcp` - MCP server configuration
 - `skills.py` - `/api/skills` - Skills management

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import posixpath
@@ -96,27 +97,41 @@ def _default_config() -> ToolOutputConfig:
 # ---------------------------------------------------------------------------
 
 
-def _message_text(content: Any) -> str | None:
-    """Extract a plain-text representation from a ToolMessage content field.
+def _split_budgetable_content(content: Any) -> tuple[str | None, list[Any]]:
+    """Render text/JSON for budgeting, retaining other blocks for the provider.
 
-    Returns ``None`` for non-string / multimodal content so the caller
-    can skip budget enforcement (images, structured blocks, etc.).
+    JSON blocks count even when mixed with media. Legacy text/image results
+    without JSON keep their existing pass-through behavior.
     """
     if isinstance(content, str):
-        return content
-    if content is None:
-        return None
+        return content, []
     if isinstance(content, list):
         pieces: list[str] = []
+        retained: list[Any] = []
+        has_json = False
         for part in content:
             if isinstance(part, str):
                 pieces.append(part)
+            elif isinstance(part, dict) and part.get("type") == "json" and "json" in part:
+                # Keep this serialization in sync with mindie_provider._fix_messages.
+                has_json = True
+                try:
+                    pieces.append(json.dumps(part["json"], ensure_ascii=False))
+                except (TypeError, ValueError):
+                    pieces.append(str(part["json"]))
             elif isinstance(part, dict) and isinstance(part.get("text"), str):
                 pieces.append(part["text"])
             else:
-                return None
-        return "\n".join(pieces) if pieces else None
-    return None
+                retained.append(part)
+        if retained and not has_json:
+            return None, retained
+        return ("\n".join(pieces) if pieces else None), retained
+    return None, []
+
+
+def _message_text(content: Any) -> str | None:
+    """Return the text/JSON representation eligible for output budgeting."""
+    return _split_budgetable_content(content)[0]
 
 
 def _snap_to_line_boundary(text: str, pos: int) -> int:
@@ -222,7 +237,9 @@ def _externalize(
         candidate_path = os.path.join(storage_dir, f".tool-output-{uuid.uuid4().hex}.tmp")
         # Exclusive creation keeps per-writer ownership while honoring umask,
         # unlike NamedTemporaryFile's fixed 0600 mode on mounted outputs.
-        with open(candidate_path, "x", encoding="utf-8") as f:
+        # newline="" keeps the bytes equal to the stamped blob ref; Windows
+        # text mode would write CRLF and restore would discard the file.
+        with open(candidate_path, "x", encoding="utf-8", newline="") as f:
             tmp_path = candidate_path
             f.write(content)
         os.replace(tmp_path, filepath)
@@ -629,7 +646,7 @@ def _patch_tool_message(
     if tool_name in config.exempt_tools:
         return msg
 
-    text = _message_text(msg.content)
+    text, retained_blocks = _split_budgetable_content(msg.content)
     if text is None:
         return msg
 
@@ -655,7 +672,7 @@ def _patch_tool_message(
         transform_kind = budgeted.transform_kind
     else:
         return msg
-    update["content"] = replacement
+    update["content"] = [{"type": "text", "text": replacement}, *retained_blocks] if retained_blocks else replacement
     if getattr(msg, "response_metadata", None):
         update["response_metadata"] = dict(msg.response_metadata)
     new_kwargs = dict(getattr(msg, "additional_kwargs", None) or {})
