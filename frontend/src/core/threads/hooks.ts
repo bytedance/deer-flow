@@ -1927,6 +1927,8 @@ export function useThreadStream({
   const scheduleActiveRunRejoinRetry = useCallback(
     (run: Pick<Run, "thread_id" | "run_id"> | undefined) => {
       const rejoin = activeRunRejoinRef.current;
+      // SDK 1.6.0 LGP joinStream errors include { thread_id, run_id }; history
+      // errors omit it. Re-verify this callback contract when upgrading the SDK.
       if (
         !rejoin.inFlight ||
         !rejoin.threadId ||
