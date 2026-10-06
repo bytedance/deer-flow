@@ -20,6 +20,7 @@ from deerflow_extension_api import (
 )
 
 from deerflow.extensions.registry import LoadedExtensions
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,21 @@ def set_extension_notify_loop(loop: asyncio.AbstractEventLoop | None) -> None:
     _notify_loop = loop
     _system_observations_enabled = True
     _warned_no_loop = False
+
+
+async def drain_extension_notify_dispatches() -> None:
+    """Wait for already-submitted fire-and-forget observations to finish."""
+    pending = tuple(_pending_dispatches)
+    if not pending:
+        return
+
+    async def _wait() -> None:
+        await asyncio.gather(
+            *(asyncio.wrap_future(future) for future in pending),
+            return_exceptions=True,
+        )
+
+    await await_drained(_wait())
 
 
 def reset_extension_notify_loop() -> None:
