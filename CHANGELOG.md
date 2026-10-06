@@ -109,7 +109,7 @@ This release closes that milestone with **439 merged pull requests**.
   pushes another owner's run out of the drain batch. Same-thread FIFO and the
   order within one owner are unchanged. A run that waits past
   `scheduler.queue_timeout_seconds` is skipped and shows "Skipped: it waited
-  too long for a free slot" in the run history. ([#6340])
+  too long for a free slot" in the run history. ([#6393])
 
   **Behavior change:** one owner now runs at most 2 scheduled runs at a time by
   default (before: up to `max_concurrent_runs`, default 3).
@@ -127,7 +127,7 @@ This release closes that milestone with **439 merged pull requests**.
   `contracts/scheduled_goal_notes_contract.json` (version 3). Migration
   `0032_activity_and_task_events` adds this table and the run-origin and
   read-state schema used by later changes; `runs.origin_kind` stays NULL for
-  existing runs. ([#6340])
+  existing runs. ([#6393])
 
 - **scheduler:** Scheduled-task IM notices are honest, localized and
   self-contained. Each occurrence sends at most one message, queued by the
@@ -146,7 +146,7 @@ This release closes that milestone with **439 merged pull requests**.
   preference, `en-US` or `zh-CN`) or else the new
   `channel_connections.notification_locale` (default `en-US`). No public base
   URL setting is added: most deployments run on localhost or a LAN, where a
-  link would be dead on the phone that receives it. ([#6340])
+  link would be dead on the phone that receives it. ([#6393])
 
   **Behavior change:** runs finalized by crash or lease recovery now notify
   once (they used to be silent); one message per occurrence replaces separate
@@ -163,7 +163,7 @@ This release closes that milestone with **439 merged pull requests**.
   server-created threads appear within 15 seconds without a reload, opening
   one clears its dot on every device, and the open chat stays read while a
   scheduled run in it updates. Nothing polls when the Gateway has no thread
-  activity (memory persistence). ([#6340])
+  activity (memory persistence). ([#6393])
 
 - **frontend:** The chat that created a schedule now shows one line when the
   schedule pauses or ends ("Release checklist was paused by the agent. Stop
@@ -174,7 +174,7 @@ This release closes that milestone with **439 merged pull requests**.
   and stays after the task is deleted. Settings → Channels and the sidebar's
   channel list say for each app whether scheduled task updates are sent there
   ("sent here" for WeCom, "not available for this app yet" for the others).
-  ([#6340])
+  ([#6393])
 
 - **scheduler:** The web app keeps the account's `locale` preference equal to
   its interface language (after sign-in with session auth and on every
@@ -187,7 +187,7 @@ This release closes that milestone with **439 merged pull requests**.
   activity polling that refetches the thread lists only when a
   server-originated thread changed or a thread was read on another device,
   debounced read marking, and the per-chat lifecycle events with their
-  placement in the conversation. ([#6340])
+  placement in the conversation. ([#6393])
 
 - **scheduler:** The tasks page shows the per-run goal and end conditions of
   conversation-created tasks. Run history shows whether a goal was met,
@@ -223,7 +223,7 @@ This release closes that milestone with **439 merged pull requests**.
   the caller's own server-originated runs make a thread unread; interactive
   runs, other users' runs in shared threads and runs from before the upgrade
   never do. `GET /api/features` reports `thread_activity.available` (SQL
-  persistence only). ([#6340])
+  persistence only). ([#6393])
 
 - **uploads:** Add stable cursor pagination to the `list_uploaded_files`
   discovery tool. With more than 100 historical uploads matching the same
@@ -811,7 +811,7 @@ This release closes that milestone with **439 merged pull requests**.
   `no-cache`, so proxies that compress responses, such as the Next.js rewrite
   proxy used by `pnpm start` without nginx, no longer buffer the stream and
   deliver it in bursts. `X-Accel-Buffering: no` and `Content-Location` are
-  unchanged, and nginx deployments behave as before. ([#6340])
+  unchanged, and nginx deployments behave as before. ([#6393])
 - **middleware:** Tool-output budgeting no longer hides a failed shell exit from
   subagent evidence. A bash result between `externalize_min_chars` (12,000) and
   the sandbox limit (20,000) was replaced by a preview ending in its `Access:`
@@ -9024,7 +9024,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6333]: https://github.com/bytedance/deer-flow/pull/6333
 [#6335]: https://github.com/bytedance/deer-flow/pull/6335
 [#6338]: https://github.com/bytedance/deer-flow/pull/6338
-[#6340]: https://github.com/bytedance/deer-flow/issues/6340
 [#6343]: https://github.com/bytedance/deer-flow/pull/6343
 [#6344]: https://github.com/bytedance/deer-flow/pull/6344
 [#6347]: https://github.com/bytedance/deer-flow/pull/6347
@@ -9032,3 +9031,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351
 [#6354]: https://github.com/bytedance/deer-flow/pull/6354
 [#6378]: https://github.com/bytedance/deer-flow/pull/6378
+[#6393]: https://github.com/bytedance/deer-flow/pull/6393
