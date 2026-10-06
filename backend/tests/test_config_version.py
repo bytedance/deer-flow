@@ -34,7 +34,6 @@ def test_knowledge_base_config_is_provider_agnostic() -> None:
 # Only the upgrade-script test shells out; it needs Git Bash on Windows (the
 # WSL launcher and Store alias stubs cannot run the repo scripts).
 SCRIPT_BASH = find_script_bash()
-REPO_ROOT_BACKEND = Path(__file__).resolve().parents[2] / "backend"
 
 
 def _make_config_files(tmpdir: Path, user_config: dict, example_config: dict) -> Path:
@@ -160,7 +159,6 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     the user's existing database backend settings. Uses the repository's real
     config.example.yaml and the real config-upgrade script.
     """
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -206,7 +204,6 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
 @pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
     """The v46 migration keeps provider settings on the RAGFlow tool entry."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -261,7 +258,6 @@ def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
 @pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_path):
     """Tools-only legacy configs must not be disabled by the new capability gate."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -307,7 +303,6 @@ def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_p
 
 def test_version_45_tools_only_ragflow_config_runs_knowledge_migration(tmp_path):
     """The knowledge migration must run for configs at the former base version."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -356,7 +351,6 @@ def test_version_45_tools_only_ragflow_config_runs_knowledge_migration(tmp_path)
 
 def test_version_45_tools_only_lightrag_config_keeps_knowledge_tool_available(tmp_path):
     """Upgrading a configured LightRAG provider must enable the new knowledge gate."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -413,7 +407,6 @@ def test_version_45_tools_only_lightrag_config_keeps_knowledge_tool_available(tm
 
 def test_version_45_lightrag_config_preserves_explicit_disabled_gate(tmp_path):
     """Migration must not override an operator's explicit knowledge gate value."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     config_path = tmp_path / "config.yaml"
@@ -549,7 +542,6 @@ def test_version_46_pii_enabled_config_upgrade_generates_token_secret(tmp_path):
     """Upgrading a v46 config with redaction enabled persists a generated
     token_secret, leaving the deployment startable under the v47 mandatory
     validation instead of failing startup after the version bump."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -594,7 +586,6 @@ def test_version_46_pii_enabled_config_upgrade_generates_token_secret(tmp_path):
 @pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_version_46_pii_disabled_config_upgrade_skips_token_secret(tmp_path):
     """The migration must not invent a secret when redaction is off."""
-    import subprocess
 
     repo_root = Path(__file__).resolve().parents[2]
     example_src = repo_root / "config.example.yaml"
@@ -667,24 +658,8 @@ def test_config_upgrade_skips_with_a_warning_when_the_environment_is_absent(tmp_
     """
     checkout = tmp_path / "checkout"
     original_config = _write_outdated_config(checkout / "config.yaml")
-    (checkout / "backend").mkdir()
-    (checkout / "scripts").mkdir()
-    shutil.copy2(Path(__file__).resolve().parents[2] / "scripts" / "config-upgrade.sh", checkout / "scripts" / "config-upgrade.sh")
 
-    # Simulate "environment absent" deterministically: point uv at the real
-    # backend project but at a venv path that does not exist. The probe's
-    # --no-sync then fails instead of falling back to the runner's own venv.
-    env = os.environ.copy()
-    env["UV_PROJECT"] = str(REPO_ROOT_BACKEND)
-    env["UV_PROJECT_ENVIRONMENT"] = str(tmp_path / "absent-venv")
-    env.pop("VIRTUAL_ENV", None)
-    result = subprocess.run(
-        [SCRIPT_BASH, str(checkout / "scripts" / "config-upgrade.sh")],
-        cwd=str(checkout),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    result = _run_config_upgrade_in_checkout(checkout, UV_PROJECT_ENVIRONMENT=str(tmp_path / "absent-venv"))
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "skipping the config upgrade" in result.stdout
@@ -697,27 +672,16 @@ def test_fresh_checkout_startup_ends_with_the_config_upgraded_and_startable(tmp_
     again after the sync — one startup must leave even a fresh checkout with an
     upgraded, startable config (Huixin615's v46 pii_redaction scenario)."""
     checkout = tmp_path / "checkout"
-    _write_outdated_config(checkout / "config.yaml")
-    (checkout / "backend").mkdir()
-    (checkout / "scripts").mkdir()
-    shutil.copy2(Path(__file__).resolve().parents[2] / "scripts" / "config-upgrade.sh", checkout / "scripts" / "config-upgrade.sh")
-    shutil.copy2(Path(__file__).resolve().parents[2] / "config.example.yaml", checkout / "config.example.yaml")
-    script = str(checkout / "scripts" / "config-upgrade.sh")
+    original_config = _write_outdated_config(checkout / "config.yaml")
 
     # Phase 1 — before serve.sh's dependency install: no environment yet.
-    absent = os.environ.copy()
-    absent["UV_PROJECT"] = str(REPO_ROOT_BACKEND)
-    absent["UV_PROJECT_ENVIRONMENT"] = str(tmp_path / "absent-venv")
-    absent.pop("VIRTUAL_ENV", None)
-    skipped = subprocess.run([SCRIPT_BASH, script], cwd=str(checkout), env=absent, capture_output=True, text=True)
+    skipped = _run_config_upgrade_in_checkout(checkout, UV_PROJECT_ENVIRONMENT=str(tmp_path / "absent-venv"))
     assert skipped.returncode == 0, skipped.stdout + skipped.stderr
     assert "skipping the config upgrade" in skipped.stdout
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == original_config
 
-    # Phase 2 — the sync has created the environment; the re-run must land.
-    installed = os.environ.copy()
-    installed["UV_PROJECT"] = str(REPO_ROOT_BACKEND)
-    installed.pop("UV_PROJECT_ENVIRONMENT", None)
-    upgraded = subprocess.run([SCRIPT_BASH, script], cwd=str(checkout), env=installed, capture_output=True, text=True)
+    # Phase 2 — serve.sh has synced the environment; the re-run must land.
+    upgraded = _run_config_upgrade_in_checkout(checkout)
     assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
 
     expected_version = yaml.safe_load((checkout / "config.example.yaml").read_text(encoding="utf-8"))["config_version"]
@@ -752,7 +716,6 @@ def _run_config_upgrade_in_checkout(checkout: Path, **env_overrides: str):
     candidate exists: otherwise the script would upgrade the developer's own
     ``config.yaml``.
     """
-    import shutil
     import subprocess
 
     project_root = Path(env_overrides.get("DEER_FLOW_PROJECT_ROOT", checkout))
