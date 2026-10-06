@@ -429,6 +429,50 @@ class TestToolBoundary:
         final = _run_tool_call(_make_middleware(), "fetch_url", result, tool=tool)
         assert final.content == EMAIL_ALICE
 
+    def test_mcp_structured_json_fields_are_redacted_recursively(self):
+        result = ToolMessage(
+            content=[
+                {
+                    "type": "json",
+                    "json": {
+                        "contact": {"email": "alice@example.com"},
+                        "phone_numbers": ["13800138000"],
+                    },
+                }
+            ],
+            tool_call_id="call_structured",
+            name="fetch_url",
+        )
+        tool = SimpleNamespace(metadata={MCP_TOOL_METADATA_KEY: True})
+
+        final = _run_tool_call(_make_middleware(), "fetch_url", result, tool=tool)
+
+        payload = final.content[0]["json"]
+        assert payload["contact"]["email"] == EMAIL_ALICE
+        assert payload["phone_numbers"] == [PHONE_CN]
+        assert "alice@example.com" not in str(final.content)
+        assert "13800138000" not in str(final.content)
+        assert result.content[0]["json"]["contact"]["email"] == "alice@example.com"
+
+    def test_mcp_structured_json_keys_are_redacted_recursively(self):
+        result = ToolMessage(
+            content=[
+                {
+                    "type": "json",
+                    "json": {"alice@example.com": {"status": "active"}},
+                }
+            ],
+            tool_call_id="call_structured_key",
+            name="fetch_url",
+        )
+        tool = SimpleNamespace(metadata={MCP_TOOL_METADATA_KEY: True})
+
+        final = _run_tool_call(_make_middleware(), "fetch_url", result, tool=tool)
+
+        payload = final.content[0]["json"]
+        assert list(payload) == [EMAIL_ALICE]
+        assert "alice@example.com" not in str(final.content)
+
     def test_command_result_passthrough(self):
         result = Command(update={"events": ["alice@example.com"]})
         final = _run_tool_call(_make_middleware(), "web_fetch", result)

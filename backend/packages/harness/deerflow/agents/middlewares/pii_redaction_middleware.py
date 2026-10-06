@@ -317,47 +317,16 @@ def _independent_copy(value: object, *, what: str) -> object:
         return value
 
 
-def _redact_json_value(value: object, redactor: _Redactor) -> tuple[object, bool]:
-    """Redact string leaves inside a ``json`` block payload. Returns ``(value, changed)``.
-
-    Providers that serialize structured blocks onto the text channel (MindIE)
-    would otherwise hand the payload to the model raw: the block carries no
-    ``text`` field, so the block-level branch never touches it. Keys stay
-    untouched — they are the schema the model reads, not user data. Any string
-    leaf is scanned, including one holding double-encoded JSON.
-    """
-    if isinstance(value, str):
-        redacted = redactor.redact(value)
-        return redacted, redacted != value
-    if isinstance(value, dict):
-        changed = False
-        new_items: dict = {}
-        for key, item in value.items():
-            new_item, item_changed = _redact_json_value(item, redactor)
-            changed = changed or item_changed
-            new_items[key] = new_item
-        return (new_items if changed else value), changed
-    if isinstance(value, list):
-        changed = False
-        new_list: list = []
-        for item in value:
-            new_item, item_changed = _redact_json_value(item, redactor)
-            changed = changed or item_changed
-            new_list.append(new_item)
-        return (new_list if changed else value), changed
-    return value, False
-
-
 def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]:
     """Redact *content*, preserving its shape. Returns ``(content, changed)``.
 
     Handles the two shapes message content takes — plain ``str`` and a list of
-    content blocks. Blocks pass through untouched except for any string-valued
-    ``text`` field they carry: lenient downstream consumers (e.g. DeerMem's
-    ``format_conversation_for_update``) read ``p.get("text")`` regardless of
-    the block type, so a non-text block must not smuggle raw PII past the
-    helper. A ``json`` block's payload is redacted leaf-wise for the same
-    reason. The input is never mutated.
+    content blocks. Blocks pass through untouched except for string-valued
+    ``text`` fields and structured ``json`` payloads. The latter is important
+    for MCP results: serializing a ``{"type": "json", "json": {...}}`` block
+    later must not bypass the PII boundary. Binary media fields are left alone
+    so redaction cannot corrupt an image or file payload. The input is never
+    mutated.
     """
     if isinstance(content, str):
         redacted = redactor.redact(content)
@@ -371,23 +340,52 @@ def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]
             redacted = redactor.redact(block)
             changed = changed or redacted != block
             new_content.append(redacted)
-            continue
-        if not isinstance(block, dict):
+        elif isinstance(block, dict):
+            updated_block = block
+            block_changed = False
+
+            if isinstance(block.get("text"), str):
+                redacted = redactor.redact(block["text"])
+                if redacted != block["text"]:
+                    updated_block = {**updated_block, "text": redacted}
+                    block_changed = True
+
+            if "json" in block:
+                redacted_json, json_changed = _redact_json_value(block["json"], redactor)
+                if json_changed:
+                    updated_block = {**updated_block, "json": redacted_json}
+                    block_changed = True
+
+            changed = changed or block_changed
+            new_content.append(updated_block)
+        else:
             new_content.append(block)
-            continue
-        new_block = block
-        if isinstance(block.get("text"), str):
-            redacted = redactor.redact(block["text"])
-            if redacted != block["text"]:
-                new_block = {**new_block, "text": redacted}
-        if "json" in block:
-            redacted_json, json_changed = _redact_json_value(block["json"], redactor)
-            if json_changed:
-                new_block = {**new_block, "json": redacted_json}
-        if new_block is not block:
-            changed = True
-        new_content.append(new_block)
     return new_content, changed
+
+
+def _redact_json_value(value: object, redactor: _Redactor) -> tuple[object, bool]:
+    """Redact string leaves in a structured JSON value without mutating it."""
+    if isinstance(value, str):
+        redacted = redactor.redact(value)
+        return redacted, redacted != value
+    if isinstance(value, list):
+        items: list[object] = []
+        changed = False
+        for item in value:
+            redacted_item, item_changed = _redact_json_value(item, redactor)
+            items.append(redacted_item)
+            changed = changed or item_changed
+        return items, changed
+    if isinstance(value, dict):
+        result: dict[object, object] = {}
+        changed = False
+        for key, item in value.items():
+            redacted_key = redactor.redact(key) if isinstance(key, str) else key
+            redacted_item, item_changed = _redact_json_value(item, redactor)
+            result[redacted_key] = redacted_item
+            changed = changed or item_changed or redacted_key != key
+        return result, changed
+    return value, False
 
 
 class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
