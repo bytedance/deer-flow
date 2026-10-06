@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -96,7 +97,7 @@ class ConfiguredExtension:
     required: bool
 
 
-def _write_bytes_atomically(path: Path, content: bytes) -> None:
+def _write_bytes_atomically(path: Path, content: bytes, mode: int | None) -> None:
     """Publish *content* at *path* so an interrupted restore cannot truncate it.
 
     ``Path.write_bytes`` opens with ``O_TRUNC``, so a rollback that dies midway
@@ -109,6 +110,8 @@ def _write_bytes_atomically(path: Path, content: bytes) -> None:
         with os.fdopen(fd, "wb") as handle:
             handle.write(content)
             handle.flush()
+            if mode is not None:
+                os.chmod(temporary, mode)
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except BaseException:
@@ -120,16 +123,20 @@ def _write_bytes_atomically(path: Path, content: bytes) -> None:
 class _FileSnapshot:
     path: Path
     content: bytes | None
+    mode: int | None
 
     @classmethod
     def capture(cls, path: Path) -> _FileSnapshot:
-        return cls(path, path.read_bytes() if path.exists() else None)
+        if not path.exists():
+            return cls(path, None, None)
+        with path.open("rb") as handle:
+            return cls(path, handle.read(), stat.S_IMODE(os.fstat(handle.fileno()).st_mode))
 
     def restore(self) -> None:
         if self.content is None:
             self.path.unlink(missing_ok=True)
         else:
-            _write_bytes_atomically(self.path, self.content)
+            _write_bytes_atomically(self.path, self.content, self.mode)
 
 
 def _read_optional_bytes(path: Path) -> bytes | None:

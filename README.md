@@ -1460,8 +1460,12 @@ Management commands bootstrap the checkout environment without the extension gro
 when an installed extension's remote source or managed snapshot has become unavailable,
 while a fresh checkout can still create the non-extension environment from the existing lock. The
 manager itself owns the subsequent locked dependency transaction.
-Mutations for one checkout are serialized through a process lock. The initial manager
-surface is create/remove rather than in-place upgrade: to change an installed source, save
+Mutations for one checkout are serialized through a process lock.
+Failed extension operations restore dependency files and configuration atomically with
+their original file permissions, preserving access for a Gateway that reads them through
+group permissions.
+The initial manager surface is create/remove rather than in-place upgrade: to change an
+installed source, save
 its private `plugins[].config`, remove it, reinstall the new pin, and restore that config.
 
 Local-directory installs are copied into
