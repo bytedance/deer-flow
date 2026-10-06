@@ -421,7 +421,8 @@ def _build_fallback(
     A trailing bash exit marker (``Exit Code: N`` / ``Command exited with
     code N``) is reserved from the budget the way sandbox truncation does,
     so harvest can still recover the shell status. Only when *max_chars*
-    is smaller than the marker itself does the marker drop.
+    is smaller than the marker line (including its leading newline) does
+    the marker drop.
     """
     total = len(content)
     if max_chars <= 0 or total <= max_chars:
@@ -433,7 +434,7 @@ def _build_fallback(
         match = _BASH_EXIT_MARKER_TAIL_RE.search(content)
         if match is not None:
             line = f"\n{match.group(0).strip()}"
-            if len(line) < max_chars:
+            if len(line) <= max_chars:
                 body = content[: match.start()]
                 preserved = line
                 max_chars -= len(preserved)

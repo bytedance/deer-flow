@@ -935,10 +935,10 @@ class TestBashExitMarkerPreservation:
     def test_fallback_never_exceeds_max_chars_with_exit_marker(self):
         content = _pytest_like_output("Exit Code: 1")
         marker_line = "\nExit Code: 1"
-        for max_chars in [10, 20, 80, 200, 500, 1000, 5000, 20000]:
+        for max_chars in [10, len(marker_line) - 1, len(marker_line), 20, 80, 200, 500, 1000, 5000, 20000]:
             result = _build_fallback(content, tool_name="bash", max_chars=max_chars, head_chars=max_chars // 2, tail_chars=max_chars // 4)
             assert len(result) <= max_chars, f"max_chars={max_chars}: got {len(result)}"
-            if max_chars > len(marker_line):
+            if max_chars >= len(marker_line):
                 assert result.rstrip().endswith("Exit Code: 1"), f"max_chars={max_chars}"
             else:
                 assert not result.rstrip().endswith("Exit Code: 1")
@@ -962,9 +962,9 @@ class TestBashExitMarkerPreservation:
         spec = importlib.util.spec_from_file_location("_budget_exit_marker_executor", path)
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
         try:
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
             from deerflow.subagents import acceptance_checks
 
             content = _pytest_like_output("Exit Code: 1")
@@ -990,8 +990,11 @@ class TestBashExitMarkerPreservation:
             assert leaf["checked"] is True
             assert leaf["holds"] is False
         finally:
-            module._shutdown_isolated_subagent_loop()
             sys.modules.pop(spec.name, None)
+            # Absent when exec_module failed part-way; don't mask that error.
+            shutdown = getattr(module, "_shutdown_isolated_subagent_loop", None)
+            if shutdown is not None:
+                shutdown()
 
 
 # ===========================================================================
