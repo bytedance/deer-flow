@@ -631,7 +631,7 @@ This release closes that milestone with **439 merged pull requests**.
   could be deleted under a live Gateway. The help text and a notice before
   deletion now name the directory, and `make clean` stops with a hint to run
   `make down` or `make docker-stop` while that container is running, before it
-  stops anything.
+  stops anything. ([#6351])
 - **sandbox:** With host bash enabled, the local sandbox no longer keeps a
   thread on the skill view of the last restricted Agent that ran there. That
   view is only maintained while host bash is off, but `LocalSandboxProvider`
@@ -8791,3 +8791,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6338]: https://github.com/bytedance/deer-flow/pull/6338
 [#6343]: https://github.com/bytedance/deer-flow/pull/6343
 [#6344]: https://github.com/bytedance/deer-flow/pull/6344
+[#6351]: https://github.com/bytedance/deer-flow/pull/6351
