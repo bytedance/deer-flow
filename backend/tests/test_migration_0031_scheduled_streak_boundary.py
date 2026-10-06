@@ -18,14 +18,16 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 REVISION = "0031_scheduled_streak_boundary"
 PREVIOUS = "0030_notification_claim_tokens"
+NEXT = "0032_activity_and_task_events"
 COLUMNS = {"unmet_streak_after_seq", "stop_condition"}
 pytestmark = pytest.mark.asyncio
 
 
-async def test_0031_is_the_single_head_after_0030():
+async def test_0031_follows_0030_and_precedes_0032():
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [REVISION]
+    assert len(script.get_heads()) == 1
     assert script.get_revision(REVISION).down_revision == PREVIOUS
+    assert script.get_revision(NEXT).down_revision == REVISION
     # alembic_version.version_num is VARCHAR(32).
     assert len(REVISION) <= 32
 

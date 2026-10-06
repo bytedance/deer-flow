@@ -660,6 +660,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         if sf is not None:
             from deerflow.persistence.mcp_tasks import McpTaskRepository
             from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepository
+            from deerflow.persistence.scheduled_task_events import ScheduledTaskEventRepository
             from deerflow.persistence.scheduled_task_runs import (
                 ScheduledTaskRunRepository,
             )
@@ -676,6 +677,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 sf,
                 run_repository=app.state.run_store,
             )
+            app.state.scheduled_task_event_repo = ScheduledTaskEventRepository(sf)
             app.state.mcp_task_repo = McpTaskRepository(sf)
             app.state.subagent_batch_repo = SubagentBatchRepository(sf)
         else:
@@ -685,6 +687,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.subagent_batch_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
+            app.state.scheduled_task_event_repo = None
 
         # RunManager with store backing for persistence
         run_ownership_config = getattr(config, "run_ownership", None)
@@ -829,6 +832,13 @@ def get_scheduled_task_run_repo(request: Request):
     val = getattr(request.app.state, "scheduled_task_run_repo", None)
     if val is None:
         raise _scheduler_unavailable("Scheduled task run repo not available")
+    return val
+
+
+def get_scheduled_task_event_repo(request: Request):
+    val = getattr(request.app.state, "scheduled_task_event_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Scheduled task event repo not available")
     return val
 
 

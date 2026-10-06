@@ -11,18 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
-from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, automatic_runs_used, end_condition_reached, finalize_occurrence, is_host_pause_marker, utc
+from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, automatic_runs_used, end_condition_reached, finalize_occurrence, finish_task_at_end_condition, is_host_pause_marker, utc
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
-from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, ScheduledTaskRow
+from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, LIVE_TASK_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, TERMINAL_TASK_STATUSES, ScheduledTaskRow
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
 from deerflow.utils.goal_objective import normalize_goal_objective
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
-
-TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
-LIVE_TASK_STATUSES: frozenset[str] = frozenset({"enabled", "running", "paused"})
 
 
 class ScheduledTaskQuotaExceeded(ValueError):
@@ -771,12 +768,11 @@ class ScheduledTaskRepository:
                 # Completion owns the lifecycle while work is already executing.
                 return True
             if active is not None and active.trigger == "scheduled":
+                # Skipping the waiting row finishes the task and emits there;
+                # the helper below then only clears the lease.
                 await finalize_occurrence(session, task, active, status="skipped", error=RUN_ERROR_END_REACHED, finished_at=now, run_id=None, observer=self._finalization_observer)
-            task.status = "completed"
-            task.next_run_at = None
-            task.lease_owner = None
-            task.lease_expires_at = None
-            task.updated_at = now
+            # No queued row (or a queued manual trial): an idle finish.
+            await finish_task_at_end_condition(session, task, occurrence=None, now=now, observer=self._finalization_observer)
             await session.commit()
             return True
 

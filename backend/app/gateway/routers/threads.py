@@ -834,6 +834,18 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     except Exception:
         logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
 
+    # Remove the chat's scheduled-task lifecycle lines (best-effort). They are
+    # display-only history of this chat; the tasks themselves are untouched.
+    # This runs after the thread_meta delete: the finalization observer writes
+    # a line only while that row exists, so a task finishing during the delete
+    # cannot leave a line behind once both steps are done.
+    try:
+        task_event_repo = getattr(request.app.state, "scheduled_task_event_repo", None)
+        if task_event_repo is not None:
+            await task_event_repo.delete_by_thread(thread_id, user_id=user_id)
+    except Exception:
+        logger.debug("Could not delete scheduled task events for thread %s (not critical)", sanitize_log_param(thread_id))
+
     # Tear down any live browser session (best-effort). Sessions are keyed only
     # by thread_id, so leaving one alive after the owner deletes the thread lets
     # a later caller who guesses the id reuse the retained page/cookies.

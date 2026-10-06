@@ -115,6 +115,20 @@ This release closes that milestone with **301 merged pull requests**.
   default (before: up to `max_concurrent_runs`, default 3).
   `scheduler.max_concurrent_runs_per_user: 0` restores the old behavior.
 
+- **scheduler:** When a schedule created in a chat is paused by the agent
+  (its stop condition was met), is paused automatically after three missed
+  goals, or finishes (all `max_runs` done, `end_at` passed, or a one-time task
+  ran), a durable lifecycle event is recorded for that chat in the same
+  database transaction as the state change, and recovery after a crash or a
+  lost lease never records it twice. New `GET
+  /api/threads/{thread_id}/scheduled-task-events` lists them (title snapshot,
+  stop condition, run number and the last run's outcome); the rows stay after
+  the task is deleted and go with the chat. The event names are pinned in
+  `contracts/scheduled_goal_notes_contract.json` (version 3). Migration
+  `0032_activity_and_task_events` adds this table and the run-origin and
+  read-state schema used by later changes; `runs.origin_kind` stays NULL for
+  existing runs. ([#6340])
+
 - **scheduler:** The tasks page shows the per-run goal and end conditions of
   conversation-created tasks. Run history shows whether a goal was met,
   including when it relied on stated assumptions; an unmet run shows a readable

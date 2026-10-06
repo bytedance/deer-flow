@@ -12,7 +12,13 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow
+from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.scheduled_task_events import ScheduledTaskEventRepository
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected
+from deerflow.persistence.scheduled_task_runs.finalization import LIFECYCLE_EVENTS, RUN_EVENT_BY_STATUS, lifecycle_anchor, lifecycle_reason
+from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+from deerflow.persistence.scheduled_task_runs.sql import run_number_expression
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ERROR_INTERRUPTED, RUN_ERROR_LEASE_LOST, RUN_ERROR_PAUSED_WHILE_QUEUED, RUN_ERROR_QUEUE_TIMEOUT, RUN_ERROR_RESTARTED
 from deerflow.scheduler.schedules import next_run_at
@@ -51,6 +57,47 @@ def _as_utc(value: datetime | str | None) -> datetime | None:
     if isinstance(value, str):
         value = datetime.fromisoformat(f"{value[:-1]}+00:00" if value.endswith("Z") else value)
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _as_utc_or_none(value: object) -> datetime | None:
+    """A datetime as aware UTC; anything else (or an unusable value) is None."""
+    if not isinstance(value, datetime):
+        return None
+    try:
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _int_or_none(value: object) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _chat_event_payload(task, occurrence, event: str, *, run_number: int | None) -> dict[str, Any]:
+    """Display snapshot of a lifecycle event (survives task deletion and edits).
+
+    ``run_thread_id`` is set only when the occurrence launched a run (a skipped
+    occurrence's thread was never created). ``latest_reason_code`` is the
+    unmet reason of that run. Never raises for bad stored values.
+    """
+    title = task.title.strip() if isinstance(task.title, str) else ""
+    stop_condition = getattr(task, "stop_condition", None)
+    end_at = _as_utc_or_none(getattr(task, "end_at", None))
+    run_status = getattr(occurrence, "status", None) if occurrence is not None else None
+    return {
+        "task_title": title or None,
+        "stop_condition": stop_condition if event == "task_stopped" and isinstance(stop_condition, str) and stop_condition.strip() else None,
+        "run_thread_id": occurrence.thread_id if occurrence is not None and occurrence.run_id is not None else None,
+        "run_number": run_number,
+        "run_status": run_status,
+        "latest_reason_code": occurrence.error if run_status == "unmet" and isinstance(occurrence.error, str) else None,
+        "max_runs": _int_or_none(getattr(task, "max_runs", None)),
+        "end_at": end_at.isoformat() if end_at is not None else None,
+        "schedule_type": task.schedule_type if isinstance(task.schedule_type, str) else None,
+    }
 
 
 # Shared so the active-row fast path and the atomic-admission conflict path
@@ -135,11 +182,71 @@ class ScheduledTaskService:
         return self._task is not None and not self._task.done()
 
     def _install_finalization_observers(self) -> None:
-        observer = self._enqueue_finalization_notices if self._connection_repo is not None and self._notification_repo is not None else None
+        # Always installed: chat events need no outbox. The IM step checks the
+        # outbox wiring at call time, so a detached outbox keeps chat events.
         for repository in (self._task_repo, self._task_run_repo):
             register = getattr(repository, "set_finalization_observer", None)
             if callable(register):
-                register(observer)
+                register(self._on_finalization)
+
+    async def _on_finalization(self, session, task, occurrence, *, events: tuple[str, ...]) -> None:
+        """Stage lifecycle obligations in the transaction that finalizes them.
+
+        Called by ``finalize_occurrence`` and ``finish_task_at_end_condition``
+        under the parent lock, before their commit, so every row written here
+        commits or rolls back with the state change it reports (also during
+        crash and lease recovery). ``occurrence`` is None for an idle finish.
+
+        1. A manual trial drops only its ``run_*`` events (the user is watching
+           it); lifecycle events are one-time transitions and are kept.
+        2. Lifecycle events become rows for the originating chat.
+        3. IM notices (only while the outbox is wired).
+
+        Lookups never raise for bad data (see ``_record_chat_events``); only
+        database errors propagate, because swallowing them would break the
+        same-transaction guarantee.
+        """
+        if occurrence is not None and occurrence.trigger == "manual":
+            events = tuple(event for event in events if event not in RUN_EVENT_BY_STATUS.values())
+        lifecycle = tuple(event for event in events if event in LIFECYCLE_EVENTS)
+        if lifecycle:
+            await self._record_chat_events(session, task, occurrence, lifecycle)
+        if self._notification_repo is not None and self._connection_repo is not None:
+            await self._enqueue_finalization_notices(session, task, occurrence, events=events)
+
+    async def _record_chat_events(self, session, task, occurrence, events: tuple[str, ...]) -> None:
+        """Write one display-only event row per lifecycle event for the originating chat.
+
+        Page-created tasks have no originating chat, and a deleted chat gets no
+        new rows. Bad stored data falls back (blank title -> None, unreadable
+        end time -> ``max_runs`` / ``seq:`` anchor, missing run -> None).
+        """
+        origin_thread_id = getattr(task, "origin_thread_id", None)
+        if not isinstance(origin_thread_id, str) or not origin_thread_id:
+            return
+        if await session.scalar(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == origin_thread_id)) is None:
+            return
+        now = _as_utc_or_none(getattr(occurrence, "finished_at", None)) or _as_utc_or_none(task.updated_at) or datetime.now(UTC)
+        anchor = lifecycle_anchor(task, occurrence)
+        after_run_id = await session.scalar(select(RunRow.run_id).where(RunRow.thread_id == origin_thread_id, RunRow.operation_kind == "run").order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(1))
+        run_number = None
+        if occurrence is not None:
+            value = await session.scalar(select(run_number_expression(ScheduledTaskRunRow)).where(ScheduledTaskRunRow.id == occurrence.id))
+            run_number = _int_or_none(value)
+        for event in events:
+            reason = lifecycle_reason(task, event, now=now, occurrence=occurrence)
+            await ScheduledTaskEventRepository.record_in_session(
+                session,
+                user_id=task.user_id,
+                task_id=task.id,
+                thread_id=origin_thread_id,
+                occurrence_id=occurrence.id if occurrence is not None else None,
+                anchor=anchor,
+                event=event,
+                reason_code=reason,
+                after_run_id=after_run_id,
+                payload=_chat_event_payload(task, occurrence, event, run_number=run_number),
+            )
 
     async def _enqueue_finalization_notices(self, session, task, occurrence, *, events: tuple[str, ...]) -> None:
         """Commit new lifecycle notices with their first terminal transition.
@@ -149,7 +256,7 @@ class ScheduledTaskService:
         this transaction-aware callback, including during crash recovery.
         """
         selected = tuple(event for event in events if event in {"run_unmet", "task_paused"})
-        if not selected or occurrence.trigger == "manual" or self._notification_repo is None or self._connection_repo is None:
+        if not selected or occurrence is None or occurrence.trigger == "manual" or self._notification_repo is None or self._connection_repo is None:
             return
         bindings = await session.scalars(select(ChannelConnectionRow).where(ChannelConnectionRow.owner_user_id == task.user_id, ChannelConnectionRow.status == "connected"))
         for binding in bindings:

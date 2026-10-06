@@ -1243,6 +1243,7 @@ POST   /api/scheduled-tasks/{task_id}/resume
 POST   /api/scheduled-tasks/{task_id}/trigger
 GET    /api/scheduled-tasks/{task_id}/runs?status=&limit=&offset=
 GET    /api/threads/{thread_id}/scheduled-tasks
+GET    /api/threads/{thread_id}/scheduled-task-events?limit=50
 POST   /api/scheduled-tasks/preview-cron
 ```
 
@@ -1273,6 +1274,32 @@ while its run executes, so check `active_run_status` for "is a run active".
 (`origin`: created in the chat, `reuse`: runs in the chat, `run`: the chat is
 one of its runs) and `thread_run` (`{"run_number", "trigger", "scheduled_for",
 "status"}` for `run`, else null).
+
+`GET /api/threads/{thread_id}/scheduled-task-events` (thread owner check;
+`limit` 1–200, default 50) returns the caller's lifecycle events for a chat
+that created tasks, oldest first:
+
+```json
+{ "events": [ { "id": "evt-…", "task_id": "task-…", "event": "task_stopped", "reason_code": "agent_stop",
+  "task_title": "Check the release checklist", "stop_condition": "all items are ticked",
+  "run_thread_id": "…", "run_number": 4, "run_status": "success", "max_runs": null, "end_at": null,
+  "schedule_type": "cron", "after_run_id": "…", "created_at": "2026-10-06T09:00:03+00:00" } ] }
+```
+
+`event` is `task_stopped` (the agent paused its own schedule, reason
+`agent_stop`), `task_paused` (automatic pause, `consecutive_unmet`) or
+`task_finished` (`max_runs`, `end_at`, or a one-time task's `once_done` /
+`once_failed`); the vocabulary is pinned in
+`contracts/scheduled_goal_notes_contract.json`. Each row is written in the
+same transaction as the state change it reports and is unique per task,
+transition and event, so recovery never adds a second one. `run_status` is the
+last run's outcome (a stop or finish after a failed run says so);
+`run_thread_id` is null when the occurrence never launched; `after_run_id` is
+the newest run of the chat when the event was written (the chat shows the line
+after that turn, else at the end). Rows keep a title snapshot and stay after
+the task is deleted; deleting the chat removes them. Tasks created on the
+Scheduled tasks page have no originating chat and no rows. IDs are for links
+only.
 
 **Create** returns `409 scheduler_not_running` (after the request validates)
 while this Gateway process's scheduler is not running; the tasks page's

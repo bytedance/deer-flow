@@ -2483,9 +2483,12 @@ schedule, the next run and the stop condition in plain text.
   keep the saved zone; the browser zone never changes an existing task.
 - **Where results appear.** Each run posts its result in a new chat of its own,
   titled “{task} · {local time}”, or in the originating chat when the task runs
-  there. Nothing else is posted back to the originating conversation. A run chat
-  shows the task instructions as one collapsed “Task instructions” block under
-  the run's header instead of a long user message.
+  there. When the schedule is paused by the agent, is paused automatically or
+  finishes, the originating chat shows one line where the conversation stood,
+  with a link to that run or to the task; nothing else is posted back to it.
+  The line stays after the task is deleted. A run chat shows the task
+  instructions as one collapsed “Task instructions” block under the run's
+  header instead of a long user message.
 - **Language.** The agent writes the title, instructions and stop condition in
   your language, and scheduled runs answer in the language of the instructions.
 

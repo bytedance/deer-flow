@@ -12,7 +12,7 @@ from sqlalchemy.orm import aliased
 
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
-from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, end_condition_reached, finalize_occurrence, is_host_pause_marker
+from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, end_condition_reached, finalize_occurrence, finish_task_at_end_condition, is_host_pause_marker
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
 from deerflow.persistence.scheduled_tasks.model import (
@@ -240,10 +240,9 @@ class ScheduledTaskRunRepository:
                         await session.rollback()
                         raise ScheduledTaskAdmissionRejected(task_id, reason="stale")
                 if trigger == "scheduled" and await end_condition_reached(session, task, now=scheduled_for):
-                    task.status = "completed"
-                    task.next_run_at = None
-                    task.lease_owner = None
-                    task.lease_expires_at = None
+                    # The row being admitted is never persisted, so this is an
+                    # idle finish (no occurrence anchor).
+                    await finish_task_at_end_condition(session, task, occurrence=None, now=scheduled_for, observer=self._finalization_observer)
                     await session.commit()
                     raise ScheduledTaskAdmissionRejected(task_id, reason="ended")
                 active_status = await session.scalar(
@@ -545,10 +544,10 @@ class ScheduledTaskRunRepository:
                 return None
             if task is not None and row.trigger == "scheduled" and await end_condition_reached(session, task, now=now):
                 await finalize_occurrence(session, task, row, status="skipped", error=RUN_ERROR_END_REACHED, finished_at=now, run_id=None, observer=self._finalization_observer)
-                task.status = "completed"
-                task.next_run_at = None
-                task.lease_owner = None
-                task.lease_expires_at = None
+                # finalize_occurrence already finished a live recurring task
+                # (and emitted); this only clears the lease and covers rows
+                # that could not project, without emitting twice.
+                await finish_task_at_end_condition(session, task, occurrence=row, now=now, observer=self._finalization_observer)
                 await session.commit()
                 return None
             executing = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES)))
