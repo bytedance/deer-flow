@@ -15,6 +15,8 @@ from __future__ import annotations
 import functools
 from types import SimpleNamespace
 
+import os
+
 import pytest
 
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
@@ -22,7 +24,14 @@ from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepo
 from deerflow.projects.documents import add_staged_document, read_file_chunks, stage_document_bytes, stage_document_copy_for_attach
 from deerflow.utils.file_io import run_file_io as _real_run_file_io
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.allow_blocking_io]
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.allow_blocking_io,
+    pytest.mark.skipif(
+        os.name == "nt",
+        reason="project-document anchors exceed Windows MAX_PATH (WinError 206); see #6353",
+    ),
+]
 
 _USER = "u1"
 
