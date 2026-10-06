@@ -43,6 +43,7 @@ import { cn } from "@/lib/utils";
 
 import { ChannelProviderIcon } from "../channels/channel-provider-icon";
 import { ChannelRuntimeConfigDialog } from "../channels/channel-runtime-config-dialog";
+import { ChannelScheduledUpdates } from "../channels/channel-scheduled-updates";
 
 import { SettingsSection } from "./settings-section";
 
@@ -206,6 +207,7 @@ function ChannelProviderItem({
               ? ` ${provider.unavailable_reason}`
               : ""}
           </ItemDescription>
+          <ChannelScheduledUpdates provider={provider} className="mt-1" />
         </ItemContent>
         <ItemActions className="ml-auto">
           {isConnected ? (

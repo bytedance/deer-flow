@@ -7,6 +7,7 @@ import { MessageList } from "@/components/workspace/messages/message-list";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import type { MessageGroup } from "@/core/messages/utils";
+import type { ScheduledTaskEvent } from "@/core/scheduled-tasks/events";
 
 import {
   loadScheduledThread,
@@ -29,13 +30,18 @@ rs.mock("@/components/workspace/messages/virtual-message-list", () => ({
   VirtualMessageList: ({
     groups,
     renderGroup,
+    renderAfterGroup,
   }: {
     groups: MessageGroup[];
     renderGroup: (group: MessageGroup, index: number) => ReactNode;
+    renderAfterGroup?: (index: number) => ReactNode;
   }) => (
     <div>
       {groups.map((group, index) => (
-        <div key={`${group.type}:${group.id}`}>{renderGroup(group, index)}</div>
+        <div key={`${group.type}:${group.id}`}>
+          {renderGroup(group, index)}
+          {renderAfterGroup?.(index)}
+        </div>
       ))}
     </div>
   ),
@@ -73,13 +79,18 @@ afterEach(cleanup);
 
 const getMessagesMetadata = () => undefined;
 
-function view(messages: Message[], isLoading: boolean) {
+function view(
+  messages: Message[],
+  isLoading: boolean,
+  scheduledTaskEvents?: ScheduledTaskEvent[],
+) {
   return (
     <I18nContext.Provider
       value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
     >
       <MessageList
         threadId="scheduled-run"
+        scheduledTaskEvents={scheduledTaskEvents}
         canEdit
         onEditAndRegenerateMessage={async () => true}
         thread={
@@ -151,5 +162,100 @@ describe("MessageList with scheduled runs", () => {
     render(view(loadScheduledThread("en-3-chat-thread").messages, false));
     expect(screen.getAllByTestId("card")).toHaveLength(2);
     expect(screen.getAllByTestId("item-ai")).toHaveLength(2);
+  });
+});
+
+/** The recorded origin chat with one run per turn: create, then trial. */
+function chatThreadWithRuns(): Message[] {
+  const messages = loadScheduledThread("en-3-chat-thread").messages;
+  const trialStart = messages.findIndex(
+    (message, index) => index > 0 && message.type === "human",
+  );
+  return messages.map(
+    (message, index) =>
+      ({
+        ...message,
+        run_id: index < trialStart ? "run-create" : "run-trial",
+      }) as unknown as Message,
+  );
+}
+
+function taskEvent(
+  id: string,
+  overrides: Partial<ScheduledTaskEvent> = {},
+): ScheduledTaskEvent {
+  return {
+    id,
+    task_id: "task-2b559ac2af344c3f9e55b90391f7fb1a",
+    event: "task_stopped",
+    reason_code: "agent_stop",
+    task_title: "Release checklist status watcher",
+    stop_condition: null,
+    run_thread_id: "83d5133d-f8aa-4095-9bba-2aca03f8f61c",
+    run_number: 2,
+    run_status: "success",
+    max_runs: null,
+    end_at: null,
+    schedule_type: "cron",
+    after_run_id: "run-trial",
+    created_at: "2026-10-05T12:22:00+00:00",
+    ...overrides,
+  };
+}
+
+const follows = (a: Element, b: Element) =>
+  Boolean(b.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+describe("MessageList with schedule event lines", () => {
+  it("puts a line at the end of its run's turn, before the next question", () => {
+    render(
+      view(chatThreadWithRuns(), false, [
+        taskEvent("evt-a", { after_run_id: "run-create" }),
+      ]),
+    );
+    const line = screen.getByTestId("scheduled-task-event-line");
+    const [firstCard, secondCard] = screen.getAllByTestId("card");
+    const humans = screen.getAllByTestId("item-human");
+    expect(follows(line, firstCard!)).toBe(true);
+    expect(follows(humans[1]!, line)).toBe(true);
+    expect(follows(secondCard!, line)).toBe(true);
+  });
+
+  it("falls back to the tail when no message carries the anchor run", () => {
+    render(
+      view(chatThreadWithRuns(), false, [
+        taskEvent("evt-a", { after_run_id: "run-from-a-pruned-branch" }),
+      ]),
+    );
+    const line = screen.getByTestId("scheduled-task-event-line");
+    for (const item of [
+      ...screen.getAllByTestId("item-ai"),
+      ...screen.getAllByTestId("card"),
+    ]) {
+      expect(follows(line, item)).toBe(true);
+    }
+  });
+
+  it("keeps lines of one anchor in created order", () => {
+    render(
+      view(chatThreadWithRuns(), false, [
+        taskEvent("evt-later", {
+          event: "task_finished",
+          reason_code: "end_at",
+          created_at: "2026-10-05T12:30:00+00:00",
+        }),
+        taskEvent("evt-earlier"),
+      ]),
+    );
+    expect(
+      screen
+        .getAllByTestId("scheduled-task-event-line")
+        .map((line) => line.getAttribute("data-event-id")),
+    ).toEqual(["evt-earlier", "evt-later"]);
+  });
+
+  it("renders no line without events", () => {
+    render(view(chatThreadWithRuns(), false, []));
+    expect(screen.queryByTestId("scheduled-task-event-line")).toBeNull();
   });
 });

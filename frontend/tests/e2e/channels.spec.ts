@@ -833,3 +833,74 @@ for (const entry of ["sidebar", "settings"] as const) {
     });
   }
 }
+
+test.describe("scheduled task updates per app", () => {
+  const COPY = {
+    en: {
+      locale: "en-US",
+      supported: "Scheduled task updates: sent here",
+      unsupported: "Scheduled task updates: not available for this app yet",
+      dialog: "Settings",
+    },
+    zh: {
+      locale: "zh-CN",
+      supported: "定时任务通知：会发送到这里",
+      unsupported: "定时任务通知：此应用暂不支持",
+      dialog: "设置",
+    },
+  } as const;
+
+  for (const lang of ["en", "zh"] as const) {
+    test(`WeCom says updates are sent there, Feishu says not yet (${lang})`, async ({
+      page,
+    }) => {
+      const copy = COPY[lang];
+      await page
+        .context()
+        .addCookies([
+          { name: "locale", value: copy.locale, url: "http://localhost:3000" },
+        ]);
+      mockLangGraphAPI(page);
+      mockChannelsAPI(
+        page,
+        defaultProviders()
+          .filter(({ provider }) => ["feishu", "wecom"].includes(provider))
+          .map((provider) => ({
+            ...provider,
+            // Only WeCom implements proactive push today.
+            proactive_notifications: provider.provider === "wecom",
+          })),
+      );
+
+      await page.goto("/workspace/chats/new?settings=channels");
+      const dialog = page.getByRole("dialog", { name: copy.dialog });
+      // Cards carry the backend's display name.
+      const wecomName = "WeCom";
+      const feishuName = "Feishu";
+      const wecomCard = dialog
+        .locator("[data-slot='item']")
+        .filter({ hasText: wecomName });
+      const feishuCard = dialog
+        .locator("[data-slot='item']")
+        .filter({ hasText: feishuName });
+      await expect(
+        wecomCard.getByTestId("channel-scheduled-updates"),
+      ).toHaveText(copy.supported);
+      await expect(
+        feishuCard.getByTestId("channel-scheduled-updates"),
+      ).toHaveText(copy.unsupported);
+
+      // The sidebar's channel list says the same.
+      await page.keyboard.press("Escape");
+      const sidebar = page.locator("[data-sidebar='sidebar']");
+      const lines = sidebar.getByTestId("channel-scheduled-updates");
+      await expect(lines).toHaveCount(2);
+      await expect(
+        sidebar.locator("li").filter({ hasText: wecomName }),
+      ).toContainText(copy.supported);
+      await expect(
+        sidebar.locator("li").filter({ hasText: feishuName }),
+      ).toContainText(copy.unsupported);
+    });
+  }
+});

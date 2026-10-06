@@ -34,6 +34,7 @@ import { cn } from "@/lib/utils";
 
 import { ChannelProviderIcon } from "./channel-provider-icon";
 import { ChannelRuntimeConfigDialog } from "./channel-runtime-config-dialog";
+import { ChannelScheduledUpdates } from "./channel-scheduled-updates";
 
 function getProviderUnavailableReason(
   provider: ChannelProvider,
@@ -137,51 +138,60 @@ export function WorkspaceChannelsList() {
 
           return (
             <SidebarMenuItem key={provider.provider}>
-              <div className="hover:bg-sidebar-accent flex h-10 items-center gap-2 rounded-md px-2 transition-colors">
-                <ChannelProviderIcon
-                  provider={provider.provider}
-                  className="size-5 shrink-0"
-                />
-                <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                  {provider.display_name}
-                </span>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant={isConnected ? "outline" : "secondary"}
-                  className={cn(
-                    "h-8 w-24 px-2 text-xs",
-                    isConnected && "gap-1",
-                  )}
-                  disabled={isPending}
-                  title={unavailableReason}
-                  onClick={() => {
-                    if (
-                      providerNeedsRuntimeConfig(provider) ||
-                      (isConnected && canEditRuntimeConfig)
-                    ) {
-                      setSetupStep("setup");
-                      setSetupProvider(provider);
-                      return;
-                    }
-
-                    if (!canConnect) {
-                      toast.error(unavailableReason ?? t.channels.unavailable);
-                      return;
-                    }
-
-                    startConnect(provider);
-                  }}
-                >
-                  {isPending ? (
-                    <LoaderCircleIcon className="size-3.5 animate-spin" />
-                  ) : isConnected ? (
-                    <CheckIcon className="size-3.5" />
-                  ) : null}
-                  <span>
-                    {isConnected ? t.channels.connected : t.channels.connect}
+              <div className="hover:bg-sidebar-accent flex flex-col rounded-md px-2 py-1 transition-colors">
+                <div className="flex h-8 items-center gap-2">
+                  <ChannelProviderIcon
+                    provider={provider.provider}
+                    className="size-5 shrink-0"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                    {provider.display_name}
                   </span>
-                </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={isConnected ? "outline" : "secondary"}
+                    className={cn(
+                      "h-8 w-24 px-2 text-xs",
+                      isConnected && "gap-1",
+                    )}
+                    disabled={isPending}
+                    title={unavailableReason}
+                    onClick={() => {
+                      if (
+                        providerNeedsRuntimeConfig(provider) ||
+                        (isConnected && canEditRuntimeConfig)
+                      ) {
+                        setSetupStep("setup");
+                        setSetupProvider(provider);
+                        return;
+                      }
+
+                      if (!canConnect) {
+                        toast.error(
+                          unavailableReason ?? t.channels.unavailable,
+                        );
+                        return;
+                      }
+
+                      startConnect(provider);
+                    }}
+                  >
+                    {isPending ? (
+                      <LoaderCircleIcon className="size-3.5 animate-spin" />
+                    ) : isConnected ? (
+                      <CheckIcon className="size-3.5" />
+                    ) : null}
+                    <span>
+                      {isConnected ? t.channels.connected : t.channels.connect}
+                    </span>
+                  </Button>
+                </div>
+                {/* Under the name, full width: the row is too narrow beside the button. */}
+                <ChannelScheduledUpdates
+                  provider={provider}
+                  className="pb-0.5 pl-7 text-[11px] leading-snug [&_svg]:hidden"
+                />
               </div>
             </SidebarMenuItem>
           );

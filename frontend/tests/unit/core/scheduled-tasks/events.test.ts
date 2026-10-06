@@ -9,6 +9,7 @@ import {
   describeTaskEvent,
   placeTaskEvents,
   SCHEDULED_TASK_LIFECYCLE_EVENTS,
+  sentenceGap,
   SCHEDULED_TASK_LIFECYCLE_REASONS,
   type ScheduledTaskEvent,
 } from "@/core/scheduled-tasks/events";
@@ -214,6 +215,28 @@ describe("describeTaskEvent", () => {
       )!.suffix,
     ).toBeNull();
     expect(describeTaskEvent(event({}), enUS)!.suffix).toBeNull();
+  });
+
+  test("a suffix after a bare stop condition gets its own stop", () => {
+    const stopped = {
+      stop_condition: "the report is published",
+      run_status: "failed" as const,
+    };
+    expect(describeTaskEvent(event(stopped), enUS)!.text).toBe(
+      "Check the release checklist was paused by the agent. Stop condition met: the report is published. The last run failed.",
+    );
+    expect(
+      describeTaskEvent(
+        event({ stop_condition: "报告已发布", run_status: "unmet" }),
+        zhCN,
+      )!.text,
+    ).toBe(
+      "Check the release checklist 已由智能体暂停。停止条件已满足：报告已发布。最后一次运行未达成目标。",
+    );
+    expect(sentenceGap("条件：done.", "最后一次运行出错了。")).toBe(" ");
+    expect(sentenceGap("条件：已完成。", "The last run failed.")).toBe(" ");
+    expect(sentenceGap("met: it is “done!”", "The last run failed.")).toBe(" ");
+    expect(sentenceGap("met: done", "The last run failed.")).toBe(". ");
   });
 
   test("once lines never add a last-run suffix", () => {

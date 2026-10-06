@@ -22,7 +22,7 @@ export interface ChannelProvider {
   credential_values?: ChannelRuntimeConfigValues;
   /**
    * The app can receive scheduled-task updates (proactive push; only WeCom
-   * today). Absent from older backends: treat as not available.
+   * today). Absent from older backends, which cannot say: show nothing.
    */
   proactive_notifications?: boolean;
 }

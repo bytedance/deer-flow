@@ -165,6 +165,17 @@ This release closes that milestone with **301 merged pull requests**.
   scheduled run in it updates. Nothing polls when the Gateway has no thread
   activity (memory persistence). ([#6340])
 
+- **frontend:** The chat that created a schedule now shows one line when the
+  schedule pauses or ends ("Release checklist was paused by the agent. Stop
+  condition met: …", "… was paused automatically: 3 runs in a row missed the
+  goal.", "… finished: all 5 runs are done. The last run failed.", "… has
+  run."), at the end of the turn it followed, with the time and "See that run"
+  or "Open task". It appears without a reload when the task's state changes,
+  and stays after the task is deleted. Settings → Channels and the sidebar's
+  channel list say for each app whether scheduled task updates are sent there
+  ("sent here" for WeCom, "not available for this app yet" for the others).
+  ([#6340])
+
 - **scheduler:** The web app keeps the account's `locale` preference equal to
   its interface language (after sign-in with session auth and on every
   language switch), so scheduled-task IM notices arrive in the language the

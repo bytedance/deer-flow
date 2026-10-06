@@ -203,6 +203,11 @@ export type MockAPIController = {
   pushThreadActivity: (...entries: MockThreadActivityEntry[]) => void;
   /** Simulate a read on another device (raises `read_version`). */
   bumpReadVersion: () => void;
+  /**
+   * Replace the scheduled tasks every task route serves (the list, one task,
+   * a chat's tasks), e.g. to flip a task to paused or delete it.
+   */
+  setScheduledTasks: (tasks: MockScheduledTask[]) => void;
   /** Replace the lifecycle events of an originating chat. */
   setScheduledTaskEvents: (
     threadId: string,
@@ -2572,6 +2577,9 @@ export function mockLangGraphAPI(
     },
     bumpReadVersion: () => {
       readVersion += 1;
+    },
+    setScheduledTasks: (tasks) => {
+      mutableScheduledTasks = [...tasks];
     },
     setScheduledTaskEvents: (threadId, events) => {
       scheduledTaskEvents[threadId] = events;

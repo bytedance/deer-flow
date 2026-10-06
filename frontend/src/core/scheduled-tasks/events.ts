@@ -231,12 +231,31 @@ function segmentsOf(
   return segments;
 }
 
-/** A separate sentence after the main one: a space in English, none after "。". */
+/**
+ * What goes between the main sentence and the suffix sentence. The main
+ * sentence can end with the user's own stop condition, which usually has no
+ * final stop, so one is added in the suffix's script ("… met: report is out.
+ * The last run failed." / "…已满足：清单已完成。最后一次运行出错了。").
+ * Otherwise a space in English and nothing after a full-width stop.
+ */
+export function sentenceGap(main: string, suffix: string): string {
+  const cjkSuffix = /^[\u3000-\u30ff\u3400-\u9fff\uff00-\uffef]/.test(suffix);
+  const end = main.trimEnd();
+  if (/[。！？][”’」』）)]*$/.test(end)) {
+    return cjkSuffix ? "" : " ";
+  }
+  if (/[.!?…][”’"')]*$/.test(end)) {
+    return " ";
+  }
+  return cjkSuffix ? "。" : ". ";
+}
+
+/** The suffix as a separate sentence after the main one. */
 function joinSentences(main: string, suffix: string | null): string {
   if (!suffix) {
     return main;
   }
-  return /[。！？]$/.test(main) ? `${main}${suffix}` : `${main} ${suffix}`;
+  return `${main}${sentenceGap(main, suffix)}${suffix}`;
 }
 
 function nonEmpty(value: string | null | undefined): string | null {
