@@ -418,6 +418,10 @@ class ScheduledTaskRepository:
                     max_runs = row.max_runs
                     await session.rollback()
                     raise ScheduledTaskLimitsExhausted(limit=limit, used=used, max_runs=max_runs, end_at=coerce_iso(utc(end_at)) if end_at is not None else None)
+                if is_host_pause_marker(row.last_error):
+                    # As on resume: a later manual pause must not read as
+                    # "Paused by agent" or "Auto-paused".
+                    row.last_error = None
             row.updated_at = datetime.now(UTC)
             await session.commit()
             await session.refresh(row)

@@ -193,6 +193,25 @@ describe("TaskFormDialog", () => {
     });
   });
 
+  test("a title-only edit leaves a cron the schedule input reorders alone", async () => {
+    // The input shows "0 09 * * 0,6" as weekly Sat+Sun and emits
+    // "0 9 * * 6,0"; re-sending it would re-arm (or refuse) a finished task.
+    const source = task({
+      status: "completed",
+      schedule_spec: { cron: "0 09 * * 0,6" },
+    });
+    updateTask.mockResolvedValue({ ...source, title: "Weekend check" });
+    renderForm({ mode: "edit", task: source });
+    fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {
+      target: { value: "Weekend check" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(updateTask).toHaveBeenCalledTimes(1));
+    expect(updateTask).toHaveBeenCalledWith("task-1", {
+      title: "Weekend check",
+    });
+  });
+
   test("a title-only edit leaves an end time in a repeated hour alone", async () => {
     // 06:30Z is the second 01:30 of the New York fall-back; the field shows
     // 01:30, which alone would read as the first one (05:30Z).
@@ -327,6 +346,30 @@ describe("form payload helpers", () => {
     expect(state.maxRuns).toBe("10");
     expect(state.assistantId).toBe("bot");
   });
+
+  test.each([
+    ["0 9 * * 6,0", false],
+    ["0 9 * * 7,6", false],
+    ["0 10 * * 6,0", true],
+    ["0 9 * * 6", true],
+  ])(
+    "a stored 0 09 * * 0,6 edited to %s sends the schedule: %s",
+    (cron, sent) => {
+      const source = task({ schedule_spec: { cron: "0 09 * * 0,6" } });
+      const { state } = initialFormState({ mode: "edit", task: source }, "");
+      const edited = {
+        ...state,
+        schedule: { ...state.schedule, schedule_spec: { cron } },
+      };
+      const valid = validateForm(edited, source.end_at);
+      expect(valid.ok).toBe(true);
+      if (!valid.ok) return;
+      const updates = updatePayload(source, edited, valid, {
+        includeStopCondition: true,
+      });
+      expect("schedule_spec" in updates).toBe(sent);
+    },
+  );
 
   test("duplicate copies an end time in a repeated hour as the same instant", () => {
     const source = task({

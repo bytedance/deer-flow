@@ -915,6 +915,10 @@ async def test_naive_end_at_without_any_timezone_asks(monkeypatch):
     # An interval task saved with the UTC placeholder: a local end time asks too.
     updated = await capability.manage(action="update", request={"task_id": "task-1", "end_at": end_local})
     assert updated["code"] == "timezone_required"
+    # Resume takes no timezone: it asks too, and an end time with an offset passes.
+    resumed = await capability.manage(action="resume", request={"task_id": "task-1", "end_at": end_local})
+    assert resumed["code"] == "timezone_required"
+    assert "code" not in await capability.manage(action="resume", request={"task_id": "task-1", "end_at": f"{end_local}+08:00"})
     repo.update.assert_not_awaited()
     named = await capability.manage(action="update", request={"task_id": "task-1", "end_at": end_local, "timezone": "Asia/Shanghai"})
     assert named["task"]["timezone_source"] == "explicit"

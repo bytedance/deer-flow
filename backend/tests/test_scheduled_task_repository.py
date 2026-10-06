@@ -11,6 +11,7 @@ from deerflow.persistence.scheduled_task_runs import (
     ScheduledTaskAdmissionRejected,
     ScheduledTaskRunRepository,
 )
+from deerflow.persistence.scheduled_task_runs.finalization import AGENT_STOP_LAST_ERROR_PREFIX, AUTO_PAUSE_LAST_ERROR
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict, ScheduledTaskRepository
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
@@ -1397,6 +1398,32 @@ async def test_reactivating_after_the_end_time_reports_end_at(tmp_path):
         assert (await tasks.get("task-1", user_id="user-1"))["status"] == "completed"
         later = datetime.now(UTC) + timedelta(days=7)
         assert (await tasks.update("task-1", user_id="user-1", updates={"status": "enabled", "end_at": later}, require_mutable=True))["status"] == "enabled"
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("last_error", "kept"),
+    [
+        (f"{AGENT_STOP_LAST_ERROR_PREFIX}run-x", None),
+        (AUTO_PAUSE_LAST_ERROR, None),
+        ("run failed: timeout", "run failed: timeout"),
+    ],
+)
+async def test_reactivating_clears_a_host_pause_marker_only(tmp_path, last_error, kept):
+    from _scheduled_rows import create_task
+
+    _sf, tasks, _runs = await _sql_repos(tmp_path)
+    try:
+        # A trial finished a task the host had paused, then a PATCH re-arms it:
+        # a later manual pause must read as a plain pause.
+        await create_task(tasks)
+        await tasks.update("task-1", user_id="user-1", updates={"status": "completed", "last_error": last_error})
+        rearmed = await tasks.update("task-1", user_id="user-1", updates={"status": "enabled", "next_run_at": datetime.now(UTC) + timedelta(days=1)}, require_mutable=True)
+        assert (rearmed["status"], rearmed["last_error"]) == ("enabled", kept)
+        paused = await tasks.update("task-1", user_id="user-1", updates={"status": "paused"})
+        assert paused["last_error"] == kept
     finally:
         await close_engine()
 

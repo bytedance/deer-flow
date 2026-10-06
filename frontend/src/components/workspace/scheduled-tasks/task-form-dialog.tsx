@@ -44,6 +44,8 @@ import {
   editedZonedLocalToUtcIso,
   hasScheduleSpec,
   onceRunAtInstant,
+  parseCron,
+  serializeCron,
   utcToZonedLocalInput,
 } from "@/core/scheduled-tasks/cron";
 import { browserTimeZone } from "@/core/scheduled-tasks/format";
@@ -179,9 +181,15 @@ function sameSchedule(task: ScheduledTask, value: ScheduleValue): boolean {
     case "interval":
       return spec.every_seconds === next.every_seconds;
     case "cron": {
-      const norm = (cron: unknown) =>
-        typeof cron === "string" ? cron.trim().split(/\s+/).join(" ") : "";
-      return norm(spec.cron) === norm(next.cron);
+      // The schedule input re-serializes a cron it shows as a preset
+      // ("0 09 * * 0,6" -> "0 9 * * 6,0"); compare that form, so an untouched
+      // schedule is never re-sent and never re-arms a finished task.
+      const canonical = (cron: unknown) => {
+        if (typeof cron !== "string") return "";
+        const { preset, parts } = parseCron(cron);
+        return serializeCron(preset, parts).split(/\s+/).join(" ");
+      };
+      return canonical(spec.cron) === canonical(next.cron);
     }
   }
 }
