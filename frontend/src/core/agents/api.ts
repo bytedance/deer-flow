@@ -92,8 +92,28 @@ export async function importAgentPackage(
     body: JSON.stringify(agentPackage),
   });
   if (!res.ok) {
-    const err = (await res.json().catch(() => ({}))) as { detail?: string };
-    throw new Error(err.detail ?? `Failed to import agent: ${res.statusText}`);
+    const err = (await res.json().catch(() => null)) as {
+      detail?: unknown;
+    } | null;
+    const detail = err?.detail;
+    const message = Array.isArray(detail)
+      ? detail
+          .filter(
+            (issue): issue is { msg: string } =>
+              typeof issue === "object" &&
+              issue !== null &&
+              "msg" in issue &&
+              typeof issue.msg === "string" &&
+              issue.msg.trim().length > 0,
+          )
+          .map((issue) => issue.msg)
+          .join("; ")
+      : typeof detail === "string"
+        ? detail
+        : null;
+    throw new Error(
+      message?.trim() ? message : `Failed to import agent: ${res.statusText}`,
+    );
   }
   return res.json() as Promise<Agent>;
 }
