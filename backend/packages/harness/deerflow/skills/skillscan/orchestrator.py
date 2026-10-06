@@ -157,9 +157,23 @@ _DESTRUCTIVE_RM_RE = (
 # text in `# export -p` -- and dumps nothing. The text this is matched against is
 # first reduced to shell code by `_shell_code_only`, so a `;` inside a comment and
 # a command-looking line inside a heredoc body do not count either.
+#
+# `env` is a launcher as well as a dumper: with a command operand it runs that
+# command and prints nothing (`env FOO=1 python3 tool.py`, `env -i bash`), so the
+# command position only counts when the command ends after the operands that
+# belong to `env` itself. `printenv` and `export -p` take no command operand, so
+# they need no such guard.
 _SHELL_ENV_DUMP_RE = re.compile(
     r"(?m)(?:^|(?<=[;&|()`])|\{(?=[ \t])|(?<![\w/.-])(?:if|then|elif|else|while|until|do|exec)\b[ \t]+)"
-    r"[ \t]*(?:[A-Za-z_]\w*=[^ \t]*[ \t]+)*(?P<cmd>env\b|printenv\b|export[ \t]+-p\b)"
+    r"[ \t]*(?:[A-Za-z_]\w*=[^ \t]*[ \t]+)*"
+    # The lookahead is the rest of the `env` operand list: options, the value of
+    # an option that takes one (`-u NAME`, `-C DIR`, `-S STRING`), `NAME=value`
+    # assignments and redirections, then the end of the command. Its branches
+    # consume a distinct first character (or refuse a value-taking option
+    # outright), so every token has exactly one parse and a long chain cannot
+    # backtrack exponentially.
+    r"(?P<cmd>env\b(?=(?:[ \t]*(?:-[uCS]\b[ \t]+[^ \t]+|-(?![uCS]\b)[^ \t]+|[A-Za-z_]\w*=[^ \t]*|[0-9]*[<>][^ \t]*))*(?:[ \t]*\r?[;&|()`<>#\n]|[ \t]*\r?$))"
+    r"|printenv\b|export[ \t]+-p\b)"
 )
 # The head of a heredoc redirection: `<<` or `<<-`, an optional quoted delimiter,
 # then the delimiter word. Requiring a leading letter/underscore keeps arithmetic
@@ -803,7 +817,13 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         # a backslash plus a distinct following character), avoiding nested
         # overlapping repeats when a download command has no pipe.
         r"\b(?:curl|wget)\b(?:[^\\\r\n|;]|\\\r?\n|\\[^\r\n])*"
-        r"\|(?:\s|\\\r?\n)*(?:sudo(?:\s|\\\r?\n)+"
+        # `env` launches the shell just as `sudo` does (`env -i bash`), so it is
+        # a launcher next to `sudo` rather than an unknown word. Its operands are
+        # options, the value of an option that takes one, and `NAME=value`
+        # assignments; the branches consume a distinct first character (or refuse
+        # a value-taking option outright), so every token has exactly one parse
+        # and a failing chain stays linear.
+        r"\|(?:\s|\\\r?\n)*(?:env(?:\s|\\\r?\n)+(?:-[uCS]\b(?:\s|\\\r?\n)+[^\s|;\\]+(?:\s|\\\r?\n)+|-(?![uCS]\b)[^\s|;\\]+(?:\s|\\\r?\n)+|[A-Za-z_]\w*=[^\s|;\\]*(?:\s|\\\r?\n)+)*?|sudo(?:\s|\\\r?\n)+"
         # A sudo option that takes a separate value (`-u user`, `-g group`,
         # `-h host`, ...) must swallow that value too: otherwise
         # `| sudo -u deploy bash` leaves the matcher parked on the username and
