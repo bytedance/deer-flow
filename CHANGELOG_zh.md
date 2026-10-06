@@ -558,6 +558,10 @@
 
 ### 修复
 
+- **部署：** 在全新检出的仓库上，`make up`、`make down` 与 `make prod-logs` 不再因 `env file .../.env not found` 而中止。`.env` 与
+  `frontend/.env` 已被 gitignore，`make up` 也不会创建它们，但生产 compose 文件此前要求两者都存在。
+  现在其 `env_file` 条目与开发 compose 文件一样为可选：文件存在时加载，不存在时跳过。此写法需要
+  Docker Compose 2.24 或更高版本，即 README 已注明的最低版本。
 - **make：** `make clean` 现在会说明它删除的内容，并拒绝在运行中的 Docker Gateway 下执行。`make help`
   此前称其清理"临时文件"，但它实际删除 `backend/.deer-flow`：本地数据库、用户、线程、上传、记忆和密钥。
   两套 Docker 栈都把该目录挂载进 `deer-flow-gateway` 容器，而 `make stop` 不会停止它，因此数据可能在

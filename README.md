@@ -392,7 +392,7 @@ Use the table below as a practical starting point when choosing how to run DeerF
 
 Requires Docker Desktop / Docker Engine and **Docker Compose v2.24+**
 (`docker compose version`). Older Compose clients cannot parse the optional
-`env_file` syntax in `docker/docker-compose-dev.yaml`.
+`env_file` syntax in `docker/docker-compose.yaml` and `docker/docker-compose-dev.yaml`.
 
 **Development** (hot-reload, source mounts):
 

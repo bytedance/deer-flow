@@ -1,6 +1,12 @@
 # DeerFlow Production Environment
 # Usage: make up
 #
+# Requires Docker Compose >= 2.24. ../.env and ../frontend/.env are gitignored,
+# so a fresh checkout has neither; the env_file entries below use the long-form
+# path/required syntax so Compose loads them when present instead of aborting
+# with "env file ... not found". Older clients reject this file with:
+#   services.<name>.env_file.0 must be a string
+#
 # Services:
 #   - nginx:       Reverse proxy (port 2026, configurable via PORT env var)
 #   - frontend:    Next.js production server
@@ -91,7 +97,8 @@ services:
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
     env_file:
-      - ../frontend/.env
+      - path: ../frontend/.env
+        required: false
     networks:
       - deer-flow
     restart: unless-stopped
@@ -165,7 +172,8 @@ services:
       - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
       - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
     env_file:
-      - ../.env
+      - path: ../.env
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -212,7 +220,8 @@ services:
       - NODE_HOST=host.docker.internal
       - K8S_API_SERVER=https://host.docker.internal:26443
     env_file:
-      - ../.env
+      - path: ../.env
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

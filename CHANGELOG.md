@@ -623,6 +623,12 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **deploy:** `make up`, `make down` and `make prod-logs` no longer stop on a
+  fresh checkout with `env file .../.env not found`. `.env` and `frontend/.env` are gitignored and
+  `make up` does not create them, but the production compose file required
+  both. Its `env_file` entries are now optional, as in the development compose
+  file: Compose loads them when present and skips them otherwise. This needs
+  Docker Compose 2.24 or newer, the floor the README already documents.
 - **make:** `make clean` now says what it deletes and refuses to run under a live
   Docker Gateway. `make help` described it as cleaning up "temporary files", but
   it deletes `backend/.deer-flow`: the local database, users, threads, uploads,
