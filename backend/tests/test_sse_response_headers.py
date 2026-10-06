@@ -82,41 +82,27 @@ def test_helper_shape():
     assert sse_response_headers(content_location="/api/threads/t/runs/r")["Content-Location"] == "/api/threads/t/runs/r"
 
 
-def test_thread_run_create_stream_headers(client):
+@pytest.mark.parametrize(
+    ("method", "path", "json_body", "creates_run"),
+    [
+        ("POST", f"/api/threads/{THREAD_ID}/runs/stream", {"input": {}}, True),
+        ("POST", "/api/runs/stream", {"input": {}, "config": {"configurable": {"thread_id": THREAD_ID}}}, True),
+        ("GET", f"/api/threads/{THREAD_ID}/runs/{{run_id}}/join", None, False),
+        ("GET", f"/api/threads/{THREAD_ID}/runs/{{run_id}}/stream", None, False),
+        ("POST", f"/api/threads/{THREAD_ID}/runs/{{run_id}}/stream", None, False),
+    ],
+    ids=["thread-run-create", "stateless-create", "join", "existing-run-GET", "existing-run-POST"],
+)
+def test_sse_route_headers(client, method: str, path: str, json_body: dict | None, creates_run: bool):
     test_client, run_id = client
-    response, body = _stream(test_client, "POST", f"/api/threads/{THREAD_ID}/runs/stream", json={"input": {}})
+    kwargs = {} if json_body is None else {"json": json_body}
+    response, body = _stream(test_client, method, path.format(run_id=run_id), **kwargs)
     _assert_sse_headers(response)
-    assert response.headers["content-location"] == f"/api/threads/{THREAD_ID}/runs/{run_id}"
-    assert "event: end" in body
-
-
-def test_stateless_create_stream_headers(client):
-    test_client, run_id = client
-    response, body = _stream(
-        test_client,
-        "POST",
-        "/api/runs/stream",
-        json={"input": {}, "config": {"configurable": {"thread_id": THREAD_ID}}},
-    )
-    _assert_sse_headers(response)
-    assert response.headers["content-location"] == f"/api/threads/{THREAD_ID}/runs/{run_id}"
-    assert "event: end" in body
-
-
-def test_join_headers(client):
-    test_client, run_id = client
-    response, body = _stream(test_client, "GET", f"/api/threads/{THREAD_ID}/runs/{run_id}/join")
-    _assert_sse_headers(response)
-    assert "content-location" not in response.headers
-    assert "event: end" in body
-
-
-@pytest.mark.parametrize("method", ("GET", "POST"))
-def test_existing_run_stream_headers(client, method: str):
-    test_client, run_id = client
-    response, body = _stream(test_client, method, f"/api/threads/{THREAD_ID}/runs/{run_id}/stream")
-    _assert_sse_headers(response)
-    assert "content-location" not in response.headers
+    if creates_run:
+        # Only the two routes that create a run point at it.
+        assert response.headers["content-location"] == f"/api/threads/{THREAD_ID}/runs/{run_id}"
+    else:
+        assert "content-location" not in response.headers
     assert "event: end" in body
 
 

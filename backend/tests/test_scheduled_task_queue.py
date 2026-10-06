@@ -1139,12 +1139,14 @@ async def sqlite_repos(tmp_path):
         await close_engine()
 
 
-def _launcher(launches: list[dict]):
+def _capped_service(task_repo, run_repo, launches: list[dict], **limits) -> ScheduledTaskService:
+    """The real service with the given caps; every launch is recorded in ``launches``."""
+
     async def launch_run(**kwargs):
         launches.append(kwargs)
         return {"run_id": f"run-{len(launches)}", "thread_id": kwargs["thread_id"]}
 
-    return launch_run
+    return ScheduledTaskService(task_repo=task_repo, task_run_repo=run_repo, launch_run=launch_run, poll_interval_seconds=5, lease_seconds=120, **limits)
 
 
 async def test_fair_batch_includes_other_owner_when_one_owner_is_at_cap(sqlite_repos):
@@ -1211,7 +1213,7 @@ async def test_orphan_queued_row_is_still_drained(sqlite_repos):
     assert [row["id"] for row in await run_repo.list_queued_runs(limit=16, per_user_max_concurrent_runs=1)] == ["orphan"]
 
     launches: list[dict] = []
-    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=run_repo, launch_run=_launcher(launches), poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3, max_concurrent_runs_per_user=1)
+    service = _capped_service(task_repo, run_repo, launches, max_concurrent_runs=3, max_concurrent_runs_per_user=1)
     await service.run_once(now=datetime.now(UTC))
 
     row = (await run_repo.list_by_task("task-deleted"))[0]
@@ -1243,7 +1245,7 @@ async def test_effective_owner_cap_is_bounded_by_global_cap(sqlite_repos):
     for index in range(3):
         await _owned_occurrence(task_repo, run_repo, f"a-queued-{index}", user_id=OWNER_A)
     launches: list[dict] = []
-    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=run_repo, launch_run=_launcher(launches), poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=1, max_concurrent_runs_per_user=2)
+    service = _capped_service(task_repo, run_repo, launches, max_concurrent_runs=1, max_concurrent_runs_per_user=2)
 
     assert service._max_concurrent_runs_per_user == 1
     await service.run_once(now=datetime.now(UTC))
@@ -1260,16 +1262,7 @@ async def test_capped_owner_queue_expiry_writes_contract_queue_timeout_note(sqli
     await _owned_occurrence(task_repo, run_repo, "a-running", user_id=OWNER_A, status="running")
     await _owned_occurrence(task_repo, run_repo, "a-waiting", user_id=OWNER_A)
     launches: list[dict] = []
-    service = ScheduledTaskService(
-        task_repo=task_repo,
-        task_run_repo=run_repo,
-        launch_run=_launcher(launches),
-        poll_interval_seconds=5,
-        lease_seconds=120,
-        max_concurrent_runs=3,
-        max_concurrent_runs_per_user=1,
-        queue_timeout_seconds=60,
-    )
+    service = _capped_service(task_repo, run_repo, launches, max_concurrent_runs=3, max_concurrent_runs_per_user=1, queue_timeout_seconds=60)
 
     # While A holds its only slot, the waiting row is not launched.
     await service.run_once(now=datetime.now(UTC))
@@ -1317,7 +1310,7 @@ async def test_service_drain_launches_other_owner_first(sqlite_repos):
         await _owner_task(task_repo, f"task-a-{index}", user_id=OWNER_A, next_run_at=t0)
     await _owner_task(task_repo, "task-b", user_id=OWNER_B, next_run_at=t0 + timedelta(seconds=1))
     launches: list[dict] = []
-    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=run_repo, launch_run=_launcher(launches), poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3, max_concurrent_runs_per_user=1)
+    service = _capped_service(task_repo, run_repo, launches, max_concurrent_runs=3, max_concurrent_runs_per_user=1)
 
     b_cycle = None
     for cycle in range(1, 5):
@@ -1342,7 +1335,7 @@ async def test_service_drain_launches_other_owner_from_a_seeded_queue(sqlite_rep
         await _owned_occurrence(task_repo, run_repo, f"a-queued-{index:02d}", user_id=OWNER_A)
     await _owned_occurrence(task_repo, run_repo, "b-queued", user_id=OWNER_B)
     launches: list[dict] = []
-    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=run_repo, launch_run=_launcher(launches), poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3, max_concurrent_runs_per_user=1)
+    service = _capped_service(task_repo, run_repo, launches, max_concurrent_runs=3, max_concurrent_runs_per_user=1)
 
     await service.run_once(now=datetime.now(UTC))
 

@@ -510,10 +510,17 @@ async def test_terminal_pause_cannot_race_a_create_out_of_its_quota_slot(tmp_pat
 # --- Lifecycle events (task_stopped / task_paused / task_finished) ----------------------
 
 
-def recording_service(tasks, runs):
-    """Install the scheduler's real finalization observer and record each call."""
+async def lifecycle_task(sf, tasks, runs, *, once=False, **extra):
+    """The task (``once`` makes it a once task) and its originating chat, with the
+    scheduler's real finalization observer installed; returns each recorded call."""
     from app.scheduler.service import ScheduledTaskService
 
+    await task(tasks, **extra)
+    if once:
+        await tasks.update("task", user_id="owner", updates={"schedule_type": "once", "schedule_spec": {"run_at": NOW.isoformat()}})
+    async with sf() as session:
+        session.add(ThreadMetaRow(thread_id="origin", user_id="owner"))
+        await session.commit()
     service = ScheduledTaskService(task_repo=tasks, task_run_repo=runs, launch_run=None, poll_interval_seconds=60, lease_seconds=30, max_concurrent_runs=3)
     observed = []
 
@@ -530,27 +537,15 @@ def lifecycle_calls(observed):
     return [(occurrence_id, tuple(event for event in events if event.startswith("task_"))) for occurrence_id, events in observed if any(event.startswith("task_") for event in events)]
 
 
-async def origin_chat(sf, thread_id="origin"):
-    async with sf() as session:
-        session.add(ThreadMetaRow(thread_id=thread_id, user_id="owner"))
-        await session.commit()
-
-
 async def event_rows(sf):
     async with sf() as session:
         return list((await session.execute(select(ScheduledTaskEventRow).order_by(ScheduledTaskEventRow.created_at, ScheduledTaskEventRow.id))).scalars())
 
 
-async def make_once(tasks):
-    await tasks.update("task", user_id="owner", updates={"schedule_type": "once", "schedule_spec": {"run_at": NOW.isoformat()}})
-
-
 @pytest.mark.asyncio
 async def test_agent_stop_emits_task_stopped_once(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks)
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs)
         occurrence_id, run_id = await occurrence(sf, runs, durable_status="running")
         assert await runs.request_stop(occurrence_id, task_id="task", run_id=run_id, user_id="owner")
         assert await complete(tasks, occurrence_id, run_id) is True
@@ -564,9 +559,7 @@ async def test_agent_stop_emits_task_stopped_once(tmp_path, database_backend):
 @pytest.mark.asyncio
 async def test_max_runs_completion_emits_task_finished(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks, max_runs=2)
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs, max_runs=2)
         for suffix in ("1", "2"):
             occurrence_id, run_id = await occurrence(sf, runs, suffix=suffix)
             await complete(tasks, occurrence_id, run_id)
@@ -580,9 +573,7 @@ async def test_max_runs_completion_emits_task_finished(tmp_path, database_backen
 @pytest.mark.asyncio
 async def test_end_condition_wins_over_agent_stop_events(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks, max_runs=1)
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs, max_runs=1)
         occurrence_id, run_id = await occurrence(sf, runs, durable_status="running")
         assert await runs.request_stop(occurrence_id, task_id="task", run_id=run_id, user_id="owner")
         await complete(tasks, occurrence_id, run_id)
@@ -593,9 +584,7 @@ async def test_end_condition_wins_over_agent_stop_events(tmp_path, database_back
 @pytest.mark.asyncio
 async def test_idle_end_at_finish_emits_with_end_anchor_once(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks, end_at=NOW)
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs, end_at=NOW)
         assert await tasks.complete_if_ended("task", user_id="owner", now=NOW + timedelta(seconds=1)) is True
         assert await tasks.complete_if_ended("task", user_id="owner", now=NOW + timedelta(seconds=2)) is True
         assert observed == [(None, ("task_finished",))]
@@ -610,9 +599,7 @@ async def test_idle_max_runs_finish_then_end_time_finish_writes_two_events(tmp_p
     anchor: after a reactivation, the real end-time finish still gets its line."""
     end = NOW + timedelta(hours=1)
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks, end_at=end, max_runs=1)
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs, end_at=end, max_runs=1)
         await runs.create(run_record_id="used", task_id="task", thread_id="thread", scheduled_for=NOW, trigger="scheduled", status="queued")
         async with sf() as session:
             row = await session.get(ScheduledTaskRunRow, "used")
@@ -635,9 +622,7 @@ async def test_idle_max_runs_finish_then_end_time_finish_writes_two_events(tmp_p
 @pytest.mark.asyncio
 async def test_claim_time_end_skip_emits_task_finished_once(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks, end_at=NOW + timedelta(seconds=1))
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs, end_at=NOW + timedelta(seconds=1))
         await runs.create(run_record_id="waiting", task_id="task", thread_id="thread", scheduled_for=NOW, trigger="scheduled", status="queued")
         assert await runs.claim_queued_run("waiting", lease_owner="worker", now=NOW + timedelta(seconds=2), lease_seconds=30, global_max_concurrent_runs=1) is None
         assert lifecycle_calls(observed) == [("waiting", ("task_finished",))]
@@ -650,9 +635,7 @@ async def test_claim_time_end_skip_emits_task_finished_once(tmp_path, database_b
 @pytest.mark.asyncio
 async def test_complete_if_ended_with_queued_row_emits_once(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks, end_at=NOW + timedelta(seconds=1))
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs, end_at=NOW + timedelta(seconds=1))
         await runs.create(run_record_id="waiting", task_id="task", thread_id="thread", scheduled_for=NOW, trigger="scheduled", status="queued")
         assert await tasks.complete_if_ended("task", user_id="owner", now=NOW + timedelta(seconds=2)) is True
         assert observed == [("waiting", ("task_finished",))]
@@ -663,9 +646,7 @@ async def test_complete_if_ended_with_queued_row_emits_once(tmp_path, database_b
 @pytest.mark.asyncio
 async def test_complete_if_ended_with_queued_manual_row_emits_idle_finish(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks, end_at=NOW + timedelta(seconds=1))
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs, end_at=NOW + timedelta(seconds=1))
         await runs.create(run_record_id="trial", task_id="task", thread_id="thread", scheduled_for=NOW, trigger="manual", status="queued")
         assert await tasks.complete_if_ended("task", user_id="owner", now=NOW + timedelta(seconds=2)) is True
         assert observed == [(None, ("task_finished",))]
@@ -678,10 +659,7 @@ async def test_complete_if_ended_with_queued_manual_row_emits_idle_finish(tmp_pa
 @pytest.mark.asyncio
 async def test_once_task_end_skip_stays_silent(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks, end_at=NOW + timedelta(seconds=1))
-        await make_once(tasks)
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs, once=True, end_at=NOW + timedelta(seconds=1))
         await runs.create(run_record_id="waiting", task_id="task", thread_id="thread", scheduled_for=NOW, trigger="scheduled", status="queued")
         assert await runs.claim_queued_run("waiting", lease_owner="worker", now=NOW + timedelta(seconds=2), lease_seconds=30, global_max_concurrent_runs=1) is None
         # As in PR1: skipped -> cancelled, then the end condition marks it completed.
@@ -697,10 +675,7 @@ async def test_once_task_end_skip_stays_silent(tmp_path, database_backend):
 )
 async def test_once_task_finish_reasons(tmp_path, database_backend, status, error, reason):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks)
-        await make_once(tasks)
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs, once=True)
         occurrence_id, run_id = await occurrence(sf, runs)
         assert await complete(tasks, occurrence_id, run_id, status=status, error=error) is True
         rows = await event_rows(sf)
@@ -715,9 +690,7 @@ async def test_once_task_finish_reasons(tmp_path, database_backend, status, erro
 @pytest.mark.asyncio
 async def test_admission_time_end_emits_task_finished(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks, end_at=NOW - timedelta(seconds=1))
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs, end_at=NOW - timedelta(seconds=1))
         with pytest.raises(ScheduledTaskAdmissionRejected) as rejected:
             await runs.create(run_record_id="admitted", task_id="task", thread_id="thread", scheduled_for=NOW, trigger="scheduled", status="queued", coordinate_with_task=True, expected_task_user_id="owner")
         assert rejected.value.reason == "ended"
@@ -731,9 +704,7 @@ async def test_admission_time_end_emits_task_finished(tmp_path, database_backend
 @pytest.mark.asyncio
 async def test_manual_trial_that_reaches_end_at_emits_task_finished(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks, end_at=NOW)
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs, end_at=NOW)
         occurrence_id, run_id = await occurrence(sf, runs, suffix="trial", trigger="manual")
         await complete(tasks, occurrence_id, run_id)
         # Finalization reports the run event too; the observer drops only that for a trial.
@@ -745,9 +716,7 @@ async def test_manual_trial_that_reaches_end_at_emits_task_finished(tmp_path, da
 @pytest.mark.asyncio
 async def test_manual_trial_agent_stop_emits_task_stopped(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks)
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs)
         occurrence_id, run_id = await occurrence(sf, runs, suffix="trial", trigger="manual", durable_status="running")
         assert await runs.request_stop(occurrence_id, task_id="task", run_id=run_id, user_id="owner")
         await complete(tasks, occurrence_id, run_id)
@@ -759,9 +728,7 @@ async def test_manual_trial_agent_stop_emits_task_stopped(tmp_path, database_bac
 @pytest.mark.asyncio
 async def test_agent_stop_after_failed_run_pauses_and_says_run_failed(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
-        await task(tasks)
-        await origin_chat(sf)
-        observed = recording_service(tasks, runs)
+        observed = await lifecycle_task(sf, tasks, runs)
         occurrence_id, run_id = await occurrence(sf, runs, durable_status="running")
         assert await runs.request_stop(occurrence_id, task_id="task", run_id=run_id, user_id="owner")
         await complete(tasks, occurrence_id, run_id, status="failed", error="boom")

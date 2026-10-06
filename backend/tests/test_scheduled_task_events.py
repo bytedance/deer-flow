@@ -13,6 +13,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
@@ -37,6 +38,7 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_events import ScheduledTaskEventRepository, ScheduledTaskEventRow
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
+from deerflow.persistence.scheduled_task_runs.finalization import LIFECYCLE_REASONS, lifecycle_anchor, lifecycle_reason
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
@@ -303,9 +305,7 @@ async def test_poisoned_row_does_not_block_recovery_of_other_rows(tmp_path):
 async def test_detached_outbox_keeps_chat_events(tmp_path):
     async with database(tmp_path) as (sf, tasks, runs):
         await chat(sf)
-        async with sf() as session:
-            session.add(ChannelConnectionRow(id="binding", owner_user_id=OWNER, provider="wecom", status="connected", external_account_id="wecom-user"))
-            await session.commit()
+        await bind_wecom(sf)
         service = service_for(tasks, runs, connection_repo=object(), notification_repo=NotificationDeliveryRepository(sf))
 
         async def auto_pause(task_id):
@@ -521,8 +521,6 @@ async def test_payload_has_title_condition_run_number(tmp_path):
 
 
 def _task(**values):
-    from types import SimpleNamespace
-
     base = {"schedule_type": "interval", "status": "completed", "end_at": None, "last_occurrence_seq": 4}
     return SimpleNamespace(**{**base, **values})
 
@@ -543,10 +541,6 @@ def _task(**values):
     ],
 )
 def test_lifecycle_reason(task_values, event, occurrence_status, expected):
-    from types import SimpleNamespace
-
-    from deerflow.persistence.scheduled_task_runs.finalization import LIFECYCLE_REASONS, lifecycle_reason
-
     occurrence = SimpleNamespace(status=occurrence_status) if occurrence_status is not None else None
     reason = lifecycle_reason(_task(**task_values), event, now=NOW, occurrence=occurrence)
     assert reason == expected
@@ -554,10 +548,6 @@ def test_lifecycle_reason(task_values, event, occurrence_status, expected):
 
 
 def test_lifecycle_anchor_is_deterministic():
-    from types import SimpleNamespace
-
-    from deerflow.persistence.scheduled_task_runs.finalization import lifecycle_anchor
-
     assert lifecycle_anchor(_task(), SimpleNamespace(id="occ-7"), now=NOW) == "occ-7"
     naive = datetime(2026, 12, 31, 18, 0)
     after_end = datetime(2027, 1, 1, tzinfo=UTC)
@@ -571,8 +561,6 @@ def test_lifecycle_anchor_is_deterministic():
 def test_idle_max_runs_finish_does_not_take_the_end_time_anchor():
     """A max_runs idle finish before the end time keeps a seq anchor, so a later
     end-time finish (after a reactivation) is not dropped as a duplicate."""
-    from deerflow.persistence.scheduled_task_runs.finalization import lifecycle_anchor
-
     end = datetime(2026, 12, 31, 18, 0, tzinfo=UTC)
     before_end = lifecycle_anchor(_task(end_at=end), None, now=end - timedelta(days=1))
     after_end = lifecycle_anchor(_task(end_at=end), None, now=end + timedelta(minutes=1))
