@@ -623,6 +623,20 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **helm:** A default Helm install can create sandboxes again. The chart
+  enables the sandbox provisioner and points `config.sandbox.provisioner_url`
+  at it, but nothing rendered `PROVISIONER_API_KEY`: the provisioner
+  Deployment had no such env, the `<release>-app` Secret no such key, and the
+  embedded config no `provisioner_api_key`. Since the provisioner started
+  requiring the key (#4116), its `verify_api_key` middleware answers 401 to
+  every `/api/*` request while the key is empty or mismatched, so every
+  sandbox creation failed. The app Secret now generates the key once and
+  preserves it across upgrades like the other app secrets, the gateway and
+  provisioner Pods read it from that one Secret (a user-managed
+  `existingAppSecret` must carry it while `provisioner.enabled` is true), and
+  the default `config` sets `sandbox.provisioner_api_key:
+  $PROVISIONER_API_KEY`, which the chart README's config example now keeps
+  too. docker-compose was unaffected: it reads the key from `.env`.
 - **sandbox:** With host bash enabled, the local sandbox no longer keeps a
   thread on the skill view of the last restricted Agent that ran there. That
   view is only maintained while host bash is off, but `LocalSandboxProvider`

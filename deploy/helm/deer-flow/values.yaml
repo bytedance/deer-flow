@@ -132,6 +132,11 @@ nginx:
 #    this namespace via a ServiceAccount + RBAC.
 provisioner:
   enabled: true
+  # The gateway authenticates to the provisioner with PROVISIONER_API_KEY,
+  # which the chart generates into the `<release>-app` Secret (see
+  # existingAppSecret) and injects into both Pods; `config.sandbox` below
+  # references it as `provisioner_api_key: $PROVISIONER_API_KEY`. The
+  # provisioner rejects every /api/* request without a matching key.
   resources:
     requests:
       cpu: 50m
@@ -289,8 +294,10 @@ secrets: {}
 existingSecret: ""
 # -- Use an existing Secret for the app secrets instead of generating
 #    `<release>-app`. It must hold BETTER_AUTH_SECRET (frontend),
-#    DEER_FLOW_INTERNAL_AUTH_TOKEN and, for more than one gateway instance,
-#    AUTH_JWT_SECRET (the session-cookie signing key every Pod must share).
+#    DEER_FLOW_INTERNAL_AUTH_TOKEN, PROVISIONER_API_KEY (the shared gateway ->
+#    sandbox-provisioner key, required while `provisioner.enabled`) and, for
+#    more than one gateway instance, AUTH_JWT_SECRET (the session-cookie
+#    signing key every Pod must share).
 existingAppSecret: ""
 
 # -- Ingress in front of nginx (port 2026). nginx preserves all internal routing.
@@ -340,6 +347,11 @@ config: |
   sandbox:
     use: deerflow.community.aio_sandbox:AioSandboxProvider
     provisioner_url: http://provisioner:8002
+    # Sent as X-API-Key on every provisioner request. The chart injects the
+    # generated `<release>-app` key into the gateway and provisioner Pods as
+    # PROVISIONER_API_KEY; without a matching value the provisioner answers
+    # 401 and no sandbox can be created.
+    provisioner_api_key: $PROVISIONER_API_KEY
     image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
     port: 8080
     replicas: 3
