@@ -23,6 +23,7 @@ import httpx
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from app.channels.allowed_users import parse_allowed_users
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
@@ -191,37 +192,16 @@ def _parse_wechat_user_id(entry: Any) -> str | None:
 
 
 def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
-    """Parse ``channels.wechat.allowed_users``; ``None`` means no allowlist.
-
-    A single user ID is shorthand for a one-entry list. Iterating a scalar
-    instead turns ``"wxid"`` into the characters ``w``, ``x``, ``i`` and ``d``.
-    A mapping is one unreadable entry, not a list of its keys. Entries that are
-    not ID strings or numbers (booleans, nulls, empty strings, fractional or
-    non-finite numbers) are dropped with a warning. If an allowlist was
-    configured but no valid ID remains, the result is an empty frozenset that
-    denies everyone: the operator asked for a restriction, so an unreadable
-    allowlist must fail closed rather than opening the bot to all.
-    """
-    if allowed_users is None or (isinstance(allowed_users, str) and not allowed_users.strip()):
-        return None
+    """Parse iLink IDs without splitting a scalar string into multiple IDs."""
     if isinstance(allowed_users, str) and ("," in allowed_users or any(char.isspace() for char in allowed_users.strip())):
         logger.warning("[WeChat] allowed_users is a scalar string containing separators; treating it as one literal user ID. Use a YAML list for multiple IDs")
-    entries = list(allowed_users) if isinstance(allowed_users, (list, tuple, set, frozenset)) else [allowed_users]
-    if not entries:
-        return None
-    user_ids: set[str] = set()
-    for entry in entries:
-        user_id = _parse_wechat_user_id(entry)
-        if user_id is None:
-            logger.warning(
-                "[WeChat] Ignoring allowed_users entry %r: expected a valid iLink user ID; list several IDs as a YAML list",
-                entry,
-            )
-        else:
-            user_ids.add(user_id)
-    if not user_ids:
-        logger.error("[WeChat] allowed_users has no valid user ID; denying every user until it is fixed")
-    return frozenset(user_ids)
+    return parse_allowed_users(
+        allowed_users,
+        parse_user_id=_parse_wechat_user_id,
+        logger=logger,
+        channel_name="WeChat",
+        expected_id="a valid iLink user ID",
+    )
 
 
 class WechatChannel(Channel):

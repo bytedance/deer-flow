@@ -404,7 +404,10 @@ class TestWechatAllowedUsers:
 
         return WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", **config_extra})
 
-    @pytest.mark.parametrize("config_extra", [{}, {"allowed_users": None}, {"allowed_users": []}, {"allowed_users": " "}])
+    @pytest.mark.parametrize(
+        "config_extra",
+        [{}, {"allowed_users": None}, {"allowed_users": []}, {"allowed_users": ()}, {"allowed_users": set()}, {"allowed_users": frozenset()}, {"allowed_users": " "}],
+    )
     def test_unset_or_empty_allowlist_allows_everyone_without_warning(self, config_extra, caplog):
         with caplog.at_level(logging.WARNING, logger="app.channels.wechat"):
             channel = self._channel(config_extra)
@@ -413,8 +416,9 @@ class TestWechatAllowedUsers:
         assert channel._check_user("wxid-bob")
         assert caplog.records == []
 
-    def test_listed_ids_are_allowed_and_others_denied(self):
-        channel = self._channel({"allowed_users": ["wxid-alice", "wxid-bob"]})
+    @pytest.mark.parametrize("collection", [list, tuple, set, frozenset])
+    def test_listed_ids_are_allowed_and_others_denied(self, collection):
+        channel = self._channel({"allowed_users": collection(["wxid-alice", "wxid-bob"])})
 
         assert channel._check_user("wxid-alice")
         assert channel._check_user("wxid-bob")
