@@ -957,6 +957,9 @@ class TestStampingGateBugFix:
             pytest.param("a\n\nb\n", {"start_line": 2, "end_line": 2}, id="both_bounds"),
             pytest.param("a\n\n", {"start_line": 2}, id="start_only"),
             pytest.param("\nb\n", {"end_line": 1}, id="end_only"),
+            pytest.param("a\r\n\r\nb\r\n", {"start_line": 2, "end_line": 2}, id="crlf_both_bounds"),
+            pytest.param("a\r\n\r\n", {"start_line": 2}, id="crlf_start_only"),
+            pytest.param("\r\nb\r\n", {"end_line": 1}, id="crlf_end_only"),
         ],
     )
     def test_blank_line_range_stamps_full_hash_and_allows_write(self, tmp_path, monkeypatch, content, line_range):
@@ -970,7 +973,7 @@ class TestStampingGateBugFix:
 
         outputs = tmp_path / "outputs"
         outputs.mkdir()
-        (outputs / "report.md").write_text(content, encoding="utf-8")
+        (outputs / "report.md").write_text(content, encoding="utf-8", newline="")
         runtime = SimpleNamespace(
             state={"sandbox": {"sandbox_id": "local:t-test"}, "thread_data": {"outputs_path": str(outputs)}},
             context={"thread_id": "t-test"},

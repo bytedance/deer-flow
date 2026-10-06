@@ -9,6 +9,7 @@ skipped when Playwright is not installed.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import socket
 import sys
@@ -360,12 +361,35 @@ async def test_session_launches_chromium_through_its_egress_proxy_and_closes_it(
     assert proxy["server"].startswith("socks5://127.0.0.1:")
     assert proxy["bypass"] == "<-loopback>"
     proxy_port = int(proxy["server"].rsplit(":", 1)[1])
-    _reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
-    writer.close()
+    egress_proxy = session._egress_proxy
+    assert egress_proxy is not None
+    server = egress_proxy._server
+    assert server is not None and server.is_serving()
+    listening_sockets = server.sockets
+    assert listening_sockets
+    writer = None
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
+        writer.write(b"\x05\x01\x00")
+        await writer.drain()
+        assert await asyncio.wait_for(reader.readexactly(2), timeout=1.0) == b"\x05\x00"
 
-    await session._close()
-    with pytest.raises(OSError):
-        await asyncio.open_connection("127.0.0.1", proxy_port)
+        await session._close()
+        # A fresh connect can succeed through host loopback forwarding even
+        # after close. Check the listener this session actually owned instead.
+        assert not server.is_serving()
+        assert not server.sockets
+        assert all(sock.fileno() == -1 for sock in listening_sockets)
+        assert egress_proxy._server is None
+        assert session._egress_proxy is None
+        assert await asyncio.wait_for(reader.read(), timeout=1.0) == b""
+    finally:
+        if writer is not None:
+            writer.close()
+            with contextlib.suppress(ConnectionError):
+                await writer.wait_closed()
+        await session._close()
+        await egress_proxy.close()
 
 
 @pytest.mark.asyncio

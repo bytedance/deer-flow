@@ -2,6 +2,15 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Browser egress session-close tests retain the real listener and its sockets,
+verify a SOCKS handshake, then check listener shutdown, closed socket descriptors
+and EOF on the established client. A new connection to the old port is not a
+reliable ownership assertion on hosts with loopback forwarding or port reuse.
+Always drain the client writer and close the saved proxy during teardown.
+
+Read-before-write hash fixtures pin `newline=""` when writing LF/CRLF test
+content, so native Windows cannot translate the bytes before the real read.
+
 Browser-asset confinement tests use `support.symlinks.symlink_or_skip` for real
 file and directory symlinks. Keep missing-file, duplicate-key, and size-limit
 checks separate so they still run when the host cannot create symlinks.
