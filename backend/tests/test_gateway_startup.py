@@ -146,8 +146,8 @@ exit 97
 @requires_docker_compose
 @pytest.mark.parametrize(
     "command",
-    [("deploy.sh", "start"), ("deploy.sh", "down"), ("docker.sh", "logs", "--prod")],
-    ids=["make-up", "make-down", "make-prod-logs"],
+    [("deploy.sh",), ("deploy.sh", "start"), ("deploy.sh", "down"), ("docker.sh", "logs", "--prod")],
+    ids=["make-up", "deploy-start", "make-down", "make-prod-logs"],
 )
 def test_production_entry_points_parse_the_compose_project_without_env_files(tmp_path: Path, command: tuple[str, ...]) -> None:
     """A fresh clone has no .env or frontend/.env (both gitignored).

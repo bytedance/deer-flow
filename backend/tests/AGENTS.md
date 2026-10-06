@@ -18,6 +18,14 @@ The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
 `ast`, checking both `encoding` and `errors`; module-wide literal counts can
 hide unpinned calls behind unrelated settings.
 
+## Real Compose tests
+
+`support/compose.py` probes `docker compose version --short` and requires Compose
+2.24+ for optional `env_file` syntax. Skip missing, old or unreadable clients with
+an actionable reason; cover version detection offline in `test_support_compose.py`.
+Real rendering and production entry-point tests use only read-only Compose calls.
+Never start or stop a stack from these tests.
+
 ## Claude provider tests
 
 `test_claude_provider_prompt_caching.py` exercises real Anthropic SDK serialization
