@@ -150,6 +150,10 @@ export default function ChatsPage() {
                       const channelSource = channelSourceOfThread(thread, t);
                       const title = titleOfThread(thread, t.pages.untitled);
                       const unread = thread.unread === true;
+                      const origin = threadOriginOf(thread);
+                      // The unread label replaces the row's name; the time
+                      // stays announced as its description.
+                      const timeId = `thread-time-${thread.thread_id}`;
                       return (
                         <div
                           key={thread.thread_id}
@@ -157,7 +161,12 @@ export default function ChatsPage() {
                         >
                           <Link
                             aria-label={
-                              unread ? unreadLabelOfThread(title, t) : undefined
+                              unread
+                                ? unreadLabelOfThread(title, t, origin)
+                                : undefined
+                            }
+                            aria-describedby={
+                              unread && thread.updated_at ? timeId : undefined
                             }
                             className="min-w-0 flex-1"
                             data-unread={unread ? "true" : undefined}
@@ -166,7 +175,7 @@ export default function ChatsPage() {
                             <div className="flex flex-col gap-2 p-4">
                               <div className="flex min-w-0 items-center gap-2">
                                 <ThreadOriginIcon
-                                  origin={threadOriginOf(thread)}
+                                  origin={origin}
                                   className="text-muted-foreground"
                                 />
                                 <div className="min-w-0 truncate">{title}</div>
@@ -178,7 +187,10 @@ export default function ChatsPage() {
                                 />
                               </div>
                               {thread.updated_at && (
-                                <div className="text-muted-foreground text-sm">
+                                <div
+                                  id={timeId}
+                                  className="text-muted-foreground text-sm"
+                                >
                                   {formatTimeAgo(thread.updated_at)}
                                 </div>
                               )}

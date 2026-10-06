@@ -7,7 +7,7 @@ import re
 import pytest
 from _readable_helpers import assert_no_raw_identifiers
 
-from app.scheduler.notification_text import _GOAL_REASON_TEXT, NOTIFICATION_LOCALES, redact_egress_text, render_notification_text, wants_result_summary
+from app.scheduler.notification_text import _GOAL_REASON_TEXT, _TEXT, NOTIFICATION_LOCALES, redact_egress_text, render_notification_text, wants_result_summary
 from deerflow.persistence.scheduled_task_runs.sql import run_summary
 
 TASK_ID = "task-0f3c9a7d5b2e4c1a"
@@ -73,7 +73,8 @@ def test_english_templates():
     assert line2("run_completed_assumption") == "Finished a run. Goal met, with an assumption."
     assert line2("run_failed") == "A run failed."
     assert line2("run_unmet") == "Ran, but the goal wasn't met: it needs your input."
-    assert line2("task_paused") == "Paused after 3 runs in a row missed the goal: the goal is not met yet."
+    # goal_not_met_yet only restates the miss: the reason-less sentence.
+    assert line2("task_paused") == "Paused after 3 runs in a row missed the goal."
     assert line2("task_stopped") == "Paused by agent: its stop condition was met (all items are ticked)."
     assert line2("task_stopped_no_condition") == "Paused by agent: its stop condition was met."
     assert line2("task_stopped_failed") == "Paused by agent: its stop condition was met (all items are ticked). The last run failed."
@@ -92,7 +93,7 @@ def test_chinese_templates():
     assert line2("run_completed_assumption") == "完成了一次运行。目标已达成（含假设）。"
     assert line2("run_failed") == "一次运行出错了。"
     assert line2("run_unmet") == "已运行，但目标未达成：需要你提供信息。"
-    assert line2("task_paused") == "连续 3 次未达成目标，已自动暂停。最近一次的原因：目标尚未达成。"
+    assert line2("task_paused") == "连续 3 次未达成目标，已自动暂停。"
     assert line2("task_stopped") == "已由智能体暂停：停止条件已满足（all items are ticked）。"
     assert line2("task_stopped_failed") == "已由智能体暂停：停止条件已满足（all items are ticked）。最后一次运行出错了。"
     assert line2("task_finished_max_runs") == "已结束：5 次自动运行已全部完成。"
@@ -126,6 +127,33 @@ def test_multiline_title_stays_on_the_title_line():
     assert text.splitlines()[0] == "Scheduled task “Weekly report”"
 
 
+def test_notification_locales_follow_the_config_type_and_have_templates():
+    from typing import get_args
+
+    from app.gateway.routers.user_preferences import Preferences
+    from deerflow.config.channel_connections_config import NotificationLocale
+
+    assert set(NOTIFICATION_LOCALES) == set(get_args(NotificationLocale)) == set(_TEXT) == set(_GOAL_REASON_TEXT)
+    # /preferences accepts exactly the notice languages.
+    for locale in NOTIFICATION_LOCALES:
+        assert Preferences(locale=locale).locale == locale
+
+
+@pytest.mark.parametrize("locale", NOTIFICATION_LOCALES)
+@pytest.mark.parametrize("code", ["goal_not_met_yet", "unknown", None])
+@pytest.mark.parametrize(
+    ("event", "reason_code"),
+    [("run_unmet", "same"), ("task_paused", "consecutive_unmet"), ("task_finished", "max_runs"), ("task_stopped", "agent_stop")],
+)
+def test_generic_reason_never_repeats_the_sentence(locale, code, event, reason_code):
+    """'Ran, but the goal wasn't met: the goal is not met yet.' says one thing twice."""
+    payload = {"run_status": "unmet", "reason_code": code if reason_code == "same" else reason_code, "latest_reason_code": code, "max_runs": 3}
+    line = render_notification_text(notice(event, locale=locale, **payload)).splitlines()[1]
+    for text in (_GOAL_REASON_TEXT[locale]["goal_not_met_yet"], _GOAL_REASON_TEXT[locale]["unknown"]):
+        assert text not in line, line
+    assert "：。" not in line and ": ." not in line and "原因" not in line
+
+
 def test_every_reason_code_exists_in_both_locales():
     assert set(_GOAL_REASON_TEXT) == set(NOTIFICATION_LOCALES)
     assert set(_GOAL_REASON_TEXT["en-US"]) == set(_GOAL_REASON_TEXT["zh-CN"])
@@ -138,7 +166,8 @@ def test_every_reason_code_exists_in_both_locales():
 def test_unknown_reason_is_never_forwarded(locale):
     text = render_notification_text(notice("run_unmet", locale=locale, reason_code="provider said: secret", run_status="unmet"))
     assert "secret" not in text
-    assert _GOAL_REASON_TEXT[locale]["unknown"] in text
+    # An unrecognized code says nothing more than "the goal wasn't met".
+    assert text.splitlines()[1] == {"en-US": "Ran, but the goal wasn't met.", "zh-CN": "已运行，但目标未达成。"}[locale]
 
 
 @pytest.mark.parametrize("status", ["success", "unmet"])
@@ -239,8 +268,8 @@ def test_failed_run_never_forwards_raw_error_text():
         # Rows written before payload version 2.
         ({"event": "run_completed", "task_id": TASK_ID, "run_id": RUN_ID, "payload": {"run_status": "success", "error": None, "task_id": TASK_ID}}, "Finished a run."),
         ({"event": "run_failed", "task_id": TASK_ID, "run_id": RUN_ID, "payload": {"run_status": "failed", "error": "boom", "task_id": TASK_ID, "task_title": "Digest"}}, "A run failed."),
-        ({"event": "run_unmet", "task_id": TASK_ID, "run_id": RUN_ID, "payload": {"task_id": TASK_ID, "reason_code": "goal_not_met_yet"}}, "Ran, but the goal wasn't met: the goal is not met yet."),
-        ({"event": "task_paused", "task_id": TASK_ID, "run_id": RUN_ID, "payload": {"task_id": TASK_ID, "reason_code": "consecutive_unmet"}}, "Paused after 3 runs in a row missed the goal: no reason was recorded."),
+        ({"event": "run_unmet", "task_id": TASK_ID, "run_id": RUN_ID, "payload": {"task_id": TASK_ID, "reason_code": "goal_not_met_yet"}}, "Ran, but the goal wasn't met."),
+        ({"event": "task_paused", "task_id": TASK_ID, "run_id": RUN_ID, "payload": {"task_id": TASK_ID, "reason_code": "consecutive_unmet"}}, "Paused after 3 runs in a row missed the goal."),
     ],
 )
 def test_legacy_rows_render_with_the_new_templates(delivery, expected):

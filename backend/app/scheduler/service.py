@@ -104,6 +104,17 @@ def _chat_event_payload(task, occurrence, event: str, *, run_number: int | None)
     }
 
 
+def _origin_thread_share_lock(thread_id: str):
+    """``SELECT ... FOR SHARE`` on the originating chat's ``threads_meta`` row.
+
+    The share lock makes a concurrent thread delete wait until this
+    finalization commits (Postgres; SQLite already serializes writers), so the
+    delete's later ``delete_by_thread`` step removes the line written here. A
+    delete that committed first leaves no row to lock, and no line is written.
+    """
+    return select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == thread_id).with_for_update(read=True)
+
+
 def _event_time(task, occurrence) -> datetime:
     """When the reported transition happened (for the ``end_at`` / ``max_runs`` reason)."""
     return _as_utc_or_none(getattr(occurrence, "finished_at", None)) or _as_utc_or_none(getattr(task, "updated_at", None)) or datetime.now(UTC)
@@ -298,10 +309,10 @@ class ScheduledTaskService:
         origin_thread_id = getattr(task, "origin_thread_id", None)
         if not isinstance(origin_thread_id, str) or not origin_thread_id:
             return
-        if await session.scalar(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == origin_thread_id)) is None:
+        if await session.scalar(_origin_thread_share_lock(origin_thread_id)) is None:
             return
         now = _event_time(task, occurrence)
-        anchor = lifecycle_anchor(task, occurrence)
+        anchor = lifecycle_anchor(task, occurrence, now=now)
         after_run_id = await session.scalar(select(RunRow.run_id).where(RunRow.thread_id == origin_thread_id, RunRow.operation_kind == "run").order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(1))
         run_number = None
         if occurrence is not None:
@@ -331,7 +342,8 @@ class ScheduledTaskService:
         without proactive push get no row. Plain manual trials reach here
         without run events and send nothing; interrupted runs have no event.
         """
-        selected = _notice_event(task, occurrence, events, now=_event_time(task, occurrence))
+        now = _event_time(task, occurrence)
+        selected = _notice_event(task, occurrence, events, now=now)
         if selected is None:
             return
         event, reason = selected
@@ -343,7 +355,7 @@ class ScheduledTaskService:
         if not bindings:
             return
         payload = _notice_payload(task, occurrence, event, reason, locale=await self._owner_locale(session, task.user_id))
-        task_run_id = occurrence.id if occurrence is not None else _idle_notice_key(task.id, lifecycle_anchor(task, occurrence))
+        task_run_id = occurrence.id if occurrence is not None else _idle_notice_key(task.id, lifecycle_anchor(task, occurrence, now=now))
         for binding in bindings:
             await self._notification_repo.enqueue_in_session(
                 session,

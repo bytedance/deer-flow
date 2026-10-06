@@ -132,7 +132,7 @@ describe("RecentChatList origin markers and unread state", () => {
   test("an unread scheduled run shows the clock, its title and the dot", async () => {
     renderList("en-US");
     const link = await screen.findByRole("link", {
-      name: "Release checklist reminder · 10-05 20:21, unread",
+      name: "Scheduled run, Release checklist reminder · 10-05 20:21, unread",
     });
     expect(link.getAttribute("data-unread")).toBe("true");
     expect(
@@ -146,7 +146,7 @@ describe("RecentChatList origin markers and unread state", () => {
   test("an IM thread shows its provider icon, chip and dot; a read thread has no dot", async () => {
     renderList("en-US");
     const feishu = await screen.findByRole("link", {
-      name: "Weekly numbers, unread",
+      name: "From Feishu, Weekly numbers, unread",
     });
     expect(
       within(feishu).getByRole("img", { name: "From Feishu" }),
@@ -171,7 +171,9 @@ describe("RecentChatList origin markers and unread state", () => {
 
   test("the open thread never shows the dot, even while it is unread", async () => {
     renderList("en-US", RUN_THREAD);
-    await screen.findByRole("link", { name: "Weekly numbers, unread" });
+    await screen.findByRole("link", {
+      name: "From Feishu, Weekly numbers, unread",
+    });
     const active = rowLink(RUN_THREAD);
     expect(active.getAttribute("data-active")).toBe("true");
     expect(within(active).queryByTestId("thread-unread-dot")).toBeNull();
@@ -186,13 +188,15 @@ describe("RecentChatList origin markers and unread state", () => {
   test("zh-CN labels read naturally", async () => {
     renderList("zh-CN");
     const run = await screen.findByRole("link", {
-      name: "Release checklist reminder · 10-05 20:21，未读",
+      name: "定时运行，Release checklist reminder · 10-05 20:21，未读",
     });
     expect(within(run).getByRole("img", { name: "定时运行" })).not.toBeNull();
     expect(within(run).getByTestId("thread-unread-dot").textContent).toBe(
       "未读",
     );
-    const feishu = screen.getByRole("link", { name: "Weekly numbers，未读" });
+    const feishu = screen.getByRole("link", {
+      name: "来自飞书，Weekly numbers，未读",
+    });
     expect(
       within(feishu).getByRole("img", { name: "来自飞书" }),
     ).not.toBeNull();
@@ -206,7 +210,9 @@ describe("RecentChatList origin markers and unread state", () => {
 
   test("the list shows no raw identifiers", async () => {
     const { container } = renderList("en-US");
-    await screen.findByRole("link", { name: "Weekly numbers, unread" });
+    await screen.findByRole("link", {
+      name: "From Feishu, Weekly numbers, unread",
+    });
     expectNoRawIdentifiers(container);
     expect(container.textContent).not.toContain("feishu");
     expect(container.textContent).not.toContain("channel");

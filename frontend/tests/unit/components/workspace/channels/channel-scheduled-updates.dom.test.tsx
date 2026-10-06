@@ -9,7 +9,11 @@ import { zhCN } from "@/core/i18n/locales/zh-CN";
 
 afterEach(cleanup);
 
-function renderIn(locale: Locale, proactive: boolean | undefined) {
+function renderIn(
+  locale: Locale,
+  proactive: boolean | undefined,
+  connected?: boolean,
+) {
   return render(
     <I18nContext.Provider
       value={{
@@ -20,20 +24,41 @@ function renderIn(locale: Locale, proactive: boolean | undefined) {
     >
       <ChannelScheduledUpdates
         provider={{ proactive_notifications: proactive }}
+        connected={connected}
       />
     </I18nContext.Provider>,
   );
 }
 
 describe("ChannelScheduledUpdates", () => {
-  for (const [locale, supported, unsupported] of [
+  for (const [locale, supported, afterConnect, unsupported] of [
     [
       "en-US",
       "Scheduled task updates: sent here",
+      "Scheduled task updates: available after you connect",
       "Scheduled task updates: not available for this app yet",
     ],
-    ["zh-CN", "定时任务通知：会发送到这里", "定时任务通知：此应用暂不支持"],
+    [
+      "zh-CN",
+      "定时任务通知：会发送到这里",
+      "定时任务通知：连接后可发送到这里",
+      "定时任务通知：此应用暂不支持",
+    ],
   ] as const) {
+    test(`an app with push that is not connected yet does not claim "sent here" (${locale})`, () => {
+      renderIn(locale, true, false);
+      const line = screen.getByTestId("channel-scheduled-updates");
+      expect(line.textContent).toBe(afterConnect);
+      expect(line.getAttribute("data-supported")).toBe("true");
+    });
+
+    test(`an app without push says so whether or not it is connected (${locale})`, () => {
+      renderIn(locale, false, false);
+      expect(screen.getByTestId("channel-scheduled-updates").textContent).toBe(
+        unsupported,
+      );
+    });
+
     test(`an app with proactive push says updates are sent here (${locale})`, () => {
       renderIn(locale, true);
       const line = screen.getByTestId("channel-scheduled-updates");

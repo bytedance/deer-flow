@@ -31,10 +31,11 @@ const COPY = {
   },
   zh: {
     label: "定时任务通知",
+    // A Chinese title takes no space before the predicate.
     stopped: (title: string, condition: string) =>
-      `${title} 已由智能体暂停。停止条件已满足：${condition}`,
-    autoPaused: (title: string) => `${title} 已自动暂停：连续 3 次未达成目标。`,
-    finished: (title: string) => `${title} 已结束：5 次运行已全部完成。`,
+      `${title}已由智能体暂停。停止条件已满足：${condition}`,
+    autoPaused: (title: string) => `${title}已自动暂停：连续 3 次未达成目标。`,
+    finished: (title: string) => `${title}已结束：5 次运行已全部完成。`,
     seeThatRun: "查看那次运行",
     openTask: "查看任务",
     pausedByAgent: "已由智能体暂停",

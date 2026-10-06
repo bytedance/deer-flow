@@ -1161,6 +1161,11 @@ export interface Translations {
     unread: string;
     /** Row `aria-label` of an unread thread: "{title}, unread". */
     unreadLabel: string;
+    /**
+     * The same with the origin marker's label first, so the row name keeps
+     * it: "{origin}, {title}, unread".
+     */
+    unreadLabelWithOrigin: string;
     origin: {
       schedule: string;
       /** "From {provider}" for an IM channel thread; `provider` is already localized. */
@@ -1286,6 +1291,7 @@ export interface Translations {
     /** Whether scheduled-task updates reach this app (one muted line on the provider card). */
     scheduledUpdates: {
       supported: string;
+      supportedAfterConnect: string;
       unsupported: string;
     };
   };

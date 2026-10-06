@@ -1098,16 +1098,18 @@ export const zhCN: Translations = {
       triggerFailed: "无法启动这次运行。",
       permissionDenied: "你没有执行此操作的权限。",
     },
+    // No space after {title}: "检查发布清单已结束". A title ending in a Latin
+    // letter or digit gets one at render time ("Daily report 已结束").
     events: {
       stoppedWithCondition:
-        "{title} 已由智能体暂停。停止条件已满足：{condition}",
-      stopped: "{title} 已由智能体暂停：停止条件已满足。",
-      autoPaused: "{title} 已自动暂停：连续 3 次未达成目标。",
-      finishedRuns: "{title} 已结束：{max} 次运行已全部完成。",
-      finishedEnd: "{title} 已结束：已过结束时间。",
-      finished: "{title} 已结束。",
-      onceDone: "{title} 已运行。",
-      onceFailed: "{title} 没有成功完成。",
+        "{title}已由智能体暂停。停止条件已满足：{condition}",
+      stopped: "{title}已由智能体暂停：停止条件已满足。",
+      autoPaused: "{title}已自动暂停：连续 3 次未达成目标。",
+      finishedRuns: "{title}已结束：{max} 次运行已全部完成。",
+      finishedEnd: "{title}已结束：已过结束时间。",
+      finished: "{title}已结束。",
+      onceDone: "{title}已运行。",
+      onceFailed: "{title}没有成功完成。",
       label: "定时任务通知",
       suffixLastFailed: "最后一次运行出错了。",
       suffixLastUnmet: "最后一次运行未达成目标。",
@@ -1311,6 +1313,7 @@ export const zhCN: Translations = {
   threads: {
     unread: "未读",
     unreadLabel: "{title}，未读",
+    unreadLabelWithOrigin: "{origin}，{title}，未读",
     origin: {
       schedule: "定时运行",
       // A Latin name keeps the usual space ("来自 GitHub"); a Chinese one does not ("来自飞书").
@@ -1450,6 +1453,7 @@ export const zhCN: Translations = {
     connectedAs: (name: string) => `已连接为 ${name}。`,
     scheduledUpdates: {
       supported: "定时任务通知：会发送到这里",
+      supportedAfterConnect: "定时任务通知：连接后可发送到这里",
       unsupported: "定时任务通知：此应用暂不支持",
     },
   },

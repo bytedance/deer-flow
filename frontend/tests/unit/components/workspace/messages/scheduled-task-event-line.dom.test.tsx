@@ -301,8 +301,9 @@ describe("ScheduledTaskEventLine", () => {
         expect(time!.getAttribute("datetime")).toBe(
           "2026-10-07T01:01:00+00:00",
         );
+        // A real space before the time keeps the accessible text apart.
         expect(text().textContent).toBe(
-          `${copy.text}${time!.textContent ?? ""}`,
+          `${copy.text} ${time!.textContent ?? ""}`,
         );
         expect(text().querySelector("strong")?.textContent).toBe(
           "Release checklist watcher",
@@ -334,8 +335,9 @@ describe("ScheduledTaskEventLine", () => {
     expect(text().querySelector("strong")?.textContent).toBe(
       "发布清单未完成项监控",
     );
+    // No ASCII space between a Chinese title and the predicate.
     expect(text().textContent).toContain(
-      "已由智能体暂停。停止条件已满足：清单上的所有项都已勾选",
+      "发布清单未完成项监控已由智能体暂停。停止条件已满足：清单上的所有项都已勾选",
     );
     expect(text().textContent).not.toMatch(/paused|Stop condition/);
   });

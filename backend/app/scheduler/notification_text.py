@@ -26,11 +26,13 @@ version 2 render with the same templates.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, get_args
 
+from deerflow.config.channel_connections_config import NotificationLocale
 from deerflow.persistence.scheduled_task_runs.sql import run_summary
 
-NOTIFICATION_LOCALES: tuple[str, ...] = ("en-US", "zh-CN")
+# One source of truth: the config type that ``/preferences`` also accepts.
+NOTIFICATION_LOCALES: tuple[str, ...] = get_args(NotificationLocale)
 DEFAULT_NOTIFICATION_LOCALE = "en-US"
 
 _CONDITION_LIMIT = 200
@@ -114,7 +116,9 @@ _TEXT: dict[str, dict[str, str]] = {
         "goal_met_with_assumption": "Goal met, with an assumption.",
         "run_failed": "A run failed.",
         "run_unmet": "Ran, but the goal wasn't met: {reason}.",
+        "run_unmet_bare": "Ran, but the goal wasn't met.",
         "task_paused": "Paused after 3 runs in a row missed the goal: {reason}.",
+        "task_paused_bare": "Paused after 3 runs in a row missed the goal.",
         "task_stopped_condition": "Paused by agent: its stop condition was met ({condition}).",
         "task_stopped": "Paused by agent: its stop condition was met.",
         "finished_max_runs": "Finished: all {max_runs} automatic runs are done.",
@@ -124,6 +128,7 @@ _TEXT: dict[str, dict[str, str]] = {
         "update": "There is an update.",
         "last_failed": "The last run failed.",
         "last_unmet": "The last run didn't meet the goal: {reason}.",
+        "last_unmet_bare": "The last run didn't meet the goal.",
         "last_interrupted": "The last run was interrupted.",
         "result": "Result: {summary}",
         "closing": "Open DeerFlow → Scheduled tasks for details.",
@@ -137,7 +142,9 @@ _TEXT: dict[str, dict[str, str]] = {
         "goal_met_with_assumption": "目标已达成（含假设）。",
         "run_failed": "一次运行出错了。",
         "run_unmet": "已运行，但目标未达成：{reason}。",
+        "run_unmet_bare": "已运行，但目标未达成。",
         "task_paused": "连续 3 次未达成目标，已自动暂停。最近一次的原因：{reason}。",
+        "task_paused_bare": "连续 3 次未达成目标，已自动暂停。",
         "task_stopped_condition": "已由智能体暂停：停止条件已满足（{condition}）。",
         "task_stopped": "已由智能体暂停：停止条件已满足。",
         "finished_max_runs": "已结束：{max_runs} 次自动运行已全部完成。",
@@ -147,6 +154,7 @@ _TEXT: dict[str, dict[str, str]] = {
         "update": "有新的动态。",
         "last_failed": "最后一次运行出错了。",
         "last_unmet": "最后一次运行未达成目标：{reason}。",
+        "last_unmet_bare": "最后一次运行未达成目标。",
         "last_interrupted": "最后一次运行被中断了。",
         "result": "结果：{summary}",
         "closing": "在 DeerFlow 的定时任务页查看详情。",
@@ -196,11 +204,26 @@ def _truncate(text: str, *, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-def _reason_text(code: object, locale: str) -> str:
+# Codes that only restate "the goal wasn't met" (or say nothing): the notice
+# uses its reason-less sentence instead of "…wasn't met: the goal is not met yet."
+_NO_EXTRA_REASON = frozenset({"goal_not_met_yet", "unknown"})
+
+
+def _reason_text(code: object, locale: str) -> str | None:
+    """Readable reason for a goal code, or None when it would add nothing."""
     texts = _GOAL_REASON_TEXT[locale]
     if isinstance(code, str):
         code = code.removeprefix("blocked:")
-    return texts.get(code, texts["unknown"]) if isinstance(code, str) else texts["unknown"]
+    if not isinstance(code, str) or code not in texts or code in _NO_EXTRA_REASON:
+        return None
+    return texts[code]
+
+
+def _with_reason(key: str, code: object, locale: str) -> str:
+    """The ``key`` sentence with the reason, or its ``{key}_bare`` form without one."""
+    reason = _reason_text(code, locale)
+    text = _TEXT[locale]
+    return text[f"{key}_bare"] if reason is None else text[key].format(reason=reason)
 
 
 def _title(payload: dict[str, Any], locale: str) -> str:
@@ -221,7 +244,7 @@ def _last_run_suffix(event: str, run_status: str | None, payload: dict[str, Any]
     if run_status == "failed":
         return text["last_failed"]
     if run_status == "unmet":
-        return text["last_unmet"].format(reason=_reason_text(payload.get("latest_reason_code"), locale))
+        return _with_reason("last_unmet", payload.get("latest_reason_code"), locale)
     if run_status == "interrupted" and event == "task_stopped":
         return text["last_interrupted"]
     return None
@@ -241,13 +264,13 @@ def _what_happened(delivery: dict[str, Any], locale: str) -> str:
         # Raw error text never leaves: tracebacks can carry hosts, paths and tokens.
         parts = [text["run_failed"]]
     elif event == "run_unmet":
-        parts = [text["run_unmet"].format(reason=_reason_text(payload.get("reason_code"), locale))]
+        parts = [_with_reason("run_unmet", payload.get("reason_code"), locale)]
     elif event == "task_paused":
         # The pause reason itself is fixed (3 misses); show the latest miss's reason.
         latest = payload.get("latest_reason_code")
         if latest is None and payload.get("reason_code") != "consecutive_unmet":
             latest = payload.get("reason_code")
-        parts = [text["task_paused"].format(reason=_reason_text(latest, locale))]
+        parts = [_with_reason("task_paused", latest, locale)]
     elif event == "task_stopped":
         condition = payload.get("stop_condition")
         condition = _truncate(_one_line(redact_egress_text(condition)), limit=_CONDITION_LIMIT) if isinstance(condition, str) else ""

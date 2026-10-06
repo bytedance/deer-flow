@@ -24,6 +24,7 @@ import {
   prepareConnectWindow,
 } from "@/core/channels/open-connect-url";
 import {
+  channelProviderName,
   providerCanConnect,
   providerCanEditRuntimeConfig,
   providerNeedsRuntimeConfig,
@@ -145,7 +146,7 @@ export function WorkspaceChannelsList() {
                     className="size-5 shrink-0"
                   />
                   <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                    {provider.display_name}
+                    {channelProviderName(provider, t)}
                   </span>
                   <Button
                     type="button"
@@ -187,11 +188,14 @@ export function WorkspaceChannelsList() {
                     </span>
                   </Button>
                 </div>
-                {/* Under the name, full width: the row is too narrow beside the button. */}
-                <ChannelScheduledUpdates
-                  provider={provider}
-                  className="pb-0.5 pl-7 text-[11px] leading-snug [&_svg]:hidden"
-                />
+                {/* Only for a connected app, where the answer applies. Under the
+                    name, full width: the row is too narrow beside the button. */}
+                {isConnected ? (
+                  <ChannelScheduledUpdates
+                    provider={provider}
+                    className="pb-0.5 pl-7 text-[11px] leading-snug [&_svg]:hidden"
+                  />
+                ) : null}
               </div>
             </SidebarMenuItem>
           );

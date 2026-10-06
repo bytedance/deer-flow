@@ -848,8 +848,10 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     # Remove the chat's scheduled-task lifecycle lines (best-effort). They are
     # display-only history of this chat; the tasks themselves are untouched.
     # This runs after the thread_meta delete: the finalization observer writes
-    # a line only while that row exists, so a task finishing during the delete
-    # cannot leave a line behind once both steps are done.
+    # a line only while that row exists, and holds a share lock on it (FOR
+    # SHARE) until its transaction commits. A thread_meta delete racing a
+    # finalization therefore commits after the line, and this step removes it,
+    # so a task finishing during the delete cannot leave a line behind.
     try:
         task_event_repo = getattr(request.app.state, "scheduled_task_event_repo", None)
         if task_event_repo is not None:

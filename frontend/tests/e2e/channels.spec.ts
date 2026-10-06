@@ -841,12 +841,16 @@ test.describe("scheduled task updates per app", () => {
       supported: "Scheduled task updates: sent here",
       unsupported: "Scheduled task updates: not available for this app yet",
       dialog: "Settings",
+      wecom: "WeCom",
+      feishu: "Feishu",
     },
     zh: {
       locale: "zh-CN",
       supported: "定时任务通知：会发送到这里",
       unsupported: "定时任务通知：此应用暂不支持",
       dialog: "设置",
+      wecom: "企业微信",
+      feishu: "飞书",
     },
   } as const;
 
@@ -874,9 +878,10 @@ test.describe("scheduled task updates per app", () => {
 
       await page.goto("/workspace/chats/new?settings=channels");
       const dialog = page.getByRole("dialog", { name: copy.dialog });
-      // Cards carry the backend's display name.
-      const wecomName = "WeCom";
-      const feishuName = "Feishu";
+      // Cards carry the provider's name in the UI language, the same label
+      // the thread origin markers use, not the backend's English name.
+      const wecomName = copy.wecom;
+      const feishuName = copy.feishu;
       const wecomCard = dialog
         .locator("[data-slot='item']")
         .filter({ hasText: wecomName });
@@ -889,6 +894,10 @@ test.describe("scheduled task updates per app", () => {
       await expect(
         feishuCard.getByTestId("channel-scheduled-updates"),
       ).toHaveText(copy.unsupported);
+      if (lang === "zh") {
+        await expect(wecomCard).not.toContainText("WeCom");
+        await expect(feishuCard).not.toContainText("Feishu");
+      }
 
       // The sidebar's channel list says the same.
       await page.keyboard.press("Escape");

@@ -33,6 +33,7 @@ import {
   prepareConnectWindow,
 } from "@/core/channels/open-connect-url";
 import {
+  channelProviderName,
   providerCanConnect,
   providerCanEditRuntimeConfig,
   providerNeedsRuntimeConfig,
@@ -189,7 +190,7 @@ function ChannelProviderItem({
         </ItemMedia>
         <ItemContent className="min-w-0">
           <ItemTitle className="w-full">
-            <span className="truncate">{provider.display_name}</span>
+            <span className="truncate">{channelProviderName(provider, t)}</span>
             <Badge
               variant={isConnected ? "default" : "outline"}
               className={cn(!isConnected && "text-muted-foreground")}
@@ -207,7 +208,11 @@ function ChannelProviderItem({
               ? ` ${provider.unavailable_reason}`
               : ""}
           </ItemDescription>
-          <ChannelScheduledUpdates provider={provider} className="mt-1" />
+          <ChannelScheduledUpdates
+            provider={provider}
+            connected={isConnected}
+            className="mt-1"
+          />
         </ItemContent>
         <ItemActions className="ml-auto">
           {isConnected ? (

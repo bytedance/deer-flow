@@ -179,6 +179,27 @@ describe("describeTaskEvent", () => {
     ).toBe("Check the release checklist 已结束：5 次运行已全部完成。");
   });
 
+  test("in Chinese, a Chinese title takes no space before the predicate; a Latin one does", () => {
+    const finished = {
+      event: "task_finished",
+      reason_code: "max_runs",
+      max_runs: 5,
+    } as const;
+    expect(
+      describeTaskEvent(
+        event({ ...finished, task_title: "检查发布清单" }),
+        zhCN,
+      )!.text,
+    ).toBe("检查发布清单已结束：5 次运行已全部完成。");
+    expect(
+      describeTaskEvent(event({ ...finished, task_title: "Release v2" }), zhCN)!
+        .text,
+    ).toBe("Release v2 已结束：5 次运行已全部完成。");
+    expect(
+      describeTaskEvent(event({ ...finished, task_title: "  " }), zhCN)!.text,
+    ).toBe("未命名任务已结束：5 次运行已全部完成。");
+  });
+
   test("a stop or finish adds the last run's outcome as a separate sentence", () => {
     const stoppedFailed = describeTaskEvent(
       event({ run_status: "failed" }),
@@ -374,6 +395,38 @@ describe("placeTaskEvents", () => {
       "e-1",
       "e-2",
     ]);
+  });
+
+  test("while older history is unloaded, a missing anchor is held back, not put at the bottom", () => {
+    const placed = placeTaskEvents(
+      GROUPS,
+      [
+        event({ id: "e-old", after_run_id: "run-on-older-page" }),
+        event({ id: "e-loaded", after_run_id: "run-1" }),
+        event({ id: "e-none", after_run_id: null }),
+      ],
+      { hasMoreHistory: true },
+    );
+    expect(placed.afterGroup.get(2)!.map((item) => item.id)).toEqual([
+      "e-loaded",
+    ]);
+    expect(placed.afterGroup.get(4)!.map((item) => item.id)).toEqual([
+      "e-none",
+    ]);
+    const all = [...placed.afterGroup.values()].flat().concat(placed.tail);
+    expect(all.map((item) => item.id)).not.toContain("e-old");
+  });
+
+  test("with no groups loaded yet and more history, anchored events wait", () => {
+    const placed = placeTaskEvents(
+      [],
+      [
+        event({ id: "anchored", after_run_id: "run-1" }),
+        event({ id: "free", after_run_id: null }),
+      ],
+      { hasMoreHistory: true },
+    );
+    expect(placed.tail.map((item) => item.id)).toEqual(["free"]);
   });
 
   test("events at one position are ordered by created_at", () => {

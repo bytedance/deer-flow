@@ -387,9 +387,11 @@ export function MessageList({
   const placedTaskEvents = useMemo(
     () =>
       scheduledTaskEvents && scheduledTaskEvents.length > 0
-        ? placeTaskEvents(groupedMessages, scheduledTaskEvents)
+        ? placeTaskEvents(groupedMessages, scheduledTaskEvents, {
+            hasMoreHistory: Boolean(hasMoreHistory),
+          })
         : null,
-    [groupedMessages, scheduledTaskEvents],
+    [groupedMessages, scheduledTaskEvents, hasMoreHistory],
   );
   // Stable historical groups survive streaming updates. Weak keys also release
   // cached targets when pagination or a thread change removes those groups.

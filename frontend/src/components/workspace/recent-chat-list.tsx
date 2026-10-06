@@ -232,7 +232,7 @@ export function ThreadSidebarItem({
   // clears its server-side unread state).
   const unread = thread.unread === true && !isActive;
   const rowLabel = unread
-    ? unreadLabelOfThread(branchLabel ?? title, t)
+    ? unreadLabelOfThread(branchLabel ?? title, t, origin)
     : branchLabel;
 
   return (

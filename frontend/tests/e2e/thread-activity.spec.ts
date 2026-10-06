@@ -10,7 +10,8 @@ const COPY = {
   en: {
     scheduled: "Scheduled run",
     unread: "Unread",
-    unreadLabel: (title: string) => `${title}, unread`,
+    // The origin marker's label stays in the row name of an unread run.
+    unreadLabel: (title: string) => `Scheduled run, ${title}, unread`,
     feishu: "From Feishu",
     feishuChip: "Feishu",
     github: "From GitHub",
@@ -18,7 +19,7 @@ const COPY = {
   zh: {
     scheduled: "定时运行",
     unread: "未读",
-    unreadLabel: (title: string) => `${title}，未读`,
+    unreadLabel: (title: string) => `定时运行，${title}，未读`,
     feishu: "来自飞书",
     feishuChip: "飞书",
     github: "来自 GitHub",
@@ -206,6 +207,10 @@ test("the chats page shows the same origin marker and unread dot", async ({
   );
   await expect(run.getByRole("img", { name: COPY.zh.scheduled })).toBeVisible();
   await expect(run.getByTestId("thread-unread-dot")).toBeVisible();
+  // The label replaces the row's name; the time stays as its description.
+  const timeId = await run.getAttribute("aria-describedby");
+  expect(timeId).toBeTruthy();
+  await expect(run.locator(`[id="${timeId}"]`)).toBeVisible();
   const feishu = list.locator(
     `a[href='/workspace/chats/${FEISHU_THREAD.thread_id}']`,
   );

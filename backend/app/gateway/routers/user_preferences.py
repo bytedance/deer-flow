@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 
 from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
 from app.gateway.deps import get_current_user_from_request
+from deerflow.config.channel_connections_config import NotificationLocale
 from deerflow.persistence.engine import get_session_factory
 from deerflow.persistence.user.preferences import UserPreferencesRepository
 
@@ -26,7 +27,7 @@ class Preferences(BaseModel):
     # The web app's UI language, synced on sign-in and on every language
     # switch. Scheduled-task IM notices are written in it; without it they use
     # ``channel_connections.notification_locale``.
-    locale: Literal["en-US", "zh-CN"] | None = None
+    locale: NotificationLocale | None = None
 
 
 async def _owner(request: Request, expected_user: str) -> str:

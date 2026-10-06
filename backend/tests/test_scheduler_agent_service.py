@@ -207,7 +207,8 @@ def test_known_host_stand_down_reasons_are_reported_readably(reason, readable):
 
 def test_unknown_reason_code_is_not_forwarded():
     text = render_notification_text({"event": "run_unmet", "task_id": "task-a", "payload": {"reason_code": "provider said: secret"}})
-    assert "Ran, but the goal wasn't met: no reason was recorded." in text
+    # An unrecognized code adds nothing: the reason-less sentence.
+    assert "Ran, but the goal wasn't met." in text.splitlines()
     assert "secret" not in text
 
 

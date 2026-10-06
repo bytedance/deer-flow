@@ -260,17 +260,20 @@ def lifecycle_reason(task: ScheduledTaskRow, event: str, *, now: datetime, occur
     return "end_at" if reached else "max_runs"
 
 
-def lifecycle_anchor(task: ScheduledTaskRow, occurrence: ScheduledTaskRunRow | None) -> str:
+def lifecycle_anchor(task: ScheduledTaskRow, occurrence: ScheduledTaskRunRow | None, *, now: datetime) -> str:
     """Dedupe anchor of a lifecycle event: one event per transition, replay-safe.
 
-    An occurrence anchors on its id. An idle finish anchors on the end time
-    (``end:<iso>``), else on the occurrence sequence high-water mark
-    (``seq:<n>``), so re-running ``complete_if_ended`` cannot add a row, while
-    a resume with a new end time followed by a second finish gets a new anchor.
+    An occurrence anchors on its id. An idle finish anchors on its reason: the
+    end time (``end:<iso>``) when that end time had passed at ``now`` (reason
+    ``end_at``), else the occurrence sequence high-water mark (``seq:<n>``,
+    reason ``max_runs``). Re-running ``complete_if_ended`` cannot add a row,
+    and an idle ``max_runs`` finish does not take the anchor of a later finish
+    at the task's (then still future) end time. A resume with a new end time
+    followed by a second finish gets a new anchor.
     """
     if occurrence is not None:
         return occurrence.id
     end_at = _end_at_utc(task)
-    if end_at is not None:
+    if end_at is not None and lifecycle_reason(task, "task_finished", now=now) == "end_at":
         return f"end:{coerce_iso(end_at)}"
     return f"seq:{task.last_occurrence_seq}"

@@ -216,7 +216,7 @@ function segmentsOf(
     }
   };
   for (const match of template.matchAll(pattern)) {
-    pushText(template.slice(last, match.index));
+    pushText(gapAfterTitle(template.slice(last, match.index)));
     const name = match[1];
     if (name === "title") {
       segments.push({ kind: "title", text: values.title });
@@ -227,8 +227,18 @@ function segmentsOf(
     }
     last = (match.index ?? 0) + match[0].length;
   }
-  pushText(template.slice(last));
+  pushText(gapAfterTitle(template.slice(last)));
   return segments;
+
+  // CJK templates put no space after the title ("检查发布清单已结束"); a title
+  // ending in a Latin letter or digit keeps the usual one ("Daily report 已结束").
+  function gapAfterTitle(text: string): string {
+    return segments.at(-1)?.kind === "title" &&
+      /[A-Za-z0-9]$/.test(values.title) &&
+      /^[\u3400-\u9fff]/.test(text)
+      ? ` ${text}`
+      : text;
+  }
 }
 
 /**
@@ -397,14 +407,24 @@ function compareEvents(a: ScheduledTaskEvent, b: ScheduledTaskEvent): number {
  * after the last group of that turn, before the next `human` group. When no
  * message carries that run (branched or pruned history, or no anchor) it goes
  * after the last group. Lines at one position are ordered by `created_at`.
+ *
+ * While older history is still unloaded (`hasMoreHistory`), a missing anchor
+ * may just sit on a page the user has not scrolled to yet. Such an event is
+ * held back instead of being put at the bottom, where it would read as if it
+ * had just happened; it appears once its turn loads. Events without an anchor
+ * still go after the last group.
  */
 export function placeTaskEvents(
   groups: readonly PlaceableGroup[],
   events: readonly ScheduledTaskEvent[],
+  { hasMoreHistory = false }: { hasMoreHistory?: boolean } = {},
 ): PlacedTaskEvents {
   const afterGroup = new Map<number, ScheduledTaskEvent[]>();
   if (groups.length === 0) {
-    return { afterGroup, tail: [...events].sort(compareEvents) };
+    const placeable = hasMoreHistory
+      ? events.filter((event) => !event.after_run_id)
+      : events;
+    return { afterGroup, tail: [...placeable].sort(compareEvents) };
   }
 
   // Last group index containing each run id.
@@ -430,6 +450,9 @@ export function placeTaskEvents(
     const anchor = event.after_run_id
       ? lastGroupOfRun.get(event.after_run_id)
       : undefined;
+    if (anchor === undefined && event.after_run_id && hasMoreHistory) {
+      continue;
+    }
     const index = anchor === undefined ? lastIndex : endOfTurn(anchor);
     const bucket = afterGroup.get(index);
     if (bucket) {

@@ -115,11 +115,23 @@ export function ThreadChannelBadge({
   );
 }
 
-/** Row `aria-label` of an unread thread: "{title}, unread" / "{title}，未读". */
+/**
+ * Row `aria-label` of an unread thread: "{title}, unread" / "{title}，未读".
+ * With an origin marker its label comes first ("Scheduled run, {title},
+ * unread" / "来自飞书，{title}，未读"), so the label that replaces the row's
+ * content does not drop who created the thread.
+ */
 export function unreadLabelOfThread(
   title: string,
   t: Pick<Translations, "threads">,
+  origin: ThreadOrigin | null = null,
 ): string {
+  const originLabel = labelOfThreadOrigin(origin, t);
+  if (originLabel) {
+    return t.threads.unreadLabelWithOrigin
+      .replace("{origin}", () => originLabel)
+      .replace("{title}", () => title);
+  }
   return t.threads.unreadLabel.replace("{title}", () => title);
 }
 

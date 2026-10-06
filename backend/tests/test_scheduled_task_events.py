@@ -352,6 +352,19 @@ async def test_no_event_for_deleted_origin_thread(tmp_path):
         assert await event_rows(sf) == []
 
 
+def test_origin_thread_lookup_takes_a_share_lock():
+    """A racing thread delete waits for the finalization (FOR SHARE), so its
+    later delete_by_thread step removes the line instead of orphaning it."""
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    from app.scheduler.service import _origin_thread_share_lock
+
+    statement = _origin_thread_share_lock("origin")
+    assert "FOR SHARE" in str(statement.compile(dialect=postgresql.dialect()))
+    # SQLite has no row locks; its single writer already serializes the two.
+    assert "FOR" not in str(statement.compile(dialect=sqlite.dialect()))
+
+
 @pytest.mark.asyncio
 async def test_skipped_occurrence_payload_has_no_run_thread(tmp_path):
     async with database(tmp_path) as (sf, tasks, runs):
@@ -545,10 +558,24 @@ def test_lifecycle_anchor_is_deterministic():
 
     from deerflow.persistence.scheduled_task_runs.finalization import lifecycle_anchor
 
-    assert lifecycle_anchor(_task(), SimpleNamespace(id="occ-7")) == "occ-7"
+    assert lifecycle_anchor(_task(), SimpleNamespace(id="occ-7"), now=NOW) == "occ-7"
     naive = datetime(2026, 12, 31, 18, 0)
-    assert lifecycle_anchor(_task(end_at=naive), None) == "end:2026-12-31T18:00:00+00:00"
-    assert lifecycle_anchor(_task(end_at=naive.replace(tzinfo=UTC)), None) == lifecycle_anchor(_task(end_at=naive), None)
-    assert lifecycle_anchor(_task(), None) == "seq:4"
-    assert lifecycle_anchor(_task(end_at="not a time"), None) == "seq:4"
-    assert len(lifecycle_anchor(_task(end_at=naive), None)) <= 96
+    after_end = datetime(2027, 1, 1, tzinfo=UTC)
+    assert lifecycle_anchor(_task(end_at=naive), None, now=after_end) == "end:2026-12-31T18:00:00+00:00"
+    assert lifecycle_anchor(_task(end_at=naive.replace(tzinfo=UTC)), None, now=after_end) == lifecycle_anchor(_task(end_at=naive), None, now=after_end)
+    assert lifecycle_anchor(_task(), None, now=after_end) == "seq:4"
+    assert lifecycle_anchor(_task(end_at="not a time"), None, now=after_end) == "seq:4"
+    assert len(lifecycle_anchor(_task(end_at=naive), None, now=after_end)) <= 96
+
+
+def test_idle_max_runs_finish_does_not_take_the_end_time_anchor():
+    """A max_runs idle finish before the end time keeps a seq anchor, so a later
+    end-time finish (after a reactivation) is not dropped as a duplicate."""
+    from deerflow.persistence.scheduled_task_runs.finalization import lifecycle_anchor
+
+    end = datetime(2026, 12, 31, 18, 0, tzinfo=UTC)
+    before_end = lifecycle_anchor(_task(end_at=end), None, now=end - timedelta(days=1))
+    after_end = lifecycle_anchor(_task(end_at=end), None, now=end + timedelta(minutes=1))
+    assert before_end == "seq:4"
+    assert after_end == f"end:{end.isoformat()}"
+    assert before_end != after_end

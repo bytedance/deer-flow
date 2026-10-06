@@ -605,6 +605,34 @@ async def test_idle_end_at_finish_emits_with_end_anchor_once(tmp_path, database_
 
 
 @pytest.mark.asyncio
+async def test_idle_max_runs_finish_then_end_time_finish_writes_two_events(tmp_path, database_backend):
+    """An idle max_runs finish before the end time must not take the end-time
+    anchor: after a reactivation, the real end-time finish still gets its line."""
+    end = NOW + timedelta(hours=1)
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
+        await task(tasks, end_at=end, max_runs=1)
+        await origin_chat(sf)
+        observed = recording_service(tasks, runs)
+        await runs.create(run_record_id="used", task_id="task", thread_id="thread", scheduled_for=NOW, trigger="scheduled", status="queued")
+        async with sf() as session:
+            row = await session.get(ScheduledTaskRunRow, "used")
+            row.status, row.launch_accounted, row.finished_at = "success", True, NOW
+            await session.commit()
+        assert await tasks.complete_if_ended("task", user_id="owner", now=NOW + timedelta(seconds=1)) is True
+        async with sf() as session:
+            parent = await session.get(ScheduledTaskRow, "task")
+            parent.status, parent.max_runs = "enabled", 5
+            await session.commit()
+        assert await tasks.complete_if_ended("task", user_id="owner", now=end + timedelta(seconds=1)) is True
+        assert observed == [(None, ("task_finished",)), (None, ("task_finished",))]
+        rows = await event_rows(sf)
+        assert [(row.event, row.reason_code, row.anchor) for row in rows] == [
+            ("task_finished", "max_runs", "seq:1"),
+            ("task_finished", "end_at", f"end:{end.isoformat()}"),
+        ]
+
+
+@pytest.mark.asyncio
 async def test_claim_time_end_skip_emits_task_finished_once(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
         await task(tasks, end_at=NOW + timedelta(seconds=1))

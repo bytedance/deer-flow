@@ -122,10 +122,13 @@ export function ScheduledTaskEventLine({
             {description.suffix}
           </>
         )}
+        {/* A real space, so the accessible text (the link's description)
+            keeps the sentence and the time apart. */}
+        {time && " "}
         {time && (
           <time
             dateTime={event.created_at}
-            className="text-muted-foreground ml-2 text-xs whitespace-nowrap"
+            className="text-muted-foreground ml-1 text-xs whitespace-nowrap"
           >
             {time}
           </time>

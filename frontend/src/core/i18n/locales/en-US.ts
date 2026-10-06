@@ -1397,6 +1397,7 @@ export const enUS: Translations = {
   threads: {
     unread: "Unread",
     unreadLabel: "{title}, unread",
+    unreadLabelWithOrigin: "{origin}, {title}, unread",
     origin: {
       schedule: "Scheduled run",
       fromProvider: (provider: string) => `From ${provider}`,
@@ -1544,6 +1545,8 @@ export const enUS: Translations = {
     connectedAs: (name: string) => `Connected as ${name}.`,
     scheduledUpdates: {
       supported: "Scheduled task updates: sent here",
+      supportedAfterConnect:
+        "Scheduled task updates: available after you connect",
       unsupported: "Scheduled task updates: not available for this app yet",
     },
   },
