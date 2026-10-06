@@ -26,10 +26,6 @@ from deerflow.utils.file_io import run_file_io as _real_run_file_io
 pytestmark = [
     pytest.mark.asyncio,
     pytest.mark.allow_blocking_io,
-    pytest.mark.skipif(
-        os.name == "nt",
-        reason="project-document anchors exceed Windows MAX_PATH (WinError 206); see #6353",
-    ),
 ]
 
 _USER = "u1"
@@ -68,6 +64,10 @@ async def _shelf_document(env) -> dict:
     return result[0]
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="attach staging copy/read exceed Windows MAX_PATH (WinError 206); see #6353",
+)
 async def test_attach_staging_copy_dispatches_off_the_loop(tmp_path, monkeypatch) -> None:
     """The under-lock source copy (existence/size check + ``shutil.copyfile``)
     must go through ``run_file_io`` while the row lock is held."""
@@ -87,6 +87,10 @@ async def test_attach_staging_copy_dispatches_off_the_loop(tmp_path, monkeypatch
         await close_engine()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="attach staging copy/read exceed Windows MAX_PATH (WinError 206); see #6353",
+)
 async def test_attach_staged_read_dispatches_off_the_loop(tmp_path, monkeypatch) -> None:
     """``read_file_chunks`` (attach ingestion source + from-thread promote
     source) must dispatch the open, every chunk read, and the close through
