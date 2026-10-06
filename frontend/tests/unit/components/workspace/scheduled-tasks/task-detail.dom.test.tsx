@@ -245,24 +245,35 @@ describe("TaskDetail", () => {
   test("Chinese copy keeps a space between an interpolated time and the words after it (live take)", async () => {
     // Recorded live: run 2 (16:48 Asia/Shanghai) found the list done and the
     // agent paused the task; run 1 led in with "…未完成：" and a list.
-    const { task: live, runs } = loadLiveMinuteTask();
-    renderDetail(live, { locale: "zh-CN", runs });
-    const notice = await screen.findByTestId("scheduled-task-outcome");
-    await waitFor(() => expect(notice.textContent).toContain("16:48 的运行中"));
-    expect(notice.textContent).toMatch(
-      /在(今天|昨天|\d+月\d+日) 16:48 的运行中，智能体判断停止条件已满足/,
-    );
-    const stops = screen.getByTestId("scheduled-task-stops-when").textContent;
-    expect(stops).toMatch(/✓ 已于(今天|昨天|\d+月\d+日) 16:48 满足$/);
-    for (const text of [notice.textContent, stops]) {
-      // No time runs straight into the Chinese after it ("16:48满足").
-      expect(text).not.toMatch(/\d{2}:\d{2}[一-龥]/);
+    // An interval task reads in the viewer's zone, so pin it to the take's.
+    const browserOptions = Intl.DateTimeFormat().resolvedOptions();
+    const viewerZone = rs
+      .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+      .mockReturnValue({ ...browserOptions, timeZone: "Asia/Shanghai" });
+    try {
+      const { task: live, runs } = loadLiveMinuteTask();
+      renderDetail(live, { locale: "zh-CN", runs });
+      const notice = await screen.findByTestId("scheduled-task-outcome");
+      await waitFor(() =>
+        expect(notice.textContent).toContain("16:48 的运行中"),
+      );
+      expect(notice.textContent).toMatch(
+        /在(今天|昨天|\d+月\d+日) 16:48 的运行中，智能体判断停止条件已满足/,
+      );
+      const stops = screen.getByTestId("scheduled-task-stops-when").textContent;
+      expect(stops).toMatch(/✓ 已于(今天|昨天|\d+月\d+日) 16:48 满足$/);
+      for (const text of [notice.textContent, stops]) {
+        // No time runs straight into the Chinese after it ("16:48满足").
+        expect(text).not.toMatch(/\d{2}:\d{2}[一-龥]/);
+      }
+      const detail = screen.getByTestId("scheduled-task-detail");
+      expect(detail.textContent).toContain("每分钟");
+      expect(detail.textContent).toContain(
+        "清单中还有 2 项未完成：Publish the Docker image — 负责人：Sam Okafor；Post the release notes — 负责人：Nora Lind",
+      );
+    } finally {
+      viewerZone.mockRestore();
     }
-    const detail = screen.getByTestId("scheduled-task-detail");
-    expect(detail.textContent).toContain("每分钟");
-    expect(detail.textContent).toContain(
-      "清单中还有 2 项未完成：Publish the Docker image — 负责人：Sam Okafor；Post the release notes — 负责人：Nora Lind",
-    );
   });
 
   test("a recurring task mid-run reads Running now and blocks changes", async () => {

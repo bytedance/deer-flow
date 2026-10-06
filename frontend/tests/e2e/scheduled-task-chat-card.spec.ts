@@ -15,6 +15,9 @@ import {
 } from "./utils/scheduled-fixtures";
 
 test.describe.configure({ mode: "serial" });
+// The live takes were recorded in Asia/Shanghai, and interval tasks read in
+// the viewer's zone; pin it so CI (UTC) renders the recorded times.
+test.use({ timezoneId: "Asia/Shanghai" });
 
 // Recorded live (fixtures/scheduled/live-*.json): the conversations are
 // Chinese; the UI runs in both locales over them.
