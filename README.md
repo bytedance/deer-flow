@@ -2550,6 +2550,9 @@ switching conversations. An invalid `/resume` reference displays an error withou
 closing the TUI or changing the current conversation.
 After an interrupt, late stream actions from the previous run cannot change the
 next run's display or status, even when both prompts use the same conversation.
+A tool call already in progress still finishes, so until it does a new prompt in
+that conversation is held back with a notice instead of racing it; `/new` and
+`/resume` stay available.
 If a run cannot start, the TUI reports an error and returns to idle so you can retry.
 
 At the last composer row, `Down` leaves an unsent draft untouched unless you are
