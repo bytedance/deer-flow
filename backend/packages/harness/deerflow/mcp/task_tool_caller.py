@@ -20,7 +20,12 @@ from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
 from deerflow.mcp.personal_access import require_personal_mcp_access
-from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
+from deerflow.mcp.session_pool import (
+    MCPPoolDomain,
+    MCPSessionPool,
+    call_pooled_session_tool,
+    get_session_pool,
+)
 from deerflow.mcp.tasks.runtime import get_mcp_task_oauth_token_manager
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, load_user_mcp_config_if_changed
 from deerflow.mcp_scope import mcp_session_scope_key
@@ -130,6 +135,7 @@ class McpTaskToolCaller:
                 thread_id=thread_id,
                 thread_incarnation=thread_incarnation,
                 request_scoped_headers=request_scoped_headers,
+                connection_scope="personal",
             )
         if connection_scope != "deployment":
             raise ValueError("Invalid MCP task connection scope")
@@ -141,6 +147,7 @@ class McpTaskToolCaller:
             thread_id=thread_id,
             thread_incarnation=thread_incarnation,
             request_scoped_headers=request_scoped_headers,
+            connection_scope="deployment",
         )
 
     def _personal_caller_for(self, user_id: str, server_name: str) -> McpTaskToolCaller:
@@ -172,6 +179,7 @@ class McpTaskToolCaller:
         thread_id: str,
         thread_incarnation: str | None,
         request_scoped_headers: bool,
+        connection_scope: MCPPoolDomain,
     ) -> Any:
         is_background_call = not request_scoped_headers
         interceptors = self._interceptors if is_background_call else self._submit_interceptors
@@ -195,10 +203,11 @@ class McpTaskToolCaller:
             )
             pool = get_session_pool()
             session_init_timeout = server_config.session_init_timeout
+            session_request = pool.get_session(server_name, scope_key, connection) if connection_scope == "deployment" else pool.get_session(server_name, scope_key, connection, domain=connection_scope)
             if session_init_timeout is not None:
                 try:
                     session = await asyncio.wait_for(
-                        pool.get_session(server_name, scope_key, connection),
+                        session_request,
                         timeout=session_init_timeout,
                     )
                 except TimeoutError:
@@ -209,7 +218,7 @@ class McpTaskToolCaller:
                     )
                     raise
             else:
-                session = await pool.get_session(server_name, scope_key, connection)
+                session = await session_request
             return await self._invoke(
                 session=session,
                 pool=pool,
@@ -223,6 +232,7 @@ class McpTaskToolCaller:
                 session_init_timeout_seconds=None,
                 persistent_session=True,
                 interceptors=interceptors,
+                connection_scope=connection_scope,
             )
 
         authorization = await self._oauth_token_manager.get_authorization_header(server_name)
@@ -247,6 +257,7 @@ class McpTaskToolCaller:
             session_init_timeout_seconds=server_config.session_init_timeout,
             persistent_session=False,
             interceptors=interceptors,
+            connection_scope=connection_scope,
         )
 
     async def _invoke(
@@ -264,6 +275,7 @@ class McpTaskToolCaller:
         session_init_timeout_seconds: float | None,
         persistent_session: bool,
         interceptors: list[Any],
+        connection_scope: MCPPoolDomain,
     ) -> Any:
         from langchain_mcp_adapters.interceptors import MCPToolCallRequest
         from langchain_mcp_adapters.sessions import create_session
@@ -283,6 +295,7 @@ class McpTaskToolCaller:
                             "Ignoring MCP interceptor headers with unsupported type: %s",
                             type(request.headers).__name__,
                         )
+                domain_kwargs = {"domain": connection_scope} if connection_scope != "deployment" else {}
                 return await call_pooled_session_tool(
                     session,
                     pool,
@@ -291,6 +304,7 @@ class McpTaskToolCaller:
                     tool_name=request.name,
                     arguments=request.args,
                     call_kwargs=call_kwargs,
+                    **domain_kwargs,
                 )
 
             effective_connection = dict(connection)

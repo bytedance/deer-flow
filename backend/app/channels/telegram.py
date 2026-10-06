@@ -10,7 +10,7 @@ import time
 from collections.abc import Coroutine
 from typing import Any
 
-from app.channels.base import Channel
+from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
@@ -269,8 +269,9 @@ class TelegramChannel(Channel):
                             logger.warning("[Telegram] polling thread did not stop within the shutdown budget")
             finally:
                 if worker_thread is not None and worker_thread.is_alive():
-                    logger.warning("[Telegram] polling thread is still exiting after bounded shutdown")
-                self._thread = None
+                    raise ChannelStopTimeout("Telegram polling thread is still running after stop timeout")
+                if self._thread is worker_thread:
+                    self._thread = None
                 self._application = None
         logger.info("Telegram channel stopped")
 

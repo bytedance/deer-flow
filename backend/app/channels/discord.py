@@ -34,16 +34,71 @@ DISCORD_OUTBOUND_TIMEOUT_SECONDS = 30.0
 DISCORD_UPLOAD_TIMEOUT_SECONDS = 120.0
 
 
+def _parse_discord_guild_id(entry: Any) -> int | None:
+    """Return a Discord guild (snowflake) ID, or ``None`` if ``entry`` is not one."""
+    if isinstance(entry, int) and not isinstance(entry, bool) and entry > 0:
+        return entry
+    if isinstance(entry, str):
+        text = entry.strip()
+        if text.isascii() and text.isdigit():
+            return int(text) or None
+    return None
+
+
+def _parse_allowed_guilds(allowed_guilds: Any) -> frozenset[int] | None:
+    """Parse ``channels.discord.allowed_guilds``; ``None`` means no allowlist.
+
+    A single ID is shorthand for a one-entry list, the form
+    ``config.example.yaml`` advertises. Iterating a scalar instead turns
+    ``"321"`` into guilds 1, 2 and 3 and raises ``TypeError`` on an unquoted
+    YAML int. Entries that are not positive numeric snowflakes are dropped with
+    a warning. If none remain, the result is an empty set that denies every
+    guild: the operator asked for a restriction, so an unreadable one must not
+    open the bot to every server it joined.
+    """
+    if allowed_guilds is None or (isinstance(allowed_guilds, str) and not allowed_guilds.strip()):
+        return None
+    entries = list(allowed_guilds) if isinstance(allowed_guilds, list | tuple | set) else [allowed_guilds]
+    if not entries:
+        return None
+    guild_ids: set[int] = set()
+    for entry in entries:
+        guild_id = _parse_discord_guild_id(entry)
+        if guild_id is None:
+            logger.warning("[Discord] Ignoring allowed_guilds entry %r: expected a positive numeric guild ID; list several IDs as a YAML list", entry)
+        else:
+            guild_ids.add(guild_id)
+    if not guild_ids:
+        logger.error("[Discord] allowed_guilds has no valid numeric guild ID; denying every guild until it is fixed")
+    return frozenset(guild_ids)
+
+
+def _parse_allowed_channels(allowed_channels: Any) -> frozenset[str]:
+    """Parse ``channels.discord.allowed_channels``; a single ID is one entry.
+
+    Channel IDs are snowflakes that only ever get compared as strings here, so
+    the entries are kept verbatim rather than validated — an unreadable ID just
+    never matches, which leaves ``mention_only`` in force (fail-closed).
+    """
+    if allowed_channels is None or (isinstance(allowed_channels, str) and not allowed_channels.strip()):
+        return frozenset()
+    entries = list(allowed_channels) if isinstance(allowed_channels, list | tuple | set) else [allowed_channels]
+    return frozenset(text for text in (str(entry).strip() for entry in entries) if text)
+
+
 class DiscordChannel(Channel):
     """Discord bot channel.
 
     Configuration keys (in ``config.yaml`` under ``channels.discord``):
         - ``bot_token``: Discord Bot token.
-        - ``allowed_guilds``: (optional) List of allowed Discord guild IDs. Empty = allow all.
+        - ``allowed_guilds``: (optional) List of allowed Discord guild IDs, or a
+          single ID. Empty = allow all; a non-empty list with no valid ID denies
+          every guild.
         - ``mention_only``: (optional) If true, only respond when the bot is mentioned.
         - ``allowed_channels``: (optional) List of channel IDs where messages are always accepted
-          (even when mention_only is true). Use for channels where you want the bot to respond
-          without mentions. Empty = mention_only applies everywhere.
+          (even when mention_only is true), or a single ID. Use for channels where
+          you want the bot to respond without mentions. Empty = mention_only applies
+          everywhere.
         - ``thread_mode``: (optional) If true, group a channel conversation into a thread.
           Default: same as ``mention_only``.
     """
@@ -51,17 +106,10 @@ class DiscordChannel(Channel):
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
         super().__init__(name="discord", bus=bus, config=config)
         self._bot_token = str(config.get("bot_token", "")).strip()
-        self._allowed_guilds: set[int] = set()
-        for guild_id in config.get("allowed_guilds", []):
-            try:
-                self._allowed_guilds.add(int(guild_id))
-            except (TypeError, ValueError):
-                continue
+        self._allowed_guilds: frozenset[int] | None = _parse_allowed_guilds(config.get("allowed_guilds"))
         self._mention_only: bool = bool(config.get("mention_only", False))
         self._thread_mode: bool = config.get("thread_mode", self._mention_only)
-        self._allowed_channels: set[str] = set()
-        for channel_id in config.get("allowed_channels", []):
-            self._allowed_channels.add(str(channel_id))
+        self._allowed_channels: frozenset[str] = _parse_allowed_channels(config.get("allowed_channels"))
 
         # Session tracking: channel_id -> Discord thread_id (in-memory, persisted to JSON).
         # Uses a dedicated JSON file separate from ChannelStore, which maps IM
@@ -487,6 +535,11 @@ class DiscordChannel(Channel):
         task.add_done_callback(self._on_ack_reaction_task_done)
         return task
 
+    def _check_guild(self, guild) -> bool:
+        if self._allowed_guilds is None:
+            return True
+        return guild is not None and guild.id in self._allowed_guilds
+
     async def _on_message(self, message) -> None:
         if not self._running or not self._client:
             return
@@ -498,9 +551,8 @@ class DiscordChannel(Channel):
             return
 
         guild = message.guild
-        if self._allowed_guilds:
-            if guild is None or guild.id not in self._allowed_guilds:
-                return
+        if not self._check_guild(guild):
+            return
 
         text = (message.content or "").strip()
         if not text:

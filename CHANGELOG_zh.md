@@ -432,6 +432,24 @@
 
 ### 修复
 
+- **沙箱：** 启用 host bash 时，本地沙箱不再把线程固定在上一个受限 Agent 的技能视图上。
+  该视图只在 host bash 关闭时维护，但 `LocalSandboxProvider` 只要它存在就会挂载，导致该线程之后
+  不受限的运行仍沿用旧的 allowlist，读不到 `/mnt/skills` 下其他已启用或新增的技能。现在这些运行
+  使用共享技能视图；线程视图会保留，并在关闭 host bash 后重新生效。([#6344])
+- **沙箱：** 本地沙箱不再改写换行符。`read_file` 此前把 CRLF 转成 LF，导致
+  `str_replace` 编辑 CRLF 文件后整份文件都变成 LF，且读后写校验无法察觉仅改动换行符的
+  变更；在 Windows 上 `write_file` 会把 LF 内容写成 CRLF，使 `bash run.sh` 等脚本失败。
+  现在本地读写与远程沙箱一致，按原样保留换行符；当文件使用 CRLF 时，`str_replace` 会把
+  以 `\n` 书写的 `old_str`/`new_str` 转为 CRLF，远程沙箱上的多行编辑也因此能匹配 CRLF 文件。
+  本地 `grep` 与 `read_file` 一样只在 `\n` 处断行，即使文件含有单独的 `\r`，命中的行号也与按行号范围读取的结果一致。
+  同样在 Windows 上，保存到 `outputs/.tool-results/` 的超长工具输出此前也被写成 CRLF，与其 blob
+  引用不再一致，未配置 blob 存储时会在下一次模型调用时被删除；现在按原样逐字节写入。([#6343])
+- **技能：** 编辑自定义技能时，不再在事件循环上执行文件系统操作。
+  `PUT /api/skills/custom/{name}` 此前在事件循环上构建用户级技能存储、探测自定义、
+  内置、旧版共享与集成目录、把草稿写入临时目录以校验 frontmatter，并读取将被替换的
+  内容；只有最后的写入与历史追加已移出事件循环。现在这些步骤都在工作线程中执行，
+  与回滚路由一致。自定义技能的删除与归档安装路由，以及智能体的 `skill_manage`
+  工具（其存储查找每次调用都会 stat `config.yaml`）也改为在工作线程中构建存储。([#6332])
 - **网关：** 知识检索目录加载自定义 Agent 配置时不再阻塞网关事件循环。
   `GET /api/knowledge/retrieval-catalog/datasets` 与 `.../datasets/{id}/documents`
   此前在事件循环上通过同步 Agent 存储读取 Agent：`file` 后端为文件 IO，`db` 后端
@@ -6501,3 +6519,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6313]: https://github.com/bytedance/deer-flow/pull/6313
 [#6319]: https://github.com/bytedance/deer-flow/pull/6319
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
+[#6332]: https://github.com/bytedance/deer-flow/pull/6332
+[#6343]: https://github.com/bytedance/deer-flow/pull/6343
+[#6344]: https://github.com/bytedance/deer-flow/pull/6344

@@ -289,6 +289,11 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
 
    For vLLM 0.19.0, use `deerflow.models.vllm_provider:VllmChatModel`. For Qwen-style reasoning models, DeerFlow toggles reasoning with `extra_body.chat_template_kwargs.enable_thinking` and preserves vLLM's non-standard `reasoning` field across multi-turn tool-call conversations. Legacy `thinking` configs are normalized automatically for backward compatibility. If the endpoint reports a cumulative usage snapshot on every streaming chunk, set `cumulative_stream_usage: true` so DeerFlow converts those snapshots into per-chunk deltas; the option is disabled by default and leaves usage unchanged when a stable completion id is unavailable. Reasoning models may also require the server to be started with `--reasoning-parser ...`. If your local vLLM deployment accepts any non-empty API key, you can still set `VLLM_API_KEY` to a placeholder value.
 
+   When prompt caching is enabled for a model configured with
+   `deerflow.models.claude_provider:ClaudeChatModel`, DeerFlow preserves thinking
+   and redacted-thinking history without placing cache breakpoints directly on
+   those blocks. Extended-thinking tool follow-ups can keep using prompt caching.
+
    CLI-backed provider examples:
 
    ```yaml
@@ -309,6 +314,7 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
    ```
 
    - Codex CLI reads `~/.codex/auth.json`
+   - Completed Codex responses still return their text and tool calls when token usage is null, omitted, or empty; usage metadata remains unavailable.
    - The Codex model provider returns completed responses without waiting for the SSE connection to close. Failed or incomplete responses report the provider's error or reason; partial output is not returned as a successful answer. Non-object error details are reported as text.
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
    - `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` accepts a UTF-8 token handoff and reuses it for later model instances in the same process. Undecodable handoffs are skipped so Claude Code can still try its override or default credentials file.
@@ -574,6 +580,10 @@ is opt-in: it fails fast when `frontend/.next` has no completed build.
 
 Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
 
+Cold agent imports during run creation use a dedicated worker pool, keeping
+unrelated Gateway requests responsive while the agent stack loads. A failed
+factory import prevents the run from being admitted.
+
 For a read-only demo without the Gateway, run `make build-static` from `frontend/`,
 then `HOSTNAME=127.0.0.1 PORT=3000 node --env-file=.env .next/standalone/server.js`
 from the same directory. The build includes public demo assets and resolves
@@ -784,6 +794,14 @@ DeerFlow can also expose user-owned IM channel connections in the workspace UI. 
 
 **Configuration in `config.yaml`:**
 
+Discord's `channels.discord.allowed_guilds` accepts one positive numeric guild
+ID (quoted or unquoted) or a YAML list. Unset, `null`, `[]`, or a blank string
+allows all guilds. Invalid entries are ignored with a warning; any other
+configured value yielding no valid ID denies every guild and logs an error.
+`allowed_channels` accepts one channel ID (quoted or unquoted) or a YAML list
+of IDs exempt from `mention_only`, within allowed guilds. An empty value gives
+no exemptions, so `mention_only` applies everywhere when enabled.
+
 ```yaml
 channels:
   # LangGraph-compatible Gateway API base URL (default: http://localhost:8001/api)
@@ -949,6 +967,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 3. When `bot_token` is absent and QR bootstrap is enabled, watch backend logs for the QR content returned by iLink and complete the binding flow.
 4. After the QR flow succeeds, DeerFlow persists the acquired token under `state_dir` for later restarts.
 5. For Docker Compose deployments, keep `state_dir` on a persistent volume so the `get_updates_buf` cursor and saved auth state survive restarts.
+6. Outbound images/files enforce `max_outbound_image_bytes` / `max_outbound_file_bytes` (20 MiB / 50 MiB defaults) while reading, including files that grow after resolution. Oversize reads are rejected before encryption/upload instead of sending a truncated prefix. Non-positive limits disable the corresponding cap.
 
 **WeCom Setup**
 
@@ -1302,6 +1321,7 @@ If a trusted operator manages the configured skills directory through an externa
 
 Skill installs and agent-managed skill edits run through **SkillScan**, a native deterministic safety scanner before the LLM-based skill scanner. Phase 1 runs offline with no Semgrep/OpenGrep dependency, blocks high-confidence `CRITICAL` findings such as private keys or shell execution, and passes warning findings to the LLM scanner for contextual review. Code files (anything under `scripts/`, a script suffix such as `.py`, `.sh`, or `.js`, or an extensionless file starting with `#!`) that are not NUL-free UTF-8 text raise a warning and are still analyzed over a lossy decode, so a single stray byte cannot hide them from `CRITICAL` checks. The moderation adapter normalizes both plain-text model responses and LangChain Responses API text blocks before parsing the required JSON decision. Python instance-client exfiltration checks follow a minimal same-scope evidence chain: a simple name bound to a known client constructor, optional name-to-name aliases, and an actual outbound method or context-manager use supported by that constructor. Constructor roots must be proven imports; bare canonical-looking names are not inferred as modules. Nested scopes do not inherit client handles and inherit only constructor import aliases that are never rebound in the enclosing scope. Comprehensions, walrus-bearing statements, annotations, complex binding targets, unsupported operations, and ambiguous branch flows produce no finding from this signal; skipped constructs conservatively invalidate every name they may bind so stale client state cannot create a finding. A deterministic work budget or recursion limit reached by this best-effort analysis does not discard findings already collected for the file. Set `skill_scan.enabled: false` in `config.yaml` to disable only the deterministic analyzers; safe archive extraction and the LLM scanner still run.
 
+Windows scripts (`.bat`, `.cmd`, `.ps1`, `.psm1`, `.js`, `.jse`, `.vbs`, `.vbe`, `.wsf`), HTML applications (`.hta`), and scriptlets (`.sct`) count as code even outside `scripts/`, regardless of filename case. They receive both SkillScan analysis and the installer's executable-code policy.
 SkillScan warns about remote downloads piped into common shells, including sudo, interpreter paths, and shell line continuations. Pipes to non-shell tools such as `jq` and `tee` do not trigger this warning.
 
 SkillScan treats HTTP hostnames case-insensitively and recognizes bracketed IPv6
@@ -1864,6 +1884,11 @@ For example, independent read-only research can run concurrently when the wall-c
 ### Sandbox & File System
 
 Host-externalized tool outputs use the Gateway's normal file-creation umask.
+Host and sandbox outputs use deterministic filenames hashed from the raw tool
+call ID and output content. Missing, colliding, or oversized IDs cannot overwrite
+different output or make the filename too long; identical output can reuse its path.
+Host and remote sandbox persistence failures, including invalid Unicode during filename
+hashing, use the configured inline fallback.
 `tool_output` character/count budgets, including per-tool overrides, require
 non-negative integers; YAML booleans are rejected rather than treated as 0 or 1.
 An explicit zero per-tool override disables externalization while preserving
@@ -2354,6 +2379,9 @@ Runs on member threads also receive a bounded `<documents>` index rendered per
 run from the pinned snapshot (capped by `projects.shelf_index_max_entries` and
 `projects.shelf_index_max_bytes`), and the agent can page the shelf and read
 documents with the `list_project_documents` and `read_project_document` tools.
+
+Document character counts use a bounded, thread-safe cache; concurrent reads
+do not serialize full file scans behind its cache lock.
 
 ### Archive read semantics
 

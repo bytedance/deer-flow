@@ -1815,7 +1815,10 @@ async def start_run(
         # Validate even when resume takes precedence, so ignored input cannot
         # appear to have been admitted or persist as unchecked run audit data.
         normalized_input = normalize_input(body.input, trusted_internal=is_internal_caller)
-        agent_factory = resolve_agent_factory(body.assistant_id)
+        # Cold resolution imports the lead-agent stack. Use the assembly pool
+        # so import-lock waiters cannot starve unrelated default-executor work.
+        # Keep this before admission so import failures cannot create a run.
+        agent_factory = await run_assembly(resolve_agent_factory, body.assistant_id)
         command = getattr(body, "command", None)
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
