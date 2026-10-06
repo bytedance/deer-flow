@@ -53,6 +53,7 @@ from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provi
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
@@ -1606,7 +1607,7 @@ async def _rollback_failed_sandbox_lookup_async(
         if owner_id is not None:
             await get_sandbox_lease_manager(provider).release_async(owner_id)
         else:
-            await asyncio.to_thread(provider.release, sandbox_id)
+            await await_drained(asyncio.to_thread(provider.release, sandbox_id))
     except Exception:
         logger.warning(
             "Failed to roll back sandbox after async post-acquire lookup failure: %s",

@@ -103,6 +103,12 @@ keep `name` for React identity, URLs, requests, and runtime `agent_name`.
 The 100-code-point budget uses `[...value.trim()].length`, matching Pydantic;
 do not use HTML `maxLength`, which counts UTF-16 code units instead.
 
+Custom Agent portability uses the versioned `deerflow.custom-agent` JSON
+document through `core/agents/api.ts`. Keep file parsing client-side only for
+previewing the proposed local name; the Gateway is authoritative for schema,
+name, model, and conflict validation. Export downloads must never synthesize
+runtime state from browser caches.
+
 - **Imports**: Enforced ordering (builtin → external → internal → parent → sibling), alphabetized, newlines between groups. Use inline type imports: `import { type Foo }`.
 - **Unused variables**: Prefix with `_`.
 - **Class names**: Use `cn()` from `@/lib/utils` for conditional Tailwind classes.
