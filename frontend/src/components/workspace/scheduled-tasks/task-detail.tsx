@@ -58,7 +58,10 @@ import {
   useResumeScheduledTask,
   useTriggerScheduledTask,
 } from "@/core/scheduled-tasks/hooks";
-import { useScheduledTaskRunHistory } from "@/core/scheduled-tasks/run-history";
+import {
+  useLatestScheduledTaskRuns,
+  useScheduledTaskRunHistory,
+} from "@/core/scheduled-tasks/run-history";
 import {
   presentTaskStatus,
   taskStatusLabel,
@@ -257,7 +260,10 @@ export function TaskDetail({
   const status = presentTaskStatus(task);
   const StatusIcon = status.icon;
   const actions = availableActions(task, { createBlocked });
-  const outcome = describeTaskOutcome(task, runs);
+  // The notice describes the current pause, so it reads the newest runs
+  // whichever history page is shown.
+  const latestRuns = useLatestScheduledTaskRuns(task.id);
+  const outcome = describeTaskOutcome(task, latestRuns);
   const schedule = describeTaskSchedule(task, locale, { time: st.time });
   const nextLine = nextRunLine(task, t, locale);
   const stops = stopLines(task, t, locale, {

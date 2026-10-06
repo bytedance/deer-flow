@@ -276,6 +276,35 @@ test("describeTaskOutcome: agent stop links the run that asked to stop", () => {
   });
 });
 
+test("describeTaskOutcome: an earlier stop on the page shown never stands in for this pause", () => {
+  // Resumed after run-old stopped it, then stopped again by run-current; the
+  // page shown is older and holds only the first stop.
+  const olderPage = [
+    historyRun({
+      id: "occ-old",
+      run_id: "run-old",
+      thread_id: "thread-old",
+      stop_requested_run_id: "run-old",
+      started_at: "2026-10-01T01:00:30+00:00",
+    }),
+  ];
+  expect(
+    describeTaskOutcome(
+      outcomeTask({
+        status: "paused",
+        last_error: `${CONTRACT.agent_stop_last_error_prefix}run-current`,
+        last_run_id: "run-current",
+        last_run_at: "2026-10-05T01:00:00+00:00",
+      }),
+      olderPage,
+    ),
+  ).toEqual({
+    kind: "pausedByAgent",
+    runThreadId: null,
+    at: "2026-10-05T01:00:00+00:00",
+  });
+});
+
 test("agentStopTime: a trial after the agent paused the task never lends its time", () => {
   const stopped = {
     last_error: `${CONTRACT.agent_stop_last_error_prefix}run-1`,

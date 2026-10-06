@@ -1251,6 +1251,15 @@ export const enUS: Translations = {
     description:
       "Create and manage custom agents with specialized prompts and capabilities.",
     newAgent: "New Agent",
+    importAgent: "Import Agent",
+    importTitle: "Import custom agent",
+    importDescription:
+      "Choose the local name for this agent. Existing agents are never overwritten.",
+    importName: "Agent name",
+    importInvalidFile: "This file is not valid JSON",
+    importSuccess: "Agent imported",
+    exportAgent: "Export Agent",
+    exportSuccess: "Agent package downloaded",
     emptyTitle: "No custom agents yet",
     emptyDescription:
       "Create your first custom agent with a specialized system prompt.",

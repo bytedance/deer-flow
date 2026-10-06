@@ -9,36 +9,41 @@ import type {
 } from "./mock-api";
 
 /**
- * Recorded takes (ux-audit evidence en-3 / zh-1): the task and runs as the
- * page reads them, and the origin chat and one run conversation shaped by
- * the PR1 contracts (see each file's `_provenance`).
+ * Live-recorded takes from the PR1 acceptance run on DeepSeek Flash (demo
+ * data, fictional names; see each file's `_provenance`):
+ * - `minute`: a zh chat creates a per-minute checklist task; run 1 finds two
+ *   open items, run 2 finds the list done and the agent pauses the task.
+ * - `weekday`: a zh chat creates a weekday task, runs a trial, moves it to
+ *   daily 10:00, pauses and resumes it, all on the same task.
+ * The conversations are Chinese; specs run the UI in both locales over them.
  */
-function fixture<T>(name: string): T {
-  return JSON.parse(
-    readFileSync(
-      new URL(`../fixtures/scheduled/${name}`, import.meta.url),
-      "utf8",
-    ),
-  ) as T;
-}
-
-export type ScheduledTake = {
-  lang: "en" | "zh";
+export type LiveTake = {
   task: MockScheduledTask;
   runs: MockScheduledTaskRun[];
   chatThread: MockThread;
-  runThread: MockThread;
+  runThread?: MockThread;
 };
 
-export function scheduledTake(take: "en-3" | "zh-1"): ScheduledTake {
-  return {
-    lang: take === "en-3" ? "en" : "zh",
-    task: fixture<MockScheduledTask>(`${take}-task.json`),
-    runs: fixture<MockScheduledTaskRun[]>(`${take}-runs.json`),
-    chatThread: fixture<MockThread>(`${take}-chat-thread.json`),
-    runThread: fixture<MockThread>(`${take}-run-thread.json`),
-  };
+export function liveTake(take: "minute" | "weekday"): LiveTake {
+  const { task, runs, chatThread, runThread } = JSON.parse(
+    readFileSync(
+      new URL(`../fixtures/scheduled/live-${take}.json`, import.meta.url),
+      "utf8",
+    ),
+  ) as LiveTake;
+  return { task, runs, chatThread, ...(runThread ? { runThread } : {}) };
 }
+
+/** The live minute take with its run conversation, which it always has. */
+export function liveMinuteTake(): LiveTake & { runThread: MockThread } {
+  const take = liveTake("minute");
+  if (!take.runThread) {
+    throw new Error("live-minute.json has no runThread");
+  }
+  return take as LiveTake & { runThread: MockThread };
+}
+
+export const LOCALES = ["en", "zh"] as const;
 
 export async function setLocaleCookie(page: Page, lang: "en" | "zh") {
   await page.context().addCookies([

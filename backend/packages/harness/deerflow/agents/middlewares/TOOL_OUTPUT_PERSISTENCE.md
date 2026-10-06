@@ -14,7 +14,10 @@ file publication, allowing the tool wrappers to use the configured inline fallba
 creation (`open(..., "x")`). Its mode is `0o666 & ~umask`, preserving ordinary
 file-creation permissions without reading or changing the process-wide umask.
 This matters when a mounted sandbox reads the output under a different UID.
-Restrictive operator umasks remain restrictive.
+Restrictive operator umasks remain restrictive. It also passes `newline=""`, so
+the file holds exactly the bytes of the stamped blob ref on every platform;
+Windows text mode would write CRLF, and restore discards a file whose size or
+digest does not match.
 
 The writer closes its file before atomically replacing the deterministic final
 path. Concurrent publishers of identical output can safely reuse that path;
@@ -29,6 +32,28 @@ not advertise the host path. It also must not unlink the deterministic final
 path: a concurrent publisher may already have replaced it and durably
 checkpointed that content. Remove published files only as part of inactive
 thread-data maintenance.
+
+## Structured tool results
+
+`type=json` payloads count toward the configured text budget, including results
+that also carry media or other non-text blocks. Externalization saves the full
+text/JSON rendering and replaces that portion with a synopsis; other blocks stay
+in the result for providers that support them. Historical results use the same
+configured fallback. Disabled budgets, raised limits and tool exemptions apply
+before provider normalization. Pure text/media results without JSON retain their
+existing pass-through behavior.
+
+## Bash exit marker
+
+The subagent executor reads a bash result's exit status only from its end
+(`Exit Code: N`, or a whole-output `Command exited with code N`); with no marker
+it falls back to `deerflow_tool_meta`, which reports `success` for a nonzero
+exit. A model-visible rewrite of a `bash`/`bash_tool` result must therefore keep
+the original trailing marker last: the preview re-appends it after the `Access:`
+footer, and the storage-unavailable fallback reserves it from `max_chars` like
+sandbox truncation. The local marker regex mirrors
+`sandbox.tools._BASH_EXIT_MARKER_TAIL_RE` and a test pins them together. The
+persisted output is the original bytes; other tools are not rewritten.
 
 ## Unclean shutdown
 

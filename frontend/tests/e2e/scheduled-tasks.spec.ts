@@ -1,5 +1,3 @@
-import { readFileSync } from "node:fs";
-
 import { expect, test, type Page } from "@playwright/test";
 
 import {
@@ -7,11 +5,14 @@ import {
   mockLangGraphAPI,
   type MockAPIOptions,
   type MockScheduledTask,
-  type MockScheduledTaskRun,
 } from "./utils/mock-api";
 import { expectNoRawIdentifiers } from "./utils/readable";
+import { liveMinuteTake } from "./utils/scheduled-fixtures";
 
 test.describe.configure({ mode: "serial" });
+// The live takes were recorded in Asia/Shanghai, and interval tasks read in
+// the viewer's zone; pin it so CI (UTC) renders the recorded times.
+test.use({ timezoneId: "Asia/Shanghai" });
 
 function task(overrides: Partial<MockScheduledTask> = {}): MockScheduledTask {
   return {
@@ -35,19 +36,11 @@ function task(overrides: Partial<MockScheduledTask> = {}): MockScheduledTask {
   };
 }
 
-// Recorded takes (ux-audit evidence en-3 / zh-1) with the new response fields.
-function fixture<T>(name: string): T {
-  return JSON.parse(
-    readFileSync(
-      new URL(`./fixtures/scheduled/${name}`, import.meta.url),
-      "utf8",
-    ),
-  ) as T;
-}
-const en3 = fixture<MockScheduledTask>("en-3-task.json");
-const en3History = fixture<MockScheduledTaskRun[]>("en-3-runs.json");
-const zh1 = fixture<MockScheduledTask>("zh-1-task.json");
-const zh1History = fixture<MockScheduledTaskRun[]>("zh-1-runs.json");
+// Recorded live (fixtures/scheduled/live-minute.json): the per-minute
+// checklist task the agent paused after run 2 found the list done.
+const live = liveMinuteTake();
+const liveTask = live.task;
+const liveRuns = live.runs;
 
 async function useChinese(page: Page) {
   await page
@@ -222,6 +215,47 @@ test("New task creates a task with the default agent and selects it", async ({
   expect(creates[0]).not.toHaveProperty("max_runs");
 });
 
+for (const via of ["New task", "Duplicate"] as const) {
+  test(`${via} from a chat's tasks shows the new task, which that chat doesn't own`, async ({
+    page,
+  }) => {
+    await openPage(
+      page,
+      {
+        scheduledTasks: [
+          task({
+            id: "task-1",
+            title: "Thread task",
+            origin_thread_id: MOCK_THREAD_ID,
+          }),
+        ],
+      },
+      `?thread_id=${MOCK_THREAD_ID}`,
+    );
+    await expect(detail(page).getByRole("heading")).toHaveText("Thread task");
+    if (via === "New task") {
+      await page.getByTestId("scheduled-task-new").click();
+    } else {
+      await detail(page).getByRole("button", { name: "More actions" }).click();
+      await page.getByRole("menuitem", { name: "Duplicate" }).click();
+    }
+    const dialog = form(page);
+    await dialog.getByLabel("Title", { exact: true }).fill("Not this chat's");
+    await dialog.getByLabel("Instructions").fill("Summarize thread");
+    await dialog.getByRole("button", { name: "Create", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    // A fresh-thread task has no chat, so the chat filter is dropped.
+    await expect(page).toHaveURL(/task_id=task-created/);
+    await expect(page).not.toHaveURL(/thread_id=/);
+    await expect(page.getByTestId("scheduled-task-link-missing")).toHaveCount(
+      0,
+    );
+    await expect(detail(page).getByRole("heading")).toHaveText(
+      "Not this chat's",
+    );
+  });
+}
+
 test("?task_id= selects that task and clicking another updates the URL", async ({
   page,
 }) => {
@@ -254,8 +288,8 @@ test("the selected task's status is visible at 1280x800 without scrolling", asyn
 }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openPage(page, {
-    scheduledTasks: [en3],
-    scheduledTaskRuns: { [en3.id]: en3History },
+    scheduledTasks: [liveTask],
+    scheduledTaskRuns: { [liveTask.id]: liveRuns },
   });
   const status = page.getByTestId("scheduled-task-status");
   await expect(status).toHaveText("Paused by agent");
@@ -269,10 +303,10 @@ test("at phone width the page does not scroll sideways and selecting shows the d
 }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await openPage(page, {
-    scheduledTasks: [en3, task({ id: "weekly", title: "Weekly report" })],
-    scheduledTaskRuns: { [en3.id]: en3History },
+    scheduledTasks: [liveTask, task({ id: "weekly", title: "Weekly report" })],
+    scheduledTaskRuns: { [liveTask.id]: liveRuns },
   });
-  await expect(page.getByTestId("scheduled-run-row")).toHaveCount(3);
+  await expect(page.getByTestId("scheduled-run-row")).toHaveCount(2);
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - window.innerWidth,
   );
@@ -282,55 +316,83 @@ test("at phone width the page does not scroll sideways and selecting shows the d
   await expect(detail(page).getByRole("heading")).toBeInViewport();
 });
 
-test("paused-by-agent notice links to the run that stopped it (en-3)", async ({
-  page,
-}) => {
-  await openPage(page, {
-    scheduledTasks: [en3],
-    scheduledTaskRuns: { [en3.id]: en3History },
-  });
-  const notice = page.getByTestId("scheduled-task-outcome");
-  await expect(notice).toHaveAttribute("data-outcome", "pausedByAgent");
-  await expect(notice).toContainText("Paused by agent");
-  await expect(notice).toContainText("the agent found your stop condition met");
-  await expect(
-    notice.getByRole("link", { name: "See that run" }),
-  ).toHaveAttribute(
-    "href",
-    "/workspace/chats/83d5133d-f8aa-4095-9bba-2aca03f8f61c",
-  );
-  const stops = page.getByTestId("scheduled-task-stops-when");
-  await expect(stops).toContainText(
-    "every item on the checklist is checked, pauses itself",
-  );
-  await expect(stops).toContainText("Reached");
-  await expect(detail(page)).toContainText("Safety cap: 2 of 5 runs used");
-  await expect(page.getByTestId(`scheduled-task-item-${en3.id}`)).toContainText(
-    "Paused by agent ·",
-  );
-  await expect(
-    detail(page).getByTestId("scheduled-task-origin-link"),
-  ).toHaveAttribute(
-    "href",
-    "/workspace/chats/c04264b7-891e-451a-92af-8c084e1eed55",
-  );
-  await expect(
-    detail(page).getByRole("button", { name: "Resume" }),
-  ).toBeVisible();
-  await expect(detail(page).getByRole("button", { name: "Pause" })).toHaveCount(
-    0,
-  );
-});
+const PAUSED_BY_AGENT = {
+  en: {
+    title: "Paused by agent",
+    body: "In the run from today 16:48, the agent found your stop condition met",
+    seeRun: "See that run",
+    stops: `${liveTask.stop_condition}, pauses itself`,
+    reached: "✓ Reached today 16:48",
+    cap: "Safety cap: 2 of 60 runs used",
+    resume: "Resume",
+    pause: "Pause",
+  },
+  zh: {
+    title: "已由智能体暂停",
+    body: "在今天 16:48 的运行中，智能体判断停止条件已满足",
+    seeRun: "查看那次运行",
+    stops: `${liveTask.stop_condition}，满足后自动暂停`,
+    reached: "✓ 已于今天 16:48 满足",
+    cap: "保险上限：已用 2/60 次",
+    resume: "恢复",
+    pause: "暂停",
+  },
+} as const;
 
-test("auto-pause notice gives the reason and three ways forward (zh-1 variant)", async ({
+for (const lang of ["en", "zh"] as const) {
+  test(`${lang}: paused-by-agent notice links to the run that stopped it (live)`, async ({
+    page,
+  }) => {
+    const copy = PAUSED_BY_AGENT[lang];
+    // The afternoon of the recording (16:48 Asia/Shanghai is 08:48 UTC).
+    await page.clock.setFixedTime(new Date("2026-10-06T09:00:00Z"));
+    if (lang === "zh") await useChinese(page);
+    await openPage(page, {
+      scheduledTasks: [liveTask],
+      scheduledTaskRuns: { [liveTask.id]: liveRuns },
+    });
+    const notice = page.getByTestId("scheduled-task-outcome");
+    await expect(notice).toHaveAttribute("data-outcome", "pausedByAgent");
+    await expect(notice).toContainText(copy.title);
+    await expect(notice).toContainText(copy.body);
+    await expect(
+      notice.getByRole("link", { name: copy.seeRun }),
+    ).toHaveAttribute("href", `/workspace/chats/${live.runThread.thread_id}`);
+    const stops = page.getByTestId("scheduled-task-stops-when");
+    await expect(stops).toContainText(copy.stops);
+    await expect(stops).toContainText(copy.reached);
+    await expect(detail(page)).toContainText(copy.cap);
+    await expect(
+      page.getByTestId(`scheduled-task-item-${liveTask.id}`),
+    ).toContainText(`${copy.title} ·`);
+    await expect(
+      detail(page).getByTestId("scheduled-task-origin-link"),
+    ).toHaveAttribute("href", `/workspace/chats/${live.chatThread.thread_id}`);
+    // Run 1's reply led in with "…未完成：" and a list: the row reads the items.
+    await expect(page.getByTestId("scheduled-run-row").last()).toContainText(
+      "清单中还有 2 项未完成：Publish the Docker image — 负责人：Sam Okafor；Post the release notes — 负责人：Nora Lind",
+    );
+    await expect(
+      detail(page).getByRole("button", { name: copy.resume, exact: true }),
+    ).toBeVisible();
+    await expect(
+      detail(page).getByRole("button", { name: copy.pause, exact: true }),
+    ).toHaveCount(0);
+  });
+}
+
+test("auto-pause notice gives the reason and three ways forward (zh, live variant)", async ({
   page,
 }) => {
   await useChinese(page);
+  // The live task with a goal whose runs all missed it: a constructed
+  // variant, since the live take reached its stop condition instead.
   const autoPaused: MockScheduledTask = {
-    ...zh1,
+    ...liveTask,
+    goal_objective: "列出所有未完成的条目及其负责人",
     last_error: "paused after 3 unmet scheduled goal runs",
   };
-  const runs = zh1History.map((run) =>
+  const runs = liveRuns.map((run) =>
     run.trigger === "scheduled"
       ? {
           ...run,
@@ -344,17 +406,14 @@ test("auto-pause notice gives the reason and three ways forward (zh-1 variant)",
   );
   await openPage(page, {
     scheduledTasks: [autoPaused],
-    scheduledTaskRuns: { [zh1.id]: runs },
+    scheduledTaskRuns: { [liveTask.id]: runs },
   });
   const notice = page.getByTestId("scheduled-task-outcome");
   await expect(notice).toContainText("已暂停：连续 3 次未达成目标");
   await expect(notice).toContainText("最近一次的原因：目标检查：缺少依据");
   await expect(
     notice.getByRole("link", { name: "查看最近一次运行" }),
-  ).toHaveAttribute(
-    "href",
-    "/workspace/chats/85e503ef-a8bf-46a3-8c4e-b697dd7f1b57",
-  );
+  ).toHaveAttribute("href", `/workspace/chats/${live.runThread.thread_id}`);
   await expect(notice.getByRole("button", { name: "仍然恢复" })).toBeVisible();
   await expect(page.getByTestId("scheduled-task-status")).toHaveText(
     "已自动暂停",
@@ -458,6 +517,52 @@ test("Resume of an exhausted task opens the renew dialog and sends the new cap",
   await again.getByRole("button", { name: "Resume" }).click();
   await expect(again).toHaveCount(0);
   expect(resumes.at(-1)).toEqual({ max_runs: null });
+});
+
+test("raising the run limit leaves an untouched end time out of the renewal", async ({
+  page,
+}) => {
+  const resumes = writesTo(page, "POST", "/api/scheduled-tasks/limited/resume");
+  await openPage(page, {
+    scheduledTasks: [
+      task({
+        id: "limited",
+        title: "Limited task",
+        status: "paused",
+        max_runs: 5,
+        automatic_runs_used: 5,
+        // The second 01:30 of a New York fall-back, with seconds: the
+        // minute-precision field shows 01:30, which alone reads as 05:30Z.
+        timezone: "America/New_York",
+        end_at: "2030-11-03T06:30:45+00:00",
+      }),
+    ],
+  });
+  await page.route("**/api/scheduled-tasks/limited/resume", (route) =>
+    route.request().postData()
+      ? route.fallback()
+      : route.fulfill({
+          status: 409,
+          json: {
+            detail: {
+              code: "limits_exhausted",
+              message: "All 5 automatic runs are used.",
+              params: {
+                limit: "max_runs",
+                used: 5,
+                max_runs: 5,
+                end_at: "2030-11-03T06:30:45+00:00",
+              },
+            },
+          },
+        }),
+  );
+  await detail(page).getByRole("button", { name: "Resume" }).click();
+  const dialog = page.getByRole("dialog", { name: "Extend the safety cap" });
+  await dialog.getByLabel("Safety cap: number of runs").fill("70");
+  await dialog.getByRole("button", { name: "Resume" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(resumes.at(-1)).toEqual({ max_runs: 70 });
 });
 
 test("a finished task offers no Pause and explains how to extend it", async ({
@@ -689,11 +794,9 @@ for (const locale of ["en-US", "zh-CN"] as const) {
   }) => {
     const zh = locale === "zh-CN";
     if (zh) await useChinese(page);
-    const source = zh ? zh1 : en3;
-    const runs = zh ? zh1History : en3History;
     await openPage(page, {
       scheduledTasks: [
-        source,
+        liveTask,
         task({
           id: "custom",
           title: "Custom",
@@ -706,9 +809,9 @@ for (const locale of ["en-US", "zh-CN"] as const) {
           thread_id: MOCK_THREAD_ID,
         }),
       ],
-      scheduledTaskRuns: { [source.id]: runs },
+      scheduledTaskRuns: { [liveTask.id]: liveRuns },
     });
-    await expect(page.getByTestId("scheduled-run-row")).toHaveCount(3);
+    await expect(page.getByTestId("scheduled-run-row")).toHaveCount(2);
     await expectNoRawIdentifiers(page.getByTestId("scheduled-task-list"));
     await expectNoRawIdentifiers(detail(page));
     await page.getByTestId("scheduled-task-item-custom").click();

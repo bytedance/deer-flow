@@ -148,12 +148,15 @@ export function agentStopTime(
  * Why a task stopped running, derived on read from task and run state (the
  * host writes no separate notice):
  * - pausedByAgent: a run asked to stop its own schedule; `runThreadId` is that
- *   run's chat when the run is among `runs`.
+ *   run's chat when the run named in `last_error` is among `runs`. Another
+ *   run that asked to stop (an earlier pause) never stands in for it.
  * - autoPaused: three scheduled runs in a row missed the goal; the latest
  *   unmet run gives the reason and its chat.
  * - limitReached / endReached: a finished task whose safety cap ran out.
  * - onceFinished / onceFailed: a one-time task that ran or failed.
- * `runs` are newest first (the run history order).
+ * `runs` are the newest runs, newest first (the latest history page, whichever
+ * page is shown): `last_error` of an auto-pause names no run, so an older page
+ * would offer an earlier miss as the reason.
  */
 export type TaskOutcome =
   | { kind: "pausedByAgent"; runThreadId: string | null; at: string | null }
@@ -189,9 +192,9 @@ export function describeTaskOutcome(
     if (note?.kind === "agentStop") {
       const stopRunId = parseStopRunId(task.last_error);
       const run =
-        runs.find((item) => stopRunId !== null && item.run_id === stopRunId) ??
-        runs.find(requestedScheduleStop) ??
-        null;
+        stopRunId === null
+          ? null
+          : (runs.find((item) => item.run_id === stopRunId) ?? null);
       return {
         kind: "pausedByAgent",
         runThreadId: run?.thread_id ?? null,

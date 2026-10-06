@@ -515,6 +515,12 @@ class _SchedulerCapability:
             raise scheduler_error(422, "unsupported_fields", "Unsupported scheduled task fields")
         task = await self._task(request.get("task_id"))
         fields = _fields_with_clears(request, _RESUME_CLEARABLE)
+        schedule = (task.get("schedule_type"), task.get("schedule_spec"))
+        if task.get("timezone") == "UTC" and not _needs_timezone(*schedule) and _needs_timezone(*schedule, fields.get("end_at")):
+            # As on update: a local end time must not silently become the UTC
+            # placeholder of a zone-free schedule. Resume takes no timezone.
+            exc = scheduler_error(422, "timezone_required", "Ask the user which timezone to use, then give end_at with that zone's UTC offset.")
+            raise _with_now_local(exc, self._client_timezone)
         try:
             renewal = ScheduledTaskResumeRequest(**fields).model_dump(include=set(fields))
             await self._ensure_mutable(task)

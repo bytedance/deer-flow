@@ -9,12 +9,24 @@ import {
 import { expectNoRawIdentifiers } from "./utils/readable";
 import {
   conversation,
-  scheduledTake,
+  liveMinuteTake,
+  liveTake,
+  LOCALES,
   setLocaleCookie,
-  type ScheduledTake,
+  type LiveTake,
 } from "./utils/scheduled-fixtures";
 
 test.describe.configure({ mode: "serial" });
+// The live takes were recorded in Asia/Shanghai; pin the zone as the other
+// live-take specs do, so CI (UTC) renders the recorded times.
+test.use({ timezoneId: "Asia/Shanghai" });
+
+// Recorded live (fixtures/scheduled/live-*.json), Chinese conversations; the
+// UI runs in both locales over them. `minute`: the agent pauses the task in
+// run 2. `weekday`: one chat with five turns (create, trial, edit, pause,
+// resume), each its own recorded run.
+const minute = liveMinuteTake();
+const weekday = liveTake("weekday");
 
 const COPY = {
   en: {
@@ -44,7 +56,7 @@ const COPY = {
 } as const;
 
 /** The recorded task right after creation: active, nothing run yet. */
-function freshTask(take: ScheduledTake): MockScheduledTask {
+function freshTask(take: LiveTake): MockScheduledTask {
   return {
     ...take.task,
     status: "enabled",
@@ -60,22 +72,30 @@ function freshTask(take: ScheduledTake): MockScheduledTask {
 }
 
 /** An unrelated page-created task, so the tasks page is not empty. */
-function otherTask(take: ScheduledTake): MockScheduledTask {
+function otherTask(take: LiveTake, lang: "en" | "zh"): MockScheduledTask {
   return {
     ...take.task,
     id: "task-0d1c2b3a4f5e6d7c8b9a0f1e2d3c4b5a",
-    title: take.lang === "zh" ? "每周摘要" : "Weekly digest",
+    title: lang === "zh" ? "每周摘要" : "Weekly digest",
     origin_thread_id: null,
     thread_id: null,
     status: "enabled",
   };
 }
 
-/** Run id every message of the recorded origin chat carries in the mock. */
-const chatRunId = (take: ScheduledTake) => `run-${take.chatThread.thread_id}`;
+/** The recorded run ids of the origin chat's turns, oldest first. */
+function turnRunIds(take: LiveTake): string[] {
+  return (take.chatThread.messages ?? []).flatMap((message) => {
+    const { type, run_id } = message as { type?: string; run_id?: unknown };
+    return type === "human" && typeof run_id === "string" ? [run_id] : [];
+  });
+}
+
+/** The chat's newest run when the event was recorded (its placement anchor). */
+const chatRunId = (take: LiveTake) => turnRunIds(take).at(-1) ?? null;
 
 function stopEvent(
-  take: ScheduledTake,
+  take: LiveTake,
   overrides: Partial<MockScheduledTaskEvent> = {},
 ): MockScheduledTaskEvent {
   return {
@@ -85,35 +105,19 @@ function stopEvent(
     reason_code: "agent_stop",
     task_title: take.task.title,
     stop_condition: take.task.stop_condition ?? null,
-    run_thread_id: take.runThread.thread_id,
+    run_thread_id: take.runThread?.thread_id ?? take.task.last_thread_id,
     run_number: 2,
     run_status: "success",
     max_runs: take.task.max_runs ?? null,
     schedule_type: take.task.schedule_type,
     after_run_id: chatRunId(take),
-    created_at: "2026-10-05T12:22:40+00:00",
+    created_at: "2026-10-06T08:49:00+00:00",
     ...overrides,
   };
 }
 
-/** The origin chat with one run per turn ("create", then "trial"). */
-function chatWithRunPerTurn(take: ScheduledTake): MockThread {
-  const messages = take.chatThread.messages ?? [];
-  const trialStart = messages.findIndex(
-    (message, index) =>
-      index > 0 && (message as { type?: string }).type === "human",
-  );
-  return {
-    ...take.chatThread,
-    messages: messages.map((message, index) => ({
-      ...(message as Record<string, unknown>),
-      run_id: index < trialStart ? "run-create" : "run-trial",
-    })),
-  };
-}
-
-/** The user's second question in the recorded chat ("Run it now"). */
-function trialQuestion(take: ScheduledTake): string {
+/** The user's second question in the recorded chat (the trial request). */
+function trialQuestion(take: LiveTake): string {
   const humans = (take.chatThread.messages ?? []).filter(
     (message) => (message as { type?: string }).type === "human",
   );
@@ -145,7 +149,8 @@ function lastGroupIndex(page: Page): Promise<number> {
 
 async function openChat(
   page: Page,
-  take: ScheduledTake,
+  lang: "en" | "zh",
+  take: LiveTake,
   {
     tasks = [freshTask(take)],
     events = [],
@@ -156,9 +161,9 @@ async function openChat(
     chat?: MockThread;
   } = {},
 ) {
-  await setLocaleCookie(page, take.lang);
+  await setLocaleCookie(page, lang);
   const api = mockLangGraphAPI(page, {
-    threads: [chat, take.runThread],
+    threads: take.runThread ? [chat, take.runThread] : [chat],
     scheduledTasks: tasks,
     scheduledTaskRuns: { [take.task.id]: take.runs },
     scheduledTaskEvents: { [take.chatThread.thread_id]: events },
@@ -168,16 +173,17 @@ async function openChat(
   return api;
 }
 
-for (const name of ["en-3", "zh-1"] as const) {
-  const take = scheduledTake(name);
-  const copy = COPY[take.lang];
+for (const lang of LOCALES) {
+  const take = minute;
+  const runThread = minute.runThread;
+  const copy = COPY[lang];
   const condition = take.task.stop_condition ?? "";
 
-  test(`${name}: a pause by the agent appears as a line at the end of the chat, without a reload`, async ({
+  test(`${lang}: a pause by the agent appears as a line at the end of the chat, without a reload`, async ({
     page,
   }) => {
     await page.clock.install();
-    const api = await openChat(page, take);
+    const api = await openChat(page, lang, take);
     await expect(lines(page)).toHaveCount(0);
 
     // The recorded final state: run 2 asked the schedule to stop, and the
@@ -198,7 +204,7 @@ for (const name of ["en-3", "zh-1"] as const) {
     await expect(line.locator("strong")).toHaveText(take.task.title);
     await expect(line).toHaveAttribute("data-task-id", take.task.id);
 
-    // At the end of the last turn, after the trial card.
+    // At the end of the last turn, after its card.
     expect(await groupIndexOf(line)).toBe(await lastGroupIndex(page));
     expect(
       await cards(page)
@@ -216,46 +222,46 @@ for (const name of ["en-3", "zh-1"] as const) {
     await expectNoRawIdentifiers(conversation(page));
   });
 
-  test(`${name}: See that run opens the run's chat`, async ({ page }) => {
-    await openChat(page, take, {
+  test(`${lang}: See that run opens the run's chat`, async ({ page }) => {
+    await openChat(page, lang, take, {
       tasks: [take.task],
       events: [stopEvent(take)],
     });
     const link = lines(page).getByRole("link", { name: copy.seeThatRun });
     await expect(link).toHaveAttribute(
       "href",
-      `/workspace/chats/${take.runThread.thread_id}`,
+      `/workspace/chats/${runThread.thread_id}`,
     );
     await link.click();
-    await page.waitForURL(`**/workspace/chats/${take.runThread.thread_id}`);
+    await page.waitForURL(`**/workspace/chats/${runThread.thread_id}`);
     await expect(page.getByTestId("scheduled-run-prompt")).toBeVisible();
   });
 
-  test(`${name}: a line follows its run's turn, and one without an anchor goes to the tail`, async ({
+  test(`${lang}: a line follows its run's turn, and one without an anchor goes to the tail`, async ({
     page,
   }) => {
-    await openChat(page, take, {
-      tasks: [take.task],
-      chat: chatWithRunPerTurn(take),
+    // The weekday chat: one recorded run per turn.
+    await openChat(page, lang, weekday, {
+      tasks: [weekday.task],
       events: [
-        stopEvent(take, {
+        stopEvent(weekday, {
           id: "evt-tail",
           after_run_id: "run-on-a-branch-this-chat-no-longer-shows",
         }),
-        stopEvent(take, {
+        stopEvent(weekday, {
           id: "evt-anchored",
           event: "task_paused",
           reason_code: "consecutive_unmet",
           run_status: "unmet",
-          after_run_id: "run-create",
-          created_at: "2026-10-05T12:21:00+00:00",
+          after_run_id: turnRunIds(weekday)[0],
+          created_at: "2026-10-06T08:45:00+00:00",
         }),
       ],
     });
     await expect(lines(page)).toHaveCount(2);
     const anchored = page.locator('[data-event-id="evt-anchored"]');
     const tail = page.locator('[data-event-id="evt-tail"]');
-    await expect(anchored).toContainText(copy.autoPaused(take.task.title));
+    await expect(anchored).toContainText(copy.autoPaused(weekday.task.title));
 
     // Anchored: the end of the "create" turn, right before the next question.
     const anchoredGroup = await groupIndexOf(anchored);
@@ -265,7 +271,7 @@ for (const name of ["en-3", "zh-1"] as const) {
         node.closest("[data-message-group-index]")?.nextElementSibling
           ?.textContent ?? "",
     );
-    expect(nextGroupText).toContain(trialQuestion(take));
+    expect(nextGroupText).toContain(trialQuestion(weekday));
     expect(await groupIndexOf(cards(page).first())).toBeLessThanOrEqual(
       anchoredGroup,
     );
@@ -277,10 +283,10 @@ for (const name of ["en-3", "zh-1"] as const) {
     expect(await groupIndexOf(tail)).toBe(await lastGroupIndex(page));
   });
 
-  test(`${name}: two events of one task stay in the order they happened`, async ({
+  test(`${lang}: two events of one task stay in the order they happened`, async ({
     page,
   }) => {
-    await openChat(page, take, {
+    await openChat(page, lang, take, {
       tasks: [take.task],
       events: [
         // Served newest first on purpose; the chat orders by time.
@@ -290,7 +296,7 @@ for (const name of ["en-3", "zh-1"] as const) {
           reason_code: "max_runs",
           max_runs: 5,
           run_thread_id: null,
-          created_at: "2026-10-05T13:30:00+00:00",
+          created_at: "2026-10-06T09:30:00+00:00",
         }),
         stopEvent(take, { id: "evt-stopped" }),
       ],
@@ -313,7 +319,7 @@ for (const name of ["en-3", "zh-1"] as const) {
     await expectNoRawIdentifiers(conversation(page));
   });
 
-  test(`${name}: the line stays after the task is deleted, and Open task shows it is gone`, async ({
+  test(`${lang}: the line stays after the task is deleted, and Open task shows it is gone`, async ({
     page,
   }) => {
     const pausedEvent = stopEvent(take, {
@@ -322,13 +328,13 @@ for (const name of ["en-3", "zh-1"] as const) {
       reason_code: "consecutive_unmet",
       run_status: "unmet",
     });
-    const api = await openChat(page, take, {
-      tasks: [take.task, otherTask(take)],
+    const api = await openChat(page, lang, take, {
+      tasks: [take.task, otherTask(take, lang)],
       events: [pausedEvent],
     });
     await expect(lines(page)).toHaveCount(1);
 
-    api.setScheduledTasks([otherTask(take)]);
+    api.setScheduledTasks([otherTask(take, lang)]);
     await page.reload();
     await expect(cards(page).first()).toHaveAttribute("data-state", "deleted");
     await expect(lines(page)).toHaveCount(1);

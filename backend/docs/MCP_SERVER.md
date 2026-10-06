@@ -396,7 +396,19 @@ the task alive and recognize its ID after DeerFlow reconnects. A stdio server
 must therefore persist its own tasks; multi-instance deployments should
 normally use an independently running HTTP/SSE service.
 
-Server-level OAuth works during background polling and refreshes normally.
+For deployment-level HTTP/SSE servers with `task_toolsets`, discovery, ordinary
+tool calls, and background submit/status/cancel calls share the cached access
+token, rotated refresh token, and refresh lock for one Gateway process lifetime.
+Tool-cache resets and rediscovery keep that state. Token rotation does not
+modify the parsed configuration or trigger the startup-snapshot drift guard;
+real operator configuration changes still require a restart.
+
+This state is process-local and is never written back to `extensions_config.json`
+or an environment variable. A restarted Gateway needs a valid configured
+refresh token, and separate Gateway workers do not coordinate token rotation.
+Personal MCP connections remain owner-scoped and do not use this deployment
+state, even if their runtime names match a deployment server.
+
 When `user_auth` is enabled on an HTTP/SSE server, background status and
 cancellation calls use the persisted task owner's configured credential,
 including after a Gateway restart.

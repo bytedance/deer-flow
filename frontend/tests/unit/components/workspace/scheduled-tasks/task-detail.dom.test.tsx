@@ -18,6 +18,7 @@ import type {
 } from "@/core/scheduled-tasks/types";
 
 import { expectNoRawIdentifiers } from "../../../helpers/readable";
+import { loadLiveMinuteTask } from "../../../helpers/scheduled-fixtures";
 
 const { fetchRuns } = rs.hoisted(() => ({ fetchRuns: rs.fn() }));
 
@@ -118,14 +119,21 @@ function renderDetail(
     toolEnabled = true,
     createBlocked = false,
   }: {
-    runs?: ScheduledTaskRun[];
+    /** One history, or the page at each offset. */
+    runs?: ScheduledTaskRun[] | ((offset: number) => ScheduledTaskRun[]);
     locale?: "en-US" | "zh-CN";
     toolEnabled?: boolean;
     createBlocked?: boolean;
   } = {},
 ) {
   document.cookie = `locale=${locale}; path=/`;
-  fetchRuns.mockResolvedValue(runs);
+  if (typeof runs === "function") {
+    fetchRuns.mockImplementation(
+      async (_taskId: string, { offset }: { offset: number }) => runs(offset),
+    );
+  } else {
+    fetchRuns.mockResolvedValue(runs);
+  }
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -241,6 +249,40 @@ describe("TaskDetail", () => {
     );
   });
 
+  test("Chinese copy keeps a space between an interpolated time and the words after it (live take)", async () => {
+    // Recorded live: run 2 (16:48 Asia/Shanghai) found the list done and the
+    // agent paused the task; run 1 led in with "…未完成：" and a list.
+    // An interval task reads in the viewer's zone, so pin it to the take's.
+    const browserOptions = Intl.DateTimeFormat().resolvedOptions();
+    const viewerZone = rs
+      .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
+      .mockReturnValue({ ...browserOptions, timeZone: "Asia/Shanghai" });
+    try {
+      const { task: live, runs } = loadLiveMinuteTask();
+      renderDetail(live, { locale: "zh-CN", runs });
+      const notice = await screen.findByTestId("scheduled-task-outcome");
+      await waitFor(() =>
+        expect(notice.textContent).toContain("16:48 的运行中"),
+      );
+      expect(notice.textContent).toMatch(
+        /在(今天|昨天|\d+月\d+日) 16:48 的运行中，智能体判断停止条件已满足/,
+      );
+      const stops = screen.getByTestId("scheduled-task-stops-when").textContent;
+      expect(stops).toMatch(/✓ 已于(今天|昨天|\d+月\d+日) 16:48 满足$/);
+      for (const text of [notice.textContent, stops]) {
+        // No time runs straight into the Chinese after it ("16:48满足").
+        expect(text).not.toMatch(/\d{2}:\d{2}[一-龥]/);
+      }
+      const detail = screen.getByTestId("scheduled-task-detail");
+      expect(detail.textContent).toContain("每分钟");
+      expect(detail.textContent).toContain(
+        "清单中还有 2 项未完成：Publish the Docker image — 负责人：Sam Okafor；Post the release notes — 负责人：Nora Lind",
+      );
+    } finally {
+      viewerZone.mockRestore();
+    }
+  });
+
   test("a recurring task mid-run reads Running now and blocks changes", async () => {
     renderDetail(task({ status: "enabled", active_run_status: "running" }));
     await screen.findByText("No runs yet");
@@ -324,7 +366,8 @@ describe("TaskDetail", () => {
     for (const label of ["运行时间", "何时停止", "执行内容", "运行记录"]) {
       expect(within(detail).getByText(label)).toBeTruthy();
     }
-    expect(detail.textContent).toContain("每 1 分钟");
+    expect(detail.textContent).toContain("每分钟");
+    expect(detail.textContent).not.toContain("每 1 分钟");
     expect(detail.textContent).toContain(
       "清单上的所有项都已勾选，满足后自动暂停",
     );
@@ -423,6 +466,72 @@ describe("TaskDetail", () => {
       "disabled",
       false,
     );
+  });
+
+  test("an older history page never moves the pause notice to an earlier stop or miss", async () => {
+    // Page 1 is the latest 50 runs plus one; page 2 holds an earlier stop
+    // and an earlier miss, neither of which made the current pause.
+    const latest = [
+      run({
+        id: "task-run-current0000000000",
+        run_id: "run-current",
+        thread_id: "thread-current",
+        stop_requested_run_id: "run-current",
+        status: "unmet",
+        error: "blocked:missing_evidence",
+        started_at: "2026-10-05T12:21:55+00:00",
+      }),
+      ...Array.from({ length: 50 }, (_, index) =>
+        run({ id: `task-run-${String(index).padStart(20, "0")}` }),
+      ),
+    ];
+    const older = [
+      run({
+        id: "task-run-old00000000000000",
+        run_id: "run-old",
+        thread_id: "thread-old",
+        stop_requested_run_id: "run-old",
+        status: "unmet",
+        error: "no_verdict",
+        summary: "An earlier miss",
+        started_at: "2026-10-01T12:21:55+00:00",
+      }),
+    ];
+    for (const lastError of [
+      "stopped by the agent in run run-current",
+      // contracts/scheduled_goal_notes_contract.json auto_pause_last_error
+      "paused after 3 unmet scheduled goal runs",
+    ]) {
+      fetchRuns.mockClear();
+      const view = renderDetail(
+        task({
+          status: "paused",
+          goal_objective: "every item is checked",
+          last_error: lastError,
+          last_run_id: "run-current",
+          last_run_at: "2026-10-05T12:21:55+00:00",
+        }),
+        { runs: (offset) => (offset === 0 ? latest : older) },
+      );
+      const notice = await screen.findByTestId("scheduled-task-outcome");
+      await waitFor(() =>
+        expect(
+          notice.querySelector('a[href*="thread-current"]'),
+        ).not.toBeNull(),
+      );
+      const before = notice.textContent;
+      // The notice shares the latest page's request.
+      expect(
+        fetchRuns.mock.calls.filter(([, options]) => options.offset === 0),
+      ).toHaveLength(1);
+      fireEvent.click(screen.getByRole("button", { name: "Older runs" }));
+      await screen.findByText("An earlier miss");
+      // The notice still reads the latest page: same words, same run.
+      expect(notice.textContent).toBe(before);
+      expect(notice.querySelector('a[href*="thread-current"]')).not.toBeNull();
+      expect(notice.querySelector('a[href*="thread-old"]')).toBeNull();
+      view.unmount();
+    }
   });
 
   test("an auto-pause quotes one sentence of the run's summary, punctuated once", async () => {

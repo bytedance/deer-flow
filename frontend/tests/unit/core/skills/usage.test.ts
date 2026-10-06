@@ -226,9 +226,11 @@ describe("skill usage around scheduled-task groups", () => {
   });
 
   test("a run thread attributes skills like an ordinary human turn", () => {
-    const { messages } = loadScheduledThread("en-3-run-thread");
+    const { messages } = loadScheduledThread("minute-run");
+    const finalId = messages.at(-1)?.id;
+    expect(messages.at(-1)?.type).toBe("ai");
     const withSkill = messages.map((item) =>
-      item.id === "ai-final"
+      item.id === finalId
         ? ({
             ...item,
             additional_kwargs: { skill_usages: [snapshot] },

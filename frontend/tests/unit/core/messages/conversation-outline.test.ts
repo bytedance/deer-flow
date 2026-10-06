@@ -112,7 +112,7 @@ describe("conversation outline model", () => {
 
 describe("conversation outline for scheduled runs", () => {
   it("titles a scheduled launch by its task, at the same turn as an ordinary message", () => {
-    const { messages } = loadScheduledThread("zh-1-run-thread");
+    const { messages } = loadScheduledThread("minute-run");
     const scheduled = buildConversationChapters(
       getMessageGroups(messages),
       "Attachment",
@@ -124,16 +124,21 @@ describe("conversation outline for scheduled runs", () => {
     expect(scheduled.map(({ id, groupIndex }) => ({ id, groupIndex }))).toEqual(
       ordinary.map(({ id, groupIndex }) => ({ id, groupIndex })),
     );
-    expect(scheduled[0]?.title).toBe("发布清单未完成项监控");
+    expect(scheduled[0]?.title).toBe("发布清单未完成项提醒");
     expect(scheduled[0]?.title).not.toContain("stop_scheduled_task");
   });
 
   it("does not open a chapter for a schedule card", () => {
-    const { messages } = loadScheduledThread("en-3-chat-thread");
+    // Live: five turns (create, trial, edit, pause, resume), five cards.
+    const { messages } = loadScheduledThread("weekday-chat");
     expect(
       buildConversationChapters(getMessageGroups(messages), "Attachment").map(
         (chapter) => chapter.id,
       ),
-    ).toEqual(["human-create", "human-trial"]);
+    ).toEqual(
+      messages
+        .filter((message) => message.type === "human")
+        .map((message) => message.id),
+    );
   });
 });

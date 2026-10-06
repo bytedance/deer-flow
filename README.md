@@ -165,7 +165,7 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
 
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
 
-   Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Retry waits are randomized within the time budget. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
+   Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Valid `Retry-After` hints set a minimum wait for HTTP 429/503; 429 without a valid hint stays terminal. Hints that cannot fit the remaining budget stop retries. Local backoff remains randomized. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
 
    Run `make doctor` at any time to verify your setup and get actionable fix hints.
    If you are opening a GitHub issue about a local setup or runtime problem, run
@@ -314,6 +314,7 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
    ```
 
    - Codex CLI reads `~/.codex/auth.json`
+   - Codex function tools preserve explicit `strict: true` or `strict: false` in wrapped or flat dictionary definitions. Missing or null settings keep the provider default. `bind_tools` applies the same conversion to dictionaries and `BaseTool` schemas.
    - Completed Codex responses still return their text and tool calls when token usage is null, omitted, or empty; usage metadata remains unavailable.
    - The Codex model provider returns completed responses without waiting for the SSE connection to close. Failed or incomplete responses report the provider's error or reason; partial output is not returned as a successful answer. Non-object error details are reported as text.
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
@@ -757,6 +758,12 @@ OpenViking memory backend; it does not replace automatic turn capture or recall.
 [OpenViking MCP tools configuration](backend/docs/MCP_SERVER.md#openviking-mcp-tools).
 
 The Gateway can adapt an MCP server's ordinary `submit` / `status` / `cancel` tools into durable background tasks. The Agent sees only the configured submit tool and a DeerFlow-local task ID; remote IDs are persisted before the submit call returns, while status and cancel stay internal to the runtime. Polling uses cross-worker leases, exponential retry backoff, scoped MCP sessions, bounded result storage, and restart recovery. A status-tool `isError` is retained as a bounded diagnostic and retried; servers report a permanent remote-task outcome through a normal structured result with `status: "failed"`. Remote poll hints are finite positive numbers capped at 24 hours, artifact-reference JSON is limited to 64 KiB, and task/server identifiers are validated against their durable SQL column limits before persistence. Input-required and terminal updates wake the current chat through idempotent Agent runs, while `list_background_tasks` and `cancel_background_task` let the Agent manage tasks without asking users for remote handles. Current-thread tasks are available through `GET /api/threads/{thread_id}/mcp-tasks`, its detail endpoint, and `POST /api/threads/{thread_id}/mcp-tasks/{task_id}/cancel`; when the task runtime actually starts, the Web UI exposes the same safe local view from the chat header with live status refresh, cancellation, and on-demand result, artifact, input-request, status-error, and cancellation-retry details. Default-disabled and memory-backend deployments hide that UI and do not poll the task endpoints. A failed remote cancellation remains queued with backoff, and its latest bounded error and attempt count stay visible in the expanded task card. Enable `mcp_tasks` in `config.yaml`, configure `task_toolsets` with exact raw tool names in `extensions_config.json`, and use a SQL database backend (`sqlite` or `postgres`). Task-enabled server connection, authentication, interceptor, timeout, or binding changes require a Gateway restart so Agent tool discovery and background calls cannot use different configuration versions. `input_required` is notification-only for now: DeerFlow can display the request but cannot yet submit the user's answer back to the remote task.
+
+For deployment-level HTTP/SSE servers with `task_toolsets`, discovery, ordinary
+tools, and background task calls share OAuth token state within one Gateway
+process, including across tool-cache resets. Rotated refresh tokens stay in
+memory; they are not written back to configuration or shared across processes.
+After a restart, the configured refresh token must still be valid.
 
 Notification launch and failed Agent-run deliveries use capped exponential backoff with a visible attempt count and stop after five failed attempts. When a bounded ordinary release exceeds its drain deadline, the service retains ownership until it settles. A permanently rejected target such as a deleted chat is dead-lettered immediately instead of retried forever or recreated. Cancellation endpoints return after durably recording the request; the background service owns the potentially slow remote MCP call and its retry schedule.
 
@@ -1318,7 +1325,7 @@ Skill installs and agent-managed skill edits run through **SkillScan**, a native
 Windows scripts (`.bat`, `.cmd`, `.ps1`, `.psm1`, `.js`, `.jse`, `.vbs`, `.vbe`, `.wsf`), HTML applications (`.hta`), and scriptlets (`.sct`) count as code even outside `scripts/`, regardless of filename case. They receive both SkillScan analysis and the installer's executable-code policy.
 SkillScan warns about remote downloads piped into common shells, including sudo, interpreter paths, and shell line continuations. Pipes to non-shell tools such as `jq` and `tee` do not trigger this warning.
 
-SkillScan treats HTTP hostnames case-insensitively and recognizes bracketed IPv6
+SkillScan treats HTTP/HTTPS scheme spellings and HTTP hostnames case-insensitively and recognizes bracketed IPv6
 loopback (`[::1]`) URLs as local. External IPv6 endpoints still trigger network findings,
 and cloud-metadata hostname detection is case-insensitive.
 
@@ -1634,8 +1641,12 @@ Management commands bootstrap the checkout environment without the extension gro
 when an installed extension's remote source or managed snapshot has become unavailable,
 while a fresh checkout can still create the non-extension environment from the existing lock. The
 manager itself owns the subsequent locked dependency transaction.
-Mutations for one checkout are serialized through a process lock. The initial manager
-surface is create/remove rather than in-place upgrade: to change an installed source, save
+Mutations for one checkout are serialized through a process lock.
+Failed extension operations restore dependency files and configuration atomically with
+their original file permissions, preserving access for a Gateway that reads them through
+group permissions.
+The initial manager surface is create/remove rather than in-place upgrade: to change an
+installed source, save
 its private `plugins[].config`, remove it, reinstall the new pin, and restore that config.
 
 Local-directory installs are copied into
@@ -1800,6 +1811,16 @@ the stable English `name`. API callers can pass `display_name` to agent creation
 or update requests; an omitted update preserves it and `null` clears it. The
 same optional field is supported in the agent's `config.yaml`.
 
+Custom Agents can also be moved between DeerFlow users or deployments from the
+Agents gallery. **Export Agent** downloads a versioned
+`*.deerflow-agent.json` package containing the portable definition and
+`SOUL.md`; **Import Agent** validates that package and lets the receiving user
+choose a local name. Invalid packages show validation messages so you can correct
+the package and retry. Imports never overwrite an existing agent. Packages carry
+model, tool/MCP, skill, knowledge, sub-agent, reasoning, and memory-policy
+settings, but deliberately exclude memory contents, conversations, credentials,
+and operator-owned GitHub bindings.
+
 Sub-agents are an optimization, not the default response to a complex request.
 
 After Stop interrupts a delegated task before it returns a reply, the next user
@@ -1887,6 +1908,10 @@ hashing, use the configured inline fallback.
 non-negative integers; YAML booleans are rejected rather than treated as 0 or 1.
 An explicit zero per-tool override disables externalization while preserving
 any positive global fallback limit.
+Structured JSON tool results follow these budgets, including results mixed with
+media; externalization keeps the full JSON available through a file reference.
+MindIE renders JSON tool results as escaped text, with configured tool exemptions
+preserved. Enabled PII redaction scans nested JSON keys and values before rendering.
 Mounted sandboxes running under another UID need read access through the shared
 storage permissions. An unclean shutdown can leave `.tool-output-*.tmp` files in
 `tool_output.storage_subdir` (default `.tool-results`) under thread outputs.
@@ -2108,6 +2133,8 @@ request the binary capability retain the legacy JSON/base64 frame protocol.
 
 ### Context Engineering
 
+**Table Tool-Output Synopses**: CSV/TSV row counts reflect logical records, so newlines inside quoted fields do not add rows. If parsing fails or exceeds the field limit, the synopsis reports an undetermined count. Outputs beyond the input-size limit still skip structured parsing.
+
 **Isolated Sub-Agent Context**: Each sub-agent runs in its own isolated context. This means that the sub-agent will not be able to see the context of the main agent or other sub-agents. This is important to ensure that the sub-agent is able to focus on the task at hand and not be distracted by the context of the main agent or other sub-agents.
 
 **Summarization**: Within a session, DeerFlow manages context aggressively — summarizing completed sub-tasks, offloading intermediate results to the filesystem, compressing what's no longer immediately relevant. This lets it stay sharp across long, multi-step tasks without blowing the context window.
@@ -2194,6 +2221,10 @@ behavior, and current boundaries.
 
 Across sessions, DeerFlow builds a persistent memory of your profile, preferences, and accumulated knowledge. The more you use it, the better it knows you — your writing style, your technical stack, your recurring workflows. Memory is stored locally and stays under your control.
 
+DeerMem and mem0 capture user inputs and final assistant replies. Assistant
+turns that request tools, including malformed or provider-raw calls, are
+excluded from memory extraction even when they contain visible text.
+
 DeerMem remains the default local backend. An opt-in `mem0` backend is also
 available for the hosted mem0 Platform API or API-compatible self-hosted
 servers. Its token-bearing `base_url` must use HTTPS by default; plaintext HTTP
@@ -2258,6 +2289,11 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - **Reasoning capabilities** for adaptive planning and complex decomposition
 - **Multimodal inputs** for image understanding and video comprehension
 - **Strong tool-use** for reliable function calling and structured outputs
+
+MindIE XML tool-call arguments support signed, fractional, and exponent JSON
+numbers. If a number overflows, underflows to zero, or exceeds Python's integer
+digit limit, the complete argument stays a string, including nested JSON lists
+and objects, so parsing does not silently change its value.
 
 ## Embedded Python Client
 
@@ -2595,6 +2631,9 @@ switching conversations. An invalid `/resume` reference displays an error withou
 closing the TUI or changing the current conversation.
 After an interrupt, late stream actions from the previous run cannot change the
 next run's display or status, even when both prompts use the same conversation.
+A tool call already in progress still finishes, so until it does a new prompt in
+that conversation is held back with a notice instead of racing it; `/new` and
+`/resume` stay available.
 If a run cannot start, the TUI reports an error and returns to idle so you can retry.
 
 At the last composer row, `Down` leaves an unsent draft untouched unless you are

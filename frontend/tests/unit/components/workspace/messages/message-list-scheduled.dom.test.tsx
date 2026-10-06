@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { MessageList } from "@/components/workspace/messages/message-list";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
+import { getMessageRunId } from "@/core/messages/run-duration";
 import type { MessageGroup } from "@/core/messages/utils";
 import type { ScheduledTaskEvent } from "@/core/scheduled-tasks/events";
 
@@ -107,16 +108,9 @@ function view(
   );
 }
 
-/** The recorded run thread with a persisted duration on its final answer. */
+/** The live-recorded run thread; its final answer carries the run's recorded duration. */
 function runThread(): Message[] {
-  return loadScheduledThread("en-3-run-thread").messages.map((message) =>
-    message.id === "ai-final"
-      ? ({
-          ...message,
-          additional_kwargs: { turn_duration: 11 },
-        } as Message)
-      : message,
-  );
+  return loadScheduledThread("minute-run").messages;
 }
 
 function snapshot(messages: Message[], isLoading: boolean) {
@@ -159,25 +153,31 @@ describe("MessageList with scheduled runs", () => {
   });
 
   it("renders one card per schedule result and keeps the replies", () => {
-    render(view(loadScheduledThread("en-3-chat-thread").messages, false));
-    expect(screen.getAllByTestId("card")).toHaveLength(2);
-    expect(screen.getAllByTestId("item-ai")).toHaveLength(2);
+    // Live: create, trial, edit, pause and resume, each with its reply.
+    render(view(loadScheduledThread("weekday-chat").messages, false));
+    expect(screen.getAllByTestId("card")).toHaveLength(5);
+    expect(screen.getAllByTestId("item-ai")).toHaveLength(5);
   });
 });
 
-/** The recorded origin chat with one run per turn: create, then trial. */
+/**
+ * The live origin chat (create, trial, edit, pause, resume); every message
+ * carries the run id it was recorded with, one run per turn.
+ */
 function chatThreadWithRuns(): Message[] {
-  const messages = loadScheduledThread("en-3-chat-thread").messages;
-  const trialStart = messages.findIndex(
-    (message, index) => index > 0 && message.type === "human",
-  );
-  return messages.map(
-    (message, index) =>
-      ({
-        ...message,
-        run_id: index < trialStart ? "run-create" : "run-trial",
-      }) as unknown as Message,
-  );
+  return loadScheduledThread("weekday-chat").messages;
+}
+
+/** The recorded run id of the chat's n-th turn (0 = create, 1 = trial). */
+function turnRunId(turn: number): string {
+  const human = chatThreadWithRuns().filter(
+    (message) => message.type === "human",
+  )[turn];
+  const runId = human ? getMessageRunId(human) : undefined;
+  if (!runId) {
+    throw new Error(`weekday-chat turn ${turn} has no run id`);
+  }
+  return runId;
 }
 
 function taskEvent(
@@ -186,19 +186,19 @@ function taskEvent(
 ): ScheduledTaskEvent {
   return {
     id,
-    task_id: "task-2b559ac2af344c3f9e55b90391f7fb1a",
+    task_id: "task-f3a00a4dd1574021b6cacfa875fd1bdd",
     event: "task_stopped",
     reason_code: "agent_stop",
-    task_title: "Release checklist status watcher",
+    task_title: "工作日发布清单未完成项提醒",
     stop_condition: null,
-    run_thread_id: "83d5133d-f8aa-4095-9bba-2aca03f8f61c",
+    run_thread_id: "e0a4c9eb-80aa-44b1-b4f1-d8e44df07749",
     run_number: 2,
     run_status: "success",
     max_runs: null,
     end_at: null,
     schedule_type: "cron",
-    after_run_id: "run-trial",
-    created_at: "2026-10-05T12:22:00+00:00",
+    after_run_id: turnRunId(1),
+    created_at: "2026-10-06T08:53:00+00:00",
     ...overrides,
   };
 }
@@ -210,7 +210,7 @@ describe("MessageList with schedule event lines", () => {
   it("puts a line at the end of its run's turn, before the next question", () => {
     render(
       view(chatThreadWithRuns(), false, [
-        taskEvent("evt-a", { after_run_id: "run-create" }),
+        taskEvent("evt-a", { after_run_id: turnRunId(0) }),
       ]),
     );
     const line = screen.getByTestId("scheduled-task-event-line");
@@ -242,7 +242,7 @@ describe("MessageList with schedule event lines", () => {
         taskEvent("evt-later", {
           event: "task_finished",
           reason_code: "end_at",
-          created_at: "2026-10-05T12:30:00+00:00",
+          created_at: "2026-10-06T09:00:00+00:00",
         }),
         taskEvent("evt-earlier"),
       ]),

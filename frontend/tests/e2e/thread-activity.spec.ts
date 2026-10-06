@@ -2,9 +2,17 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { mockLangGraphAPI, type MockThread } from "./utils/mock-api";
 import { expectNoRawIdentifiers } from "./utils/readable";
-import { scheduledTake, setLocaleCookie } from "./utils/scheduled-fixtures";
+import {
+  liveMinuteTake,
+  LOCALES,
+  setLocaleCookie,
+} from "./utils/scheduled-fixtures";
 
 test.describe.configure({ mode: "serial" });
+
+// Recorded live (fixtures/scheduled/live-minute.json): the per-minute chat
+// and the conversation of its run 2; the UI runs in both locales over them.
+const take = liveMinuteTake();
 
 const COPY = {
   en: {
@@ -63,17 +71,16 @@ function trackRequests(page: Page) {
   return { activity, loads };
 }
 
-for (const name of ["en-3", "zh-1"] as const) {
-  const take = scheduledTake(name);
-  const copy = COPY[take.lang];
+for (const lang of LOCALES) {
+  const copy = COPY[lang];
   const runTitle = take.runThread.title!;
   const runThreadId = take.runThread.thread_id;
 
-  test(`${name}: a new scheduled run appears in the sidebar unread, and opening it clears the dot`, async ({
+  test(`${lang}: a new scheduled run appears in the sidebar unread, and opening it clears the dot`, async ({
     page,
   }) => {
     await page.clock.install();
-    await setLocaleCookie(page, take.lang);
+    await setLocaleCookie(page, lang);
     const requests = trackRequests(page);
     const api = mockLangGraphAPI(page, {
       threads: [take.chatThread, FEISHU_THREAD, GITHUB_THREAD],
@@ -146,7 +153,6 @@ test("a read on another device clears the dot after the next poll", async ({
   page,
 }) => {
   await page.clock.install();
-  const take = scheduledTake("en-3");
   const requests = trackRequests(page);
   const api = mockLangGraphAPI(page, {
     threads: [
@@ -182,7 +188,6 @@ test("a read on another device clears the dot after the next poll", async ({
 test("the chats page shows the same origin marker and unread dot", async ({
   page,
 }) => {
-  const take = scheduledTake("zh-1");
   await setLocaleCookie(page, "zh");
   mockLangGraphAPI(page, {
     threads: [
@@ -223,7 +228,6 @@ test("nothing polls thread activity when the Gateway does not offer it", async (
   page,
 }) => {
   await page.clock.install();
-  const take = scheduledTake("en-3");
   const requests = trackRequests(page);
   const api = mockLangGraphAPI(page, {
     threads: [

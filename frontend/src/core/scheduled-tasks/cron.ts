@@ -321,13 +321,14 @@ export function describeSchedule(
     const amount = state.intervalAmount ?? 1;
     const unit = state.intervalUnit ?? "minutes";
     if (zh) {
+      // "每分钟" / "每小时", never "每 1 分钟".
       if (unit === "hours") {
-        return `每 ${amount} 小时`;
+        return amount === 1 ? "每小时" : `每 ${amount} 小时`;
       }
       if (unit === "seconds") {
-        return `每 ${amount} 秒`;
+        return amount === 1 ? "每秒" : `每 ${amount} 秒`;
       }
-      return `每 ${amount} 分钟`;
+      return amount === 1 ? "每分钟" : `每 ${amount} 分钟`;
     }
     if (unit === "hours") {
       return amount === 1 ? "Every hour" : `Every ${amount} hours`;
@@ -466,6 +467,15 @@ export function describeTaskSchedule(
   if (task.schedule_type === "interval") {
     const seconds =
       typeof spec.every_seconds === "number" ? spec.every_seconds : 0;
+    if (Number.isInteger(seconds) && seconds > 0 && seconds % 86400 === 0) {
+      // Whole days read as days ("每天", "Every 2 days"), not "每 24 小时".
+      const days = seconds / 86400;
+      let text = days === 1 ? "Every day" : `Every ${days} days`;
+      if (zh) {
+        text = days === 1 ? "每天" : `每 ${days} 天`;
+      }
+      return { text, raw: null };
+    }
     const { amount, unit } = secondsToInterval(seconds);
     return {
       text: describeSchedule(
@@ -614,6 +624,24 @@ export function validZonedLocalToUtcIso(
   } catch {
     return null;
   }
+}
+
+/**
+ * The instant of an edited wall value that started as `stored`. A
+ * minute-precision wall time cannot keep seconds or name the later instant
+ * of a repeated (DST fall-back) hour, so while it still shows `stored` in
+ * `timezone` the stored instant is kept; otherwise it reads as
+ * `validZonedLocalToUtcIso`.
+ */
+export function editedZonedLocalToUtcIso(
+  localValue: string,
+  timezone: string,
+  stored: string | null | undefined,
+): string | null {
+  if (stored && utcToZonedLocalInput(stored, timezone) === localValue) {
+    return stored;
+  }
+  return validZonedLocalToUtcIso(localValue, timezone);
 }
 
 function tzOffsetMs(timezone: string, date: Date): number {

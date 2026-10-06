@@ -70,9 +70,26 @@ imagePullSecrets:
 {{- else -}}{{- printf "%s-provider" (include "deer-flow.fullname" .) -}}{{- end -}}
 {{- end -}}
 
-{{/* Name of the Secret holding generated app secrets (auth token, better-auth). */}}
+{{/* Name of the Secret holding the app secrets (BETTER_AUTH_SECRET,
+     DEER_FLOW_INTERNAL_AUTH_TOKEN, AUTH_JWT_SECRET). `existingAppSecret` points
+     every consumer (gateway, frontend) at a user-managed Secret instead and
+     skips generating one; it must carry all three keys for more than one
+     gateway instance. */}}
 {{- define "deer-flow.appSecret" -}}
-{{- printf "%s-app" (include "deer-flow.fullname" .) -}}
+{{- if .Values.existingAppSecret -}}{{- .Values.existingAppSecret -}}
+{{- else -}}{{- printf "%s-app" (include "deer-flow.fullname" .) -}}{{- end -}}
+{{- end -}}
+
+{{/* "true" when more than one gateway instance shares the database. An explicit
+     boolean `gateway.multiInstance` wins -- set it before scaling with
+     `kubectl scale` or an HPA, which change the replica count without a Helm
+     upgrade -- otherwise it is derived from `gateway.replicas`. */}}
+{{- define "deer-flow.gatewayMultiInstance" -}}
+{{- if kindIs "invalid" .Values.gateway.multiInstance -}}
+{{- gt (int .Values.gateway.replicas) 1 -}}
+{{- else -}}
+{{- eq (toString .Values.gateway.multiInstance | lower) "true" -}}
+{{- end -}}
 {{- end -}}
 
 {{/* Name of the postgres StatefulSet/Service. */}}

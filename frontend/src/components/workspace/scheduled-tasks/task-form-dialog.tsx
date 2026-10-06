@@ -41,10 +41,12 @@ import type {
   ScheduledTaskUpdatePayload,
 } from "@/core/scheduled-tasks/api";
 import {
+  editedZonedLocalToUtcIso,
   hasScheduleSpec,
   onceRunAtInstant,
+  parseCron,
+  serializeCron,
   utcToZonedLocalInput,
-  validZonedLocalToUtcIso,
 } from "@/core/scheduled-tasks/cron";
 import { browserTimeZone } from "@/core/scheduled-tasks/format";
 import {
@@ -179,9 +181,15 @@ function sameSchedule(task: ScheduledTask, value: ScheduleValue): boolean {
     case "interval":
       return spec.every_seconds === next.every_seconds;
     case "cron": {
-      const norm = (cron: unknown) =>
-        typeof cron === "string" ? cron.trim().split(/\s+/).join(" ") : "";
-      return norm(spec.cron) === norm(next.cron);
+      // The schedule input re-serializes a cron it shows as a preset
+      // ("0 09 * * 0,6" -> "0 9 * * 6,0"); compare that form, so an untouched
+      // schedule is never re-sent and never re-arms a finished task.
+      const canonical = (cron: unknown) => {
+        if (typeof cron !== "string") return "";
+        const { preset, parts } = parseCron(cron);
+        return serializeCron(preset, parts).split(/\s+/).join(" ");
+      };
+      return canonical(spec.cron) === canonical(next.cron);
     }
   }
 }
@@ -198,7 +206,14 @@ export type FormValidation =
       error: "required" | "invalidMaxRuns" | "invalidEndAt" | "goalNeedsFresh";
     };
 
-export function validateForm(state: TaskFormState): FormValidation {
+/**
+ * `storedEndAt` is the source task's end time (edit and duplicate): kept
+ * as is while the end-time field still shows it.
+ */
+export function validateForm(
+  state: TaskFormState,
+  storedEndAt?: string | null,
+): FormValidation {
   if (
     !state.title.trim() ||
     !state.prompt.trim() ||
@@ -217,9 +232,10 @@ export function validateForm(state: TaskFormState): FormValidation {
   }
   let endAt: string | null = null;
   if (state.endAtLocal) {
-    endAt = validZonedLocalToUtcIso(
+    endAt = editedZonedLocalToUtcIso(
       state.endAtLocal,
       state.schedule.timezone || browserTimeZone(),
+      storedEndAt,
     );
     if (!endAt) {
       return { ok: false, error: "invalidEndAt" };
@@ -424,7 +440,7 @@ function TaskForm({
   };
 
   const submit = () => {
-    const valid = validateForm(state);
+    const valid = validateForm(state, task?.end_at);
     if (!valid.ok) {
       setError(
         valid.error === "required"

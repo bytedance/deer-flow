@@ -1,45 +1,64 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { mockLangGraphAPI, type MockScheduledTask } from "./utils/mock-api";
+import {
+  mockLangGraphAPI,
+  type MockScheduledTask,
+  type MockThread,
+} from "./utils/mock-api";
 import { expectNoRawIdentifiers } from "./utils/readable";
 import {
   conversation,
-  scheduledTake,
+  liveMinuteTake,
+  liveTake,
+  LOCALES,
   setLocaleCookie,
-  type ScheduledTake,
 } from "./utils/scheduled-fixtures";
 
 test.describe.configure({ mode: "serial" });
+// The live takes were recorded in Asia/Shanghai, and interval tasks read in
+// the viewer's zone; pin it so CI (UTC) renders the recorded times.
+test.use({ timezoneId: "Asia/Shanghai" });
+
+// Recorded live (fixtures/scheduled/live-*.json): the conversations are
+// Chinese; the UI runs in both locales over them.
+const weekday = liveTake("weekday");
+const minute = liveMinuteTake();
 
 const COPY = {
   en: {
-    stops: "every item on the checklist is checked, pauses itself",
+    pausesItself: ", pauses itself",
+    dailyAtTen: "Every day at 10:00 (Asia/Shanghai)",
+    everyMinute: "Every minute",
     runNow: "Run once now",
     trialStarted: "Trial run started",
     openChat: "Open chat",
     openTask: "Open task",
     active: "Active",
     pausedByAgent: "Paused by agent",
+    reached: "✓ Reached today 16:48",
     footer: "Trial runs don't count toward the cap.",
   },
   zh: {
-    stops: "清单上的所有项都已勾选，满足后自动暂停",
+    pausesItself: "，满足后自动暂停",
+    dailyAtTen: "每天 10:00 (Asia/Shanghai)",
+    everyMinute: "每分钟",
     runNow: "立即试运行",
     trialStarted: "试运行已开始",
     openChat: "打开对话",
     openTask: "查看任务",
     active: "已启用",
     pausedByAgent: "已由智能体暂停",
+    reached: "✓ 已于今天 16:48 满足",
     footer: "试运行不计入上限。",
   },
 } as const;
 
-/** The recorded task as it was right after creation: active, nothing run yet. */
-function freshTask(take: ScheduledTake): MockScheduledTask {
+/** The per-minute task as it was right after creation: active, nothing run yet. */
+function freshMinuteTask(): MockScheduledTask {
   return {
-    ...take.task,
+    ...minute.task,
     status: "enabled",
-    next_run_at: "2099-10-05T12:20:36+00:00",
+    next_run_at: "2026-10-06T08:47:52+00:00",
     last_run_at: null,
     last_run_id: null,
     last_thread_id: null,
@@ -50,51 +69,67 @@ function freshTask(take: ScheduledTake): MockScheduledTask {
   };
 }
 
-async function openChat(page: Page, take: ScheduledTake) {
-  await setLocaleCookie(page, take.lang);
-  mockLangGraphAPI(page, {
-    threads: [take.chatThread],
-    scheduledTasks: [freshTask(take)],
-  });
-  await page.goto(`/workspace/chats/${take.chatThread.thread_id}`);
+async function openChat(
+  page: Page,
+  lang: "en" | "zh",
+  thread: MockThread,
+  task: MockScheduledTask,
+) {
+  await setLocaleCookie(page, lang);
+  mockLangGraphAPI(page, { threads: [thread], scheduledTasks: [task] });
+  await page.goto(`/workspace/chats/${thread.thread_id}`);
 }
 
 const cards = (page: Page) => page.getByTestId("scheduled-task-card");
 
-for (const name of ["en-3", "zh-1"] as const) {
-  const take = scheduledTake(name);
-  const copy = COPY[take.lang];
+for (const lang of LOCALES) {
+  const copy = COPY[lang];
 
-  test(`${name}: the schedule result renders as a live card and the reply stays readable`, async ({
+  test(`${lang}: each schedule_task turn of the live chat is one live card and the replies stay readable`, async ({
     page,
   }) => {
-    await openChat(page, take);
-    // One card per turn: the create result and the trial result.
-    await expect(cards(page)).toHaveCount(2);
-    const card = cards(page).first();
-    await expect(card).toContainText(take.task.title);
-    await expect(card).toContainText(copy.stops);
-    await expect(card.getByTestId("scheduled-task-card-status")).toHaveText(
-      copy.active,
+    await openChat(page, lang, weekday.chatThread, weekday.task);
+    // create, trial, edit, pause, resume: one card per turn, all one task.
+    await expect(cards(page)).toHaveCount(5);
+    for (const card of await cards(page).all()) {
+      await expect(card).toHaveAttribute("data-task-id", weekday.task.id);
+      // Every card follows the live task: resumed, daily at 10:00.
+      await expect(card.getByTestId("scheduled-task-card-status")).toHaveText(
+        copy.active,
+      );
+      await expect(card.getByTestId("scheduled-task-card-schedule")).toHaveText(
+        copy.dailyAtTen,
+      );
+    }
+    const first = cards(page).first();
+    await expect(first).toContainText(weekday.task.title);
+    await expect(first.getByTestId("scheduled-task-card-stops")).toContainText(
+      `${weekday.task.stop_condition}${copy.pausesItself}`,
     );
     await expect(page.getByText(copy.footer).first()).toBeVisible();
-    await expectNoRawIdentifiers(card);
+    // The agent's recorded replies stay plain chat text next to the cards.
+    await expect(conversation(page)).toContainText(
+      "已恢复，每天早上 10 点（含周末）继续检查清单",
+    );
+    await expectNoRawIdentifiers(first);
     await expectNoRawIdentifiers(conversation(page));
   });
 
-  test(`${name}: Run once now triggers once and links the trial chat`, async ({
+  test(`${lang}: Run once now triggers once and links the trial chat`, async ({
     page,
   }) => {
     const triggers: string[] = [];
     page.on("request", (request) => {
       if (
         request.method() === "POST" &&
-        request.url().endsWith(`/api/scheduled-tasks/${take.task.id}/trigger`)
+        request
+          .url()
+          .endsWith(`/api/scheduled-tasks/${weekday.task.id}/trigger`)
       ) {
         triggers.push(request.url());
       }
     });
-    await openChat(page, take);
+    await openChat(page, lang, weekday.chatThread, weekday.task);
     const card = cards(page).last();
     await card.getByRole("button", { name: copy.runNow }).dblclick();
     await expect(card.getByTestId("scheduled-task-card-trial")).toContainText(
@@ -103,48 +138,56 @@ for (const name of ["en-3", "zh-1"] as const) {
     expect(triggers).toHaveLength(1);
     await expect(
       card.getByRole("link", { name: copy.openChat }),
-    ).toHaveAttribute("href", `/workspace/chats/trial-thread-${take.task.id}`);
+    ).toHaveAttribute(
+      "href",
+      `/workspace/chats/trial-thread-${weekday.task.id}`,
+    );
   });
 
-  test(`${name}: Open task selects the task on the tasks page`, async ({
+  test(`${lang}: Open task selects the task on the tasks page`, async ({
     page,
   }) => {
-    await openChat(page, take);
+    await openChat(page, lang, weekday.chatThread, weekday.task);
     await cards(page)
       .first()
       .getByRole("link", { name: copy.openTask })
       .click();
     await page.waitForURL(
-      `**/workspace/scheduled-tasks?task_id=${take.task.id}`,
+      `**/workspace/scheduled-tasks?task_id=${weekday.task.id}`,
     );
     await expect(page.getByTestId("scheduled-task-detail")).toHaveAttribute(
       "data-task-id",
-      take.task.id,
+      weekday.task.id,
     );
   });
 
-  test(`${name}: the card follows the task to Paused by agent without a reload`, async ({
+  test(`${lang}: the per-minute card follows the task to Paused by agent without a reload`, async ({
     page,
   }) => {
-    await page.clock.install();
-    await openChat(page, take);
-    const card = cards(page).last();
+    // The afternoon of the recording (16:48 Asia/Shanghai is 08:48 UTC).
+    await page.clock.install({ time: new Date("2026-10-06T09:00:00Z") });
+    await openChat(page, lang, minute.chatThread, freshMinuteTask());
+    const card = cards(page);
+    await expect(card).toHaveCount(1);
     await expect(card.getByTestId("scheduled-task-card-status")).toHaveText(
       copy.active,
     );
+    await expect(card.getByTestId("scheduled-task-card-schedule")).toHaveText(
+      copy.everyMinute,
+    );
     // The recorded final state: run 2 asked the schedule to stop.
-    await page.route(`**/api/scheduled-tasks/${take.task.id}`, (route) =>
+    await page.route(`**/api/scheduled-tasks/${minute.task.id}`, (route) =>
       route.request().method() === "GET"
-        ? route.fulfill({ json: take.task })
+        ? route.fulfill({ json: minute.task })
         : route.fallback(),
     );
     await page.clock.fastForward(16_000);
     await expect(card.getByTestId("scheduled-task-card-status")).toHaveText(
       copy.pausedByAgent,
     );
-    await expect(
-      cards(page).first().getByTestId("scheduled-task-card-status"),
-    ).toHaveText(copy.pausedByAgent);
+    await expect(card.getByTestId("scheduled-task-card-stops")).toContainText(
+      copy.reached,
+    );
     await expectNoRawIdentifiers(card);
   });
 }

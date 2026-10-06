@@ -3,9 +3,18 @@ import { resolve } from "node:path";
 
 import type { Message } from "@langchain/langgraph-sdk";
 
+import type {
+  ScheduledTask,
+  ScheduledTaskRun,
+} from "@/core/scheduled-tasks/types";
+
 /**
- * Recorded chat / run-thread fixtures shared with the Playwright specs
- * (`tests/e2e/fixtures/scheduled/*-thread.json`).
+ * Live-recorded chat / run-thread fixtures shared with the Playwright specs
+ * (`tests/e2e/fixtures/scheduled/live-*.json`, recorded on DeepSeek Flash
+ * during the PR1 acceptance run; demo data, fictional names):
+ * - `weekday-chat`: create (after a read_file), trial, edit, pause, resume;
+ * - `minute-chat`: create a per-minute task (after a read_file);
+ * - `minute-run`: scheduled run 2, which reads the file and stops the task.
  */
 export type ScheduledThreadFixture = {
   thread_id: string;
@@ -14,19 +23,38 @@ export type ScheduledThreadFixture = {
   messages: Message[];
 };
 
-export function loadScheduledThread(
-  name:
-    | "en-3-chat-thread"
-    | "zh-1-chat-thread"
-    | "en-3-run-thread"
-    | "zh-1-run-thread",
-): ScheduledThreadFixture {
+const LIVE_THREADS = {
+  "weekday-chat": ["live-weekday.json", "chatThread"],
+  "minute-chat": ["live-minute.json", "chatThread"],
+  "minute-run": ["live-minute.json", "runThread"],
+} as const;
+
+function liveBundle(file: string): Record<string, unknown> {
   return JSON.parse(
     readFileSync(
-      resolve(__dirname, `../../e2e/fixtures/scheduled/${name}.json`),
+      resolve(__dirname, `../../e2e/fixtures/scheduled/${file}`),
       "utf-8",
     ),
-  ) as ScheduledThreadFixture;
+  ) as Record<string, unknown>;
+}
+
+/** The live per-minute task (paused by its agent in run 2) and its runs, newest first. */
+export function loadLiveMinuteTask(): {
+  task: ScheduledTask;
+  runs: ScheduledTaskRun[];
+} {
+  const bundle = liveBundle("live-minute.json");
+  return {
+    task: bundle.task as ScheduledTask,
+    runs: bundle.runs as ScheduledTaskRun[],
+  };
+}
+
+export function loadScheduledThread(
+  name: keyof typeof LIVE_THREADS,
+): ScheduledThreadFixture {
+  const [file, key] = LIVE_THREADS[name];
+  return liveBundle(file)[key] as ScheduledThreadFixture;
 }
 
 export const SCHEDULED_GOAL_NOTES_CONTRACT = JSON.parse(

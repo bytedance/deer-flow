@@ -222,7 +222,7 @@ describe("scheduled run threads and schedule cards", () => {
     groups.map((group) => group.type);
 
   it("segments a run thread's turn like an ordinary human turn while streaming", () => {
-    const { messages } = loadScheduledThread("en-3-run-thread");
+    const { messages } = loadScheduledThread("minute-run");
     const ordinaryMessages = withOrdinaryHumanTurn(messages);
     for (const source of [messages, ordinaryMessages]) {
       let previous: ReturnType<typeof getMessageGroups> = [];
@@ -258,17 +258,20 @@ describe("scheduled run threads and schedule cards", () => {
   });
 
   it("keeps a schedule card inside its turn for usage", () => {
-    const { messages } = loadScheduledThread("zh-1-chat-thread");
+    // Live: create (after a read_file), trial, edit, pause, resume.
+    const { messages } = loadScheduledThread("weekday-chat");
     const groups = deriveStableMessageGroups(messages, false, [], false);
     const { byGroupIndex } = deriveAssistantTurnUsageState(groups);
     const cardIndexes = groups.flatMap((group, index) =>
       group.type === "assistant:scheduled-task" ? [index] : [],
     );
-    expect(cardIndexes).toHaveLength(2);
-    for (const index of cardIndexes) {
+    expect(cardIndexes).toHaveLength(5);
+    // The create turn has three model calls (read_file, schedule_task,
+    // reply); the others two. The card splits none of them.
+    cardIndexes.forEach((index, turn) => {
       expect(byGroupIndex[index]).toBeNull();
       expect(groups[index + 1]?.type).toBe("assistant");
-      expect(byGroupIndex[index + 1]?.length).toBe(2);
-    }
+      expect(byGroupIndex[index + 1]?.length).toBe(turn === 0 ? 3 : 2);
+    });
   });
 });
