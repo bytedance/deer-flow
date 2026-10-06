@@ -103,6 +103,14 @@ async def test_exhaustion_and_defaults(rig, status):
     assert rig.waits == [7, 7]
 
 
+@pytest.mark.parametrize("status", [502, 504])
+async def test_other_retryable_statuses_ignore_retry_after(rig, status):
+    rig.post.side_effect = [response(status, "7"), response(200)]
+    assert await jina_client.JinaClient().crawl("https://example.com", max_retries=1) == "provider result"
+    assert rig.waits == [0.5]
+    assert rig.post.await_count == 2
+
+
 @pytest.mark.parametrize("status", [401, 402, 403, 409, 500, 418])
 async def test_other_statuses_terminal(rig, status):
     rig.post.return_value = response(status, "1")
