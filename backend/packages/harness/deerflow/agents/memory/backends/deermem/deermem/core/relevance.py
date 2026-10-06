@@ -52,6 +52,8 @@ def warm_tokenizer() -> None:
 def tokenize(text: str) -> list[str]:
     """Tokenize at most 4096 characters into at most 128 relevance tokens.
 
+    Jieba tokens without a letter or digit are dropped and do not use the 128-token budget.
+
     Space-free CJK text without jieba falls back to character bigrams so
     Chinese queries still produce deterministic token overlap.
     """
