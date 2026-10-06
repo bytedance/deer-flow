@@ -7,6 +7,14 @@
  * `custom` for anything else.
  */
 
+import {
+  displayTimeZone,
+  formatTaskDateTime,
+  formatTaskTime,
+  type TaskTimeLabels,
+} from "./format";
+import type { ScheduledTask } from "./types";
+
 export type CronPreset = "hourly" | "daily" | "weekly" | "monthly" | "custom";
 
 export type Weekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
@@ -358,6 +366,156 @@ export function describeSchedule(
   }
   // Unreachable — switch is exhaustive over CronPreset.
   return zh ? `自定义 (${tz})` : `Custom (${tz})`;
+}
+
+const MON_TO_FRI: Weekday[] = ["mon", "tue", "wed", "thu", "fri"];
+
+/**
+ * `parseCron` plus day-of-week ranges ("0 9 * * 1-5"), which agents often
+ * write. Display only: the form keeps `parseCron`, so editing such a task
+ * still shows the expression as custom instead of rewriting it.
+ */
+function parseDisplayCron(cron: string): {
+  preset: CronPreset;
+  parts: CronParts;
+} {
+  const parsed = parseCron(cron);
+  if (parsed.preset !== "custom") {
+    return parsed;
+  }
+  const fields = cron.split(/\s+/);
+  const [m, h, dom, mon, dow] = fields;
+  if (
+    fields.length !== 5 ||
+    !m ||
+    !h ||
+    !dow ||
+    !/^\d+$/.test(m) ||
+    !/^\d+$/.test(h) ||
+    dom !== "*" ||
+    mon !== "*" ||
+    !/^[0-7](-[0-7])?(,[0-7](-[0-7])?)*$/.test(dow)
+  ) {
+    return parsed;
+  }
+  const days = new Set<Weekday>();
+  for (const token of dow.split(",")) {
+    const [start, end = start] = token.split("-").map(Number);
+    if (start === undefined || end === undefined || end < start) {
+      return parsed;
+    }
+    for (let day = start; day <= end; day++) {
+      const weekday = CRON_TO_WEEKDAY[String(day)];
+      if (weekday) days.add(weekday);
+    }
+  }
+  return {
+    preset: "weekly",
+    parts: {
+      minute: Number(m),
+      hour: Number(h),
+      weekdays: orderedWeekdays([...days]),
+    },
+  };
+}
+
+function isWeekdays(days: Weekday[] | undefined): boolean {
+  const ordered = orderedWeekdays(days);
+  return (
+    ordered.length === MON_TO_FRI.length &&
+    ordered.every((day, index) => day === MON_TO_FRI[index])
+  );
+}
+
+export type TaskScheduleDescription = {
+  /** Readable text for default views; never a cron string or the stored UTC of an interval. */
+  text: string;
+  /** The cron expression, for a tooltip only; null for other schedule types. */
+  raw: string | null;
+};
+
+/**
+ * Readable schedule of a saved task: "Weekdays at 09:00 (Asia/Shanghai)",
+ * "Every 30 minutes" (intervals carry no zone), "Once, Tomorrow 09:00 (…)".
+ * A cron that matches no preset reads "Custom schedule (tz)"; the expression
+ * itself is returned only in `raw`. Pass `time` (the `t.scheduledTasks.time`
+ * labels) to get relative days for one-time tasks; without them the time
+ * reads as a plain date ("Oct 7 09:00"), never an ISO value.
+ */
+export function describeTaskSchedule(
+  task: Pick<ScheduledTask, "schedule_type" | "schedule_spec" | "timezone">,
+  locale: string,
+  options: { time?: TaskTimeLabels; now?: Date } = {},
+): TaskScheduleDescription {
+  const lang: ScheduleLocale = locale.toLowerCase().startsWith("zh")
+    ? "zh"
+    : "en";
+  const zh = lang === "zh";
+  const spec = task.schedule_spec;
+  const timezone = displayTimeZone(task);
+
+  if (task.schedule_type === "interval") {
+    const seconds =
+      typeof spec.every_seconds === "number" ? spec.every_seconds : 0;
+    const { amount, unit } = secondsToInterval(seconds);
+    return {
+      text: describeSchedule(
+        {
+          scheduleType: "interval",
+          intervalAmount: amount,
+          intervalUnit: unit,
+          timezone,
+        },
+        lang,
+      ),
+      raw: null,
+    };
+  }
+
+  if (task.schedule_type === "once") {
+    const runAt = typeof spec.run_at === "string" ? spec.run_at : "";
+    const when = options.time
+      ? formatTaskTime(runAt, {
+          timeZone: timezone,
+          locale,
+          labels: options.time,
+          now: options.now,
+        })
+      : formatTaskDateTime(runAt, {
+          timeZone: timezone,
+          locale,
+          now: options.now,
+        });
+    return {
+      text: zh ? `单次，${when} (${timezone})` : `Once, ${when} (${timezone})`,
+      raw: null,
+    };
+  }
+
+  const cron = typeof spec.cron === "string" ? spec.cron.trim() : "";
+  const { preset, parts } = parseDisplayCron(cron);
+  if (preset === "custom") {
+    return {
+      text: zh ? `自定义时间 (${timezone})` : `Custom schedule (${timezone})`,
+      raw: cron,
+    };
+  }
+  if (preset === "weekly" && isWeekdays(parts.weekdays)) {
+    const hhmm = `${pad2(parts.hour ?? 0)}:${pad2(parts.minute ?? 0)}`;
+    return {
+      text: zh
+        ? `工作日 ${hhmm} (${timezone})`
+        : `Weekdays at ${hhmm} (${timezone})`,
+      raw: cron,
+    };
+  }
+  return {
+    text: describeSchedule(
+      { scheduleType: "cron", preset, parts, timezone },
+      lang,
+    ),
+    raw: cron,
+  };
 }
 
 /**

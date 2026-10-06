@@ -72,6 +72,13 @@ This release closes that milestone with **301 merged pull requests**.
   replies in the user's language. The tools are offered only while the
   Gateway's scheduler is running. ([#6340])
 
+- **scheduler:** The web app sends the browser timezone with chat runs
+  (`context.client_timezone`), shows scheduled-task API errors as localized
+  messages chosen by error code (raw server text only behind "Details"), and
+  uses one scheduled-task vocabulary in English and Chinese (定时任务, 运行,
+  智能体; no `lead_agent` in labels). Untitled chats and the Scheduled tasks and
+  Agents breadcrumbs follow the interface language. ([#6340])
+
 - **scheduler:** The tasks page shows the per-run goal and end conditions of
   conversation-created tasks. Run history shows whether a goal was met,
   including when it relied on stated assumptions; an unmet run shows a readable

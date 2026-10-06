@@ -238,6 +238,7 @@ export function buildThreadSubmitMessages({
  * `string[]` under `context.conversation_references`, only when the caller
  * attached them, and never from local settings. A stray key in settings is
  * dropped rather than forwarded, so a stale value can never grant access.
+ * `client_timezone` carries the browser's zone (scheduled-task default only).
  */
 export function buildRunContext({
   settings,
@@ -274,7 +275,24 @@ export function buildRunContext({
             ? "low"
             : undefined),
     thread_id: threadId,
+    ...clientTimezoneContext(),
   };
+}
+
+/**
+ * The browser's IANA zone as `context.client_timezone`. The Gateway reads it
+ * only to offer a default zone when a chat creates a scheduled task; it never
+ * reaches the model's context. Omitted when the browser cannot tell.
+ */
+function clientTimezoneContext(): { client_timezone?: string } {
+  try {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return typeof timeZone === "string" && timeZone.length > 0
+      ? { client_timezone: timeZone }
+      : {};
+  } catch {
+    return {};
+  }
 }
 
 // Stable identity for "no optimistic messages" so the merged-messages memo

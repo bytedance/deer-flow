@@ -2,6 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 
 import {
   describeSchedule,
+  describeTaskSchedule,
   hasScheduleSpec,
   clampIntervalAmount,
   intervalToSeconds,
@@ -456,5 +457,98 @@ describe("zonedLocalToUtcIso DST transitions", () => {
     expect(zonedLocalToUtcIso("2026-03-08T03:30", "Asia/Shanghai")).toBe(
       "2026-03-07T19:30:00+00:00",
     );
+  });
+});
+
+describe("describeTaskSchedule", () => {
+  const cronTask = (cron: string, timezone = "Asia/Shanghai") => ({
+    schedule_type: "cron" as const,
+    schedule_spec: { cron },
+    timezone,
+  });
+
+  test("Mon–Fri reads as weekdays, with the cron only in raw", () => {
+    expect(describeTaskSchedule(cronTask("0 9 * * 1-5"), "en-US")).toEqual({
+      text: "Weekdays at 09:00 (Asia/Shanghai)",
+      raw: "0 9 * * 1-5",
+    });
+    expect(describeTaskSchedule(cronTask("0 18 * * 1,3-5"), "en-US").text).toBe(
+      "Every Mon, Wed, Thu, Fri at 18:00 (Asia/Shanghai)",
+    );
+    expect(
+      describeTaskSchedule(cronTask("0 9 * * 1,2,3,4,5"), "en-US"),
+    ).toEqual({
+      text: "Weekdays at 09:00 (Asia/Shanghai)",
+      raw: "0 9 * * 1,2,3,4,5",
+    });
+    expect(
+      describeTaskSchedule(cronTask("30 8 * * 1,2,3,4,5"), "zh-CN").text,
+    ).toBe("工作日 08:30 (Asia/Shanghai)");
+  });
+
+  test("daily reuses the preset wording", () => {
+    expect(describeTaskSchedule(cronTask("0 9 * * *"), "en-US").text).toBe(
+      "Every day at 09:00 (Asia/Shanghai)",
+    );
+    expect(describeTaskSchedule(cronTask("0 9 * * *"), "zh-CN").text).toBe(
+      "每天 09:00 (Asia/Shanghai)",
+    );
+  });
+
+  test("a custom cron never shows the expression in text", () => {
+    const { text, raw } = describeTaskSchedule(
+      cronTask("*/15 9-17 * * 1-5"),
+      "zh-CN",
+    );
+    expect(text).toBe("自定义时间 (Asia/Shanghai)");
+    expect(text).not.toContain("*/15");
+    expect(raw).toBe("*/15 9-17 * * 1-5");
+    expect(
+      describeTaskSchedule(cronTask("*/15 9-17 * * 1-5"), "en-US").text,
+    ).toBe("Custom schedule (Asia/Shanghai)");
+  });
+
+  test("interval tasks read in minutes and never print the stored zone", () => {
+    const interval = {
+      schedule_type: "interval" as const,
+      schedule_spec: { every_seconds: 1800 },
+      timezone: "UTC",
+    };
+    expect(describeTaskSchedule(interval, "en-US")).toEqual({
+      text: "Every 30 minutes",
+      raw: null,
+    });
+    expect(describeTaskSchedule(interval, "zh-CN").text).toBe("每 30 分钟");
+    expect(describeTaskSchedule(interval, "en-US").text).not.toContain("UTC");
+  });
+
+  test("one-time tasks read their local time, relative when labels are given", () => {
+    const once = {
+      schedule_type: "once" as const,
+      schedule_spec: { run_at: "2026-10-07T01:00:00+00:00" },
+      timezone: "Asia/Shanghai",
+    };
+    expect(
+      describeTaskSchedule(once, "en-US", {
+        time: {
+          today: "Today {time}",
+          tomorrow: "Tomorrow {time}",
+          yesterday: "Yesterday {time}",
+          yourTime: "{time} your time",
+        },
+        now: new Date("2026-10-06T04:00:00Z"),
+      }).text,
+    ).toBe("Once, Tomorrow 09:00 (Asia/Shanghai)");
+    // Without labels: a plain local date, never an ISO-like value.
+    const plain = describeTaskSchedule(once, "zh-CN", {
+      now: new Date("2026-10-06T04:00:00Z"),
+    }).text;
+    expect(plain).toBe("单次，10月7日 09:00 (Asia/Shanghai)");
+    expect(plain).not.toMatch(/\d{4}-\d{2}-\d{2}/);
+    expect(
+      describeTaskSchedule(once, "en-US", {
+        now: new Date("2026-10-06T04:00:00Z"),
+      }).text,
+    ).toBe("Once, Oct 7 09:00 (Asia/Shanghai)");
   });
 });

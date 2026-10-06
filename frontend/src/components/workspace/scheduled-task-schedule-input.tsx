@@ -32,6 +32,7 @@ import {
   type ScheduleType,
   type Weekday,
 } from "@/core/scheduled-tasks/cron";
+import { browserTimeZone } from "@/core/scheduled-tasks/format";
 
 export type ScheduleValue = {
   schedule_type: ScheduleType;
@@ -70,18 +71,6 @@ const FALLBACK_TIMEZONES = [
   "America/Los_Angeles",
 ];
 
-function detectBrowserTimezone(): string {
-  try {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (typeof tz === "string" && tz.length > 0) {
-      return tz;
-    }
-  } catch {
-    // resolvedOptions unavailable
-  }
-  return "UTC";
-}
-
 function timezoneOptions(): string[] {
   const supported = (
     Intl as unknown as {
@@ -119,7 +108,7 @@ export function ScheduledTaskScheduleInput({
     () => parseCron(initial.schedule_spec.cron ?? "0 9 * * *").parts,
   );
   const [timezone, setTimezone] = useState<string>(
-    () => initial.timezone || detectBrowserTimezone(),
+    () => initial.timezone || browserTimeZone(),
   );
   const [runAtLocal, setRunAtLocal] = useState<string>(
     initial.schedule_type === "once" && initial.schedule_spec.run_at
@@ -269,6 +258,7 @@ export function ScheduledTaskScheduleInput({
           <Button
             variant={scheduleType === "cron" ? "default" : "outline"}
             size="sm"
+            aria-pressed={scheduleType === "cron"}
             onClick={() => setScheduleType("cron")}
           >
             {labels.scheduleType.cron}
@@ -276,6 +266,7 @@ export function ScheduledTaskScheduleInput({
           <Button
             variant={scheduleType === "once" ? "default" : "outline"}
             size="sm"
+            aria-pressed={scheduleType === "once"}
             onClick={() => setScheduleType("once")}
           >
             {labels.scheduleType.once}
@@ -283,6 +274,7 @@ export function ScheduledTaskScheduleInput({
           <Button
             variant={scheduleType === "interval" ? "default" : "outline"}
             size="sm"
+            aria-pressed={scheduleType === "interval"}
             onClick={() => setScheduleType("interval")}
           >
             {labels.scheduleType.interval}
@@ -296,7 +288,11 @@ export function ScheduledTaskScheduleInput({
             value={preset}
             onValueChange={(v) => changePreset(v as CronPreset)}
           >
-            <SelectTrigger className="w-full" data-testid="schedule-preset">
+            <SelectTrigger
+              aria-label={labels.preset.label}
+              className="w-full"
+              data-testid="schedule-preset"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -429,6 +425,7 @@ export function ScheduledTaskScheduleInput({
             }}
           >
             <SelectTrigger
+              aria-label={labels.fields.intervalUnit}
               className="w-36"
               data-testid="schedule-interval-unit"
             >
@@ -458,7 +455,11 @@ export function ScheduledTaskScheduleInput({
       )}
 
       <Select value={timezone} onValueChange={setTimezone}>
-        <SelectTrigger className="w-full" data-testid="schedule-timezone">
+        <SelectTrigger
+          aria-label={labels.fields.timezone}
+          className="w-full"
+          data-testid="schedule-timezone"
+        >
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -486,7 +487,10 @@ export function ScheduledTaskScheduleInput({
           className="text-muted-foreground text-xs"
           data-testid="schedule-interval-min-hint"
         >
-          {labels.fields.intervalMinHint}
+          {labels.fields.intervalMinHint.replace(
+            "{n}",
+            String(minIntervalAmount("seconds")),
+          )}
         </div>
       )}
     </div>

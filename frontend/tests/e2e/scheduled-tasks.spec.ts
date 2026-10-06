@@ -272,7 +272,7 @@ test("trigger shows a run entry in the detail pane", async ({ page }) => {
   await page.getByRole("button", { name: "Trigger now" }).click();
   await expect(page.getByTestId("scheduled-task-runs")).toContainText("1 run");
   await expect(
-    page.getByTestId("scheduled-task-run-list").getByText(/Manual · Success/i),
+    page.getByTestId("scheduled-task-run-list").getByText(/Trial run · Done/i),
   ).toBeVisible();
 });
 
@@ -354,7 +354,7 @@ test("create posts the default lead_agent assistant_id", async ({ page }) => {
   const createForm = page.getByTestId("scheduled-task-create-form");
   await expect(
     createForm.getByTestId("scheduled-task-create-agent"),
-  ).toContainText(/Default agent \(lead_agent\)/i);
+  ).toContainText(/^Default agent$/i);
   await createForm.getByRole("button", { name: "One-time" }).click();
   await createForm.getByLabel("Run at").fill("2026-07-02T09:00");
   await createForm.getByPlaceholder("Task title").fill("Agent pin");
@@ -363,7 +363,10 @@ test("create posts the default lead_agent assistant_id", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Agent pin/i })).toBeVisible();
   expect(createBody).toMatchObject({ assistant_id: "lead_agent" });
   await expect(page.getByTestId("scheduled-task-detail")).toContainText(
-    /Default agent \(lead_agent\)/i,
+    "Agent: Default agent",
+  );
+  await expect(page.getByTestId("scheduled-task-detail")).not.toContainText(
+    "lead_agent",
   );
 });
 

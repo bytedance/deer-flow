@@ -233,7 +233,7 @@ export default function ScheduledTasksPage() {
   const applyRecipe = (recipe: Recipe) => {
     const labels = st.recipes[recipe.titleKey];
     setTitle(labels.title);
-    setPrompt(recipe.prompt);
+    setPrompt(labels.prompt);
     setCreateSchedule(recipe.schedule);
     setContextMode("fresh_thread_per_run");
     setCreateNonce((n) => n + 1);
@@ -756,7 +756,7 @@ export default function ScheduledTasksPage() {
                       size="sm"
                       onClick={() =>
                         selectedTask.status === "paused"
-                          ? resumeTask.mutate(selectedTask.id)
+                          ? resumeTask.mutate({ taskId: selectedTask.id })
                           : pauseTask.mutate(selectedTask.id)
                       }
                     >

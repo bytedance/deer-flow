@@ -123,7 +123,7 @@ test("search controls and no-match feedback are localized", async ({
   });
   await page.reload();
   await page
-    .getByRole("searchbox", { name: "搜索任务标题或提示词" })
+    .getByRole("searchbox", { name: "搜索任务标题或任务指令" })
     .fill("不存在的任务");
   await expect(page.getByTestId("scheduled-task-search-empty")).toHaveText(
     "没有符合搜索内容和筛选条件的任务。",

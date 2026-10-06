@@ -137,7 +137,7 @@ test("goal runs show their outcome and the unmet reason is not styled as an erro
   ).toHaveText("future_reason");
   await expect(
     rowOf(list, "execution-stop").getByTestId("scheduled-run-stop-requested"),
-  ).toHaveText("This run asked to stop the schedule");
+  ).toHaveText("This run paused the task");
   await expect(list.getByTestId("scheduled-run-stop-requested")).toHaveCount(1);
   await expect(
     rowOf(list, "execution-failed").locator(".text-destructive"),
@@ -161,13 +161,13 @@ test("tasks without a goal render their runs as before", async ({ page }) => {
 test("goal outcomes use the Chinese copy", async ({ page }) => {
   const list = await openTask(page, goalTask, goalRuns, "zh-CN");
   await expect(page.getByTestId("scheduled-task-goal")).toHaveText(
-    "每次执行的目标: status.md lists every unchecked item",
+    "每次运行的目标: status.md lists every unchecked item",
   );
   await expect(rowOf(list, "execution-met")).toContainText("目标已达成");
   await expect(page.getByTestId("scheduled-task-last-error")).toHaveText(
-    "上次暂停原因: Agent 主动停止了该定时任务",
+    "上次暂停原因: 已由智能体暂停",
   );
   await expect(
     rowOf(list, "execution-unmet").getByTestId("scheduled-run-goal"),
-  ).toHaveText("目标检查：缺少证据");
+  ).toHaveText("目标检查：缺少依据");
 });

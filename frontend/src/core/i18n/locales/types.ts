@@ -665,6 +665,7 @@ export interface Translations {
       invalidRunAt: string;
       timezone: string;
       intervalAmount: string;
+      intervalUnit: string;
       intervalUnitSeconds: string;
       intervalUnitMinutes: string;
       intervalUnitHours: string;
@@ -709,6 +710,39 @@ export interface Translations {
       once: string;
       interval: string;
     };
+    page: {
+      description: string;
+      descriptionNoChat: string;
+      newTask: string;
+      tabs: { all: string; active: string; paused: string; finished: string };
+      tabsLabel: string;
+      search: string;
+      emptyTitle: string;
+      emptyBody: string;
+      emptyBodyNoChat: string;
+      threadFilter: string;
+      showAll: string;
+      schedulerOffTitle: string;
+      schedulerOffBody: string;
+      createBlocked: string;
+      unavailableTitle: string;
+      unavailableBody: string;
+      selectHint: string;
+    };
+    time: {
+      today: string;
+      tomorrow: string;
+      yesterday: string;
+      yourTime: string;
+    };
+    list: {
+      next: string;
+      pausedByAgentOn: string;
+      autoPausedLine: string;
+      finishedLimit: string;
+      finishedEnd: string;
+      runningNow: string;
+    };
     detail: {
       contextMode: string;
       agent: string;
@@ -725,6 +759,95 @@ export interface Translations {
       noSelection: string;
       filteredByThread: string;
       loadFailed: string;
+      runs: string;
+      stopsWhen: string;
+      does: string;
+      goal: string;
+      notes: string;
+      history: string;
+      next: string;
+      firstRun: string;
+      notWhilePaused: string;
+      ifResumed: string;
+      noMoreRuns: string;
+      showAll: string;
+      showLess: string;
+      createdInChat: string;
+      openChat: string;
+      contextFresh: string;
+      contextReuse: string;
+      copyTaskId: string;
+      copied: string;
+      moreActions: string;
+      agentLine: string;
+    };
+    stop: {
+      pausesItself: string;
+      reached: string;
+      noRule: string;
+      afterRuns: string;
+      atTime: string;
+      capRuns: string;
+      capRunsUsed: string;
+      capEnd: string;
+      capBoth: string;
+      trialsDontCount: string;
+      autoPauseRule: string;
+      goalTooltip: string;
+    };
+    notice: {
+      pausedByAgentTitle: string;
+      pausedByAgentBody: string;
+      seeThatRun: string;
+      autoPausedTitle: string;
+      autoPausedBody: string;
+      editGoal: string;
+      openLatestRun: string;
+      resumeAnyway: string;
+      limitTitle: string;
+      limitBody: string;
+      endTitle: string;
+      extendLimit: string;
+      onceFinished: string;
+      onceFailed: string;
+    };
+    renew: {
+      title: string;
+      bodyRuns: string;
+      bodyEnd: string;
+      removeCap: string;
+      removeCapBlocked: string;
+      submit: string;
+    };
+    form: {
+      createTitle: string;
+      editTitle: string;
+      title: string;
+      instructions: string;
+      instructionsHint: string;
+      stopCondition: string;
+      stopConditionHint: string;
+      goal: string;
+      goalHint: string;
+      goalNeedsFresh: string;
+      maxRuns: string;
+      maxRunsHint: string;
+      endAt: string;
+      clear: string;
+      frequentNeedsCap: string;
+      schedule: string;
+      agent: string;
+      advanced: string;
+      contextFresh: string;
+      contextReuse: string;
+      chatId: string;
+      reuseNoticeTitle: string;
+      reuseNoticeDescription: string;
+      create: string;
+      save: string;
+      required: string;
+      endAtPassed: string;
+      copySuffix: string;
     };
     actions: {
       edit: string;
@@ -732,9 +855,27 @@ export interface Translations {
       pause: string;
       resume: string;
       trigger: string;
+      runNow: string;
       duplicate: string;
       duplicateTitleSuffix: string;
       delete: string;
+      openTask: string;
+      openChat: string;
+      busyRunning: string;
+      busyQueued: string;
+      alreadyQueued: string;
+      deleteTitle: string;
+      deleteBody: string;
+    };
+    feedback: {
+      created: string;
+      saved: string;
+      paused: string;
+      resumed: string;
+      deleted: string;
+      trialStarted: string;
+      trialQueued: string;
+      alreadyQueued: string;
     };
     deleteConfirm: string;
     errors: {
@@ -757,6 +898,9 @@ export interface Translations {
       completed: string;
       failed: string;
       cancelled: string;
+      pausedByAgent: string;
+      autoPaused: string;
+      deleted: string;
     };
     history: {
       navigation: string;
@@ -768,6 +912,11 @@ export interface Translations {
       loading: string;
       loadFailed: string;
       retry: string;
+      runNumber: string;
+      tokens: string;
+      continuations: string;
+      details: string;
+      listLabel: string;
     };
     runTrigger: { scheduled: string; manual: string };
     runStatus: {
@@ -791,6 +940,9 @@ export interface Translations {
       agentStopped: string;
       autoPaused: string;
       lastUnmet: string;
+      assumptionBadge: string;
+      assumptionTooltip: string;
+      unchecked: string;
       reasons: {
         missingEvidence: string;
         needsUserInput: string;
@@ -806,12 +958,86 @@ export interface Translations {
         noVerdict: string;
       };
     };
+    runErrors: {
+      restarted: string;
+      leaseLost: string;
+      queueTimeout: string;
+      pausedWhileQueued: string;
+      deletedWhileQueued: string;
+      endReached: string;
+      interrupted: string;
+      launchFailed: string;
+      failed: string;
+    };
+    apiErrors: {
+      generic: string;
+      invalidRequest: string;
+      invalidSchedule: string;
+      invalidScheduleType: string;
+      invalidTimezone: string;
+      intervalTooShort: string;
+      intervalTooLong: string;
+      onceInPast: string;
+      onceTooSoon: string;
+      onceTimePassed: string;
+      invalidContextMode: string;
+      reuseThreadRequiresThread: string;
+      threadNotFound: string;
+      invalidAssistant: string;
+      unknownAssistant: string;
+      invalidGoal: string;
+      goalRequiresFreshThread: string;
+      invalidStopCondition: string;
+      invalidMaxRuns: string;
+      endAtInPast: string;
+      endAtBeforeFirstRun: string;
+      frequentRequiresLimit: string;
+      maxRunsNotAboveUsed: string;
+      limitsExhaustedRuns: string;
+      limitsExhaustedEnd: string;
+      taskNotFound: string;
+      taskRunning: string;
+      runQueued: string;
+      taskChanged: string;
+      taskFinished: string;
+      taskQuotaExceeded: string;
+      schedulerNotRunning: string;
+      triggerFailed: string;
+      permissionDenied: string;
+    };
+    card: {
+      runs: string;
+      stopsWhen: string;
+      results: string;
+      resultsFresh: string;
+      resultsReuse: string;
+      next: string;
+      footer: string;
+      deleted: string;
+      trialStarted: string;
+      schedulerOff: string;
+      refreshFailed: string;
+      label: string;
+    };
+    runThread: {
+      scheduledRun: string;
+      trialRun: string;
+      runNumber: string;
+      instructions: string;
+      stopsWhen: string;
+      notes: string;
+      openTask: string;
+    };
+    header: {
+      countLabel: string;
+      runTask: string;
+    };
     recipes: {
       label: string;
-      trending: { title: string; desc: string };
-      news: { title: string; desc: string };
-      issues: { title: string; desc: string };
-      weekly: { title: string; desc: string };
+      trending: { title: string; desc: string; prompt: string };
+      news: { title: string; desc: string; prompt: string };
+      issues: { title: string; desc: string; prompt: string };
+      weekly: { title: string; desc: string; prompt: string };
     };
   };
 
@@ -1088,6 +1314,17 @@ export interface Translations {
     browserBack: string;
     browserScreenshot: string;
     browserClose: string;
+    scheduleTaskCreate: string;
+    scheduleTaskUpdate: string;
+    scheduleTaskList: string;
+    scheduleTaskPause: string;
+    scheduleTaskResume: string;
+    scheduleTaskDelete: string;
+    scheduleTaskNote: string;
+    scheduleTaskTrial: string;
+    scheduleTaskGeneric: string;
+    scheduleTaskFailed: string;
+    stopScheduledTask: string;
   };
 
   humanInput: {

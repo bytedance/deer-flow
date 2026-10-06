@@ -123,13 +123,13 @@ test("history load failure is retriable and switching tasks resets the page", as
   await page.goto("/workspace/scheduled-tasks");
   await page.getByRole("button", { name: "Older runs", exact: true }).click();
   await expect(
-    page.getByRole("alert").filter({ hasText: "Could not load run history." }),
-  ).toContainText("Could not load run history.", { timeout: 15000 });
+    page
+      .getByRole("alert")
+      .filter({ hasText: "Couldn't load the run history." }),
+  ).toContainText("Couldn't load the run history.", { timeout: 15000 });
   await expect(page.getByTestId("scheduled-task-runs")).toHaveCount(0);
   fail = false;
-  await page
-    .getByRole("button", { name: "Retry history", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(page.getByTestId("scheduled-task-run-list")).toContainText(
     "execution-50",
   );
@@ -195,13 +195,13 @@ test("Chinese history navigation and empty results are localized", async ({
     document.cookie = "locale=zh-CN; path=/";
   });
   await page.reload();
-  const nav = page.getByRole("navigation", { name: "执行记录分页" });
+  const nav = page.getByRole("navigation", { name: "运行记录分页" });
   await expect(nav).toContainText("第 1 页");
   await expect(
-    nav.getByRole("button", { name: "更早记录", exact: true }),
+    nav.getByRole("button", { name: "更早的运行", exact: true }),
   ).toBeDisabled();
   await expect(
-    nav.getByRole("button", { name: "较新记录", exact: true }),
+    nav.getByRole("button", { name: "较新的运行", exact: true }),
   ).toBeDisabled();
 });
 
