@@ -9,6 +9,17 @@ DeerFlow has been deployed.
   three images (see the chart README's "Build & push images" section).
 {{- end }}
 
+{{- if gt (int .Values.gateway.replicas) 1 }}
+
+  ⚠️  WARNING: `gateway.replicas={{ .Values.gateway.replicas }}` enables the
+  Gateway's multi-instance startup gate. Before scaling out, configure shared
+  Postgres, `run_events.backend: db`,
+  `run_ownership.heartbeat_enabled: true`, and the Redis stream bridge.
+  Unsupported process-local features (including browser tools and memory-only
+  ownership/state) will be rejected at startup. See the chart README's
+  "Gateway replicas" section for the full requirements.
+{{- end }}
+
 Get the status:
 
   kubectl -n {{ include "deer-flow.namespace" . }} get pods
