@@ -3140,6 +3140,10 @@ run_ownership:
 #       # resource unrestricted for the role**, so list it explicitly to
 #       # constrain it. Declared plugin pages are not gated yet: their
 #       # `plugin_pages` row ships with the page-authorization slice.
+#       #
+#       # Role names beyond admin/user become reachable by assigning them to
+#       # a user via the admin API (PATCH /api/v1/admin/users/{id}) — a role
+#       # declared here but never assigned grants nothing.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}

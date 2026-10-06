@@ -7,6 +7,7 @@ import {
   rs,
 } from "@rstest/core";
 
+import { userSchema } from "@/core/auth/types";
 import { AUTH_DISABLED_USER } from "@/core/auth/auth-disabled-user";
 import { STATIC_WEBSITE_USER } from "@/core/auth/static-user";
 
@@ -173,5 +174,36 @@ describe("getServerSideUser — gateway_unavailable contract (issue #3493)", () 
     await expect(getServerSideUser()).resolves.toEqual({
       tag: "gateway_unavailable",
     });
+  });
+});
+
+
+// ── system_role contract (RFC #4063 gap 2) ─────────────────────────
+
+describe("userSchema system_role", () => {
+  test("accepts a provider-configured custom role verbatim", () => {
+    const parsed = userSchema.parse({
+      id: "1",
+      email: "g@example.com",
+      system_role: "guest",
+      needs_setup: false,
+      oauth_provider: null,
+      permissions: null,
+    });
+
+    expect(parsed.system_role).toBe("guest");
+  });
+
+  test("still rejects an empty role string", () => {
+    expect(() =>
+      userSchema.parse({
+        id: "1",
+        email: "g@example.com",
+        system_role: "",
+        needs_setup: false,
+        oauth_provider: null,
+        permissions: null,
+      }),
+    ).toThrow();
   });
 });
