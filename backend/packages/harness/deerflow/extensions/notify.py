@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
@@ -183,7 +184,7 @@ async def _notify_each(
 # loops, but extension resources must always be touched on the loop where they
 # were started.
 _notify_loop: asyncio.AbstractEventLoop | None = None
-_pending_dispatches: set[asyncio.Future[Any]] = set()
+_pending_dispatches: set[concurrent.futures.Future[None]] = set()
 _warned_no_loop = False
 _system_observations_enabled = True
 
@@ -196,17 +197,31 @@ def set_extension_notify_loop(loop: asyncio.AbstractEventLoop | None) -> None:
     _warned_no_loop = False
 
 
-async def drain_extension_notify_dispatches() -> None:
-    """Wait for already-submitted fire-and-forget observations to finish."""
+async def drain_extension_notify_dispatches(*, timeout: float = 5.0) -> None:
+    """Boundedly drain already-submitted fire-and-forget observations.
+
+    New detached observations are suspended before the snapshot so shutdown
+    cannot open a submit-after-snapshot window. The bounded wait keeps a wedged
+    extension observer from holding Gateway teardown forever.
+    """
+    suspend_extension_system_observations()
     pending = tuple(_pending_dispatches)
     if not pending:
         return
 
     async def _wait() -> None:
-        await asyncio.gather(
-            *(asyncio.wrap_future(future) for future in pending),
-            return_exceptions=True,
-        )
+        try:
+            async with asyncio.timeout(timeout):
+                await asyncio.gather(
+                    *(asyncio.wrap_future(future) for future in pending),
+                    return_exceptions=True,
+                )
+        except TimeoutError:
+            logger.warning(
+                "Timed out after %.1fs draining %d pending extension observation(s)",
+                timeout,
+                len(pending),
+            )
 
     await await_drained(_wait())
 
