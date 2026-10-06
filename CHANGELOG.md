@@ -636,7 +636,7 @@ This release closes that milestone with **439 merged pull requests**.
   snapshot of the cached `AppConfig` follows it. A truncated or invalid
   revision (for example midway through the non-atomic overwrite fallback on
   a bind-mounted file) keeps the previous configuration and is logged once;
-  a broken file at startup still fails loudly.
+  a broken file at startup still fails loudly. ([#6386])
 - **middleware:** Tool-output budgeting no longer hides a failed shell exit from
   subagent evidence. A bash result between `externalize_min_chars` (12,000) and
   the sandbox limit (20,000) was replaced by a preview ending in its `Access:`
@@ -8855,3 +8855,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6350]: https://github.com/bytedance/deer-flow/pull/6350
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351
 [#6354]: https://github.com/bytedance/deer-flow/pull/6354
+[#6386]: https://github.com/bytedance/deer-flow/pull/6386
