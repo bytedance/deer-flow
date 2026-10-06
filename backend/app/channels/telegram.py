@@ -10,7 +10,7 @@ import time
 from collections.abc import Coroutine
 from typing import Any
 
-from app.channels.base import Channel
+from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
@@ -73,10 +73,68 @@ def _has_rich_constructs(text: str) -> bool:
     return _TELEGRAM_RICH_CONSTRUCT_RE.search(text) is not None
 
 
+def _utf16_width(char: str) -> int:
+    """UTF-16 code units taken by *char*, the unit Telegram measures message limits in."""
+    return 2 if ord(char) > 0xFFFF else 1
+
+
+def _first_utf16_chunk(text: str, limit: int) -> tuple[str, bool]:
+    """The longest prefix of *text* fitting in *limit* UTF-16 code units, and whether anything was left out.
+
+    Stops at the first character that does not fit, so previewing a bounded
+    number of units out of a growing reply costs the limit, not the reply.
+    """
+    units = 0
+    for index, char in enumerate(text):
+        units += _utf16_width(char)
+        if units > limit:
+            return text[:index], True
+    return text, False
+
+
 def _load_telegram_input_file(path, filename: str):
     from telegram import InputFile
 
     return InputFile(path.read_bytes(), filename=filename)
+
+
+def _parse_telegram_user_id(entry: Any) -> int | None:
+    """A positive Telegram user ID from an ``int`` or a digit string, else ``None``."""
+    if isinstance(entry, bool):
+        # bool is an int subclass: ``true`` must not become user 1.
+        return None
+    if isinstance(entry, int):
+        return entry if entry > 0 else None
+    if isinstance(entry, str):
+        text = entry.strip()
+        if text.isascii() and text.isdigit():
+            return int(text) or None
+    return None
+
+
+def _parse_allowed_users(allowed_users: Any) -> frozenset[int] | None:
+    """Parse ``channels.telegram.allowed_users``; ``None`` means no allowlist.
+
+    A single ID is shorthand for a one-entry list. Entries that are not numeric
+    user IDs (``@usernames``, floats, booleans) are dropped with a warning. If
+    none remain, the result is an empty set that denies everyone: the operator
+    asked for a restriction, so an unreadable one must not open the bot to all.
+    """
+    if allowed_users is None or (isinstance(allowed_users, str) and not allowed_users.strip()):
+        return None
+    entries = list(allowed_users) if isinstance(allowed_users, list | tuple | set) else [allowed_users]
+    if not entries:
+        return None
+    user_ids: set[int] = set()
+    for entry in entries:
+        user_id = _parse_telegram_user_id(entry)
+        if user_id is None:
+            logger.warning("[Telegram] Ignoring allowed_users entry %r: expected a positive numeric Telegram user ID (not an @username); list several IDs as a YAML list", entry)
+        else:
+            user_ids.add(user_id)
+    if not user_ids:
+        logger.error("[Telegram] allowed_users has no valid numeric user ID; denying every user until it is fixed")
+    return frozenset(user_ids)
 
 
 class TelegramChannel(Channel):
@@ -84,7 +142,9 @@ class TelegramChannel(Channel):
 
     Configuration keys (in ``config.yaml`` under ``channels.telegram``):
         - ``bot_token``: Telegram Bot API token (from @BotFather).
-        - ``allowed_users``: (optional) List of allowed Telegram user IDs. Empty = allow all.
+        - ``allowed_users``: (optional) List of numeric Telegram user IDs (not
+          @usernames), or a single ID. Empty = allow all; a non-empty list with
+          no valid ID denies everyone.
     """
 
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
@@ -104,12 +164,7 @@ class TelegramChannel(Channel):
         # Tasks submitted from the main dispatcher loop back to PTB's loop.
         # Only the Telegram loop mutates this set.
         self._tg_bridge_tasks: set[asyncio.Task[Any]] = set()
-        self._allowed_users: set[int] = set()
-        for uid in config.get("allowed_users", []):
-            try:
-                self._allowed_users.add(int(uid))
-            except (ValueError, TypeError):
-                pass
+        self._allowed_users = _parse_allowed_users(config.get("allowed_users"))
         # chat_id -> last sent message_id for threaded replies
         self._last_bot_message: dict[str, int] = {}
         # stream_key ("chat_id:thread_ts") -> state of the in-flight streamed
@@ -214,8 +269,9 @@ class TelegramChannel(Channel):
                             logger.warning("[Telegram] polling thread did not stop within the shutdown budget")
             finally:
                 if worker_thread is not None and worker_thread.is_alive():
-                    logger.warning("[Telegram] polling thread is still exiting after bounded shutdown")
-                self._thread = None
+                    raise ChannelStopTimeout("Telegram polling thread is still running after stop timeout")
+                if self._thread is worker_thread:
+                    self._thread = None
                 self._application = None
         logger.info("Telegram channel stopped")
 
@@ -265,9 +321,14 @@ class TelegramChannel(Channel):
         if not text:
             return
 
-        display = text
-        if len(display) > TELEGRAM_MAX_MESSAGE_LENGTH:
-            display = display[: TELEGRAM_MAX_MESSAGE_LENGTH - 1] + "…"
+        # The manager republishes the whole cumulative reply as it grows, so the
+        # preview is clipped by a bounded scan instead of measuring and splitting
+        # the full text on every update.
+        display, over_limit = _first_utf16_chunk(text, TELEGRAM_MAX_MESSAGE_LENGTH)
+        if over_limit:
+            # Clip again with one unit free, so the ellipsis stays inside the limit.
+            display, _ = _first_utf16_chunk(display, TELEGRAM_MAX_MESSAGE_LENGTH - 1)
+            display += "…"
 
         bot = self._application.bot
         state = self._stream_messages.get(key)
@@ -352,7 +413,13 @@ class TelegramChannel(Channel):
         # actually contains a rich construct. Structured command/error replies
         # are plain text with none, so they stay plain and their newlines and
         # <placeholder> tokens are not collapsed into one line.
-        return bool(self.config.get("rich_messages")) and 0 < len(text) <= TELEGRAM_MAX_RICH_MESSAGE_LENGTH and _has_rich_constructs(text)
+        if not self.config.get("rich_messages"):
+            return False
+        # Telegram measures this cap in UTF-16 code units like its other limits, while
+        # `len()` counts code points, so reuse the bounded scan the plain-text path
+        # uses: an emoji-heavy reply that fits by code points is still rejected.
+        _, over_limit = _first_utf16_chunk(text, TELEGRAM_MAX_RICH_MESSAGE_LENGTH)
+        return not over_limit and _has_rich_constructs(text)
 
     async def _edit_rich_message(self, chat_id: int, message_id: int, text: str) -> bool:
         """Replace a streamed preview with a persistent Telegram Rich Message."""
@@ -812,7 +879,28 @@ class TelegramChannel(Channel):
 
     @staticmethod
     def _split_message(text: str) -> list[str]:
-        return [text[i : i + TELEGRAM_MAX_MESSAGE_LENGTH] for i in range(0, len(text), TELEGRAM_MAX_MESSAGE_LENGTH)] or [text]
+        """Split *text* into chunks that fit Telegram's 4096 UTF-16 code unit limit.
+
+        Slicing by code points hands sendMessage up to twice the limit when the
+        reply is emoji-heavy (a non-BMP character costs 2 units), the retry policy
+        repeats the rejected 400 "Message is too long" and the reply is dropped.
+        A split can still fall inside one user-perceived character (a combining
+        mark, a ZWJ emoji sequence, the second half of a flag emoji); every chunk
+        stays within budget, so a seam is a rendering artifact, not a failed send.
+        """
+        chunks: list[str] = []
+        current: list[str] = []
+        units = 0
+        for char in text:
+            width = _utf16_width(char)
+            if units + width > TELEGRAM_MAX_MESSAGE_LENGTH:
+                chunks.append("".join(current))
+                current = []
+                units = 0
+            current.append(char)
+            units += width
+        chunks.append("".join(current))
+        return chunks
 
     async def _send_running_reply(self, chat_id: str, reply_to_message_id: int) -> None:
         """Send a 'Working on it...' reply and register it as the stream target."""
@@ -865,7 +953,7 @@ class TelegramChannel(Channel):
                 logger.exception("Error during Telegram shutdown")
 
     def _check_user(self, user_id: int) -> bool:
-        if not self._allowed_users:
+        if self._allowed_users is None:
             return True
         return user_id in self._allowed_users
 

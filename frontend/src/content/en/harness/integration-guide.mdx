@@ -110,7 +110,7 @@ from fastapi import FastAPI
 app = FastAPI()
 
 # Mount the DeerFlow gateway router
-from deerflow.app.gateway.main import app as gateway_app
+from app.gateway.app import app as gateway_app
 app.mount("/deerflow", gateway_app)
 ```
 

@@ -2,6 +2,29 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Browser-asset confinement tests use `support.symlinks.symlink_or_skip` for real
+file and directory symlinks. Keep missing-file, duplicate-key, and size-limit
+checks separate so they still run when the host cannot create symlinks.
+
+`blocking_io/test_web_tool_url_validation.py` resolves a synthetic `.invalid`
+hostname to loopback by patching `_socket.getaddrinfo`, below the real
+`socket.getaddrinfo` wrapper. Do not replace that wrapper or the production URL
+guard: the strict gate must still reject on-loop resolution. Assert each tool
+path reaches the native fixture so an unresolved-host rejection cannot mask it.
+The IPv4 fixture accepts only `AF_UNSPEC` and `AF_INET`; unsupported families
+must fail rather than receive a fabricated IPv4 answer.
+
+The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
+`ast`, checking both `encoding` and `errors`; module-wide literal counts can
+hide unpinned calls behind unrelated settings.
+
+## Claude provider tests
+
+`test_claude_provider_prompt_caching.py` exercises real Anthropic SDK serialization
+through offline HTTP transports. Keep its directly imported `anthropic` SDK in
+the backend `dev` dependency group rather than relying on `langchain-anthropic`
+to supply it transitively.
+
 ## Router auth fixtures
 
 For owner-scoped route assertions, pass a stable `user_factory` and
@@ -60,6 +83,12 @@ repository, then verify the entire new row remains unchanged. Reclaiming before
 the old operation starts does not catch SQLite SELECT/ORM-flush races. Keep the
 old completion timestamp within its original lease so expiry cannot mask a
 missing token fence; always drain paused tasks and restore session patches.
+
+## Project document cache
+
+`test_project_document_char_cache.py` pauses real file-IO workers between cache
+lookup and promotion to exercise concurrent eviction. Keep cache metadata
+operations atomic, and verify that a full scan does not hold the cache lock.
 
 ## Executor starvation tests
 

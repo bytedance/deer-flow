@@ -43,6 +43,7 @@ async def _run_goal_delivery(
     completion_recovers=False,
     checkpoint_mode="full",
     after_terminal_completion=None,
+    scheduled=False,
 ):
     """Keep graphs, checkpoints, output scanning and delivery verification real.
 
@@ -74,7 +75,9 @@ async def _run_goal_delivery(
 
     run_store = RunStore()
     manager = RunManager(store=run_store, run_ownership_config=RunOwnershipConfig(heartbeat_enabled=heartbeat_enabled))
-    record = await manager.create("goal-delivery-thread")
+    scheduled_owner = get_effective_user_id() if scheduled else None
+    scheduled_metadata = {"scheduled_task_id": "scheduled-task", "scheduled_task_run_id": "scheduled-occurrence", "scheduled_goal_objective": "Create and present report.md."} if scheduled else {}
+    record = await manager.create("goal-delivery-thread", user_id=scheduled_owner, metadata=scheduled_metadata)
     thread_id = record.thread_id
     paths = Paths(base_dir=tmp_path)
     output_dir = paths.sandbox_outputs_dir(thread_id, user_id=get_effective_user_id())
@@ -114,6 +117,7 @@ async def _run_goal_delivery(
                         "blocker": "none" if satisfied else "goal_not_met_yet",
                         "reason": "Fixed evaluator response for the worker regression.",
                         "evidence_summary": "The assistant reports that the report is complete.",
+                        "relied_on_assumption": False,
                     }
                 )
             )
@@ -149,22 +153,28 @@ async def _run_goal_delivery(
     graph.add_edge("report", END)
     compiled = graph.compile(checkpointer=checkpointer)
     accessor = CheckpointStateAccessor.bind(compiled, checkpointer, mode=checkpoint_mode)
-    await accessor.aupdate(
-        {"configurable": {"thread_id": thread_id}},
-        {"messages": [HumanMessage(content="Create and present report.md.")], "title": "Report"},
-        as_node="report",
-    )
     goal = build_goal_state("Create and present report.md.", max_continuations=2)
-    await write_thread_goal(checkpointer, thread_id, goal)
+    if not scheduled:
+        await accessor.aupdate(
+            {"configurable": {"thread_id": thread_id}},
+            {"messages": [HumanMessage(content="Create and present report.md.")], "title": "Report"},
+            as_node="report",
+        )
+        await write_thread_goal(checkpointer, thread_id, goal)
 
     await worker.run_agent(
         bridge,
         manager,
         record,
-        ctx=worker.RunContext(checkpointer=checkpointer, event_store=event_store, checkpoint_channel_mode=checkpoint_mode),
+        ctx=worker.RunContext(
+            checkpointer=checkpointer,
+            event_store=event_store,
+            checkpoint_channel_mode=checkpoint_mode,
+            scheduled_task_runtime={"task_id": "scheduled-task", "occurrence_id": "scheduled-occurrence", "user_id": scheduled_owner, "goal_objective": goal["objective"]} if scheduled else None,
+        ),
         agent_factory=lambda config: compiled,
         graph_input={"messages": [HumanMessage(content="Finish the report now.")]},
-        config={"configurable": {"thread_id": thread_id}},
+        config={"configurable": {"thread_id": thread_id}, **({"context": {"non_interactive": True, "user_id": scheduled_owner}} if scheduled else {})},
         stream_modes=["values"],
     )
 
@@ -261,6 +271,18 @@ async def test_cancellation_during_evaluation_preserves_goal(tmp_path, monkeypat
     assert result.record.status == RunStatus.interrupted
     assert result.durable_run["status"] == "interrupted"
     assert result.goal == result.original_goal
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("checkpoint_mode", ["full", "delta"])
+@pytest.mark.parametrize("fail_receipt", [False, True])
+async def test_scheduled_goal_cleanup_and_atomic_verdict_follow_delivery_finalization(tmp_path, monkeypatch, checkpoint_mode, fail_receipt):
+    result = await _run_goal_delivery(tmp_path, monkeypatch, scheduled=True, present_on_turn=1, checkpoint_mode=checkpoint_mode, fail_receipt=fail_receipt)
+    assert result.goal is None
+    assert result.durable_run["status"] == ("error" if fail_receipt else "success")
+    assert result.durable_run["goal_verdict"]["satisfied"] is True
+    assert result.durable_run["goal_verdict"]["relied_on_assumption"] is False
+    assert result.goals_at_receipt[0]["objective"] == "Create and present report.md."
 
 
 @pytest.mark.asyncio

@@ -7,8 +7,9 @@ from typing import Any, Literal, Self
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationInfo, field_validator, model_validator
 
+from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agent_storage_config import AgentStorageConfig
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
@@ -19,6 +20,7 @@ from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.dedupe_storage_config import DedupeStorageConfig
+from deerflow.config.deployment_config import DeploymentConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
@@ -61,9 +63,11 @@ from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 from deerflow.config.typesafe_config import TypeSafeConfig, load_typesafe_config_from_dict
 from deerflow.config.verification_config import VerificationConfig
+from deerflow.env import load_selected_env_file
 from deerflow.extensions.loader import ExtensionSpec
 
-load_dotenv()
+if not load_selected_env_file():
+    load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +94,8 @@ class CircuitBreakerConfig(BaseModel):
 
     @field_validator("failure_threshold", "recovery_timeout_sec", mode="before")
     @classmethod
-    def _reject_boolean_circuit_settings(cls, value: object) -> object:
-        if isinstance(value, bool):
-            raise ValueError("must be an integer, not a boolean")
-        return value
+    def _reject_boolean_circuit_settings(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
 
 class LlmCallConfig(BaseModel):
@@ -151,6 +153,18 @@ class LlmCallConfig(BaseModel):
             "Ignored when the provider sends Retry-After (honored verbatim)."
         ),
     )
+
+    @field_validator(
+        "max_concurrent_calls",
+        "retry_max_attempts",
+        "retry_base_delay_ms",
+        "retry_cap_delay_ms",
+        "burst_retry_base_delay_ms",
+        mode="before",
+    )
+    @classmethod
+    def _reject_boolean_llm_call_settings(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
 
 
 class LoggingEnhanceConfig(BaseModel):
@@ -250,6 +264,12 @@ class AppConfig(BaseModel):
         ge=1,
         description="Hard server-side ceiling for configured defaults and client-supplied run recursion_limit values. Values above this are clamped; prevents runaway LangGraph super-steps (LLM cost / DoS).",
     )
+
+    @field_validator("recursion_limit", "max_recursion_limit", mode="before")
+    @classmethod
+    def _reject_boolean_recursion_limits(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
+
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
     sandbox: SandboxConfig = Field(
         description=format_field_description(
@@ -365,6 +385,13 @@ class AppConfig(BaseModel):
         description=format_field_description(
             "stream_bridge",
             field_doc="Stream bridge connecting agent workers to SSE endpoints.",
+        ),
+    )
+    deployment: DeploymentConfig = Field(
+        default_factory=DeploymentConfig,
+        description=format_field_description(
+            "deployment",
+            field_doc="Deployment topology declaration: whether more than one Gateway instance shares this database (drives the multi-process startup safety gate).",
         ),
     )
     run_ownership: RunOwnershipConfig = Field(

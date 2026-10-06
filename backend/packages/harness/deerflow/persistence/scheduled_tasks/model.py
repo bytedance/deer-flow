@@ -15,6 +15,11 @@ class ScheduledTaskRow(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     thread_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    origin_thread_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
+    goal_objective: Mapped[str | None] = mapped_column(Text, nullable=True)
+    max_runs: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    standing_notes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     context_mode: Mapped[str] = mapped_column(String(32), default="fresh_thread_per_run")
     assistant_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     title: Mapped[str] = mapped_column(String(255))
@@ -48,6 +53,7 @@ class ScheduledTaskRunStatus(StrEnum):
     LAUNCHING = "launching"
     RUNNING = "running"
     SUCCESS = "success"
+    UNMET = "unmet"
     FAILED = "failed"
     SKIPPED = "skipped"
     INTERRUPTED = "interrupted"
@@ -59,6 +65,7 @@ class ScheduledTaskRunStatus(StrEnum):
 TERMINAL_RUN_STATUSES: frozenset[str] = frozenset(
     {
         ScheduledTaskRunStatus.SUCCESS,
+        ScheduledTaskRunStatus.UNMET,
         ScheduledTaskRunStatus.FAILED,
         ScheduledTaskRunStatus.SKIPPED,
         ScheduledTaskRunStatus.INTERRUPTED,
@@ -78,6 +85,7 @@ ACTIVE_RUN_STATUSES: frozenset[str] = frozenset(
 ONCE_TASK_STATUS_BY_RUN_STATUS: dict[str, str] = {
     "success": "completed",
     "failed": "failed",
+    "unmet": "failed",
     "interrupted": "cancelled",
     "skipped": "cancelled",
 }

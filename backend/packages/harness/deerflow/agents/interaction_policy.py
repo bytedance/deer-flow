@@ -97,7 +97,7 @@ Do not wait for clarification or approval. Resolve ambiguity from the request,
 {context_sources}.
 
 - For low-risk and reversible work, make the smallest reasonable assumption and continue.
-- State every material assumption in the final result.
+- State every material assumption in the final result, one line each: what was unclear, what you chose, and why.
 - For high-risk or irreversible work without sufficient authorization, do not guess:
   stop with a concise structured `BLOCKED` result that names the missing decision.
 - Prefer inspection and read-only checks before changing state.
