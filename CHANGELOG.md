@@ -72,6 +72,16 @@ This release closes that milestone with **301 merged pull requests**.
   replies in the user's language. The tools are offered only while the
   Gateway's scheduler is running. ([#6340])
 
+- **scheduler:** The Scheduled tasks page is list-first: status tabs and search
+  above the task list, a "New task" dialog (create, edit and duplicate, including
+  the per-run goal, the stop condition and the safety cap), and a detail view with
+  Runs, Stops when, Does, notes from chat and History. Each run row shows its
+  number, a one-line summary, the goal result, token usage and an "Open chat"
+  link; raw errors stay behind "Details". Tasks paused by their agent, auto-paused
+  after three missed goals or finished by their safety cap explain why, with
+  "See that run", "Edit goal" or "Extend limit". `?task_id=` deep-links a task,
+  and the page explains when the scheduler is off. ([#6340])
+
 - **scheduler:** The web app sends the browser timezone with chat runs
   (`context.client_timezone`), shows scheduled-task API errors as localized
   messages chosen by error code (raw server text only behind "Details"), and

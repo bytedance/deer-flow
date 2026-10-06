@@ -683,33 +683,10 @@ export interface Translations {
     preview: string;
     cronHelp: string;
     create: {
-      title: string;
-      taskTitle: string;
-      prompt: string;
       agent: string;
       leadAgent: string;
-      submit: string;
-      fillRequired: string;
     };
-    context: {
-      fresh: string;
-      reuse: string;
-      threadIdPlaceholder: string;
-      reuseNoticeTitle: string;
-      reuseNoticeDescription: string;
-    };
-    search: { placeholder: string; clear: string; noResults: string };
-    filters: {
-      allStatuses: string;
-      enabled: string;
-      paused: string;
-      completed: string;
-      failed: string;
-      allTypes: string;
-      cron: string;
-      once: string;
-      interval: string;
-    };
+    search: { clear: string; noResults: string };
     page: {
       description: string;
       descriptionNoChat: string;
@@ -744,20 +721,10 @@ export interface Translations {
       runningNow: string;
     };
     detail: {
-      contextMode: string;
       agent: string;
-      thread: string;
-      lastThread: string;
-      schedule: string;
-      nextRun: string;
-      lastRun: string;
-      lastRunId: string;
-      lastError: string;
       runsCount: string;
       runsCountOne: string;
       noRuns: string;
-      noSelection: string;
-      filteredByThread: string;
       loadFailed: string;
       runs: string;
       stopsWhen: string;
@@ -851,13 +818,10 @@ export interface Translations {
     };
     actions: {
       edit: string;
-      cancelEdit: string;
       pause: string;
       resume: string;
-      trigger: string;
       runNow: string;
       duplicate: string;
-      duplicateTitleSuffix: string;
       delete: string;
       openTask: string;
       openChat: string;
@@ -872,12 +836,12 @@ export interface Translations {
       saved: string;
       paused: string;
       resumed: string;
+      resumedNoTime: string;
       deleted: string;
       trialStarted: string;
       trialQueued: string;
       alreadyQueued: string;
     };
-    deleteConfirm: string;
     errors: {
       create: string;
       update: string;
@@ -885,11 +849,6 @@ export interface Translations {
       resume: string;
       trigger: string;
       delete: string;
-    };
-    edit: {
-      titlePlaceholder: string;
-      promptPlaceholder: string;
-      submit: string;
     };
     status: {
       enabled: string;
@@ -930,16 +889,8 @@ export interface Translations {
       interrupted: string;
     };
     goal: {
-      objective: string;
-      maxRuns: string;
-      endAt: string;
       met: string;
-      metAssumed: string;
       stopRequested: string;
-      lastPause: string;
-      agentStopped: string;
-      autoPaused: string;
-      lastUnmet: string;
       assumptionBadge: string;
       assumptionTooltip: string;
       unchecked: string;

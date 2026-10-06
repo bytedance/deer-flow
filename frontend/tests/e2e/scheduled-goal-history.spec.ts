@@ -74,6 +74,7 @@ const goalRuns = [
     goal_verdict: { satisfied: true },
     stop_requested_run_id: "execution-stop",
   }),
+  run("unchecked", { ...goal, status: "unmet", error: "evaluator_failed" }),
   run("unknown", { ...goal, status: "unmet", error: "future_reason" }),
   run("failed", { ...goal, status: "failed", error: "boom" }),
 ];
@@ -103,71 +104,112 @@ async function openTask(
     }, locale);
     await page.reload();
   }
-  return page.getByTestId("scheduled-task-run-list");
 }
 
-const rowOf = (list: ReturnType<Page["getByTestId"]>, runId: string) =>
-  list.locator("div.rounded-md").filter({ hasText: runId });
+const rowOf = (page: Page, runId: string) =>
+  page.locator(
+    `[data-testid="scheduled-run-row"][data-run-id="execution-${runId}"]`,
+  );
 
-test("goal runs show their outcome and the unmet reason is not styled as an error", async ({
+test("goal runs show their outcome; raw text stays behind Details", async ({
   page,
 }) => {
-  const list = await openTask(page, goalTask, goalRuns);
-  const detail = page.getByTestId("scheduled-task-detail");
+  await openTask(page, goalTask, goalRuns);
   await expect(page.getByTestId("scheduled-task-goal")).toHaveText(
-    "Goal per run: status.md lists every unchecked item",
+    "status.md lists every unchecked item",
   );
-  await expect(detail.getByText("Automatic runs: up to 5")).toBeVisible();
-  await expect(page.getByTestId("scheduled-task-last-error")).toHaveText(
-    "Last pause reason: The agent stopped its own schedule",
+  await expect(page.getByTestId("scheduled-task-detail")).toContainText(
+    "After 5 automatic runs",
+  );
+  await expect(page.getByTestId("scheduled-task-status")).toHaveText(
+    "Paused by agent",
   );
 
-  await expect(rowOf(list, "execution-met")).toContainText("Goal met");
-  await expect(rowOf(list, "execution-assumed")).toContainText(
-    "Goal met, relying on stated assumptions",
+  await expect(rowOf(page, "met").getByTestId("scheduled-run-goal")).toHaveText(
+    "Goal met",
   );
-  const unmet = rowOf(list, "execution-unmet").getByTestId(
-    "scheduled-run-goal",
+  await expect(
+    rowOf(page, "met").getByTestId("scheduled-run-assumption"),
+  ).toHaveCount(0);
+  await expect(
+    rowOf(page, "assumed").getByTestId("scheduled-run-assumption"),
+  ).toHaveText("Assumption made");
+  const unmet = rowOf(page, "unmet");
+  await expect(unmet.getByTestId("scheduled-run-goal")).toHaveText(
+    "Goal not met",
   );
-  await expect(unmet).toHaveText("Goal check: evidence missing");
-  await expect(unmet).toHaveAttribute("title", "blocked:missing_evidence");
-  await expect(unmet).not.toHaveClass(/text-destructive/);
+  await expect(unmet).toContainText("Goal check: evidence missing");
+  await expect(unmet.getByTestId("scheduled-run-goal")).not.toHaveClass(
+    /text-destructive/,
+  );
   await expect(
-    rowOf(list, "execution-unknown").getByTestId("scheduled-run-goal"),
-  ).toHaveText("future_reason");
+    rowOf(page, "unchecked").getByTestId("scheduled-run-goal"),
+  ).toHaveText("Couldn't check the goal");
+  await expect(rowOf(page, "unchecked")).toContainText(
+    "Couldn't check the goal; the run itself may be fine",
+  );
+
+  // An unknown goal code is not shown as text until Details is opened.
+  const unknown = rowOf(page, "unknown");
+  await expect(unknown.getByTestId("scheduled-run-goal")).toHaveText(
+    "Goal not met",
+  );
+  await expect(unknown.getByText("future_reason")).toBeHidden();
+  await unknown.getByText("Details").click();
+  await expect(unknown.getByText("future_reason")).toBeVisible();
+
   await expect(
-    rowOf(list, "execution-stop").getByTestId("scheduled-run-stop-requested"),
+    rowOf(page, "stop").getByTestId("scheduled-run-stop-requested"),
   ).toHaveText("This run paused the task");
-  await expect(list.getByTestId("scheduled-run-stop-requested")).toHaveCount(1);
-  await expect(
-    rowOf(list, "execution-failed").locator(".text-destructive"),
-  ).toHaveText("boom");
+  await expect(page.getByTestId("scheduled-run-stop-requested")).toHaveCount(1);
+
+  const failed = rowOf(page, "failed");
+  await expect(failed).toContainText(
+    "Failed while running. Open the chat to see where it stopped.",
+  );
+  await expect(failed.getByText("boom")).toBeHidden();
+  await failed.getByText("Details").click();
+  await expect(failed.getByTestId("scheduled-run-raw-error")).toHaveText(
+    "boom",
+  );
 });
 
-test("tasks without a goal render their runs as before", async ({ page }) => {
-  const list = await openTask(page, plainTask, plainRuns);
-  await expect(list.getByText("execution-plain-ok")).toBeVisible();
+test("tasks without a goal render their runs without goal badges", async ({
+  page,
+}) => {
+  await openTask(page, plainTask, plainRuns);
+  await expect(page.getByTestId("scheduled-run-row")).toHaveCount(2);
   await expect(page.getByTestId("scheduled-task-goal")).toHaveCount(0);
-  await expect(page.getByTestId("scheduled-task-last-error")).toHaveText(
-    "Last error: boom",
+  await expect(page.getByTestId("scheduled-run-goal")).toHaveCount(0);
+  await expect(page.getByTestId("scheduled-run-stop-requested")).toHaveCount(0);
+  await expect(page.getByTestId("scheduled-task-detail")).not.toContainText(
+    "boom",
+    { useInnerText: true },
   );
-  await expect(list.getByTestId("scheduled-run-goal")).toHaveCount(0);
-  await expect(list.getByTestId("scheduled-run-stop-requested")).toHaveCount(0);
-  await expect(
-    rowOf(list, "execution-plain-failed").locator(".text-destructive"),
-  ).toHaveText("boom");
+  const failed = rowOf(page, "plain-failed");
+  await failed.getByText("Details").click();
+  await expect(failed.getByTestId("scheduled-run-raw-error")).toHaveText(
+    "boom",
+  );
 });
 
 test("goal outcomes use the Chinese copy", async ({ page }) => {
-  const list = await openTask(page, goalTask, goalRuns, "zh-CN");
-  await expect(page.getByTestId("scheduled-task-goal")).toHaveText(
-    "每次运行的目标: status.md lists every unchecked item",
+  await openTask(page, goalTask, goalRuns, "zh-CN");
+  await expect(page.getByTestId("scheduled-task-detail")).toContainText(
+    "每次运行的目标",
   );
-  await expect(rowOf(list, "execution-met")).toContainText("目标已达成");
-  await expect(page.getByTestId("scheduled-task-last-error")).toHaveText(
-    "上次暂停原因: 已由智能体暂停",
+  await expect(rowOf(page, "met").getByTestId("scheduled-run-goal")).toHaveText(
+    "目标已达成",
   );
   await expect(
-    rowOf(list, "execution-unmet").getByTestId("scheduled-run-goal"),
-  ).toHaveText("目标检查：缺少依据");
+    rowOf(page, "assumed").getByTestId("scheduled-run-assumption"),
+  ).toHaveText("含假设");
+  await expect(
+    rowOf(page, "unchecked").getByTestId("scheduled-run-goal"),
+  ).toHaveText("未能检查目标");
+  await expect(page.getByTestId("scheduled-task-status")).toHaveText(
+    "已由智能体暂停",
+  );
+  await expect(rowOf(page, "unmet")).toContainText("目标检查：缺少依据");
+  await expect(rowOf(page, "failed")).toContainText("运行中出错");
 });

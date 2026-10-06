@@ -34,6 +34,8 @@ const runs = (count: number) =>
     finished_at: null,
     created_at: "2026-01-01T00:00:00Z",
   }));
+const rowOf = (page: Page, runId: string) =>
+  page.locator(`[data-testid="scheduled-run-row"][data-run-id="${runId}"]`);
 const endpoint = /\/api\/scheduled-tasks\/history\/runs(?:\?|$)/;
 async function seedRuns(
   page: Page,
@@ -64,21 +66,17 @@ for (const count of [100, 101]) {
     mockLangGraphAPI(page, { threads: [], scheduledTasks: [task] });
     await seedRuns(page, { history: runs(count) });
     await page.goto("/workspace/scheduled-tasks");
-    const list = page.getByTestId("scheduled-task-run-list");
+    const rows = page.getByTestId("scheduled-run-row");
     const older = page.getByRole("button", { name: "Older runs", exact: true });
-    await expect(list.getByText(/^execution-\d+$/)).toHaveCount(50);
-    await expect(list.getByText("execution-50", { exact: true })).toHaveCount(
-      0,
-    );
+    await expect(rows).toHaveCount(50);
+    await expect(rowOf(page, "execution-50")).toHaveCount(0);
     await older.click();
-    await expect(list.getByText("execution-50", { exact: true })).toBeVisible();
-    await expect(list.getByText(/^execution-\d+$/)).toHaveCount(50);
+    await expect(rowOf(page, "execution-50")).toBeVisible();
+    await expect(rows).toHaveCount(50);
     if (count === 101) {
       await older.click();
-      await expect(
-        list.getByText("execution-100", { exact: true }),
-      ).toBeVisible();
-      await expect(list.getByText(/^execution-\d+$/)).toHaveCount(1);
+      await expect(rowOf(page, "execution-100")).toBeVisible();
+      await expect(rows).toHaveCount(1);
     }
     await expect(older).toBeDisabled();
     await page.getByRole("button", { name: "Newer runs", exact: true }).click();
@@ -89,7 +87,7 @@ for (const count of [100, 101]) {
       await page
         .getByRole("button", { name: "Latest runs", exact: true })
         .click();
-    await expect(list.getByText("execution-0", { exact: true })).toBeVisible();
+    await expect(rowOf(page, "execution-0")).toBeVisible();
     expect(requests).toContain("?limit=51&offset=50");
     expect(requests).not.toContain("?limit=51&offset=150");
   });
@@ -130,13 +128,9 @@ test("history load failure is retriable and switching tasks resets the page", as
   await expect(page.getByTestId("scheduled-task-runs")).toHaveCount(0);
   fail = false;
   await page.getByRole("button", { name: "Try again", exact: true }).click();
-  await expect(page.getByTestId("scheduled-task-run-list")).toContainText(
-    "execution-50",
-  );
+  await expect(rowOf(page, "execution-50")).toBeVisible();
   await page.getByTestId("scheduled-task-item-other").click();
-  await expect(page.getByTestId("scheduled-task-run-list")).toContainText(
-    "other-execution",
-  );
+  await expect(rowOf(page, "other-execution")).toBeVisible();
   await expect(
     page.getByRole("navigation", { name: "Run history pages" }),
   ).toContainText("Page 1");
@@ -164,13 +158,12 @@ test("only latest history polls and returning to latest fetches newly inserted r
     });
   });
   await page.goto("/workspace/scheduled-tasks");
-  const list = page.getByTestId("scheduled-task-run-list");
-  await expect(list).toContainText("execution-0");
+  await expect(rowOf(page, "execution-0")).toBeVisible();
   const initialRequests = offsets.length;
   await page.clock.fastForward(16000);
   await expect.poll(() => offsets.length).toBeGreaterThan(initialRequests);
   await page.getByRole("button", { name: "Older runs", exact: true }).click();
-  await expect(list).toContainText("execution-50");
+  await expect(rowOf(page, "execution-50")).toBeVisible();
   const olderRequests = offsets.length;
   rows.unshift({ ...rows[0]!, id: "inserted", run_id: "new-execution" });
   await page.clock.fastForward(31000);
@@ -180,9 +173,9 @@ test("only latest history polls and returning to latest fetches newly inserted r
     document.dispatchEvent(new Event("visibilitychange"));
   });
   expect(offsets.length).toBe(olderRequests);
-  await expect(list).toContainText("execution-50");
+  await expect(rowOf(page, "execution-50")).toBeVisible();
   await page.getByRole("button", { name: "Latest runs", exact: true }).click();
-  await expect(list).toContainText("new-execution");
+  await expect(rowOf(page, "new-execution")).toBeVisible();
   expect(offsets.at(-1)).toBe(0);
 });
 
@@ -225,4 +218,32 @@ test("pending history does not report an empty run count", async ({ page }) => {
     release();
   }
   await expect(page.getByTestId("scheduled-task-runs")).toContainText("0 runs");
+});
+
+test("rows link to their chat; a queued run without a chat does not", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, { threads: [], scheduledTasks: [task] });
+  await seedRuns(page, {
+    history: [
+      {
+        ...runs(1)[0]!,
+        id: "queued-row",
+        run_id: null as unknown as string,
+        status: "queued" as unknown as "success",
+      },
+      { ...runs(1)[0]!, id: "done-row", run_id: "execution-done" },
+    ],
+  });
+  await page.goto("/workspace/scheduled-tasks");
+  const rows = page.getByTestId("scheduled-run-row");
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText("Queued");
+  await expect(rows.nth(0).getByRole("link")).toHaveCount(0);
+  await expect(
+    rowOf(page, "execution-done").getByRole("link", { name: "Open chat" }),
+  ).toHaveAttribute("href", "/workspace/chats/thread-1");
+  await expect(page.getByTestId("scheduled-task-run-list")).not.toContainText(
+    "execution-done",
+  );
 });
