@@ -438,7 +438,7 @@
   现在本地读写与远程沙箱一致，按原样保留换行符；当文件使用 CRLF 时，`str_replace` 会把
   以 `\n` 书写的 `old_str`/`new_str` 转为 CRLF，远程沙箱上的多行编辑也因此能匹配 CRLF 文件。
   同样在 Windows 上，保存到 `outputs/.tool-results/` 的超长工具输出此前也被写成 CRLF，与其 blob
-  引用不再一致，未配置 blob 存储时会在下一次模型调用时被删除；现在按原样逐字节写入。
+  引用不再一致，未配置 blob 存储时会在下一次模型调用时被删除；现在按原样逐字节写入。([#6343])
 - **技能：** 编辑自定义技能时，不再在事件循环上执行文件系统操作。
   `PUT /api/skills/custom/{name}` 此前在事件循环上构建用户级技能存储、探测自定义、
   内置、旧版共享与集成目录、把草稿写入临时目录以校验 frontmatter，并读取将被替换的
@@ -6515,3 +6515,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6319]: https://github.com/bytedance/deer-flow/pull/6319
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
 [#6332]: https://github.com/bytedance/deer-flow/pull/6332
+[#6343]: https://github.com/bytedance/deer-flow/pull/6343

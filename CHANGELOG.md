@@ -504,7 +504,7 @@ This release closes that milestone with **301 merged pull requests**.
   multi-line edits match CRLF files on remote providers. On Windows, oversized
   tool output saved under `outputs/.tool-results/` was likewise written as CRLF,
   no longer matched its stamped blob reference, and was deleted on the next
-  model call when no blob store was configured; it is now written byte-exact.
+  model call when no blob store was configured; it is now written byte-exact. ([#6343])
 - **skills:** Editing a custom skill no longer runs filesystem work on the event
   loop. `PUT /api/skills/custom/{name}` built the user-scoped skill storage,
   probed the custom, public, legacy and integration roots, validated the
@@ -7836,3 +7836,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
 [#6328]: https://github.com/bytedance/deer-flow/pull/6328
 [#6332]: https://github.com/bytedance/deer-flow/pull/6332
+[#6343]: https://github.com/bytedance/deer-flow/pull/6343
