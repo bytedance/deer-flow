@@ -799,7 +799,13 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         # leaves the matcher parked on the username and misses the shell.
         # Standalone flags (`-E`, `-H`, ...) stay handled by the next branch.
         r"(?:-[acCDgprRtTuU]\b(?:\s|\\\r?\n)+[^\s|;\\]+(?:\s|\\\r?\n)+"
-        r"|-\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
+        # The standalone branch must not re-consume a value-taking option:
+        # `-u` would otherwise match both alternatives, and a chain of them
+        # inside `*?` lets the matcher explore every one-/two-token partition
+        # (exponential) before the non-shell tail fails. The lookahead keeps
+        # the two branches mutually exclusive, so each token is consumed in
+        # exactly one way and a failing chain stays linear.
+        r"|-(?![acCDgprRtTuU]\b)\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
         r"(?:bash|zsh|dash|fish|sh)\b",
         text,
     ):
