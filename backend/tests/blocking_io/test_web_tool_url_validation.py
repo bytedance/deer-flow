@@ -1,26 +1,72 @@
 """Web tools must resolve SSRF-screened hostnames off the agent event loop.
 
-``http://127.1/`` is not an ``ipaddress`` literal, so the URL guard hands it to
-the real ``socket.getaddrinfo``, which expands it to 127.0.0.1 without any DNS
-traffic. The strict gate's ``socket.getaddrinfo`` rule fails each test if the
-tool resolves on the loop instead of in a worker thread.
+A synthetic hostname resolves to loopback through a native resolver fixture,
+without depending on platform-specific numeric-host parsing or external DNS.
+The real ``socket.getaddrinfo`` wrapper and the strict gate's rule remain active,
+so resolution on the loop still fails instead of reaching the fixture.
 """
 
+import _socket
+import asyncio
+import socket
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from blockbuster import BlockingError
 
 from deerflow.community.browser_automation import tools as browser_tools
+from deerflow.community.browser_automation.egress import BrowserEgressProxy
 from deerflow.community.browserless import tools as browserless_tools
 from deerflow.community.crawl4ai import tools as crawl4ai_tools
+from deerflow.community.url_safety import resolve_host_addresses
 
 pytestmark = pytest.mark.asyncio
 
-_UNRESOLVED_LOOPBACK_URL = "http://127.1/"
+_LOOPBACK_HOST = "loopback.test.invalid"
+_UNRESOLVED_LOOPBACK_URL = f"http://{_LOOPBACK_HOST}/"
 
 
-async def test_crawl4ai_web_fetch_resolves_off_loop() -> None:
+@pytest.fixture
+def loopback_dns(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    native_getaddrinfo = _socket.getaddrinfo
+
+    def getaddrinfo(host, port, family=socket.AF_UNSPEC, *args, **kwargs):
+        if host == _LOOPBACK_HOST:
+            assert family in (socket.AF_UNSPEC, socket.AF_INET), f"unsupported address family: {family}"
+            calls.append(host)
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", port or 0))]
+        return native_getaddrinfo(host, port, family, *args, **kwargs)
+
+    # Patch below socket.getaddrinfo, not over Blockbuster's instrumented wrapper.
+    monkeypatch.setattr(_socket, "getaddrinfo", getaddrinfo)
+    return calls
+
+
+async def test_loopback_dns_keeps_on_loop_resolution_blocked(loopback_dns: list[str]) -> None:
+    with pytest.raises(BlockingError, match="socket.getaddrinfo"):
+        resolve_host_addresses(_LOOPBACK_HOST)
+
+    assert loopback_dns == []
+
+
+@pytest.mark.parametrize("family", [socket.AF_UNSPEC, socket.AF_INET])
+async def test_loopback_dns_accepts_ipv4_compatible_families(loopback_dns: list[str], family: int) -> None:
+    addresses = await asyncio.to_thread(socket.getaddrinfo, _LOOPBACK_HOST, 80, family, socket.SOCK_STREAM)
+
+    assert addresses == [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 80))]
+    assert loopback_dns == [_LOOPBACK_HOST]
+
+
+async def test_loopback_dns_rejects_ipv6_requests(loopback_dns: list[str]) -> None:
+    with pytest.raises(AssertionError, match="unsupported address family"):
+        await asyncio.to_thread(socket.getaddrinfo, _LOOPBACK_HOST, 80, socket.AF_INET6, socket.SOCK_STREAM)
+
+    assert loopback_dns == []
+
+
+async def test_crawl4ai_web_fetch_resolves_off_loop(loopback_dns: list[str]) -> None:
     with (
         patch.object(crawl4ai_tools, "_get_tool_config", return_value={}),
         patch.object(crawl4ai_tools, "_build_client") as build_client,
@@ -28,10 +74,11 @@ async def test_crawl4ai_web_fetch_resolves_off_loop() -> None:
         result = await crawl4ai_tools.web_fetch_tool.ainvoke({"url": _UNRESOLVED_LOOPBACK_URL})
 
     assert result == "Error: Refusing to fetch a private, loopback, or metadata address"
+    assert loopback_dns == [_LOOPBACK_HOST]
     build_client.assert_not_called()
 
 
-async def test_browserless_web_fetch_resolves_off_loop() -> None:
+async def test_browserless_web_fetch_resolves_off_loop(loopback_dns: list[str]) -> None:
     with (
         patch.object(browserless_tools, "_get_tool_config", return_value={}),
         patch.object(browserless_tools, "_get_browserless_client") as get_client,
@@ -39,10 +86,11 @@ async def test_browserless_web_fetch_resolves_off_loop() -> None:
         result = await browserless_tools.web_fetch_tool.ainvoke({"url": _UNRESOLVED_LOOPBACK_URL})
 
     assert result == "Error: Refusing to fetch a private, loopback, or metadata address"
+    assert loopback_dns == [_LOOPBACK_HOST]
     get_client.assert_not_called()
 
 
-async def test_browserless_web_capture_resolves_off_loop() -> None:
+async def test_browserless_web_capture_resolves_off_loop(loopback_dns: list[str]) -> None:
     with (
         patch.object(browserless_tools, "_get_tool_config", return_value={}),
         patch.object(browserless_tools, "_get_browserless_client") as get_client,
@@ -54,10 +102,11 @@ async def test_browserless_web_capture_resolves_off_loop() -> None:
         )
 
     assert result.update["messages"][0].content == "Error: Refusing to capture a private, loopback, or metadata address"
+    assert loopback_dns == [_LOOPBACK_HOST]
     get_client.assert_not_called()
 
 
-async def test_browser_navigate_tool_resolves_off_loop() -> None:
+async def test_browser_navigate_tool_resolves_off_loop(loopback_dns: list[str]) -> None:
     manager = MagicMock()
     with (
         patch.object(browser_tools, "_get_tool_config", return_value={}),
@@ -70,10 +119,11 @@ async def test_browser_navigate_tool_resolves_off_loop() -> None:
         )
 
     assert result.update["messages"][0].content == "Error: Refusing to browse a private, loopback, or metadata address"
+    assert loopback_dns == [_LOOPBACK_HOST]
     manager.acquire_session.assert_not_called()
 
 
-async def test_browser_navigate_and_capture_resolves_off_loop(tmp_path) -> None:
+async def test_browser_navigate_and_capture_resolves_off_loop(tmp_path, loopback_dns: list[str]) -> None:
     manager = MagicMock()
     with (
         patch.object(browser_tools, "_get_tool_config", return_value={}),
@@ -83,9 +133,10 @@ async def test_browser_navigate_and_capture_resolves_off_loop(tmp_path) -> None:
         await browser_tools.navigate_and_capture(thread_id="thread-1", url=_UNRESOLVED_LOOPBACK_URL, outputs_path=tmp_path)
 
     manager.acquire_session.assert_not_called()
+    assert loopback_dns == [_LOOPBACK_HOST]
 
 
-async def test_browser_request_guard_resolves_off_loop() -> None:
+async def test_browser_request_guard_resolves_off_loop(loopback_dns: list[str]) -> None:
     # The context route guard screens every redirect hop and subresource on the
     # shared Playwright loop, which also pumps Live frames for every session.
     from deerflow.community.browser_automation.session import BrowserSession
@@ -114,3 +165,27 @@ async def test_browser_request_guard_resolves_off_loop() -> None:
         await captured["handler"](route)
 
     assert route.aborted_with == "blockedbyclient"
+    assert loopback_dns == [_LOOPBACK_HOST]
+
+
+async def test_browser_egress_proxy_resolves_off_loop(loopback_dns: list[str]) -> None:
+    # Chromium hands every hostname to the session's egress proxy, which runs on
+    # the same shared Playwright loop as the request guard.
+    proxy = BrowserEgressProxy(browser_tools.resolve_browser_egress)
+    with patch.object(browser_tools, "_get_tool_config", return_value={}):
+        proxy_url = await proxy.start()
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", int(proxy_url.rsplit(":", 1)[1]))
+            writer.write(b"\x05\x01\x00")
+            await writer.drain()
+            assert await reader.readexactly(2) == b"\x05\x00"
+            hostname = _LOOPBACK_HOST.encode("ascii")
+            writer.write(b"\x05\x01\x00\x03" + bytes([len(hostname)]) + hostname + b"\x00\x50")
+            await writer.drain()
+            reply = await reader.readexactly(10)
+            writer.close()
+        finally:
+            await proxy.close()
+
+    assert reply[1] == 0x02  # refused: the hostname resolves to loopback
+    assert loopback_dns == [_LOOPBACK_HOST]

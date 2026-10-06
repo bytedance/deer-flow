@@ -78,6 +78,10 @@ import {
   buildConversationReferenceMetadata,
   type ConversationReference,
 } from "@/core/conversation-references";
+import {
+  extensionMentionId,
+  MAX_EXTENSION_MENTIONS,
+} from "@/core/extensions/mentions";
 import { useConversationReferencesCapability } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
@@ -169,6 +173,7 @@ import {
   type SlashCommandSuggestion,
 } from "./input-box-helpers";
 import {
+  extensionMentionMetadata,
   inlineReferences,
   reconcileConversationReferences,
   MAX_EXPLICIT_SKILLS,
@@ -179,6 +184,7 @@ import {
   referenceCaret,
   focusReferenceAt,
   renderReferenceEditor,
+  selectReferenceForDeletion,
 } from "./mentions/inline-references";
 import {
   MentionPicker,
@@ -519,6 +525,9 @@ export function InputBox({
   const projectReferenceCache = useRef(
     new Map<string, (typeof projectAttachments)[number]>(),
   );
+  const conversationReferenceCache = useRef(
+    new Map<string, ConversationReference>(),
+  );
   useLayoutEffect(() => {
     projectReferenceCache.current.clear();
     setInlineEditorActive(false);
@@ -532,6 +541,10 @@ export function InputBox({
         );
     }
   }, [projectAttachments]);
+  useLayoutEffect(() => {
+    for (const reference of conversationReferences)
+      conversationReferenceCache.current.set(reference.threadId, reference);
+  }, [conversationReferences]);
   const inlineCompositionEndedAt = useRef(-Infinity);
   const goalRequestStateRef = useRef(createGoalRequestState());
   const compactRequestStateRef = useRef(createGoalRequestState());
@@ -1005,6 +1018,7 @@ export function InputBox({
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
     setTextInput("");
+    conversationReferenceCache.current.clear();
     setConversationReferences([]);
     setMentionQuery(null);
     setMentionButtonOpen(false);
@@ -1454,12 +1468,21 @@ export function InputBox({
         toast.warning(t.inputBox.mentionMultipleSkills);
         return Promise.reject(new Error("Too many skill references."));
       }
+      const extensionMetadata = extensionMentionMetadata(textInput.value);
+      if (
+        (extensionMetadata.extension_mentions?.length ?? 0) >
+        MAX_EXTENSION_MENTIONS
+      ) {
+        toast.warning(t.inputBox.mentionExtensionsLimit);
+        return Promise.reject(new Error("Too many extension mentions"));
+      }
       pendingDraftSubmissionRef.current = {
         key: draftKey,
         text: textInput.value,
         skillName: null,
       };
       const additionalKwargs = {
+        ...extensionMetadata,
         ...(skillReferences.length
           ? { skill_references: skillReferences }
           : {}),
@@ -1542,6 +1565,7 @@ export function InputBox({
       sidecar,
       t.inputBox.suggestionPlaceholderRequired,
       t.inputBox.mentionMultipleSkills,
+      t.inputBox.mentionExtensionsLimit,
       conversationCapability,
       threadId,
       uploadLimits,
@@ -1836,7 +1860,9 @@ export function InputBox({
           ? selection.skill.name
           : selection.kind === "conversation"
             ? selection.reference.threadId
-            : null;
+            : selection.kind === "extension"
+              ? extensionMentionId(selection.reference)
+              : null;
       const selected =
         selectionId &&
         inlineReferences(originalText).some(
@@ -1873,6 +1899,12 @@ export function InputBox({
           "conversation",
           selection.reference.threadId,
           selection.reference.title,
+        );
+      if (selection.kind === "extension")
+        token = referenceToken(
+          "extension",
+          extensionMentionId(selection.reference),
+          selection.reference.label,
         );
       if (selection.kind === "file")
         token = referenceToken(
@@ -2530,15 +2562,17 @@ export function InputBox({
       promptHistoryDraftRef.current = "";
       const nextText = readReferenceEditor(element);
       const refs = inlineReferences(nextText);
-      setConversationReferences(
-        (previous) =>
-          reconcileConversationReferences(
-            nextText,
-            previous,
-            conversationCapability,
-            threadId,
-          ).references,
-      );
+      setConversationReferences((previous) => {
+        const known = new Map(conversationReferenceCache.current);
+        for (const reference of previous)
+          known.set(reference.threadId, reference);
+        return reconcileConversationReferences(
+          nextText,
+          [...known.values()],
+          conversationCapability,
+          threadId,
+        ).references;
+      });
       setProjectAttachments((previous) => {
         const ids = new Set(
           refs.filter((ref) => ref.kind === "file").map((ref) => ref.id),
@@ -2635,6 +2669,16 @@ export function InputBox({
       // over Enter-to-submit. Skip it mid-composition, where Enter belongs to
       // the IME candidate rather than the list.
       if (!isIMEComposing(event, inlineSkillComposingRef.current)) {
+        if (
+          !composerLocked &&
+          !event.altKey &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          !event.shiftKey &&
+          (event.key === "Backspace" || event.key === "Delete") &&
+          selectReferenceForDeletion(event.currentTarget, event.key)
+        )
+          return;
         if (showMentions) mentionPickerRef.current?.onKeyDown(event);
         if (event.defaultPrevented) return;
         handleCommandSuggestionKeyDown(event);
@@ -2666,6 +2710,7 @@ export function InputBox({
       event.currentTarget.closest("form")?.requestSubmit();
     },
     [
+      composerLocked,
       showMentions,
       handlePromptHistoryKeyDown,
       handleCommandSuggestionKeyDown,
@@ -2856,6 +2901,9 @@ export function InputBox({
           style={{ maxHeight: mentionPlacement.maxHeight }}
         >
           <MentionPicker
+            selectedExtensions={inlineReferences(textInput.value)
+              .filter((ref) => ref.kind === "extension")
+              .map((ref) => ref.id)}
             ref={mentionPickerRef}
             listId={mentionListId}
             query={mentionQuery?.query ?? ""}

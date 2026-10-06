@@ -26,6 +26,7 @@ def _stub_app_config(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "0")
     monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
     monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.delenv("DEER_FLOW_MULTI_INSTANCE", raising=False)
     set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
     yield
     reset_app_config()
@@ -1452,6 +1453,8 @@ def test_wechat_qr_confirmation_preserves_bot_id_unless_replaced(monkeypatch, re
         {"GATEWAY_WORKERS": "invalid"},
         # A blank GATEWAY_WORKERS is unset, so WEB_CONCURRENCY still decides.
         {"GATEWAY_WORKERS": "", "WEB_CONCURRENCY": "2"},
+        # Kubernetes replicas run one worker each and declare their peers instead.
+        {"GATEWAY_WORKERS": "1", "DEER_FLOW_MULTI_INSTANCE": "1"},
     ],
 )
 @pytest.mark.parametrize("method,suffix", [("POST", ""), ("POST", "/session/poll"), ("DELETE", "/session")])
@@ -1490,3 +1493,78 @@ def test_manual_wechat_setup_remains_available_with_multiple_workers(monkeypatch
     assert result.status_code == 200
     assert app.state.channels_config["wechat"]["bot_token"] == "manual-token"
     restart.assert_awaited_once()
+
+
+def test_qq_provider_exposes_binding_flow_and_masks_secret(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate({"enabled": True, "qq": {"enabled": True}})
+    app = _make_app(
+        config,
+        repo,
+        {
+            "qq": {
+                "enabled": True,
+                "app_id": "fixture-app",
+                "client_secret": "fixture-private-secret",
+            }
+        },
+    )
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/channels/providers")
+            assert response.status_code == 200
+            providers = response.json()["providers"]
+            assert len(providers) == 1
+            provider = providers[0]
+            assert provider["provider"] == "qq"
+            assert provider["display_name"] == "QQ"
+            assert provider["auth_mode"] == "binding_code"
+            assert provider["configured"] is True
+            assert provider["connectable"] is True
+            assert "fixture-private-secret" not in response.text
+            fields = {field["name"]: field for field in provider["credential_fields"]}
+            assert fields["app_id"]["type"] == "text"
+            assert fields["client_secret"]["type"] == "password"
+            connected = client.post("/api/channels/qq/connect")
+            assert connected.status_code == 200
+            body = connected.json()
+            assert body["mode"] == "binding_code"
+            assert body["url"] is None
+            assert body["instruction"] == f"Send /connect {body['code']} to the DeerFlow QQ bot."
+
+        async def consume():
+            return await repo.consume_oauth_state(provider="qq", state=body["code"])
+
+        state = anyio.run(consume)
+        assert state["owner_user_id"] == str(_user().id)
+        assert anyio.run(consume) is None
+    finally:
+        anyio.run(repo.close)
+
+
+def test_qq_runtime_credentials_can_be_configured_from_browser(tmp_path):
+    import anyio
+
+    repo = anyio.run(_make_repo, tmp_path)
+    config = ChannelConnectionsConfig.model_validate({"enabled": True, "qq": {"enabled": True}})
+    app = _make_app(config, repo, {})
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/channels/qq/runtime-config",
+                json={
+                    "values": {
+                        "app_id": "fixture-app",
+                        "client_secret": "fixture-private-secret",
+                    }
+                },
+            )
+            assert response.status_code == 200
+            assert response.json()["configured"] is True
+            assert "fixture-private-secret" not in response.text
+            assert app.state.channels_config["qq"]["client_secret"] == "fixture-private-secret"
+            assert client.post("/api/channels/qq/connect").status_code == 200
+    finally:
+        anyio.run(repo.close)

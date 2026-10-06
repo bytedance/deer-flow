@@ -26,7 +26,8 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0023_run_change_seq` → `0023_user_preferences` →
 `0024_project_documents` → `0025_repair_run_change_seq` →
 `0026_mcp_task_lease_tokens` → `0027_notification_deliveries` →
-`0028_parked_attempts` (current head). The preference
+`0028_parked_attempts` → `0029_scheduler_agent_tasks` →
+`0030_notification_claim_tokens` (current head). The preference
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to
@@ -85,7 +86,7 @@ the extra nullable columns and their data remain intact. A regression exercises
 that procedure from the original schema and verifies repository reads/inserts
 and preservation of incarnation data.
 
-**Concurrency safety**: Postgres uses `pg_advisory_lock` to serialise concurrent Gateway instances. SQLite uses a per-engine `asyncio.Lock` for same-process startup and is best-effort across processes via SQLite's file-level write lock + `PRAGMA busy_timeout`; multi-instance deployments should use Postgres. Column revisions in `versions/` additionally use idempotent helpers (`_helpers.py::safe_add_column`, `safe_drop_column`) so repeated post-baseline changes and retries are no-ops when the change is already present.
+**Concurrency safety**: Postgres serialises concurrent Gateway instances with a session-level advisory lock, acquired by polling `pg_try_advisory_lock` so the app engine's `command_timeout` never cuts the wait short. SQLite uses a per-engine `asyncio.Lock` for same-process startup and is best-effort across processes via SQLite's file-level write lock + `PRAGMA busy_timeout`; multi-instance deployments should use Postgres. Column revisions in `versions/` additionally use idempotent helpers (`_helpers.py::safe_add_column`, `safe_drop_column`) so repeated post-baseline changes and retries are no-ops when the change is already present.
 
 **Authoring a new revision**:
 ```bash

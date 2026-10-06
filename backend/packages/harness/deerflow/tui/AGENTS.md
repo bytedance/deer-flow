@@ -13,4 +13,31 @@ A terminal-native UI over the embedded harness, exposed as the `deerflow` consol
 
 **Web UI visibility**: the Web UI lists threads from the `threads_meta` SQL table (user-scoped), not the checkpointer. `persistence.py` writes a `threads_meta` row under the default user (`"default"`) into the same DB the Gateway reads — via the harness-only `deerflow.persistence.engine.init_engine_from_config()` — so TUI sessions appear in the Web UI sidebar **without** running the Gateway. Best-effort: a no-op on the `memory` backend. All DB work runs on one long-lived background event loop (a SQLAlchemy async engine is bound to its creating loop).
 
+Thread switching must reject active runs both before resolving/opening a picker
+and when applying the picker callback, which may outlive the idle state in which
+it opened. Keep the current thread and transcript unchanged when rejecting a
+switch. Report invalid resume references as error rows without relaxing the
+canonical thread-id validation or terminating the app.
+Reserve the run identity and busy state when accepting input, before its worker
+starts. Each run owns its cancellation flag; a later send must not reset it.
+If worker creation fails, cancel and clear that reserved run, restore idle state,
+and show a retryable error. Do not cancel a previously completed run's title write.
+Worker callbacks check both run identity and thread id on UI delivery, rejecting
+cancelled, completed, or superseded runs before updating the reducer. Keep the
+completed run's state available for its worker's title persistence check. An
+uncancelled, normally completed run still writes its title to its original
+thread after the UI moves on; keep that write off the UI thread. This does not
+order completed title writes, roll back a write already in progress, or force
+stop synchronous backend work.
+
+`InputHistory.down()` returns `None` when history navigation is inactive; the
+app must then leave the composer untouched, including its cursor and undo state.
+`InputHistory.up()` returns `None` when history is empty, and `down()` returns
+`None` when history navigation is inactive; the app must then leave the composer
+untouched, including its cursor and undo state.
+An empty string is a valid saved draft and must still be restored after history.
+History navigation may advance its index without changing the input text. When
+the recalled value equals the composer value, skip loading the document so its
+cursor and undo state survive.
+
 **Tests**: `tests/test_tui_*.py` — pure layers via plain pytest, the app/palette/overlays via Textual's pilot harness with a fake in-process session, and `test_tui_persistence.py` for the `threads_meta` round-trip.

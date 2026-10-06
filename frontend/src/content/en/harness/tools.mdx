@@ -297,7 +297,8 @@ tools:
 Captures rendered web pages with Browserless `/screenshot` and presents the image
 through DeerFlow's artifact system. This is useful for visual evidence, UI checks,
 and JavaScript-heavy pages where Markdown extraction is not enough. By default it
-refuses URLs that resolve to private, loopback, or cloud-metadata addresses;
+refuses URLs that resolve to private, loopback, shared (`100.64.0.0/10`, used by
+CGNAT and Tailscale), other non-global, or cloud-metadata addresses;
 set `allow_private_addresses: true` only when you intentionally target an internal host.
 
 ### Image search

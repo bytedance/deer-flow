@@ -128,6 +128,38 @@ async def test_multiline_arrows_move_lines_before_input_history():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("draft", ["unsent question", "first line\nsecond line"])
+async def test_up_with_empty_history_preserves_draft_and_cursor(draft):
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste(draft))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        location = (0, 2)
+        composer.move_cursor(location)
+
+        await pilot.press("up", "up")
+        await pilot.pause()
+        assert composer.value == draft
+        assert composer.cursor_location == location
+
+
+@pytest.mark.asyncio
+async def test_up_with_empty_history_preserves_undo():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.post_message(events.Paste("unsent question"))
+        await pilot.pause()
+        await pilot.press("up", "ctrl+z")
+        await pilot.pause()
+        assert app.query_one("#composer").value == ""
+
+
+@pytest.mark.asyncio
 async def test_app_assigns_thread_id_on_first_send():
     app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
     async with app.run_test() as pilot:
@@ -625,6 +657,65 @@ async def test_down_on_last_line_of_multiline_input_falls_back_to_history():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("history", [[], ["previous prompt"]])
+@pytest.mark.parametrize("draft", ["unsent question", "first line\nsecond line"])
+async def test_down_without_history_navigation_preserves_draft_and_cursor(history, draft):
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for entry in history:
+            app._history.add(entry)
+        app.post_message(events.Paste(draft))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        location = (len(draft.splitlines()) - 1, 2)
+        composer.move_cursor(location)
+
+        await pilot.press("down", "down")
+        await pilot.pause()
+        assert composer.value == draft
+        assert composer.cursor_location == location
+        await pilot.press("ctrl+z")
+        await pilot.pause()
+        assert composer.value == ""
+
+
+@pytest.mark.asyncio
+async def test_history_round_trip_restores_draft_and_idle_down_keeps_later_edits():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    draft = "first line\nsecond line"
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._history.add("older prompt")
+        app._history.add("newer prompt")
+        app.post_message(events.Paste(draft))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        composer.cursor_position = 0
+
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "newer prompt"
+        await pilot.press("up")
+        await pilot.pause()
+        assert composer.value == "older prompt"
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == "newer prompt"
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == draft
+
+        app.post_message(events.Paste(" edited"))
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        assert composer.value == draft + " edited"
+
+
+@pytest.mark.asyncio
 async def test_slash_command_with_surrounding_whitespace_still_runs_as_command():
     session = _FakeSession()
     app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
@@ -641,6 +732,30 @@ async def test_slash_command_with_surrounding_whitespace_still_runs_as_command()
 
 
 _LONG_PROMPT = " ".join(f"word{i}" for i in range(60))  # one logical line that soft-wraps
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["up", "down"])
+async def test_equal_history_recall_preserves_cursor_and_undo(direction):
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._history.add("same prompt")
+        if direction == "down":
+            # Down will restore the same draft that Up saved.
+            app._history.up("same prompt")
+        app.post_message(events.Paste("same prompt"))
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        composer.move_cursor((0, 2))
+
+        await pilot.press(direction)
+        await pilot.pause()
+        assert composer.cursor_location == (0, 2)
+        await pilot.press("ctrl+z")
+        await pilot.pause()
+        assert composer.value == ""
 
 
 @pytest.mark.asyncio

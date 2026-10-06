@@ -15,6 +15,11 @@ Only Markdown destinations decode once; relative images match decoded names
 against raw artifact paths before encoding.
 File-type detection uses the basename so extensionless `Dockerfile` and
 `Makefile` artifacts remain recognizable under nested or dotted directories.
+HTML preview base detection skips DOM construction without case-insensitive `base`
+text; otherwise an inert template distinguishes real tags from comments, scripts
+and nested templates without rewriting source. Tests: `preview-base.dom.test.ts`
+(happy-dom); textarea/title RCDATA needs real-browser checks due to parser gaps.
+Other preview helpers retain the node test environment.
 Language-map membership checks only own properties; inherited names such as
 `constructor` and `__proto__` must keep the unknown-file download fallback.
 
@@ -27,8 +32,13 @@ Language-map membership checks only own properties; inherited names such as
    Regular artifact text loads request at most the first 1 MiB through an HTTP
    byte range. A truncated preview must stay lightweight and expose an explicit
    full-file action; do not mount CodeMirror for that artifact until the user
-   requests and receives the complete content. The Gateway retains range
-   ownership and returns 206/416 through `FileResponse`.
+   requests and receives the complete content. Truncated responses must never
+   establish or replace an editing baseline, including when discarding a draft:
+   their ETag can match the full response. Editing and saving require complete
+   content; retain existing drafts across partial reloads. The Gateway retains
+   range ownership and returns 206/416 through `FileResponse`. Keep Exit editing
+   available while editing even if a reload is loading, truncated, or fails;
+   exiting retains the draft and is disabled only during a pending save.
 3. `useThreadHistory` loads persisted conversation pages from `GET /api/threads/{id}/messages/page`, preserving the backend's thread-global event `seq`; rendering overlays checkpoint/live copies at their matching canonical identities (a summarized checkpoint may contain a protected early input plus a recent tail). Context-compaction rescue diffs every retained visible identity rather than slicing at the first anchor, and keeps a run-scoped ledger of committed visible messages so replacement updates and repeated rolling checkpoint windows cannot erase an already displayed step. A checkpoint/transient prefix whose canonical position is still behind an unloaded cursor page is woven in before the first shared anchor, not discarded: both the checkpoint and seq-sorted history place it earlier, so that position is known even when the pages between are not. Position authority is seq-first and lives in `core/threads/message-order.ts` (re-exported through `hooks.ts`): every normalized identity tracks latest visible content and trusted position separately; a valid `deerflow_seq` (positive safe integer, earliest value wins per identity, hidden control copies contribute a position only when no visible copy carries one) joins an ascending skeleton that outranks identity-anchor weaving, which remains the fallback for no-seq segments whose internal order is preserved. Live-only and rescued messages with trusted seq also serve as anchors for adjacent no-seq segments. A trailing segment follows its last live-only positioned anchor within the loaded window; after a shared anchor or a rescued prefix before the window, it stays at the tail. Optimistic messages remain last; the transient bridge inserts positioned rows before weaving so the insertion cannot reverse previously displayed steps. Rescued sequence anchors preserve preceding captured steps even before React has rendered them; only a leading prefix anchored to loaded history requires previously rendered ordering to cross an unloaded cursor gap. Content replacement never drops the known seq, `run_id`, or `turn_duration`, and the compaction transient bridge plus rendered ledger share the same position priority. `deerflow_seq` is server-owned display metadata and is never written back into a checkpoint. It must never be appended to the tail (#4065) — the tail is provably wrong — but suppressing it entirely is how a user's own question vanished from a long thread once the first 50-row history page no longer reached back to it (#4666). A collapsed unloaded gap is recoverable by paging; a dropped message is not. Weaving alone restores the message but not its exact position — after compaction the live window carries too few anchors — so both sides now carry the backend's thread-global `additional_kwargs.deerflow_seq`: `buildVisibleHistoryMessages` copies each row's `seq`, and the Gateway stamps it onto `values` frame messages it has already persisted. A live message whose seq is below the loaded window's lower bound is placed ahead of everything on screen instead of before the nearest anchor, which is what puts a compaction-rescued first user turn back at the head rather than mid-transcript. That split happens _before_ the anchor walk, not inside it: a compacted checkpoint can share no identity at all with the loaded page — it keeps only the current run's recent tail, while the page on screen was fetched turns earlier — and the anchor walk then never runs at all, which is precisely when a rescued turn most needs its seq. Doing the split inside the walk left that case appending the message after the whole window (#4666), the one arrangement #4065 proved wrong. A message without a seq (still streaming, so not in the feed yet) keeps the weaving path — the tail is already its correct position. Optimistic messages are then added without timestamp re-sorting. History invalidation preserves already-loaded pages so their established ordering positions are not discarded. Dynamic context re-keys each submitted user message from the client-generated `local-human-*` identity `X` to the visible server echo `X__user`; UI identity matching normalizes that reserved suffix only for human messages so the optimistic input and checkpoint replacement remain one visible turn. At dispatch, a local-turn anchor snapshots the checkpoint identity baseline, canonical history identities and maximum trusted seq, and any pre-existing transient-bridge identities. Render repair uses `confirmedHistoryIdentities` plus `preSubmitMaxSeq` to restore baseline or history-confirmed messages above that exact human anchor, while moving only speculative non-baseline AI/tool steps behind it; `currentTurnRunIds` keeps already-persisted steps of the active turn below their human. Keep the anchor scoped to its originating thread through finish, stop, and stream error because the SDK's settled frame can retain transient event order; replace it on the next local submit and clear it on thread switch or replay-gap recovery.
 4. Stop actions call the LangGraph SDK stream stop path; `core/threads/hooks.ts` invalidates current-thread, thread-history, token-usage, and sidebar/search caches immediately and schedules one follow-up refetch because SDK stop may finish via abort + fire-and-forget cancel before backend title finalization commits
 5. TanStack Query manages server state. `UserPreferencesBoundary` preserves
@@ -98,6 +108,12 @@ Language-map membership checks only own properties; inherited names such as
    definitions. Only administrators see managed-definition mutation controls;
    Custom Agent settings consume the same query and preserve stale selected names
    as removable "missing" entries instead of silently widening the allowlist.
+   The Agents gallery imports and exports versioned JSON packages through
+   `core/agents`; it may prefill an import name from untrusted JSON, but only the
+   Gateway validates or persists the package. A 409 is an explicit rename
+   prompt/error, never permission to overwrite the existing Agent.
+   Import errors join FastAPI 422 validation messages into readable text while
+   preserving string conflict details; unusable error bodies use a status fallback.
 6. Components subscribe to thread state and render updates
 
 AI message grouping uses `extractContentFromMessage()` to identify visible answer content. A non-empty content array may contain only Anthropic thinking blocks; keep it in `assistant:processing` until answer content arrives. Cover both streamed snapshots in `tests/unit/core/messages/utils.test.ts`.
@@ -212,3 +228,16 @@ reset on conversation changes. Gateway supplies defaults for clients without a
 selector; frontend visibility must not become a runtime enforcement boundary.
 
 MCP hooks and the editor default to personal scope. Mutation-option builders require an explicit scope. MCP control accessible names include the localized ownership section, so same-named shared and personal connections remain distinct without region context. Query keys include scope and authenticated user ID; remount each editor when that ID changes. Platform provided uses the deployment editor only for administrators outside static mode, restoring add, edit, toggle and delete through the existing admin-only MCP API. Ordinary users see shared entries read-only. My plugins contains personal configuration templates, Lark account authorization and the personal MCP editor; a deployment installation must not mark a personal template configured.
+
+Plugin mention providers extend the existing composer picker via
+`core/extensions/use-mentions.ts`. Keep provider queries bounded and fenced by
+viewer, thread, query, and installed snapshot.
+Provider and page-surface IDs must be strings before slug validation; JavaScript
+coercion is not validation. A settled snapshot with no enabled, viewer-visible
+mention providers returns an empty result immediately without a search timer.
+Settled results may remain visible during query/retry refreshes only within the
+same viewer, thread, locale and installed snapshot; stale responses stay fenced.
+Inline plugin references serialize into human-message
+`additional_kwargs.extension_mentions`; these IDs and labels
+are untrusted input, never a routing or permission grant. Built-in mentions must
+remain usable when a provider fails or times out.

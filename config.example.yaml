@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 50
+config_version: 53
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -917,6 +917,8 @@ tools:
   #   group: web
   #   use: deerflow.community.serper.tools:web_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
+  #   include_domains: []  # Optional domain-only lists, at most 10 entries each
+  #   exclude_domains: []  # Exclusion wins; see backend/docs/CONFIGURATION.md
   #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
 
   # Web search tool (uses Serply - Google Search API, requires SERPLY_API_KEY)
@@ -1111,7 +1113,8 @@ tools:
   #   timeout_ms: 30000                # Per-action navigation/interaction timeout
   #   viewport_width: 1280
   #   viewport_height: 720
-  #   # allow_private_addresses: false # SSRF guard: keep false in production
+  #   # allow_private_addresses: false # SSRF guard: keep false in production. Also applies to the
+  #   #                                # pinned egress proxy every launched browser connects through.
   #   # cdp_url: http://127.0.0.1:9222 # Attach to YOUR running Chrome (Codex-style)
   #   # allow_unguarded_cdp: false      # REQUIRED true with cdp_url: attaching to an
   #   #                                # existing Chrome prevents DeerFlow from
@@ -1126,7 +1129,9 @@ tools:
   #   #                                # CDP handshake. If so, use headless: false to launch
   #   #                                # Playwright's own visible browser instead.
   #   # Multi-worker note: browser sessions live in one Gateway worker's memory.
-  #   # Keep GATEWAY_WORKERS=1 while this tool group is enabled.
+  #   # Keep the Gateway to one worker process while this tool group is enabled:
+  #   # GATEWAY_WORKERS=1, and WEB_CONCURRENCY unset or 1 on the launches that pass
+  #   # uvicorn no --workers (backend/Dockerfile, scripts/serve.sh).
   # - name: browser_snapshot
   #   group: browser
   #   use: deerflow.community.browser_automation.tools:browser_snapshot_tool
@@ -2711,6 +2716,7 @@ agent_storage:
 #   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
   enabled: false
+  tool_enabled: false          # Offer schedule tools to authorized Gateway conversations
   multi_instance: false       # Opt into lease-aware recovery across Gateway instances
   poll_interval_seconds: 5
   lease_seconds: 120
@@ -2747,6 +2753,27 @@ mcp_tasks:
   tracking_degraded_after_errors: 3
   max_result_bytes: 65536
   result_preview_max_chars: 2000
+
+# ============================================================================
+# Deployment Topology
+# ============================================================================
+# Declare whether more than one Gateway instance shares this database.
+#
+# GATEWAY_WORKERS / WEB_CONCURRENCY only count the uvicorn workers of one
+# process tree, so a Kubernetes Deployment with replicas > 1 (one worker per
+# Pod) is invisible to the startup safety gate. Without this declaration each
+# Pod passes every check, and its startup orphan reconciliation writes the
+# other Pods' lease-less runs off as crashed on every rolling update.
+#
+# With multi_instance: true (or the environment variable
+# DEER_FLOW_MULTI_INSTANCE=1, which deploy tooling such as a Helm chart can
+# set from its replica count) startup requires database.backend: postgres, run_events.backend: db,
+# run_ownership.heartbeat_enabled: true and a Redis stream bridge, and refuses
+# an explicit sandbox.ownership.type: memory, process-local browser tools, and
+# scheduler.enabled: true without scheduler.multi_instance: true.
+# Restart required; apply the same value to every instance.
+deployment:
+  multi_instance: false
 
 # ============================================================================
 # Run Ownership Configuration
@@ -2832,7 +2859,7 @@ run_ownership:
 # - Provider bot/app credentials stay under `channels.*`.
 # - `channel_connections` stores per-user bindings and one-time connect codes.
 # - Telegram uses a deep link when `bot_username` is configured.
-# - Slack, Discord, Feishu, DingTalk, WeChat, and WeCom use `/connect <code>`
+# - Slack, Discord, Feishu, DingTalk, WeChat, WeCom, and QQ use `/connect <code>`
 #   through the already-running bot/app.
 # - When enabled (and channels are running), scheduled-task completions/failures
 #   also enqueue IM pushes to the owner's connected identities (see scheduler
@@ -2867,6 +2894,9 @@ run_ownership:
 #     enabled: false
 #
 #   buzz:
+#     enabled: false
+#
+#   qq:
 #     enabled: false
 
 # ============================================================================
@@ -2909,6 +2939,15 @@ run_ownership:
 #       is_plan_mode: false
 #       subagent_enabled: false
 #
+#   # QQ Open Platform bot; choose WebSocket in the developer console.
+#   # Text-only C2C and group @mentions; no public callback URL required.
+#   qq:
+#     enabled: false
+#     app_id: $QQ_APP_ID
+#     client_secret: $QQ_CLIENT_SECRET
+#     allowed_users: []  # QQ OpenIDs, not numeric QQ account numbers; empty allows all
+#     sandbox: false    # REST sandbox host only; console sandbox membership is separate
+#
 #   feishu:
 #     enabled: false
 #     app_id: $FEISHU_APP_ID
@@ -2925,7 +2964,7 @@ run_ownership:
 #   telegram:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
-#     allowed_users: []               # empty = allow all
+#     allowed_users: []               # numeric user IDs, not @usernames; empty = allow all
 #     rich_messages: false             # Bot API 10.1 Rich Messages for final Markdown responses
 #
 #   wechat:
@@ -3000,9 +3039,15 @@ run_ownership:
 #   discord:
 #     enabled: false
 #     bot_token: $DISCORD_BOT_TOKEN
-#     allowed_guilds: []              # empty = allow all guilds; can also be a single guild ID
+#     # Allowed guild IDs: one positive numeric ID (quoted or unquoted) or a YAML list.
+#     # Unset, null, [], or a blank string allows all guilds.
+#     # Invalid entries are ignored with a warning. Any other configured value
+#     # with no valid ID denies every guild and logs an error.
+#     allowed_guilds: []
 #     mention_only: false             # If true, only respond when the bot is mentioned
-#     allowed_channels: []              # Optional: channel IDs exempt from mention_only (bot responds without mention)
+#     # Channel IDs exempt from mention_only: one ID (quoted or unquoted) or a YAML list.
+#     # Empty = no exemptions; mention_only applies to every channel when enabled.
+#     allowed_channels: []
 #     thread_mode: false               # If true, group a channel conversation into a thread
 #
 #   # Buzz (https://github.com/block/buzz) — Nostr-relay team workspace.

@@ -104,6 +104,31 @@ def _match_segments(pattern_parts: tuple[str, ...], path_parts: tuple[str, ...])
     return len(path_parts) in reachable
 
 
+def should_ignore_path_under_root(path: str, root: str) -> bool:
+    """Apply :func:`should_ignore_path` to ``path`` as seen from ``root``.
+
+    Ignore patterns are scoped to the search root, the way ``list_dir`` already
+    applies them: an ignored name hides its own descendants, so searching
+    ``build`` -- or any path below an ignored ancestor -- still returns its
+    contents. Testing the absolute path instead silently hides every result as
+    soon as the search root, or one of its ancestors, is itself an ignored
+    name, so ``glob``/``grep`` reported "no matches" for a directory the local
+    walk lists without any trouble.
+    """
+    root_clean = root.rstrip("/")
+    if not root_clean:
+        root_clean = "/"
+    if path == root_clean:
+        # The caller asked for this exact path. There is nothing relative to
+        # test, and an ignored name must not hide what was explicitly
+        # requested (a single-file ``grep`` hits this on every match).
+        return False
+    prefix = "/" if root_clean == "/" else f"{root_clean}/"
+    if path.startswith(prefix):
+        return should_ignore_path(path[len(prefix) :])
+    return should_ignore_path(path)
+
+
 def path_matches(pattern: str, rel_path: str) -> bool:
     """Match ``rel_path`` (relative to the search root) against a glob pattern.
 
@@ -224,8 +249,14 @@ def find_grep_matches(
                 continue
             if file_path.stat().st_size > max_file_size or is_binary_file(file_path):
                 continue
-            with file_path.open(encoding="utf-8", errors="replace") as handle:
+            # newline="\n" ends lines where LocalSandbox.read_file does, so a
+            # hit's line_number is the start_line that reads it back; a bare
+            # "\r" stays content. A CRLF terminator still reads as "\n", so $
+            # anchors match as before.
+            with file_path.open(encoding="utf-8", errors="replace", newline="\n") as handle:
                 for line_number, line in enumerate(handle, start=1):
+                    if line.endswith("\r\n"):
+                        line = line[:-2] + "\n"
                     if len(line) > _max_line_chars:
                         continue
                     if regex.search(line):

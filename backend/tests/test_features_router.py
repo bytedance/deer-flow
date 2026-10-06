@@ -9,6 +9,19 @@ from app.gateway.deps import get_config
 from app.gateway.routers import features
 
 
+@pytest.fixture(autouse=True)
+def isolated_worker_env(monkeypatch):
+    """Keep the feature surface independent of the invoking shell's worker count.
+
+    ``browser_capability()`` consults the Gateway worker count, which uvicorn takes
+    from ``WEB_CONCURRENCY`` on the launches that pass no ``--workers``. An exported
+    value there would otherwise make the browser-control assertions below report a
+    refusal the code under test did not produce.
+    """
+    monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+
+
 def _app_with_config(
     *,
     agents_api_enabled: bool,

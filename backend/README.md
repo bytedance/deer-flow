@@ -135,7 +135,8 @@ FastAPI application providing REST endpoints for frontend integration:
 | `GET /api/models` | List available LLM models |
 | `GET/PUT /api/mcp/config` | Manage MCP server configurations |
 | `POST /api/mcp/cache/reset` | Reset cached MCP tools so they reload on next use |
-| `GET/PUT /api/skills` | List and manage skills |
+| `GET /api/skills` | List skills visible to the caller |
+| `PUT /api/skills/{skill_name}` | Enable or disable a skill (admin only) |
 | `POST /api/skills/install` | Install skill from `.skill` archive |
 | `GET /api/memory` | Retrieve memory data |
 | `POST /api/memory/reload` | Force memory reload |
@@ -146,6 +147,11 @@ FastAPI application providing REST endpoints for frontend integration:
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |
 | `DELETE /api/threads/{id}` | Delete DeerFlow-managed local thread data after LangGraph thread deletion; unexpected failures are logged server-side and return a generic 500 detail |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
+
+Cancelling an upload waits for an already-running document conversion worker to
+finish before removing its temporary source. This prevents cleanup from deleting
+a file that the converter is still reading; cancellation can therefore take as
+long as that conversion.
 
 Converted-upload ownership records live in each thread's `upload-companions/`
 directory, outside the sandbox-mounted `user-data/` tree. Older conversions
@@ -511,8 +517,11 @@ the only execution path, which keeps operational mistakes off the table. See
 ### Testing
 
 ```bash
-# Default offline backend suite (live external-API and blocking-I/O tests are excluded)
+# Default offline backend suite (four parallel shards; excludes live and blocking-I/O tests)
 make test
+
+# Run the same shards sequentially
+make test TEST_JOBS=1
 
 # Strict blocking-I/O suite
 make test-blocking-io

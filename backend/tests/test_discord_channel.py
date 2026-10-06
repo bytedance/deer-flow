@@ -11,7 +11,7 @@ import sys
 import threading
 import weakref
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -281,9 +281,8 @@ async def test_discord_bot_mention_slash_skill_routes_as_chat() -> None:
     channel._add_reaction = noop
 
     await channel._on_message(_make_discord_message("<@999> /data-analysis analyze uploads/foo.csv"))
-    await asyncio.sleep(0)
-
-    inbound = bus.get_inbound_nowait()
+    # The commit runs as a task on the Gateway loop (identity lookup included).
+    inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
     bus.inbound_task_done()
     assert inbound.text == "/data-analysis analyze uploads/foo.csv"
     assert inbound.msg_type == InboundMessageType.CHAT
@@ -306,9 +305,8 @@ async def test_discord_bot_mention_known_command_routes_as_command() -> None:
     channel._add_reaction = noop
 
     await channel._on_message(_make_discord_message("<@999> /help"))
-    await asyncio.sleep(0)
-
-    inbound = bus.get_inbound_nowait()
+    # The commit runs as a task on the Gateway loop (identity lookup included).
+    inbound = await asyncio.wait_for(bus.get_inbound(), timeout=5)
     bus.inbound_task_done()
     assert inbound.text == "/help"
     assert inbound.msg_type == InboundMessageType.COMMAND
@@ -789,3 +787,115 @@ async def test_send_control_calls_keep_the_default_outbound_bound() -> None:
     assert len(run_mock.await_args_list) == 2  # stop_typing + one text chunk
     for call in run_mock.await_args_list:
         assert "timeout" not in call.kwargs
+
+
+# ---------------------------------------------------------------------------
+# allowed_guilds / allowed_channels parsing
+# ---------------------------------------------------------------------------
+
+
+class TestDiscordAllowedGuilds:
+    """A restriction the operator configured must never silently open the bot."""
+
+    @staticmethod
+    def _channel(config_extra: dict) -> DiscordChannel:
+        return DiscordChannel(bus=MessageBus(), config={"bot_token": "token", **config_extra})
+
+    @pytest.mark.parametrize("config_extra", [{}, {"allowed_guilds": None}, {"allowed_guilds": []}, {"allowed_guilds": " "}])
+    def test_unset_or_empty_allowlist_allows_every_guild_without_warning(self, config_extra, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.discord"):
+            channel = self._channel(config_extra)
+
+        assert channel._check_guild(SimpleNamespace(id=321))
+        assert channel._check_guild(None)
+        assert caplog.records == []
+
+    def test_listed_guild_ids_are_allowed_and_others_denied(self):
+        channel = self._channel({"allowed_guilds": [321, "654"]})
+
+        assert channel._check_guild(SimpleNamespace(id=321))
+        assert channel._check_guild(SimpleNamespace(id=654))
+        assert not channel._check_guild(SimpleNamespace(id=1))
+        assert not channel._check_guild(None)
+
+    @pytest.mark.parametrize("allowed_guilds", ["321", 321], ids=["str", "int"])
+    def test_scalar_guild_id_is_one_entry_not_its_digits(self, allowed_guilds):
+        # config.example.yaml sells this shorthand ("can also be a single guild
+        # ID"). Iterating the string "321" admitted guilds 1, 2 and 3 while
+        # blocking 321; an unquoted YAML int raised TypeError in the constructor.
+        channel = self._channel({"allowed_guilds": allowed_guilds})
+
+        assert channel._check_guild(SimpleNamespace(id=321))
+        assert not channel._check_guild(SimpleNamespace(id=3))
+
+    @pytest.mark.parametrize("bad_entry", ["@acme", "321,654", 0, -5, None, 4.2, True])
+    def test_unparseable_entry_is_dropped_with_warning(self, bad_entry, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.discord"):
+            channel = self._channel({"allowed_guilds": [321, bad_entry]})
+
+        assert channel._check_guild(SimpleNamespace(id=321))
+        assert not channel._check_guild(SimpleNamespace(id=1))
+        assert repr(bad_entry) in caplog.text
+        # 0, -5 and True are numeric, so the hint has to say what they lack.
+        assert "positive numeric guild ID" in caplog.text
+
+    @pytest.mark.parametrize(
+        "allowed_guilds",
+        # "321,654" is what a $ENV reference to a comma-separated value resolves
+        # to; the dict reaches the constructor from the runtime channel config.
+        [["@acme", "server"], "@acme", "321,654", [True], [4.2], {"id": 321}],
+    )
+    def test_allowlist_without_a_parseable_entry_denies_every_guild(self, allowed_guilds, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.discord"):
+            channel = self._channel({"allowed_guilds": allowed_guilds})
+
+        assert not channel._check_guild(SimpleNamespace(id=321))
+        assert not channel._check_guild(SimpleNamespace(id=3))
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("allowed_guilds", "admitted"), [("321", True), ("322", False)])
+    async def test_on_message_applies_the_allowlist(self, allowed_guilds, admitted):
+        # _make_discord_message reports guild ID 321 — the documented scalar.
+        channel = self._channel({"allowed_guilds": allowed_guilds})
+        channel._running = True
+        channel._client = SimpleNamespace(user=SimpleNamespace(id=999, mention="<@999>"))
+        channel._discord_module = SimpleNamespace(Thread=type("FakeThread", (), {}))
+        channel._main_loop = asyncio.get_running_loop()
+        # A refused capacity slot ends the hand-off here, so nothing is stubbed
+        # beyond it: the assertion is purely "did the gate let the message in".
+        channel._reserve_inbound = MagicMock(return_value=None)
+
+        await channel._on_message(_make_discord_message("hello"))
+
+        assert channel._reserve_inbound.called is admitted
+
+
+class TestDiscordAllowedChannels:
+    """``allowed_channels`` is parsed by the same lines, so it breaks the same way."""
+
+    @staticmethod
+    def _channel(config_extra: dict) -> DiscordChannel:
+        return DiscordChannel(bus=MessageBus(), config={"bot_token": "token", "mention_only": True, "thread_mode": False, **config_extra})
+
+    @pytest.mark.parametrize("allowed_channels", ["456", 456], ids=["str", "int"])
+    def test_scalar_channel_id_is_one_entry_not_its_digits(self, allowed_channels):
+        channel = self._channel({"allowed_channels": allowed_channels})
+
+        assert "456" in channel._allowed_channels
+        assert "4" not in channel._allowed_channels
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("allowed_channels", "admitted"), [("456", True), ("457", False)])
+    async def test_exempt_channel_needs_no_mention(self, allowed_channels, admitted):
+        channel = self._channel({"allowed_channels": allowed_channels})
+        channel._running = True
+        channel._client = SimpleNamespace(user=SimpleNamespace(id=999, mention="<@999>"))
+        channel._discord_module = SimpleNamespace(Thread=type("FakeThread", (), {}))
+        channel._main_loop = asyncio.get_running_loop()
+        channel._reserve_inbound = MagicMock(return_value=MagicMock())
+        channel._publish_reserved = MagicMock(return_value=None)
+
+        await channel._on_message(_make_discord_message("hello"))
+
+        assert channel._publish_reserved.called is admitted

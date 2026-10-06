@@ -10,7 +10,7 @@ import time
 from collections.abc import Coroutine
 from typing import Any
 
-from app.channels.base import Channel
+from app.channels.base import Channel, ChannelStopTimeout
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
@@ -98,12 +98,53 @@ def _load_telegram_input_file(path, filename: str):
     return InputFile(path.read_bytes(), filename=filename)
 
 
+def _parse_telegram_user_id(entry: Any) -> int | None:
+    """A positive Telegram user ID from an ``int`` or a digit string, else ``None``."""
+    if isinstance(entry, bool):
+        # bool is an int subclass: ``true`` must not become user 1.
+        return None
+    if isinstance(entry, int):
+        return entry if entry > 0 else None
+    if isinstance(entry, str):
+        text = entry.strip()
+        if text.isascii() and text.isdigit():
+            return int(text) or None
+    return None
+
+
+def _parse_allowed_users(allowed_users: Any) -> frozenset[int] | None:
+    """Parse ``channels.telegram.allowed_users``; ``None`` means no allowlist.
+
+    A single ID is shorthand for a one-entry list. Entries that are not numeric
+    user IDs (``@usernames``, floats, booleans) are dropped with a warning. If
+    none remain, the result is an empty set that denies everyone: the operator
+    asked for a restriction, so an unreadable one must not open the bot to all.
+    """
+    if allowed_users is None or (isinstance(allowed_users, str) and not allowed_users.strip()):
+        return None
+    entries = list(allowed_users) if isinstance(allowed_users, list | tuple | set) else [allowed_users]
+    if not entries:
+        return None
+    user_ids: set[int] = set()
+    for entry in entries:
+        user_id = _parse_telegram_user_id(entry)
+        if user_id is None:
+            logger.warning("[Telegram] Ignoring allowed_users entry %r: expected a positive numeric Telegram user ID (not an @username); list several IDs as a YAML list", entry)
+        else:
+            user_ids.add(user_id)
+    if not user_ids:
+        logger.error("[Telegram] allowed_users has no valid numeric user ID; denying every user until it is fixed")
+    return frozenset(user_ids)
+
+
 class TelegramChannel(Channel):
     """Telegram bot channel using long-polling.
 
     Configuration keys (in ``config.yaml`` under ``channels.telegram``):
         - ``bot_token``: Telegram Bot API token (from @BotFather).
-        - ``allowed_users``: (optional) List of allowed Telegram user IDs. Empty = allow all.
+        - ``allowed_users``: (optional) List of numeric Telegram user IDs (not
+          @usernames), or a single ID. Empty = allow all; a non-empty list with
+          no valid ID denies everyone.
     """
 
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
@@ -123,12 +164,7 @@ class TelegramChannel(Channel):
         # Tasks submitted from the main dispatcher loop back to PTB's loop.
         # Only the Telegram loop mutates this set.
         self._tg_bridge_tasks: set[asyncio.Task[Any]] = set()
-        self._allowed_users: set[int] = set()
-        for uid in config.get("allowed_users", []):
-            try:
-                self._allowed_users.add(int(uid))
-            except (ValueError, TypeError):
-                pass
+        self._allowed_users = _parse_allowed_users(config.get("allowed_users"))
         # chat_id -> last sent message_id for threaded replies
         self._last_bot_message: dict[str, int] = {}
         # stream_key ("chat_id:thread_ts") -> state of the in-flight streamed
@@ -233,8 +269,9 @@ class TelegramChannel(Channel):
                             logger.warning("[Telegram] polling thread did not stop within the shutdown budget")
             finally:
                 if worker_thread is not None and worker_thread.is_alive():
-                    logger.warning("[Telegram] polling thread is still exiting after bounded shutdown")
-                self._thread = None
+                    raise ChannelStopTimeout("Telegram polling thread is still running after stop timeout")
+                if self._thread is worker_thread:
+                    self._thread = None
                 self._application = None
         logger.info("Telegram channel stopped")
 
@@ -916,7 +953,7 @@ class TelegramChannel(Channel):
                 logger.exception("Error during Telegram shutdown")
 
     def _check_user(self, user_id: int) -> bool:
-        if not self._allowed_users:
+        if self._allowed_users is None:
             return True
         return user_id in self._allowed_users
 

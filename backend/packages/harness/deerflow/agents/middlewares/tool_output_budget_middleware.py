@@ -184,16 +184,7 @@ def _sanitize_tool_name(name: str) -> str:
     return safe or "unknown"
 
 
-def _sanitize_tool_call_id(tool_call_id: str) -> str:
-    """Make a tool call id safe to use inside a filename.
-
-    The id reaches us from the model/provider, so it gets the same treatment as
-    a tool name: no separators and no traversal components.
-    """
-    return _sanitize_tool_name(tool_call_id)
-
-
-def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
+def _build_externalized_filename(*, tool_name: str, tool_call_id: str, content: str) -> str:
     """Build the on-disk filename for an externalized tool output.
 
     Shared by the host-disk and sandbox externalization paths so both
@@ -201,11 +192,15 @@ def _build_externalized_filename(*, tool_name: str, tool_call_id: str) -> str:
     """
     safe_name = _sanitize_tool_name(tool_name)
     ext = _EXT_MAP.get(tool_name, "txt")
-    # Derived from the call id so the host-disk and sandbox paths agree on one
-    # name for a given call, and so externalizing the same output twice is
-    # idempotent instead of leaving two files behind.
-    safe_id = _sanitize_tool_call_id(tool_call_id)
-    return f"{safe_name}-{safe_id}.{ext}"
+    # Hash the raw ID and content so missing IDs, sanitization collisions and
+    # oversized IDs cannot overwrite distinct output. Frame the ID length to
+    # keep the boundary unambiguous, including when either value contains NUL.
+    call_id_bytes = tool_call_id.encode("utf-8")
+    digest = hashlib.sha256()
+    digest.update(len(call_id_bytes).to_bytes(8, "big"))
+    digest.update(call_id_bytes)
+    digest.update(content.encode("utf-8"))
+    return f"{safe_name}-{digest.hexdigest()}.{ext}"
 
 
 def _externalize(
@@ -225,25 +220,26 @@ def _externalize(
     except OSError:
         return None
 
-    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id)
-    filepath = os.path.join(storage_dir, filename)
-
-    if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
-        return None
-
     # Each writer owns a unique sibling temp file, so concurrent calls cannot
     # truncate or clean up each other's pending output. Publish only after close
     # (also required on Windows), keeping the final filename deterministic.
     tmp_path = None
     try:
+        filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
+        filepath = os.path.join(storage_dir, filename)
+        if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
+            return None
+
         candidate_path = os.path.join(storage_dir, f".tool-output-{uuid.uuid4().hex}.tmp")
         # Exclusive creation keeps per-writer ownership while honoring umask,
         # unlike NamedTemporaryFile's fixed 0600 mode on mounted outputs.
-        with open(candidate_path, "x", encoding="utf-8") as f:
+        # newline="" keeps the bytes equal to the stamped blob ref; Windows
+        # text mode would write CRLF and restore would discard the file.
+        with open(candidate_path, "x", encoding="utf-8", newline="") as f:
             tmp_path = candidate_path
             f.write(content)
         os.replace(tmp_path, filepath)
-    except OSError:
+    except (OSError, UnicodeEncodeError):
         if tmp_path is not None:
             try:
                 os.unlink(tmp_path)
@@ -310,10 +306,12 @@ def _externalize_to_sandbox(
     """
     if os.path.isabs(storage_subdir) or ".." in storage_subdir:
         return None
-    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id)
-    virtual_dir = f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}"
-    virtual_path = f"{virtual_dir}/{filename}"
     try:
+        # Hashing encodes provider text too; keep encoding errors within the
+        # same failure boundary as sandbox writes so callers can truncate.
+        filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
+        virtual_dir = f"{_VIRTUAL_OUTPUTS_BASE}/{storage_subdir}"
+        virtual_path = f"{virtual_dir}/{filename}"
         # AIO sandbox write_file does NOT create parent directories, so create
         # them explicitly before writing. execute_command returns its stdout
         # verbatim (including an "Error: ..." string on failure) rather than
@@ -531,7 +529,12 @@ def _budget_content(
 
         if host_outputs_path is not None:
             blob_store = get_blob_store_if_enabled()
-            blob_bytes = content.encode("utf-8") if blob_store is not None else None
+            try:
+                blob_bytes = content.encode("utf-8") if blob_store is not None else None
+            except UnicodeEncodeError:
+                blob_bytes = None
+                durable_fallback_required = True
+                logger.warning("Tool output cannot be encoded as UTF-8 for durable blob externalization")
             if blob_bytes is not None and len(blob_bytes) > _MAX_TOOL_OUTPUT_BLOB_BYTES:
                 durable_fallback_required = True
                 logger.warning(
@@ -539,7 +542,7 @@ def _budget_content(
                     len(blob_bytes),
                     _MAX_TOOL_OUTPUT_BLOB_BYTES,
                 )
-            else:
+            elif not durable_fallback_required:
                 virtual_path = _externalize(
                     content,
                     tool_name=tool_name,

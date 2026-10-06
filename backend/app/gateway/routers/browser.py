@@ -11,6 +11,7 @@ from app.gateway.authz import Permissions, require_permission, resolve_route_per
 from app.gateway.browser_capability import browser_capability
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id, reset_current_user, set_current_user
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -261,6 +262,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
             BrowserLiveViewerError,
             BrowserSessionCapacityError,
             get_browser_session_manager,
+            resolve_browser_egress,
             validate_browser_url,
         )
     except ImportError:
@@ -326,6 +328,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
             cdp_url=_cfg_str("cdp_url"),
             allow_unguarded_cdp=_cfg_bool("allow_unguarded_cdp", False),
             url_guard=validate_browser_url,
+            egress_resolver=resolve_browser_egress,
         )
         session = session_lease.__enter__()
     except BrowserSessionCapacityError:
@@ -474,6 +477,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
     input_task: asyncio.Task | None = None
     reader_task: asyncio.Task | None = None
     poll_task: asyncio.Task | None = None
+    cancellation: asyncio.CancelledError | None = None
     try:
         # Seed the live page from the latest browser_view URL. A thread can have
         # a stale browser session from an earlier panel/live attempt; if that
@@ -498,6 +502,8 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         await reader_task
     except WebSocketDisconnect:
         pass
+    except asyncio.CancelledError as exc:
+        cancellation = exc
     except Exception as exc:
         logger.exception("browser stream error: thread_id=%s err=%s", thread_id, exc)
     finally:
@@ -508,7 +514,14 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
             reader_task.cancel()
         if poll_task is not None:
             poll_task.cancel()
-        with contextlib.suppress(Exception):
-            await session.stop_screencast(_on_frame)
+        try:
+            await await_drained(session.stop_screencast(_on_frame))
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+        except Exception:
+            pass
         session_lease.__exit__(None, None, None)
         reset_current_user(token)
+        if cancellation is not None:
+            raise cancellation

@@ -27,7 +27,12 @@ export interface Translations {
     catalogHint: string;
     installationGuide: string;
     catalog: Record<
-      "bookmarks" | "context" | "classify" | "screening" | "example",
+      | "agentTeams"
+      | "bookmarks"
+      | "context"
+      | "classify"
+      | "screening"
+      | "example",
       { title: string; description: string }
     >;
     pageUnavailable: string;
@@ -312,6 +317,8 @@ export interface Translations {
     mentionSearch: string;
     mentionSkills: string;
     mentionFiles: string;
+    mentionExtensions: string;
+    mentionExtensionsLimit: string;
     mentionConversations: string;
     mentionUpload: string;
     mentionEmpty: string;
@@ -768,9 +775,36 @@ export interface Translations {
       launching: string;
       running: string;
       success: string;
+      unmet: string;
       failed: string;
       skipped: string;
       interrupted: string;
+    };
+    goal: {
+      objective: string;
+      maxRuns: string;
+      endAt: string;
+      met: string;
+      metAssumed: string;
+      stopRequested: string;
+      lastPause: string;
+      agentStopped: string;
+      autoPaused: string;
+      lastUnmet: string;
+      reasons: {
+        missingEvidence: string;
+        needsUserInput: string;
+        externalWait: string;
+        runFailed: string;
+        goalNotMetYet: string;
+        maxContinuations: string;
+        noProgress: string;
+        tokenCapped: string;
+        evaluatorFailed: string;
+        noDurableEndOfTurn: string;
+        threadChanged: string;
+        noVerdict: string;
+      };
     };
     recipes: {
       label: string;
@@ -786,6 +820,14 @@ export interface Translations {
     title: string;
     description: string;
     newAgent: string;
+    importAgent: string;
+    importTitle: string;
+    importDescription: string;
+    importName: string;
+    importInvalidFile: string;
+    importSuccess: string;
+    exportAgent: string;
+    exportSuccess: string;
     emptyTitle: string;
     emptyDescription: string;
     featureDisabledTitle: string;

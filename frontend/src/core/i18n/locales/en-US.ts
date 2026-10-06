@@ -40,6 +40,11 @@ export const enUS: Translations = {
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
     catalog: {
+      agentTeams: {
+        title: "Agent teams",
+        description:
+          "Let full Custom Agents collaborate through @mentions, shared records and task handoffs.",
+      },
       bookmarks: {
         title: "Bookmarks",
         description:
@@ -379,9 +384,11 @@ export const enUS: Translations = {
   // Input Box
   inputBox: {
     mentionPicker: "Add a reference",
-    mentionSearch: "Search skills, project files and conversations",
+    mentionSearch: "Search skills, project files, conversations and plugins",
     mentionSkills: "Skills",
     mentionFiles: "Project files",
+    mentionExtensions: "Plugins",
+    mentionExtensionsLimit: "Select up to 16 plugin references.",
     mentionConversations: "Conversations",
     mentionUpload: "Upload a file",
     mentionEmpty: "No matching references in loaded results",
@@ -932,9 +939,36 @@ export const enUS: Translations = {
       launching: "Launching",
       running: "Running",
       success: "Success",
+      unmet: "Goal unmet",
       failed: "Failed",
       skipped: "Skipped",
       interrupted: "Interrupted",
+    },
+    goal: {
+      objective: "Goal per run",
+      maxRuns: "Automatic runs: up to {count}",
+      endAt: "Ends at",
+      met: "Goal met",
+      metAssumed: "Goal met, relying on stated assumptions",
+      stopRequested: "This run asked to stop the schedule",
+      lastPause: "Last pause reason",
+      agentStopped: "The agent stopped its own schedule",
+      autoPaused: "3 scheduled runs in a row did not meet the goal",
+      lastUnmet: "Last unmet reason",
+      reasons: {
+        missingEvidence: "Goal check: evidence missing",
+        needsUserInput: "Needs your input",
+        externalWait: "Goal check: waiting on something external",
+        runFailed: "Goal check: the run did not finish the work",
+        goalNotMetYet: "Goal check: not met yet",
+        maxContinuations: "Continuation limit reached",
+        noProgress: "No progress between turns",
+        tokenCapped: "Token budget reached",
+        evaluatorFailed: "Goal check could not run",
+        noDurableEndOfTurn: "No final reply was saved",
+        threadChanged: "Conversation changed during the goal check",
+        noVerdict: "No goal verdict",
+      },
     },
     recipes: {
       label: "Quick create",
@@ -963,6 +997,15 @@ export const enUS: Translations = {
     description:
       "Create and manage custom agents with specialized prompts and capabilities.",
     newAgent: "New Agent",
+    importAgent: "Import Agent",
+    importTitle: "Import custom agent",
+    importDescription:
+      "Choose the local name for this agent. Existing agents are never overwritten.",
+    importName: "Agent name",
+    importInvalidFile: "This file is not valid JSON",
+    importSuccess: "Agent imported",
+    exportAgent: "Export Agent",
+    exportSuccess: "Agent package downloaded",
     emptyTitle: "No custom agents yet",
     emptyDescription:
       "Create your first custom agent with a specialized system prompt.",
@@ -1220,6 +1263,7 @@ export const enUS: Translations = {
     saveChanges: "Save changes",
     descriptions: {
       buzz: "Buzz channels and direct messages through your DeerFlow agent.",
+      qq: "QQ direct messages and group @mentions over WebSocket.",
       telegram: "Telegram direct messages through your DeerFlow bot.",
       slack: "Slack workspace messages and mentions.",
       discord: "Discord server messages through your DeerFlow bot.",
