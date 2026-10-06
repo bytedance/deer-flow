@@ -49,6 +49,17 @@ spec:
               value: {{ include "deer-flow.namespace" . | quote }}
             - name: SANDBOX_IMAGE
               value: {{ .Values.provisioner.sandboxImage | quote }}
+            # Shared secret the gateway sends as X-API-Key. verify_api_key in
+            # docker/provisioner/app.py answers 401 to every /api/* request
+            # while this is empty or mismatched, so a provisioner without it
+            # cannot create a single sandbox: the key is required (a
+            # user-managed existingAppSecret must carry it) and comes from the
+            # same Secret the gateway reads.
+            - name: PROVISIONER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: PROVISIONER_API_KEY
             # In-cluster API access via the mounted ServiceAccount token.
             # K8S_API_SERVER is intentionally unset (do NOT use host.docker.internal).
             # Service type for per-sandbox Services. ClusterIP (default) routes the

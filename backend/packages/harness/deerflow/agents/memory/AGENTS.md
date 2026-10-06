@@ -362,6 +362,8 @@ runs by default.
   retrieval, while adapter indexing and warm-up remain configured.
 - Ranking reads at most 4096 characters and 128 tokens per query/fact. The
   no-jieba fallback emits both Latin words and CJK bigrams, including mixed text.
+  With jieba, tokens without a letter or digit (punctuation) are dropped, as in
+  the fallback, so they neither match nor use the 128-token budget.
   `DeerMem.warm()` initializes optional jieba before serving requests, even
   with character-based token counting. Invalid/missing confidence defaults to 0.
 - Search stops MMR after `top_k` picks. Injection diversifies guaranteed and
