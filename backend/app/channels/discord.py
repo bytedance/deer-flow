@@ -15,6 +15,7 @@ from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -253,6 +254,10 @@ class DiscordChannel(Channel):
             except Exception:
                 logger.exception("[Discord] failed to persist thread mappings")
 
+    async def _persist_thread_mappings_async(self) -> None:
+        """Persist mappings without letting cancellation detach the worker thread."""
+        await await_drained(asyncio.to_thread(self._persist_thread_mappings))
+
     @staticmethod
     def _read_attachment_bytes(path: str) -> bytes:
         """Read an attachment file synchronously (intended for ``asyncio.to_thread``)."""
@@ -274,7 +279,7 @@ class DiscordChannel(Channel):
         # with {} — the #2897 data loss this PR exists to prevent.
         if self._thread_store_loaded:
             try:
-                await asyncio.to_thread(self._persist_thread_mappings)
+                await self._persist_thread_mappings_async()
             except Exception:
                 logger.warning("[Discord] failed to flush thread mappings during shutdown")
 
@@ -685,7 +690,7 @@ class DiscordChannel(Channel):
                     if thread_obj is not None:
                         target_thread_id = str(thread_obj.id)
                         self._record_thread_mapping(channel_id, target_thread_id)
-                        await asyncio.to_thread(self._persist_thread_mappings)
+                        await self._persist_thread_mappings_async()
                         thread_id = target_thread_id
                         chat_id = channel_id
                         typing_target = thread_obj
@@ -712,7 +717,7 @@ class DiscordChannel(Channel):
                 if thread_obj is not None:
                     target_thread_id = str(thread_obj.id)
                     self._record_thread_mapping(channel_id, target_thread_id)
-                    await asyncio.to_thread(self._persist_thread_mappings)
+                    await self._persist_thread_mappings_async()
                     thread_id = target_thread_id
                     chat_id = channel_id
                     typing_target = thread_obj  # Type into the new thread
@@ -735,7 +740,7 @@ class DiscordChannel(Channel):
                 else:
                     target_thread_id = str(thread_obj.id)
                     self._record_thread_mapping(channel_id, target_thread_id)
-                    await asyncio.to_thread(self._persist_thread_mappings)
+                    await self._persist_thread_mappings_async()
                     thread_id = target_thread_id
                     chat_id = channel_id
                     typing_target = thread_obj  # Type into the new thread

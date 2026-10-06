@@ -3,12 +3,61 @@ import logging
 import math
 import os
 import random
+import re
+import time
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 _api_key_warned = False
+
+
+_DAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
+_MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+_CLOCK = r"[0-9]{2}:[0-9]{2}:[0-9]{2}"
+_HTTP_DATE = re.compile(
+    rf"(?:{_DAY}, [0-9]{{2}} {_MONTH} [0-9]{{4}} {_CLOCK} GMT"
+    rf"|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), [0-9]{{2}}-{_MONTH}-[0-9]{{2}} {_CLOCK} GMT"
+    rf"|{_DAY} {_MONTH} (?:[0-9]{{2}}| [0-9]) {_CLOCK} [0-9]{{4}})"
+)
+
+
+def _retry_after(value: str | None) -> float | None:
+    """Return a server floor, or None for an invalid HTTP Retry-After value."""
+    if value is None:
+        return None
+    value = value.strip(" \t")
+    if value and value.isascii() and value.isdecimal():
+        digits = value.lstrip("0") or "0"
+        # Bound integer conversion work. Infinity is a valid, unfit floor, not
+        # a parsing failure that could cause an early fallback retry.
+        if len(digits) > 309:
+            return math.inf
+        seconds = int(digits)
+        try:
+            floor = float(seconds)
+        except OverflowError:
+            return math.inf
+        return math.nextafter(floor, math.inf) if floor < seconds else floor
+    if not _HTTP_DATE.fullmatch(value):
+        return None
+    try:
+        date = parsedate_to_datetime(value).replace(tzinfo=UTC)
+        now = time.time()
+        if "-" in value:
+            # RFC 850 two-digit years: choose the most recent matching year
+            # no more than 50 years in the future (RFC 9110 section 5.6.7).
+            current = datetime.fromtimestamp(now, UTC)
+            year = (current.year + 50) // 100 * 100 + date.year % 100
+            if (year, date.month, date.day, date.hour, date.minute, date.second) > (current.year + 50, current.month, current.day, current.hour, current.minute, current.second):
+                year -= 100
+            date = date.replace(year=year)
+        return max(0.0, date.timestamp() - now)
+    except (ValueError, OverflowError):
+        return None
 
 
 class JinaClient:
@@ -46,6 +95,7 @@ class JinaClient:
                         if remaining is not None and remaining <= 0:
                             raise TimeoutError
                         request_timeout = min(timeout, remaining) if remaining is not None else timeout
+                        server_floor = None
                         try:
                             response = await client.post("https://r.jina.ai/", headers=headers, json=data, timeout=request_timeout)
                         except (httpx.ConnectError, httpx.ConnectTimeout):
@@ -58,16 +108,26 @@ class JinaClient:
                                 error_message = "Jina API returned empty response"
                                 logger.error(error_message)
                                 return f"Error: {error_message}"
-                            if response.status_code not in {502, 503, 504} or attempt == max_retries:
+                            if response.status_code in {429, 503} and attempt < max_retries:
+                                server_floor = _retry_after(response.headers.get("Retry-After"))
+                            retryable = response.status_code in {502, 503, 504} or (response.status_code == 429 and server_floor is not None)
+                            if not retryable or attempt == max_retries:
                                 error_message = f"Jina API returned status {response.status_code}: {response.text}"
                                 logger.error(error_message)
                                 return f"Error: {error_message}"
 
                         # Only allowlisted failures reach the non-blocking wait.
                         remaining = deadline - asyncio.get_running_loop().time()
+                        if server_floor is not None and server_floor >= remaining:
+                            return f"Error: Jina API returned status {response.status_code}: {response.text}"
                         if remaining <= 0:
                             raise TimeoutError
-                        await asyncio.sleep(min(delay, remaining) * random.uniform(0.5, 1.0))
+                        wait = min(delay, remaining) * random.uniform(0.5, 1.0)
+                        if server_floor is not None:
+                            wait = max(wait, server_floor)
+                            if wait >= remaining:
+                                return f"Error: Jina API returned status {response.status_code}: {response.text}"
+                        await asyncio.sleep(wait)
                         delay = min(delay * 2, 4.0)
         except Exception as e:
             if isinstance(e, TimeoutError) and max_retries and asyncio.get_running_loop().time() >= deadline:

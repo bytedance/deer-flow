@@ -9421,7 +9421,10 @@ class TestTelegramAllowedUsers:
 
         return TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token", **config_extra})
 
-    @pytest.mark.parametrize("config_extra", [{}, {"allowed_users": None}, {"allowed_users": []}, {"allowed_users": " "}])
+    @pytest.mark.parametrize(
+        "config_extra",
+        [{}, {"allowed_users": None}, {"allowed_users": []}, {"allowed_users": ()}, {"allowed_users": set()}, {"allowed_users": frozenset()}, {"allowed_users": " "}],
+    )
     def test_unset_or_empty_allowlist_allows_everyone_without_warning(self, config_extra, caplog):
         with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
             ch = self._channel(config_extra)
@@ -9431,7 +9434,7 @@ class TestTelegramAllowedUsers:
 
     @pytest.mark.parametrize(
         "allowed_users",
-        [[123456, 7], ["123456", " 7 "], (123456, 7), {123456, 7}],
+        [[123456, 7], ["123456", " 7 "], (123456, 7), {123456, 7}, frozenset({123456, 7})],
     )
     def test_numeric_ids_are_allowed_and_others_denied(self, allowed_users):
         ch = self._channel({"allowed_users": allowed_users})
@@ -9458,6 +9461,15 @@ class TestTelegramAllowedUsers:
         assert repr(bad_entry) in caplog.text
         # 0 and -5 are numeric, so the hint has to say what they are missing.
         assert "positive numeric" in caplog.text
+
+    def test_frozen_allowlist_drops_invalid_entries_without_blocking_valid_ids(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.telegram"):
+            ch = self._channel({"allowed_users": frozenset({123456, "@alice"})})
+
+        assert ch._check_user(123456)
+        assert not ch._check_user(42)
+        assert "'@alice'" in caplog.text
+        assert not any(record.levelno == logging.ERROR for record in caplog.records)
 
     @pytest.mark.parametrize(
         "allowed_users",

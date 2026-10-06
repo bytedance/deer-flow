@@ -623,6 +623,35 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **middleware:** Tool-output budgeting no longer hides a failed shell exit from
+  subagent evidence. A bash result between `externalize_min_chars` (12,000) and
+  the sandbox limit (20,000) was replaced by a preview ending in its `Access:`
+  footer, so the trailing `Exit Code: N` was no longer last,
+  `_bash_evidence_status` fell back to `deerflow_tool_meta` (`success`), and a
+  failed `pytest` whose output still said `12 passed` could satisfy a
+  `tests_passed` acceptance criterion. `ToolOutputBudgetMiddleware` now
+  re-appends the original trailing `Exit Code: N` / `Command exited with code N`
+  after the preview, and the storage-unavailable fallback reserves it from the
+  `fallback_max_chars` budget the way sandbox truncation does. Only `bash` and
+  `bash_tool` results are affected; the persisted full output is unchanged.
+  ([#6354])
+- **make:** `make clean` now says what it deletes and refuses to run under a live
+  Docker Gateway. `make help` described it as cleaning up "temporary files", but
+  it deletes `backend/.deer-flow`: the local database, users, threads, uploads,
+  memory, and secrets. Both Docker stacks mount that directory into the
+  `deer-flow-gateway` container, which `make stop` leaves running, so the data
+  could be deleted under a live Gateway. The help text and a notice before
+  deletion now name the directory, and `make clean` stops with a hint to run
+  `make down` or `make docker-stop` while that container is running, before it
+  stops anything. ([#6351])
+- **tui:** A new prompt no longer races an interrupted run in the same
+  conversation. After `Ctrl+C` the run's worker keeps going until its current
+  step returns, so a tool call already in progress (a long shell command, for
+  example) still finished and checkpointed while the next prompt ran on the same
+  thread; whichever run checkpointed last became the conversation's history, so
+  the new turn could silently disappear from it. Until the interrupted worker
+  returns, a prompt in that conversation now shows a notice instead of starting a
+  second run; other conversations stay available through `/new` and `/resume`. ([#6350])
 - **sandbox:** With host bash enabled, the local sandbox no longer keeps a
   thread on the skill view of the last restricted Agent that ran there. That
   view is only maintained while host bash is off, but `LocalSandboxProvider`
@@ -8809,3 +8838,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6343]: https://github.com/bytedance/deer-flow/pull/6343
 [#6344]: https://github.com/bytedance/deer-flow/pull/6344
 [#6347]: https://github.com/bytedance/deer-flow/pull/6347
+[#6350]: https://github.com/bytedance/deer-flow/pull/6350
+[#6351]: https://github.com/bytedance/deer-flow/pull/6351
+[#6354]: https://github.com/bytedance/deer-flow/pull/6354
