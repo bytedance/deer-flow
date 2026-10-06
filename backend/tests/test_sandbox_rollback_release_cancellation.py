@@ -31,9 +31,7 @@ class _BlockingRollbackProvider(SandboxProvider):
 @pytest.mark.anyio
 async def test_async_rollback_drains_direct_release_across_repeated_cancellation() -> None:
     provider = _BlockingRollbackProvider()
-    task = asyncio.create_task(
-        _rollback_failed_sandbox_lookup_async(provider, "rollback-sandbox", None)
-    )
+    task = asyncio.create_task(_rollback_failed_sandbox_lookup_async(provider, "rollback-sandbox", None))
     try:
         assert await asyncio.to_thread(provider.started.wait, 2)
         task.cancel()
