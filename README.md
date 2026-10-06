@@ -1903,6 +1903,10 @@ hashing, use the configured inline fallback.
 non-negative integers; YAML booleans are rejected rather than treated as 0 or 1.
 An explicit zero per-tool override disables externalization while preserving
 any positive global fallback limit.
+Structured JSON tool results follow these budgets, including results mixed with
+media; externalization keeps the full JSON available through a file reference.
+MindIE renders JSON tool results as escaped text, with configured tool exemptions
+preserved. Enabled PII redaction scans nested JSON keys and values before rendering.
 Mounted sandboxes running under another UID need read access through the shared
 storage permissions. An unclean shutdown can leave `.tool-output-*.tmp` files in
 `tool_output.storage_subdir` (default `.tool-results`) under thread outputs.

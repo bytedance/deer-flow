@@ -97,37 +97,41 @@ def _default_config() -> ToolOutputConfig:
 # ---------------------------------------------------------------------------
 
 
-def _message_text(content: Any) -> str | None:
-    """Extract a plain-text representation from a ToolMessage content field.
+def _split_budgetable_content(content: Any) -> tuple[str | None, list[Any]]:
+    """Render text/JSON for budgeting, retaining other blocks for the provider.
 
-    Returns ``None`` for content with no model-bound text rendering (images
-    and other non-textual blocks) so the caller can skip budget enforcement.
-    ``{"type": "json"}`` blocks do have one: provider adapters such as
-    ``mindie_provider._fix_messages`` serialize them onto the text channel,
-    so they are rendered here with that same serialization and count toward
-    the budget before provider normalization.
+    JSON blocks count even when mixed with media. Legacy text/image results
+    without JSON keep their existing pass-through behavior.
     """
     if isinstance(content, str):
-        return content
-    if content is None:
-        return None
+        return content, []
     if isinstance(content, list):
         pieces: list[str] = []
+        retained: list[Any] = []
+        has_json = False
         for part in content:
             if isinstance(part, str):
                 pieces.append(part)
-            elif isinstance(part, dict) and isinstance(part.get("text"), str):
-                pieces.append(part["text"])
             elif isinstance(part, dict) and part.get("type") == "json" and "json" in part:
                 # Keep this serialization in sync with mindie_provider._fix_messages.
+                has_json = True
                 try:
                     pieces.append(json.dumps(part["json"], ensure_ascii=False))
                 except (TypeError, ValueError):
                     pieces.append(str(part["json"]))
+            elif isinstance(part, dict) and isinstance(part.get("text"), str):
+                pieces.append(part["text"])
             else:
-                return None
-        return "\n".join(pieces) if pieces else None
-    return None
+                retained.append(part)
+        if retained and not has_json:
+            return None, retained
+        return ("\n".join(pieces) if pieces else None), retained
+    return None, []
+
+
+def _message_text(content: Any) -> str | None:
+    """Return the text/JSON representation eligible for output budgeting."""
+    return _split_budgetable_content(content)[0]
 
 
 def _snap_to_line_boundary(text: str, pos: int) -> int:
@@ -642,7 +646,7 @@ def _patch_tool_message(
     if tool_name in config.exempt_tools:
         return msg
 
-    text = _message_text(msg.content)
+    text, retained_blocks = _split_budgetable_content(msg.content)
     if text is None:
         return msg
 
@@ -668,7 +672,7 @@ def _patch_tool_message(
         transform_kind = budgeted.transform_kind
     else:
         return msg
-    update["content"] = replacement
+    update["content"] = [{"type": "text", "text": replacement}, *retained_blocks] if retained_blocks else replacement
     if getattr(msg, "response_metadata", None):
         update["response_metadata"] = dict(msg.response_metadata)
     new_kwargs = dict(getattr(msg, "additional_kwargs", None) or {})

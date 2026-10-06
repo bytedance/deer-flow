@@ -563,25 +563,25 @@ class TestToolBoundary:
 
 
 class TestMindieJsonChannel:
-    def test_redacted_json_block_stays_redacted_through_mindie_serialization(self):
-        # Review finding on #6208: MindIE's _fix_messages flattens json blocks
-        # onto the text channel after the middleware ran. The payload must
-        # already be redacted at that point, or raw PII reaches the endpoint.
+    def test_redacted_user_json_block_remains_dropped_by_mindie(self):
+        # User JSON still participates in redaction for other providers;
+        # MindIE renders JSON only in tool results.
         from deerflow.models.mindie_provider import _fix_messages
 
         messages, _ = _run_model_call(
             _make_middleware(),
-            [HumanMessage(content=[{"type": "json", "json": {"email": "alice@example.com"}}])],
+            [HumanMessage(content=[{"type": "text", "text": "keep user text"}, {"type": "json", "json": {"email": "alice@example.com"}}])],
         )
+        assert messages[0].content[1]["json"]["email"] == EMAIL_ALICE
         fixed = _fix_messages(messages)
-        assert EMAIL_ALICE in fixed[0].content
-        assert "alice@example.com" not in fixed[0].content
+        assert fixed[0].content == "keep user text"
 
-    def test_redacted_tool_json_block_stays_redacted_through_mindie_serialization(self):
+    @pytest.mark.parametrize("payload", [{"row": "alice@example.com"}, {"alice@example.com": {"status": "active"}}], ids=["value", "key"])
+    def test_redacted_tool_json_block_stays_redacted_through_mindie_serialization(self, payload):
         from deerflow.models.mindie_provider import _fix_messages
 
         result = ToolMessage(
-            content=[{"type": "json", "json": {"row": "alice@example.com"}}],
+            content=[{"type": "json", "json": payload}],
             tool_call_id="c1",
             name="web_fetch",
         )

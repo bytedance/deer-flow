@@ -144,6 +144,85 @@ class TestMessageText:
         assert _message_text([{"type": "json"}]) is None
 
 
+class TestStructuredJsonMindIEBudget:
+    def test_mixed_json_media_externalizes_without_losing_media(self, tmp_path):
+        from deerflow.models.mindie_provider import _fix_messages
+
+        payload = {"rows": ["x" * 10_000], "answer": "TAIL_SENTINEL"}
+        media = {"type": "image", "base64": "BINARY_SENTINEL", "mime_type": "image/png"}
+        message = ToolMessage(
+            content=[{"type": "json", "json": payload}, media, {"type": "json"}],
+            name="query_rows",
+            tool_call_id="call_rows",
+            artifact={"source": "rows"},
+        )
+        middleware = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=100, preview_head_chars=20, preview_tail_chars=10))
+
+        result = middleware.wrap_tool_call(_make_request(tool_name="query_rows", outputs_path=str(tmp_path)), lambda _: message)
+
+        assert result is not message
+        assert isinstance(result.content, list)
+        assert media in result.content
+        assert result.artifact == message.artifact
+        files = list((tmp_path / ".tool-results").iterdir())
+        assert len(files) == 1
+        assert json.loads(files[0].read_text(encoding="utf-8")) == payload
+        visible = _fix_messages([result])[0].content
+        assert "Full query_rows output saved to" in visible
+        assert "BINARY_SENTINEL" not in visible
+        assert "x" * 10_000 not in visible
+        assert message.content[0]["json"] == payload
+
+    @pytest.mark.anyio
+    async def test_mixed_json_media_history_is_budgeted_before_mindie(self):
+        from deerflow.models.mindie_provider import _fix_messages
+
+        payload = {"rows": "x" * 2000, "answer": "TAIL_SENTINEL"}
+        media = {"type": "image", "base64": "BINARY_SENTINEL", "mime_type": "image/png"}
+        message = ToolMessage(content=[{"type": "json", "json": payload}, media], name="query_rows", tool_call_id="call_history")
+        request = ModelRequest(model=None, messages=[message], tools=[], state={})
+        middleware = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=100, fallback_max_chars=300, fallback_head_chars=80, fallback_tail_chars=40))
+        captured = {}
+
+        async def handler(req):
+            captured["request"] = req
+            return []
+
+        await middleware.awrap_model_call(request, handler)
+
+        forwarded = captured["request"]
+        assert forwarded is not request
+        assert media in forwarded.messages[0].content
+        visible = _fix_messages(forwarded.messages)[0].content
+        assert len(visible) <= 333  # Configured text limit plus XML framing.
+        assert "TAIL_SENTINEL" in visible
+        assert "BINARY_SENTINEL" not in visible
+        assert message.content[0]["json"] == payload
+
+    @pytest.mark.parametrize("structured", [False, True], ids=["plain-text", "json"])
+    @pytest.mark.parametrize(
+        "config,tool_name",
+        [
+            (ToolOutputConfig(enabled=False), "query_rows"),
+            (ToolOutputConfig(externalize_min_chars=60_000, fallback_max_chars=60_000), "query_rows"),
+            (ToolOutputConfig(), "read_file"),
+        ],
+        ids=["disabled", "increased-limits", "exempt-read"],
+    )
+    def test_configured_passthrough_survives_provider_normalization(self, config, tool_name, structured):
+        from deerflow.models.mindie_provider import _fix_messages
+
+        payload = "x" * 35_000 + "TAIL_SENTINEL"
+        content = [{"type": "json", "json": {"rows": payload}}] if structured else payload
+        message = ToolMessage(content=content, name=tool_name, tool_call_id="call_passthrough")
+        middleware = ToolOutputBudgetMiddleware(config=config)
+
+        result = middleware.wrap_tool_call(_make_request(tool_name=tool_name), lambda _: message)
+
+        assert result is message
+        assert payload in _fix_messages([result])[0].content
+
+
 class TestSnapToLineBoundary:
     def test_snaps_to_newline(self):
         text = "line1\nline2\nline3"

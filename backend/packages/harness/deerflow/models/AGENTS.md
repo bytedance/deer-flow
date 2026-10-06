@@ -115,10 +115,13 @@ Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
 ### MindIE Provider (`packages/harness/deerflow/models/mindie_provider.py`)
 
 `_fix_messages` converts tool results to the XML text format expected by MindIE.
-Tool results may contain structured content blocks, so the adapter serializes
-non-text blocks instead of silently dropping them. The escaping boundary around
-`<tool_response>` remains mandatory. Regression coverage lives in
-`tests/test_mindie_provider.py`.
+Only tool-message `type=json` payloads join the text channel; other non-text
+blocks remain omitted. Keep the `<tool_response>` escaping boundary and the
+non-serializable/circular JSON fallback. Output limits belong to
+`ToolOutputBudgetMiddleware`, including mixed JSON/media results and configured
+exemptions. Enabled PII redaction scans JSON keys and values before serialization.
+Regression coverage: `test_mindie_provider.py`, `test_pii_redaction_middleware.py`,
+and `test_tool_output_budget_middleware.py` in `tests/`.
 
 ### Managed shared models (`config/managed_models.py`)
 

@@ -33,6 +33,16 @@ path: a concurrent publisher may already have replaced it and durably
 checkpointed that content. Remove published files only as part of inactive
 thread-data maintenance.
 
+## Structured tool results
+
+`type=json` payloads count toward the configured text budget, including results
+that also carry media or other non-text blocks. Externalization saves the full
+text/JSON rendering and replaces that portion with a synopsis; other blocks stay
+in the result for providers that support them. Historical results use the same
+configured fallback. Disabled budgets, raised limits and tool exemptions apply
+before provider normalization. Pure text/media results without JSON retain their
+existing pass-through behavior.
+
 ## Unclean shutdown
 
 SIGKILL, OOM termination, and host failure bypass exception cleanup and can leave
