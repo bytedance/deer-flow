@@ -25,6 +25,8 @@ class _BlockingDisposeEngine:
 @pytest.mark.asyncio
 async def test_postgres_auto_create_retry_drains_provisional_engine_dispose_across_cancellation(monkeypatch) -> None:
     engine = _BlockingDisposeEngine()
+    previous_engine = engine_mod._engine
+    previous_factory = engine_mod._session_factory
     monkeypatch.setitem(sys.modules, "asyncpg", SimpleNamespace())
     monkeypatch.setattr(engine_mod, "create_async_engine", lambda *args, **kwargs: engine)
     monkeypatch.setattr(engine_mod, "async_sessionmaker", lambda *args, **kwargs: object())
@@ -48,9 +50,11 @@ async def test_postgres_auto_create_retry_drains_provisional_engine_dispose_acro
         await asyncio.wait_for(engine.dispose_started.wait(), timeout=2)
 
         task.cancel()
-        await asyncio.sleep(0)
+        for _ in range(5):
+            await asyncio.sleep(0)
         task.cancel()
-        await asyncio.sleep(0)
+        for _ in range(5):
+            await asyncio.sleep(0)
 
         assert not task.done()
         engine.allow_dispose.set()
@@ -61,7 +65,7 @@ async def test_postgres_auto_create_retry_drains_provisional_engine_dispose_acro
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        engine_mod._engine = None
-        engine_mod._session_factory = None
+        engine_mod._engine = previous_engine
+        engine_mod._session_factory = previous_factory
 
     assert engine.dispose_finished.is_set()
