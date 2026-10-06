@@ -26,6 +26,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from deerflow.config.app_config import AppConfig
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHART = REPO_ROOT / "deploy" / "helm" / "deer-flow"
 VALUES = CHART / "values.yaml"
@@ -118,7 +120,17 @@ def test_existing_app_secret_is_honored_by_the_provisioner() -> None:
     assert _secret_ref(_container(documents, "-gateway", "gateway"), ENV_NAME)["name"] == "my-app-secret"
 
 
-def test_gateway_key_is_omitted_while_the_bundled_provisioner_is_disabled() -> None:
+def test_harness_needs_the_variable_set_but_accepts_an_empty_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pins the contract the gateway Deployment relies on when the bundled provisioner is disabled."""
+    reference = {"sandbox": {"provisioner_api_key": f"${ENV_NAME}"}}
+    monkeypatch.delenv(ENV_NAME, raising=False)
+    with pytest.raises(ValueError, match=ENV_NAME):
+        AppConfig.resolve_env_variables(reference)
+    monkeypatch.setenv(ENV_NAME, "")
+    assert AppConfig.resolve_env_variables(reference) == {"sandbox": {"provisioner_api_key": ""}}
+
+
+def test_gateway_key_is_omitted_when_an_external_key_is_supplied() -> None:
     """An explicit env entry wins over envFrom, so rendering it would override the key an operator
     supplies through ``secrets`` for an external provisioner with the generated, unrelated value."""
     documents = _render_chart("provisioner.enabled=false", "secrets.PROVISIONER_API_KEY=external-provisioner-key")
@@ -127,3 +139,18 @@ def test_gateway_key_is_omitted_while_the_bundled_provisioner_is_disabled() -> N
     assert ENV_NAME not in _env(gateway)
     assert any(source["secretRef"]["name"].endswith("-provider") for source in gateway["envFrom"]), "the external key still arrives through the provider Secret"
     assert _by_kind(documents, "Secret", "-provider")["stringData"][ENV_NAME] == "external-provisioner-key"
+
+
+def test_gateway_key_is_omitted_with_a_user_managed_provider_secret() -> None:
+    """The chart cannot see inside ``existingSecret``, so it must not override whatever key it carries."""
+    gateway = _container(_render_chart("provisioner.enabled=false", "existingSecret=my-provider-secret"), "-gateway", "gateway")
+    assert ENV_NAME not in _env(gateway)
+    assert [source["secretRef"]["name"] for source in gateway["envFrom"]] == ["my-provider-secret"]
+
+
+def test_gateway_gets_an_empty_key_when_the_bundled_provisioner_is_disabled_without_an_external_key() -> None:
+    """The default config still references $PROVISIONER_API_KEY; an unset variable would stop the gateway
+    from starting at all, where the chart used to boot it and only fail sandbox calls at use time."""
+    gateway = _container(_render_chart("provisioner.enabled=false"), "-gateway", "gateway")
+    entry = _env(gateway)[ENV_NAME]
+    assert entry == {"name": ENV_NAME, "value": ""}

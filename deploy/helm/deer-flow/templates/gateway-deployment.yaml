@@ -155,6 +155,18 @@ spec:
                 secretKeyRef:
                   name: {{ include "deer-flow.appSecret" . }}
                   key: PROVISIONER_API_KEY
+            {{- else if not (or (hasKey (default dict .Values.secrets) "PROVISIONER_API_KEY") .Values.existingSecret) }}
+            # Bundled provisioner disabled and no external key supplied through
+            # `secrets` or `existingSecret`: the default config still references
+            # $PROVISIONER_API_KEY, and the harness refuses to start on an unset
+            # variable while it resolves an empty one to "", so give it an empty
+            # value. The gateway then boots as it did before the key existed and
+            # sandbox calls fail at use time instead of blocking every endpoint
+            # at startup. With an external key this entry is omitted so the
+            # envFrom value is not overridden; a user-managed existingSecret
+            # must carry the key or the operator drops the line from `config`.
+            - name: PROVISIONER_API_KEY
+              value: ""
             {{- end }}
             # Tells the Gateway's startup gate that peers share the database;
             # its GATEWAY_WORKERS count only sees this Pod. Derived from

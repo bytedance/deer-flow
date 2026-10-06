@@ -317,10 +317,13 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   the default `config` references it as `sandbox.provisioner_api_key:
   $PROVISIONER_API_KEY` (keep that line when you override `config:`; the
   harness refuses to start when a referenced variable is unset). With
-  `provisioner.enabled: false` the chart does not render the gateway's
-  `PROVISIONER_API_KEY` at all, so an external provisioner keeps taking its
-  key from `secrets` (an explicit `env` entry would otherwise win over
-  `envFrom`). `AUTH_JWT_SECRET` is required whenever the gateway is
+  `provisioner.enabled: false` the gateway takes `PROVISIONER_API_KEY` from
+  `secrets` or `existingSecret` when you supply one, so an external
+  provisioner keeps its key (an explicit `env` entry would otherwise win over
+  `envFrom`), and otherwise gets an empty value so the default `config`
+  still loads; a user-managed `existingSecret` must carry the key, or drop
+  the `provisioner_api_key` line from `config`. `AUTH_JWT_SECRET` is
+  required whenever the gateway is
   multi-instance — without it, concurrently booting Pods race to write their
   own `.jwt_secret` on the home volume and sign sessions with different keys —
   and only a single Pod may omit it and fall back to that file. **Upgrading a

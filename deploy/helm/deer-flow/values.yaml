@@ -137,8 +137,9 @@ provisioner:
   # existingAppSecret) and injects into both Pods; `config.sandbox` below
   # references it as `provisioner_api_key: $PROVISIONER_API_KEY`. The
   # provisioner rejects every /api/* request without a matching key. With
-  # `enabled: false` the chart leaves the gateway's PROVISIONER_API_KEY
-  # alone, so an external provisioner keeps taking its key from `secrets`.
+  # `enabled: false` the gateway takes PROVISIONER_API_KEY from `secrets` /
+  # `existingSecret` when you supply one (external provisioner) and gets an
+  # empty value otherwise, so the default `config` below still loads.
   resources:
     requests:
       cpu: 50m
