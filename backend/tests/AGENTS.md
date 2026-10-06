@@ -6,7 +6,8 @@ Browser egress session-close tests retain the real listener and its sockets,
 verify a SOCKS handshake, then check listener shutdown, closed socket descriptors
 and EOF on the established client. A new connection to the old port is not a
 reliable ownership assertion on hosts with loopback forwarding or port reuse.
-Always drain the client writer and close the saved proxy during teardown.
+Keep ownership assertions inside the teardown-protected block; always drain
+the client writer and close the saved proxy during teardown.
 
 Read-before-write hash fixtures pin `newline=""` when writing LF/CRLF test
 content, so native Windows cannot translate the bytes before the real read.

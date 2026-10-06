@@ -48,7 +48,8 @@ strict providers reject.
 Read-before-write marks belong to the requested `tool_call_id`. Select only a
 matching `ToolMessage`, including inside `Command.update.messages`; unrelated
 results must neither gain a mark nor determine read success. Missing matches
-skip content inspection. Graph coverage: `tests/test_read_mark_tool_call_correlation.py`.
+skip content inspection and log the unmatched request ID at debug level.
+Graph coverage: `tests/test_read_mark_tool_call_correlation.py`.
 
 **Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
 

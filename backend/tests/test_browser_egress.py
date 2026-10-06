@@ -362,13 +362,13 @@ async def test_session_launches_chromium_through_its_egress_proxy_and_closes_it(
     assert proxy["bypass"] == "<-loopback>"
     proxy_port = int(proxy["server"].rsplit(":", 1)[1])
     egress_proxy = session._egress_proxy
-    assert egress_proxy is not None
-    server = egress_proxy._server
-    assert server is not None and server.is_serving()
-    listening_sockets = server.sockets
-    assert listening_sockets
     writer = None
     try:
+        assert egress_proxy is not None
+        server = egress_proxy._server
+        assert server is not None and server.is_serving()
+        listening_sockets = server.sockets
+        assert listening_sockets
         reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
         writer.write(b"\x05\x01\x00")
         await writer.drain()
@@ -389,7 +389,8 @@ async def test_session_launches_chromium_through_its_egress_proxy_and_closes_it(
             with contextlib.suppress(ConnectionError):
                 await writer.wait_closed()
         await session._close()
-        await egress_proxy.close()
+        if egress_proxy is not None:
+            await egress_proxy.close()
 
 
 @pytest.mark.asyncio

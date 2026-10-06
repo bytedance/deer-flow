@@ -402,8 +402,12 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         path = self._requested_path(request)
         if path is None:
             return
-        message = self._extract_tool_message(result, tool_call_id=str(request.tool_call.get("id") or ""))
-        if message is None or message.status == "error":
+        tool_call_id = str(request.tool_call.get("id") or "")
+        message = self._extract_tool_message(result, tool_call_id=tool_call_id)
+        if message is None:
+            logger.debug("read-before-write mark skipped for %r: no result matching request tool_call_id %r", path, tool_call_id)
+            return
+        if message.status == "error":
             return
         # In-band contract errors (invalid range, start_line exceeds file length, etc.)
         # are returned with status="success" by LangChain even though the model received
