@@ -1,3 +1,13 @@
+### MindIE XML numeric arguments (`mindie_provider.py`)
+
+The XML parser recognizes JSON numeric syntax, including signed, fractional,
+and exponent values. Invalid numeric forms such as `007`, `3.`, and `+3` remain
+strings. Numeric conversion failures preserve the entire argument, including
+lists or objects with overflowing or underflowing floats or oversized integers.
+Only JSON syntax errors may use the existing Python-literal fallback; never retry
+numeric conversion failures through `ast.literal_eval`, which can silently turn
+nested underflow into zero. Regression coverage is in `tests/test_mindie_provider.py`.
+
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 
 Request-admission waits follow the next scheduled admission and configured

@@ -2033,6 +2033,11 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - **Multimodal inputs** for image understanding and video comprehension
 - **Strong tool-use** for reliable function calling and structured outputs
 
+MindIE XML tool-call arguments support signed, fractional, and exponent JSON
+numbers. If a number overflows, underflows to zero, or exceeds Python's integer
+digit limit, the complete argument stays a string, including nested JSON lists
+and objects, so parsing does not silently change its value.
+
 ## Embedded Python Client
 
 For `DeerFlowClient(agent_name="researcher")`, the named agent's `mcp_plugins`

@@ -138,18 +138,19 @@ def _parse_xml_tool_call_to_dict(content: str) -> tuple[str, list[dict]]:
             if raw_value.startswith(("[", "{")) or raw_value in ("true", "false", "null") or _JSON_NUMBER_RE.fullmatch(raw_value):
                 try:
                     parsed_value = json.loads(raw_value, parse_float=_parse_json_float)
-                except (json.JSONDecodeError, ValueError):
-                    # Numeric-looking values must remain strings when the
-                    # JSON conversion would overflow, underflow, or exceed
-                    # Python's integer digit limit. Do not let literal_eval
-                    # silently turn those values into a different number.
-                    if not _JSON_NUMBER_RE.fullmatch(raw_value):
-                        try:
-                            candidate = ast.literal_eval(raw_value)
-                            if _safe_literal(candidate):
-                                parsed_value = candidate
-                        except (ValueError, SyntaxError):
-                            pass
+                except json.JSONDecodeError:
+                    try:
+                        candidate = ast.literal_eval(raw_value)
+                        if _safe_literal(candidate):
+                            parsed_value = candidate
+                    except (ValueError, SyntaxError):
+                        pass
+                except ValueError:
+                    # Preserve the entire argument when JSON numeric conversion
+                    # rejects overflow, underflow, or the integer digit limit.
+                    # Retrying containers with literal_eval would turn nested
+                    # underflowing numbers into zero and bypass this validation.
+                    pass
 
             args[key] = parsed_value
 

@@ -255,6 +255,51 @@ class TestParseXmlToolCalls:
         _, calls = _parse_xml_tool_call_to_dict(content)
         assert calls[0]["args"]["n"] == raw_value
 
+    def test_leading_zero_param_stays_string(self):
+        content = "<tool_call><function=f><parameter=n>007</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == "007"
+
+    def test_trailing_dot_param_stays_string(self):
+        content = "<tool_call><function=f><parameter=n>3.</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == "3."
+
+    def test_leading_plus_param_stays_string(self):
+        content = "<tool_call><function=f><parameter=n>+3</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == "+3"
+
+    @pytest.mark.parametrize(
+        "raw_value",
+        ["[1e-400]", '{"n":1e-400}', '[{"n":-1e-400}]', '{"n":[0.5,1e-400]}', '{"n":[1e400]}'],
+    )
+    def test_unsafe_nested_json_numbers_preserve_entire_argument(self, raw_value):
+        content = f"<tool_call><function=f><parameter=n>{raw_value}</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == raw_value
+
+    @pytest.mark.parametrize(
+        ("raw_value", "expected"),
+        [
+            ("[0.0,1e-308,5e-324]", [0.0, 1e-308, 5e-324]),
+            ('{"n":-1e-3,"zero":0.0}', {"n": -1e-3, "zero": 0.0}),
+        ],
+    )
+    def test_representable_nested_json_numbers_deserialised(self, raw_value, expected):
+        content = f"<tool_call><function=f><parameter=n>{raw_value}</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == expected
+
+    @pytest.mark.parametrize(
+        ("raw_value", "expected"),
+        [("[True,1.5]", [True, 1.5]), ("{'n':1.5}", {"n": 1.5}), ("[1e400,]", "[1e400,]")],
+    )
+    def test_python_literal_fallback_preserves_finite_value_policy(self, raw_value, expected):
+        content = f"<tool_call><function=f><parameter=n>{raw_value}</parameter></function></tool_call>"
+        _, calls = _parse_xml_tool_call_to_dict(content)
+        assert calls[0]["args"]["n"] == expected
+
     def test_list_param_deserialised(self):
         content = '<tool_call><function=f><parameter=lst>["a","b"]</parameter></function></tool_call>'
         _, calls = _parse_xml_tool_call_to_dict(content)
