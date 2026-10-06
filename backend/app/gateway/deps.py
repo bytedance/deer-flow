@@ -783,6 +783,18 @@ _cached_local_provider: LocalAuthProvider | None = None
 _cached_repo: SQLiteUserRepository | None = None
 
 
+def get_user_repository() -> SQLiteUserRepository:
+    """Return the cached user repository (created on first use).
+
+    Origin: admin user-management surface (RFC #4063 / #3462 gap 2). Shares
+    the ``get_local_provider`` cache so both surfaces see one store.
+    """
+
+    get_local_provider()
+    assert _cached_repo is not None
+    return _cached_repo
+
+
 def get_local_provider() -> LocalAuthProvider:
     """Get or create the cached LocalAuthProvider singleton.
 
