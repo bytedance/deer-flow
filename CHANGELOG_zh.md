@@ -489,6 +489,13 @@
 
 ### 修复
 
+- **网关：** 经过会压缩响应的代理时，运行流现在会逐帧到达。所有 SSE 响应
+  （`POST /api/threads/{id}/runs/stream`、`GET .../join`、
+  `GET`/`POST .../runs/{run_id}/stream` 与 `POST /api/runs/stream`）改由同一个
+  辅助函数发送 `Cache-Control: no-cache, no-transform`，不再只是 `no-cache`。
+  因此会压缩响应的代理（例如不经 nginx、直接 `pnpm start` 时的 Next.js 改写代理）
+  不再先缓冲整段流、再成批送出。`X-Accel-Buffering: no` 与 `Content-Location`
+  保持不变，使用 nginx 的部署不受影响。([#6340])
 - **技能：** 编辑自定义技能时，不再在事件循环上执行文件系统操作。
   `PUT /api/skills/custom/{name}` 此前在事件循环上构建用户级技能存储、探测自定义、
   内置、旧版共享与集成目录、把草稿写入临时目录以校验 frontmatter，并读取将被替换的

@@ -1474,6 +1474,21 @@ Both endpoints return `Content-Location: /api/threads/{thread_id}/runs/{run_id}`
 The DeerFlow web UI and LangGraph SDK clients rely on this header to discover the
 assigned `thread_id` and `run_id` on the first message of a new chat.
 
+Every SSE response (both create endpoints above, `GET /api/threads/{thread_id}/runs/{run_id}/join`
+and `GET`/`POST /api/threads/{thread_id}/runs/{run_id}/stream`) carries the same headers:
+
+```http
+Content-Type: text/event-stream
+Cache-Control: no-cache, no-transform
+Connection: keep-alive
+X-Accel-Buffering: no
+```
+
+`no-transform` keeps compressing proxies (for example the Next.js rewrite proxy
+when the frontend runs with `pnpm start` and no nginx) from gzipping and therefore
+buffering the stream; `X-Accel-Buffering: no` does the same for nginx. A reverse
+proxy you put in front of the Gateway should not compress `text/event-stream`.
+
 ### SSE replay retention and gaps
 
 Clients may reconnect to a run stream with `Last-Event-ID`. Replay history is
