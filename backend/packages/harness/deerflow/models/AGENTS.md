@@ -1,3 +1,13 @@
+### MindIE XML numeric arguments (`mindie_provider.py`)
+
+The XML parser recognizes JSON numeric syntax, including signed, fractional,
+and exponent values. Invalid numeric forms such as `007`, `3.`, and `+3` remain
+strings. Numeric conversion failures preserve the entire argument, including
+lists or objects with overflowing or underflowing floats or oversized integers.
+Only JSON syntax errors may use the existing Python-literal fallback; never retry
+numeric conversion failures through `ast.literal_eval`, which can silently turn
+nested underflow into zero. Regression coverage is in `tests/test_mindie_provider.py`.
+
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 
 Request-admission waits follow the next scheduled admission and configured
@@ -75,6 +85,13 @@ correlation; serialization does not trim IDs or rewrite the input messages.
 Each omitted tool result emits a warning with its normalized content length;
 the warning never includes the result content.
 Coverage: `tests/test_codex_provider.py`.
+
+Codex function-tool conversion preserves explicit `strict=True` and `False`
+for wrapped and flat dictionaries; missing or `None` stays omitted to preserve
+the provider default. Wrapped dictionaries and converted `BaseTool` schemas
+share `_convert_tools` so binding cannot discard the setting. Keep caller
+schemas and definitions unchanged. Offline sync/async request and tool-followup
+coverage: `tests/test_codex_tool_strict.py`.
 
 ### Codex SSE termination (`packages/harness/deerflow/models/openai_codex_provider.py`)
 

@@ -558,10 +558,20 @@
 
 ### 修复
 
-- **部署：** 在全新检出的仓库上，`make up`、`make down` 与 `make prod-logs` 不再因 `env file .../.env not found` 而中止。`.env` 与
+- **部署：** 在全新检出的仓库上，`make up`、`make down` 与 `make prod-logs` 
+  不再因 `env file .../.env not found` 而中止。`.env` 与
   `frontend/.env` 已被 gitignore，`make up` 也不会创建它们，但生产 compose 文件此前要求两者都存在。
   现在其 `env_file` 条目与开发 compose 文件一样为可选：文件存在时加载，不存在时跳过。此写法需要
   Docker Compose 2.24 或更高版本，即 README 已注明的最低版本。([#6370])
+- **中间件：** 工具输出预算不再让子智能体证据丢失失败的 shell 退出码。长度介于
+  `externalize_min_chars`（12,000）与沙箱上限（20,000）之间的 bash 结果会被替换为
+  以 `Access:` 页脚结尾的预览，结尾的 `Exit Code: N` 不再位于最后，
+  `_bash_evidence_status` 退回到报告 `success` 的 `deerflow_tool_meta`，输出里仍写着
+  `12 passed` 的失败 `pytest` 可能满足 `tests_passed` 验收条件。现在
+  `ToolOutputBudgetMiddleware` 会在预览之后重新追加原始结尾的 `Exit Code: N` /
+  `Command exited with code N`；存储不可用时的回退截断也像沙箱截断一样，从
+  `fallback_max_chars` 预算中为它预留位置。仅影响 `bash` 与 `bash_tool` 的结果，
+  落盘的完整输出保持不变。([#6354])
 - **make：** `make clean` 现在会说明它删除的内容，并拒绝在运行中的 Docker Gateway 下执行。`make help`
   此前称其清理"临时文件"，但它实际删除 `backend/.deer-flow`：本地数据库、用户、线程、上传、记忆和密钥。
   两套 Docker 栈都把该目录挂载进 `deer-flow-gateway` 容器，而 `make stop` 不会停止它，因此数据可能在
@@ -7313,4 +7323,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6344]: https://github.com/bytedance/deer-flow/pull/6344
 [#6350]: https://github.com/bytedance/deer-flow/pull/6350
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351
+[#6354]: https://github.com/bytedance/deer-flow/pull/6354
 [#6370]: https://github.com/bytedance/deer-flow/pull/6370

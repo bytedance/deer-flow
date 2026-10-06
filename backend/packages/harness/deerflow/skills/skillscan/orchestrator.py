@@ -270,12 +270,22 @@ def scan_skill_dir(skill_dir: Path) -> ScanResult:
     for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
         rel_path = _relative_file(path, root)
         try:
-            file_bytes = path.read_bytes()
+            file_size = path.stat().st_size
+        except OSError as e:
+            scanner_errors.append(f"{rel_path}: failed to stat file: {e}")
+            continue
+        try:
+            # One bounded read for every file: files smaller than MAX_FILE_BYTES
+            # come back whole, oversized ones are truncated and recorded below —
+            # no unbounded read regardless of growth between stat() and here
+            # (mirrors _read_archive_member).
+            with path.open("rb") as handle:
+                file_bytes = handle.read(MAX_FILE_BYTES + 1)
         except OSError as e:
             scanner_errors.append(f"{rel_path}: failed to read file: {e}")
             continue
 
-        findings.extend(_scan_file_package_properties(rel_path, file_bytes, path.stat().st_size))
+        findings.extend(_scan_file_package_properties(rel_path, file_bytes, file_size))
         text = _decode_text_for_analysis(file_bytes)
         if text is None:
             text = _decode_script_lossily(rel_path, file_bytes)
@@ -794,7 +804,20 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         # overlapping repeats when a download command has no pipe.
         r"\b(?:curl|wget)\b(?:[^\\\r\n|;]|\\\r?\n|\\[^\r\n])*"
         r"\|(?:\s|\\\r?\n)*(?:sudo(?:\s|\\\r?\n)+"
-        r"(?:-\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
+        # A sudo option that takes a separate value (`-u user`, `-g group`,
+        # `-h host`, ...) must swallow that value too: otherwise
+        # `| sudo -u deploy bash` leaves the matcher parked on the username and
+        # misses the shell. This class is hand-maintained, so an option that
+        # takes a value must be listed here or it regresses to a miss; the
+        # case-sensitivity also keeps `-H` (no value) in the next branch.
+        r"(?:-[acCDghprRtTuU]\b(?:\s|\\\r?\n)+[^\s|;\\]+(?:\s|\\\r?\n)+"
+        # The standalone branch must not re-consume a value-taking option:
+        # `-u` would otherwise match both alternatives, and a chain of them
+        # inside `*?` lets the matcher explore every one-/two-token partition
+        # (exponential) before the non-shell tail fails. The lookahead keeps
+        # the two branches mutually exclusive, so each token is consumed in
+        # exactly one way and a failing chain stays linear.
+        r"|-(?![acCDghprRtTuU]\b)\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
         r"(?:bash|zsh|dash|fish|sh)\b",
         text,
     ):

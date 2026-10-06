@@ -13,7 +13,7 @@ import pytest
 from deerflow.skills.package_files import is_executable_binary_prefix
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.skillscan import StaticScanBlockedError, enforce_static_scan, scan_archive_preflight, scan_skill_dir
-from deerflow.skills.skillscan.orchestrator import _PYTHON_CLIENT_SINK_METHODS
+from deerflow.skills.skillscan.orchestrator import _PYTHON_CLIENT_SINK_METHODS, MAX_FILE_BYTES
 
 _FINDING_FIELDS = {"rule_id", "severity", "file", "line", "message", "remediation", "evidence"}
 
@@ -1810,6 +1810,30 @@ def test_secret_assignment_survives_nul_byte_in_python(tmp_path: Path) -> None:
     finding = _finding_by_rule(_scan_python_sample(tmp_path, source), "secret-env-assignment")
 
     assert finding["file"] == "scripts/sample.py"
+
+
+def test_scan_dir_bounds_oversized_file_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`scan_skill_dir` must gate the size BEFORE reading: an oversized file is
+    recorded as a finding and scanned only through the bounded read, never via
+    `read_bytes` (mirroring `_read_archive_member`'s gate-then-bounded-read)."""
+    skill_dir = tmp_path / "skill"
+    _write_skill(skill_dir)
+    blob = skill_dir / "blob.bin"
+    with blob.open("wb") as handle:
+        handle.seek(300 * 1024 * 1024 - 1)
+        handle.write(b"\0")
+
+    real_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(self: Path) -> bytes:
+        if self.stat().st_size > MAX_FILE_BYTES:
+            raise AssertionError("read_bytes used on an oversized file")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+
+    findings = scan_skill_dir(skill_dir)["findings"]
+    assert _finding_by_rule(findings, "package-oversized-file")
 
 
 def test_bundled_public_skill_scripts_report_no_secret_assignment() -> None:
