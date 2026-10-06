@@ -207,3 +207,26 @@ async def test_tool_real_extraction_preserves_output_cap(transport, monkeypatch)
     result = await tools.web_fetch_tool.ainvoke({"url": "https://example.com"})
     assert "Useful article text." in result and len(result) == 4096
     assert stream.closed
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize("budget,limit", [(30, 4), (5, 4), (30, 3)])
+async def test_streaming_preserves_retry_after_policy(transport, monkeypatch, status, budget, limit):
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    first = respond(transport, [b"busy"], status, {"Retry-After": "7"})
+    second = respond(transport, [b"done"])
+    result = await JinaClient().crawl("https://example.com", max_response_bytes=limit, max_retries=1, retry_budget_seconds=budget)
+    assert first.closed
+    if limit == 3:
+        assert "max_response_bytes" in result
+        sleep.assert_not_awaited()
+        assert len(transport[1]) == 1
+    elif budget == 5:
+        assert result == f"Error: Jina API returned status {status}: busy"
+        sleep.assert_not_awaited()
+        assert len(transport[1]) == 1
+    else:
+        assert result == "done"
+        sleep.assert_awaited_once_with(7)
+        assert second.closed and len(transport[1]) == 2

@@ -165,7 +165,7 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
 
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
 
-   Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Retry waits are randomized within the time budget. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
+   Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Valid `Retry-After` hints set a minimum wait for HTTP 429/503; 429 without a valid hint stays terminal. Hints that cannot fit the remaining budget stop retries. Local backoff remains randomized. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
 
    Jina also accepts an opt-in `max_response_bytes` tool setting (positive integer; omitted/null disables it). It stops oversized decoded responses before extraction, with no partial success or retry. This leaves the 4096-character output cap unchanged and does not bound HTTPX decompressor allocations or wire bandwidth; see [response budget](backend/docs/CONFIGURATION.md#jina-response-byte-budget).
 
@@ -1326,7 +1326,7 @@ Skill installs and agent-managed skill edits run through **SkillScan**, a native
 Windows scripts (`.bat`, `.cmd`, `.ps1`, `.psm1`, `.js`, `.jse`, `.vbs`, `.vbe`, `.wsf`), HTML applications (`.hta`), and scriptlets (`.sct`) count as code even outside `scripts/`, regardless of filename case. They receive both SkillScan analysis and the installer's executable-code policy.
 SkillScan warns about remote downloads piped into common shells, including sudo, interpreter paths, and shell line continuations. Pipes to non-shell tools such as `jq` and `tee` do not trigger this warning.
 
-SkillScan treats HTTP hostnames case-insensitively and recognizes bracketed IPv6
+SkillScan treats HTTP/HTTPS scheme spellings and HTTP hostnames case-insensitively and recognizes bracketed IPv6
 loopback (`[::1]`) URLs as local. External IPv6 endpoints still trigger network findings,
 and cloud-metadata hostname detection is case-insensitive.
 
@@ -2572,6 +2572,9 @@ switching conversations. An invalid `/resume` reference displays an error withou
 closing the TUI or changing the current conversation.
 After an interrupt, late stream actions from the previous run cannot change the
 next run's display or status, even when both prompts use the same conversation.
+A tool call already in progress still finishes, so until it does a new prompt in
+that conversation is held back with a notice instead of racing it; `/new` and
+`/resume` stay available.
 If a run cannot start, the TUI reports an error and returns to idle so you can retry.
 
 At the last composer row, `Down` leaves an unsent draft untouched unless you are

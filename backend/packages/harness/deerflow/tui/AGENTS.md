@@ -29,6 +29,11 @@ uncancelled, normally completed run still writes its title to its original
 thread after the UI moves on; keep that write off the UI thread. This does not
 order completed title writes, roll back a write already in progress, or force
 stop synchronous backend work.
+An interrupted worker keeps streaming until its next event, so a long tool step
+still checkpoints. Until that worker returns (`_Run.started`/`stopped`, set by the
+worker itself; Textual reports a cancelled thread worker finished at once), reject
+sends on its thread: whichever run checkpoints last would drop the other turn.
+Other threads stay usable; a worker cancelled before it started holds nothing.
 
 `InputHistory.down()` returns `None` when history navigation is inactive; the
 app must then leave the composer untouched, including its cursor and undo state.
