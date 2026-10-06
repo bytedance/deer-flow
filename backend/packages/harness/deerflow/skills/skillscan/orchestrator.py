@@ -275,14 +275,12 @@ def scan_skill_dir(skill_dir: Path) -> ScanResult:
             scanner_errors.append(f"{rel_path}: failed to stat file: {e}")
             continue
         try:
-            # Gate before read: an oversized file is recorded as a finding and only
-            # its first MAX_FILE_BYTES + 1 bytes are scanned, mirroring
-            # _read_archive_member so neither entry point loads unbounded content.
-            if file_size > MAX_FILE_BYTES:
-                with path.open("rb") as handle:
-                    file_bytes = handle.read(MAX_FILE_BYTES + 1)
-            else:
-                file_bytes = path.read_bytes()
+            # One bounded read for every file: files smaller than MAX_FILE_BYTES
+            # come back whole, oversized ones are truncated and recorded below —
+            # no unbounded read regardless of growth between stat() and here
+            # (mirrors _read_archive_member).
+            with path.open("rb") as handle:
+                file_bytes = handle.read(MAX_FILE_BYTES + 1)
         except OSError as e:
             scanner_errors.append(f"{rel_path}: failed to read file: {e}")
             continue
