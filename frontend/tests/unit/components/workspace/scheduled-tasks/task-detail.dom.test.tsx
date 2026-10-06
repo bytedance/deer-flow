@@ -530,6 +530,15 @@ describe("TaskDetail", () => {
       expect(notice.textContent).toBe(before);
       expect(notice.querySelector('a[href*="thread-current"]')).not.toBeNull();
       expect(notice.querySelector('a[href*="thread-old"]')).toBeNull();
+      // An older page does not refresh, not even the latest page behind the
+      // notice: reconnecting or refocusing fetches nothing.
+      window.dispatchEvent(new Event("offline"));
+      window.dispatchEvent(new Event("online"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        fetchRuns.mock.calls.filter(([, options]) => options.offset === 0),
+      ).toHaveLength(1);
       view.unmount();
     }
   });

@@ -45,12 +45,18 @@ function runPageQuery(taskId: string | undefined, page: number) {
 /**
  * The newest runs (the latest history page) whichever page the history
  * shows, for what describes the task's current state. It shares the latest
- * page's cache entry, so it adds no request while that page is shown.
+ * page's cache entry and leaves refreshing to the history, which refreshes
+ * the latest page only while it is shown: an older page triggers no request.
  */
 export function useLatestScheduledTaskRuns(
   taskId: string | undefined,
 ): readonly ScheduledTaskRun[] {
-  const { data } = useQuery(runPageQuery(taskId, 0));
+  const { data } = useQuery({
+    ...runPageQuery(taskId, 0),
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
   return data?.slice(0, RUN_HISTORY_PAGE_SIZE) ?? NO_RUNS;
 }
 
