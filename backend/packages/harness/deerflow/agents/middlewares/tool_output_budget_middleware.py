@@ -209,17 +209,16 @@ def _externalize(
     except OSError:
         return None
 
-    filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
-    filepath = os.path.join(storage_dir, filename)
-
-    if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
-        return None
-
     # Each writer owns a unique sibling temp file, so concurrent calls cannot
     # truncate or clean up each other's pending output. Publish only after close
     # (also required on Windows), keeping the final filename deterministic.
     tmp_path = None
     try:
+        filename = _build_externalized_filename(tool_name=tool_name, tool_call_id=tool_call_id, content=content)
+        filepath = os.path.join(storage_dir, filename)
+        if not os.path.abspath(filepath).startswith(os.path.abspath(storage_dir)):
+            return None
+
         candidate_path = os.path.join(storage_dir, f".tool-output-{uuid.uuid4().hex}.tmp")
         # Exclusive creation keeps per-writer ownership while honoring umask,
         # unlike NamedTemporaryFile's fixed 0600 mode on mounted outputs.
@@ -227,7 +226,7 @@ def _externalize(
             tmp_path = candidate_path
             f.write(content)
         os.replace(tmp_path, filepath)
-    except OSError:
+    except (OSError, UnicodeEncodeError):
         if tmp_path is not None:
             try:
                 os.unlink(tmp_path)
@@ -517,7 +516,12 @@ def _budget_content(
 
         if host_outputs_path is not None:
             blob_store = get_blob_store_if_enabled()
-            blob_bytes = content.encode("utf-8") if blob_store is not None else None
+            try:
+                blob_bytes = content.encode("utf-8") if blob_store is not None else None
+            except UnicodeEncodeError:
+                blob_bytes = None
+                durable_fallback_required = True
+                logger.warning("Tool output cannot be encoded as UTF-8 for durable blob externalization")
             if blob_bytes is not None and len(blob_bytes) > _MAX_TOOL_OUTPUT_BLOB_BYTES:
                 durable_fallback_required = True
                 logger.warning(
@@ -525,7 +529,7 @@ def _budget_content(
                     len(blob_bytes),
                     _MAX_TOOL_OUTPUT_BLOB_BYTES,
                 )
-            else:
+            elif not durable_fallback_required:
                 virtual_path = _externalize(
                     content,
                     tool_name=tool_name,

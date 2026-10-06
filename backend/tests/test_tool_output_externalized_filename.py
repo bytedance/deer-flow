@@ -103,6 +103,17 @@ def test_host_and_sandbox_use_the_same_bounded_filename(tmp_path: Path, tool_cal
 
 
 @pytest.mark.parametrize("invalid_field", ["content", "tool_call_id"])
+def test_host_externalization_handles_filename_encoding_failure(tmp_path: Path, invalid_field: str):
+    kwargs = dict(content="output", tool_call_id="call_1")
+    kwargs[invalid_field] += "\ud800"
+
+    result = _externalize(tool_name="bash", storage_subdir=".tool-results", outputs_path=str(tmp_path), **kwargs)
+
+    assert result is None
+    assert not any(path.is_file() for path in tmp_path.rglob("*"))
+
+
+@pytest.mark.parametrize("invalid_field", ["content", "tool_call_id"])
 def test_sandbox_externalization_handles_filename_encoding_failure(invalid_field: str):
     sandbox = MagicMock(spec=Sandbox)
     kwargs = dict(content="output", tool_call_id="call_1")
@@ -117,19 +128,25 @@ def test_sandbox_externalization_handles_filename_encoding_failure(invalid_field
 
 @pytest.mark.parametrize("async_wrapper", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("invalid_field", ["content", "tool_call_id"])
+@pytest.mark.parametrize("storage_target", ["sandbox", "host", "mounted-host", "blob"])
 @pytest.mark.asyncio
-async def test_sandbox_filename_encoding_failure_uses_bounded_fallback(monkeypatch, tmp_path: Path, async_wrapper: bool, invalid_field: str):
+async def test_filename_encoding_failure_uses_bounded_fallback(monkeypatch, tmp_path: Path, async_wrapper: bool, invalid_field: str, storage_target: str):
     from deerflow.agents.middlewares import tool_output_budget_middleware as mw
 
     sandbox = MagicMock(spec=Sandbox)
-    provider = SimpleNamespace(uses_thread_data_mounts=False, get=lambda _: sandbox)
+    provider = SimpleNamespace(uses_thread_data_mounts=storage_target == "mounted-host", get=lambda _: sandbox)
     monkeypatch.setattr(mw, "get_sandbox_provider", lambda: provider)
+    blob_store = MagicMock() if storage_target == "blob" else None
+    monkeypatch.setattr(mw, "get_blob_store_if_enabled", lambda: blob_store)
     content = "A" * 16_000 + ("\ud800" if invalid_field == "content" else "X") + "B" * 16_000
     call_id = "call_1" + ("\ud800" if invalid_field == "tool_call_id" else "")
     message = ToolMessage(content=content, name="remote_executor", tool_call_id=call_id, id="message_1", artifact={"original": True})
+    state = {"thread_data": {"outputs_path": str(tmp_path)}}
+    if storage_target in {"sandbox", "mounted-host"}:
+        state["sandbox"] = {"sandbox_id": "sb-1"}
     request = SimpleNamespace(
         tool_call={"name": "remote_executor", "id": call_id},
-        runtime=SimpleNamespace(state={"thread_data": {"outputs_path": str(tmp_path)}, "sandbox": {"sandbox_id": "sb-1"}}, context={"thread_id": "thread-1"}),
+        runtime=SimpleNamespace(state=state, context={"thread_id": "thread-1"}),
     )
     config = ToolOutputConfig()
     middleware = ToolOutputBudgetMiddleware(config=config)
@@ -154,4 +171,6 @@ async def test_sandbox_filename_encoding_failure_uses_bounded_fallback(monkeypat
     assert message.content == content
     sandbox.execute_command.assert_not_called()
     sandbox.write_file.assert_not_called()
-    assert list(tmp_path.iterdir()) == []
+    if blob_store is not None:
+        blob_store.put_bytes.assert_not_called()
+    assert not any(path.is_file() for path in tmp_path.rglob("*"))
