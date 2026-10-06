@@ -636,7 +636,7 @@ This release closes that milestone with **439 merged pull requests**.
   `existingAppSecret` must carry it while `provisioner.enabled` is true), and
   the default `config` sets `sandbox.provisioner_api_key:
   $PROVISIONER_API_KEY`, which the chart README's config example now keeps
-  too. docker-compose was unaffected: it reads the key from `.env`.
+  too. docker-compose was unaffected: it reads the key from `.env`. ([#6365])
 - **sandbox:** With host bash enabled, the local sandbox no longer keeps a
   thread on the skill view of the last restricted Agent that ran there. That
   view is only maintained while host bash is off, but `LocalSandboxProvider`
@@ -8823,3 +8823,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6343]: https://github.com/bytedance/deer-flow/pull/6343
 [#6344]: https://github.com/bytedance/deer-flow/pull/6344
 [#6347]: https://github.com/bytedance/deer-flow/pull/6347
+[#6365]: https://github.com/bytedance/deer-flow/pull/6365
