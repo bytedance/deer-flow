@@ -2364,6 +2364,16 @@ async def launch_scheduled_thread_run(
             idempotency_key=idempotency_key,
             scheduled_task_runtime=scheduled_task_runtime,
         )
+    if title:
+        # The worker copies the title to the thread list only when the run
+        # ends; name the thread now, so a sidebar that shows the new run
+        # thread at once does not list it as untitled meanwhile.
+        from app.gateway.deps import get_thread_store
+
+        try:
+            await get_thread_store(request).update_display_name(record.thread_id, title, user_id=owner_user_id)
+        except Exception:
+            logger.debug("Failed to pre-set the title of scheduled run thread %s (non-fatal)", record.thread_id, exc_info=True)
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 

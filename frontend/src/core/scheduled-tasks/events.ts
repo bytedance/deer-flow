@@ -343,7 +343,9 @@ export function describeTaskEvent(
       const max = event.max_runs;
       template =
         event.reason_code === "max_runs" && typeof max === "number" && max > 0
-          ? copy.finishedRuns
+          ? max === 1
+            ? copy.finishedOneRun
+            : copy.finishedRuns
           : event.reason_code === "end_at"
             ? copy.finishedEnd
             : copy.finished;

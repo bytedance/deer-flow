@@ -177,6 +177,18 @@ describe("describeTaskEvent", () => {
         zhCN,
       )!.text,
     ).toBe("Check the release checklist 已结束：5 次运行已全部完成。");
+    // A cap of one is not "all 1 runs".
+    const one = event({
+      event: "task_finished",
+      reason_code: "max_runs",
+      max_runs: 1,
+    });
+    expect(describeTaskEvent(one, enUS)!.text).toBe(
+      "Check the release checklist finished: its one run is done.",
+    );
+    expect(
+      describeTaskEvent({ ...one, task_title: "每分钟自检" }, zhCN)!.text,
+    ).toBe("每分钟自检已结束：唯一一次运行已完成。");
   });
 
   test("in Chinese, a Chinese title takes no space before the predicate; a Latin one does", () => {

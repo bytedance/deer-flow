@@ -1106,6 +1106,7 @@ export const zhCN: Translations = {
       stopped: "{title}已由智能体暂停：停止条件已满足。",
       autoPaused: "{title}已自动暂停：连续 3 次未达成目标。",
       finishedRuns: "{title}已结束：{max} 次运行已全部完成。",
+      finishedOneRun: "{title}已结束：唯一一次运行已完成。",
       finishedEnd: "{title}已结束：已过结束时间。",
       finished: "{title}已结束。",
       onceDone: "{title}已运行。",

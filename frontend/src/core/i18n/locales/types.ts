@@ -981,6 +981,7 @@ export interface Translations {
       stopped: string;
       autoPaused: string;
       finishedRuns: string;
+      finishedOneRun: string;
       finishedEnd: string;
       /** A finish whose reason this client does not know. */
       finished: string;

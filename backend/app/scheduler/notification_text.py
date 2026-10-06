@@ -122,6 +122,7 @@ _TEXT: dict[str, dict[str, str]] = {
         "task_stopped_condition": "Paused by agent: its stop condition was met ({condition}).",
         "task_stopped": "Paused by agent: its stop condition was met.",
         "finished_max_runs": "Finished: all {max_runs} automatic runs are done.",
+        "finished_one_run": "Finished: its one automatic run is done.",
         "finished_all_runs": "Finished: all automatic runs are done.",
         "finished_end_at": "Finished: its end time has been reached.",
         "finished": "Finished.",
@@ -148,6 +149,7 @@ _TEXT: dict[str, dict[str, str]] = {
         "task_stopped_condition": "已由智能体暂停：停止条件已满足（{condition}）。",
         "task_stopped": "已由智能体暂停：停止条件已满足。",
         "finished_max_runs": "已结束：{max_runs} 次自动运行已全部完成。",
+        "finished_one_run": "已结束：唯一一次自动运行已完成。",
         "finished_all_runs": "已结束：自动运行已全部完成。",
         "finished_end_at": "已结束：已到结束时间。",
         "finished": "已结束。",
@@ -283,7 +285,7 @@ def _what_happened(delivery: dict[str, Any], locale: str) -> str:
             parts = [text["finished_end_at"]]
         elif reason == "max_runs":
             max_runs = _positive_int(payload.get("max_runs"))
-            parts = [text["finished_max_runs"].format(max_runs=max_runs) if max_runs is not None else text["finished_all_runs"]]
+            parts = [text["finished_one_run"] if max_runs == 1 else text["finished_max_runs"].format(max_runs=max_runs) if max_runs is not None else text["finished_all_runs"]]
         else:
             parts = [text["finished"]]
         if (suffix := _last_run_suffix(event, run_status, payload, locale)) is not None:

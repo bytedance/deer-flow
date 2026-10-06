@@ -37,6 +37,7 @@ CASES = {
     "task_stopped_failed": dict(reason_code="agent_stop", run_status="failed", stop_condition="all items are ticked"),
     "task_stopped_interrupted": dict(reason_code="agent_stop", run_status="interrupted"),
     "task_finished_max_runs": dict(reason_code="max_runs", run_status="success", max_runs=5, result_summary="Done"),
+    "task_finished_one_run": dict(reason_code="max_runs", run_status="success", max_runs=1),
     "task_finished_end_at": dict(reason_code="end_at", run_status=None),
     "task_finished_unmet": dict(reason_code="max_runs", run_status="unmet", latest_reason_code="missing_evidence", max_runs=3),
     "task_finished_failed": dict(reason_code="max_runs", run_status="failed", max_runs=3),
@@ -80,6 +81,7 @@ def test_english_templates():
     assert line2("task_stopped_failed") == "Paused by agent: its stop condition was met (all items are ticked). The last run failed."
     assert line2("task_stopped_interrupted") == "Paused by agent: its stop condition was met. The last run was interrupted."
     assert line2("task_finished_max_runs") == "Finished: all 5 automatic runs are done."
+    assert line2("task_finished_one_run") == "Finished: its one automatic run is done."
     assert line2("task_finished_end_at") == "Finished: its end time has been reached."
     assert line2("task_finished_unmet") == "Finished: all 3 automatic runs are done. The last run didn't meet the goal: the goal check found evidence missing."
     assert line2("task_finished_failed") == "Finished: all 3 automatic runs are done. The last run failed."
@@ -97,6 +99,7 @@ def test_chinese_templates():
     assert line2("task_stopped") == "已由智能体暂停：停止条件已满足（all items are ticked）。"
     assert line2("task_stopped_failed") == "已由智能体暂停：停止条件已满足（all items are ticked）。最后一次运行出错了。"
     assert line2("task_finished_max_runs") == "已结束：5 次自动运行已全部完成。"
+    assert line2("task_finished_one_run") == "已结束：唯一一次自动运行已完成。"
     assert line2("task_finished_end_at") == "已结束：已到结束时间。"
     assert line2("task_finished_unmet") == "已结束：3 次自动运行已全部完成。最后一次运行未达成目标：目标检查发现缺少依据。"
     text = render_notification_text(notice("task_stopped", locale="zh-CN", **CASES["task_stopped"]))

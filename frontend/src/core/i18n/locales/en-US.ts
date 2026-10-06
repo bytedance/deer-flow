@@ -1177,6 +1177,7 @@ export const enUS: Translations = {
       autoPaused:
         "{title} was paused automatically: 3 runs in a row missed the goal.",
       finishedRuns: "{title} finished: all {max} runs are done.",
+      finishedOneRun: "{title} finished: its one run is done.",
       finishedEnd: "{title} finished: its end time has passed.",
       finished: "{title} finished.",
       onceDone: "{title} has run.",
