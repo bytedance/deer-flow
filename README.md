@@ -1804,7 +1804,8 @@ Custom Agents can also be moved between DeerFlow users or deployments from the
 Agents gallery. **Export Agent** downloads a versioned
 `*.deerflow-agent.json` package containing the portable definition and
 `SOUL.md`; **Import Agent** validates that package and lets the receiving user
-choose a local name. Imports never overwrite an existing agent. Packages carry
+choose a local name. Invalid packages show validation messages so you can correct
+the package and retry. Imports never overwrite an existing agent. Packages carry
 model, tool/MCP, skill, knowledge, sub-agent, reasoning, and memory-policy
 settings, but deliberately exclude memory contents, conversations, credentials,
 and operator-owned GitHub bindings.
