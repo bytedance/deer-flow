@@ -172,6 +172,13 @@ _SHELL_ENV_DUMP_RE = re.compile(
     # consume a distinct first character (or refuse a value-taking option
     # outright), so every token has exactly one parse and a long chain cannot
     # backtrack exponentially.
+    #
+    # Only the short value-taking options are modelled. The long spellings
+    # (`env --unset NAME`, `env --chdir DIR`, `env --split-string STRING`) are
+    # not recognised, so the standalone branch eats the option and the lookahead
+    # then fails on its value: those dumps stay silent. This is a known gap, not
+    # an oversight -- do not read the option list above as exhaustive, and
+    # extend it deliberately (the `=` forms, e.g. `--unset=NAME`, already work).
     r"(?P<cmd>env\b(?=(?:[ \t]*(?:-[uCS]\b[ \t]+[^ \t]+|-(?![uCS]\b)[^ \t]+|[A-Za-z_]\w*=[^ \t]*|[0-9]*[<>][^ \t]*))*(?:[ \t]*\r?[;&|()`<>#\n]|[ \t]*\r?$))"
     r"|printenv\b|export[ \t]+-p\b)"
 )

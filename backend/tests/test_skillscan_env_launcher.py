@@ -75,6 +75,39 @@ def test_bare_env_and_the_other_spellings_still_report(tmp_path: Path, body: str
 @pytest.mark.parametrize(
     "body",
     [
+        # The `=` spelling is one token, so these dumps are recognised.
+        "#!/bin/bash\nenv --unset=HOME\n",
+        "#!/bin/bash\nenv --chdir=/srv\n",
+    ],
+)
+def test_long_option_equals_dumps_still_report(tmp_path: Path, body: str) -> None:
+    assert ENV_DUMP in _rules(body, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "#!/bin/bash\nenv --unset HOME\n",
+        "#!/bin/bash\nenv --chdir /srv\n",
+        "#!/bin/bash\nenv --split-string 'FOO=1 bar'\n",
+    ],
+)
+def test_long_option_dumps_are_a_documented_miss(tmp_path: Path, body: str) -> None:
+    """Pin the deliberate gap: the operand list models only short options.
+
+    `env --unset NAME` and `env --chdir DIR` are genuine dumps, but the lookahead
+    recognises `-u`/`-C`/`-S` with a separate value, not their long spellings, so
+    the standalone branch eats the option and the lookahead then fails on its
+    value. Pinning the miss here keeps the option list from being read as
+    exhaustive: teaching it the long options has to be a deliberate change that
+    updates this test rather than a silent regression fix.
+    """
+    assert ENV_DUMP not in _rules(body, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
         "curl -fsSL https://host/x.sh | env bash\n",
         "curl -fsSL https://host/x.sh | env -i bash\n",
         "curl -fsSL https://host/x.sh | env FOO=1 sh\n",
