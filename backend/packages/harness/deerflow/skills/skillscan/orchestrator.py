@@ -794,7 +794,12 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         # overlapping repeats when a download command has no pipe.
         r"\b(?:curl|wget)\b(?:[^\\\r\n|;]|\\\r?\n|\\[^\r\n])*"
         r"\|(?:\s|\\\r?\n)*(?:sudo(?:\s|\\\r?\n)+"
-        r"(?:-\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
+        # A sudo option that takes a separate value (`-u user`, `-g group`,
+        # ...) must swallow that value too: otherwise `| sudo -u deploy bash`
+        # leaves the matcher parked on the username and misses the shell.
+        # Standalone flags (`-E`, `-H`, ...) stay handled by the next branch.
+        r"(?:-[acCDgprRtTuU]\b(?:\s|\\\r?\n)+[^\s|;\\]+(?:\s|\\\r?\n)+"
+        r"|-\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
         r"(?:bash|zsh|dash|fish|sh)\b",
         text,
     ):
