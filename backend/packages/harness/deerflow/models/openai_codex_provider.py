@@ -210,23 +210,20 @@ class CodexChatModel(BaseChatModel):
         for tool in tools:
             if tool.get("type") == "function" and "function" in tool:
                 fn = tool["function"]
-                responses_tools.append(
-                    {
-                        "type": "function",
-                        "name": fn["name"],
-                        "description": fn.get("description", ""),
-                        "parameters": fn.get("parameters", {}),
-                    }
-                )
             elif "name" in tool:
-                responses_tools.append(
-                    {
-                        "type": "function",
-                        "name": tool["name"],
-                        "description": tool.get("description", ""),
-                        "parameters": tool.get("parameters", {}),
-                    }
-                )
+                fn = tool
+            else:
+                continue
+            converted = {
+                "type": "function",
+                "name": fn["name"],
+                "description": fn.get("description", ""),
+                "parameters": fn.get("parameters", {}),
+            }
+            # Omitting strict is not equivalent to the caller's explicit False.
+            if "strict" in fn:
+                converted["strict"] = fn["strict"]
+            responses_tools.append(converted)
         return responses_tools
 
     def _call_codex_api(self, messages: list[BaseMessage], tools: list[dict] | None = None) -> dict:
@@ -493,15 +490,7 @@ class CodexChatModel(BaseChatModel):
                     )
             elif isinstance(tool, dict):
                 if "function" in tool:
-                    fn = tool["function"]
-                    formatted_tools.append(
-                        {
-                            "type": "function",
-                            "name": fn["name"],
-                            "description": fn.get("description", ""),
-                            "parameters": fn.get("parameters", {}),
-                        }
-                    )
+                    formatted_tools.extend(self._convert_tools([{"type": "function", "function": tool["function"]}]))
                 else:
                     formatted_tools.append(tool)
 

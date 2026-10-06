@@ -314,6 +314,7 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
    ```
 
    - Codex CLI reads `~/.codex/auth.json`
+   - Codex function tools preserve an explicit `strict` setting in wrapped or flat dictionary definitions, including `strict: false`; leaving it out keeps the provider default. This also applies to dictionaries passed through `bind_tools`.
    - Completed Codex responses still return their text and tool calls when token usage is null, omitted, or empty; usage metadata remains unavailable.
    - The Codex model provider returns completed responses without waiting for the SSE connection to close. Failed or incomplete responses report the provider's error or reason; partial output is not returned as a successful answer. Non-object error details are reported as text.
    - Claude Code accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_CREDENTIALS_PATH`, or `~/.claude/.credentials.json`
