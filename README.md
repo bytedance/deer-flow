@@ -1641,8 +1641,12 @@ Management commands bootstrap the checkout environment without the extension gro
 when an installed extension's remote source or managed snapshot has become unavailable,
 while a fresh checkout can still create the non-extension environment from the existing lock. The
 manager itself owns the subsequent locked dependency transaction.
-Mutations for one checkout are serialized through a process lock. The initial manager
-surface is create/remove rather than in-place upgrade: to change an installed source, save
+Mutations for one checkout are serialized through a process lock.
+Failed extension operations restore dependency files and configuration atomically with
+their original file permissions, preserving access for a Gateway that reads them through
+group permissions.
+The initial manager surface is create/remove rather than in-place upgrade: to change an
+installed source, save
 its private `plugins[].config`, remove it, reinstall the new pin, and restore that config.
 
 Local-directory installs are copied into
@@ -2216,6 +2220,10 @@ See [OpenViking memory backend](docs/OPENVIKING.md) for its configuration,
 behavior, and current boundaries.
 
 Across sessions, DeerFlow builds a persistent memory of your profile, preferences, and accumulated knowledge. The more you use it, the better it knows you — your writing style, your technical stack, your recurring workflows. Memory is stored locally and stays under your control.
+
+DeerMem and mem0 capture user inputs and final assistant replies. Assistant
+turns that request tools, including malformed or provider-raw calls, are
+excluded from memory extraction even when they contain visible text.
 
 DeerMem remains the default local backend. An opt-in `mem0` backend is also
 available for the hosted mem0 Platform API or API-compatible self-hosted
