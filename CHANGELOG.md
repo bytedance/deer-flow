@@ -44,7 +44,7 @@ This release closes that milestone with **301 merged pull requests**.
   `automatic_runs_used` and `active_run_status`; run rows add `run_number`,
   `total_tokens` and `summary`; thread task rows add `thread_relation`;
   `/api/features` adds `scheduled_tasks`; trigger returns `outcome`,
-  `existing` and `thread_id`. ([#6340])
+  `existing` and `thread_id`. ([#6378])
 
   **Breaking:** errors from `/api/scheduled-tasks*` are now
   `{"detail": {"code", "message", "params"}}` instead of a string `detail`.
@@ -71,7 +71,7 @@ This release closes that milestone with **301 merged pull requests**.
   chats are titled "{task} · {local time}", goal verdicts record
   `continuations`, and the lead prompt keeps stored task text and scheduled
   replies in the user's language. The tools are offered only while the
-  Gateway's scheduler is running. ([#6340])
+  Gateway's scheduler is running. ([#6378])
 
 - **scheduler:** In web chat, `schedule_task` results render as a live task card
   (schedule, stop condition with the safety cap, results, "Run once now",
@@ -80,7 +80,7 @@ This release closes that milestone with **301 merged pull requests**.
   with the task instructions collapsed instead of the launched prompt, the
   scheduler tool steps have readable labels, and the chat header's "Scheduled
   tasks" button shows how many tasks a chat has (a run's chat links to its
-  task). ([#6340])
+  task). ([#6378])
 
 - **scheduler:** The Scheduled tasks page is list-first: status tabs and search
   above the task list, a "New task" dialog (create, edit and duplicate, including
@@ -90,14 +90,14 @@ This release closes that milestone with **301 merged pull requests**.
   link; raw errors stay behind "Details". Tasks paused by their agent, auto-paused
   after three missed goals or finished by their safety cap explain why, with
   "See that run", "Edit goal" or "Extend limit". `?task_id=` deep-links a task,
-  and the page explains when the scheduler is off. ([#6340])
+  and the page explains when the scheduler is off. ([#6378])
 
 - **scheduler:** The web app sends the browser timezone with chat runs
   (`context.client_timezone`), shows scheduled-task API errors as localized
   messages chosen by error code (raw server text only behind "Details"), and
   uses one scheduled-task vocabulary in English and Chinese (定时任务, 运行,
   智能体; no `lead_agent` in labels). Untitled chats and the Scheduled tasks and
-  Agents breadcrumbs follow the interface language. ([#6340])
+  Agents breadcrumbs follow the interface language. ([#6378])
 
 - **scheduler:** The tasks page shows the per-run goal and end conditions of
   conversation-created tasks. Run history shows whether a goal was met,
@@ -7899,4 +7899,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
 [#6328]: https://github.com/bytedance/deer-flow/pull/6328
 [#6332]: https://github.com/bytedance/deer-flow/pull/6332
-[#6340]: https://github.com/bytedance/deer-flow/issues/6340
+[#6378]: https://github.com/bytedance/deer-flow/pull/6378
