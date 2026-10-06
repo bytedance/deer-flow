@@ -79,7 +79,7 @@ class DummyRunRepo:
     async def count_active_runs(self):
         return self.active_count
 
-    async def list_queued_runs(self, *, limit):
+    async def list_queued_runs(self, *, limit, **_kwargs):
         return []
 
     async def expire_queued_runs(self, **_kwargs):
@@ -808,7 +808,7 @@ class _StatefulRunRepo:
     async def count_active_runs(self) -> int:
         return sum(1 for row in self.rows.values() if row["status"] in {"launching", "running"})
 
-    async def list_queued_runs(self, *, limit: int) -> list[dict]:
+    async def list_queued_runs(self, *, limit: int, **_kwargs) -> list[dict]:
         return []
 
     async def expire_queued_runs(self, **_kwargs) -> list[dict]:

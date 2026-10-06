@@ -922,6 +922,7 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 支持 `once`、`cron` 和 `interval` 三种调度方式
 - 后台定时执行以非交互式 DeerFlow run 运行（那里不会暴露 `ask_clarification`）
 - 当所复用的 thread 或全局执行配额正忙时，到期执行会持久化为 `queued`，并在可用后启动；队列项在 Gateway 重启后保留，超过 `scheduler.queue_timeout_seconds` 后标记为失败
+- 执行位置在任务所有者之间公平分配：同一所有者同时启动或运行的定时运行最多 `scheduler.max_concurrent_runs_per_user` 个（默认 2，不超过 `max_concurrent_runs`；设为 `0` 即关闭这一按所有者的上限）。等待队列按所有者轮流取出，一个人积压的运行不会挡住别人的运行。等待超过 `scheduler.queue_timeout_seconds` 的运行会被跳过，运行记录显示“已跳过：等待空闲位置的时间过长”
 - 当某次执行处于 `queued`、`launching` 或 `running` 时冻结任务定义，避免持久化的执行意外换用新的 prompt、thread 或调度；将任务切换为暂停或删除任务会取消已在等待的执行，而 `launching`/`running` 执行结束后才能重试这些变更；显式手动触发在调度已暂停时仍可等待并执行，且不会自动恢复调度
 - 支持暂停、恢复、手动触发、查看历史和删除任务
 - 定时任务通过正常的 DeerFlow run 生命周期执行

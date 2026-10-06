@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import UUID
 
+import httpx
 import pytest
+import pytest_asyncio
+from _router_auth_helpers import make_authed_test_app
+from sqlalchemy import func, select
 
+from app.gateway.auth.models import User
+from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
+from app.gateway.routers import scheduled_tasks
 from app.scheduler.service import ScheduledTaskService
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
+from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.runtime import ConflictError
 
 pytestmark = pytest.mark.asyncio
@@ -1052,3 +1064,304 @@ async def test_expired_launch_claim_attaches_existing_run_instead_of_relaunching
         assert (await task_repo.get("task-attached", user_id="user-1"))["run_count"] == 1
     finally:
         await close_engine()
+
+
+# --- PR2 M1: per-owner run cap and fair queue selection ------------------------------------
+
+_QUEUE_CONTRACT = json.loads((Path(__file__).resolve().parents[2] / "contracts" / "scheduled_goal_notes_contract.json").read_text(encoding="utf-8"))
+_OWNER_A = User(id=UUID("aaaaaaaa-0000-4000-8000-000000000001"), email="owner-a@example.com", password_hash="unused", system_role="user")
+OWNER_A = str(_OWNER_A.id)
+OWNER_B = "bbbbbbbb-0000-4000-8000-000000000002"
+
+
+async def _owner_task(task_repo: ScheduledTaskRepository, task_id: str, *, user_id: str, next_run_at: datetime | None = None) -> dict:
+    """A page-created per-minute task with a fresh thread for every run."""
+    return await task_repo.create(
+        task_id=task_id,
+        user_id=user_id,
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id="lead_agent",
+        title=task_id,
+        prompt="Check the list",
+        schedule_type="cron",
+        schedule_spec={"cron": "* * * * *"},
+        timezone="UTC",
+        next_run_at=next_run_at,
+    )
+
+
+async def _owned_occurrence(
+    task_repo: ScheduledTaskRepository,
+    run_repo: ScheduledTaskRunRepository,
+    row_id: str,
+    *,
+    user_id: str,
+    status: str = "queued",
+    thread_id: str | None = None,
+    task_id: str | None = None,
+) -> dict:
+    """One occurrence on its own task (one active occurrence per task)."""
+    task_id = task_id or f"task-{row_id}"
+    if await task_repo.get_internal(task_id) is None:
+        await _owner_task(task_repo, task_id, user_id=user_id)
+    return await run_repo.create(
+        run_record_id=row_id,
+        task_id=task_id,
+        thread_id=thread_id or f"thread-{row_id}",
+        scheduled_for=datetime.now(UTC),
+        trigger="scheduled",
+        status=status,
+    )
+
+
+async def _executing_by_owner(sf, owner: str) -> int:
+    async with sf() as session:
+        return int(
+            await session.scalar(
+                select(func.count())
+                .select_from(ScheduledTaskRunRow)
+                .join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id)
+                .where(ScheduledTaskRunRow.status.in_(("launching", "running")), ScheduledTaskRow.user_id == owner)
+            )
+            or 0
+        )
+
+
+@pytest_asyncio.fixture
+async def sqlite_repos(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    sf = get_session_factory()
+    assert sf is not None
+    try:
+        yield sf, ScheduledTaskRepository(sf), ScheduledTaskRunRepository(sf)
+    finally:
+        await close_engine()
+
+
+def _launcher(launches: list[dict]):
+    async def launch_run(**kwargs):
+        launches.append(kwargs)
+        return {"run_id": f"run-{len(launches)}", "thread_id": kwargs["thread_id"]}
+
+    return launch_run
+
+
+async def test_fair_batch_includes_other_owner_when_one_owner_is_at_cap(sqlite_repos):
+    _sf, task_repo, run_repo = sqlite_repos
+    for index in range(2):
+        await _owned_occurrence(task_repo, run_repo, f"a-running-{index}", user_id=OWNER_A, status="running")
+    for index in range(50):
+        await _owned_occurrence(task_repo, run_repo, f"a-queued-{index:02d}", user_id=OWNER_A)
+    await _owned_occurrence(task_repo, run_repo, "b-queued", user_id=OWNER_B)
+
+    batch = await run_repo.list_queued_runs(limit=16, per_user_max_concurrent_runs=2)
+
+    # A is at its cap, so its 50 waiting rows drop out before the limit.
+    assert [row["id"] for row in batch] == ["b-queued"]
+
+
+async def test_fair_batch_interleaves_owners_without_cap(sqlite_repos):
+    _sf, task_repo, run_repo = sqlite_repos
+    for index in range(50):
+        await _owned_occurrence(task_repo, run_repo, f"a-queued-{index:02d}", user_id=OWNER_A)
+    await _owned_occurrence(task_repo, run_repo, "b-queued", user_id=OWNER_B)
+
+    batch = [row["id"] for row in await run_repo.list_queued_runs(limit=16)]
+
+    # Without a cap the batch is still fair: B's only row, created last,
+    # comes right after A's head instead of after 50 older A rows.
+    assert len(batch) == 16
+    assert batch.index("b-queued") <= 1
+    assert batch[0] == "a-queued-00"
+    # Within an owner the order is unchanged (attempt_count, created_at, id).
+    assert [row_id for row_id in batch if row_id.startswith("a-")] == [f"a-queued-{index:02d}" for index in range(15)]
+
+
+async def test_owner_rank_respects_remaining_capacity(sqlite_repos):
+    _sf, task_repo, run_repo = sqlite_repos
+    await _owned_occurrence(task_repo, run_repo, "a-running", user_id=OWNER_A, status="running")
+    for index in range(5):
+        await _owned_occurrence(task_repo, run_repo, f"a-queued-{index}", user_id=OWNER_A)
+    await _owned_occurrence(task_repo, run_repo, "b-queued", user_id=OWNER_B)
+
+    batch = [row["id"] for row in await run_repo.list_queued_runs(limit=16, per_user_max_concurrent_runs=3)]
+
+    assert [row_id for row_id in batch if row_id.startswith("a-")] == ["a-queued-0", "a-queued-1"]
+    assert "b-queued" in batch
+
+
+@pytest.mark.parametrize("cap", [0, 2])
+async def test_fair_batch_keeps_same_thread_fifo(sqlite_repos, cap):
+    _sf, task_repo, run_repo = sqlite_repos
+    await _owned_occurrence(task_repo, run_repo, "a-older", user_id=OWNER_A, thread_id="reuse-thread")
+    await _owned_occurrence(task_repo, run_repo, "a-newer", user_id=OWNER_A, thread_id="reuse-thread")
+
+    batch = [row["id"] for row in await run_repo.list_queued_runs(limit=16, per_user_max_concurrent_runs=cap)]
+
+    assert batch == ["a-older"]
+
+
+async def test_orphan_queued_row_is_still_drained(sqlite_repos):
+    _sf, task_repo, run_repo = sqlite_repos
+    await _owned_occurrence(task_repo, run_repo, "a-running", user_id=OWNER_A, status="running")
+    # The parent task is gone (deleted while the row waited): no owner.
+    await run_repo.create(run_record_id="orphan", task_id="task-deleted", thread_id="thread-orphan", scheduled_for=datetime.now(UTC), trigger="scheduled", status="queued")
+
+    assert [row["id"] for row in await run_repo.list_queued_runs(limit=16, per_user_max_concurrent_runs=1)] == ["orphan"]
+
+    launches: list[dict] = []
+    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=run_repo, launch_run=_launcher(launches), poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3, max_concurrent_runs_per_user=1)
+    await service.run_once(now=datetime.now(UTC))
+
+    row = (await run_repo.list_by_task("task-deleted"))[0]
+    assert (row["status"], row["error"]) == ("interrupted", _QUEUE_CONTRACT["host_run_errors"]["deleted_while_queued"])
+    assert launches == []
+
+
+async def test_claim_rejects_owner_at_cap_but_admits_other_owner(sqlite_repos):
+    _sf, task_repo, run_repo = sqlite_repos
+    now = datetime.now(UTC)
+    await _owned_occurrence(task_repo, run_repo, "a-running", user_id=OWNER_A, status="running")
+    await _owned_occurrence(task_repo, run_repo, "a-queued", user_id=OWNER_A)
+    await _owned_occurrence(task_repo, run_repo, "b-queued", user_id=OWNER_B)
+    claim = {"now": now, "lease_seconds": 120, "global_max_concurrent_runs": 3, "per_user_max_concurrent_runs": 1}
+
+    assert await run_repo.claim_queued_run("a-queued", lease_owner="worker", **claim) is None
+    assert (await run_repo.list_by_task("task-a-queued"))[0]["status"] == "queued"
+    assert (await run_repo.list_by_task("task-a-queued"))[0]["attempt_count"] == 0
+
+    claimed = await run_repo.claim_queued_run("b-queued", lease_owner="worker", **claim)
+    assert claimed is not None and claimed["status"] == "launching"
+
+    # Cap 0 keeps today's behavior: only the global budget applies.
+    assert await run_repo.claim_queued_run("a-queued", lease_owner="worker", **{**claim, "per_user_max_concurrent_runs": 0}) is not None
+
+
+async def test_effective_owner_cap_is_bounded_by_global_cap(sqlite_repos):
+    sf, task_repo, run_repo = sqlite_repos
+    for index in range(3):
+        await _owned_occurrence(task_repo, run_repo, f"a-queued-{index}", user_id=OWNER_A)
+    launches: list[dict] = []
+    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=run_repo, launch_run=_launcher(launches), poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=1, max_concurrent_runs_per_user=2)
+
+    assert service._max_concurrent_runs_per_user == 1
+    await service.run_once(now=datetime.now(UTC))
+
+    assert len(launches) == 1
+    assert await run_repo.count_active_runs() == 1
+    assert await _executing_by_owner(sf, OWNER_A) == 1
+    # The drain asks only for as many A rows as A may still start.
+    assert await run_repo.list_queued_runs(limit=16, per_user_max_concurrent_runs=service._max_concurrent_runs_per_user) == []
+
+
+async def test_capped_owner_queue_expiry_writes_contract_queue_timeout_note(sqlite_repos):
+    sf, task_repo, run_repo = sqlite_repos
+    await _owned_occurrence(task_repo, run_repo, "a-running", user_id=OWNER_A, status="running")
+    await _owned_occurrence(task_repo, run_repo, "a-waiting", user_id=OWNER_A)
+    launches: list[dict] = []
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=_launcher(launches),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+        max_concurrent_runs_per_user=1,
+        queue_timeout_seconds=60,
+    )
+
+    # While A holds its only slot, the waiting row is not launched.
+    await service.run_once(now=datetime.now(UTC))
+    assert launches == []
+    assert (await run_repo.list_by_task("task-a-waiting"))[0]["status"] == "queued"
+
+    await service.run_once(now=datetime.now(UTC) + timedelta(seconds=61))
+
+    expired = (await run_repo.list_by_task("task-a-waiting"))[0]
+    assert (expired["status"], expired["run_id"]) == ("failed", None)
+    assert expired["error"] == _QUEUE_CONTRACT["host_run_errors"]["queue_timeout"]
+    assert launches == []
+
+    # The runs route hands that note to the page unchanged, so PR1's
+    # runErrors.queueTimeout mapping ("waited too long") applies.
+    app = make_authed_test_app(user_factory=lambda: _OWNER_A, bind_current_user=True)
+
+    @app.middleware("http")
+    async def mark_session_source(request, call_next):
+        request.state.auth_source = AUTH_SOURCE_SESSION
+        return await call_next(request)
+
+    app.state.scheduled_task_repo = task_repo
+    app.state.scheduled_task_run_repo = run_repo
+    app.include_router(scheduled_tasks.router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://queue.test") as client:
+        response = await client.get("/api/scheduled-tasks/task-a-waiting/runs")
+    assert response.status_code == 200, response.text
+    assert [(row["status"], row["run_id"], row["error"]) for row in response.json()] == [("failed", None, _QUEUE_CONTRACT["host_run_errors"]["queue_timeout"])]
+
+
+async def test_service_drain_launches_other_owner_first(sqlite_repos):
+    """Two poll cycles: A's backlog never takes B's slot.
+
+    ``claim_due_tasks`` admits ``max_concurrent_runs`` tasks per poll ordered
+    by ``next_run_at, id``, so A's five tasks (due first) fill cycle 1. Each
+    admitted occurrence is offered a launch at once; the per-owner cap lets
+    one A row start and leaves the other two queued. In cycle 2 the drain
+    must not start any A row, and B's occurrence (due one second later)
+    launches although four older A rows are queued ahead of it.
+    """
+    sf, task_repo, run_repo = sqlite_repos
+    t0 = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
+    for index in range(5):
+        await _owner_task(task_repo, f"task-a-{index}", user_id=OWNER_A, next_run_at=t0)
+    await _owner_task(task_repo, "task-b", user_id=OWNER_B, next_run_at=t0 + timedelta(seconds=1))
+    launches: list[dict] = []
+    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=run_repo, launch_run=_launcher(launches), poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3, max_concurrent_runs_per_user=1)
+
+    b_cycle = None
+    for cycle in range(1, 5):
+        await service.run_once(now=t0 + timedelta(seconds=cycle))
+        assert await _executing_by_owner(sf, OWNER_A) <= 1
+        b_rows = await run_repo.list_by_task("task-b")
+        if b_rows:
+            b_cycle = cycle
+            break
+
+    assert b_cycle == 2
+    assert b_rows[0]["status"] in {"launching", "running"}
+    assert await _executing_by_owner(sf, OWNER_A) == 1
+    queued_a = [row for index in range(5) for row in await run_repo.list_by_task(f"task-a-{index}") if row["status"] == "queued"]
+    assert len(queued_a) == 4
+
+
+async def test_service_drain_launches_other_owner_from_a_seeded_queue(sqlite_repos):
+    """A seeded backlog larger than the drain batch cannot hide B's row."""
+    sf, task_repo, run_repo = sqlite_repos
+    for index in range(20):
+        await _owned_occurrence(task_repo, run_repo, f"a-queued-{index:02d}", user_id=OWNER_A)
+    await _owned_occurrence(task_repo, run_repo, "b-queued", user_id=OWNER_B)
+    launches: list[dict] = []
+    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=run_repo, launch_run=_launcher(launches), poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3, max_concurrent_runs_per_user=1)
+
+    await service.run_once(now=datetime.now(UTC))
+
+    # The batch limit is max(16, 3 * 4) = 16 < 20 A rows: an unfair batch
+    # would hold only A rows. The fair one starts A's head and B's row.
+    assert (await run_repo.list_by_task("task-b-queued"))[0]["status"] == "running"
+    assert (await run_repo.list_by_task("task-a-queued-00"))[0]["status"] == "running"
+    assert await _executing_by_owner(sf, OWNER_A) == 1
+    assert len(launches) == 2
+
+
+@pytest.mark.parametrize("dialect_name", ["postgresql", "sqlite"])
+async def test_fair_queue_statement_compiles_for_both_dialects(dialect_name):
+    """The fair drain is plain SQLAlchemy Core (no raw text) on both dialects."""
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    dialect = {"postgresql": postgresql.dialect(), "sqlite": sqlite.dialect()}[dialect_name]
+    sql = str(ScheduledTaskRunRepository._fair_queue_statement(limit=16, per_user_max_concurrent_runs=2).compile(dialect=dialect)).lower()
+
+    assert "row_number() over (partition by" in sql
+    assert "group by" in sql and "not (exists" in sql
+    assert "limit" in sql

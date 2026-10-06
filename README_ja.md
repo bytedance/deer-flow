@@ -729,6 +729,7 @@ DeerFlowには現在、ワークスペース内でファーストクラスのス
 - 目標を確認できなかった場合（評価器の失敗、または確認中に会話が変わった場合）は、3回連続未達成による自動一時停止に数えられず、カウントもリセットされません。目標・指示・停止条件の変更やメモの追加でカウントは新しく始まり、再開ではそのまま保たれます。
 - このGatewayプロセスのスケジューラーが動いていない間、タスクの作成（複製を含む）は`409 scheduler_not_running`を返します。`GET /api/features`は`scheduled_tasks.available`、`running`、`tool_enabled`、`min_interval_seconds`を返します。
 - `/api/scheduled-tasks*`のエラーは`{"detail": {"code", "message", "params"}}`の形式です。[`backend/docs/API.md`](backend/docs/API.md#scheduled-tasks)と`contracts/scheduled_task_errors_contract.json`を参照してください。
+- 実行枠はタスクの所有者間で公平に分配されます。1人の所有者が同時に起動中または実行中にできるスケジュール実行は最大`scheduler.max_concurrent_runs_per_user`件です（既定値は2で、`max_concurrent_runs`を超えません。`0`にすると所有者ごとの上限は無効になります）。待機キューは所有者ごとに順番に取り出されるため、1人に溜まった実行が他の人の実行を妨げることはありません。`scheduler.queue_timeout_seconds`を超えて待った実行はスキップされ、履歴には空き枠を長く待ちすぎたと表示されます。
 
 ### 会話からスケジュールを作成する
 

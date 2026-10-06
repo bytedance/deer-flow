@@ -74,6 +74,7 @@ class ScheduledTaskService:
         poll_interval_seconds: int,
         lease_seconds: int,
         max_concurrent_runs: int,
+        max_concurrent_runs_per_user: int = 0,
         queue_timeout_seconds: int = 3600,
         multi_instance: bool = False,
         run_lease_grace_seconds: int = 10,
@@ -87,6 +88,10 @@ class ScheduledTaskService:
         self._poll_interval_seconds = poll_interval_seconds
         self._lease_seconds = lease_seconds
         self._max_concurrent_runs = max_concurrent_runs
+        # Per-owner cap on launching/running rows (0 = off). It never exceeds
+        # the global cap, so with the defaults (3 global, 2 per owner) one
+        # owner always leaves a slot for everyone else.
+        self._max_concurrent_runs_per_user = min(max_concurrent_runs_per_user, max_concurrent_runs) if max_concurrent_runs_per_user > 0 else 0
         self._queue_timeout_seconds = queue_timeout_seconds
         self._multi_instance = multi_instance
         self._run_lease_grace_seconds = run_lease_grace_seconds
@@ -377,6 +382,7 @@ class ScheduledTaskService:
             now=now,
             lease_seconds=self._lease_seconds,
             global_max_concurrent_runs=self._max_concurrent_runs,
+            per_user_max_concurrent_runs=self._max_concurrent_runs_per_user,
         )
         if claimed is None:
             return self._queued_result(task_run_id, execution_thread_id)
@@ -666,7 +672,10 @@ class ScheduledTaskService:
         }
 
     async def _drain_queue(self, *, now: datetime) -> None:
-        queued_rows = await self._task_run_repo.list_queued_runs(limit=max(16, self._max_concurrent_runs * 4))
+        queued_rows = await self._task_run_repo.list_queued_runs(
+            limit=max(16, self._max_concurrent_runs * 4),
+            per_user_max_concurrent_runs=self._max_concurrent_runs_per_user,
+        )
         for queued in queued_rows:
             await self._task_repo.release_queued_admission_lease(queued["task_id"])
             task = await self._task_repo.get_internal(queued["task_id"])

@@ -47,6 +47,9 @@ def test_enabled_scheduler_start_failure_aborts_gateway_lifespan():
         startup_config.scheduler.poll_interval_seconds = 5
         startup_config.scheduler.lease_seconds = 120
         startup_config.scheduler.max_concurrent_runs = 3
+        # Set explicitly: a bare MagicMock attribute must never reach the
+        # per-owner cap the drain query compares against.
+        startup_config.scheduler.max_concurrent_runs_per_user = 2
         startup_config.scheduler.queue_timeout_seconds = 3600
         startup_config.run_ownership.grace_seconds = 10
         channel_service = MagicMock()
@@ -63,7 +66,7 @@ def test_enabled_scheduler_start_failure_aborts_gateway_lifespan():
             patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
             patch("app.channels.service.start_channel_service", start_channel_service),
             patch("app.channels.service.stop_channel_service", AsyncMock()),
-            patch("app.scheduler.ScheduledTaskService", return_value=scheduler_service),
+            patch("app.scheduler.ScheduledTaskService", return_value=scheduler_service) as service_class,
             patch("deerflow.skills.projection.ensure_public_skill_projection"),
             patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
         ):
@@ -73,6 +76,9 @@ def test_enabled_scheduler_start_failure_aborts_gateway_lifespan():
 
         scheduler_service.start.assert_awaited_once()
         start_channel_service.assert_not_awaited()
+        # The startup-captured per-owner cap reaches the service unchanged.
+        assert service_class.call_args.kwargs["max_concurrent_runs_per_user"] == 2
+        assert service_class.call_args.kwargs["max_concurrent_runs"] == 3
 
     asyncio.run(scenario())
 
@@ -774,6 +780,7 @@ def _notification_startup_config(*, channel_connections_enabled: bool = True):
             poll_interval_seconds=5,
             lease_seconds=30,
             max_concurrent_runs=1,
+            max_concurrent_runs_per_user=2,
             multi_instance=False,
             queue_timeout_seconds=3600,
         ),
