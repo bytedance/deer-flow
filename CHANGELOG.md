@@ -501,7 +501,7 @@ This release closes that milestone with **301 merged pull requests**.
   thread; whichever run checkpointed last became the conversation's history, so
   the new turn could silently disappear from it. Until the interrupted worker
   returns, a prompt in that conversation now shows a notice instead of starting a
-  second run; other conversations stay available through `/new` and `/resume`.
+  second run; other conversations stay available through `/new` and `/resume`. ([#6350])
 - **sandbox:** With host bash enabled, the local sandbox no longer keeps a
   thread on the skill view of the last restricted Agent that ran there. That
   view is only maintained while host bash is off, but `LocalSandboxProvider`
@@ -7855,3 +7855,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6332]: https://github.com/bytedance/deer-flow/pull/6332
 [#6343]: https://github.com/bytedance/deer-flow/pull/6343
 [#6344]: https://github.com/bytedance/deer-flow/pull/6344
+[#6350]: https://github.com/bytedance/deer-flow/pull/6350
