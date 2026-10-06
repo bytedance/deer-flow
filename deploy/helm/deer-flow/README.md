@@ -319,10 +319,10 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   harness refuses to start when a referenced variable is unset). With
   `provisioner.enabled: false` the gateway takes `PROVISIONER_API_KEY` from
   `secrets` or `existingSecret` when you supply one, so an external
-  provisioner keeps its key (an explicit `env` entry would otherwise win over
-  `envFrom`), and otherwise gets an empty value so the default `config`
-  still loads; a user-managed `existingSecret` must carry the key, or drop
-  the `provisioner_api_key` line from `config`. `AUTH_JWT_SECRET` is
+  provisioner keeps its key (the chart emits no `env` entry, which would win
+  over `envFrom`); otherwise the gateway's start command defaults the
+  variable to an empty string, so the default `config` still loads even when
+  a user-managed provider Secret holds only model keys. `AUTH_JWT_SECRET` is
   required whenever the gateway is
   multi-instance — without it, concurrently booting Pods race to write their
   own `.jwt_secret` on the home volume and sign sessions with different keys —

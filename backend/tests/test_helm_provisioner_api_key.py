@@ -19,6 +19,7 @@ The ``helm template`` tests skip when helm is not installed; CI's runner has it.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -34,8 +35,10 @@ VALUES = CHART / "values.yaml"
 APP_SECRET_TEMPLATE = CHART / "templates" / "secret-app.yaml"
 README = CHART / "README.md"
 NOTES = CHART / "templates" / "NOTES.txt"
+GATEWAY_TEMPLATE = CHART / "templates" / "gateway-deployment.yaml"
 
 ENV_NAME = "PROVISIONER_API_KEY"
+SHELL_DEFAULT = 'export PROVISIONER_API_KEY="${PROVISIONER_API_KEY:-}" && '
 
 
 def _values() -> dict:
@@ -130,6 +133,24 @@ def test_harness_needs_the_variable_set_but_accepts_an_empty_value(monkeypatch: 
     assert AppConfig.resolve_env_variables(reference) == {"sandbox": {"provisioner_api_key": ""}}
 
 
+@pytest.mark.parametrize("external", [None, "external-provisioner-key"])
+def test_shell_default_sets_the_variable_only_when_nothing_else_did(external: str | None) -> None:
+    """Pins the start-command prefix from the template source: it must leave an envFrom-supplied key
+    alone and turn an unset variable into "" (the only value the harness accepts short of a real key)."""
+    prefix = re.search(r"\}\}(export PROVISIONER_API_KEY=.*?&& )\{\{ end \}\}cd backend", GATEWAY_TEMPLATE.read_text(encoding="utf-8"))
+    assert prefix is not None and prefix.group(1) == SHELL_DEFAULT
+    env = {"PATH": "/usr/bin:/bin"} | ({ENV_NAME: external} if external else {})
+    result = subprocess.run(["sh", "-c", prefix.group(1) + f"printenv {ENV_NAME}"], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, "the variable must be set in every case"
+    assert result.stdout == f"{external or ''}\n"
+
+
+def test_default_start_command_carries_no_shell_default() -> None:
+    """With the bundled provisioner the key is injected and required; the start command stays as it was."""
+    gateway = _container(_render_chart(), "-gateway", "gateway")
+    assert not " ".join(gateway["args"]).startswith("export")
+
+
 def test_gateway_key_is_omitted_when_an_external_key_is_supplied() -> None:
     """An explicit env entry wins over envFrom, so rendering it would override the key an operator
     supplies through ``secrets`` for an external provisioner with the generated, unrelated value."""
@@ -139,18 +160,22 @@ def test_gateway_key_is_omitted_when_an_external_key_is_supplied() -> None:
     assert ENV_NAME not in _env(gateway)
     assert any(source["secretRef"]["name"].endswith("-provider") for source in gateway["envFrom"]), "the external key still arrives through the provider Secret"
     assert _by_kind(documents, "Secret", "-provider")["stringData"][ENV_NAME] == "external-provisioner-key"
+    assert " ".join(gateway["args"]).startswith(SHELL_DEFAULT), "the shell default keeps the supplied key"
 
 
-def test_gateway_key_is_omitted_with_a_user_managed_provider_secret() -> None:
-    """The chart cannot see inside ``existingSecret``, so it must not override whatever key it carries."""
+def test_user_managed_provider_secret_without_the_key_still_boots_the_gateway() -> None:
+    """``existingSecret`` is a generic provider Secret that often holds only model keys; the chart
+    cannot see inside it, so it must neither override a key it carries nor leave the variable unset."""
     gateway = _container(_render_chart("provisioner.enabled=false", "existingSecret=my-provider-secret"), "-gateway", "gateway")
     assert ENV_NAME not in _env(gateway)
     assert [source["secretRef"]["name"] for source in gateway["envFrom"]] == ["my-provider-secret"]
+    assert " ".join(gateway["args"]).startswith(SHELL_DEFAULT)
 
 
-def test_gateway_gets_an_empty_key_when_the_bundled_provisioner_is_disabled_without_an_external_key() -> None:
+def test_disabled_provisioner_without_any_key_still_boots_the_gateway() -> None:
     """The default config still references $PROVISIONER_API_KEY; an unset variable would stop the gateway
     from starting at all, where the chart used to boot it and only fail sandbox calls at use time."""
     gateway = _container(_render_chart("provisioner.enabled=false"), "-gateway", "gateway")
-    entry = _env(gateway)[ENV_NAME]
-    assert entry == {"name": ENV_NAME, "value": ""}
+    assert ENV_NAME not in _env(gateway)
+    assert "envFrom" not in gateway
+    assert " ".join(gateway["args"]).startswith(SHELL_DEFAULT)

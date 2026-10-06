@@ -667,9 +667,10 @@ This release closes that milestone with **439 merged pull requests**.
   $PROVISIONER_API_KEY`, which the chart README's config example now keeps
   too. With `provisioner.enabled: false` the gateway takes the key an
   operator supplies through `secrets` or `existingSecret` (external
-  provisioner) and otherwise gets an empty value, so the default `config`
-  still loads and the gateway boots as before. docker-compose was unaffected:
-  it reads the key from `.env`. ([#6365])
+  provisioner); otherwise its start command defaults the variable to an
+  empty string, so the default `config` still loads and the gateway boots as
+  before even when a user-managed provider Secret holds only model keys.
+  docker-compose was unaffected: it reads the key from `.env`. ([#6365])
 - **sandbox:** With host bash enabled, the local sandbox no longer keeps a
   thread on the skill view of the last restricted Agent that ran there. That
   view is only maintained while host bash is off, but `LocalSandboxProvider`

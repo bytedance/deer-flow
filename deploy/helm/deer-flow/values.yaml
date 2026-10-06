@@ -138,8 +138,9 @@ provisioner:
   # references it as `provisioner_api_key: $PROVISIONER_API_KEY`. The
   # provisioner rejects every /api/* request without a matching key. With
   # `enabled: false` the gateway takes PROVISIONER_API_KEY from `secrets` /
-  # `existingSecret` when you supply one (external provisioner) and gets an
-  # empty value otherwise, so the default `config` below still loads.
+  # `existingSecret` when you supply one (external provisioner); otherwise
+  # its start command defaults the variable to "", so the default `config`
+  # below still loads even when a user-managed Secret lacks the key.
   resources:
     requests:
       cpu: 50m
