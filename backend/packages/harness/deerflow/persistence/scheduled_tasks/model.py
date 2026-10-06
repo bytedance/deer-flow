@@ -17,6 +17,8 @@ class ScheduledTaskRow(Base):
     thread_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     origin_thread_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     goal_objective: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The user's normalized "stop when ..." rule; never part of ``prompt``.
+    stop_condition: Mapped[str | None] = mapped_column(Text, nullable=True)
     max_runs: Mapped[int | None] = mapped_column(Integer, nullable=True)
     end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     standing_notes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
@@ -38,6 +40,9 @@ class ScheduledTaskRow(Base):
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     run_count: Mapped[int] = mapped_column(Integer, default=0)
     last_occurrence_seq: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    # Occurrences with occurrence_seq <= this value never count toward the
+    # unmet streak (moved by goal, prompt, stop-condition and note edits).
+    unmet_streak_after_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

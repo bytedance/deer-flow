@@ -29,19 +29,46 @@ def utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+# Goal-check failures: the host could not judge the run, so it neither counts
+# as a miss nor resets the unmet streak. Pinned as ``check_failure_codes`` in
+# contracts/scheduled_goal_notes_contract.json.
+CHECK_FAILURE_CODES = ("evaluator_failed", "no_durable_end_of_turn", "thread_changed_after_evaluation", "thread_changed_before_continuation")
+_WAIT_CODES = ("external_wait", "blocked:external_wait")
+_STREAK_NEUTRAL_CODES = _WAIT_CODES + CHECK_FAILURE_CODES
+
+
+def is_host_pause_marker(last_error: str | None) -> bool:
+    """True when ``last_error`` records a host pause (agent stop or auto-pause)."""
+    if not isinstance(last_error, str):
+        return False
+    if last_error == AUTO_PAUSE_LAST_ERROR:
+        return True
+    suffix = last_error[len(AGENT_STOP_LAST_ERROR_PREFIX) :] if last_error.startswith(AGENT_STOP_LAST_ERROR_PREFIX) else ""
+    return bool(suffix) and not suffix[0].isspace()
+
+
+async def automatic_runs_used(session: AsyncSession, task_id: str) -> int:
+    """Count launched automatic runs, the unit of the ``max_runs`` safety cap."""
+    count = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.trigger == "scheduled", ScheduledTaskRunRow.launch_accounted.is_(True)))
+    return int(count or 0)
+
+
 async def end_condition_reached(session: AsyncSession, task: ScheduledTaskRow, *, now: datetime) -> bool:
     if task.end_at is not None and utc(task.end_at) <= utc(now):
         return True
     if task.max_runs is not None:
-        count = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task.id, ScheduledTaskRunRow.trigger == "scheduled", ScheduledTaskRunRow.launch_accounted.is_(True)))
-        return int(count or 0) >= task.max_runs
+        return await automatic_runs_used(session, task.id) >= task.max_runs
     return False
 
 
-async def _unmet_streak(session: AsyncSession, occurrence: ScheduledTaskRunRow) -> bool:
-    wait_codes = ("external_wait", "blocked:external_wait")
+async def _unmet_streak(session: AsyncSession, task: ScheduledTaskRow, occurrence: ScheduledTaskRunRow) -> bool:
     verdict = occurrence.goal_verdict or {}
-    if occurrence.trigger != "scheduled" or occurrence.status != "unmet" or occurrence.error in wait_codes or verdict.get("blocker") == "external_wait":
+    if occurrence.trigger != "scheduled" or occurrence.status != "unmet" or occurrence.error in _STREAK_NEUTRAL_CODES or verdict.get("blocker") == "external_wait":
+        return False
+    # Runs judged against an earlier goal, prompt, stop condition or note set
+    # never count (the boundary moves on those edits, not on resume).
+    boundary = task.unmet_streak_after_seq
+    if boundary is not None and (occurrence.occurrence_seq is None or occurrence.occurrence_seq <= boundary):
         return False
     query = select(ScheduledTaskRunRow).where(
         ScheduledTaskRunRow.task_id == occurrence.task_id,
@@ -50,13 +77,15 @@ async def _unmet_streak(session: AsyncSession, occurrence: ScheduledTaskRunRow) 
         or_(
             ScheduledTaskRunRow.status == "success",
             and_(
-                func.coalesce(ScheduledTaskRunRow.error, "").not_in(wait_codes),
+                func.coalesce(ScheduledTaskRunRow.error, "").not_in(_STREAK_NEUTRAL_CODES),
                 func.coalesce(ScheduledTaskRunRow.goal_verdict["blocker"].as_string(), "") != "external_wait",
             ),
         ),
     )
     if occurrence.occurrence_seq is not None:
         query = query.where(ScheduledTaskRunRow.occurrence_seq <= occurrence.occurrence_seq).order_by(ScheduledTaskRunRow.occurrence_seq.desc())
+        if boundary is not None:
+            query = query.where(ScheduledTaskRunRow.occurrence_seq > boundary)
     else:
         query = query.where(ScheduledTaskRunRow.occurrence_seq.is_(None)).order_by(ScheduledTaskRunRow.created_at.desc(), ScheduledTaskRunRow.id.desc())
     latest = list((await session.execute(query.limit(3))).scalars())
@@ -111,7 +140,10 @@ async def finalize_occurrence(
         task.lease_expires_at = None
         if task.schedule_type != "once" and task.status == "running":
             task.status = "enabled"
-    task.last_error = error
+    # A trial on a task the host paused keeps the pause reason ("Paused by
+    # agent" / "Auto-paused"); the trial's own outcome stays on its run row.
+    if not (occurrence.trigger == "manual" and task.status == "paused" and is_host_pause_marker(task.last_error)):
+        task.last_error = error
     events = {"success": ("run_completed",), "failed": ("run_failed",), "unmet": ("run_unmet",)}.get(status, ())
     # A once task's result remains meaningful: an unmet once task failed.
     # Limits and agent stop apply to the recurring schedule lifecycle.
@@ -123,7 +155,7 @@ async def finalize_occurrence(
     elif occurrence.stop_requested_run_id is not None and occurrence.stop_requested_run_id == run_id:
         task.status = "paused"
         task.last_error = f"{AGENT_STOP_LAST_ERROR_PREFIX}{run_id}"
-    elif occurrence.goal_objective is not None and await _unmet_streak(session, occurrence):
+    elif occurrence.goal_objective is not None and await _unmet_streak(session, task, occurrence):
         was_paused = task.status == "paused"
         task.status = "paused"
         task.last_error = AUTO_PAUSE_LAST_ERROR

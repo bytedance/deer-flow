@@ -720,6 +720,17 @@ DeerFlowには現在、ワークスペース内でファーストクラスのス
 
 `config.yaml -> scheduler.enabled`でバックグラウンドポーリングを有効にします。手動トリガーは同じスケジュールタスクリソースと実行パスを使用します。
 
+### ライフサイクル、安全上限、停止条件
+
+- タスクページとREST API（`POST` / `PATCH /api/scheduled-tasks`）は、実行ごとの目標（`goal_objective`）、安全上限（`max_runs`、`end_at`）、停止条件（`stop_condition`）を受け付けます。PATCHで`null`を送ると、この4項目のいずれかを消去できます。UTCオフセットのない`end_at`はタスクのタイムゾーンの現地時刻として扱われます。
+- 停止条件は「〜になったら止める」というユーザーのルールです。専用のフィールド（マイグレーション`0031`）に保存され、タスクの指示には含まれません。DeerFlowは実行の開始時にのみ、その実行のメッセージへ停止条件を追加し、条件が満たされたら`stop_scheduled_task`を呼ぶよう指示します。`scheduler.tool_enabled`が有効な間は、タスクが会話とタスクページのどちらで作成されたかにかかわらず、すべてのスケジュール実行が自分のスケジュールを一時停止できます。無効な場合、実行は条件を満たしたことを報告するだけです。
+- タスクページで作成した目標付きタスクも、会話で作成したタスクと同様に目標が評価され、その実行には保存済みのメモと前回の実行への参照も渡されます。
+- 再開すると次回の実行は現在時刻から計算されるため、長く一時停止していても取り戻しの実行は発生しません。時刻を過ぎた単発タスクは`422 once_time_passed`を返し、新しい時刻の設定が必要です。有効なタスクを再開しても何も変わりません。終了したタスクを一時停止すると`409 task_finished`を返します。
+- `max_runs`はタスクの全期間を通じた自動実行の合計で、試行実行は数えません。上限を使い切ったタスクを再び有効にする操作（再開、または終了したタスクのスケジュールを再設定するPATCH）は、同じリクエストで`max_runs`を引き上げる、`end_at`を後ろにずらす、または上限を外さない限り`409 limits_exhausted`を返します。そのために`POST /api/scheduled-tasks/{task_id}/resume`は省略可能な`{"max_runs": …, "end_at": …}`ボディを受け付けます（`null`で上限を外します）。終了したタスクの上限だけを変えるPATCHは値を保存し、タスクは終了したままです。
+- 目標を確認できなかった場合（評価器の失敗、または確認中に会話が変わった場合）は、3回連続未達成による自動一時停止に数えられず、カウントもリセットされません。目標・指示・停止条件の変更やメモの追加でカウントは新しく始まり、再開ではそのまま保たれます。
+- このGatewayプロセスのスケジューラーが動いていない間、タスクの作成（複製を含む）は`409 scheduler_not_running`を返します。`GET /api/features`は`scheduled_tasks.available`、`running`、`tool_enabled`、`min_interval_seconds`を返します。
+- `/api/scheduled-tasks*`のエラーは`{"detail": {"code", "message", "params"}}`の形式です。[`backend/docs/API.md`](backend/docs/API.md#scheduled-tasks)と`contracts/scheduled_task_errors_contract.json`を参照してください。
+
 ## ターミナルワークベンチ (TUI)
 
 `deerflow`は、シェルに暮らす人々のためのターミナルネイティブなワークベンチです。**組み込み**で`DeerFlowClient`上で実行され、Gateway、フロントエンド、nginx、Dockerは不要ですが、DeerFlowの他の部分と同じ`config.yaml`、checkpointer、スキル、メモリ、MCP、サンドボックス設定を尊重します。

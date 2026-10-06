@@ -23,6 +23,28 @@
 
 #### 调度器
 
+- **调度器：** 定时任务的生命周期和上限规则在任务页面、REST 和对话中保持一致。
+  在任务页面创建的任务也可以设置每次运行的目标、保险上限（`max_runs`、`end_at`）
+  和新增的停止条件，并且会像对话中创建的任务一样检查目标、在条件满足时暂停自己的
+  定时任务。停止条件保存在新增的可空列 `scheduled_tasks.stop_condition` 中（迁移
+  `0031_scheduled_streak_boundary`，同时新增内部使用的 `unmet_streak_after_seq`
+  计数边界），只在运行启动时附加到这次运行的消息里，不会写入保存的任务指令。恢复时
+  从当前时间计算下次运行（不补跑），时间已过的单次任务不能直接恢复，并可携带可选的
+  `{max_runs, end_at}` 请求体；保险上限已用完的任务重新启用时返回
+  `409 limits_exhausted`，除非同一请求同时放宽了上限。暂停已结束的任务返回
+  `409 task_finished`。未能检查目标不再计入、也不再清零连续 3 次未达成的自动暂停
+  计数；修改目标、任务指令或停止条件，以及新增备注，会重新计数。当前 Gateway 进程的
+  调度器未运行时新建任务返回 `409 scheduler_not_running`。任务响应新增
+  `automatic_runs_used` 和 `active_run_status`；运行记录新增 `run_number`、
+  `total_tokens` 和 `summary`；对话关联任务新增 `thread_relation`；`/api/features`
+  新增 `scheduled_tasks`；手动触发返回 `outcome`、`existing` 和 `thread_id`。([#6340])
+
+  **不兼容变更：** `/api/scheduled-tasks*` 的错误改为
+  `{"detail": {"code", "message", "params"}}`，不再是字符串 `detail`。把 `detail`
+  当作字符串读取的客户端需要改读 `detail.message`。路由权限产生的 403 和 FastAPI
+  对格式错误请求体返回的 422 保持原格式。错误码列表见 `backend/docs/API.md` 和
+  `contracts/scheduled_task_errors_contract.json`。
+
 - **调度器：** 任务页显示对话创建任务的每次执行目标和结束条件。执行记录显示目标
   是否达成（含依赖已声明假设的情况）；未达成的执行以中性样式显示可读的原因，不再
   按执行错误标红显示原始代码；请求停止调度的那次执行会被标出。任务详情里由 Agent
@@ -6508,3 +6530,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6319]: https://github.com/bytedance/deer-flow/pull/6319
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
 [#6332]: https://github.com/bytedance/deer-flow/pull/6332
+[#6340]: https://github.com/bytedance/deer-flow/issues/6340

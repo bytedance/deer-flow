@@ -2442,6 +2442,17 @@ Current MVP limits:
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 
+### Lifecycle, safety caps and stop conditions
+
+- The tasks page and the REST API (`POST` / `PATCH /api/scheduled-tasks`) accept the same per-run goal (`goal_objective`), safety cap (`max_runs`, `end_at`) and stop condition (`stop_condition`) as a conversation. Sending `null` in a PATCH clears any of these four; an `end_at` without a UTC offset is wall-clock time in the task's timezone.
+- A stop condition is the user's "stop when …" rule. It is stored in its own field (migration `0031`), never inside the task instructions. Only when a run starts does DeerFlow append it to that run's message and ask the run to call `stop_scheduled_task` when the rule holds. While `scheduler.tool_enabled` is on, every scheduled run can stop its own schedule, whether a chat or the tasks page created the task; with it off, the run is asked to report a met rule instead of calling a tool it does not have.
+- Goal tasks created on the tasks page are now evaluated like chat-created ones, and their runs also receive the saved notes and the previous-run reference.
+- Resume computes the next run from now, so a long pause never causes a catch-up run. A one-time task whose time has passed returns `422 once_time_passed` and needs a new time. Resuming an active task changes nothing; pausing a finished task returns `409 task_finished`.
+- `max_runs` is a lifetime total of automatic runs; trial runs never count. Reactivating a task whose cap is used up (Resume, or a PATCH that re-arms a finished task's schedule) returns `409 limits_exhausted` unless the same request raises `max_runs`, moves `end_at` later or clears the cap. `POST /api/scheduled-tasks/{task_id}/resume` accepts an optional `{"max_runs": …, "end_at": …}` body for that (`null` clears a cap; chat-created sub-hourly tasks must keep one). A PATCH that only changes the cap of a finished task saves it and leaves the task finished.
+- Goal-check failures (the evaluator failed, or the conversation changed during the check) neither count toward the three-miss automatic pause nor reset it. Changing the goal, the instructions or the stop condition, or adding a note, starts a new count; Resume keeps it.
+- While this Gateway process's scheduler is not running, creating a task (including Duplicate) returns `409 scheduler_not_running`, because the task would never run on schedule. `GET /api/features` reports `scheduled_tasks.available`, `running`, `tool_enabled` and `min_interval_seconds`.
+- Errors from `/api/scheduled-tasks*` are `{"detail": {"code", "message", "params"}}`; see [`backend/docs/API.md`](backend/docs/API.md#scheduled-tasks) and `contracts/scheduled_task_errors_contract.json`.
+
 ### Create schedules in a conversation
 
 Set both `scheduler.enabled: true` and `scheduler.tool_enabled: true`, then restart
@@ -2464,8 +2475,8 @@ owner may keep at most 20 live tool-created tasks, including paused tasks.
 An unmet occurrence is recorded as `unmet`, distinct from an execution failure.
 Three eligible automatic unmet occurrences pause a recurring task. Accepted
 success resets the streak, including a success relying on disclosed assumptions;
-manual trials, interruption, execution failure and external waiting do not
-advance it. Resume retains the streak, so another eligible unmet occurrence can
+manual trials, interruption, execution failure, external waiting and
+goal-check failures do not advance it. Resume retains the streak, so another eligible unmet occurrence can
 pause the task again. Existing notification bindings receive goal-unmet and
 auto-pause notices through the same durable outbox; manual trials stay silent.
 

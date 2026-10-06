@@ -13,7 +13,9 @@ from sqlalchemy import select
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected
 from deerflow.runtime import ConflictError, RunRecord
+from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ERROR_INTERRUPTED, RUN_ERROR_LEASE_LOST, RUN_ERROR_PAUSED_WHILE_QUEUED, RUN_ERROR_QUEUE_TIMEOUT, RUN_ERROR_RESTARTED
 from deerflow.scheduler.schedules import next_run_at
+from deerflow.scheduler.stop_rule import launch_prompt
 from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -22,9 +24,9 @@ logger = logging.getLogger(__name__)
 # Shared so the active-row fast path and the atomic-admission conflict path
 # return byte-identical outcomes for the same active-occurrence condition.
 _ACTIVE_RUN_CONFLICT_ERROR = "task already has an active run"
-_RESTART_RECOVERY_ERROR = "interrupted: gateway restarted before the run reached a terminal state"
-_LEASE_RECOVERY_ERROR = "interrupted: the owning gateway stopped renewing its run lease"
-_QUEUE_TIMEOUT_ERROR = "scheduled task queue wait timeout exceeded"
+_RESTART_RECOVERY_ERROR = RUN_ERROR_RESTARTED
+_LEASE_RECOVERY_ERROR = RUN_ERROR_LEASE_LOST
+_QUEUE_TIMEOUT_ERROR = RUN_ERROR_QUEUE_TIMEOUT
 
 
 class ScheduledTaskService:
@@ -42,6 +44,7 @@ class ScheduledTaskService:
         run_lease_grace_seconds: int = 10,
         connection_repo=None,
         notification_repo=None,
+        own_stop_available: bool = True,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -57,11 +60,19 @@ class ScheduledTaskService:
         # delivery worker sends. Either being None keeps legacy behavior.
         self._connection_repo = connection_repo
         self._notification_repo = notification_repo
+        # Whether scheduled runs get stop_scheduled_task (scheduler.tool_enabled).
+        # Decides how a launch phrases the user's stop rule (stop_rule.launch_prompt).
+        self._own_stop_available = own_stop_available
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._skip_next_lease_reconciliation = False
         self._install_finalization_observers()
+
+    @property
+    def is_running(self) -> bool:
+        """Whether this process's poller is running (automatic runs fire here)."""
+        return self._task is not None and not self._task.done()
 
     def _install_finalization_observers(self) -> None:
         observer = self._enqueue_finalization_notices if self._connection_repo is not None and self._notification_repo is not None else None
@@ -322,21 +333,23 @@ class ScheduledTaskService:
         launched_thread_id: str | None = None
         launch_succeeded = False
         try:
-            prompt = task["prompt"]
-            metadata = {"scheduled_task_id": task["id"], "scheduled_task_run_id": task_run_id, "scheduled_trigger": trigger}
+            # Goals, notes, the stop rule and the previous-run reference apply
+            # to every task, whether a chat or the tasks page created it.
+            metadata = {"scheduled_task_id": task["id"], "scheduled_task_run_id": task_run_id, "scheduled_trigger": trigger, "scheduled_context_mode": task.get("context_mode")}
             if task.get("origin_thread_id") is not None:
-                metadata["scheduled_tool_created"] = True
-                metadata["scheduled_context_mode"] = task.get("context_mode")
-                notes = task.get("standing_notes") or []
-                if notes:
-                    prompt += "\n\nStanding task notes supplied by the user:\n" + "\n".join(notes)
-                if task.get("goal_objective") is not None:
-                    metadata["scheduled_goal_objective"] = task["goal_objective"]
-                previous_lookup = getattr(self._task_run_repo, "previous_occurrence", None)
-                if task.get("context_mode") == "fresh_thread_per_run" and task["schedule_type"] != "once" and callable(previous_lookup):
-                    previous = await previous_lookup(task["id"], before_task_run_id=task_run_id)
-                    if previous is not None and previous.get("thread_id") != execution_thread_id:
-                        metadata["scheduled_previous_thread_id"] = previous["thread_id"]
+                metadata["scheduled_tool_created"] = True  # informational only
+            # The stop rule is composed only here, never stored in the prompt.
+            prompt = launch_prompt(task["prompt"], task.get("stop_condition"), can_stop=self._own_stop_available)
+            notes = task.get("standing_notes") or []
+            if notes:
+                prompt += "\n\n<standing_notes>\n" + "\n".join(f"- {note}" for note in notes) + "\n</standing_notes>"
+            if task.get("goal_objective") is not None:
+                metadata["scheduled_goal_objective"] = task["goal_objective"]
+            previous_lookup = getattr(self._task_run_repo, "previous_occurrence", None)
+            if task.get("context_mode") == "fresh_thread_per_run" and task["schedule_type"] != "once" and callable(previous_lookup):
+                previous = await previous_lookup(task["id"], before_task_run_id=task_run_id)
+                if previous is not None and previous.get("thread_id") != execution_thread_id:
+                    metadata["scheduled_previous_thread_id"] = previous["thread_id"]
             result = await self._launch_run(
                 thread_id=execution_thread_id,
                 assistant_id=task.get("assistant_id"),
@@ -532,7 +545,8 @@ class ScheduledTaskService:
         trigger: str,
     ) -> dict[str, Any]:
         if active["status"] == "queued":
-            return self._queued_result(active["id"], active["thread_id"])
+            # No new occurrence was admitted; the caller reports the waiting one.
+            return self._queued_result(active["id"], active["thread_id"], existing=True)
         return self._active_run_conflict_result(thread_id)
 
     @staticmethod
@@ -541,6 +555,7 @@ class ScheduledTaskService:
         thread_id: str,
         *,
         error: str | None = None,
+        existing: bool = False,
     ) -> dict[str, Any]:
         return {
             "outcome": "queued",
@@ -548,6 +563,7 @@ class ScheduledTaskService:
             "run_id": None,
             "thread_id": thread_id,
             "error": error,
+            "existing": existing,
         }
 
     async def _drain_queue(self, *, now: datetime) -> None:
@@ -559,7 +575,7 @@ class ScheduledTaskService:
                 await self._task_run_repo.update_status(
                     queued["id"],
                     status="interrupted",
-                    error="scheduled task was deleted while queued",
+                    error=RUN_ERROR_DELETED_WHILE_QUEUED,
                     finished_at=now,
                 )
                 continue
@@ -571,7 +587,7 @@ class ScheduledTaskService:
                 await self._task_run_repo.update_status(
                     queued["id"],
                     status="interrupted",
-                    error="scheduled task was paused while queued",
+                    error=RUN_ERROR_PAUSED_WHILE_QUEUED,
                     finished_at=now,
                 )
                 continue
@@ -604,7 +620,7 @@ class ScheduledTaskService:
             # Distinct from "failed": an interrupt (user cancel, same-thread
             # takeover) carries no error and is not an execution failure.
             terminal_status = "interrupted"
-            error = record.error or "run was interrupted before completion"
+            error = record.error or RUN_ERROR_INTERRUPTED
         elif record.status.value in {"error", "timeout"}:
             terminal_status = "failed"
             error = record.error

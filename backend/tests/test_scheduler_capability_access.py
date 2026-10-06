@@ -275,7 +275,7 @@ async def test_note_keeps_the_users_exact_text_and_repository_guard(monkeypatch)
     prepare, repo, *_ = _setup(monkeypatch, original_text="For this task:  use develop  ")
     capability = await prepare()
     await capability.manage(action="note", request={"task_id": "task-1", "note": "  use develop  "})
-    repo.append_standing_note.assert_awaited_once_with("task-1", user_id="alice", origin_thread_id="origin", note="  use develop  ")
+    repo.append_standing_note.assert_awaited_once_with("task-1", user_id="alice", note="  use develop  ")
     repo.append_standing_note.side_effect = ActiveScheduledTaskMutationConflict("running")
     result = await capability.manage(action="note", request={"task_id": "task-1", "note": "use develop"})
     assert result["status_code"] == 409
@@ -465,7 +465,8 @@ async def test_rest_and_tool_share_creation_validation_status_and_reason(monkeyp
     with pytest.raises(HTTPException) as error:
         await call_unwrapped(scheduled_tasks.create_scheduled_task, request=request, body=scheduled_tasks.ScheduledTaskCreateRequest(**body))
     assert tool_result["status_code"] == error.value.status_code
-    assert tool_result["error"] == error.value.detail
+    assert tool_result["code"] == error.value.detail["code"]
+    assert tool_result["error"] == error.value.detail["message"]
 
 
 @pytest.mark.asyncio
@@ -527,3 +528,35 @@ async def test_capability_and_shared_validation_offload_configuration_and_timezo
         capability = await prepare()
         result = await capability.manage(action="create", request={"title": "Report", "prompt": "Write report", "schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "UTC"})
     assert "error" not in result
+
+
+@pytest.mark.asyncio
+async def test_scheduled_grant_for_a_page_created_task_stops_only_its_own_occurrence(monkeypatch):
+    prepare, repo, occurrences, *_ = _setup(monkeypatch, source=AUTH_SOURCE_INTERNAL, mode="scheduled", task=_task(origin=None))
+    capability = await prepare(scheduled_task_runtime={"user_id": "alice", "task_id": "task-1", "occurrence_id": "occurrence-1"})
+    assert capability is not None
+    result = await capability.stop_current_schedule()
+    assert result["stop_requested"] is True
+    occurrences.request_stop.assert_awaited_once_with("occurrence-1", task_id="task-1", run_id="run-1", user_id="alice")
+    managed = await capability.manage(action="pause", request={"task_id": "task-1"})
+    assert (managed["status_code"], managed["code"]) == (403, "interactive_run_required")
+    repo.pause_with_queue_cancellation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_grant_cannot_stop_another_task(monkeypatch):
+    prepare, repo, occurrences, *_ = _setup(monkeypatch, source=AUTH_SOURCE_INTERNAL, mode="scheduled", task=_task(origin=None))
+    capability = await prepare(scheduled_task_runtime={"user_id": "alice", "task_id": "task-1", "occurrence_id": "occurrence-1"})
+    repo.get.return_value = {**_task(origin=None), "id": "task-2"}
+    result = await capability.stop_current_schedule()
+    assert (result["status_code"], result["code"]) == (404, "task_not_found")
+    occurrences.request_stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_capability_pause_of_a_finished_task_is_coded(monkeypatch):
+    prepare, repo, *_ = _setup(monkeypatch)
+    repo.pause_with_queue_cancellation.return_value = "finished"
+    capability = await prepare()
+    result = await capability.manage(action="pause", request={"task_id": "task-1"})
+    assert result == {"error": "Scheduled task has finished; resume it to run again", "code": "task_finished", "status_code": 409}

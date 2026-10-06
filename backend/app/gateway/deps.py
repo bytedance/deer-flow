@@ -832,6 +832,18 @@ def get_scheduled_task_service(request: Request):
     return val
 
 
+def is_scheduler_running(request: Request) -> bool:
+    """Whether this Gateway process's scheduler poller is running.
+
+    False when the service is absent (no scheduler persistence) or was never
+    started (``scheduler.enabled: false``) or its poller stopped. Per process:
+    another worker may report differently.
+    """
+    state = getattr(getattr(request, "app", None), "state", None)
+    service = getattr(state, "scheduled_task_service", None)
+    return bool(getattr(service, "is_running", False))
+
+
 def get_mcp_task_repo(request: Request):
     val = getattr(request.app.state, "mcp_task_repo", None)
     if val is None:

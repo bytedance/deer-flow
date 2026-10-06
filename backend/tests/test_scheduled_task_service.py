@@ -1494,3 +1494,59 @@ async def test_completion_without_the_outbox_does_not_read_the_task():
 
     assert task_repo.completions[-1][1]["status"] == "success"
     assert task_repo.reads == 0
+
+
+@pytest.mark.asyncio
+async def test_trigger_while_a_scheduled_occurrence_is_queued_reports_the_existing_row():
+    launched = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        return {"run_id": "run-x", "thread_id": kwargs["thread_id"]}
+
+    class QueuedRunRepo(DummyRunRepo):
+        async def get_active_run(self, task_id):
+            return {"id": "task-run-waiting", "task_id": task_id, "thread_id": "thread-waiting", "status": "queued", "trigger": "scheduled"}
+
+    row = _once_task_row(task_id="task-waiting")
+    row.update({"schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}, "status": "enabled"})
+    run_repo = QueuedRunRepo()
+    service = ScheduledTaskService(task_repo=DummyTaskRepo([row]), task_run_repo=run_repo, launch_run=fake_launch, poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3)
+
+    result = await service.dispatch_task(row, now=datetime.now(UTC), trigger="manual")
+
+    assert result["outcome"] == "queued"
+    assert result["existing"] is True
+    assert result["task_run_id"] == "task-run-waiting"
+    assert result["thread_id"] == "thread-waiting"
+    assert run_repo.created is None
+    assert launched == []
+
+
+@pytest.mark.asyncio
+async def test_a_new_queued_trial_is_not_reported_as_existing():
+    async def fake_launch(**kwargs):
+        raise AssertionError("budget is exhausted; nothing launches")
+
+    row = _once_task_row(task_id="task-budget")
+    row.update({"schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}, "status": "enabled"})
+    run_repo = DummyRunRepo(active_count=3)
+    service = ScheduledTaskService(task_repo=DummyTaskRepo([row]), task_run_repo=run_repo, launch_run=fake_launch, poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3)
+
+    result = await service.dispatch_task(row, now=datetime.now(UTC), trigger="manual")
+
+    assert result["outcome"] == "queued"
+    assert result["existing"] is False
+    assert run_repo.created is not None
+
+
+@pytest.mark.asyncio
+async def test_is_running_reflects_the_poller_task():
+    service = ScheduledTaskService(task_repo=DummyTaskRepo([]), task_run_repo=DummyRunRepo(), launch_run=None, poll_interval_seconds=60, lease_seconds=120, max_concurrent_runs=1)
+    assert service.is_running is False
+    await service.start()
+    try:
+        assert service.is_running is True
+    finally:
+        await service.stop()
+    assert service.is_running is False

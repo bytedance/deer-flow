@@ -1219,3 +1219,198 @@ async def test_update_after_launch_rejects_stale_lease_owner(tmp_path, caplog):
         assert task["run_count"] == 0
     finally:
         await close_engine()
+
+
+# --- PR1 lifecycle, limits and listing contracts ------------------------------------------
+
+
+async def _sql_repos(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    sf = get_session_factory()
+    assert sf is not None
+    return sf, ScheduledTaskRepository(sf), ScheduledTaskRunRepository(sf)
+
+
+@pytest.mark.asyncio
+async def test_stop_condition_round_trips_and_the_streak_boundary_stays_internal(tmp_path):
+    from _scheduled_rows import create_task
+
+    _sf, tasks, _runs = await _sql_repos(tmp_path)
+    try:
+        created = await create_task(tasks, stop_condition="every item on the checklist is checked")
+        assert created["stop_condition"] == "every item on the checklist is checked"
+        assert created["prompt"] == "Summarize the notifications."
+        assert "unmet_streak_after_seq" not in created
+        cleared = await tasks.update("task-1", user_id="user-1", updates={"stop_condition": None}, require_mutable=True)
+        assert cleared["stop_condition"] is None
+        assert "unmet_streak_after_seq" not in await tasks.get("task-1", user_id="user-1")
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_automatic_runs_used_for_counts_only_launched_scheduled_runs(tmp_path):
+    from _scheduled_rows import create_task, occurrence
+
+    sf, tasks, _runs = await _sql_repos(tmp_path)
+    try:
+        for task_id in ("task-1", "task-2", "task-3"):
+            await create_task(tasks, task_id)
+        async with sf() as session:
+            session.add_all(
+                [
+                    occurrence("a1", seq=1),
+                    occurrence("a2", seq=2, status="unmet"),
+                    occurrence("a-trial", seq=3, trigger="manual"),
+                    occurrence("a-skipped", seq=4, status="skipped", accounted=False),
+                    occurrence("a-legacy", seq=None, accounted=None),
+                    occurrence("b1", "task-2", seq=1, status="failed"),
+                ]
+            )
+            await session.commit()
+        assert await tasks.automatic_runs_used_for(["task-1", "task-2", "task-3"]) == {"task-1": 2, "task-2": 1, "task-3": 0}
+        assert await tasks.automatic_runs_used_for([]) == {}
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_active_run_status_for_reports_running_recurring_tasks_in_one_query(tmp_path):
+    from _scheduled_rows import create_task, occurrence
+    from sqlalchemy import event
+
+    from deerflow.persistence.engine import get_engine
+
+    sf, tasks, _runs = await _sql_repos(tmp_path)
+    try:
+        for task_id in ("task-running", "task-queued", "task-idle"):
+            await create_task(tasks, task_id)
+        async with sf() as session:
+            session.add_all([occurrence("r", "task-running", seq=1, status="running"), occurrence("q", "task-queued", seq=1, status="queued", accounted=False), occurrence("i", "task-idle", seq=1)])
+            await session.commit()
+        # A recurring task's own status stays "enabled" while its occurrence runs.
+        assert (await tasks.get("task-running", user_id="user-1"))["status"] == "enabled"
+        statements = []
+        sync_engine = get_engine().sync_engine
+        listener = lambda *args, **kwargs: statements.append(args[2])  # noqa: E731
+        event.listen(sync_engine, "before_cursor_execute", listener)
+        try:
+            result = await tasks.active_run_status_for(["task-running", "task-queued", "task-idle"])
+        finally:
+            event.remove(sync_engine, "before_cursor_execute", listener)
+        assert result == {"task-running": "running", "task-queued": "queued"}
+        assert len([statement for statement in statements if "scheduled_task_runs" in statement]) == 1
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_list_by_user_and_thread_adds_run_conversations_and_stays_owner_scoped(tmp_path):
+    from _scheduled_rows import create_task, occurrence
+
+    sf, tasks, _runs = await _sql_repos(tmp_path)
+    try:
+        await create_task(tasks, "task-origin", origin_thread_id="thread-x")
+        await create_task(tasks, "task-reuse", thread_id="thread-x", context_mode="reuse_thread")
+        await create_task(tasks, "task-run")
+        await create_task(tasks, "task-unrelated")
+        await create_task(tasks, "task-foreign", user_id="user-2")
+        async with sf() as session:
+            session.add_all(
+                [
+                    occurrence("run-1", "task-run", seq=1, thread_id="thread-a"),
+                    occurrence("run-2", "task-run", seq=2, status="unmet", thread_id="thread-x"),
+                    occurrence("foreign", "task-foreign", seq=1, thread_id="thread-x"),
+                ]
+            )
+            await session.commit()
+        listed = {task["id"]: task for task in await tasks.list_by_user_and_thread("user-1", "thread-x")}
+        assert set(listed) == {"task-origin", "task-reuse", "task-run"}
+        assert (listed["task-origin"]["thread_relation"], listed["task-origin"]["thread_run"]) == ("origin", None)
+        assert (listed["task-reuse"]["thread_relation"], listed["task-reuse"]["thread_run"]) == ("reuse", None)
+        assert listed["task-run"]["thread_relation"] == "run"
+        assert listed["task-run"]["thread_run"] == {"run_number": 2, "trigger": "scheduled", "scheduled_for": "2026-10-01T01:02:00+00:00", "status": "unmet"}
+        assert [task["id"] for task in await tasks.list_by_user_and_thread("user-2", "thread-x")] == ["task-foreign"]
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_list_manageable_from_thread_covers_origin_and_run_conversations(tmp_path):
+    from _scheduled_rows import create_task, occurrence
+
+    sf, tasks, _runs = await _sql_repos(tmp_path)
+    try:
+        await create_task(tasks, "task-origin", origin_thread_id="thread-x")
+        await create_task(tasks, "task-run")
+        await create_task(tasks, "task-reuse", thread_id="thread-x", context_mode="reuse_thread")
+        await create_task(tasks, "task-foreign", user_id="user-2", origin_thread_id="thread-x")
+        async with sf() as session:
+            session.add(occurrence("run-1", "task-run", seq=1, thread_id="thread-x"))
+            await session.commit()
+        assert sorted(task["id"] for task in await tasks.list_manageable_from_thread("user-1", "thread-x")) == ["task-origin", "task-run"]
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_reactivating_an_exhausted_task_raises_and_leaves_the_row_unchanged(tmp_path):
+    from _scheduled_rows import create_task, occurrence
+
+    from deerflow.persistence.scheduled_tasks import ScheduledTaskLimitsExhausted
+
+    sf, tasks, runs = await _sql_repos(tmp_path)
+    try:
+        await create_task(tasks, max_runs=2)
+        async with sf() as session:
+            session.add_all([occurrence("a1", seq=1), occurrence("a2", seq=2)])
+            await session.commit()
+        await tasks.update("task-1", user_id="user-1", updates={"status": "completed", "next_run_at": None})
+        before = await tasks.get("task-1", user_id="user-1")
+        with pytest.raises(ScheduledTaskLimitsExhausted) as exhausted:
+            await tasks.update("task-1", user_id="user-1", updates={"status": "enabled", "next_run_at": datetime(2030, 1, 1, tzinfo=UTC)}, require_mutable=True)
+        assert (exhausted.value.limit, exhausted.value.used, exhausted.value.max_runs, exhausted.value.end_at) == ("max_runs", 2, 2, None)
+        assert await tasks.get("task-1", user_id="user-1") == before
+        renewed = await tasks.update("task-1", user_id="user-1", updates={"status": "enabled", "max_runs": 3, "next_run_at": datetime(2030, 1, 1, tzinfo=UTC)}, require_mutable=True)
+        assert renewed["status"] == "enabled"
+        assert renewed["run_count"] == before["run_count"]
+        assert len(await runs.list_by_task("task-1")) == 2
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_reactivating_after_the_end_time_reports_end_at(tmp_path):
+    from _scheduled_rows import create_task
+
+    from deerflow.persistence.scheduled_tasks import ScheduledTaskLimitsExhausted
+
+    _sf, tasks, _runs = await _sql_repos(tmp_path)
+    try:
+        past = datetime.now(UTC) - timedelta(days=1)
+        await create_task(tasks, end_at=past)
+        await tasks.update("task-1", user_id="user-1", updates={"status": "completed"})
+        with pytest.raises(ScheduledTaskLimitsExhausted) as exhausted:
+            await tasks.update("task-1", user_id="user-1", updates={"status": "enabled"}, require_mutable=True)
+        assert exhausted.value.limit == "end_at"
+        assert exhausted.value.end_at == past.isoformat()
+        assert (await tasks.get("task-1", user_id="user-1"))["status"] == "completed"
+        later = datetime.now(UTC) + timedelta(days=7)
+        assert (await tasks.update("task-1", user_id="user-1", updates={"status": "enabled", "end_at": later}, require_mutable=True))["status"] == "enabled"
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["completed", "failed", "cancelled"])
+async def test_pausing_a_finished_task_reports_finished(tmp_path, terminal):
+    from _scheduled_rows import create_task
+
+    _sf, tasks, _runs = await _sql_repos(tmp_path)
+    try:
+        await create_task(tasks)
+        before = await tasks.update("task-1", user_id="user-1", updates={"status": terminal})
+        assert await tasks.pause_with_queue_cancellation("task-1", user_id="user-1", error="pause", now=datetime.now(UTC)) == "finished"
+        assert await tasks.get("task-1", user_id="user-1") == before
+    finally:
+        await close_engine()

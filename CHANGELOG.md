@@ -25,6 +25,34 @@ This release closes that milestone with **301 merged pull requests**.
 
 #### Scheduler
 
+- **scheduler:** Scheduled-task lifecycle and limits behave the same on the
+  tasks page, over REST and in chat. Page-created tasks accept a per-run goal,
+  a safety cap (`max_runs`, `end_at`) and a new stop condition, and are
+  evaluated and allowed to stop their own schedule like chat-created ones. The
+  stop condition is stored in a new nullable `scheduled_tasks.stop_condition`
+  column (migration `0031_scheduled_streak_boundary`, which also adds the
+  internal `unmet_streak_after_seq` boundary) and is appended to a run's
+  message only at launch, never to the stored prompt. Resume computes the next
+  run from now (no catch-up run), refuses a one-time task whose time passed,
+  and accepts an optional `{max_runs, end_at}` body; reactivating a task whose
+  cap is used up returns `409 limits_exhausted` unless the same request renews
+  it. Pausing a finished task returns `409 task_finished`. Goal-check failures
+  no longer count toward or reset the three-miss automatic pause, and editing
+  the goal, instructions or stop condition, or adding a note, starts a new
+  count. Creating a task while this Gateway process's scheduler is not running
+  returns `409 scheduler_not_running`. Task responses add
+  `automatic_runs_used` and `active_run_status`; run rows add `run_number`,
+  `total_tokens` and `summary`; thread task rows add `thread_relation`;
+  `/api/features` adds `scheduled_tasks`; trigger returns `outcome`,
+  `existing` and `thread_id`. ([#6340])
+
+  **Breaking:** errors from `/api/scheduled-tasks*` are now
+  `{"detail": {"code", "message", "params"}}` instead of a string `detail`.
+  Clients reading `detail` as a string must read `detail.message`. Route
+  permission 403s and FastAPI's 422 for malformed bodies keep their old shape.
+  The code list is in `backend/docs/API.md` and
+  `contracts/scheduled_task_errors_contract.json`.
+
 - **scheduler:** The tasks page shows the per-run goal and end conditions of
   conversation-created tasks. Run history shows whether a goal was met,
   including when it relied on stated assumptions; an unmet run shows a readable
@@ -7825,3 +7853,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
 [#6328]: https://github.com/bytedance/deer-flow/pull/6328
 [#6332]: https://github.com/bytedance/deer-flow/pull/6332
+[#6340]: https://github.com/bytedance/deer-flow/issues/6340

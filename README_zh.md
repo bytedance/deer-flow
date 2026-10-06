@@ -941,6 +941,17 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 
 通过 `config.yaml -> scheduler.enabled` 开启后台轮询。手动触发使用同样的 scheduled-task 资源和执行路径。
 
+### 生命周期、保险上限和停止条件
+
+- 任务页面和 REST API（`POST` / `PATCH /api/scheduled-tasks`）与对话一样，支持每次运行的目标（`goal_objective`）、保险上限（`max_runs`、`end_at`）和停止条件（`stop_condition`）。在 PATCH 中传 `null` 可以清除这四项中的任意一项；不带 UTC 偏移的 `end_at` 按任务所在时区的本地时间理解。
+- 停止条件是用户“满足某个条件就停”的规则，单独保存在自己的字段里（迁移 `0031`），不会写进任务指令。只有在运行启动时，DeerFlow 才把它附加到这次运行的消息中，要求运行在条件满足时调用 `stop_scheduled_task`。开启 `scheduler.tool_enabled` 时，无论任务是在对话中还是在任务页面创建的，每次定时运行都能暂停自己的定时任务；关闭时，运行只会说明条件已满足，不会被要求调用它没有的工具。
+- 在任务页面创建的带目标任务，现在也会像对话中创建的任务一样检查目标，其运行同样会收到已保存的备注和上一次运行的引用。
+- 恢复时从当前时间重新计算下次运行，长时间暂停后不会补跑。时间已过的单次任务返回 `422 once_time_passed`，需要设置新的时间。恢复一个已启用的任务不会有任何变化；暂停已结束的任务返回 `409 task_finished`。
+- `max_runs` 统计任务累计的自动运行次数，试运行不计入。重新启用保险上限已用完的任务（恢复，或通过 PATCH 修改已结束任务的运行时间使其重新启用）会返回 `409 limits_exhausted`，除非同一个请求提高了 `max_runs`、把 `end_at` 改晚或取消了上限。`POST /api/scheduled-tasks/{task_id}/resume` 为此接受可选的 `{"max_runs": …, "end_at": …}` 请求体（`null` 表示取消这项上限；在对话中创建、且比每小时更频繁的任务必须保留一项上限）。只修改已结束任务上限的 PATCH 会保存新上限，任务仍保持已结束。
+- 未能检查目标（评估器出错，或检查期间对话发生了变化）既不计入连续 3 次未达成目标的自动暂停，也不会让计数清零。修改目标、任务指令或停止条件，以及新增备注，都会重新计数；恢复不会清零。
+- 当前 Gateway 进程的调度器未运行时，新建任务（包括复制）会返回 `409 scheduler_not_running`，因为这样的任务不会按计划运行。`GET /api/features` 会返回 `scheduled_tasks.available`、`running`、`tool_enabled` 和 `min_interval_seconds`。
+- `/api/scheduled-tasks*` 的错误格式为 `{"detail": {"code", "message", "params"}}`，详见 [`backend/docs/API.md`](backend/docs/API.md#scheduled-tasks) 和 `contracts/scheduled_task_errors_contract.json`。
+
 ### 在对话中创建定时任务
 
 同时设置 `scheduler.enabled: true` 和 `scheduler.tool_enabled: true`，重启
@@ -957,7 +968,7 @@ Gateway 后，具有权限的交互式对话可以通过 `schedule_task` 创建�
 
 未达目标的执行记为 `unmet`，与执行故障区分。周期任务连续三次符合条件的自动
 执行未达目标后会暂停。成功会重置计数，包括依赖已声明假设的成功；手动试跑、
-中断、执行故障和等待外部条件不递增计数。恢复不重置计数，下一次符合条件的
+中断、执行故障、等待外部条件和未能检查目标都不递增计数。恢复不重置计数，下一次符合条件的
 未达目标可能再次暂停。目标未达成及自动暂停通知复用现有绑定和持久化 outbox，
 手动试跑不通知。
 

@@ -1226,9 +1226,124 @@ GET /api/threads/{thread_id}/artifacts/{path}
 
 ---
 
+### Scheduled Tasks
+
+Owner-scoped task management for `/workspace/scheduled-tasks`. Reads need
+`threads:read`; mutations need `threads:write`, and create, update, resume and
+trigger also need `runs:create`.
+
+```http
+GET    /api/scheduled-tasks
+POST   /api/scheduled-tasks
+GET    /api/scheduled-tasks/{task_id}
+PATCH  /api/scheduled-tasks/{task_id}
+DELETE /api/scheduled-tasks/{task_id}
+POST   /api/scheduled-tasks/{task_id}/pause
+POST   /api/scheduled-tasks/{task_id}/resume
+POST   /api/scheduled-tasks/{task_id}/trigger
+GET    /api/scheduled-tasks/{task_id}/runs?status=&limit=&offset=
+GET    /api/threads/{thread_id}/scheduled-tasks
+POST   /api/scheduled-tasks/preview-cron
+```
+
+**Task fields.** Create and PATCH accept `title`, `prompt`, `schedule_type`
+(`once` | `cron` | `interval`), `schedule_spec`, `timezone`, `context_mode`,
+`thread_id`, `assistant_id`, plus:
+
+| Field | Type | Notes |
+|---|---|---|
+| `goal_objective` | string \| null | What one run must achieve (at most 4000 characters after whitespace normalization); requires `fresh_thread_per_run`. |
+| `max_runs` | integer \| null | Safety cap: automatic runs over the task's lifetime (trial runs excluded); at least 1. |
+| `end_at` | date-time \| null | Safety cap: no automatic run after this time. Without a UTC offset it is wall-clock time in the task's timezone. |
+| `stop_condition` | string \| null | The user's "stop when …" rule, stored in its own field. Whitespace collapses to single spaces; at most 500 characters; blank means none. It is never part of `prompt`: each launch appends it as an instruction to call `stop_scheduled_task` (or, with `scheduler.tool_enabled` off, to report a met rule). |
+
+In a PATCH, sending `null` clears `goal_objective`, `max_runs`, `end_at` or
+`stop_condition`; for every other field `null` means unchanged (`assistant_id:
+null` restores `lead_agent`). PATCH may change `schedule_type` together with
+`schedule_spec`. Changing the goal, `prompt` or `stop_condition` starts a new
+count for the automatic pause after three unmet runs. A PATCH that changes the
+schedule of a finished task re-arms it (then its safety cap applies); a PATCH
+that only changes the cap leaves a finished task finished.
+
+Task responses (list, get, create, PATCH, pause, resume) return the stored task
+plus `automatic_runs_used` (integer) and `active_run_status` (`queued` |
+`launching` | `running` | null). A recurring task's `status` stays `enabled`
+while its run executes, so check `active_run_status` for "is a run active".
+`GET /api/threads/{thread_id}/scheduled-tasks` rows add `thread_relation`
+(`origin`: created in the chat, `reuse`: runs in the chat, `run`: the chat is
+one of its runs) and `thread_run` (`{"run_number", "trigger", "scheduled_for",
+"status"}` for `run`, else null).
+
+**Create** returns `409 scheduler_not_running` (after the request validates)
+while this Gateway process's scheduler is not running; the tasks page's
+Duplicate is a create.
+
+**Pause** of a `completed`, `failed` or `cancelled` task returns `409
+task_finished`.
+
+**Resume** accepts an optional renewal body:
+
+```json
+{ "max_runs": 70, "end_at": "2026-12-31T18:00:00" }
+```
+
+Each field is optional; `null` clears that cap (a chat-created task that runs
+more often than hourly must keep one: `422 frequent_requires_limit`). The next
+run is the stored one when still ahead, otherwise computed from now, so no
+catch-up run happens; a one-time task whose time passed returns `422
+once_time_passed`. Resuming an `enabled` task changes nothing. A task whose
+safety cap is used up returns `409 limits_exhausted` unless the same request
+raises `max_runs` above `params.used`, sets a later `end_at`, or clears the cap.
+A future `end_at` that falls before the next run returns `422
+end_at_before_first_run` (also on a PATCH that changes the schedule).
+
+**Trigger** (one trial run) returns:
+
+```json
+{ "id": "task-…", "triggered": true, "outcome": "launched", "existing": false, "thread_id": "…" }
+```
+
+`outcome` is `launched` or `queued`; `existing: true` means a run was already
+waiting and no trial was added.
+
+**Runs** rows add `run_number` (the automatic-run number counted like
+`max_runs`; null for trials and runs that never launched), `total_tokens` of the
+launched run (null if none), and `summary` (first line of the agent's final
+reply, at most 160 characters).
+
+**Errors (breaking change).** Every error these routes raise for a well-typed
+request is coded:
+
+```json
+{ "detail": { "code": "limits_exhausted", "message": "All 5 automatic runs are used. Raise max_runs above 5 or set a later end_at in the same request to reactivate.", "params": { "limit": "max_runs", "used": 5, "max_runs": 5, "end_at": null } } }
+```
+
+`message` stays English for API clients; `params` is omitted when empty.
+Clients that read `detail` as a string must read `detail.message` instead.
+Two errors keep their old shape: a `403` from route permissions is the plain
+string `"Permission denied: <permission>"`, and FastAPI's own `422` for
+malformed JSON or wrong types (for example `"max_runs": "abc"`) keeps its list
+`detail`. Codes the web UI translates: `invalid_request`, `invalid_schedule`, `invalid_schedule_type`, `invalid_timezone`, `interval_too_short`, `interval_too_long`, `once_in_past`, `once_too_soon`, `once_time_passed`, `invalid_context_mode`, `reuse_thread_requires_thread`, `thread_not_found`, `invalid_assistant`, `unknown_assistant`, `invalid_goal`, `goal_requires_fresh_thread`, `invalid_stop_condition`, `invalid_max_runs`, `end_at_in_past`, `end_at_before_first_run`, `frequent_requires_limit`, `max_runs_not_above_used`, `limits_exhausted`, `task_not_found`, `task_running`, `run_queued`, `task_changed`, `task_finished`, `task_quota_exceeded`, `scheduler_not_running`, `trigger_failed`. Codes only the chat capability
+returns: `timezone_required`, `authentication_required`, `permission_denied`, `scheduler_tools_disabled`, `authority_expired`, `conversation_not_found`, `interactive_run_required`, `unsupported_action`, `unsupported_fields`, `task_id_required`, `note_not_verbatim`, `note_limit_reached`, `trial_requires_direct_request`, `no_stop_authority`, `occurrence_not_active`. The machine-readable list is
+`contracts/scheduled_task_errors_contract.json`.
+
+**Feature flag.** `GET /api/features` includes:
+
+```json
+{ "scheduled_tasks": { "available": true, "running": true, "tool_enabled": false, "min_interval_seconds": 60 } }
+```
+
+`available`: the task APIs have persistence. `running`: this process's
+scheduler poller runs (tasks fire and can be created). `tool_enabled`: chats
+can manage tasks and scheduled runs can stop their own schedule.
+`min_interval_seconds`: shortest interval and earliest one-time delay.
+
+---
+
 ## Error Responses
 
-All APIs return errors in a consistent format:
+Most APIs return errors in this format (scheduled-task routes and skill export
+return a coded object instead; see [Scheduled Tasks](#scheduled-tasks)):
 
 ```json
 {

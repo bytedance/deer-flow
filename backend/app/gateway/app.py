@@ -629,6 +629,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.gateway.services import launch_scheduled_thread_run
             from app.scheduler import ScheduledTaskService
+            from deerflow.scheduler.runtime import scheduler_tools_enabled
 
             if getattr(app.state, "scheduled_task_repo", None) is not None and getattr(app.state, "scheduled_task_run_repo", None) is not None:
                 scheduled_task_service = ScheduledTaskService(
@@ -643,6 +644,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     run_lease_grace_seconds=startup_config.run_ownership.grace_seconds,
                     connection_repo=notification_connection_repo,
                     notification_repo=scheduled_notification_repo,
+                    own_stop_available=scheduler_tools_enabled(startup_config),
                 )
                 app.state.scheduled_task_service = scheduled_task_service
                 if startup_config.scheduler.enabled:
