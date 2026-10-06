@@ -623,6 +623,14 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **tui:** A new prompt no longer races an interrupted run in the same
+  conversation. After `Ctrl+C` the run's worker keeps going until its current
+  step returns, so a tool call already in progress (a long shell command, for
+  example) still finished and checkpointed while the next prompt ran on the same
+  thread; whichever run checkpointed last became the conversation's history, so
+  the new turn could silently disappear from it. Until the interrupted worker
+  returns, a prompt in that conversation now shows a notice instead of starting a
+  second run; other conversations stay available through `/new` and `/resume`. ([#6350])
 - **helm:** A default Helm install can create sandboxes again. The chart
   enables the sandbox provisioner and points `config.sandbox.provisioner_url`
   at it, but nothing rendered `PROVISIONER_API_KEY`: the provisioner
@@ -8826,4 +8834,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6343]: https://github.com/bytedance/deer-flow/pull/6343
 [#6344]: https://github.com/bytedance/deer-flow/pull/6344
 [#6347]: https://github.com/bytedance/deer-flow/pull/6347
+[#6350]: https://github.com/bytedance/deer-flow/pull/6350
 [#6365]: https://github.com/bytedance/deer-flow/pull/6365
