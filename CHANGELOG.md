@@ -630,7 +630,7 @@ This release closes that milestone with **439 merged pull requests**.
   reconnect fails, including a drop mid-stream, recovery now releases the pointer
   and rejoins the run if the server still reports it active, with its existing
   bounded retries (immediately, then after 1s and 2s). Failed submitted runs are
-  unchanged.
+  unchanged. ([#6400])
 - **deploy:** `make up`, `make down` and `make prod-logs` no longer stop on a
   fresh checkout with `env file .../.env not found`. `.env` and `frontend/.env` are gitignored and
   `make up` does not create them, but the production compose file required
@@ -8885,3 +8885,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6365]: https://github.com/bytedance/deer-flow/pull/6365
 [#6370]: https://github.com/bytedance/deer-flow/pull/6370
 [#6388]: https://github.com/bytedance/deer-flow/pull/6388
+[#6400]: https://github.com/bytedance/deer-flow/pull/6400

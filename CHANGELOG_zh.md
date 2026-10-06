@@ -562,7 +562,7 @@
   `lg:stream` 指针重连一次，出错时保留该指针；而活动运行恢复会跳过指针匹配的运行，
   因此实时流在再次刷新前一直无法恢复。现在该重连失败时（包括流中途断开），恢复逻辑会释放指针；
   若服务端仍报告该运行处于活动状态，则按现有的有限重试（立即一次，随后 1s、2s）重新加入。
-  提交失败的运行行为不变。
+  提交失败的运行行为不变。([#6400])
 - **部署：** 在全新检出的仓库上，`make up`、`make down` 与 `make prod-logs` 
   不再因 `env file .../.env not found` 而中止。`.env` 与
   `frontend/.env` 已被 gitignore，`make up` 也不会创建它们，但生产 compose 文件此前要求两者都存在。
@@ -7336,3 +7336,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6354]: https://github.com/bytedance/deer-flow/pull/6354
 [#6370]: https://github.com/bytedance/deer-flow/pull/6370
 [#6388]: https://github.com/bytedance/deer-flow/pull/6388
+[#6400]: https://github.com/bytedance/deer-flow/pull/6400
