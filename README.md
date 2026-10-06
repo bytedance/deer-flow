@@ -868,7 +868,7 @@ channels:
     bot_token: $WECHAT_BOT_TOKEN
     ilink_bot_id: $WECHAT_ILINK_BOT_ID
     qrcode_login_enabled: true      # optional: allow first-time QR bootstrap when bot_token is absent
-    allowed_users: []               # empty = allow all
+    allowed_users: []               # iLink user IDs; empty allows all; one ID is one entry
     polling_timeout: 35             # timing values must be positive finite seconds
     polling_retry_delay: 5
     qrcode_poll_interval: 2
@@ -969,6 +969,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 4. After the QR flow succeeds, DeerFlow persists the acquired token under `state_dir` for later restarts.
 5. For Docker Compose deployments, keep `state_dir` on a persistent volume so the `get_updates_buf` cursor and saved auth state survive restarts.
 6. Outbound images/files enforce `max_outbound_image_bytes` / `max_outbound_file_bytes` (20 MiB / 50 MiB defaults) while reading, including files that grow after resolution. Oversize reads are rejected before encryption/upload instead of sending a truncated prefix. Non-positive limits disable the corresponding cap.
+7. `allowed_users` takes iLink user IDs. Unset, `null`, `[]`, or a blank string allows everyone. A single ID is one entry, not a sequence of characters, and an unquoted integer-valued number is stored as that integer's text. Invalid entries are ignored with a warning; any other configured value that yields no valid ID denies every user and logs an error. `/connect` is still accepted before that check, and a denied sender is dropped before inbound media is downloaded.
 
 **WeCom Setup**
 

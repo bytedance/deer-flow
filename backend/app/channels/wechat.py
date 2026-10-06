@@ -169,13 +169,21 @@ def _detect_image_extension_and_mime(content: bytes) -> tuple[str, str] | None:
 
 
 def _parse_wechat_user_id(entry: Any) -> str | None:
-    """A valid iLink user ID from a string or numeric scalar, else ``None``."""
+    """A valid iLink user ID from a string or numeric scalar, else ``None``.
+
+    A finite integer-valued float uses its integer text, so YAML ``12345.0``
+    matches the sender ``12345``. Fractional and non-finite floats are not IDs.
+    A numeric string is kept as written: ``"12345.0"`` does not become ``12345``.
+    """
     if isinstance(entry, bool):
         # bool is an int subclass: reject booleans before the numeric branch.
         return None
-    if isinstance(entry, (int, float)):
-        text = str(entry).strip()
-        return text or None
+    if isinstance(entry, float):
+        if not math.isfinite(entry) or not entry.is_integer():
+            return None
+        entry = int(entry)
+    if isinstance(entry, int):
+        return str(entry)
     if isinstance(entry, str):
         text = entry.strip()
         return text or None
@@ -187,11 +195,12 @@ def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
 
     A single user ID is shorthand for a one-entry list. Iterating a scalar
     instead turns ``"wxid"`` into the characters ``w``, ``x``, ``i`` and ``d``.
-    Entries that are not ID strings or numbers (booleans, nulls, empty strings)
-    are dropped with a warning. If an allowlist was configured but no valid ID
-    remains, the result is an empty frozenset that denies everyone: the operator
-    asked for a restriction, so an unreadable allowlist must fail closed rather
-    than opening the bot to all.
+    A mapping is one unreadable entry, not a list of its keys. Entries that are
+    not ID strings or numbers (booleans, nulls, empty strings, fractional or
+    non-finite numbers) are dropped with a warning. If an allowlist was
+    configured but no valid ID remains, the result is an empty frozenset that
+    denies everyone: the operator asked for a restriction, so an unreadable
+    allowlist must fail closed rather than opening the bot to all.
     """
     if allowed_users is None or (isinstance(allowed_users, str) and not allowed_users.strip()):
         return None
@@ -221,7 +230,8 @@ class WechatChannel(Channel):
         - ``qrcode_login_enabled``: (optional) Allow first-time QR bootstrap when ``bot_token`` is missing.
         - ``base_url``: (optional) iLink API base URL.
         - ``allowed_users``: (optional) List of allowed iLink user IDs, or a single
-          ID. Empty = allow all; a non-empty list with no valid ID denies everyone.
+          ID. Empty = allow all; a configured value with no valid ID denies everyone.
+          Integer-valued numbers are stored as integer text. A mapping is not a list of IDs.
         - ``allowed_media_hosts``: (optional) Extra host suffixes inbound media URLs may
           be downloaded from, in addition to the platform CDN defaults. Default: ``qq.com``.
         - ``polling_timeout``: (optional) Long-poll timeout in seconds. Default: 35.

@@ -428,7 +428,7 @@ class TestWechatAllowedUsers:
         assert channel._check_user(expected)
         assert not channel._check_user(expected[0])
 
-    @pytest.mark.parametrize("bad_entry", ["", "   ", None, True])
+    @pytest.mark.parametrize("bad_entry", ["", "   ", None, True, 1.5, float("nan"), {"wxid-bob": True}])
     def test_unparseable_entry_is_dropped_with_warning(self, bad_entry, caplog):
         with caplog.at_level(logging.WARNING, logger="app.channels.wechat"):
             channel = self._channel({"allowed_users": ["wxid-alice", bad_entry]})
@@ -437,7 +437,10 @@ class TestWechatAllowedUsers:
         assert not channel._check_user("wxid-stranger")
         assert repr(bad_entry) in caplog.text
 
-    @pytest.mark.parametrize("allowed_users", [[""], [None], [True], ["   "]])
+    @pytest.mark.parametrize(
+        "allowed_users",
+        [[""], [None], [True], ["   "], 1.5, True, {"wxid-alice": True}, {}, float("nan"), float("inf"), float("-inf")],
+    )
     def test_allowlist_without_a_parseable_entry_denies_everyone(self, allowed_users, caplog):
         with caplog.at_level(logging.ERROR, logger="app.channels.wechat"):
             channel = self._channel({"allowed_users": allowed_users})
@@ -475,6 +478,132 @@ class TestWechatAllowedUsers:
                 }
             )
             assert [msg.user_id for msg in published] == ["wxid-alice"]
+
+        _run(go())
+
+    def test_padded_id_matches_the_stripped_value(self):
+        channel = self._channel({"allowed_users": ["  wxid-alice  "]})
+
+        assert channel._check_user("wxid-alice")
+        assert not channel._check_user("wxid-stranger")
+
+    def test_integer_valued_float_is_integer_text_and_numeric_strings_stay_literal(self):
+        number = self._channel({"allowed_users": 12345.0})
+        assert number._check_user("12345")
+        assert not number._check_user("12345.0")
+        assert not number._check_user("1")
+
+        literal = self._channel({"allowed_users": "12345.0"})
+        assert literal._check_user("12345.0")
+        assert not literal._check_user("12345")
+
+        nan_text = self._channel({"allowed_users": "nan"})
+        assert nan_text._check_user("nan")
+
+    def test_set_of_ids_allows_members_and_mapping_does_not_allow_its_keys(self):
+        listed = self._channel({"allowed_users": {"wxid-alice"}})
+        assert listed._check_user("wxid-alice")
+        assert not listed._check_user("wxid-stranger")
+
+        mapping = self._channel({"allowed_users": {"wxid-alice": True}})
+        assert mapping._allowed_users == frozenset()
+        assert not mapping._check_user("wxid-alice")
+
+    def test_comma_separated_string_is_one_id(self):
+        channel = self._channel({"allowed_users": "wxid-alice,wxid-bob"})
+
+        assert channel._check_user("wxid-alice,wxid-bob")
+        assert not channel._check_user("wxid-alice")
+        assert not channel._check_user("w")
+
+    def test_gate_uses_ilink_user_id_and_skips_media_for_strangers(self):
+        async def go():
+            bus = MessageBus()
+            published = []
+
+            async def capture(msg):
+                published.append(msg)
+
+            bus.publish_inbound = capture  # type: ignore[method-assign]
+            channel = self._channel({"allowed_users": ["wxid-alice"]})
+            channel.bus = bus
+            channel._extract_inbound_files = AsyncMock(return_value=[])  # type: ignore[method-assign]
+            stranger = {
+                "message_type": 1,
+                "ilink_user_id": "wxid-stranger",
+                "context_token": "ctx-stranger",
+                "item_list": [{"type": 1, "text_item": {"text": "hello"}}, {"type": 2, "image_item": {"media": {}}}],
+            }
+            member = {
+                "message_type": 1,
+                "ilink_user_id": "wxid-alice",
+                "context_token": "ctx-alice",
+                "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+            }
+            await channel._handle_update(stranger)
+            await channel._handle_update(member)
+
+            assert [msg.user_id for msg in published] == ["wxid-alice"]
+            channel._extract_inbound_files.assert_awaited_once_with(member)
+
+        _run(go())
+
+    def test_unreadable_allowlist_drops_chat_and_command_before_media_download(self):
+        async def go():
+            bus = MessageBus()
+            published = []
+
+            async def capture(msg):
+                published.append(msg)
+
+            bus.publish_inbound = capture  # type: ignore[method-assign]
+            channel = self._channel({"allowed_users": [""]})
+            channel.bus = bus
+            channel._extract_inbound_files = AsyncMock(return_value=[{"name": "pic"}])  # type: ignore[method-assign]
+            for text in ("hello", "/status"):
+                await channel._handle_update(
+                    {
+                        "message_type": 1,
+                        "from_user_id": "wxid-stranger",
+                        "context_token": "ctx-denied",
+                        "item_list": [{"type": 1, "text_item": {"text": text}}, {"type": 2, "image_item": {"media": {}}}],
+                    }
+                )
+
+            assert published == []
+            channel._extract_inbound_files.assert_not_awaited()
+
+        _run(go())
+
+    def test_connect_code_is_consumed_when_allowlist_denies_everyone(self):
+        async def go():
+            bus = MessageBus()
+            published = []
+
+            async def capture(msg):
+                published.append(msg)
+
+            bus.publish_inbound = capture  # type: ignore[method-assign]
+            channel = self._channel({"allowed_users": [""], "connection_repo": object()})
+            channel.bus = bus
+            channel._bind_connection_from_connect_code = AsyncMock(return_value=True)  # type: ignore[method-assign]
+            channel._extract_inbound_files = AsyncMock(return_value=[{"name": "pic"}])  # type: ignore[method-assign]
+            await channel._handle_update(
+                {
+                    "message_type": 1,
+                    "from_user_id": "wxid-stranger",
+                    "context_token": "ctx-connect",
+                    "item_list": [{"type": 1, "text_item": {"text": "/connect one-time-fixture"}}],
+                }
+            )
+
+            channel._bind_connection_from_connect_code.assert_awaited_once_with(
+                chat_id="wxid-stranger",
+                context_token="ctx-connect",
+                code="one-time-fixture",
+            )
+            channel._extract_inbound_files.assert_not_awaited()
+            assert published == []
 
         _run(go())
 
