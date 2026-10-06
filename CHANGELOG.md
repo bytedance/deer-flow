@@ -674,6 +674,25 @@ This release closes that milestone with **439 merged pull requests**.
   the new turn could silently disappear from it. Until the interrupted worker
   returns, a prompt in that conversation now shows a notice instead of starting a
   second run; other conversations stay available through `/new` and `/resume`. ([#6350])
+- **helm:** A default Helm install can create sandboxes again. The chart
+  enables the sandbox provisioner and points `config.sandbox.provisioner_url`
+  at it, but nothing rendered `PROVISIONER_API_KEY`: the provisioner
+  Deployment had no such env, the `<release>-app` Secret no such key, and the
+  embedded config no `provisioner_api_key`. Since the provisioner started
+  requiring the key (#4116), its `verify_api_key` middleware answers 401 to
+  every `/api/*` request while the key is empty or mismatched, so every
+  sandbox creation failed. The app Secret now generates the key once and
+  preserves it across upgrades like the other app secrets, the gateway and
+  provisioner Pods read it from that one Secret (a user-managed
+  `existingAppSecret` must carry it while `provisioner.enabled` is true), and
+  the default `config` sets `sandbox.provisioner_api_key:
+  $PROVISIONER_API_KEY`, which the chart README's config example now keeps
+  too. With `provisioner.enabled: false` the gateway takes the key an
+  operator supplies through `secrets` or `existingSecret` (external
+  provisioner); otherwise its start command defaults the variable to an
+  empty string, so the default `config` still loads and the gateway boots as
+  before even when a user-managed provider Secret holds only model keys.
+  docker-compose was unaffected: it reads the key from `.env`. ([#6365])
 - **sandbox:** With host bash enabled, the local sandbox no longer keeps a
   thread on the skill view of the last restricted Agent that ran there. That
   view is only maintained while host bash is off, but `LocalSandboxProvider`
@@ -8863,5 +8882,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6350]: https://github.com/bytedance/deer-flow/pull/6350
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351
 [#6354]: https://github.com/bytedance/deer-flow/pull/6354
+[#6365]: https://github.com/bytedance/deer-flow/pull/6365
 [#6386]: https://github.com/bytedance/deer-flow/pull/6386
 [#6388]: https://github.com/bytedance/deer-flow/pull/6388
