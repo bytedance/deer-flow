@@ -13,7 +13,7 @@ import pytest
 from deerflow.skills.package_files import is_executable_binary_prefix
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.skillscan import StaticScanBlockedError, enforce_static_scan, scan_archive_preflight, scan_skill_dir
-from deerflow.skills.skillscan.orchestrator import _PYTHON_CLIENT_SINK_METHODS
+from deerflow.skills.skillscan.orchestrator import _PYTHON_CLIENT_SINK_METHODS, MAX_FILE_BYTES
 
 _FINDING_FIELDS = {"rule_id", "severity", "file", "line", "message", "remediation", "evidence"}
 
@@ -1812,6 +1812,30 @@ def test_secret_assignment_survives_nul_byte_in_python(tmp_path: Path) -> None:
     assert finding["file"] == "scripts/sample.py"
 
 
+def test_scan_dir_bounds_oversized_file_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`scan_skill_dir` must gate the size BEFORE reading: an oversized file is
+    recorded as a finding and scanned only through the bounded read, never via
+    `read_bytes` (mirroring `_read_archive_member`'s gate-then-bounded-read)."""
+    skill_dir = tmp_path / "skill"
+    _write_skill(skill_dir)
+    blob = skill_dir / "blob.bin"
+    with blob.open("wb") as handle:
+        handle.seek(300 * 1024 * 1024 - 1)
+        handle.write(b"\0")
+
+    real_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(self: Path) -> bytes:
+        if self.stat().st_size > MAX_FILE_BYTES:
+            raise AssertionError("read_bytes used on an oversized file")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+
+    findings = scan_skill_dir(skill_dir)["findings"]
+    assert _finding_by_rule(findings, "package-oversized-file")
+
+
 def test_bundled_public_skill_scripts_report_no_secret_assignment() -> None:
     """Bundled skill scripts must not fail the review gate on an unchanged checkout (#4996).
 
@@ -1905,6 +1929,9 @@ def test_shell_curl_without_pipe_finishes_on_repeated_backslash_text(tmp_path: P
     "url, host",
     [
         ("http://LOCALHOST:8080/api", "localhost"),
+        ("HTTP://LOCALHOST:8080/api", "localhost"),
+        ("HtTp://Example.COM/api", "example.com"),
+        ("HTTPS://[::1]:8443/api", "::1"),
         ("http://[::1]/api", "::1"),
         ("https://[::1]:8443/api", "::1"),
         ("http://[2001:DB8::1]:8080/api", "2001:db8::1"),
@@ -1934,9 +1961,10 @@ def test_uppercase_local_host_is_classified_local(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("host, external", [("localhost", False), ("LOCALHOST", False), ("LocalHost", False), ("Example.COM", True), ("[::1]", False), ("[2001:DB8::1]", True), ("localhost@Example.COM", True)])
-def test_declared_http_host_case_classification(tmp_path: Path, host: str, external: bool) -> None:
+@pytest.mark.parametrize("scheme", ["http", "HTTP", "HtTp"])
+def test_declared_http_host_case_classification(tmp_path: Path, host: str, external: bool, scheme: str) -> None:
     skill_dir = tmp_path / "skill"
-    _write_skill(skill_dir, f"Endpoint: http://{host}:8080/api\n")
+    _write_skill(skill_dir, f"Endpoint: {scheme}://{host}:8080/api\n")
 
     findings = scan_skill_dir(skill_dir)["findings"]
 
@@ -1945,10 +1973,11 @@ def test_declared_http_host_case_classification(tmp_path: Path, host: str, exter
 
 
 @pytest.mark.parametrize("host, external", [("localhost", False), ("LOCALHOST", False), ("LocalHost", False), ("Example.COM", True), ("[::1]", False), ("[2001:DB8::1]", True), ("[::1]@Example.COM", True)])
-def test_sensitive_path_http_host_case_classification(tmp_path: Path, host: str, external: bool) -> None:
+@pytest.mark.parametrize("scheme", ["http", "HTTP", "HtTp", "https", "HTTPS", "HtTpS"])
+def test_sensitive_path_http_host_case_classification(tmp_path: Path, host: str, external: bool, scheme: str) -> None:
     skill_dir = tmp_path / "skill"
     _write_skill(skill_dir)
-    (skill_dir / "run.py").write_text(f'ENDPOINT = "http://{host}:8080/api"\nopen("/etc/passwd").read()\n', encoding="utf-8")
+    (skill_dir / "run.py").write_text(f'ENDPOINT = "{scheme}://{host}:8080/api"\nopen("/etc/passwd").read()\n', encoding="utf-8")
 
     result = scan_skill_dir(skill_dir)
     findings = result["findings"]
@@ -1962,18 +1991,19 @@ def test_sensitive_path_http_host_case_classification(tmp_path: Path, host: str,
 
 
 @pytest.mark.parametrize(
-    "url, local",
+    "endpoint, local",
     [
-        ("http://[::1]:8080/api", True),
-        ("http://[::1]", True),
-        ("http://[::1]?mode=local", True),
-        ("http://[2001:DB8::1]:8080/api", False),
-        ("http://[2001:db8::1]", False),
+        ("[::1]:8080/api", True),
+        ("[::1]", True),
+        ("[::1]?mode=local", True),
+        ("[2001:DB8::1]:8080/api", False),
+        ("[2001:db8::1]", False),
     ],
 )
-def test_ipv6_cleartext_http_classification(tmp_path: Path, url: str, local: bool) -> None:
+@pytest.mark.parametrize("scheme", ["http", "HTTP", "HtTp"])
+def test_ipv6_cleartext_http_classification(tmp_path: Path, endpoint: str, local: bool, scheme: str) -> None:
     skill_dir = tmp_path / "skill"
-    _write_skill(skill_dir, f"# Demo\nEndpoint: {url}\n")
+    _write_skill(skill_dir, f"# Demo\nEndpoint: {scheme}://{endpoint}\n")
 
     findings = scan_skill_dir(skill_dir)["findings"]
 
@@ -1985,10 +2015,11 @@ def test_ipv6_cleartext_http_classification(tmp_path: Path, url: str, local: boo
     assert not [item for item in findings if item["rule_id"] == other_rule]
 
 
-def test_malformed_ipv6_url_remains_outbound(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scheme", ["http", "HTTP", "HtTp", "https", "HTTPS"])
+def test_malformed_ipv6_url_remains_outbound(tmp_path: Path, scheme: str) -> None:
     skill_dir = tmp_path / "skill"
     _write_skill(skill_dir)
-    (skill_dir / "run.py").write_text('ENDPOINT = "http://[::1/api"\nopen("/etc/passwd").read()\n', encoding="utf-8")
+    (skill_dir / "run.py").write_text(f'ENDPOINT = "{scheme}://[::1/api"\nopen("/etc/passwd").read()\n', encoding="utf-8")
 
     result = scan_skill_dir(skill_dir)
 
@@ -1997,9 +2028,10 @@ def test_malformed_ipv6_url_remains_outbound(tmp_path: Path) -> None:
     assert result["scanner_errors"] == []
 
 
-def test_cleartext_http_uses_host_after_userinfo_without_exposing_credentials(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scheme", ["http", "HTTP", "HtTp"])
+def test_cleartext_http_uses_host_after_userinfo_without_exposing_credentials(tmp_path: Path, scheme: str) -> None:
     skill_dir = tmp_path / "skill"
-    _write_skill(skill_dir, "Endpoint: http://localhost:private-value@Example.COM:8080/api\n")
+    _write_skill(skill_dir, f"Endpoint: {scheme}://localhost:private-value@Example.COM:8080/api\n")
 
     findings = scan_skill_dir(skill_dir)["findings"]
 

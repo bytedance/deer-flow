@@ -87,6 +87,12 @@ fact-only import payload supplies empty summary defaults.
 It captures `user_id` when it enqueues work.
 This identity survives the background timer boundary.
 
+DeerMem and mem0 exclude assistant tool-call intent in every representation:
+`tool_calls`, `invalid_tool_calls`, and provider-raw `tool_calls`/`function_call`.
+An empty parsed call list does not make an attempted call a final response.
+Keep both portable backend filters aligned without importing host helpers;
+test the real queue/HTTP write boundary in `tests/test_memory_tool_call_intent.py`.
+
 `memory.mode: tool` registers the four memory tools.
 The model chooses when to search or change facts.
 Tool mode still uses `MemoryMiddleware` for passive writes on supported remote backends.
