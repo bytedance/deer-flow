@@ -124,7 +124,11 @@ async def test_gzip_counts_decoded_bytes(transport, limit):
     compressed = gzip.compress(body)
     stream = respond(transport, [compressed[:10], compressed[10:]], headers={"content-encoding": "gzip", "content-length": str(len(compressed))})
     result = await JinaClient().crawl("https://example.com", max_response_bytes=limit)
-    assert result == body.decode() if limit == 1000 else result.startswith("Error:") and "max_response_bytes" in result
+    if limit == 1000:
+        assert result == body.decode()
+    else:
+        assert result.startswith("Error:")
+        assert "max_response_bytes" in result
     assert stream.closed
 
 
