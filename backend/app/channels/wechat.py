@@ -1692,9 +1692,36 @@ class WechatChannel(Channel):
 
     @staticmethod
     def _coerce_str_set(value: Any, default: frozenset[str]) -> set[str]:
-        if not isinstance(value, (list, tuple, set, frozenset)):
+        """Normalize a configured extension allowlist, falling back to *default*.
+
+        A bare string is the single entry it names — the same shape
+        ``_coerce_host_suffixes`` accepts one line below — so
+        ``allowed_file_extensions: .pdf`` restricts the channel instead of
+        silently widening back to the default allowlist. Non-string entries are
+        reported and skipped rather than stringified into bogus members such as
+        ``.123``, and every fallback to *default* is logged: this set gates which
+        files the Gateway may read, so a configured restriction that vanishes
+        without a trace is a posture change the operator cannot see.
+        """
+        if value is None:
             return set(default)
-        normalized = {str(item).strip().lower() if str(item).strip().startswith(".") else f".{str(item).strip().lower()}" for item in value if str(item).strip()}
+        if isinstance(value, str):
+            values: list[Any] = [value]
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            values = list(value)
+        else:
+            logger.warning("[wechat] ignoring allowed_file_extensions %r: expected a string or a list of strings, using the %d built-in extensions instead", value, len(default))
+            return set(default)
+        normalized: set[str] = set()
+        for entry in values:
+            if not isinstance(entry, str):
+                logger.warning("[wechat] ignoring allowed_file_extensions entry %r: expected a file extension string", entry)
+                continue
+            text = entry.strip().lower()
+            if text:
+                normalized.add(text if text.startswith(".") else f".{text}")
+        if not normalized:
+            logger.warning("[wechat] allowed_file_extensions %r lists no usable extension, using the %d built-in extensions instead", value, len(default))
         return normalized or set(default)
 
     def _coerce_host_suffixes(self, value: Any) -> frozenset[str]:
