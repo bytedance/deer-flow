@@ -41,6 +41,7 @@ from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.model import UserPreferenceRow, UserRow
 from deerflow.runtime import RunStatus
 from deerflow.runtime.runs.manager import RunRecord
 from deerflow.runtime.runs.schemas import DisconnectMode
@@ -49,7 +50,7 @@ NOW = datetime(2026, 10, 6, 8, tzinfo=UTC)
 _OWNER = User(id=UUID("6c1f3d0e-8a8f-4a35-9a51-0d2f5d1b7c11"), email="events@example.com", password_hash="unused", system_role="user")
 _OTHER = User(id=UUID("0b9d2c47-55e3-4d47-8f0c-a3b0f1f4d222"), email="other@example.com", password_hash="unused", system_role="user")
 OWNER = str(_OWNER.id)
-_TABLES = [ScheduledTaskRow, ScheduledTaskRunRow, RunRow, ThreadMetaRow, ScheduledTaskEventRow, NotificationDeliveryRow, ChannelConnectionRow]
+_TABLES = [ScheduledTaskRow, ScheduledTaskRunRow, RunRow, ThreadMetaRow, ScheduledTaskEventRow, NotificationDeliveryRow, ChannelConnectionRow, UserRow, UserPreferenceRow]
 _API_FIELDS = {"id", "task_id", "event", "reason_code", "task_title", "stop_condition", "run_thread_id", "run_number", "run_status", "max_runs", "end_at", "schedule_type", "after_run_id", "created_at"}
 
 
@@ -140,6 +141,13 @@ async def event_rows(sf):
         return list((await session.execute(select(ScheduledTaskEventRow).order_by(ScheduledTaskEventRow.created_at, ScheduledTaskEventRow.id))).scalars())
 
 
+async def bind_wecom(sf, *, owner=OWNER, target="wecom-user"):
+    """A connected WeCom identity of the owner (the only provider with proactive push)."""
+    async with sf() as session:
+        session.add(ChannelConnectionRow(id=f"binding-{target}", owner_user_id=owner, provider="wecom", status="connected", external_account_id=target))
+        await session.commit()
+
+
 async def outbox_rows(sf):
     async with sf() as session:
         return list((await session.execute(select(NotificationDeliveryRow).order_by(NotificationDeliveryRow.created_at))).scalars())
@@ -210,12 +218,17 @@ def _record(occurrence_id, run_id, *, task_id="task"):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("recovery_first", [True, False])
-async def test_recovery_races_late_completion_writes_one_event(tmp_path, recovery_first):
-    """The durable run is terminal while the occurrence is still ``running``."""
-    async with database(tmp_path) as (sf, tasks, runs):
+async def test_recovery_races_late_completion_writes_one_event(tmp_path, recovery_first, database_backend):
+    """The durable run is terminal while the occurrence is still ``running``.
+
+    Runs on Postgres too (``TEST_POSTGRES_URI``): the IM notice, its binding and
+    locale lookups and both ON CONFLICT inserts share the recovery transaction.
+    """
+    async with database(tmp_path, backend=database_backend) as (sf, tasks, runs):
         await make_task(tasks, max_runs=1)
         await chat(sf)
-        service = service_for(tasks, runs)
+        await bind_wecom(sf)
+        service = service_for(tasks, runs, connection_repo=object(), notification_repo=NotificationDeliveryRepository(sf))
         occurrence_id, run_id = await occurrence(sf, runs)
         if recovery_first:
             assert await runs.reconcile_active_runs(error="lease lost", now=NOW) == 1
@@ -227,6 +240,8 @@ async def test_recovery_races_late_completion_writes_one_event(tmp_path, recover
         rows = await event_rows(sf)
         assert [(row.event, row.anchor) for row in rows] == [("task_finished", occurrence_id)]
         assert (await tasks.get("task", user_id=OWNER))["status"] == "completed"
+        # Exactly one IM notice too, committed with the same finalization.
+        assert [(row.event, row.task_run_id, row.provider) for row in await outbox_rows(sf)] == [("task_finished", occurrence_id, "wecom")]
 
 
 @pytest.mark.asyncio
@@ -234,7 +249,8 @@ async def test_poisoned_row_does_not_block_recovery_of_other_rows(tmp_path):
     """Three stale occurrences in one recovery pass; one task carries bad stored values."""
     async with database(tmp_path) as (sf, tasks, runs):
         await chat(sf)
-        service_for(tasks, runs)
+        await bind_wecom(sf)
+        service_for(tasks, runs, connection_repo=object(), notification_repo=NotificationDeliveryRepository(sf))
         await make_task(tasks, "task-a", max_runs=1)
         await make_task(tasks, "task-b", stop_condition="all items are ticked")
         await make_task(tasks, "task-c")
@@ -246,6 +262,8 @@ async def test_poisoned_row_does_not_block_recovery_of_other_rows(tmp_path):
             # Bad stored values: a blank title and a non-numeric max_runs
             # (SQLite keeps text in an INTEGER column).
             await session.execute(text("UPDATE scheduled_tasks SET title = '   ', max_runs = 'many' WHERE id = 'task-c'"))
+            # An unreadable locale preference (not even JSON) for the owner.
+            await session.execute(text("INSERT INTO user_preferences (user_id, key, value) VALUES (:owner, 'locale', 'not json {')"), {"owner": OWNER})
             await session.commit()
 
         def unreadable_end_at(target, *_args):
@@ -273,6 +291,12 @@ async def test_poisoned_row_does_not_block_recovery_of_other_rows(tmp_path):
         poisoned = rows["task-c"].payload_json
         assert (poisoned["task_title"], poisoned["end_at"], poisoned["max_runs"]) == (None, None, None)
         assert rows["task-c"].anchor == "task-c-occ-1"
+        # Each occurrence also staged its one IM notice, the unreadable locale
+        # falling back to the configured default (locale None).
+        notices = {row.task_id: row for row in await outbox_rows(sf)}
+        assert {task_id: row.event for task_id, row in notices.items()} == {"task-a": "task_finished", "task-b": "task_stopped", "task-c": "run_completed"}
+        assert {row.payload_json["locale"] for row in notices.values()} == {None}
+        assert notices["task-c"].payload_json["task_title"] is None
 
 
 @pytest.mark.asyncio

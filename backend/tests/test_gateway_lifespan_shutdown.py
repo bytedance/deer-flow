@@ -875,6 +875,8 @@ def test_lifespan_starts_notification_worker_when_enqueue_and_channel_are_wired(
     resolve_connections = worker_on_app.factory_kwargs["resolve_connections"]
     assert resolve_connections is not None
     assert getattr(resolve_connections, "__name__", None) == "list_connections"
+    # Notices of owners without a UI language preference use channel_connections.notification_locale.
+    assert worker_on_app.factory_kwargs["default_locale"] == "en-US"
     scheduled_service.detach_notification_outbox.assert_not_called()
     worker_stop.assert_awaited_once()
     stop_channel_service.assert_awaited_once()

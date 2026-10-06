@@ -730,6 +730,7 @@ DeerFlowには現在、ワークスペース内でファーストクラスのス
 - このGatewayプロセスのスケジューラーが動いていない間、タスクの作成（複製を含む）は`409 scheduler_not_running`を返します。`GET /api/features`は`scheduled_tasks.available`、`running`、`tool_enabled`、`min_interval_seconds`を返します。
 - `/api/scheduled-tasks*`のエラーは`{"detail": {"code", "message", "params"}}`の形式です。[`backend/docs/API.md`](backend/docs/API.md#scheduled-tasks)と`contracts/scheduled_task_errors_contract.json`を参照してください。
 - 実行枠はタスクの所有者間で公平に分配されます。1人の所有者が同時に起動中または実行中にできるスケジュール実行は最大`scheduler.max_concurrent_runs_per_user`件です（既定値は2で、`max_concurrent_runs`を超えません。`0`にすると所有者ごとの上限は無効になります）。待機キューは所有者ごとに順番に取り出されるため、1人に溜まった実行が他の人の実行を妨げることはありません。`scheduler.queue_timeout_seconds`を超えて待った実行はスキップされ、履歴には空き枠を長く待ちすぎたと表示されます。
+- `channel_connections.enabled: true`のとき、スケジュールタスクの更新は、プロアクティブ送信に対応したアプリ（現在はWeComのみ）で接続済みの所有者のIMアカウントに送られます。設定画面では、アプリごとに更新が送られるかどうかが表示されます。1回の実行で送られるメッセージは最大1件（実行の完了・失敗・目標未達成、自動一時停止、エージェントによる一時停止、タスクの終了）で、結果を記録するのと同じトランザクションでキューに入るため、障害からの復旧後も1回だけ通知されます。メッセージは単体で読める内容で、Web画面の表示言語（未設定なら`channel_connections.notification_locale`）で書かれ、IDやリンクは含みません。単なる手動の試し実行と中断された実行は通知されません。
 
 ### 会話からスケジュールを作成する
 

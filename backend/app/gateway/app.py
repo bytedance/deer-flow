@@ -456,6 +456,8 @@ async def _start_scheduled_task_notification_delivery(app: FastAPI, startup_conf
             # connection repository is present whenever the outbox one is.
             resolve_connections=connection_repo.list_connections,
             poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
+            # Language of notices whose owner has no UI language preference.
+            default_locale=startup_config.channel_connections.notification_locale,
         )
         await worker.start()
     except Exception:

@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 54
+config_version: 55
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -2713,8 +2713,15 @@ agent_storage:
 #
 # When channel_connections.enabled is true and IM channels are running, the
 # same poll_interval_seconds also drives the notification delivery worker that
-# pushes scheduled-run outcomes to the owner's bound IM identities (WeCom
-# proactive push today). Manual "run now" and interrupts stay silent.
+# pushes scheduled-task updates to the owner's bound IM identities (only WeCom
+# supports proactive push today; other apps get no notices). Each occurrence
+# sends at most one message: a finished run, a failed run, a missed goal, the
+# automatic pause after three misses, a pause by the agent (stop condition met)
+# or the task finishing (all max_runs done, end_at reached). Notices are queued
+# in the same transaction that records the outcome, so runs finalized by crash
+# or lease recovery notify once. Plain manual "run now" trials and interrupted
+# runs stay silent. The text is in the owner's web UI language (else
+# channel_connections.notification_locale) and has no IDs and no links.
 #
 # scheduler:
 #   enabled: false               # Master switch for the background poller
@@ -2874,15 +2881,20 @@ run_ownership:
 # - Telegram uses a deep link when `bot_username` is configured.
 # - Slack, Discord, Feishu, DingTalk, WeChat, WeCom, and QQ use `/connect <code>`
 #   through the already-running bot/app.
-# - When enabled (and channels are running), scheduled-task completions/failures
-#   also enqueue IM pushes to the owner's connected identities (see scheduler
-#   section above). Manual triggers and interrupts do not notify.
+# - When enabled (and channels are running), scheduled-task updates (runs,
+#   pauses, finishes) are pushed to the owner's connected identities on apps
+#   with proactive push, WeCom today (see scheduler section above). Settings
+#   shows per app whether updates are sent there. Plain manual trials and
+#   interrupted runs do not notify. Notices carry no links.
 #
 # channel_connections:
 #   enabled: false
 #   # Security: keep this enabled unless you intentionally want legacy open-bot behavior.
 #   # Disabling it lets unbound external IM users create DeerFlow threads/runs.
 #   require_bound_identity: true
+#   # Language of scheduled-task IM notices (en-US or zh-CN) for owners without
+#   # a web UI language preference (e.g. auth disabled). Restart-required.
+#   notification_locale: en-US
 #
 #   telegram:
 #     enabled: false

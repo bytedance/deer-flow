@@ -51,9 +51,10 @@ def test_literal_stand_down_reasons_and_no_verdict_are_in_contract():
 
 
 @pytest.mark.parametrize("code", sorted(_CODES))
-def test_im_notice_translates_every_contract_code(code):
-    text = render_notification_text({"event": "run_unmet", "task_id": "task-a", "payload": {"reason_code": code}})
-    assert "Reason: unknown." not in text
+@pytest.mark.parametrize(("locale", "unknown"), [("en-US", "no reason was recorded"), ("zh-CN", "没有记录原因")])
+def test_im_notice_translates_every_contract_code(code, locale, unknown):
+    text = render_notification_text({"event": "run_unmet", "task_id": "task-a", "payload": {"reason_code": code, "locale": locale}})
+    assert unknown not in text
     assert code not in text
 
 

@@ -68,7 +68,8 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     # config.yaml edits.
     "channels": ("start_channel_service() is invoked once during startup; the live IM channel clients (Feishu, Slack, Telegram, DingTalk) are not rebuilt when channels.* changes."),
     "channel_connections": (
-        "start_channel_service() wires the connection repository and channel workers once at startup, and the channel-connections router caches the merged provider config on app.state; channel_connections.* edits need a restart."
+        "start_channel_service() wires the connection repository and channel workers once at startup, and the channel-connections router caches the merged provider config on app.state; "
+        "the scheduled-task notification delivery worker captures channel_connections.notification_locale when it starts. channel_connections.* edits need a restart."
     ),
     "scheduler": (
         "ScheduledTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, lease_seconds, "

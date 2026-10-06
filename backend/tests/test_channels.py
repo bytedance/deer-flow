@@ -497,6 +497,7 @@ class TestChannelBase:
         from app.channels.feishu import FeishuChannel
         from app.channels.github import GitHubChannel
         from app.channels.manager import CHANNEL_CAPABILITIES
+        from app.channels.qq import QQChannel
         from app.channels.slack import SlackChannel
         from app.channels.telegram import TelegramChannel
         from app.channels.wechat import WechatChannel
@@ -509,6 +510,7 @@ class TestChannelBase:
             "discord": DiscordChannel(bus=bus, config={}).supports_streaming,
             "feishu": FeishuChannel(bus=bus, config={}).supports_streaming,
             "github": GitHubChannel(bus=bus, config={}).supports_streaming,
+            "qq": QQChannel(bus=bus, config={}).supports_streaming,
             "slack": SlackChannel(bus=bus, config={}).supports_streaming,
             "telegram": TelegramChannel(bus=bus, config={}).supports_streaming,
             "wechat": WechatChannel(bus=bus, config={}).supports_streaming,

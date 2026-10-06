@@ -36,7 +36,7 @@ return `503`.
 
 ### Account Preferences
 
-`GET /api/v1/auth/preferences` returns the signed-in browser user's four
+`GET /api/v1/auth/preferences` returns the signed-in browser user's five
 preferences. `PATCH` updates only explicitly supplied fields and returns `204`.
 Both require `X-Expected-User-Id` matching the session user; PATCH also requires
 the normal `X-CSRF-Token` header. The expected ID is a stale-tab guard, not an
@@ -48,17 +48,22 @@ authorization credential. PAT, internal, and auth-disabled callers receive
   "notification_enabled": false,
   "model_name": "my-model",
   "mode": "pro",
-  "reasoning_effort": "high"
+  "reasoning_effort": "high",
+  "locale": "zh-CN"
 }
 ```
 
-All four fields accept `null` to restore the default. `mode` accepts `flash`,
+All five fields accept `null` to restore the default. `mode` accepts `flash`,
 `thinking`, `pro`, or `ultra`; `reasoning_effort` accepts `minimal`, `low`,
-`medium`, or `high`; model names are at most 200 characters. Unknown fields and
+`medium`, or `high`; `locale` accepts `en-US` or `zh-CN`; model names are at
+most 200 characters. Unknown fields and
 invalid values return `422`. Missing preferences read as `null`. Separate-field
 patches preserve each other's changes, and same-field writes are last-commit-wins.
 Storage requires SQLite or PostgreSQL (`503` when unavailable). Browser
 notification permission remains device-local and is not changed by this API.
+`locale` is the web UI language; the web app writes it after sign-in and on
+every language switch, and scheduled-task IM notices are written in it (without
+it they use `channel_connections.notification_locale`).
 
 ### Personal Access Tokens
 
@@ -1385,6 +1390,19 @@ other runs in `timezone`. A new run conversation is titled
 `"{task title} · MM-DD HH:MM"` in the task's zone, or `"{task title} · #{run}"`
 when that zone is only the placeholder. The key is server-owned: it is
 stripped from client-supplied messages and state updates.
+
+**IM notices ("scheduled task updates").** With `channel_connections.enabled`,
+each item of `GET /api/channels/providers` carries
+`proactive_notifications` (bool): whether scheduled-task updates are pushed to
+that app. Only providers with proactive push (WeCom today) get notices; the
+others get none, and Settings says so. An occurrence sends at most one message,
+in the owner's `locale` preference (see Account Preferences), else
+`channel_connections.notification_locale`. Notices carry no IDs and no links;
+see `backend/docs/CONFIGURATION.md` for the events and the merge rule.
+
+```json
+{ "provider": "wecom", "display_name": "WeCom", "connection_status": "connected", "proactive_notifications": true }
+```
 
 ---
 

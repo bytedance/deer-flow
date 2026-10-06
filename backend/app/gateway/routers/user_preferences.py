@@ -23,6 +23,10 @@ class Preferences(BaseModel):
     # remembered values against the selected model; the factory enforces
     # declared contracts while preserving legacy direct-request behavior.
     reasoning_effort: Annotated[str, StringConstraints(max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")] | None = None
+    # The web app's UI language, synced on sign-in and on every language
+    # switch. Scheduled-task IM notices are written in it; without it they use
+    # ``channel_connections.notification_locale``.
+    locale: Literal["en-US", "zh-CN"] | None = None
 
 
 async def _owner(request: Request, expected_user: str) -> str:

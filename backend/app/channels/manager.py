@@ -23,6 +23,7 @@ from langgraph_sdk.errors import ConflictError
 
 from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
+from app.channels.capabilities import CHANNEL_CAPABILITIES
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.connection_identity import lookup_thread_id
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
@@ -139,17 +140,6 @@ INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
 # Slack is intentionally excluded: its channel ids are not globally unique.
 CHAT_SCOPED_WORKSPACE_CHANNELS = frozenset({"telegram", "feishu", "wechat"})
 
-CHANNEL_CAPABILITIES = {
-    "buzz": {"supports_streaming": True},
-    "dingtalk": {"supports_streaming": False},
-    "discord": {"supports_streaming": False},
-    "feishu": {"supports_streaming": True},
-    "github": {"supports_streaming": False},
-    "slack": {"supports_streaming": False},
-    "telegram": {"supports_streaming": True},
-    "wechat": {"supports_streaming": False},
-    "wecom": {"supports_streaming": True},
-}
 
 InboundFileReader = Callable[[dict[str, Any], httpx.AsyncClient], Awaitable[bytes | None]]
 

@@ -129,6 +129,31 @@ This release closes that milestone with **301 merged pull requests**.
   read-state schema used by later changes; `runs.origin_kind` stays NULL for
   existing runs. ([#6340])
 
+- **scheduler:** Scheduled-task IM notices are honest, localized and
+  self-contained. Each occurrence sends at most one message, queued by the
+  finalization observer in the same transaction that records the outcome: a
+  pause by the agent (`task_stopped`, new), the automatic pause (now one
+  merged message instead of a goal-missed notice plus a pause notice), the
+  task finishing (`task_finished`, new: all `max_runs` done or `end_at`
+  reached), or the run's own outcome; a pause or finish still says how the
+  last run went. Only apps with proactive push (WeCom today) get notices: the
+  new `app/channels/capabilities.py` declares `proactive_notifications` per
+  provider (and adds the missing `qq` entry), `GET /api/channels/providers`
+  returns it, and other providers get no outbox rows. The text has the task
+  title, what happened, the tasks page's one-line run summary when the agent
+  replied (redacted) and "Open DeerFlow → Scheduled tasks for details.", with
+  no IDs and no links, in the owner's web UI language (new `locale` user
+  preference, `en-US` or `zh-CN`) or else the new
+  `channel_connections.notification_locale` (default `en-US`). No public base
+  URL setting is added: most deployments run on localhost or a LAN, where a
+  link would be dead on the phone that receives it. ([#6340])
+
+  **Behavior change:** runs finalized by crash or lease recovery now notify
+  once (they used to be silent); one message per occurrence replaces separate
+  goal-missed and pause messages; agent stops and finishes now notify; notice
+  text changed and no longer shows the task or run ID. Rows already queued for
+  providers without proactive push end once as `failed` without retries.
+
 - **scheduler:** The tasks page shows the per-run goal and end conditions of
   conversation-created tasks. Run history shows whether a goal was met,
   including when it relied on stated assumptions; an unmet run shows a readable
