@@ -27,6 +27,11 @@ to supply it transitively.
 
 ## Router auth fixtures
 
+`test_auth.py` pins `list_user_ids()` ordering with fixed UTC timestamps and UUIDs.
+Cover both creation-time precedence and the ID tie-break for equal timestamps
+through the real SQLite repository; do not assume wall-clock calls are distinct
+or weaken the result to an unordered comparison.
+
 For owner-scoped route assertions, pass a stable `user_factory` and
 `bind_current_user=True` to `make_authed_test_app`. The default stub stamps
 request state but leaves the ambient user context unchanged; the opt-in binding
