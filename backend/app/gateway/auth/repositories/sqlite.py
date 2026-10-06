@@ -152,7 +152,7 @@ class SQLiteUserRepository(UserRepository):
             id=UUID(row.id),
             email=row.email,
             password_hash=row.password_hash,
-            system_role=row.system_role,  # type: ignore[arg-type]
+            system_role=row.system_role,
             # SQLite loses tzinfo on read; reattach UTC so downstream
             # code can compare timestamps reliably.
             created_at=row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),

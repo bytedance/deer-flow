@@ -7,9 +7,9 @@ import {
   rs,
 } from "@rstest/core";
 
-import { userSchema } from "@/core/auth/types";
 import { AUTH_DISABLED_USER } from "@/core/auth/auth-disabled-user";
 import { STATIC_WEBSITE_USER } from "@/core/auth/static-user";
+import { userSchema } from "@/core/auth/types";
 
 rs.mock("next/headers", () => ({
   cookies: rs.fn(() => {
