@@ -3,6 +3,7 @@
 import asyncio
 import ipaddress
 import json
+import os
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -92,7 +93,8 @@ def test_persistent_same_name_connections_are_owner_only(personal_client):
         assert result.json()["mcp_servers"]["github"]["headers"]["Authorization"] == "***"
     assert read_user_mcp_config("alice")["mcpServers"]["github"]["headers"]["Authorization"] == "Bearer alice"
     assert read_user_mcp_config("bob")["mcpServers"]["github"]["headers"]["Authorization"] == "Bearer bob"
-    assert user_mcp_config_path("alice").stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":  # chmod cannot express owner-only modes on Windows
+        assert user_mcp_config_path("alice").stat().st_mode & 0o777 == 0o600
     assert create(client, "alice").status_code == 409
     assert create(client, "alice", name="only-alice").status_code == 200
     assert client.delete("/api/mcp/personal/config/servers/only-alice", headers={"test-user": "bob"}).status_code == 404

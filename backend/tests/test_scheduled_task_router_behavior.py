@@ -1076,7 +1076,7 @@ def _create_request(**overrides):
     return scheduled_tasks.ScheduledTaskCreateRequest(**kwargs)
 
 
-async def _seed_task(repo: _Repo, **overrides):
+async def _seed_task(repo: _Repo | ScheduledTaskRepository, **overrides):
     kwargs = {
         "task_id": "task-1",
         "user_id": "user-1",
@@ -1352,6 +1352,52 @@ async def test_update_invalid_assistant_id_is_rejected():
         )
     assert exc_info.value.status_code == 422
     assert "Invalid assistant_id" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_update_explicit_null_assistant_id_resets_to_lead_agent():
+    repo = _Repo()
+    task = await _seed_task(repo, assistant_id="research-bot")
+    with patch(
+        "app.gateway.routers.scheduled_tasks.load_agent_config",
+        side_effect=FileNotFoundError("missing"),
+    ) as loader:
+        updated = await _call_update(
+            repo,
+            task["id"],
+            scheduled_tasks.ScheduledTaskUpdateRequest(assistant_id=None),
+        )
+    loader.assert_not_called()
+    assert updated["assistant_id"] == "lead_agent"
+    assert repo.items[task["id"]]["assistant_id"] == "lead_agent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload,expected_assistant", [({"assistant_id": None}, "lead_agent"), ({}, "research-bot")], ids=["explicit-null", "omitted"])
+async def test_update_assistant_id_through_the_sql_repository(tmp_path, payload, expected_assistant):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        repo = ScheduledTaskRepository(sf)
+        task = await _seed_task(repo, assistant_id="research-bot")
+        with patch(
+            "app.gateway.routers.scheduled_tasks.load_agent_config",
+            side_effect=FileNotFoundError("missing"),
+        ) as loader:
+            updated = await _call_update(
+                repo,
+                task["id"],
+                scheduled_tasks.ScheduledTaskUpdateRequest.model_validate({"title": "Renamed", **payload}),
+            )
+        loader.assert_not_called()
+        assert updated["assistant_id"] == expected_assistant
+        stored = await repo.get(task["id"], user_id="user-1")
+        assert stored is not None
+        assert stored["assistant_id"] == expected_assistant
+        assert stored["title"] == "Renamed"
+    finally:
+        await close_engine()
 
 
 @pytest.mark.asyncio

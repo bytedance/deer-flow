@@ -88,7 +88,8 @@ def _load_editable_artifact(actual_path: Path, path: str, expected_sha256: str) 
     if file_stat.st_size > MAX_EDITABLE_ARTIFACT_BYTES:
         raise HTTPException(status_code=413, detail="Artifact is too large to edit")
 
-    current = actual_path.read_bytes()
+    with actual_path.open("rb") as handle:
+        current = handle.read(MAX_EDITABLE_ARTIFACT_BYTES + 1)
     if len(current) > MAX_EDITABLE_ARTIFACT_BYTES:
         raise HTTPException(status_code=413, detail="Artifact is too large to edit")
     if b"\x00" in current:
@@ -341,22 +342,53 @@ def _sha256_of_file(path: Path) -> str:
     (e.g. http://<lan-ip>:<port>) and otherwise breaks artifact preview +
     inline editing (see issue #4864).
 
-    The digest is cached by (path, mtime_ns, size) so the many small ``Range``
+    The digest is cached by path and file identity/change metadata so small ``Range``
     requests a browser issues while scrubbing/paginating a preview do not each
     re-hash a potentially huge artifact from scratch (raised in PR review).
     """
     stat = path.stat()
-    return _sha256_of_file_cached(str(path), stat.st_mtime_ns, stat.st_size)
+    # Sandbox syncs and other writers can atomically replace a same-size file
+    # while preserving its mtime. Identity separates those generations; ctime
+    # also invalidates in-place writes where the filesystem exposes change time.
+    return _sha256_of_file_cached(
+        str(path),
+        stat.st_dev,
+        stat.st_ino,
+        stat.st_ctime_ns,
+        stat.st_mtime_ns,
+        stat.st_size,
+    )
 
 
 @functools.lru_cache(maxsize=256)
-def _sha256_of_file_cached(path: str, mtime_ns: int, size: int) -> str:
-    """Cached SHA-256 of *path*; the size/mtime args invalidate stale entries."""
+def _sha256_of_file_cached(path: str, device: int, inode: int, ctime_ns: int, mtime_ns: int, size: int) -> str:
+    """Cached SHA-256 of *path*; metadata arguments separate file generations."""
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _artifact_etag(path: Path) -> str:
+    """Keep content revisions for editable files and metadata-only tags for large files."""
+    file_stat = path.stat()
+    if file_stat.st_size <= MAX_EDITABLE_ARTIFACT_BYTES:
+        return f'"{_sha256_of_file(path)}"'
+
+    # Do not read oversized artifacts just to validate a small byte range.
+    # The prefix keeps this opaque validator distinct from an editable SHA-256.
+    identity = f"{file_stat.st_dev}:{file_stat.st_ino}:{file_stat.st_ctime_ns}:{file_stat.st_mtime_ns}:{file_stat.st_size}"
+    return f'"stat-{hashlib.sha256(identity.encode("ascii")).hexdigest()}"'
+
+
+class _ArtifactFileResponse(FileResponse):
+    """Require an ETag to authorize conditional ranges of replaceable artifacts."""
+
+    def _should_use_range(self, http_if_range: str) -> bool:
+        # Sandbox syncs can preserve mtimes across replacements, so Last-Modified
+        # is not a strong validator. Date-form If-Range must return the full file.
+        return http_if_range == self.headers["etag"]
 
 
 @router.get(
@@ -470,15 +502,8 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         # Always force download for active content types to prevent script
         # execution in the application origin when users open generated artifacts.
         headers = {**_build_attachment_headers(actual_path.name)}
-        file_size = await asyncio.to_thread(lambda: actual_path.stat().st_size)
-        if file_size <= MAX_EDITABLE_ARTIFACT_BYTES:
-            # Real SHA-256 so the browser can skip crypto.subtle (unavailable
-            # on non-secure contexts) when previewing / editing artifacts (#4864).
-            # Skipped for oversized artifacts to avoid a full-file read on every
-            # GET / Range request (raised in review as a performance P1).
-            content_sha256 = await asyncio.to_thread(_sha256_of_file, actual_path)
-            headers["ETag"] = f'"{content_sha256}"'
-        return FileResponse(
+        headers["ETag"] = await asyncio.to_thread(_artifact_etag, actual_path)
+        return _ArtifactFileResponse(
             path=actual_path,
             filename=actual_path.name,
             media_type=mime_type,
@@ -488,15 +513,8 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
     if kind == "inline_file":
         # FileResponse honors byte-Range requests for large text previews and
         headers = {"Content-Disposition": _build_content_disposition("inline", actual_path.name), "X-Content-Type-Options": "nosniff"}
-        file_size = await asyncio.to_thread(lambda: actual_path.stat().st_size)
-        if file_size <= MAX_EDITABLE_ARTIFACT_BYTES:
-            # Real SHA-256 so the browser can skip crypto.subtle (unavailable
-            # on non-secure contexts) when previewing / editing artifacts (#4864).
-            # Skipped for oversized artifacts to avoid a full-file read on every
-            # GET / Range request (raised in review as a performance P1).
-            content_sha256 = await asyncio.to_thread(_sha256_of_file, actual_path)
-            headers["ETag"] = f'"{content_sha256}"'
-        return FileResponse(
+        headers["ETag"] = await asyncio.to_thread(_artifact_etag, actual_path)
+        return _ArtifactFileResponse(
             path=actual_path,
             media_type=mime_type,
             headers=headers,

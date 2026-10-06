@@ -1,3 +1,13 @@
+## Manual Claude OAuth Export
+
+`export_claude_code_oauth.py` validates Keychain JSON as an object containing an
+object `claudeAiOauth` and a nonblank string `accessToken` before any export action.
+Malformed containers use the existing token-missing error without exposing their
+contents. The loader returns the full container together with the validated token;
+export actions use that token without repeating credential-shape assumptions or
+trimming its contents. Offline CLI coverage:
+`backend/tests/test_claude_keychain_export.py`.
+
 ## Service Startup Contracts
 
 Optional browser dependency detection reads the top-level `tools:` sequence
@@ -18,6 +28,15 @@ orchestration pins Next.js to `3000`. Runtime commands launch from the already
 synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
+
+Both compose files mark `../.env` and `../frontend/.env` optional
+(`path`/`required: false`, Compose 2.24+), so `make up`, `make down` and
+`make prod-logs` on a fresh checkout neither abort nor create them; an
+unreadable `.env` still fails. Do not seed them from the examples in
+`deploy.sh` as `docker.sh start` does: `.env.example` holds placeholder API
+keys the production Gateway would receive, and `make config` skips files that
+exist. Pinned by `backend/tests/test_compose_default_bind_host.py` and
+`backend/tests/test_gateway_startup.py`.
 
 `deploy.sh` never sources the repo-root `.env`; Compose reads it via
 `--env-file`, and shell exports outrank that file during interpolation (an
@@ -54,6 +73,12 @@ Gateway's error, and the config-dependent checks skip. Any failure to import
 the harness is reported, never raised: doctor diagnoses broken environments.
 Pinned by `backend/tests/test_doctor.py::TestMainConfigResolution`.
 
+CLI credential JSON checks accept UTF-8 with or without a leading BOM, matching
+the runtime credential loader. Keep `_load_json_object` on `utf-8-sig`; malformed
+JSON and invalid encoding remain missing/invalid sources without exposing tokens.
+Public doctor/runtime agreement is pinned by
+`backend/tests/test_credential_file_encoding.py`.
+
 Root `make install` runs pre-commit through uv, so uv's tool bin directory
 need not be on `PATH`.
 
@@ -73,6 +98,14 @@ Git Bash wrapper. Shell scripts that invoke sibling repository scripts must
 likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
+
+`make clean` deletes `backend/.deer-flow` (database, users, threads, uploads,
+secrets), which both compose stacks mount into `deer-flow-gateway`. Its recipe
+runs `check-data-not-in-use.sh` before `make stop` (which would stop a live
+stack's sandboxes) and refuses while that container runs; an absent or
+unreachable Docker passes. `make stop` must still run before the delete: it
+stops `deer-flow-sandbox*` containers, whose thread mounts live in that tree.
+`RUNTIME_DATA_CONTENTS` feeds both the help line and the deletion notice.
 
 Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
 Python (`os.name == "nt"`), it checks `pnpm.cmd` before the generic `pnpm`
@@ -306,10 +339,12 @@ Memory backend async boundary:
 
 CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
 
-Agentic browser sessions are process-local. The Gateway startup safety gate rejects
-`GATEWAY_WORKERS > 1` when `browser_navigate` is configured, because ordinary
-uvicorn worker dispatch does not provide thread affinity for browser tools, REST
-navigation, and the Live WebSocket.
+Agentic browser sessions are process-local. Browser use is refused when the Gateway runs
+more than one worker process, because ordinary uvicorn worker dispatch does not provide
+thread affinity for browser tools, REST navigation, and the Live WebSocket. Keep
+`GATEWAY_WORKERS=1`, and on the launchers that pass uvicorn no `--workers`
+(`scripts/serve.sh`, `backend/Dockerfile`) keep `WEB_CONCURRENCY` unset or `1` too — that
+is where uvicorn takes the process count from.
 
 Browser Live screenshots remain JPEG bytes inside the harness and the Gateway's
 bounded, drop-oldest frame queue. WebSocket clients that request

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -173,6 +174,26 @@ def _run_stateless_scope(client: httpx.Client, run_id: str) -> str:
     return messages[-1]["content"][0]["text"]
 
 
+def _stop_studio_process(process: subprocess.Popen) -> None:
+    """Stop the dev server the way its persistence layer survives.
+
+    ``terminate()`` is TerminateProcess on Windows: the dev server never runs
+    its shutdown hooks, so the dev persistence flush never lands and state
+    does not survive the restart under test. uvicorn handles SIGBREAK,
+    delivered via CTRL_BREAK_EVENT to the child's process group; fall back to
+    a hard kill when the graceful stop does not finish in time.
+    """
+    if os.name == "nt":
+        process.send_signal(signal.CTRL_BREAK_EVENT)
+    else:
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
+
+
 @contextmanager
 def _running_studio_server(
     runtime_dir: Path,
@@ -231,6 +252,7 @@ def _running_studio_server(
             stdout=log_file,
             stderr=subprocess.STDOUT,
             text=True,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
         )
 
         base_url = f"http://127.0.0.1:{port}"
@@ -249,12 +271,7 @@ def _running_studio_server(
                 last_error = exc
             time.sleep(0.1)
         else:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=10)
+            _stop_studio_process(process)
             pytest.fail(f"LangGraph dev server failed to start ({last_error!r}).\n{log_path.read_text(encoding='utf-8')}")
 
         client = httpx.Client(
@@ -267,12 +284,7 @@ def _running_studio_server(
             yield client
         finally:
             client.close()
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=10)
+            _stop_studio_process(process)
 
 
 @pytest.fixture(scope="module")

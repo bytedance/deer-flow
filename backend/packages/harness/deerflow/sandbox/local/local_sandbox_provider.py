@@ -466,9 +466,15 @@ class LocalSandboxProvider(SandboxProvider):
         # triggers a full rebuild (~400 ms measured locally) under the
         # cross-process projection lock, serializing concurrent acquires and
         # mutations for that user. Acceptable for an editing-frequency event.
+        #
+        # A thread view exists only to enforce an Agent skill allowlist, and
+        # SandboxMiddleware keeps it fresh only while this provider can enforce
+        # one. With host bash allowed it skips the view (restricted runs are
+        # rejected), so mounting a leftover view would pin the last restricted
+        # Agent's allowlist; use the shared projection instead.
         skill_projection = self._ensure_skills_projection(
             effective_user_id,
-            thread_id=thread_id,
+            thread_id=thread_id if self.supports_agent_skill_isolation else None,
         )
         key = self._thread_key(thread_id, effective_user_id)
 

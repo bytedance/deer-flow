@@ -526,6 +526,36 @@ via `config.configurable.thread_id` to keep conversation history.
 
 Base URL: `/api`
 
+### Custom Agent portability
+
+`GET /api/agents/{name}/export` downloads a version-1 JSON package for a
+caller-owned Custom Agent. The package uses `format: "deerflow.custom-agent"`
+and contains the portable Agent configuration plus SOUL. It excludes memory
+contents, conversations, credentials, and deployment-owned GitHub bindings.
+
+`POST /api/agents/import` creates the packaged Agent for the current user.
+Pass `?name=<new-name>` to choose a different local identifier. The document
+schema rejects unknown fields and unsupported format/version values; invalid
+names or models return 422, and an existing name returns 409 without changing
+the existing Agent. Import is create-only and never restores runtime state.
+
+```json
+{
+  "format": "deerflow.custom-agent",
+  "version": 1,
+  "agent": {
+    "name": "research-lead",
+    "description": "Coordinates parallel research",
+    "model": "deepseek-v3",
+    "tool_groups": ["web"],
+    "skills": ["literature-review"],
+    "allowed_subagents": ["researcher", "reporter"],
+    "memory_enabled": true,
+    "soul": "Delegate independent searches, then synthesize evidence."
+  }
+}
+```
+
 ### Models
 
 #### List Models
@@ -771,9 +801,11 @@ placeholders.
 
 #### Reset MCP Tools Cache
 
-Clear cached MCP tools and persistent MCP sessions process-wide. This affects
-all threads and users in the current Gateway process. Tools are loaded again
-from configured MCP servers on the next agent run or tool lookup.
+Publish a shared cache generation, then clear cached MCP tools and persistent
+MCP sessions in the handling process. Every Gateway worker sharing the writable
+extensions-config directory observes that generation and reloads tools on its
+next agent run or tool lookup. This also refreshes remote `tools/list` changes
+that did not modify `extensions_config.json`.
 
 ```http
 POST /api/mcp/cache/reset
@@ -785,9 +817,15 @@ Requires an authenticated admin session.
 ```json
 {
   "success": true,
-  "message": "MCP tools cache reset. Tools will reload on next use."
+  "scope": "shared_config",
+  "message": "MCP tools cache reset published through the shared config directory. Tools will reload on next use."
 }
 ```
+
+`shared_config` means every worker mounting that same directory observes the
+generation; it does not claim a deployment-wide broadcast when replicas use
+independent filesystems. When no extensions-config path can be resolved, the
+request still resets the current worker and returns `"scope": "process"`.
 
 ### Skills
 

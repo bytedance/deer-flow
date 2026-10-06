@@ -464,8 +464,14 @@ def _try_table(content: str, *, delimiter: str, kind: Literal["csv", "tsv"]) -> 
         return None
 
     columns = [cell.strip() or f"column_{idx + 1}" for idx, cell in enumerate(raw_header)]
-    total_nonempty_lines = sum(1 for line in content.splitlines() if line.strip())
-    data_rows = max(0, total_nonempty_lines - 1)
+    # Count logical records from the full input, preserving quoted newlines.
+    # Keep blank-row filtering and the process-wide CSV field limit unchanged.
+    try:
+        with io.StringIO(content, newline="") as stream:
+            record_count = sum(1 for row in csv.reader(stream, delimiter=delimiter, strict=True) if any(cell.strip() for cell in row))
+        row_count_text = str(max(0, record_count - 1))
+    except csv.Error:
+        row_count_text = "an undetermined number of"
     # Render the first data row as a key=value list so quoted cells that
     # contain the delimiter do not get rejoined into a comma-separated
     # string that misleads the model about column count.
@@ -478,7 +484,7 @@ def _try_table(content: str, *, delimiter: str, kind: Literal["csv", "tsv"]) -> 
     return ToolOutputSynopsis(
         kind=kind,
         title=title,
-        summary=[f"{label} table with {data_rows} data rows and {width} columns."],
+        summary=[f"{label} table with {row_count_text} data rows and {width} columns."],
         structure=[
             f"columns: {', '.join(columns[:_TABLE_COLUMN_LIMIT])}",
             f"first data row: {' | '.join(first_data_pairs) or '(none)'}",

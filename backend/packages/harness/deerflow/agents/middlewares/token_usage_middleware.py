@@ -42,7 +42,7 @@ def _normalize_todos(value: Any) -> list[Todo]:
 
         if content is not None:
             todo["content"] = content
-        if status in {"pending", "in_progress", "completed"}:
+        if isinstance(status, str) and status in {"pending", "in_progress", "completed"}:
             todo["status"] = status
 
         normalized.append(todo)
@@ -277,6 +277,53 @@ def _build_attribution(message: AIMessage, todos: list[Todo]) -> dict[str, Any]:
     }
 
 
+def _attribute_completed_subagent_usage(messages: list[Any]) -> dict[int, AIMessage | ToolMessage]:
+    """Return copied dispatch/terminal message updates without current-step attribution."""
+    # Annotate subagent token usage onto the AIMessage that dispatched it.
+    # Terminal usage travels with the current run's ToolMessage, so provider
+    # tool-call IDs reused by another run cannot overwrite attribution state.
+    # Walk backward through consecutive ToolMessages before the new AIMessage
+    # so that multiple concurrent task tool calls all get their subagent tokens
+    # written back to the same dispatch message (merging into one update).
+    state_updates: dict[int, AIMessage | ToolMessage] = {}
+    if len(messages) >= 2:
+        idx = len(messages) - 2
+        while idx >= 0:
+            tool_msg = messages[idx]
+            if not isinstance(tool_msg, ToolMessage) or not tool_msg.tool_call_id:
+                break
+
+            subagent_usage = _subagent_usage_from_tool_message(tool_msg)
+            if subagent_usage:
+                # Search backward from the ToolMessage to find the AIMessage
+                # that dispatched it.  A single model response can dispatch
+                # multiple task tool calls, so we can't assume a fixed offset.
+                dispatch_idx = idx - 1
+                while dispatch_idx >= 0:
+                    candidate = messages[dispatch_idx]
+                    if isinstance(candidate, AIMessage) and _has_tool_call(candidate, tool_msg.tool_call_id):
+                        # Accumulate into an existing update for the same
+                        # AIMessage (multiple task calls in one response),
+                        # or merge fresh from the original message.
+                        existing_update = state_updates.get(dispatch_idx)
+                        prev = existing_update.usage_metadata if isinstance(existing_update, AIMessage) else (getattr(candidate, "usage_metadata", None) or {})
+                        merged = {
+                            **prev,
+                            "input_tokens": prev.get("input_tokens", 0) + subagent_usage["input_tokens"],
+                            "output_tokens": prev.get("output_tokens", 0) + subagent_usage["output_tokens"],
+                            "total_tokens": prev.get("total_tokens", 0) + subagent_usage["total_tokens"],
+                        }
+                        state_updates[dispatch_idx] = candidate.model_copy(update={"usage_metadata": merged})
+                        tool_metadata = dict(tool_msg.additional_kwargs)
+                        tool_metadata[SUBAGENT_TOKEN_USAGE_ATTRIBUTED_KEY] = True
+                        state_updates[idx] = tool_msg.model_copy(update={"additional_kwargs": tool_metadata})
+                        break
+                    dispatch_idx -= 1
+            idx -= 1
+
+    return state_updates
+
+
 class TokenUsageMiddleware(AgentMiddleware):
     """Logs token usage from model responses and annotates the AI step."""
 
@@ -285,47 +332,7 @@ class TokenUsageMiddleware(AgentMiddleware):
         if not messages:
             return None
 
-        # Annotate subagent token usage onto the AIMessage that dispatched it.
-        # Terminal usage travels with the current run's ToolMessage, so provider
-        # tool-call IDs reused by another run cannot overwrite attribution state.
-        # Walk backward through consecutive ToolMessages before the new AIMessage
-        # so that multiple concurrent task tool calls all get their subagent tokens
-        # written back to the same dispatch message (merging into one update).
-        state_updates: dict[int, AIMessage | ToolMessage] = {}
-        if len(messages) >= 2:
-            idx = len(messages) - 2
-            while idx >= 0:
-                tool_msg = messages[idx]
-                if not isinstance(tool_msg, ToolMessage) or not tool_msg.tool_call_id:
-                    break
-
-                subagent_usage = _subagent_usage_from_tool_message(tool_msg)
-                if subagent_usage:
-                    # Search backward from the ToolMessage to find the AIMessage
-                    # that dispatched it.  A single model response can dispatch
-                    # multiple task tool calls, so we can't assume a fixed offset.
-                    dispatch_idx = idx - 1
-                    while dispatch_idx >= 0:
-                        candidate = messages[dispatch_idx]
-                        if isinstance(candidate, AIMessage) and _has_tool_call(candidate, tool_msg.tool_call_id):
-                            # Accumulate into an existing update for the same
-                            # AIMessage (multiple task calls in one response),
-                            # or merge fresh from the original message.
-                            existing_update = state_updates.get(dispatch_idx)
-                            prev = existing_update.usage_metadata if isinstance(existing_update, AIMessage) else (getattr(candidate, "usage_metadata", None) or {})
-                            merged = {
-                                **prev,
-                                "input_tokens": prev.get("input_tokens", 0) + subagent_usage["input_tokens"],
-                                "output_tokens": prev.get("output_tokens", 0) + subagent_usage["output_tokens"],
-                                "total_tokens": prev.get("total_tokens", 0) + subagent_usage["total_tokens"],
-                            }
-                            state_updates[dispatch_idx] = candidate.model_copy(update={"usage_metadata": merged})
-                            tool_metadata = dict(tool_msg.additional_kwargs)
-                            tool_metadata[SUBAGENT_TOKEN_USAGE_ATTRIBUTED_KEY] = True
-                            state_updates[idx] = tool_msg.model_copy(update={"additional_kwargs": tool_metadata})
-                            break
-                        dispatch_idx -= 1
-                idx -= 1
+        state_updates = _attribute_completed_subagent_usage(messages)
 
         last = messages[-1]
         if not isinstance(last, AIMessage):
@@ -362,6 +369,22 @@ class TokenUsageMiddleware(AgentMiddleware):
         updated_msg = last.model_copy(update={"additional_kwargs": additional_kwargs})
         state_updates[len(messages) - 1] = updated_msg
         return {"messages": [state_updates[idx] for idx in sorted(state_updates)]}
+
+    @override
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._apply(state)
+
+    @override
+    async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._apply(state)
+
+
+class CompletedSubagentUsageMiddleware(AgentMiddleware):
+    """Backfill completed subagent usage before the lead budget checks it."""
+
+    def _apply(self, state: AgentState) -> dict | None:
+        state_updates = _attribute_completed_subagent_usage(state.get("messages", []))
+        return {"messages": [state_updates[idx] for idx in sorted(state_updates)]} if state_updates else None
 
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
