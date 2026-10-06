@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 49
+config_version: 53
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -430,31 +430,30 @@ models:
   #   context_window: 1048576
   #   supports_vision: true
 
-  # Example: Gemini model via OpenAI-compatible gateway (with thinking support)
+  # Example: Gemini model via Google's official OpenAI-compatible endpoint
   # Use PatchedChatOpenAI so that tool-call thought_signature values on tool_calls
   # are preserved across multi-turn tool-call conversations — required by the
   # Gemini API when thinking is enabled. See:
   # https://docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures
-  # - name: gemini-2.5-pro-thinking
-  #   display_name: Gemini 2.5 Pro (Thinking)
+  # Google accepts reasoning_effort, not extra_body.thinking. Gemini 3.1 Pro
+  # cannot disable thinking; dialect: none avoids emitting a thinking toggle.
+  # https://ai.google.dev/gemini-api/docs/openai#thinking
+  # - name: gemini-3.1-pro-preview
+  #   display_name: Gemini 3.1 Pro (Thinking)
   #   use: deerflow.models.patched_openai:PatchedChatOpenAI
-  #   model: google/gemini-2.5-pro-preview   # model name as expected by your gateway
+  #   model: gemini-3.1-pro-preview
   #   api_key: $GEMINI_API_KEY
-  #   base_url: https://<your-openai-compat-gateway>/v1
+  #   base_url: https://generativelanguage.googleapis.com/v1beta/openai/
   #   request_timeout: 600.0
   #   max_retries: 2
   #   max_tokens: 16384
   #   context_window: 1048576
-  #   supports_thinking: true
   #   supports_vision: true
-  #   when_thinking_enabled:
-  #     extra_body:
-  #       thinking:
-  #         type: enabled
-  #   when_thinking_disabled:
-  #     extra_body:
-  #       thinking:
-  #         type: disabled
+  #   reasoning:
+  #     thinking: required
+  #     dialect: none
+  #     effort:
+  #       values: [minimal, low, medium, high]
 
   # Example: Xiaomi MiMo model (with thinking support)
   # MiMo thinking mode returns reasoning_content and requires that field to be
@@ -918,6 +917,8 @@ tools:
   #   group: web
   #   use: deerflow.community.serper.tools:web_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
+  #   include_domains: []  # Optional domain-only lists, at most 10 entries each
+  #   exclude_domains: []  # Exclusion wins; see backend/docs/CONFIGURATION.md
   #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
 
   # Web search tool (uses Serply - Google Search API, requires SERPLY_API_KEY)
@@ -1112,7 +1113,8 @@ tools:
   #   timeout_ms: 30000                # Per-action navigation/interaction timeout
   #   viewport_width: 1280
   #   viewport_height: 720
-  #   # allow_private_addresses: false # SSRF guard: keep false in production
+  #   # allow_private_addresses: false # SSRF guard: keep false in production. Also applies to the
+  #   #                                # pinned egress proxy every launched browser connects through.
   #   # cdp_url: http://127.0.0.1:9222 # Attach to YOUR running Chrome (Codex-style)
   #   # allow_unguarded_cdp: false      # REQUIRED true with cdp_url: attaching to an
   #   #                                # existing Chrome prevents DeerFlow from
@@ -1127,7 +1129,9 @@ tools:
   #   #                                # CDP handshake. If so, use headless: false to launch
   #   #                                # Playwright's own visible browser instead.
   #   # Multi-worker note: browser sessions live in one Gateway worker's memory.
-  #   # Keep GATEWAY_WORKERS=1 while this tool group is enabled.
+  #   # Keep the Gateway to one worker process while this tool group is enabled:
+  #   # GATEWAY_WORKERS=1, and WEB_CONCURRENCY unset or 1 on the launches that pass
+  #   # uvicorn no --workers (backend/Dockerfile, scripts/serve.sh).
   # - name: browser_snapshot
   #   group: browser
   #   use: deerflow.community.browser_automation.tools:browser_snapshot_tool
@@ -1164,6 +1168,9 @@ tools:
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool
     timeout: 10
+    # Opt-in retries may increase upstream requests and cost.
+    # max_retries: 0
+    # retry_budget_seconds: 30
     # Optional proxy for restricted networks / Docker / WSL.
     # Use host.docker.internal instead of 127.0.0.1 when the proxy runs on the host.
     # proxy: $HTTPS_PROXY
@@ -1215,6 +1222,18 @@ tools:
   #   group: web
   #   use: deerflow.community.sofya.tools:web_fetch_tool
   #   # api_key: $SOFYA_API_KEY
+
+  # Web fetch tool (uses Unbrowse, requires UNBROWSE_API_KEY)
+  # Returns the page as markdown. Fetches over plain HTTP when that is enough and
+  # falls back to a hosted cloud browser for pages that need JavaScript.
+  # Get a key at https://unbrowse.ai/app.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.unbrowse.tools:web_fetch_tool
+  #   # render: auto                  # auto | never (plain HTTP only) | always (cloud browser)
+  #   # api_key: $UNBROWSE_API_KEY
 
   # Image search tool (uses DuckDuckGo)
   # Use this to find reference images before image generation
@@ -1354,6 +1373,27 @@ tool_output:
   # visible, even when superseded, so the model can still say what it just
   # wrote without a read. 0 keeps none.
   keep_recent_writes: 1
+
+# ============================================================================
+# Tool Artifact Handle Registry Configuration (issue #4676)
+# ============================================================================
+# Captures lightweight artifact references (paths, URLs, task ids) from tool
+# results into durable per-thread state (`ThreadState.tool_artifacts`) so they
+# survive context compaction. The model references artifacts by short handles
+# (`art_xxxxxxxx`) that are resolved to real references before tool execution.
+# Handles are listed in the model context and rendered as badges in the UI.
+
+tool_artifacts:
+  enabled: true
+  # Maximum artifact entries retained per thread (a sliding window: the
+  # oldest entries are evicted when the cap is exceeded).
+  max_entries: 100
+  # Conservatively scan free-text tool results for sandbox paths / remote file URLs.
+  detect_refs_in_text: true
+  # Project available artifact handles into the model request as durable context.
+  inject_model_context: true
+  # Resolve artifact handles found in tool arguments to real references before execution.
+  resolve_handles_in_args: true
 
 # ============================================================================
 # Suggestions Configuration
@@ -1820,10 +1860,10 @@ sandbox:
 #   # api_key: $OPEN_SANDBOX_API_KEY  # optional when the SDK env var is set
 #   # domain: localhost:8080          # optional; OPEN_SANDBOX_DOMAIN fallback
 #   # protocol: http                  # localhost only; use https for remote domains
-#   # request_timeout: 30             # management API request timeout seconds
-#   # ready_timeout: 30               # create/readiness timeout seconds
+#   # request_timeout: 30             # finite positive management API request timeout seconds
+#   # ready_timeout: 30               # finite positive create/readiness timeout seconds
 #   # use_server_proxy: false         # proxy execd/file traffic through server
-#   # sandbox_timeout: 14400          # remote lifetime seconds; 0 = explicit cleanup
+#   # sandbox_timeout: 14400          # finite non-negative remote lifetime seconds; 0 = explicit cleanup
 #   # bash_command_timeout: 600       # default remote command timeout seconds
 #   # replicas: 3                     # active + warm cap per gateway process
 #   # idle_timeout: 600               # warm seconds before destroy; 0 disables
@@ -2188,6 +2228,62 @@ memory:
   # exposing query-aware search (mem0 does this). Tool calls go through the
   # active MemoryManager; unsupported fact CRUD returns a JSON error.
   mode: middleware
+  # Pre-extraction cost gate (optional, OFF by default). Decides whether a batch
+  # of new conversation is worth paying for the extraction LLM call, using one
+  # `noul` question ("does this contain durable, cross-task, user-level
+  # information?").
+  #   off (default) - no request, no behavior change.
+  #   shadow - decide and record the verdict, still extract (the safe first step).
+  #   enforce - a low-probability batch skips the call AND advances the watermark,
+  #     so that batch is consumed as "nothing durable here". Enable only after the
+  #     measurement gate that scripts/eval_memory_prescreen.py implements and
+  #     backend/docs/MEMORY_IMPROVEMENTS.md documents
+  #     passes; `skip_threshold` below is provisional and unmeasured.
+  # The failure direction is always extraction: an error, timeout, unusable
+  # response, missing verdict, or an over-limit batch extracts as usual. A skip is
+  # not a safety boundary, gates no execution, and changes no post-extraction
+  # gate (confidence / scope / durability / authority / dedup / eviction).
+  #
+  # EGRESS: the formatted conversation text (user + final assistant turns, which
+  # may contain file paths or credentials) is sent to the TypeSafe API -- a second
+  # destination beyond your own extraction model. Existing memory is never sent.
+  # `pii_redaction_middleware` does not cover this path.
+  #
+  # NOTE: a batch is not judged at all while `staleness_review_enabled` (true
+  # below) or `consolidation_enabled` is on -- a skip would also skip that batch's
+  # maintenance review -- and never on the emergency (pre-summarization) flush or
+  # the shutdown drain. With the defaults shipped here, shadow/enforce therefore
+  # sees no batches until staleness_review_enabled is turned off.
+  # prescreen:
+  #   mode: "off"
+  #   use: deerflow.agents.memory.prescreen.typesafe:TypeSafeMemoryPrescreen
+  #   config:
+  #     skip_threshold: 0.2          # p below this skips; provisional, unmeasured
+  #     max_state_chars: 6000        # characters of the judged batch; over it extracts
+  #     cache_size: 256              # digest-keyed, successful verdicts only
+  #     cache_ttl_seconds: 300.0
+  #     # Connection/model/timeouts come from the top-level `typesafe:` block
+  #     # unless set here (api_key_env / api_key / base_url / model / timeout /
+  #     # deadline_seconds / max_attempts / retry_backoff).
+  #
+  # Signal classification (optional, OFF by default): two `noul` questions per
+  # batch ("does this explicitly endorse / reject something the user stated
+  # earlier?") mapped to the deterministic `reinforcement` / `correction` hints.
+  #   off (default) - no request.
+  #   shadow - decide and record only.
+  #   hints - merge the labels into the extraction hint text and, only while the
+  #     pre-screen is in `enforce`, veto a skip the model endorsed.
+  # A model verdict never decides extraction, never drives deletion, and never
+  # satisfies the reinforcement evidence gate (that gate stays deterministic).
+  # signal_classification:
+  #   mode: "off"
+  #   use: deerflow.agents.memory.signals.typesafe:TypeSafeSignalClassifier
+  #   combine: auto                  # auto | always | never: request sharing with the pre-screen
+  #   config:
+  #     hint_threshold: 0.5          # provisional, unmeasured
+  #     max_state_chars: 6000        # a mismatch with prescreen => each side keeps its own request
+  #     cache_size: 256
+  #     cache_ttl_seconds: 300.0
   # Backend-private config (a dict), passed verbatim to the backend __init__.
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
   #
@@ -2382,6 +2478,7 @@ skill_evolution:
 #
 # checkpointer:
 #   type: sqlite
+#   # A filesystem path or ':memory:'; SQLite `file:` URIs are rejected.
 #   connection_string: checkpoints.db
 #
 # checkpointer:
@@ -2603,10 +2700,15 @@ agent_storage:
 # when every Gateway instance shares Postgres, run ownership heartbeats, and
 # database-backed run events; startup recovery then preserves live peer runs.
 #
+# When channel_connections.enabled is true and IM channels are running, the
+# same poll_interval_seconds also drives the notification delivery worker that
+# pushes scheduled-run outcomes to the owner's bound IM identities (WeCom
+# proactive push today). Manual "run now" and interrupts stay silent.
+#
 # scheduler:
 #   enabled: false               # Master switch for the background poller
 #   multi_instance: false        # Opt into lease-aware recovery across Gateway instances
-#   poll_interval_seconds: 5     # How often to scan for due tasks
+#   poll_interval_seconds: 5     # How often to scan for due tasks (+ IM outbox delivery)
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
 #   max_concurrent_runs: 3       # Global cap on launching/running scheduled runs across multi-instance Pods
 #   queue_timeout_seconds: 3600  # Maximum durable queue wait before an occurrence fails
@@ -2614,6 +2716,7 @@ agent_storage:
 #   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
   enabled: false
+  tool_enabled: false          # Offer schedule tools to authorized Gateway conversations
   multi_instance: false       # Opt into lease-aware recovery across Gateway instances
   poll_interval_seconds: 5
   lease_seconds: 120
@@ -2650,6 +2753,27 @@ mcp_tasks:
   tracking_degraded_after_errors: 3
   max_result_bytes: 65536
   result_preview_max_chars: 2000
+
+# ============================================================================
+# Deployment Topology
+# ============================================================================
+# Declare whether more than one Gateway instance shares this database.
+#
+# GATEWAY_WORKERS / WEB_CONCURRENCY only count the uvicorn workers of one
+# process tree, so a Kubernetes Deployment with replicas > 1 (one worker per
+# Pod) is invisible to the startup safety gate. Without this declaration each
+# Pod passes every check, and its startup orphan reconciliation writes the
+# other Pods' lease-less runs off as crashed on every rolling update.
+#
+# With multi_instance: true (or the environment variable
+# DEER_FLOW_MULTI_INSTANCE=1, which deploy tooling such as a Helm chart can
+# set from its replica count) startup requires database.backend: postgres, run_events.backend: db,
+# run_ownership.heartbeat_enabled: true and a Redis stream bridge, and refuses
+# an explicit sandbox.ownership.type: memory, process-local browser tools, and
+# scheduler.enabled: true without scheduler.multi_instance: true.
+# Restart required; apply the same value to every instance.
+deployment:
+  multi_instance: false
 
 # ============================================================================
 # Run Ownership Configuration
@@ -2712,7 +2836,7 @@ run_ownership:
 #                                # to disable. This is not a run timeout.
 #   recovered_stream_cleanup_delay_seconds: 60  # seconds to wait after
 #                                # publishing END for a recovered orphan run
-#                                # before deleting the stream key.
+#                                # before deleting the stream key (max: 86400).
 #   max_connections: 100         # optional pool ceiling. Each live SSE client
 #                                # holds one connection blocked in XREAD ... BLOCK
 #                                # for up to the configured heartbeat interval, so
@@ -2735,8 +2859,11 @@ run_ownership:
 # - Provider bot/app credentials stay under `channels.*`.
 # - `channel_connections` stores per-user bindings and one-time connect codes.
 # - Telegram uses a deep link when `bot_username` is configured.
-# - Slack, Discord, Feishu, DingTalk, WeChat, and WeCom use `/connect <code>`
+# - Slack, Discord, Feishu, DingTalk, WeChat, WeCom, and QQ use `/connect <code>`
 #   through the already-running bot/app.
+# - When enabled (and channels are running), scheduled-task completions/failures
+#   also enqueue IM pushes to the owner's connected identities (see scheduler
+#   section above). Manual triggers and interrupts do not notify.
 #
 # channel_connections:
 #   enabled: false
@@ -2767,6 +2894,9 @@ run_ownership:
 #     enabled: false
 #
 #   buzz:
+#     enabled: false
+#
+#   qq:
 #     enabled: false
 
 # ============================================================================
@@ -2809,6 +2939,15 @@ run_ownership:
 #       is_plan_mode: false
 #       subagent_enabled: false
 #
+#   # QQ Open Platform bot; choose WebSocket in the developer console.
+#   # Text-only C2C and group @mentions; no public callback URL required.
+#   qq:
+#     enabled: false
+#     app_id: $QQ_APP_ID
+#     client_secret: $QQ_CLIENT_SECRET
+#     allowed_users: []  # QQ OpenIDs, not numeric QQ account numbers; empty allows all
+#     sandbox: false    # REST sandbox host only; console sandbox membership is separate
+#
 #   feishu:
 #     enabled: false
 #     app_id: $FEISHU_APP_ID
@@ -2825,7 +2964,7 @@ run_ownership:
 #   telegram:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
-#     allowed_users: []               # empty = allow all
+#     allowed_users: []               # numeric user IDs, not @usernames; empty = allow all
 #     rich_messages: false             # Bot API 10.1 Rich Messages for final Markdown responses
 #
 #   wechat:
@@ -2838,7 +2977,7 @@ run_ownership:
 #     ilink_app_id: ""
 #     # Optional: sent as SKRouteTag header when provided
 #     route_tag: ""
-#     allowed_users: []               # empty = allow all
+#     allowed_users: []               # iLink user IDs; empty allows all; a single ID is one entry; unparseable non-empty lists fail closed
 #     # Optional: extra host suffixes inbound media downloads may come from,
 #     # in addition to the platform CDN defaults (*.qq.com and the cdn_base_url host).
 #     # Entries are suffixes: "example.com" and "*.example.com" are equivalent.
@@ -2895,12 +3034,20 @@ run_ownership:
 #     allowed_users: []               # empty = allow all
 #     card_template_id: ""            # Optional: AI Card template ID for streaming updates
 #
+#   # Discord joins as a bot; requires the `discord` dependency extra
+#   # (uv sync --extra discord) for discord.py.
 #   discord:
 #     enabled: false
 #     bot_token: $DISCORD_BOT_TOKEN
-#     allowed_guilds: []              # empty = allow all guilds; can also be a single guild ID
+#     # Allowed guild IDs: one positive numeric ID (quoted or unquoted) or a YAML list.
+#     # Unset, null, [], or a blank string allows all guilds.
+#     # Invalid entries are ignored with a warning. Any other configured value
+#     # with no valid ID denies every guild and logs an error.
+#     allowed_guilds: []
 #     mention_only: false             # If true, only respond when the bot is mentioned
-#     allowed_channels: []              # Optional: channel IDs exempt from mention_only (bot responds without mention)
+#     # Channel IDs exempt from mention_only: one ID (quoted or unquoted) or a YAML list.
+#     # Empty = no exemptions; mention_only applies to every channel when enabled.
+#     allowed_channels: []
 #     thread_mode: false               # If true, group a channel conversation into a thread
 #
 #   # Buzz (https://github.com/block/buzz) — Nostr-relay team workspace.
@@ -2984,6 +3131,42 @@ run_ownership:
 #       #           timeout / deadline_seconds / max_attempts / retry_backoff /
 #       #           max_state_chars / cache_size / cache_ttl_seconds /
 #       #           instructions / criteria
+
+# ============================================================================
+# TypeSafe (Jev) Client Defaults (optional)
+# ============================================================================
+# One block for every TypeSafe consumer: the guardrail risk gate
+# (guardrails.provider.config) and, once enabled, memory pre-screening and
+# signal classification. Each consumer overrides what it needs in its own
+# `config`; precedence is consumer config > this block > built-in defaults.
+#
+# Not here, on purpose: failure policy (the gate denies on error, the memory
+# paths carry on), cache settings, thresholds and question content. Those are
+# the consumer's own; two consumers with different thresholds can still share
+# one request, and each publishes its own policy identity.
+#
+# Credentials: prefer api_key_env. `api_key` here puts the key in this file.
+# A consumer's `config` and this block are separate layers: the first layer that
+# sets `api_key` or `api_key_env` decides the credential, so a consumer with its
+# own `api_key_env` keeps reading that variable. Inside one layer a literal
+# `api_key` wins over that layer's `api_key_env`.
+#
+# These values are checked when a consumer is built, not on the first call: a
+# `base_url` that is not http(s) or that carries a query / fragment / embedded
+# credentials, a key with surrounding whitespace (a secret mounted from a file),
+# and a non-printable key character are all configuration errors. Numbers here are
+# validated strictly, so write `max_attempts: 2` — `true` is rejected rather than
+# silently read as `1`.
+#
+# typesafe:
+#   api_key_env: TYPESAFE_API_KEY        # default; the variable holding the key
+#   # api_key: <explicit key>            # alternative to api_key_env
+#   base_url: https://api.typesafe.ai    # default; http(s) only, no query/fragment/credentials
+#   model: jev-latest                    # default; pin an exact version for traceability
+#   timeout: 5.0                         # per-request timeout (seconds)
+#   deadline_seconds: 10.0               # whole-evaluation budget (seconds)
+#   max_attempts: 2                      # includes the first; 429/529 and transport errors only
+#   retry_backoff: 0.5                   # base seconds of exponential backoff
 
 # ============================================================================
 # Authorization Configuration

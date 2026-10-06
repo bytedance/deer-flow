@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import case, or_, select, text, update
+from sqlalchemy import and_, case, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -31,7 +31,7 @@ _TIMESTAMP_FIELDS = (
     "updated_at",
 )
 
-_INFLIGHT_NOTIFICATION_STATUSES = frozenset({"claimed", "dispatched", "retry"})
+_INFLIGHT_NOTIFICATION_STATUSES = frozenset({"claimed", "launching", "dispatched", "retry"})
 
 
 def _new_claim_token() -> str:
@@ -639,7 +639,7 @@ class McpTaskRepository:
         limit: int,
         tracking_degraded_after_errors: int,
     ) -> list[dict[str, Any]]:
-        statuses = ("pending", "claimed", "retry", "dispatched")
+        statuses = ("pending", "claimed", "launching", "retry", "dispatched")
         stmt = (
             select(McpTaskRow)
             .where(
@@ -675,6 +675,45 @@ class McpTaskRepository:
             await session.commit()
             return [self._row_to_dict(row) for row in rows]
 
+    async def begin_notification_launch(
+        self,
+        task_id: str,
+        *,
+        lease_owner: str,
+        notification_lease_token: str,
+        dispatch_version: int,
+        lease_seconds: int,
+        now: datetime,
+    ) -> bool:
+        """Reserve one idempotent Agent launch before starting the side effect."""
+        launchable = or_(
+            McpTaskRow.notification_status == "launching",
+            and_(
+                McpTaskRow.notification_status.in_(("claimed", "retry")),
+                McpTaskRow.event_version == dispatch_version,
+            ),
+        )
+        stmt = (
+            update(McpTaskRow)
+            .where(
+                McpTaskRow.id == task_id,
+                McpTaskRow.notification_lease_owner == lease_owner,
+                McpTaskRow.notification_lease_token == notification_lease_token,
+                McpTaskRow.notification_lease_expires_at >= now,
+                McpTaskRow.dispatch_version == dispatch_version,
+                launchable,
+            )
+            .values(
+                notification_status="launching",
+                notification_lease_expires_at=now + timedelta(seconds=lease_seconds),
+                updated_at=now,
+            )
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return bool(result.rowcount)
+
     async def mark_notification_dispatched(
         self,
         task_id: str,
@@ -693,7 +732,7 @@ class McpTaskRepository:
                 McpTaskRow.notification_lease_token == notification_lease_token,
                 McpTaskRow.notification_lease_expires_at >= now,
                 McpTaskRow.dispatch_version == dispatch_version,
-                McpTaskRow.notification_status.in_(("claimed", "retry")),
+                McpTaskRow.notification_status.in_(("claimed", "launching", "retry")),
             )
             .values(
                 notification_status="dispatched",
@@ -863,7 +902,7 @@ class McpTaskRepository:
             McpTaskRow.notification_lease_token == notification_lease_token,
             McpTaskRow.notification_lease_expires_at >= now,
             McpTaskRow.dispatch_version == dispatch_version,
-            McpTaskRow.notification_status.in_(("claimed", "retry", "dispatched")),
+            McpTaskRow.notification_status.in_(("claimed", "launching", "retry", "dispatched")),
         )
         dead_letter_values: dict[str, Any] = {
             "notification_status": "dead_letter",

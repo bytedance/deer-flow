@@ -215,6 +215,7 @@ class LarkIntegrationStatus:
     cli: LarkCliProbe
     auth: LarkAuthProbe
     sandbox_runtime_mode: str = "none"
+    sandbox_runtime_probed: bool = False
     sandbox_runtime_ready: bool = False
     sandbox_runtime_detail: str | None = None
 
@@ -1616,7 +1617,7 @@ def _resolve_sandbox_runtime_readiness(
     config: AppConfig,
     *,
     probe: bool,
-) -> tuple[str, bool, str | None]:
+) -> tuple[str, bool, str | None, bool]:
     """Resolve the sandbox lark-cli runtime mode and readiness.
 
     Modes:
@@ -1632,31 +1633,37 @@ def _resolve_sandbox_runtime_readiness(
       supersedes ``init-container`` when both are available.
 
     ``probe`` gates the (best-effort, short-timeout) provisioner capability call.
+
+    The fourth element reports whether readiness was actually evaluated. It is
+    False only for the unevaluated remote fallback (``probe=False`` with a
+    remote provisioner) and lives next to that branch so the two can never
+    drift apart; every other mode resolves readiness deterministically or via
+    a real probe, so it reports True.
     """
     if not _uses_aio_sandbox(config):
-        return "none", False, "Sandbox does not run lark-cli in this configuration."
+        return "none", False, "Sandbox does not run lark-cli in this configuration.", True
 
     if _uses_remote_provisioner(config):
         if not probe:
-            return "init-container", False, None
+            return "init-container", False, None, False
         caps = _probe_provisioner_capabilities(config)
         if caps is None:
-            return "init-container", False, "Could not reach the provisioner to confirm the lark-cli runtime image."
+            return "init-container", False, "Could not reach the provisioner to confirm the lark-cli runtime image.", True
         # Pattern B (broker) supersedes Pattern A (init-container binary) when
         # the provisioner has a broker image configured.
         if caps["lark_cli_broker_image"]:
-            return "broker", True, None
+            return "broker", True, None, True
         if caps["lark_cli_init_image"]:
-            return "init-container", True, None
-        return "init-container", False, "The provisioner has no lark-cli runtime image configured (LARK_CLI_INIT_IMAGE / LARK_CLI_BROKER_IMAGE)."
+            return "init-container", True, None, True
+        return "init-container", False, "The provisioner has no lark-cli runtime image configured (LARK_CLI_INIT_IMAGE / LARK_CLI_BROKER_IMAGE).", True
 
     # Local AIO: Gateway-download runtime dir.
     runtime_dir = lark_cli_managed_sandbox_dir()
     try:
         _validate_lark_cli_sandbox_runtime(runtime_dir)
     except (ValueError, OSError):
-        return "gateway-download", False, "The managed sandbox lark-cli runtime is not installed."
-    return "gateway-download", True, None
+        return "gateway-download", False, "The managed sandbox lark-cli runtime is not installed.", True
+    return "gateway-download", True, None, True
 
 
 LARK_BROKER_MODE_TTL_SECONDS = 60
@@ -1714,6 +1721,29 @@ def sandbox_lark_broker_active(config: AppConfig | None = None) -> bool:
     return active
 
 
+@dataclass(frozen=True)
+class _LarkCredentialSnapshot:
+    """Credential-derived status fields captured under ``_lark_credential_lock``.
+
+    Mutation endpoints must snapshot these fields in the same critical section
+    that commits the credential change; the slower, credential-independent
+    runtime probe can then run after the lock is released without letting a
+    concurrent app switch or auth flow mix newer credential state (or cleared
+    tokens) into the response for the just-completed mutation.
+    """
+
+    app_config: dict[str, str | bool | None]
+    auth: LarkAuthProbe
+
+
+def _read_lark_credential_snapshot(user_id: str, *, verify_auth: bool) -> _LarkCredentialSnapshot:
+    """Read the credential-derived status fields; call under the credential lock."""
+    return _LarkCredentialSnapshot(
+        app_config=read_lark_app_config(user_id),
+        auth=probe_lark_auth(user_id, verify=verify_auth),
+    )
+
+
 def get_lark_integration_status(
     user_id: str,
     config: AppConfig,
@@ -1721,16 +1751,19 @@ def get_lark_integration_status(
     verify_auth: bool = False,
     check_latest: bool = False,
     check_runtime: bool = False,
+    credential_snapshot: _LarkCredentialSnapshot | None = None,
 ) -> LarkIntegrationStatus:
     root = lark_integration_root(user_id)
     manifest = _read_manifest(root)
-    app_config = read_lark_app_config(user_id)
+    if credential_snapshot is None:
+        credential_snapshot = _read_lark_credential_snapshot(user_id, verify_auth=verify_auth)
+    app_config = credential_snapshot.app_config
     installed_skills = tuple(sorted(_installed_lark_skill_names(root)))
     enabled_skills = tuple(sorted(_enabled_lark_skill_names(user_id, config)))
     manifest_version = str(manifest.get("version")) if manifest else None
     cli = probe_lark_cli()
     latest_available = _cached_latest_lark_cli_version() if check_latest else None
-    runtime_mode, runtime_ready, runtime_detail = _resolve_sandbox_runtime_readiness(config, probe=check_runtime)
+    runtime_mode, runtime_ready, runtime_detail, runtime_probed = _resolve_sandbox_runtime_readiness(config, probe=check_runtime)
     return LarkIntegrationStatus(
         installed=bool(manifest) and "lark-shared" in installed_skills,
         version=manifest_version or FALLBACK_LARK_CLI_VERSION,
@@ -1746,10 +1779,36 @@ def get_lark_integration_status(
         enabled_skills=enabled_skills,
         install_path=str(root),
         cli=cli,
-        auth=probe_lark_auth(user_id, verify=verify_auth),
+        auth=credential_snapshot.auth,
         sandbox_runtime_mode=runtime_mode,
+        sandbox_runtime_probed=runtime_probed,
         sandbox_runtime_ready=runtime_ready,
         sandbox_runtime_detail=runtime_detail,
+    )
+
+
+def _get_lark_mutation_status(
+    user_id: str,
+    config: AppConfig,
+    *,
+    verify_auth: bool = False,
+    credential_snapshot: _LarkCredentialSnapshot | None = None,
+) -> LarkIntegrationStatus:
+    """Build a mutation response with the same runtime probe used by the GET route.
+
+    Pass ``credential_snapshot`` (captured under ``_lark_credential_lock`` right
+    after the mutation) so the credential-derived fields stay tied to the
+    committed change while the independent runtime probe runs unlocked; without
+    it, a concurrent app switch or auth flow landing during that probe could
+    clear the new tokens or mix a newer ``app_id``/auth state into this
+    response.
+    """
+    return get_lark_integration_status(
+        user_id,
+        config,
+        verify_auth=verify_auth,
+        check_runtime=True,
+        credential_snapshot=credential_snapshot,
     )
 
 
@@ -1855,7 +1914,17 @@ def install_lark_integration(
         sandbox_version = str(installed_manifest.get("version") or resolved_version or FALLBACK_LARK_CLI_VERSION)
         _ensure_managed_sandbox_lark_cli(sandbox_version)
 
-    status = get_lark_integration_status(user_id, config)
+    # Install does not change credentials, but it shares the mutation-status
+    # discipline: snapshot the credential-derived fields under the credential
+    # lock so a concurrent app switch or auth flow landing during the unlocked
+    # runtime probe cannot mix newer credential state into this response. The
+    # snapshot's auth probe runs `lark-cli auth status` as a subprocess
+    # (worst case its 8s timeout), so a concurrent same-user mutation may now
+    # wait on the lock for that duration — an accepted trade-off since install
+    # itself never mutates credentials.
+    with _lark_credential_lock(user_id):
+        credential_snapshot = _read_lark_credential_snapshot(user_id, verify_auth=False)
+    status = _get_lark_mutation_status(user_id, config, credential_snapshot=credential_snapshot)
     content_changed = previous_content_sha is not None and previous_content_sha != content_sha
     message = f"Installed {len(installed_skills)} Lark/Feishu skills."
     if content_changed:
@@ -1990,7 +2059,8 @@ def complete_lark_config(
             app_secret=app_secret,
             brand=final_brand,
         )
-        status = get_lark_integration_status(user_id, config)
+        credential_snapshot = _read_lark_credential_snapshot(user_id, verify_auth=False)
+    status = _get_lark_mutation_status(user_id, config, credential_snapshot=credential_snapshot)
     return LarkConfigCompleteResult(
         success=True,
         status=status,
@@ -2027,7 +2097,8 @@ def set_lark_app_credentials(
             app_secret=app_secret,
             brand=parsed_brand,
         )
-        status = get_lark_integration_status(user_id, config)
+        credential_snapshot = _read_lark_credential_snapshot(user_id, verify_auth=False)
+    status = _get_lark_mutation_status(user_id, config, credential_snapshot=credential_snapshot)
     return LarkConfigCompleteResult(
         success=True,
         status=status,
@@ -2105,7 +2176,8 @@ def complete_lark_auth(
             timeout=wait_timeout_seconds,
             allow_empty_success=True,
         )
-        status = get_lark_integration_status(user_id, config, verify_auth=True)
+        credential_snapshot = _read_lark_credential_snapshot(user_id, verify_auth=True)
+    status = _get_lark_mutation_status(user_id, config, verify_auth=True, credential_snapshot=credential_snapshot)
     return LarkAuthCompleteResult(
         success=status.auth.status == "authenticated",
         status=status,

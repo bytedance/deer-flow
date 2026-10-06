@@ -1,6 +1,10 @@
 import type { AIMessage, Message } from "@langchain/langgraph-sdk";
 
-import { FENCE_MARKER_RE, INDENTED_CODE_RE } from "@/core/streamdown/fences";
+import {
+  FENCE_MARKER_RE,
+  INDENTED_CODE_RE,
+  isClosingFence,
+} from "@/core/streamdown/fences";
 
 interface GenericMessageGroup<T = string> {
   type: T;
@@ -1092,7 +1096,8 @@ const INTERNAL_MARKER_RE = new RegExp(
 /**
  * Character ranges that must survive marker stripping: fenced code blocks
  * (marker-aware, so a shorter or different fence inside a block does not
- * close it) and 4-space indented code lines — the same protection the render
+ * close it, and a fence line that carries an info string never closes one)
+ * and 4-space indented code lines — the same protection the render
  * path applies in ``stripLeakedSystemTags``. ``project`` and ``documents``
  * are generic tag names, so a fenced Maven ``pom.xml`` or pasted XML must not
  * lose its span on export; a marker whose span STARTS inside a protected
@@ -1111,10 +1116,7 @@ function protectedCodeRanges(content: string): Array<[number, number]> {
       if (fenceMarker === null) {
         fenceMarker = marker;
         fenceStart = offset;
-      } else if (
-        marker.startsWith(fenceMarker.charAt(0)) &&
-        marker.length >= fenceMarker.length
-      ) {
+      } else if (isClosingFence(line, fenceMarker)) {
         ranges.push([fenceStart, offset + line.length]);
         fenceMarker = null;
       }

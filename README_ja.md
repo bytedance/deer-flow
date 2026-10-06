@@ -1,6 +1,6 @@
 # 🦌 DeerFlow - 2.0
 
-[English](./README.md) | [中文](./README_zh.md) | 日本語 | [Français](./README_fr.md) | [Русский](./README_ru.md)
+[English](./README.md) | [中文](./README_zh.md) | 日本語 | [Français](./README_fr.md) | [Русский](./README_ru.md) | [Português](./README_pt.md)
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
@@ -75,6 +75,7 @@ DeerFlowは、BytePlusが独自に開発したインテリジェント検索・�
     - [長期メモリ](#長期メモリ)
   - [推奨モデル](#推奨モデル)
   - [組み込みPythonクライアント](#組み込みpythonクライアント)
+  - [プロジェクト (Projects)](#プロジェクト-projects)
   - [スケジュールタスク (Scheduled Tasks)](#スケジュールタスク-scheduled-tasks)
   - [ターミナルワークベンチ (TUI)](#ターミナルワークベンチ-tui)
   - [ドキュメント](#ドキュメント)
@@ -282,7 +283,7 @@ HTTP/SSE MCPサーバーでは、OAuthトークンフロー（`client_credential
 
 DeerFlowはメッセージングアプリからのタスク受信をサポートしています。チャネルは設定時に自動的に開始されます。いずれもパブリックIPは不要です。
 
-DeerFlowはワークスペースUIでユーザー所有のIMチャネル接続を公開することもできます。`channel_connections`を有効にすると、ログイン済みユーザーはサイドバー / Settings > ChannelsからTelegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat、WeComをバインドできます。これは既存の`channels.*`送信トランスポートを再利用するため、パブリックIPやプロバイダーのコールバックURLは不要です。受信したIMメッセージは接続したDeerFlowユーザーアカウントの下で実行されます。セットアップとセキュリティ上の注意は[IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)をご覧ください。
+DeerFlowはワークスペースUIでユーザー所有のIMチャネル接続を公開することもできます。`channel_connections`を有効にすると、ログイン済みユーザーはサイドバー / Settings > ChannelsからTelegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat、WeCom、QQ、Buzzをバインドできます。これは既存の`channels.*`送信トランスポートを再利用するため、パブリックIPやプロバイダーのコールバックURLは不要です。受信したIMメッセージは接続したDeerFlowユーザーアカウントの下で実行されます。セットアップとセキュリティ上の注意は[IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)をご覧ください。
 
 | チャネル | トランスポート | 難易度 |
 |---------|-----------|------------|
@@ -292,6 +293,8 @@ DeerFlowはワークスペースUIでユーザー所有のIMチャネル接続�
 | WeChat | Tencent iLink（ロングポーリング） | 中程度 |
 | WeCom | WebSocket | 中程度 |
 | DingTalk | Stream Push（WebSocket） | 中程度 |
+| QQ | WebSocket（テキストのみ：個別チャットとグループ @） | 中程度 |
+| Buzz | Nostr relay（WebSocket、NIP-42） | 中程度 |
 
 **`config.yaml`での設定：**
 
@@ -333,7 +336,7 @@ channels:
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
-    allowed_users: []               # 空 = 全員許可
+    allowed_users: []               # 数値のユーザー ID（@ユーザー名は不可）、空 = 全員許可
 
     # オプション: チャネル/ユーザーごとのセッション設定
     session:
@@ -582,7 +585,7 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 /goal clear        # クリアする
 ```
 
-各Gateway駆動のrunの後に、DeerFlowはnon-thinkingな評価モデルを使って、可視の会話をアクティブなゴールと照らし合わせます。評価モデルは型付きblocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait`、`goal_not_met_yet`）と可視の証拠を返さなければなりません。DeerFlowがhidden continuationを注入するのは、直近のassistantターンが耐久性のあるチェックポイントに保存され、blockerが`goal_not_met_yet`であり、評価中にスレッドが変化せず、no-progressブレーカーが発火していない場合のみです。安全上限はデフォルトで8回のhidden continuationで、同一の非進行評価が繰り返されると2回で停止します。`/goal clear`と、ユーザーが手書きした新規入力はすべて、キュー内のcontinuationより優先されます。ゴールが満たされると、DeerFlowは自動的にクリアし、更新されたスレッドステートを公開します。
+各Gateway駆動のrunの後に、DeerFlowはnon-thinkingな評価モデルを使って、可視の会話（アシスタントのツール呼び出しと短縮されたツール結果を含む）をアクティブなゴールと照らし合わせます。ツール呼び出しが成功しただけではゴールは達成されず、アシスタントが欠けている情報や曖昧な情報を推測する必要があった場合、評価モデルは`needs_user_input`を返します。評価モデルは型付きblocker（`missing_evidence`、`needs_user_input`、`run_failed`、`external_wait`、`goal_not_met_yet`）と可視の証拠を返さなければなりません。DeerFlowがhidden continuationを注入するのは、直近のassistantターンが耐久性のあるチェックポイントに保存され、blockerが`goal_not_met_yet`であり、評価中にスレッドが変化せず、no-progressブレーカーが発火していない場合のみです。安全上限はデフォルトで8回のhidden continuationで、同一の非進行評価が繰り返されると2回で停止します。`/goal clear`と、ユーザーが手書きした新規入力はすべて、キュー内のcontinuationより優先されます。ゴールが満たされると、DeerFlowは自動的にクリアし、更新されたスレッドステートを公開します。
 
 Web UIは入力欄の上にアクティブなゴールを表示します。同じコマンドはTUIとサポート対象のIMチャネルからも利用できます。Web UIとサポート対象のIMチャネルでは、`/goal <完了条件>`を設定するとその条件をタスクとしてrunを開始します。ステータス確認やクリアのコマンドはゴールステートの管理のみを行います。
 
@@ -661,6 +664,39 @@ client.clear_goal("thread-1")
 ```
 
 すべてのdict返却メソッドはCIでGateway Pydanticレスポンスモデルに対して検証されており（`TestGatewayConformance`）、組み込みクライアントがHTTP APIスキーマと同期していることを保証します。完全なAPIドキュメントは`backend/packages/harness/deerflow/client.py`をご覧ください。
+
+## プロジェクト (Projects)
+
+プロジェクトは、関連する会話を共有の名前・指示・ドキュメントシェルフのもとにまとめます。
+
+会話は作成時（プロジェクトを選択した場合）に、または後から移動メニューを使ってプロジェクトに参加します。実行がメンバーシップを変更することはありません。メッセージを送信しても、会話の割り当てや再割り当ては行われません。会話をプロジェクトから移動すると、再度明示的に移動されるまで未割り当ての状態が保たれます。
+
+会話を移動すると、古いメタデータリクエストがまだ処理中の場合でも、ヘッダーの所属表示とプロジェクトリストが更新されます。
+
+プロジェクトには最新のデータベーステーブルとカラムが必要です。古い 0018 ベースのロールアウトで `0019_thread_incarnations` にスタンプされたデータベースは、プロジェクトのスキーマが不足している場合、起動時に拒否されます。そのデータベースに対してこのビルドを起動する前に、[オフラインデータベース復旧手順](docs/database-forward-revision-recovery.md) に従ってください。
+
+### プロジェクト指示 (Project instructions)
+
+各プロジェクトは、プロジェクト内のすべての会話に適用される背景・規約・制約を、自由形式の指示として保存します。プロジェクトページの Instructions タブで編集でき、バイト数がリアルタイムで表示されます。メンバースレッドで実行が開始されると、Gateway はプロジェクトの現在の状態を一度だけ固定（pin）し、その実行専用の有界でリクエストスコープの `<project>` ブロックとして指示をレンダリングします。このブロックがシステムプロンプトや永続化された履歴に入ることはなく、新しい実行ごとに最新の保存済み指示が参照されます。指示の長さは `projects.instructions_max_bytes` UTF-8 バイト（デフォルト 8192、範囲 256–262144）に制限され、マルチバイト文字はその UTF-8 バイト長として数えられます。サイズ超過の指示は書き込み時に `422` で拒否され、黙って切り詰められることはありません。
+
+### ドキュメントシェルフ (Document shelf)
+
+各プロジェクトには、プロジェクト全体で共有するファイルのためのドキュメントシェルフがあり、プロジェクトページの Documents セクションから管理します：
+
+- **アップロード**：ファイルをアップロードします（ボタンまたはドラッグ＆ドロップ、1 リクエストにつき 1 ファイル）。シェルフのサイズ上限は `uploads.max_file_size`（デフォルト 50 MiB）を再利用します。同一内容を再アップロードしても重複は作成されず、既存のエントリが返されます。
+- **一覧表示**：名前・サイズ・更新時刻・出自（直接アップロードか、会話から保存か）付きでエントリを一覧表示し、任意のエントリをプレビューまたはダウンロードできます。
+- **プロジェクトへ保存**：シェルフの下にある読み取り専用の会話ファイルブラウザにメンバースレッドのアップロードと出力が一覧表示され、各エントリに「プロジェクトへ保存」アクションが用意されます。
+- **スレッドにアタッチ**：シェルフのファイルを通常の取り込みパイプラインを通じてスレッドのアップロードにコピーし、会話から直接扱えるようにします。
+
+メンバースレッドの実行では、固定されたスナップショットから実行ごとにレンダリングされた有界な `<documents>` インデックス（`projects.shelf_index_max_entries` と `projects.shelf_index_max_bytes` で上限設定）も受け取ります。エージェントは `list_project_documents` および `read_project_document` ツールでシェルフをページングし、ドキュメントを読むことができます。
+
+### アーカイブ時の読み取り動作 (Archive read semantics)
+
+プロジェクトをアーカイブすると書き込みは凍結されますが、読み取りは維持されます。アーカイブされたプロジェクトのスレッドは引き続き実行でき、プロジェクトの指示とシェルフインデックスも受け取ります。シェルフも完全に読み取り可能で、一覧表示・プレビュー/ダウンロード・会話ファイルブラウザ・スレッドへのアタッチはすべて機能し続けます。アップロード、プロジェクトへの保存、個々のシェルフファイルのゴミ箱への移動にはアクティブなプロジェクトが必要で、ゴミ箱に入ったドキュメントをアーカイブ済みプロジェクトに復元することはできません。アーカイブ済みプロジェクトの削除は引き続き可能で、そのシェルフ全体がゴミ箱に移されます。
+
+### ゴミ箱 (Trash)
+
+シェルフのドキュメントを削除すると、消去ではなくゴミ箱に移動されます。エントリはバイト内容と出身プロジェクトのスナップショットを `projects.trash_retention_days`（デフォルト 30）の間保持し、その後は保持期間のクリーンアップによって完全に消去される可能性があります。`/workspace/trash` ページ（プロジェクトページの Documents セクションとサイドバーの Projects 見出しからアクセス可能）には、ゴミ箱のドキュメントが出身プロジェクトと残り保持期間付きで一覧表示され、エントリごとの「復元」と「完全に削除」アクションに加え、「ゴミ箱を空にする」アクションが用意されています。これはゴミ箱内のすべてのドキュメントを保持期間の経過を待たずに即座に完全削除します。保持期間は、クリーンアップがエントリを回収するまでエントリがそこに留まれる期間の上限を定めるだけです。復元では、ドキュメントは出身プロジェクトへ戻されます。出身プロジェクトが削除済みまたはアーカイブ済みの場合は、選択したプロジェクトへ戻されます。復元先に同一内容のアクティブなファイルが既にある場合、エントリは統合されます。プロジェクトを削除すると、そのシェルフ全体が同じ操作でゴミ箱に移されます。
 
 ## スケジュールタスク (Scheduled Tasks)
 

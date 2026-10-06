@@ -13,6 +13,7 @@ The provider itself handles:
 import asyncio
 import atexit
 import contextlib
+import contextvars
 import errno
 import hashlib
 import logging
@@ -23,6 +24,8 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from typing import Any
 
 try:
@@ -117,6 +120,42 @@ class SandboxIdentityCollisionError(RuntimeError):
         self.sandbox_id = sandbox_id
 
 
+async def _run_started_acquire_worker[T](
+    executor,
+    func: Callable[..., T],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> T:
+    """Cancel queued acquire work, but drain a worker once it has started."""
+    loop = asyncio.get_running_loop()
+    done = asyncio.Event()
+    context = contextvars.copy_context()
+    call = partial(func, *args, **kwargs)
+    worker = executor.submit(context.run, call)
+    worker.add_done_callback(lambda _future: loop.call_soon_threadsafe(done.set))
+    wrapped = asyncio.wrap_future(worker, loop=loop)
+    try:
+        return await wrapped
+    except asyncio.CancelledError as cancellation:
+        # Awaiting wrapped already asks the concurrent future to cancel. If it
+        # was still queued, preserve the old to_thread behavior: it never runs.
+        if worker.cancelled() or worker.cancel():
+            raise
+        # Once running, the worker cannot be stopped safely. Keep same-scope
+        # serializer ownership until it settles, absorbing repeated cancellation.
+        while not worker.done():
+            try:
+                await asyncio.shield(done.wait())
+            except asyncio.CancelledError:
+                continue
+        try:
+            worker.result()
+        except Exception:
+            logger.warning("Cancelled AIO acquire worker failed while draining", exc_info=True)
+        raise cancellation
+
+
 def _lock_file_exclusive(lock_file) -> None:
     if fcntl is not None:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
@@ -205,6 +244,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._sandbox_infos: dict[str, SandboxInfo] = {}  # sandbox_id -> SandboxInfo (for destroy)
         self._thread_sandboxes: dict[tuple[str, str], str] = {}  # (user_id, thread_id) -> sandbox_id
         self._acquire_serializer: AcquireSerializer[tuple[str, str]] = AcquireSerializer(thread_name_prefix="aio-sandbox-lock-wait")
+        # Lock waiters can block every serializer worker on one hot key. Work
+        # performed *after* a key is held must therefore use a separate pool:
+        # submitting it behind those waiters makes the holder wait for workers
+        # that are themselves waiting for the holder to release the key.
+        self._acquire_worker_executor = ThreadPoolExecutor(thread_name_prefix="aio-sandbox-owned-worker")
         self._last_activity: dict[str, float] = {}  # sandbox_id -> last activity timestamp
         # Warm pool: released sandboxes whose containers are still running.
         # Maps sandbox_id -> (SandboxInfo, release_timestamp).
@@ -1320,8 +1364,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def _stop_lease_renewal(self) -> None:
         self._renewal_stop.set()
         thread = self._renewal_thread
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+        if thread is None or thread is threading.current_thread():
+            return
+        if thread.is_alive():
             thread.join(timeout=5)
+        if thread.is_alive():
+            raise RuntimeError("Sandbox lease-renewal thread is still running after stop timeout")
 
     def _lease_renewal_loop(self) -> None:
         interval = self._ownership_config.renewal_interval_seconds
@@ -1513,7 +1561,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._original_sighup = signal.getsignal(signal.SIGHUP) if hasattr(signal, "SIGHUP") else None
 
         def signal_handler(signum, frame):
-            self.shutdown()
+            try:
+                self.shutdown()
+            except Exception:
+                logger.exception("Sandbox shutdown failed while handling signal %s; forwarding signal", signum)
             if signum == signal.SIGTERM:
                 original = self._original_sigterm
             elif hasattr(signal, "SIGHUP") and signum == signal.SIGHUP:
@@ -2130,7 +2181,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     async def _acquire_internal_async(self, thread_id: str | None, *, user_id: str) -> str:
         """Async counterpart to ``_acquire_internal``."""
         await asyncio.to_thread(self._ensure_skills_projection, user_id)
-        cached_id = await asyncio.to_thread(self._reuse_in_process_sandbox, thread_id, user_id=user_id)
+        cached_id = await _run_started_acquire_worker(
+            self._acquire_worker_executor,
+            self._reuse_in_process_sandbox,
+            thread_id,
+            user_id=user_id,
+        )
         if cached_id is not None:
             return cached_id
 
@@ -2142,7 +2198,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._assert_active_identity_available_locked(sandbox_id, key)
 
         # ── Layer 1.5: Warm pool (container still running, no cold-start) ──
-        reclaimed_id = await asyncio.to_thread(self._reclaim_warm_pool_sandbox, thread_id, sandbox_id, user_id=user_id)
+        reclaimed_id = await _run_started_acquire_worker(
+            self._acquire_worker_executor,
+            self._reclaim_warm_pool_sandbox,
+            thread_id,
+            sandbox_id,
+            user_id=user_id,
+        )
         if reclaimed_id is not None:
             return reclaimed_id
 
@@ -2598,6 +2660,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def reset(self) -> None:
         """Release process-local acquire workers when this instance is detached."""
         self._acquire_serializer.close()
+        self._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
 
     def shutdown(self) -> None:
         """Shutdown all sandboxes. Thread-safe and idempotent."""
@@ -2605,16 +2668,27 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if self._shutdown_called:
                 return
             self._shutdown_called = True
+
+        try:
+            self._stop_idle_checker()
+            # Stop renewing before detaching tracked ownership: the destroy paths
+            # claim ownership themselves, and a renewal racing teardown can
+            # re-publish leases we are about to drop. A bounded join timeout must
+            # fail closed so a retry still owns every active and warm entry.
+            self._stop_lease_renewal()
+        except Exception:
+            with self._lock:
+                self._shutdown_called = False
+            raise
+
+        # Do not detach tracked sandboxes before both maintenance workers are
+        # known stopped. If either bounded join fails, a retry must still own
+        # every active and warm entry.
+        with self._lock:
             sandbox_ids = list(self._sandboxes.keys())
             warm_items = list(self._warm_pool.items())
             self._warm_pool.clear()
             self._warm_pool_identity.clear()
-
-        self._stop_idle_checker()
-        # Stop renewing before destroying: the destroy paths claim ownership
-        # themselves, and a renewal racing them only re-publishes leases we are
-        # about to drop.
-        self._stop_lease_renewal()
 
         logger.info(f"Shutting down {len(sandbox_ids)} active + {len(warm_items)} warm-pool sandbox(es)")
 
@@ -2638,3 +2712,4 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             logger.warning(f"Error closing sandbox ownership store during shutdown: {e}")
 
         self._acquire_serializer.close()
+        self._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)

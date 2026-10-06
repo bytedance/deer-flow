@@ -365,6 +365,15 @@ def _collect_ids(payload: object) -> set[str]:
     return ids
 
 
+def _async_returning(value):
+    """Wrap *value* in an async callable (the real _create_agent is async)."""
+
+    async def _create(*_args, **_kwargs):
+        return value
+
+    return _create
+
+
 def _build_delegating_parent_graph(executor_module, monkeypatch, *, child_emits_error_fallback: bool = False, emit_task_running: bool = False):
     """Real parent graph whose node delegates a scripted child through the
     real ``SubagentExecutor`` and emits ``task_*`` custom events the way the
@@ -445,7 +454,7 @@ def _build_delegating_parent_graph(executor_module, monkeypatch, *, child_emits_
         return ({"messages": [HumanMessage(content=task, id="child-task-sentinel")]}, [], None)
 
     monkeypatch.setattr(executor, "_build_initial_state", build_initial_state)
-    monkeypatch.setattr(executor, "_create_agent", lambda *_args, **_kwargs: child_graph)
+    monkeypatch.setattr(executor, "_create_agent", _async_returning(child_graph))
 
     async def delegate(_state):
         writer = get_stream_writer()

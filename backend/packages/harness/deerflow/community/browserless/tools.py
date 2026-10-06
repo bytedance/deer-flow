@@ -257,7 +257,8 @@ async def web_fetch_tool(url: str) -> str:
     try:
         cfg = _get_tool_config("web_fetch") or {}
         allow_private_addresses = _as_bool(cfg.get("allow_private_addresses"), False)
-        url_error = validate_public_http_url(
+        url_error = await asyncio.to_thread(
+            validate_public_http_url,
             url,
             allow_private_addresses=allow_private_addresses,
             resolver=_resolve_host_addresses,
@@ -328,7 +329,7 @@ async def web_capture_tool(
         cfg = _get_tool_config("web_capture") or {}
         allow_private_addresses = _as_bool(cfg.get("allow_private_addresses"), False)
 
-        url_error = _validate_capture_url(url, allow_private_addresses=allow_private_addresses)
+        url_error = await asyncio.to_thread(_validate_capture_url, url, allow_private_addresses=allow_private_addresses)
         if url_error:
             return _tool_message(url_error, tool_call_id)
 

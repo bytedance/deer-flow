@@ -171,6 +171,9 @@ async def batch_task(
     separate acceptance verdict; ``succeeded`` only means execution completed.
     Retain useful results, repair unmet conditions, and verify consequential
     unknowns or preserve uncertainty. Acceptance never triggers automatic retries.
+    JSON deliverables can opt into ``file:<path> json-valid``: validate complete UTF-8
+    JSON syntax up to 50,000 bytes, rejecting NaN/Infinity. Oversize files or incomplete
+    reads return UNVERIFIED. No schema or business validation is performed.
 
     Args:
         title: Short batch name shown to the user.

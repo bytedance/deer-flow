@@ -26,6 +26,8 @@ import uuid
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from pydantic import TypeAdapter
+
 from deerflow.config import get_app_config
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.identity import derive_sandbox_scope_token
@@ -141,6 +143,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         replicas = _opt("replicas")
         idle_timeout = _opt("idle_timeout")
         max_duration = _opt("max_duration")
+        sticky = _opt("sticky", False)
         environment = dict(_opt("environment") or {})
         # Fail fast on a misconfigured key (e.g. "bad-key"): the per-call env goes
         # through the same POSIX-name check in execute_command, but this static
@@ -159,7 +162,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             # Off by default (the SDK default). Warm-pool sandboxes stay running
             # between turns, so host pinning only matters to deployments that
             # also pause/resume; expose it rather than decide for them.
-            "sticky": bool(_opt("sticky", False)),
+            "sticky": TypeAdapter(bool).validate_python(sticky) if sticky is not None else False,
             "api_key": api_key,  # None → SDK falls back to TENKI_API_KEY / TENKI_AUTH_TOKEN
             "base_url": _opt("base_url"),
             "image": _opt("image"),  # None → Tenki account default base image
@@ -327,11 +330,12 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         # Best-effort: on failure the file APIs still work via the home remap.
         try:
             result = remote.exec("sh", "-lc", _bootstrap_script(self._config["home_dir"]), timeout=_BOOTSTRAP_TIMEOUT)
-            if result.exit_code not in (0, None) or "BOOTSTRAP_OK" not in (result.stdout_text or ""):
+            if result.timed_out or result.exit_code not in (0, None) or "BOOTSTRAP_OK" not in (result.stdout_text or ""):
                 logger.warning(
-                    "Tenki bootstrap for %s exited code=%s stderr=%s",
+                    "Tenki bootstrap for %s exited code=%s timed_out=%s stderr=%s",
                     sandbox_id,
                     result.exit_code,
+                    result.timed_out,
                     (result.stderr_text or "").strip(),
                 )
         except Exception as e:
@@ -404,7 +408,12 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
 
         try:
             result = sandbox.execute_command("echo ok", timeout=10)
-            healthy = "ok" in result
+            # Login-shell profiles can add stdout/stderr around the probe marker.
+            # Keep rejecting adapter failure diagnostics even if "ok" was printed.
+            lines = result.splitlines()
+            healthy = "ok" in lines and not any(line.startswith(("Error:", "Exit Code:")) for line in lines)
+            if not healthy:
+                logger.warning("Tenki warm-pool sandbox %s health check failed: %s", sandbox_id, result)
         except Exception as e:
             logger.warning("Tenki warm-pool sandbox %s health check error: %s", sandbox_id, e)
             healthy = False
@@ -447,7 +456,12 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
                 return
             self._shutdown_called = True
 
-        self._stop_idle_checker()
+        try:
+            self._stop_idle_checker()
+        except Exception:
+            with self._lock:
+                self._shutdown_called = False
+            raise
 
         with self._lock:
             active = list(self._sandboxes.values())

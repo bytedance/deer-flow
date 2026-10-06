@@ -393,6 +393,41 @@ class TestListMessagesByRun:
         assert messages[0]["run_id"] == "r1"
         assert messages[0]["category"] == "message"
 
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("backend", ["memory", "jsonl", "db"])
+    async def test_explicit_user_id_follows_list_messages_semantics(self, tmp_path, backend):
+        """Run-scoped Gateway reads pass an explicit data identity on every backend.
+
+        Only the SQL store isolates by user; the others accept and ignore it,
+        as they do for ``list_messages`` and ``list_events``.
+        """
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+        from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+        if backend == "db":
+            await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'test.db'}", sqlite_dir=str(tmp_path))
+            s = DbRunEventStore(get_session_factory())
+        elif backend == "jsonl":
+            s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        else:
+            s = MemoryRunEventStore()
+        try:
+            token = set_current_user(type("Owner", (), {"id": "feishu:owner"})())
+            try:
+                await s.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message")
+            finally:
+                reset_current_user(token)
+
+            assert len(await s.list_messages_by_run("t1", "r1", user_id="feishu:owner")) == 1
+            assert len(await s.list_messages_by_run("t1", "r1", user_id=None)) == 1
+            other = await s.list_messages_by_run("t1", "r1", user_id="someone-else")
+            assert len(other) == (0 if backend == "db" else 1)
+        finally:
+            if backend == "db":
+                await close_engine()
+
 
 # -- count_messages --
 
@@ -1284,6 +1319,44 @@ class TestJsonlRunEventStore:
         assert c == 1
         assert not (tmp_path / "jsonl" / "threads" / "t1" / "runs" / "r2.jsonl").exists()
         assert await s.count_messages("t1") == 1
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("run_id", ["", "run.1", "a b", "../decoy"])
+    async def test_unsafe_run_id_reads_as_an_absent_run(self, tmp_path, run_id):
+        """A run ID no file can hold answers like the memory and DB stores' unknown run.
+
+        Run-scoped routes pass the URL's ``run_id`` straight through, so raising
+        here surfaced as a 500 instead of the empty result the other backends give.
+        """
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        await s.put(thread_id="t1", run_id="r1", event_type="ai_message", category="message")
+        # ``../decoy`` would resolve here if the ID reached the filesystem.
+        decoy = tmp_path / "jsonl" / "threads" / "t1" / "decoy.jsonl"
+        decoy.write_text('{"seq": 9, "category": "message", "event_type": "ai_message"}\n', encoding="utf-8")
+
+        assert await s.list_events("t1", run_id) == []
+        assert await s.list_messages_by_run("t1", run_id) == []
+        assert await s.get_last_visible_ai_seq_by_run("t1", [run_id, "r1"]) == {"r1": 1}
+        assert await s.delete_by_run("t1", run_id) == 0
+        assert decoy.exists()
+        assert await s.count_messages("t1") == 1
+
+    @pytest.mark.anyio
+    async def test_unsafe_run_id_is_still_rejected_on_write(self, tmp_path):
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        event = {"thread_id": "t1", "run_id": "run.1", "event_type": "ai_message", "category": "message"}
+
+        with pytest.raises(ValueError, match="Invalid run_id"):
+            await s.put(**event)
+        with pytest.raises(ValueError, match="Invalid run_id"):
+            await s.put_if_absent(**event)
+        with pytest.raises(ValueError, match="Invalid run_id"):
+            await s.put_batch([event])
+        assert await s.count_messages("t1") == 0
 
 
 class TestGetMessageSeqs:

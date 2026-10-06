@@ -55,6 +55,7 @@ import hmac
 import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 from typing import override
@@ -291,15 +292,41 @@ class _Redactor:
         return replace
 
 
+def _independent_copy(value: object, *, what: str) -> object:
+    """Copy *value* so the rebuilt message shares no mutable state with the original.
+
+    ``deepcopy`` keeps nested mutable blocks and metadata independent, which is
+    what the rewrite needs: ``_redact_content`` retains references to the blocks
+    it leaves untouched, and ``model_copy`` alone is shallow. It can raise for an
+    exotic value a caller placed in a block, and a copy failure must never skip
+    the rewrite — that would hand raw PII to the model. Fall back to a shallow
+    per-container copy, which still detaches the containers the rewrite touches.
+    """
+    try:
+        return deepcopy(value)
+    except Exception:
+        logger.warning(
+            "PII redaction could not deep-copy %s; using a shallow copy",
+            what,
+            exc_info=True,
+        )
+        if isinstance(value, list):
+            return [dict(item) if isinstance(item, dict) else item for item in value]
+        if isinstance(value, dict):
+            return dict(value)
+        return value
+
+
 def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]:
     """Redact *content*, preserving its shape. Returns ``(content, changed)``.
 
     Handles the two shapes message content takes — plain ``str`` and a list of
-    content blocks. Blocks pass through untouched except for any string-valued
-    ``text`` field they carry: lenient downstream consumers (e.g. DeerMem's
-    ``format_conversation_for_update``) read ``p.get("text")`` regardless of
-    the block type, so a non-text block must not smuggle raw PII past the
-    helper. The input is never mutated.
+    content blocks. Blocks pass through untouched except for string-valued
+    ``text`` fields and structured ``json`` payloads. The latter is important
+    for MCP results: serializing a ``{"type": "json", "json": {...}}`` block
+    later must not bypass the PII boundary. Binary media fields are left alone
+    so redaction cannot corrupt an image or file payload. The input is never
+    mutated.
     """
     if isinstance(content, str):
         redacted = redactor.redact(content)
@@ -313,16 +340,52 @@ def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]
             redacted = redactor.redact(block)
             changed = changed or redacted != block
             new_content.append(redacted)
-        elif isinstance(block, dict) and isinstance(block.get("text"), str):
-            redacted = redactor.redact(block["text"])
-            if redacted != block["text"]:
-                new_content.append({**block, "text": redacted})
-                changed = True
-            else:
-                new_content.append(block)
+        elif isinstance(block, dict):
+            updated_block = block
+            block_changed = False
+
+            if isinstance(block.get("text"), str):
+                redacted = redactor.redact(block["text"])
+                if redacted != block["text"]:
+                    updated_block = {**updated_block, "text": redacted}
+                    block_changed = True
+
+            if "json" in block:
+                redacted_json, json_changed = _redact_json_value(block["json"], redactor)
+                if json_changed:
+                    updated_block = {**updated_block, "json": redacted_json}
+                    block_changed = True
+
+            changed = changed or block_changed
+            new_content.append(updated_block)
         else:
             new_content.append(block)
     return new_content, changed
+
+
+def _redact_json_value(value: object, redactor: _Redactor) -> tuple[object, bool]:
+    """Redact string leaves in a structured JSON value without mutating it."""
+    if isinstance(value, str):
+        redacted = redactor.redact(value)
+        return redacted, redacted != value
+    if isinstance(value, list):
+        items: list[object] = []
+        changed = False
+        for item in value:
+            redacted_item, item_changed = _redact_json_value(item, redactor)
+            items.append(redacted_item)
+            changed = changed or item_changed
+        return items, changed
+    if isinstance(value, dict):
+        result: dict[object, object] = {}
+        changed = False
+        for key, item in value.items():
+            redacted_key = redactor.redact(key) if isinstance(key, str) else key
+            redacted_item, item_changed = _redact_json_value(item, redactor)
+            result[redacted_key] = redacted_item
+            changed = changed or item_changed or redacted_key != key
+        return result, changed
+    return value, False
 
 
 class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
@@ -370,11 +433,14 @@ class PiiRedactionMiddleware(AgentMiddleware[AgentState]):
                 continue
             if not changed_msg:
                 continue
-            messages[index] = HumanMessage(
-                content=content,
-                id=msg.id,
-                name=msg.name,
-                additional_kwargs=dict(msg.additional_kwargs or {}),
+            messages[index] = msg.model_copy(
+                update={
+                    "content": _independent_copy(content, what="message content"),
+                    "additional_kwargs": dict(msg.additional_kwargs or {}),
+                    # model_copy is shallow, so the preserved metadata would
+                    # otherwise be the same dict as the original message's.
+                    "response_metadata": _independent_copy(dict(msg.response_metadata or {}), what="response_metadata"),
+                },
             )
             changed = True
         updates = {}

@@ -28,6 +28,8 @@ class RunRow(Base):
     kwargs_json: Mapped[dict] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text)
     stop_reason: Mapped[str | None] = mapped_column(String(50))
+    # Final evaluator outcome, written atomically with terminal run status.
+    goal_verdict: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Convenience fields (for listing pages without querying RunEventStore)
     message_count: Mapped[int] = mapped_column(default=0)

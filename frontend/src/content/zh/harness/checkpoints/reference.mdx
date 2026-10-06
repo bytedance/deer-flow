@@ -170,8 +170,10 @@ Your config.yaml (version %d) is outdated — the latest version is %d. Run `mak
 | --- | --- | --- | --- |
 | `POST /api/threads/{thread_id}/runs` | `200` run 记录，无前置门禁 —— 但当线程的 run event 流为空时，`ensure_checkpoint_history_seeded` 会先在 `start_run` 内物化头部，此时返回 `500` | run 记录稍后变为 `status: error`，`error` 为不匹配原文 | `thread_runs:945-960`、`worker:1018-1030,1044-1047`、`worker:1450-1462`、`services:1503-1520,2055` |
 | `POST /api/threads/{thread_id}/runs/stream` | `200` `text/event-stream` | 一帧 `event: error`，其 `data` 为 `{"message": <不匹配原文>, "name": "CheckpointModeMismatchError"}` | `worker:1466-1472`、`services:2374-2378` |
-| `POST /api/threads/{thread_id}/runs/wait` | `200` JSON，从不返回 `409` | `{"status": "error", "error": "Thread requires delta mode; materialize and convert its checkpoints before using full mode."}` | `thread_runs:1018-1076` |
-| `POST /api/runs/stream`、`POST /api/runs/wait`（无状态） | 同上 | 同样的 `{"status", "error"}` 载荷 | `runs:59-91` |
+| `POST /api/threads/{thread_id}/runs/wait` | `200` JSON，从不返回 `409` | `{"status": "error", "error": "Thread requires delta mode; materialize and convert its checkpoints before using full mode.", "__error__": {"error": "RunError", "message": "Thread requires delta mode; materialize and convert its checkpoints before using full mode."}}` | `thread_runs:1018-1076` |
+| `POST /api/runs/stream`、`POST /api/runs/wait`（无状态） | 同上 | 同样的 SSE 错误帧或 wait `{"status", "error", "__error__"}` 载荷 | `runs:59-91` |
+
+wait 响应仍为 HTTP `200`。Python SDK 默认使用 `raise_error=True`，识别到 `__error__` 后会抛出异常，消息为 `RunError: <不匹配文本>`；传入 `raise_error=False` 才会返回 JSON 响应体，供调用者读取 `status`、`error` 和 `__error__`。
 
 ### 未做模式映射的路由
 

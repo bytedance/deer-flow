@@ -67,7 +67,15 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from deerflow.guardrails.provider import GuardrailRequest
-from deerflow.guardrails.typesafe import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL, TypeSafeGuardrailError, TypeSafeGuardrailProvider
+from deerflow.guardrails.typesafe import (
+    DEFAULT_API_KEY_ENV,
+    DEFAULT_BASE_URL,
+    DEFAULT_CRITERIA_FALSE,
+    DEFAULT_CRITERIA_TRUE,
+    DEFAULT_INSTRUCTIONS,
+    TypeSafeGuardrailError,
+    TypeSafeGuardrailProvider,
+)
 
 NETWORK = "network"
 CACHE_HIT = "cache_hit"
@@ -79,6 +87,7 @@ POPULATIONS = (NETWORK, CACHE_HIT, NOT_PROBED, NOT_ALLOWED, LOCAL_DENY)
 _DEFAULT_CASES = Path(__file__).with_name("typesafe_risk_gate_cases.json")
 _LATENCY_TARGET_SECONDS = 1.0
 _FALSE_BLOCK_TARGET = 0.05
+_POLICY_DEFAULTS = {"instructions": DEFAULT_INSTRUCTIONS, "criteria_true": DEFAULT_CRITERIA_TRUE, "criteria_false": DEFAULT_CRITERIA_FALSE}
 
 
 @dataclass
@@ -113,6 +122,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--tools", default="", help="comma-separated probe scope; default probes every tool in the case set")
     parser.add_argument("--allowed-tools", default="", help="comma-separated permission list; tools outside it are refused locally; default enforces no list")
     parser.add_argument("--max-state-chars", type=int, default=4000)
+    parser.add_argument("--instructions", default=None, help="override the question instructions; default is the provider's built-in text")
+    parser.add_argument("--criteria-true", default=None, help="override the 'risky' rubric text; default is the provider's built-in text")
+    parser.add_argument("--criteria-false", default=None, help="override the 'safe' rubric text; default is the provider's built-in text")
     parser.add_argument("--timeout", type=float, default=5.0)
     parser.add_argument("--deadline-seconds", type=float, default=10.0)
     parser.add_argument("--max-attempts", type=int, default=2)
@@ -147,11 +159,20 @@ def _split_names(value: str) -> list[str] | None:
 
 
 def _provider(args: argparse.Namespace, *, cache_enabled: bool) -> TypeSafeGuardrailProvider:
+    criteria: dict[object, object] | None = None
+    if args.criteria_true is not None or args.criteria_false is not None:
+        criteria = {}
+        if args.criteria_true is not None:
+            criteria[True] = args.criteria_true
+        if args.criteria_false is not None:
+            criteria[False] = args.criteria_false
     return TypeSafeGuardrailProvider(
         api_key_env=args.api_key_env,
         base_url=args.base_url,
         model=args.model,
         threshold=args.threshold,
+        instructions=args.instructions,
+        criteria=criteria,
         tools=_split_names(args.tools),
         allowed_tools=_split_names(args.allowed_tools),
         max_state_chars=args.max_state_chars,
@@ -161,6 +182,22 @@ def _provider(args: argparse.Namespace, *, cache_enabled: bool) -> TypeSafeGuard
         retry_backoff=args.retry_backoff,
         cache_size=256 if cache_enabled else 0,
     )
+
+
+def _effective_policy(args: argparse.Namespace) -> dict[str, str]:
+    """The question text the run actually evaluated, overrides or built-in defaults.
+
+    Without this the report cannot distinguish a custom-rubric run from a
+    default-policy one, so its verdict could not be reproduced.
+    """
+    overrides = {
+        "instructions": args.instructions,
+        "criteria_true": args.criteria_true,
+        "criteria_false": args.criteria_false,
+    }
+    # ``defaulted_text`` falls back only on None; blank override text is a
+    # provider construction error, never the default policy.
+    return {key: value if value is not None else _POLICY_DEFAULTS[key] for key, value in overrides.items()}
 
 
 async def _run_case(provider: TypeSafeGuardrailProvider, case: dict[str, Any]) -> Outcome:
@@ -386,7 +423,8 @@ def _format_ms(value: float | None) -> str:
 
 
 def _print_report(report: dict[str, Any], outcomes: list[Outcome], sequences: list[dict[str, Any]]) -> None:
-    print(f"\nTypeSafe risk-gate evaluation: {report['endpoint']} model={report['model']} threshold={report['threshold']} cases={report['cases']}")
+    policy = "default" if report["policy"] == _POLICY_DEFAULTS else "custom"
+    print(f"\nTypeSafe risk-gate evaluation: {report['endpoint']} model={report['model']} threshold={report['threshold']} cases={report['cases']} policy={policy}")
     print(f"probe scope: {report['tools'] or 'every tool in the case set'}   allowed_tools: {report['allowed_tools'] or 'none configured'}   fail_closed={not report['fail_open']}")
 
     print("\nPopulations (mutually exclusive)")
@@ -452,6 +490,7 @@ def main() -> int:
         "threshold": args.threshold,
         "tools": args.tools,
         "allowed_tools": args.allowed_tools,
+        "policy": _effective_policy(args),
         "fail_open": args.fail_open,
         "max_state_chars": args.max_state_chars,
         "timeout": args.timeout,

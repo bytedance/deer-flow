@@ -121,6 +121,7 @@ export type MockAPIOptions = {
   trashDocuments?: MockTrashDocument[];
   threadFileGroups?: MockThreadFileGroup[];
   createdThreadMessages?: unknown[];
+  honorRequestedThreadId?: boolean;
   agents?: MockAgent[];
   skills?: MockSkill[];
   scheduledTasks?: Array<{
@@ -381,7 +382,9 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     sandbox_runtime_mode: "init-container" as
       | "none"
       | "gateway-download"
-      | "init-container",
+      | "init-container"
+      | "broker",
+    sandbox_runtime_probed: true,
     sandbox_runtime_ready: false,
     sandbox_runtime_detail:
       "The provisioner has no lark-cli init image configured (LARK_CLI_INIT_IMAGE)." as
@@ -816,8 +819,13 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   // Thread create — called when user sends first message in a new chat
   void page.route("**/api/langgraph/threads", (route) => {
     if (route.request().method() === "POST") {
+      const threadId =
+        (options?.honorRequestedThreadId
+          ? (route.request().postDataJSON() as { thread_id?: string } | null)
+              ?.thread_id
+          : undefined) ?? MOCK_THREAD_ID;
       upsertThread({
-        thread_id: MOCK_THREAD_ID,
+        thread_id: threadId,
         title: "New Chat",
         updated_at: new Date().toISOString(),
         messages: options?.createdThreadMessages ?? mockStreamMessages(),
@@ -826,7 +834,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          thread_id: MOCK_THREAD_ID,
+          thread_id: threadId,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           metadata: {},
@@ -1863,6 +1871,10 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     route.fulfill({ json: { mcp_servers: {} } }),
   );
 
+  void page.route("**/api/mcp/personal/config", (route) =>
+    route.fulfill({ json: { mcp_servers: {} } }),
+  );
+
   // Skills list — capability center and slash autocomplete
   void page.route("**/api/capabilities/catalog", (route) =>
     route.fulfill({
@@ -1877,7 +1889,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     }),
   );
   void page.route("**/api/capabilities/installations/*", (route) => {
-    const adapter = route.request().url().split("/").pop();
+    const adapter = new URL(route.request().url()).pathname.split("/").pop();
     const items =
       adapter === "lark"
         ? [
@@ -1969,6 +1981,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           verified: false,
         },
         sandbox_runtime_mode: "init-container",
+        sandbox_runtime_probed: true,
         sandbox_runtime_ready: true,
         sandbox_runtime_detail: null,
       };

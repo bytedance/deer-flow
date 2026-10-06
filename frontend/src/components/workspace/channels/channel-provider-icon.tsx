@@ -18,6 +18,31 @@ export function ChannelProviderIcon({
 }: ChannelProviderIconProps) {
   const normalizedProvider = provider.toLowerCase();
 
+  if (normalizedProvider === "qq") {
+    return (
+      <svg
+        viewBox="0 0 24 24"
+        aria-hidden="true"
+        className={cn("size-5", className)}
+        {...props}
+      >
+        <ellipse cx="8" cy="21" rx="4" ry="2" fill="#F5B83D" />
+        <ellipse cx="16" cy="21" rx="4" ry="2" fill="#F5B83D" />
+        <path
+          d="M5 12C5 4 8 1 12 1s7 3 7 11c3 5 2 7 0 6-1 3-3 4-7 4s-6-1-7-4c-2 1-3-1 0-6Z"
+          fill="#252525"
+        />
+        <ellipse cx="12" cy="16" rx="5" ry="5" fill="#FFFFFF" />
+        <ellipse cx="10" cy="7" rx="1.4" ry="2" fill="#FFFFFF" />
+        <ellipse cx="14" cy="7" rx="1.4" ry="2" fill="#FFFFFF" />
+        <circle cx="10.4" cy="7.5" r=".6" fill="#252525" />
+        <circle cx="13.6" cy="7.5" r=".6" fill="#252525" />
+        <ellipse cx="12" cy="10" rx="3" ry="1" fill="#F5B83D" />
+        <path d="M5 12h14v3H9v3H6v-3H5Z" fill="#EB3434" />
+      </svg>
+    );
+  }
+
   if (normalizedProvider === "buzz") {
     return <BuzzProviderIcon className={cn("size-5", className)} {...props} />;
   }

@@ -2,6 +2,7 @@
 
 import {
   BotIcon,
+  DownloadIcon,
   MessageSquareIcon,
   Settings2Icon,
   Trash2Icon,
@@ -33,7 +34,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useDeleteAgent } from "@/core/agents";
+import { exportAgentPackage, useDeleteAgent } from "@/core/agents";
 import type { Agent } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
@@ -116,6 +117,7 @@ export function AgentCard({ agent }: AgentCardProps) {
   const deleteAgent = useDeleteAgent();
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   function handleChat() {
     router.push(`/workspace/agents/${agent.name}/chats/new`);
@@ -128,6 +130,29 @@ export function AgentCard({ agent }: AgentCardProps) {
       setDeleteOpen(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleExport() {
+    setExporting(true);
+    try {
+      const agentPackage = await exportAgentPackage(agent.name);
+      const blob = new Blob([JSON.stringify(agentPackage, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${agent.name}.deerflow-agent.json`;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      toast.success(t.agents.exportSuccess);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExporting(false);
     }
   }
 
@@ -195,6 +220,16 @@ export function AgentCard({ agent }: AgentCardProps) {
             {t.agents.chat}
           </Button>
           <div className="flex gap-1">
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-8 w-8 shrink-0"
+              onClick={handleExport}
+              disabled={exporting}
+              title={t.agents.exportAgent}
+            >
+              <DownloadIcon className="h-3.5 w-3.5" />
+            </Button>
             <Button
               size="icon"
               variant="ghost"
