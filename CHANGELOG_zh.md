@@ -432,6 +432,12 @@
 
 ### 修复
 
+- **技能：** 编辑自定义技能时，不再在事件循环上执行文件系统操作。
+  `PUT /api/skills/custom/{name}` 此前在事件循环上构建用户级技能存储、探测自定义、
+  内置、旧版共享与集成目录、把草稿写入临时目录以校验 frontmatter，并读取将被替换的
+  内容；只有最后的写入与历史追加已移出事件循环。现在这些步骤都在工作线程中执行，
+  与回滚路由一致。自定义技能的删除与归档安装路由，以及智能体的 `skill_manage`
+  工具（其存储查找每次调用都会 stat `config.yaml`）也改为在工作线程中构建存储。([#6332])
 - **网关：** 知识检索目录加载自定义 Agent 配置时不再阻塞网关事件循环。
   `GET /api/knowledge/retrieval-catalog/datasets` 与 `.../datasets/{id}/documents`
   此前在事件循环上通过同步 Agent 存储读取 Agent：`file` 后端为文件 IO，`db` 后端
@@ -6501,3 +6507,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6313]: https://github.com/bytedance/deer-flow/pull/6313
 [#6319]: https://github.com/bytedance/deer-flow/pull/6319
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
+[#6332]: https://github.com/bytedance/deer-flow/pull/6332

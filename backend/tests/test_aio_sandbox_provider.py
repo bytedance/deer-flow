@@ -2189,6 +2189,77 @@ def test_shutdown_keeps_aio_warm_entries_owned_when_idle_checker_stop_times_out(
     assert provider._warm_pool_identity == {}
 
 
+def test_shutdown_keeps_aio_warm_entries_owned_when_lease_renewal_stop_times_out(tmp_path):
+    """A live renewal worker must keep AIO ownership attached for shutdown retry."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider._lock = aio_mod.threading.Lock()
+    provider._shutdown_called = False
+    provider._sandboxes = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    warm_info = aio_mod.SandboxInfo(sandbox_id="warm-renewal-retry", sandbox_url="http://warm-renewal-retry")
+    provider._warm_pool = {"warm-renewal-retry": (warm_info, 1.0)}
+    provider._warm_pool_identity = {"warm-renewal-retry": ("default", "thread-retry")}
+    provider._stop_idle_checker = MagicMock()
+    provider._destroy_warm_entry = MagicMock()
+    provider._ownership.close = MagicMock()
+
+    renewal_thread = MagicMock()
+    renewal_thread.is_alive.side_effect = [True, True, False, False]
+    provider._renewal_thread = renewal_thread
+
+    with pytest.raises(RuntimeError, match="lease-renewal thread is still running after stop timeout"):
+        provider.shutdown()
+
+    assert provider._shutdown_called is False
+    assert provider._warm_pool == {"warm-renewal-retry": (warm_info, 1.0)}
+    assert provider._warm_pool_identity == {"warm-renewal-retry": ("default", "thread-retry")}
+    renewal_thread.join.assert_called_once_with(timeout=5)
+    provider._destroy_warm_entry.assert_not_called()
+    provider._ownership.close.assert_not_called()
+
+    provider.shutdown()
+
+    provider._destroy_warm_entry.assert_called_once_with(
+        "warm-renewal-retry",
+        warm_info,
+        reason="shutdown",
+        still_reapable=ANY,
+    )
+    assert provider._warm_pool == {}
+    assert provider._warm_pool_identity == {}
+
+
+def test_signal_handler_forwards_original_signal_when_shutdown_fails(tmp_path, monkeypatch, caplog):
+    """A fail-closed shutdown must not swallow or replace the process signal."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider = _make_provider(tmp_path)
+    provider.shutdown = MagicMock(side_effect=RuntimeError("renewal worker still alive"))
+
+    forwarded = MagicMock()
+    installed = {}
+
+    def fake_getsignal(signum):
+        return forwarded if signum == aio_mod.signal.SIGTERM else aio_mod.signal.SIG_IGN
+
+    def fake_signal(signum, handler):
+        installed[signum] = handler
+
+    monkeypatch.setattr(aio_mod.signal, "getsignal", fake_getsignal)
+    monkeypatch.setattr(aio_mod.signal, "signal", fake_signal)
+
+    provider._register_signal_handlers()
+
+    with caplog.at_level("ERROR"):
+        installed[aio_mod.signal.SIGTERM](aio_mod.signal.SIGTERM, None)
+
+    provider.shutdown.assert_called_once_with()
+    forwarded.assert_called_once_with(aio_mod.signal.SIGTERM, None)
+    assert "Sandbox shutdown failed while handling signal" in caplog.text
+
+
 def test_cleanup_idle_sandboxes_keeps_active_cleanup_and_delegates_warm_expiry(tmp_path):
     """AIO active-idle cleanup must remain local while warm expiry uses the shared lifecycle."""
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")

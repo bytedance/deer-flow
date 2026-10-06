@@ -32,6 +32,21 @@ def test_unchanged_source_keeps_companion_after_read(converted_upload):
     assert extract_outline_for_file(original)[0] == [{"title": "Original A", "line": 1}]
 
 
+def test_companion_record_accepts_uppercase_markdown_suffix(tmp_path):
+    uploads = tmp_path / "thread" / "user-data" / "uploads"
+    uploads.mkdir(parents=True)
+    original = uploads / "report.pdf"
+    markdown = uploads / "report.MD"
+    original.write_bytes(b"%PDF ORIGINAL A")
+    markdown.write_text("# Uppercase suffix\n", encoding="utf-8")
+
+    register_companion(original, markdown)
+
+    assert resolve_companion(original) == markdown
+    assert companion_names(original.parent) == {markdown.name}
+    assert extract_outline_for_file(original)[0] == [{"title": "Uppercase suffix", "line": 1}]
+
+
 def test_same_size_sandbox_rewrite_rejects_stale_outline(converted_upload):
     original, markdown = converted_upload
     before = original.stat()

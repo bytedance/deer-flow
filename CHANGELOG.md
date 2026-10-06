@@ -494,6 +494,15 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **skills:** Editing a custom skill no longer runs filesystem work on the event
+  loop. `PUT /api/skills/custom/{name}` built the user-scoped skill storage,
+  probed the custom, public, legacy and integration roots, validated the
+  frontmatter by writing the draft into a temporary directory, and read the
+  content being replaced, all on the loop; only the final write and history
+  append had been offloaded. Those steps now run in worker threads, matching the
+  rollback route. The custom-skill delete and archive-install routes and the
+  agent's `skill_manage` tool, whose storage lookup stats `config.yaml` on every
+  call, also build their storage off the loop. ([#6332])
 - **gateway:** The knowledge retrieval catalog no longer blocks the Gateway event
   loop while it loads a custom agent's config. Both
   `GET /api/knowledge/retrieval-catalog/datasets` and
@@ -7815,3 +7824,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6319]: https://github.com/bytedance/deer-flow/pull/6319
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
 [#6328]: https://github.com/bytedance/deer-flow/pull/6328
+[#6332]: https://github.com/bytedance/deer-flow/pull/6332

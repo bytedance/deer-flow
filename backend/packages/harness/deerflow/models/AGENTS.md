@@ -78,6 +78,12 @@ Coverage: `tests/test_codex_provider.py`.
 
 ### Codex SSE termination (`packages/harness/deerflow/models/openai_codex_provider.py`)
 
+Completed responses with null, omitted, or empty `usage` retain their text,
+reasoning, and tool calls. Normalize unavailable usage to the existing empty
+mapping fallback while keeping `AIMessage.usage_metadata` as `None`; populated
+usage mappings, including zero counts and cached/reasoning token details, remain
+unchanged.
+
 `response.completed` ends stream consumption immediately, before transport EOF;
 retain the output-item recovery path for empty completed output. Terminal
 `response.failed`, `response.incomplete`, and `error` events raise with their
