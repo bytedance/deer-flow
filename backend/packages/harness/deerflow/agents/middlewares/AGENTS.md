@@ -40,6 +40,11 @@ so malformed values cannot abort compaction/model calls.
 `tool_calls` update: adapters resend stale `content` tool-call blocks, which
 strict providers reject.
 
+Read-before-write marks belong to the requested `tool_call_id`. Select only a
+matching `ToolMessage`, including inside `Command.update.messages`; unrelated
+results must neither gain a mark nor determine read success. Missing matches
+skip content inspection. Graph coverage: `tests/test_read_mark_tool_call_correlation.py`.
+
 **Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
 
 1. **InputSanitizationMiddleware** - First, so it is the outermost `wrap_model_call` wrapper; every inner middleware (including LLM retries) sees sanitized messages. `additional_kwargs.original_user_content` is server-owned provenance: Gateway strips caller-supplied values for non-internal run requests, trusted IM calls may carry the string they captured before adding transport/file context, and the middleware replaces any non-string value before wrapping. Uploads and sanitization retain first-writer-wins only for validated strings. Caller markers are marked `untrusted_input`, never stripped; scope is every turn.

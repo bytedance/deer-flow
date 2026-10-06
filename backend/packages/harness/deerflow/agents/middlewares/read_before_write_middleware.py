@@ -402,7 +402,7 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         path = self._requested_path(request)
         if path is None:
             return
-        message = self._extract_tool_message(result)
+        message = self._extract_tool_message(result, tool_call_id=str(request.tool_call.get("id") or ""))
         if message is None or message.status == "error":
             return
         # In-band contract errors (invalid range, start_line exceeds file length, etc.)
@@ -435,13 +435,17 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         }
 
     @staticmethod
-    def _extract_tool_message(result: ToolMessage | Command) -> ToolMessage | None:
+    def _extract_tool_message(result: ToolMessage | Command, *, tool_call_id: str) -> ToolMessage | None:
         if isinstance(result, ToolMessage):
-            return result
+            return result if result.tool_call_id == tool_call_id else None
         if isinstance(result, Command) and isinstance(result.update, dict):
-            candidates = [m for m in result.update.get("messages", []) if isinstance(m, ToolMessage)]
-            if candidates:
-                return candidates[-1]
+            messages = result.update.get("messages")
+            if isinstance(messages, ToolMessage):
+                messages = [messages]
+            if isinstance(messages, (list, tuple)):
+                # Command updates may include other calls' results. They are not
+                # evidence that this read succeeded and must never receive its mark.
+                return next((message for message in reversed(messages) if isinstance(message, ToolMessage) and message.tool_call_id == tool_call_id), None)
         return None
 
 

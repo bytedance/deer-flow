@@ -357,7 +357,7 @@ class TestErrorStringSandboxes:
 
     def test_existing_file_read_still_marked_and_write_allowed(self):
         mw = self._error_string_middleware({self.PATH: "v1"})
-        read_request = _make_request("read_file", {"description": "d", "path": self.PATH})
+        read_request = _make_request("read_file", {"description": "d", "path": self.PATH}, tool_call_id="r1")
         read_handler = MagicMock(return_value=ToolMessage(content="v1", tool_call_id="r1", name="read_file"))
         read_result = mw.wrap_tool_call(read_request, read_handler)
         assert read_result.additional_kwargs["deerflow_read_mark"]["hash"] == _sha("v1")
@@ -423,7 +423,7 @@ class TestSamePathSerialization:
             return ToolMessage(content="OK", tool_call_id="w-call", name="write_file")
 
         async def run():
-            read_task = asyncio.create_task(mw.awrap_tool_call(_make_request("read_file", {"description": "d", "path": self.PATH}), read_handler))
+            read_task = asyncio.create_task(mw.awrap_tool_call(_make_request("read_file", {"description": "d", "path": self.PATH}, tool_call_id="r-call"), read_handler))
             await asyncio.sleep(0.01)
             write_task = asyncio.create_task(
                 mw.awrap_tool_call(
