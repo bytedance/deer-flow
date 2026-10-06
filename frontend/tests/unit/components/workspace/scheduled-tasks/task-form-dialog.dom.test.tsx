@@ -192,6 +192,76 @@ describe("TaskFormDialog", () => {
     });
   });
 
+  test("a duplicate keeps the stop condition even while its field is hidden", async () => {
+    createTask.mockResolvedValue(task({ id: "task-2" }));
+    renderForm({ mode: "duplicate", task: task() }, { toolEnabled: false });
+    expect(
+      screen.queryByRole("textbox", { name: "Stops when (optional)" }),
+    ).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(createTask).toHaveBeenCalledTimes(1));
+    expect(createTask.mock.calls[0]![0]).toMatchObject({
+      title: "Checklist (copy)",
+      stop_condition: "every item is checked",
+      goal_objective: "status.md lists the open items",
+      max_runs: 10,
+    });
+  });
+
+  test("switching to an existing chat leaves a goal clearable, then saves", async () => {
+    updateTask.mockResolvedValue(task());
+    renderForm({ mode: "edit", task: task() });
+    fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+    const where = screen.getByRole("group", { name: "Where runs happen" });
+    expect(where).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Run in an existing chat" }),
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Chat ID" }), {
+      target: { value: "chat-1" },
+    });
+    const goal = screen.getByRole("textbox", {
+      name: "Each run's goal (optional)",
+    });
+    expect(goal).toHaveProperty("disabled", false);
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(
+      screen.getByText("A goal needs each run to start a new chat.", {
+        selector: "p[role=alert]",
+      }),
+    ).toBeTruthy();
+    fireEvent.change(goal, { target: { value: "" } });
+    expect(goal).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(updateTask).toHaveBeenCalledTimes(1));
+    expect(updateTask.mock.calls[0]![1]).toMatchObject({
+      context_mode: "reuse_thread",
+      thread_id: "chat-1",
+      goal_objective: null,
+    });
+  });
+
+  test("a non-existent end time names the end time, not the schedule", () => {
+    renderForm({ mode: "edit", task: task({ timezone: "America/New_York" }) });
+    fireEvent.change(
+      screen.getByLabelText("Safety cap: end by (America/New_York)"),
+      // Spring forward: 02:30 does not exist in New York that morning.
+      { target: { value: "2099-03-08T02:30" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(screen.getByRole("alert").textContent).toBe(
+      "This end time does not exist in the selected timezone. Choose another time.",
+    );
+    expect(updateTask).not.toHaveBeenCalled();
+  });
+
+  test("Chinese field labels put the zone in full-width parentheses", () => {
+    renderForm({ mode: "create" }, { locale: "zh-CN" });
+    fireEvent.click(screen.getByRole("button", { name: "高级选项" }));
+    expect(screen.getByRole("group", { name: "运行位置" })).toBeTruthy();
+    expect(screen.getByText(/^保险上限：结束时间（.+）$/)).toBeTruthy();
+  });
+
   test("an invalid run limit is refused before any request", () => {
     renderForm({ mode: "edit", task: task() });
     fireEvent.change(

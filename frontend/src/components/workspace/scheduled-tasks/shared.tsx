@@ -92,6 +92,8 @@ export function blockReasonText(
       return st.actions.busyRunning;
     case "queued":
       return st.actions.busyQueued;
+    case "queuedNoPause":
+      return st.actions.busyQueuedPaused;
     case "alreadyQueued":
       return st.actions.alreadyQueued;
     case "createBlocked":

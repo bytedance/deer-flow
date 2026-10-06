@@ -23,6 +23,27 @@ from deerflow.utils.thread_id import validate_thread_id
 logger = logging.getLogger(__name__)
 
 
+def _zone_is_placeholder(task: dict[str, Any]) -> bool:
+    """Whether the stored "UTC" only means "no zone was needed" (timezone_source not_needed).
+
+    A chat can save an interval task, or a one-time task whose run_at carries
+    an offset, without knowing the user's zone; it stores "UTC". Those times
+    are shown in the viewer's zone, so a UTC wall-clock time must not appear
+    in the run conversation's title.
+    """
+    if task.get("timezone") != "UTC":
+        return False
+    if task.get("schedule_type") == "interval":
+        return True
+    if task.get("schedule_type") == "once":
+        run_at = (task.get("schedule_spec") or {}).get("run_at")
+        try:
+            return isinstance(run_at, str) and datetime.fromisoformat(run_at).tzinfo is not None
+        except ValueError:
+            return False
+    return False
+
+
 def _as_utc(value: datetime | str | None) -> datetime | None:
     """A stored timestamp (ISO string from the repository, or a datetime) as aware UTC."""
     if value is None:
@@ -58,7 +79,7 @@ class ScheduledTaskService:
         run_lease_grace_seconds: int = 10,
         connection_repo=None,
         notification_repo=None,
-        own_stop_available: bool = True,
+        own_stop_available: bool | None = None,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -76,12 +97,32 @@ class ScheduledTaskService:
         self._notification_repo = notification_repo
         # Whether scheduled runs get stop_scheduled_task (scheduler.tool_enabled).
         # Decides how a launch phrases the user's stop rule (stop_rule.launch_prompt).
+        # None (production) reads the live config at each launch, the same source
+        # the run itself uses to grant the tool; a bool is a fixed test override.
         self._own_stop_available = own_stop_available
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._skip_next_lease_reconciliation = False
         self._install_finalization_observers()
+
+    async def _can_stop_itself(self) -> bool:
+        """Whether the launched run will be given stop_scheduled_task.
+
+        Read per launch from the live config, like ``start_run`` (which decides
+        whether the run gets the tool) and ``/api/features``, so a config reload
+        never tells a run to call a tool it does not have.
+        """
+        if self._own_stop_available is not None:
+            return self._own_stop_available
+        from deerflow.config.app_config import get_app_config
+        from deerflow.scheduler.runtime import scheduler_tools_enabled
+
+        try:
+            return scheduler_tools_enabled(await asyncio.to_thread(get_app_config))
+        except Exception:
+            logger.warning("Could not read the scheduler tool setting; phrasing the stop rule without the tool", exc_info=True)
+            return False
 
     @property
     def is_running(self) -> bool:
@@ -353,7 +394,7 @@ class ScheduledTaskService:
             if task.get("origin_thread_id") is not None:
                 metadata["scheduled_tool_created"] = True  # informational only
             # The stop rule is composed only here, never stored in the prompt.
-            prompt = launch_prompt(task["prompt"], task.get("stop_condition"), can_stop=self._own_stop_available)
+            prompt = launch_prompt(task["prompt"], task.get("stop_condition"), can_stop=await self._can_stop_itself())
             notes = task.get("standing_notes") or []
             if notes:
                 prompt += "\n\n<standing_notes>\n" + "\n".join(f"- {note}" for note in notes) + "\n</standing_notes>"
@@ -534,6 +575,7 @@ class ScheduledTaskService:
             "run_number": run_number,
             "scheduled_for": scheduled_for.isoformat(),
             "timezone": task["timezone"],
+            "schedule_type": task.get("schedule_type"),
             "task_title": task.get("title") or "",
             "instructions": task["prompt"],
             "stop_condition": task.get("stop_condition"),
@@ -541,7 +583,12 @@ class ScheduledTaskService:
         }
         title = None
         if task.get("context_mode") == "fresh_thread_per_run":
-            title = f"{origin['task_title'][:80]} · {scheduled_for.astimezone(ZoneInfo(task['timezone'])):%m-%d %H:%M}"
+            title = origin["task_title"][:80]
+            if not _zone_is_placeholder(task):
+                title = f"{title} · {scheduled_for.astimezone(ZoneInfo(task['timezone'])):%m-%d %H:%M}"
+            elif run_number is not None:
+                # No zone the reader would recognise: name the run, not a UTC time.
+                title = f"{title} · #{run_number}"
         return origin, title
 
     async def _record_launched_run(

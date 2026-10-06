@@ -81,8 +81,9 @@ async def schedule_task(
     To change a task, call update with its task_id; never delete and recreate
     it. Use clear_fields to remove a goal, stop condition or cap. Use resume to
     restart a paused or finished task. If the result has code limits_exhausted,
-    ask whether to raise max_runs, move end_at or remove the cap, then pass
-    that with resume. Use delete only when the user explicitly asks to delete;
+    renew the limit named in params.limit: ask whether to raise max_runs or
+    remove it (max_runs), or to move end_at later or remove it (end_at), then
+    pass that with resume. Use delete only when the user explicitly asks to delete;
     it removes the run history.
 
     Where results appear: each run posts its result in a new chat of its own,
@@ -136,7 +137,7 @@ async def schedule_task(
     """
     capability = _capability(runtime, "interactive")
     if capability is None:
-        return {"error": "Scheduled task management is unavailable in this run."}
+        return {"error": "Scheduled task management is unavailable in this run.", "code": "scheduler_tools_disabled", "status_code": 503}
     # Plain types only: value rules come back as coded results, as in REST.
     request = {
         key: value
@@ -180,5 +181,5 @@ async def stop_scheduled_task(runtime: Runtime) -> dict[str, Any]:
     """
     capability = _capability(runtime, "scheduled")
     if capability is None:
-        return {"error": "Stopping a schedule is unavailable in this run."}
+        return {"error": "Stopping a schedule is unavailable in this run.", "code": "scheduler_tools_disabled", "status_code": 503}
     return await capability.stop_current_schedule()

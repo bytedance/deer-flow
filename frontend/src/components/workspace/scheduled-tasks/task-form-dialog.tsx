@@ -42,6 +42,7 @@ import type {
 } from "@/core/scheduled-tasks/api";
 import {
   hasScheduleSpec,
+  onceRunAtInstant,
   utcToZonedLocalInput,
   validZonedLocalToUtcIso,
 } from "@/core/scheduled-tasks/cron";
@@ -172,7 +173,8 @@ function sameSchedule(task: ScheduledTask, value: ScheduleValue): boolean {
       return (
         typeof spec.run_at === "string" &&
         typeof next.run_at === "string" &&
-        Date.parse(spec.run_at) === Date.parse(next.run_at)
+        Date.parse(onceRunAtInstant(spec.run_at, task.timezone || "UTC")) ===
+          Date.parse(onceRunAtInstant(next.run_at, value.timezone || "UTC"))
       );
     case "interval":
       return spec.every_seconds === next.every_seconds;
@@ -233,7 +235,6 @@ export function validateForm(state: TaskFormState): FormValidation {
 export function createPayload(
   state: TaskFormState,
   valid: { maxRuns: number | null; endAt: string | null },
-  { includeStopCondition }: { includeStopCondition: boolean },
 ): ScheduledTaskPayload {
   const reuse = state.contextMode === "reuse_thread";
   const payload: ScheduledTaskPayload = {
@@ -250,7 +251,7 @@ export function createPayload(
   if (goal) payload.goal_objective = goal;
   if (valid.maxRuns != null) payload.max_runs = valid.maxRuns;
   if (valid.endAt) payload.end_at = valid.endAt;
-  const stop = includeStopCondition ? normalizeText(state.stopCondition) : null;
+  const stop = normalizeText(state.stopCondition);
   if (stop) payload.stop_condition = stop;
   return payload;
 }
@@ -307,11 +308,14 @@ export function updatePayload(
 export function TaskFormDialog({
   request,
   toolEnabled,
+  minIntervalSeconds,
   onOpenChange,
   onSaved,
 }: {
   request: TaskFormRequest | null;
   toolEnabled: boolean;
+  /** Server floor for interval schedules (`/api/features`). */
+  minIntervalSeconds?: number;
   onOpenChange: (open: boolean) => void;
   onSaved?: (task: ScheduledTask, mode: TaskFormMode) => void;
 }) {
@@ -322,6 +326,7 @@ export function TaskFormDialog({
           key={`${request.mode}:${request.task?.id ?? ""}`}
           request={request}
           toolEnabled={toolEnabled}
+          minIntervalSeconds={minIntervalSeconds}
           onClose={() => onOpenChange(false)}
           onSaved={onSaved}
         />
@@ -333,11 +338,13 @@ export function TaskFormDialog({
 function TaskForm({
   request,
   toolEnabled,
+  minIntervalSeconds,
   onClose,
   onSaved,
 }: {
   request: TaskFormRequest;
   toolEnabled: boolean;
+  minIntervalSeconds?: number;
   onClose: () => void;
   onSaved?: (task: ScheduledTask, mode: TaskFormMode) => void;
 }) {
@@ -426,14 +433,17 @@ function TaskForm({
             ? st.apiErrors.invalidMaxRuns
             : valid.error === "goalNeedsFresh"
               ? st.form.goalNeedsFresh
-              : st.fields.invalidRunAt,
+              : st.form.invalidEndAt,
       );
       return;
     }
     setError(null);
-    const options = { includeStopCondition: toolEnabled };
     if (editing) {
-      const updates = updatePayload(task, state, valid, options);
+      // Edit sends the stop condition only while its field is shown; a hidden
+      // field is left untouched on the server.
+      const updates = updatePayload(task, state, valid, {
+        includeStopCondition: toolEnabled,
+      });
       if (Object.keys(updates).length === 0) {
         onClose();
         return;
@@ -447,7 +457,10 @@ function TaskForm({
       });
       return;
     }
-    createTask.mutate(createPayload(state, valid, options), {
+    // Create and Duplicate always send it: a duplicate copies the source's
+    // stop condition even while the field is hidden (the run is then told
+    // the condition without being given the tool, spec 3.4).
+    createTask.mutate(createPayload(state, valid), {
       onSuccess: (created) => {
         toast.success(st.feedback.created);
         onClose();
@@ -532,6 +545,7 @@ function TaskForm({
             initial={scheduleInitial}
             onChange={(value) => set("schedule", value)}
             scheduleTypeLocked={editing}
+            minIntervalSeconds={minIntervalSeconds}
           />
         </fieldset>
 
@@ -561,7 +575,9 @@ function TaskForm({
             ref={goalRef}
             rows={2}
             value={state.goal}
-            disabled={reuse}
+            // In an existing chat a goal can't be saved; keep the field
+            // editable while it still holds text so the user can clear it.
+            disabled={reuse && !state.goal}
             aria-describedby={`${id("goal")}-hint`}
             onChange={(event) => set("goal", event.target.value)}
           />
@@ -598,7 +614,10 @@ function TaskForm({
           </Field>
           <Field
             id={id("end-at")}
-            label={`${st.form.endAt} (${timeZone})`}
+            label={fill(st.form.labelWithZone, {
+              label: st.form.endAt,
+              tz: timeZone,
+            })}
             hint={initial.endAtDropped ? st.form.endAtPassed : undefined}
           >
             <div className="flex gap-2">
@@ -676,7 +695,11 @@ function TaskForm({
                 </SelectContent>
               </Select>
             </Field>
-            <div className="flex flex-wrap gap-2" role="group">
+            <div
+              className="flex flex-wrap gap-2"
+              role="group"
+              aria-label={st.form.contextLabel}
+            >
               <Button
                 type="button"
                 size="sm"

@@ -490,6 +490,8 @@ async def test_auth_disabled_default_owner_needs_the_explicit_host_mode(monkeypa
     "updates",
     [
         {"timezone": "missing/zone"},
+        {"timezone": "Europe"},
+        {"schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}, "timezone": "Europe"},
         {"schedule_type": "unsupported"},
         {"schedule_spec": {"every_seconds": 1}},
         {"schedule_type": "cron", "schedule_spec": {"cron": "not cron"}},
@@ -704,8 +706,9 @@ async def test_create_and_update_store_stop_condition_separately(monkeypatch):
         ({}, {"schedule_spec": {"every_seconds": 600}}),
         ({"timezone": "Asia/Shanghai"}, {"end_at": "2020-01-01T00:00:00"}),
         ({}, {"timezone": "missing/zone"}),
+        ({}, {"timezone": "Europe"}),
     ],
-    ids=["sub-hourly-without-cap", "end-at-past", "invalid-timezone"],
+    ids=["sub-hourly-without-cap", "end-at-past", "invalid-timezone", "timezone-directory"],
 )
 async def test_update_shares_rest_validation_codes(monkeypatch, task_updates, fields):
     from fastapi import HTTPException

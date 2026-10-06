@@ -1593,7 +1593,7 @@ async def test_launch_passes_user_language_origin_and_run_thread_title(trigger):
 
     task_repo = DummyTaskRepo([_provenance_task()])
     run_repo = NumberedRunRepo(4)
-    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=run_repo, launch_run=fake_launch, poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3)
+    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=run_repo, launch_run=fake_launch, poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3, own_stop_available=True)
     now = datetime(2026, 10, 7, 1, 0, tzinfo=UTC)
 
     await service.dispatch_task(task_repo.rows[0], now=now, trigger=trigger)
@@ -1608,6 +1608,7 @@ async def test_launch_passes_user_language_origin_and_run_thread_title(trigger):
         "run_number": 4 if trigger == "scheduled" else None,
         "scheduled_for": now.isoformat(),
         "timezone": "Asia/Shanghai",
+        "schedule_type": "cron",
         "task_title": "检查发布清单",
         "instructions": "检查 release-checklist.md，列出没勾的项",
         "stop_condition": "清单全部勾完",
@@ -1619,6 +1620,33 @@ async def test_launch_passes_user_language_origin_and_run_thread_title(trigger):
     assert launch["prompt"].startswith(origin["instructions"])
     assert "stop_scheduled_task" in launch["prompt"] and "<standing_notes>" in launch["prompt"]
     assert launch["title"] == "检查发布清单 · 10-07 09:00"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("updates", "trigger", "expected"),
+    [
+        ({"schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "UTC"}, "scheduled", "检查发布清单 · #4"),
+        ({"schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "UTC"}, "manual", "检查发布清单"),
+        ({"schedule_type": "once", "schedule_spec": {"run_at": "2026-10-07T01:00:00+00:00"}, "timezone": "UTC"}, "scheduled", "检查发布清单 · #4"),
+        ({"schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "Asia/Shanghai"}, "scheduled", "检查发布清单 · 10-07 09:00"),
+        ({"schedule_type": "cron", "schedule_spec": {"cron": "0 1 * * *"}, "timezone": "UTC"}, "scheduled", "检查发布清单 · 10-07 01:00"),
+    ],
+    ids=["interval-placeholder", "interval-placeholder-trial", "once-offset-placeholder", "interval-real-zone", "cron-real-utc"],
+)
+async def test_run_thread_title_never_shows_a_placeholder_utc_time(updates, trigger, expected):
+    launches = []
+
+    async def fake_launch(**kwargs):
+        launches.append(kwargs)
+        return {"run_id": "run-prov", "thread_id": kwargs["thread_id"]}
+
+    task_repo = DummyTaskRepo([_provenance_task(**updates)])
+    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=NumberedRunRepo(4), launch_run=fake_launch, poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3, own_stop_available=True)
+    await service.dispatch_task(task_repo.rows[0], now=datetime(2026, 10, 7, 1, 0, tzinfo=UTC), trigger=trigger)
+    (launch,) = launches
+    assert launch["title"] == expected
+    assert launch["origin"]["schedule_type"] == updates["schedule_type"]
 
 
 @pytest.mark.asyncio

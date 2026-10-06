@@ -1486,7 +1486,7 @@ async def http(tmp_path, monkeypatch):
     monkeypatch.setattr(scheduled_tasks, "get_config", lambda: _Config())
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://lifecycle.test") as client:
-            yield SimpleNamespace(client=client, repo=repo, runs=run_repo, sf=sf, launches=launches)
+            yield SimpleNamespace(client=client, app=app, repo=repo, runs=run_repo, sf=sf, launches=launches)
     finally:
         await close_engine()
 
@@ -1575,7 +1575,10 @@ async def test_resume_renewal_raises_the_cap_or_clears_it(http):
     await _exhaust(http)
     detail = coded(await http.client.post("/api/scheduled-tasks/task-l/resume"), 409, "limits_exhausted")
     assert detail["params"] == {"limit": "max_runs", "used": 2, "max_runs": 2, "end_at": None}
-    assert detail["message"] == "All 2 automatic runs are used. Raise max_runs above 2 or set a later end_at in the same request to reactivate."
+    assert detail["message"] == "All 2 automatic runs are used. Raise max_runs above 2 or clear it (max_runs: null) in the same request to reactivate."
+    # A later end time does not renew a used-up run limit.
+    later = (datetime.now(UTC) + timedelta(days=2)).isoformat()
+    coded(await http.client.post("/api/scheduled-tasks/task-l/resume", json={"end_at": later}), 409, "limits_exhausted")
     coded(await http.client.post("/api/scheduled-tasks/task-l/resume", json={"max_runs": 2}), 422, "max_runs_not_above_used")
     raised = await http.client.post("/api/scheduled-tasks/task-l/resume", json={"max_runs": 5})
     assert raised.status_code == 200, raised.text
@@ -1606,7 +1609,7 @@ async def test_resume_reports_an_end_time_that_passed(http):
     await http.repo.update("task-l", user_id=OWNER, updates={"status": "completed"})
     detail = coded(await http.client.post("/api/scheduled-tasks/task-l/resume"), 409, "limits_exhausted")
     assert detail["params"]["limit"] == "end_at"
-    assert detail["message"].startswith("The end time ") and detail["message"].endswith("has passed. Set a later end_at (or clear it) in the same request to reactivate.")
+    assert detail["message"].startswith("The end time ") and detail["message"].endswith("has passed. Set a later end_at or clear it (end_at: null) in the same request to reactivate.")
     coded(await http.client.post("/api/scheduled-tasks/task-l/resume", json={"end_at": past.isoformat()}), 422, "end_at_in_past")
 
 
@@ -1669,6 +1672,18 @@ async def test_task_responses_report_the_active_run_of_a_recurring_task(http):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["scheduled_task_repo", "scheduled_task_service"])
+async def test_missing_scheduler_backend_is_a_coded_503(http, missing):
+    kept = getattr(http.app.state, missing)
+    setattr(http.app.state, missing, None)
+    try:
+        response = await (http.client.get("/api/scheduled-tasks") if missing == "scheduled_task_repo" else http.client.post("/api/scheduled-tasks/task-x/trigger"))
+        coded(response, 503, "scheduler_unavailable")
+    finally:
+        setattr(http.app.state, missing, kept)
+
+
+@pytest.mark.asyncio
 async def test_wrong_types_keep_fastapis_list_detail(http):
     response = await http.client.post("/api/scheduled-tasks", json={**_CREATE, "max_runs": "abc"})
     assert response.status_code == 422
@@ -1688,6 +1703,8 @@ async def test_wrong_types_keep_fastapis_list_detail(http):
         ({"context_mode": "reuse_thread", "thread_id": "thread-1", "goal_objective": "report"}, "goal_requires_fresh_thread", None),
         ({"schedule_spec": {"every_seconds": 30}}, "interval_too_short", {"min_seconds": 60}),
         ({"timezone": "Mars/Base"}, "invalid_timezone", None),
+        ({"timezone": "Europe"}, "invalid_timezone", None),
+        ({"schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}, "timezone": "Europe"}, "invalid_timezone", None),
         ({"schedule_type": "weekly"}, "invalid_schedule_type", None),
     ],
 )
@@ -1695,6 +1712,13 @@ async def test_value_rules_are_coded_errors(http, extra, code, params):
     detail = coded(await http.client.post("/api/scheduled-tasks", json={**_CREATE, **extra}), 422, code)
     assert detail.get("params") == params
     assert await http.repo.list_by_user(OWNER) == []
+
+
+@pytest.mark.asyncio
+async def test_patch_with_a_timezone_directory_name_is_invalid_timezone(http):
+    created = (await http.client.post("/api/scheduled-tasks", json={**_CREATE, "schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}})).json()
+    detail = coded(await http.client.patch(f"/api/scheduled-tasks/{created['id']}", json={"timezone": "Europe"}), 422, "invalid_timezone")
+    assert "zoneinfo" not in detail["message"].lower()
 
 
 @pytest.mark.asyncio

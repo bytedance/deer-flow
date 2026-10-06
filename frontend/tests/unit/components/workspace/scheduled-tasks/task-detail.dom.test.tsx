@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, rs, test } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import { TaskDetail } from "@/components/workspace/scheduled-tasks/task-detail";
@@ -334,5 +341,132 @@ describe("TaskDetail", () => {
     );
     expect(visible).not.toContain("boom");
     expectNoRawIdentifiers(visible);
+  });
+
+  test("a prompt that wraps past two lines gets Show all, measured not guessed", async () => {
+    // jsdom has no layout: give the clamped prompt the heights a 375 px
+    // column produces for a 120-character prompt (three lines, two shown).
+    const prompt =
+      "Read release-checklist.md and list every unchecked item, with its owner and due date, for the team.";
+    expect(prompt.length).toBeLessThan(180);
+    const heights = (element: HTMLElement) =>
+      element.dataset.testid === "scheduled-task-prompt"
+        ? {
+            client: 40,
+            scroll: element.className.includes("line-clamp-2") ? 60 : 40,
+          }
+        : { client: 0, scroll: 0 };
+    const client = rs
+      .spyOn(HTMLElement.prototype, "clientHeight", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return heights(this).client;
+      });
+    const scroll = rs
+      .spyOn(HTMLElement.prototype, "scrollHeight", "get")
+      .mockImplementation(function (this: HTMLElement) {
+        return heights(this).scroll;
+      });
+    try {
+      renderDetail(task({ prompt }));
+      await screen.findByText("No runs yet");
+      const showAll = screen.getByRole("button", { name: "Show all" });
+      expect(showAll.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(showAll);
+      expect(screen.getByRole("button", { name: "Show less" })).toBeTruthy();
+      expect(
+        screen.getByTestId("scheduled-task-prompt").className,
+      ).not.toContain("line-clamp-2");
+    } finally {
+      client.mockRestore();
+      scroll.mockRestore();
+    }
+  });
+
+  test("a short prompt that fits gets no Show all", async () => {
+    const client = rs
+      .spyOn(HTMLElement.prototype, "clientHeight", "get")
+      .mockReturnValue(40);
+    const scroll = rs
+      .spyOn(HTMLElement.prototype, "scrollHeight", "get")
+      .mockReturnValue(40);
+    try {
+      renderDetail(task({ prompt: "Check the list." }));
+      await screen.findByText("No runs yet");
+      expect(screen.queryByRole("button", { name: "Show all" })).toBeNull();
+    } finally {
+      client.mockRestore();
+      scroll.mockRestore();
+    }
+  });
+
+  test("a short history shows its count and no pager", async () => {
+    renderDetail(task(), { runs: [run()] });
+    await screen.findByTestId("scheduled-run-row");
+    expect(screen.getByTestId("scheduled-task-runs").textContent).toBe("1 run");
+    expect(
+      screen.queryByRole("navigation", { name: "Run history pages" }),
+    ).toBeNull();
+  });
+
+  test("a history longer than a page shows no page-sized count, and pages", async () => {
+    const runs = Array.from({ length: 51 }, (_, index) =>
+      run({ id: `task-run-${String(index).padStart(20, "0")}` }),
+    );
+    renderDetail(task(), { runs });
+    await screen.findAllByTestId("scheduled-run-row");
+    expect(screen.getAllByTestId("scheduled-run-row")).toHaveLength(50);
+    expect(screen.queryByTestId("scheduled-task-runs")).toBeNull();
+    expect(
+      screen.getByRole("navigation", { name: "Run history pages" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Older runs" })).toHaveProperty(
+      "disabled",
+      false,
+    );
+  });
+
+  test("an auto-pause quotes one sentence of the run's summary, punctuated once", async () => {
+    renderDetail(
+      task({
+        status: "paused",
+        goal_objective: "清单全部勾完",
+        // contracts/scheduled_goal_notes_contract.json auto_pause_last_error
+        last_error: "paused after 3 unmet scheduled goal runs",
+      }),
+      {
+        locale: "zh-CN",
+        runs: [
+          run({
+            status: "unmet",
+            summary: "清单里还有 3 项没勾（负责人：赵宁）。明天再检查。",
+          }),
+        ],
+      },
+    );
+    const notice = await screen.findByTestId("scheduled-task-outcome");
+    await waitFor(() =>
+      expect(notice.textContent).toContain(
+        "最近一次的原因：清单里还有 3 项没勾（负责人：赵宁）。恢复后计数不会清零",
+      ),
+    );
+    expect(notice.textContent).not.toContain("。。");
+    expect(notice.textContent).not.toContain("明天再检查");
+  });
+
+  test("a task finished by its run limit is told to raise or remove that limit", async () => {
+    renderDetail(
+      task({
+        status: "completed",
+        next_run_at: null,
+        max_runs: 5,
+        automatic_runs_used: 5,
+        end_at: "2099-12-31T10:00:00Z",
+      }),
+    );
+    const notice = await screen.findByTestId("scheduled-task-outcome");
+    expect(notice.textContent).toContain(
+      "To keep it running, raise the run limit or remove it, then resume.",
+    );
+    expect(notice.textContent).not.toContain("later end time");
   });
 });

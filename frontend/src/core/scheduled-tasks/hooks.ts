@@ -5,7 +5,6 @@ import {
   type QueryClient,
 } from "@tanstack/react-query";
 import { useEffect, useRef, type RefObject } from "react";
-import { toast } from "sonner";
 
 import { GatewayApiError } from "@/core/api/errors";
 import { useRenderActivity } from "@/core/dom/render-activity";
@@ -25,6 +24,7 @@ import {
   type ScheduledTaskPayload,
   type ScheduledTaskUpdatePayload,
 } from "./api";
+import { toastScheduledTaskError } from "./error-toast";
 import {
   describeScheduledTaskError,
   shouldReportScheduledTaskError,
@@ -144,8 +144,11 @@ function useErrorToast(action: keyof Translations["scheduledTasks"]["errors"]) {
     if (!shouldReportScheduledTaskError(error)) {
       return;
     }
-    const { message } = describeScheduledTaskError(error, t, { locale });
-    toast.error(`${t.scheduledTasks.errors[action]}: ${message}`);
+    toastScheduledTaskError(
+      t,
+      t.scheduledTasks.errors[action],
+      describeScheduledTaskError(error, t, { locale }),
+    );
   };
 }
 

@@ -705,8 +705,18 @@ export interface Translations {
       unavailableTitle: string;
       unavailableBody: string;
       selectHint: string;
+      tabCount: string;
+      loading: string;
+      taskNotInChat: string;
     };
     time: {
+      today: string;
+      tomorrow: string;
+      yesterday: string;
+      yourTime: string;
+    };
+    /** Same as `time`, for use mid-sentence (lowercase in English). */
+    timeInline: {
       today: string;
       tomorrow: string;
       yesterday: string;
@@ -772,7 +782,8 @@ export interface Translations {
       openLatestRun: string;
       resumeAnyway: string;
       limitTitle: string;
-      limitBody: string;
+      limitBodyRuns: string;
+      limitBodyEnd: string;
       endTitle: string;
       extendLimit: string;
       onceFinished: string;
@@ -800,6 +811,9 @@ export interface Translations {
       maxRuns: string;
       maxRunsHint: string;
       endAt: string;
+      invalidEndAt: string;
+      labelWithZone: string;
+      contextLabel: string;
       clear: string;
       frequentNeedsCap: string;
       schedule: string;
@@ -827,6 +841,7 @@ export interface Translations {
       openChat: string;
       busyRunning: string;
       busyQueued: string;
+      busyQueuedPaused: string;
       alreadyQueued: string;
       deleteTitle: string;
       deleteBody: string;
@@ -849,6 +864,7 @@ export interface Translations {
       resume: string;
       trigger: string;
       delete: string;
+      withReason: string;
     };
     status: {
       enabled: string;
@@ -953,6 +969,7 @@ export interface Translations {
       taskFinished: string;
       taskQuotaExceeded: string;
       schedulerNotRunning: string;
+      schedulerUnavailable: string;
       triggerFailed: string;
       permissionDenied: string;
     };

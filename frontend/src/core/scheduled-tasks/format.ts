@@ -265,3 +265,19 @@ export function displayTimeZone(
   }
   return task.timezone || browserTimeZone();
 }
+
+/**
+ * A run summary short enough to quote mid-sentence: its first sentence, no
+ * trailing sentence punctuation (the template adds its own), at most `max`
+ * characters with an ellipsis. The full text stays in the linked run.
+ */
+export function briefReason(summary: string, max = 120): string {
+  const text = summary.replace(/\s+/g, " ").trim();
+  const sentenceEnd = /[。！？]|[.!?](?=\s|$)/.exec(text);
+  const first = sentenceEnd ? text.slice(0, sentenceEnd.index + 1) : text;
+  const bare = first.replace(/[\s。．.！!？?；;，,、:：]+$/u, "");
+  if (bare.length <= max) {
+    return bare;
+  }
+  return `${bare.slice(0, max - 1).trimEnd()}…`;
+}

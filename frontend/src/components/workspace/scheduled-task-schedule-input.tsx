@@ -18,6 +18,7 @@ import {
   intervalToSeconds,
   maxIntervalAmount,
   minIntervalAmount,
+  onceRunAtInstant,
   pad2,
   parseCron,
   secondsToInterval,
@@ -89,10 +90,13 @@ export function ScheduledTaskScheduleInput({
   initial,
   onChange,
   scheduleTypeLocked = false,
+  minIntervalSeconds,
 }: {
   initial: ScheduleValue;
   onChange: (value: ScheduleValue) => void;
   scheduleTypeLocked?: boolean;
+  /** Server floor for intervals (`/api/features`); the default when unknown. */
+  minIntervalSeconds?: number;
 }) {
   const { t, locale } = useI18n();
   const schedLocale: ScheduleLocale = locale.startsWith("zh") ? "zh" : "en";
@@ -112,7 +116,10 @@ export function ScheduledTaskScheduleInput({
   );
   const [runAtLocal, setRunAtLocal] = useState<string>(
     initial.schedule_type === "once" && initial.schedule_spec.run_at
-      ? utcToZonedLocalInput(initial.schedule_spec.run_at, timezone)
+      ? utcToZonedLocalInput(
+          onceRunAtInstant(initial.schedule_spec.run_at, timezone),
+          timezone,
+        )
       : "",
   );
 
@@ -171,7 +178,7 @@ export function ScheduledTaskScheduleInput({
       // Preserve their cadence on edit/duplicate until the amount or unit is
       // explicitly changed; the server owns the configurable minimum.
       const amount = intervalEdited
-        ? clampIntervalAmount(intervalAmount, intervalUnit)
+        ? clampIntervalAmount(intervalAmount, intervalUnit, minIntervalSeconds)
         : intervalAmount;
       onChangeRef.current({
         schedule_type: "interval",
@@ -200,6 +207,7 @@ export function ScheduledTaskScheduleInput({
     intervalAmount,
     intervalUnit,
     intervalEdited,
+    minIntervalSeconds,
   ]);
 
   function updateParts(patch: Partial<CronParts>) {
@@ -387,7 +395,7 @@ export function ScheduledTaskScheduleInput({
         <div className="flex gap-2">
           <Input
             type="number"
-            min={minIntervalAmount(intervalUnit)}
+            min={minIntervalAmount(intervalUnit, minIntervalSeconds)}
             max={maxIntervalAmount(intervalUnit)}
             value={intervalAmountText}
             onChange={(e) => {
@@ -407,6 +415,7 @@ export function ScheduledTaskScheduleInput({
               const next = clampIntervalAmount(
                 Number(intervalAmountText),
                 intervalUnit,
+                minIntervalSeconds,
               );
               setIntervalAmount(next);
               setIntervalAmountText(String(next));
@@ -419,7 +428,11 @@ export function ScheduledTaskScheduleInput({
               const unit = value as IntervalUnit;
               setIntervalEdited(true);
               setIntervalUnit(unit);
-              const next = clampIntervalAmount(intervalAmount, unit);
+              const next = clampIntervalAmount(
+                intervalAmount,
+                unit,
+                minIntervalSeconds,
+              );
               setIntervalAmount(next);
               setIntervalAmountText(String(next));
             }}
@@ -482,17 +495,19 @@ export function ScheduledTaskScheduleInput({
       >
         {preview}
       </div>
-      {scheduleType === "interval" && intervalUnit === "seconds" && (
-        <div
-          className="text-muted-foreground text-xs"
-          data-testid="schedule-interval-min-hint"
-        >
-          {labels.fields.intervalMinHint.replace(
-            "{n}",
-            String(minIntervalAmount("seconds")),
-          )}
-        </div>
-      )}
+      {scheduleType === "interval" &&
+        (intervalUnit === "seconds" ||
+          minIntervalAmount(intervalUnit, minIntervalSeconds) > 1) && (
+          <div
+            className="text-muted-foreground text-xs"
+            data-testid="schedule-interval-min-hint"
+          >
+            {labels.fields.intervalMinHint.replace(
+              "{n}",
+              String(minIntervalAmount("seconds", minIntervalSeconds)),
+            )}
+          </div>
+        )}
     </div>
   );
 }

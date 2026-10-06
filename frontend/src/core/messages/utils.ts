@@ -86,6 +86,12 @@ export function scheduledOriginOf(message: Message): ScheduledOrigin | null {
       typeof origin.run_number === "number" ? origin.run_number : null,
     scheduled_for: stringOr(origin.scheduled_for, ""),
     timezone: stringOr(origin.timezone, ""),
+    schedule_type:
+      origin.schedule_type === "once" ||
+      origin.schedule_type === "cron" ||
+      origin.schedule_type === "interval"
+        ? origin.schedule_type
+        : null,
     task_title: stringOr(origin.task_title, ""),
     instructions: stringOr(origin.instructions, ""),
     stop_condition: stringOr(origin.stop_condition, null),

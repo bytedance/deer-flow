@@ -811,24 +811,31 @@ def get_thread_store(request: Request) -> ThreadMetaStore:
     return val
 
 
+def _scheduler_unavailable(message: str) -> HTTPException:
+    """Coded 503 for the scheduled-task routes (contracts/scheduled_task_errors_contract.json)."""
+    from app.gateway.scheduled_task_errors import scheduler_error
+
+    return scheduler_error(503, "scheduler_unavailable", message)
+
+
 def get_scheduled_task_repo(request: Request):
     val = getattr(request.app.state, "scheduled_task_repo", None)
     if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task repo not available")
+        raise _scheduler_unavailable("Scheduled task repo not available")
     return val
 
 
 def get_scheduled_task_run_repo(request: Request):
     val = getattr(request.app.state, "scheduled_task_run_repo", None)
     if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task run repo not available")
+        raise _scheduler_unavailable("Scheduled task run repo not available")
     return val
 
 
 def get_scheduled_task_service(request: Request):
     val = getattr(request.app.state, "scheduled_task_service", None)
     if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task service not available")
+        raise _scheduler_unavailable("Scheduled task service not available")
     return val
 
 

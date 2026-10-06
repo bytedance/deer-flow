@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { zhCN } from "@/core/i18n/locales/zh-CN";
 import {
+  briefReason,
   browserTimeZone,
   displayTimeZone,
   formatTaskDateTime,
@@ -177,5 +178,25 @@ describe("display zone", () => {
     expect(
       displayTimeZone({ schedule_type: "once", timezone: "Europe/Berlin" }),
     ).toBe("Europe/Berlin");
+  });
+});
+
+describe("briefReason", () => {
+  it("quotes one sentence without its closing punctuation", () => {
+    expect(
+      briefReason("清单里还有 3 项没勾（负责人：赵宁）。明天再检查一次。"),
+    ).toBe("清单里还有 3 项没勾（负责人：赵宁）");
+    expect(briefReason("Two items are still open. I will check again.")).toBe(
+      "Two items are still open",
+    );
+    expect(briefReason("Version 1.2 is not released yet")).toBe(
+      "Version 1.2 is not released yet",
+    );
+  });
+
+  it("caps a long sentence with an ellipsis", () => {
+    const reason = briefReason("a".repeat(300));
+    expect(reason).toHaveLength(120);
+    expect(reason.endsWith("…")).toBe(true);
   });
 });

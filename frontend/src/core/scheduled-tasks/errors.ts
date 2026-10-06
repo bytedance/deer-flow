@@ -43,6 +43,7 @@ export const SCHEDULED_TASK_ERROR_KEYS: Readonly<
   task_finished: "taskFinished",
   task_quota_exceeded: "taskQuotaExceeded",
   scheduler_not_running: "schedulerNotRunning",
+  scheduler_unavailable: "schedulerUnavailable",
   trigger_failed: "triggerFailed",
 };
 

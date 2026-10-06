@@ -341,6 +341,7 @@ describe("ScheduledTaskCard", () => {
         status: "paused",
         last_error:
           "stopped by the agent in run 41e5fae0-0ffd-4af7-809b-c71d6dd2bb39",
+        last_run_id: "41e5fae0-0ffd-4af7-809b-c71d6dd2bb39",
         last_run_at: "2026-10-05T12:21:53+00:00",
       }),
     );
@@ -354,6 +355,27 @@ describe("ScheduledTaskCard", () => {
       screen.getByTestId("scheduled-task-card-stops").textContent,
     ).toContain("Reached");
     expectNoRawIdentifiers(card());
+  });
+
+  test("a trial after the agent paused the task never shows as the moment it was reached", async () => {
+    api.fetchScheduledTask.mockResolvedValue(
+      liveTask({
+        status: "paused",
+        stop_condition: "every item is checked",
+        last_error:
+          "stopped by the agent in run 41e5fae0-0ffd-4af7-809b-c71d6dd2bb39",
+        // "Run once now" on the paused task moved the last run.
+        last_run_id: "9b1c7f8e-1111-4c4c-9c9c-000000000001",
+        last_run_at: "2026-10-06T08:00:00+00:00",
+      }),
+    );
+    renderCard();
+    await waitFor(() =>
+      expect(card().textContent).toContain("Paused by agent"),
+    );
+    expect(
+      screen.getByTestId("scheduled-task-card-stops").textContent,
+    ).not.toContain("Reached");
   });
 
   test("resume with exhausted limits explains inline and links the task", async () => {

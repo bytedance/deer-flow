@@ -32,6 +32,7 @@ import { useScheduledTasksFeature } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { availableActions } from "@/core/scheduled-tasks/actions";
 import { describeTaskSchedule } from "@/core/scheduled-tasks/cron";
+import { toastScheduledTaskError } from "@/core/scheduled-tasks/error-toast";
 import {
   describeScheduledTaskError,
   shouldReportScheduledTaskError,
@@ -175,11 +176,11 @@ export function ScheduledTaskCard({
   // `limits_exhausted` inline, so it reports the rest itself.
   const reportResumeError = (error: Error) => {
     if (!shouldReportScheduledTaskError(error)) return;
-    const { message } = describeScheduledTaskError(error, t, {
-      locale,
-      timeZone,
-    });
-    toast.error(`${st.errors.resume}: ${message}`);
+    toastScheduledTaskError(
+      t,
+      st.errors.resume,
+      describeScheduledTaskError(error, t, { locale, timeZone }),
+    );
   };
 
   const doPause = () => {

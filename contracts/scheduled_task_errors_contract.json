@@ -32,6 +32,7 @@
     "task_finished",
     "task_quota_exceeded",
     "scheduler_not_running",
+    "scheduler_unavailable",
     "trigger_failed"
   ],
   "agent_only_codes": [

@@ -10,12 +10,14 @@ export type TaskAction =
 
 /**
  * Why an action is disabled. UI copy: running → `actions.busyRunning`,
- * queued → `actions.busyQueued`, alreadyQueued → `actions.alreadyQueued`,
- * createBlocked → `page.createBlocked`.
+ * queued → `actions.busyQueued` (says Pause cancels it), queuedNoPause →
+ * `actions.busyQueuedPaused` (a paused or finished task offers no Pause),
+ * alreadyQueued → `actions.alreadyQueued`, createBlocked → `page.createBlocked`.
  */
 export type TaskActionBlockReason =
   | "running"
   | "queued"
+  | "queuedNoPause"
   | "alreadyQueued"
   | "createBlocked";
 
@@ -61,13 +63,17 @@ export function availableActions(
   const busy = isTaskBusy(task);
   const queued = !busy && task.active_run_status === "queued";
   const terminal = TERMINAL.has(task.status);
+  const pauseVisible = task.status === "enabled" || task.status === "running";
+  // Only point at Pause when Pause is offered (a trial queued on a paused
+  // task waits its turn instead).
   const blocked: TaskActionBlockReason | undefined = busy
     ? "running"
     : queued
-      ? "queued"
+      ? pauseVisible
+        ? "queued"
+        : "queuedNoPause"
       : undefined;
 
-  const pauseVisible = task.status === "enabled" || task.status === "running";
   const resumeVisible =
     task.status === "paused" || (terminal && task.schedule_type !== "once");
 

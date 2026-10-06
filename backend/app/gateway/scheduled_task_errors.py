@@ -47,6 +47,7 @@ SCHEDULER_UI_ERROR_CODES: frozenset[str] = frozenset(
         "task_finished",
         "task_quota_exceeded",
         "scheduler_not_running",
+        "scheduler_unavailable",
         "trigger_failed",
     }
 )
@@ -108,9 +109,9 @@ def active_occurrence_error(status: str) -> HTTPException:
 def limits_exhausted_error(exc: Any) -> HTTPException:
     """409 ``limits_exhausted`` from a ``ScheduledTaskLimitsExhausted``."""
     if exc.limit == "end_at":
-        message = f"The end time {exc.end_at} has passed. Set a later end_at (or clear it) in the same request to reactivate."
+        message = f"The end time {exc.end_at} has passed. Set a later end_at or clear it (end_at: null) in the same request to reactivate."
     else:
-        message = f"All {exc.max_runs} automatic runs are used. Raise max_runs above {exc.used} or set a later end_at in the same request to reactivate."
+        message = f"All {exc.max_runs} automatic runs are used. Raise max_runs above {exc.used} or clear it (max_runs: null) in the same request to reactivate."
     return scheduler_error(409, "limits_exhausted", message, limit=exc.limit, used=exc.used, max_runs=exc.max_runs, end_at=exc.end_at)
 
 

@@ -1293,7 +1293,9 @@ run is the stored one when still ahead, otherwise computed from now, so no
 catch-up run happens; a one-time task whose time passed returns `422
 once_time_passed`. Resuming an `enabled` task changes nothing. A task whose
 safety cap is used up returns `409 limits_exhausted` unless the same request
-raises `max_runs` above `params.used`, sets a later `end_at`, or clears the cap.
+renews the limit named in `params.limit`: for `max_runs`, a `max_runs` above
+`params.used` or `null`; for `end_at`, a later `end_at` or `null`. A later
+`end_at` alone does not renew a used-up `max_runs`.
 A future `end_at` that falls before the next run returns `422
 end_at_before_first_run` (also on a PATCH that changes the schedule).
 
@@ -1315,15 +1317,16 @@ reply, at most 160 characters).
 request is coded:
 
 ```json
-{ "detail": { "code": "limits_exhausted", "message": "All 5 automatic runs are used. Raise max_runs above 5 or set a later end_at in the same request to reactivate.", "params": { "limit": "max_runs", "used": 5, "max_runs": 5, "end_at": null } } }
+{ "detail": { "code": "limits_exhausted", "message": "All 5 automatic runs are used. Raise max_runs above 5 or clear it (max_runs: null) in the same request to reactivate.", "params": { "limit": "max_runs", "used": 5, "max_runs": 5, "end_at": null } } }
 ```
 
 `message` stays English for API clients; `params` is omitted when empty.
 Clients that read `detail` as a string must read `detail.message` instead.
-Two errors keep their old shape: a `403` from route permissions is the plain
-string `"Permission denied: <permission>"`, and FastAPI's own `422` for
-malformed JSON or wrong types (for example `"max_runs": "abc"`) keeps its list
-`detail`. Codes the web UI translates: `invalid_request`, `invalid_schedule`, `invalid_schedule_type`, `invalid_timezone`, `interval_too_short`, `interval_too_long`, `once_in_past`, `once_too_soon`, `once_time_passed`, `invalid_context_mode`, `reuse_thread_requires_thread`, `thread_not_found`, `invalid_assistant`, `unknown_assistant`, `invalid_goal`, `goal_requires_fresh_thread`, `invalid_stop_condition`, `invalid_max_runs`, `end_at_in_past`, `end_at_before_first_run`, `frequent_requires_limit`, `max_runs_not_above_used`, `limits_exhausted`, `task_not_found`, `task_running`, `run_queued`, `task_changed`, `task_finished`, `task_quota_exceeded`, `scheduler_not_running`, `trigger_failed`. Codes only the chat capability
+Three errors keep their old shape: a `403` from route permissions is the plain
+string `"Permission denied: <permission>"`, FastAPI's own `422` for malformed
+JSON or wrong types (for example `"max_runs": "abc"`) keeps its list `detail`,
+and the shared `503` `"Thread metadata store not available"` (a Gateway without
+a thread store) stays a plain string. Codes the web UI translates: `invalid_request`, `invalid_schedule`, `invalid_schedule_type`, `invalid_timezone`, `interval_too_short`, `interval_too_long`, `once_in_past`, `once_too_soon`, `once_time_passed`, `invalid_context_mode`, `reuse_thread_requires_thread`, `thread_not_found`, `invalid_assistant`, `unknown_assistant`, `invalid_goal`, `goal_requires_fresh_thread`, `invalid_stop_condition`, `invalid_max_runs`, `end_at_in_past`, `end_at_before_first_run`, `frequent_requires_limit`, `max_runs_not_above_used`, `limits_exhausted`, `task_not_found`, `task_running`, `run_queued`, `task_changed`, `task_finished`, `task_quota_exceeded`, `scheduler_not_running`, `scheduler_unavailable` (503: this Gateway has no scheduled-task persistence), `trigger_failed`. Codes only the chat capability
 returns: `timezone_required`, `authentication_required`, `permission_denied`, `scheduler_tools_disabled`, `authority_expired`, `conversation_not_found`, `interactive_run_required`, `unsupported_action`, `unsupported_fields`, `task_id_required`, `note_not_verbatim`, `note_limit_reached`, `trial_requires_direct_request`, `no_stop_authority`, `occurrence_not_active`. The machine-readable list is
 `contracts/scheduled_task_errors_contract.json`.
 
@@ -1347,9 +1350,14 @@ ignored, and it never reaches the run config, the checkpoint or the prompt.
 **Scheduled run messages.** A scheduled run's prompt message has the id
 `scheduled-<task_run_id>` and carries `additional_kwargs.deerflow_scheduled_origin`
 (`task_id`, `task_run_id`, `trigger`, `run_number`, `scheduled_for`, `timezone`,
-`task_title`, `instructions`, `stop_condition`, `standing_notes`), the
-user-written parts a client shows instead of the launched text. The key is
-server-owned: it is stripped from client-supplied messages and state updates.
+`schedule_type`, `task_title`, `instructions`, `stop_condition`,
+`standing_notes`), the user-written parts a client shows instead of the
+launched text. Show an `interval` run's time in the viewer's zone (its stored
+`timezone` may be the `"UTC"` placeholder of a task created without one) and
+other runs in `timezone`. A new run conversation is titled
+`"{task title} · MM-DD HH:MM"` in the task's zone, or `"{task title} · #{run}"`
+when that zone is only the placeholder. The key is server-owned: it is
+stripped from client-supplied messages and state updates.
 
 ---
 

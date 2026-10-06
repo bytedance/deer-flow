@@ -131,12 +131,11 @@ test("history load failure is retriable and switching tasks resets the page", as
   await expect(rowOf(page, "execution-50")).toBeVisible();
   await page.getByTestId("scheduled-task-item-other").click();
   await expect(rowOf(page, "other-execution")).toBeVisible();
+  // Back on page 1 of a one-run history: no pager, and the count shows.
   await expect(
     page.getByRole("navigation", { name: "Run history pages" }),
-  ).toContainText("Page 1");
-  await expect(
-    page.getByRole("button", { name: "Newer runs", exact: true }),
-  ).toBeDisabled();
+  ).toHaveCount(0);
+  await expect(page.getByTestId("scheduled-task-runs")).toContainText("1 run");
 });
 
 test("only latest history polls and returning to latest fetches newly inserted runs", async ({
@@ -182,7 +181,11 @@ test("only latest history polls and returning to latest fetches newly inserted r
 test("Chinese history navigation and empty results are localized", async ({
   page,
 }) => {
-  mockLangGraphAPI(page, { threads: [], scheduledTasks: [task] });
+  mockLangGraphAPI(page, {
+    threads: [],
+    scheduledTasks: [task, { ...task, id: "empty", title: "Empty history" }],
+  });
+  await seedRuns(page, { history: runs(51), empty: [] });
   await page.goto("/workspace/scheduled-tasks");
   await page.evaluate(() => {
     document.cookie = "locale=zh-CN; path=/";
@@ -191,11 +194,19 @@ test("Chinese history navigation and empty results are localized", async ({
   const nav = page.getByRole("navigation", { name: "运行记录分页" });
   await expect(nav).toContainText("第 1 页");
   await expect(
-    nav.getByRole("button", { name: "更早的运行", exact: true }),
-  ).toBeDisabled();
-  await expect(
     nav.getByRole("button", { name: "较新的运行", exact: true }),
   ).toBeDisabled();
+  await nav.getByRole("button", { name: "更早的运行", exact: true }).click();
+  await expect(nav).toContainText("第 2 页");
+  await expect(
+    nav.getByRole("button", { name: "更早的运行", exact: true }),
+  ).toBeDisabled();
+  // An empty history is localized and needs no pager.
+  await page.getByTestId("scheduled-task-item-empty").click();
+  await expect(page.getByText("还没有运行", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("navigation", { name: "运行记录分页" }),
+  ).toHaveCount(0);
 });
 
 test("pending history does not report an empty run count", async ({ page }) => {

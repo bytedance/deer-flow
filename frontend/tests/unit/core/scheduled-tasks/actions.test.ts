@@ -84,6 +84,21 @@ describe("availableActions", () => {
     expect(actions.runNow).toEqual(blocked("alreadyQueued"));
   });
 
+  it.each(["paused", "completed"] as const)(
+    "a trial queued on a %s task never points at Pause, which is not offered",
+    (status) => {
+      const actions = availableActions(
+        task({ status, active_run_status: "queued" }),
+        { createBlocked: false },
+      );
+      expect(actions.pause.visible).toBe(false);
+      expect(actions.resume).toEqual(blocked("queuedNoPause"));
+      expect(actions.edit).toEqual(blocked("queuedNoPause"));
+      expect(actions.delete).toEqual(blocked("queuedNoPause"));
+      expect(actions.runNow).toEqual(blocked("alreadyQueued"));
+    },
+  );
+
   it.each(["completed", "failed", "cancelled"] as const)(
     "a finished recurring task (%s) offers Resume, never Pause",
     (status) => {

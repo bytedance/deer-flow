@@ -11,8 +11,10 @@ MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60
 def validate_timezone(timezone_name: str) -> str:
     try:
         ZoneInfo(timezone_name)
-    except ZoneInfoNotFoundError as exc:
-        raise ValueError(f"Unknown timezone: {timezone_name}") from exc
+    except (ZoneInfoNotFoundError, OSError, ValueError):
+        # A tzdata directory name such as "Europe" raises IsADirectoryError
+        # (an OSError) and malformed keys raise ValueError; all are an unknown zone.
+        raise ValueError(f"Unknown timezone: {timezone_name}") from None
     return timezone_name
 
 

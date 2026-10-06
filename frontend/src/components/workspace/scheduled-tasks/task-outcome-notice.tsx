@@ -12,7 +12,7 @@ import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
-import { formatTaskTime } from "@/core/scheduled-tasks/format";
+import { briefReason, formatTaskTime } from "@/core/scheduled-tasks/format";
 import type { TaskOutcome } from "@/core/scheduled-tasks/goal-outcome";
 import type { ScheduledTask } from "@/core/scheduled-tasks/types";
 import { cn } from "@/lib/utils";
@@ -95,6 +95,9 @@ export function TaskOutcomeNotice({
   const st = t.scheduledTasks;
   const time = (iso: string) =>
     formatTaskTime(iso, { timeZone, locale, labels: st.time });
+  // Mid-sentence: "yesterday 20:22", not "Yesterday 20:22".
+  const inlineTime = (iso: string) =>
+    formatTaskTime(iso, { timeZone, locale, labels: st.timeInline });
 
   switch (outcome.kind) {
     case "pausedByAgent":
@@ -106,7 +109,9 @@ export function TaskOutcomeNotice({
           title={st.notice.pausedByAgentTitle}
           body={
             outcome.at
-              ? fill(st.notice.pausedByAgentBody, { time: time(outcome.at) })
+              ? fill(st.notice.pausedByAgentBody, {
+                  time: inlineTime(outcome.at),
+                })
               : undefined
           }
           actions={
@@ -123,7 +128,9 @@ export function TaskOutcomeNotice({
     case "autoPaused": {
       const reason = outcome.latestReasonKey
         ? st.goal.reasons[outcome.latestReasonKey]
-        : (outcome.latestSummary ?? st.runStatus.unmet);
+        : outcome.latestSummary
+          ? briefReason(outcome.latestSummary)
+          : st.runStatus.unmet;
       return (
         <Notice
           kind={outcome.kind}
@@ -168,7 +175,11 @@ export function TaskOutcomeNotice({
               ? fill(st.notice.limitTitle, { max: outcome.max })
               : fill(st.notice.endTitle, { time: time(outcome.endAt) })
           }
-          body={st.notice.limitBody}
+          body={
+            outcome.kind === "limitReached"
+              ? st.notice.limitBodyRuns
+              : st.notice.limitBodyEnd
+          }
           actions={
             <Button
               variant="outline"

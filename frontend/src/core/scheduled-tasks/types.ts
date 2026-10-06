@@ -136,6 +136,8 @@ export type ScheduledOrigin = {
   run_number: number | null;
   scheduled_for: string;
   timezone: string;
+  /** Absent on launches recorded before this field existed. */
+  schedule_type: ScheduledTask["schedule_type"] | null;
   task_title: string;
   instructions: string;
   stop_condition: string | null;

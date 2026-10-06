@@ -7,6 +7,7 @@ import {
   clampIntervalAmount,
   intervalToSeconds,
   minIntervalAmount,
+  onceRunAtInstant,
   parseCron,
   secondsToInterval,
   serializeCron,
@@ -360,6 +361,17 @@ describe("interval conversion", () => {
     expect(clampIntervalAmount(1, "minutes")).toBe(1);
   });
 
+  test("a server with a larger floor raises every unit's minimum", () => {
+    expect(minIntervalAmount("seconds", 300)).toBe(300);
+    expect(minIntervalAmount("minutes", 300)).toBe(5);
+    expect(minIntervalAmount("hours", 300)).toBe(1);
+    expect(minIntervalAmount("minutes", 90)).toBe(2);
+    expect(clampIntervalAmount(2, "minutes", 300)).toBe(5);
+    expect(clampIntervalAmount(120, "seconds", 300)).toBe(300);
+    // An unknown or broken floor falls back to the default.
+    expect(minIntervalAmount("seconds", Number.NaN)).toBe(60);
+  });
+
   test("hasScheduleSpec accepts interval every_seconds", () => {
     expect(hasScheduleSpec({ every_seconds: 90 })).toBe(true);
     expect(hasScheduleSpec({ cron: "0 9 * * *" })).toBe(true);
@@ -460,6 +472,27 @@ describe("zonedLocalToUtcIso DST transitions", () => {
   });
 });
 
+describe("onceRunAtInstant", () => {
+  test("a run_at without an offset is wall-clock time in the task's zone", () => {
+    expect(onceRunAtInstant("2026-10-07T09:00:00", "Asia/Shanghai")).toBe(
+      "2026-10-07T01:00:00+00:00",
+    );
+    expect(onceRunAtInstant("2026-10-07T09:00", "America/New_York")).toBe(
+      "2026-10-07T13:00:00+00:00",
+    );
+  });
+
+  test("a run_at with an offset is already an instant", () => {
+    for (const value of [
+      "2026-10-07T01:00:00Z",
+      "2026-10-07T09:00:00+08:00",
+      "2026-10-07T09:00:00-0500",
+    ]) {
+      expect(onceRunAtInstant(value, "Europe/Berlin")).toBe(value);
+    }
+  });
+});
+
 describe("describeTaskSchedule", () => {
   const cronTask = (cron: string, timezone = "Asia/Shanghai") => ({
     schedule_type: "cron" as const,
@@ -550,5 +583,20 @@ describe("describeTaskSchedule", () => {
         now: new Date("2026-10-06T04:00:00Z"),
       }).text,
     ).toBe("Once, Oct 7 09:00 (Asia/Shanghai)");
+  });
+});
+
+describe("describeTaskSchedule for a chat-created one-time task", () => {
+  test("reads the agent's local run_at in the task's zone, whatever the viewer's zone", () => {
+    const task = {
+      schedule_type: "once" as const,
+      schedule_spec: { run_at: "2026-10-07T09:00:00" },
+      timezone: "America/New_York",
+    };
+    expect(
+      describeTaskSchedule(task, "en-US", {
+        now: new Date("2026-10-01T00:00:00Z"),
+      }).text,
+    ).toBe("Once, Oct 7 09:00 (America/New_York)");
   });
 });

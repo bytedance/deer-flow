@@ -13,6 +13,7 @@ import { fill } from "@/components/workspace/scheduled-tasks/shared";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   browserTimeZone,
+  displayTimeZone,
   formatWithViewerTime,
 } from "@/core/scheduled-tasks/format";
 import type { ScheduledOrigin } from "@/core/scheduled-tasks/types";
@@ -21,11 +22,19 @@ import { cn } from "@/lib/utils";
 import { taskPagePath } from "./scheduled-task-card";
 
 /**
- * Zone a run's time is shown in. A task saved without a zone (an interval
- * created where no zone was known) stores the placeholder "UTC"; its times
- * read in the viewer's zone instead.
+ * Zone a run's time is shown in, by the same rule as the tasks page
+ * (`displayTimeZone`): interval tasks read in the viewer's zone (a chat may
+ * have stored the placeholder "UTC"); every other task uses its own zone.
+ * Launches recorded before the origin carried the schedule type fall back to
+ * treating "UTC" as the placeholder.
  */
 function originTimeZone(origin: ScheduledOrigin): string {
+  if (origin.schedule_type) {
+    return displayTimeZone({
+      schedule_type: origin.schedule_type,
+      timezone: origin.timezone,
+    });
+  }
   return !origin.timezone || origin.timezone === "UTC"
     ? browserTimeZone()
     : origin.timezone;

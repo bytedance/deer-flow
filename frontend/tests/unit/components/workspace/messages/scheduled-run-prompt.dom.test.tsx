@@ -132,4 +132,56 @@ describe("ScheduledRunPrompt", () => {
     expect(block.textContent).toContain("发布清单未完成项监控 · 第 2 次");
     expect(block.textContent).toContain("查看任务");
   });
+
+  describe("run time zone follows the tasks page", () => {
+    afterEach(() => {
+      rs.restoreAllMocks();
+    });
+
+    function viewerIn(timeZone: string) {
+      const RealDateTimeFormat = Intl.DateTimeFormat;
+      // Only the zone lookup (`Intl.DateTimeFormat()` with no arguments)
+      // changes; every formatter still formats for real.
+      rs.spyOn(Intl, "DateTimeFormat").mockImplementation(function (
+        ...args: ConstructorParameters<typeof Intl.DateTimeFormat>
+      ) {
+        const real = new RealDateTimeFormat(...args);
+        if (args.length > 0) {
+          return real;
+        }
+        return Object.assign(Object.create(real) as Intl.DateTimeFormat, {
+          resolvedOptions: () => ({ ...real.resolvedOptions(), timeZone }),
+        });
+      } as unknown as typeof Intl.DateTimeFormat);
+    }
+
+    const at = (origin: ScheduledOrigin) => ({
+      ...origin,
+      // 01:00 UTC is 09:00 in Shanghai.
+      scheduled_for: "2026-10-07T01:00:00+00:00",
+    });
+
+    test("an interval task's placeholder UTC reads in the viewer's zone", () => {
+      viewerIn("Asia/Shanghai");
+      const { origin } = launch("en-3-run-thread");
+      renderPrompt(
+        at({ ...origin, schedule_type: "interval", timezone: "UTC" }),
+        "en-US",
+      );
+      const block = screen.getByTestId("scheduled-run-prompt");
+      expect(block.textContent).toContain("09:00");
+      expect(block.textContent).not.toContain("your time");
+    });
+
+    test("a cron task saved in UTC reads in UTC, with the viewer's time beside it", () => {
+      viewerIn("Asia/Shanghai");
+      const { origin } = launch("en-3-run-thread");
+      renderPrompt(
+        at({ ...origin, schedule_type: "cron", timezone: "UTC" }),
+        "en-US",
+      );
+      const block = screen.getByTestId("scheduled-run-prompt");
+      expect(block.textContent).toContain("01:00 · 09:00 your time");
+    });
+  });
 });

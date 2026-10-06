@@ -125,6 +125,26 @@ export function parseStopRunId(lastError: string | null): string | null {
 }
 
 /**
+ * When the run that paused the task started: that run's start (or slot) when
+ * it is at hand, else the task's last launch time, but only while that launch
+ * is the stopping run (a later trial moves `last_run_at`). Null when unknown,
+ * so no view shows another run's time as the moment the agent paused it.
+ * Every view uses this one source (list line, card, notice, "Reached").
+ */
+export function agentStopTime(
+  task: Pick<ScheduledTask, "last_error" | "last_run_at" | "last_run_id">,
+  run?: Pick<ScheduledTaskRun, "started_at" | "scheduled_for"> | null,
+): string | null {
+  if (run) {
+    return run.started_at ?? run.scheduled_for ?? null;
+  }
+  const stopRunId = parseStopRunId(task.last_error);
+  return stopRunId !== null && stopRunId === task.last_run_id
+    ? task.last_run_at
+    : null;
+}
+
+/**
  * Why a task stopped running, derived on read from task and run state (the
  * host writes no separate notice):
  * - pausedByAgent: a run asked to stop its own schedule; `runThreadId` is that
@@ -156,6 +176,7 @@ export function describeTaskOutcome(
     | "schedule_type"
     | "last_error"
     | "last_run_at"
+    | "last_run_id"
     | "max_runs"
     | "end_at"
     | "automatic_runs_used"
@@ -174,7 +195,7 @@ export function describeTaskOutcome(
       return {
         kind: "pausedByAgent",
         runThreadId: run?.thread_id ?? null,
-        at: run?.finished_at ?? run?.scheduled_for ?? task.last_run_at ?? null,
+        at: agentStopTime(task, run),
       };
     }
     if (note?.kind === "autoPause") {

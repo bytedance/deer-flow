@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { expect, test } from "@rstest/core";
 
 import {
+  agentStopTime,
   CHECK_FAILURE_CODES,
   describeGoalOutcome,
   describeTaskLastError,
@@ -207,6 +208,7 @@ const outcomeTask = (overrides: Partial<ScheduledTask>): OutcomeTask => ({
   schedule_type: "cron",
   last_error: null,
   last_run_at: null,
+  last_run_id: null,
   max_runs: null,
   end_at: null,
   automatic_runs_used: 0,
@@ -237,6 +239,7 @@ test("describeTaskOutcome: agent stop links the run that asked to stop", () => {
       id: "occ-2",
       run_id: "run-2",
       thread_id: "thread-2",
+      started_at: "2026-10-05T01:00:30+00:00",
       finished_at: "2026-10-05T01:05:00+00:00",
     }),
   ];
@@ -251,14 +254,16 @@ test("describeTaskOutcome: agent stop links the run that asked to stop", () => {
   ).toEqual({
     kind: "pausedByAgent",
     runThreadId: "thread-2",
-    at: "2026-10-05T01:05:00+00:00",
+    at: "2026-10-05T01:00:30+00:00",
   });
-  // The stopping run is on an older page: no link, the task's last run time.
+  // The stopping run is on an older page: no link, the task's last launch
+  // time while that launch is the stopping run.
   expect(
     describeTaskOutcome(
       outcomeTask({
         status: "paused",
         last_error: `${CONTRACT.agent_stop_last_error_prefix}run-1`,
+        last_run_id: "run-1",
         last_run_at: "2026-10-04T01:00:00+00:00",
       }),
       runs,
@@ -268,6 +273,28 @@ test("describeTaskOutcome: agent stop links the run that asked to stop", () => {
     runThreadId: null,
     at: "2026-10-04T01:00:00+00:00",
   });
+});
+
+test("agentStopTime: a trial after the agent paused the task never lends its time", () => {
+  const stopped = {
+    last_error: `${CONTRACT.agent_stop_last_error_prefix}run-1`,
+    last_run_id: "run-1",
+    last_run_at: "2026-10-04T01:00:00+00:00",
+  };
+  expect(agentStopTime(stopped)).toBe("2026-10-04T01:00:00+00:00");
+  // "Run once now" on the paused task moves last_run_id / last_run_at.
+  const afterTrial = {
+    ...stopped,
+    last_run_id: "run-trial",
+    last_run_at: "2026-10-05T08:00:00+00:00",
+  };
+  expect(agentStopTime(afterTrial)).toBeNull();
+  expect(
+    describeTaskOutcome(
+      outcomeTask({ status: "paused", schedule_type: "cron", ...afterTrial }),
+      [],
+    ),
+  ).toEqual({ kind: "pausedByAgent", runThreadId: null, at: null });
 });
 
 test("describeTaskOutcome: auto-pause reports the latest unmet scheduled run", () => {

@@ -92,20 +92,29 @@ export function maxIntervalAmount(unit: IntervalUnit): number {
   return MAX_INTERVAL_SECONDS;
 }
 
-export function minIntervalAmount(unit: IntervalUnit): number {
-  // Matches scheduler.min_once_delay_seconds default. Minutes/hours already
-  // start at 60s; seconds must not go below that or create/edit 422s.
-  if (unit === "seconds") {
-    return DEFAULT_INTERVAL_MIN_SECONDS;
-  }
-  return 1;
+/**
+ * Smallest amount of `unit` the server accepts. `minSeconds` is the server's
+ * `scheduler.min_once_delay_seconds` (`/api/features`), so a server with a
+ * larger floor never lets the form submit an interval it will refuse.
+ */
+export function minIntervalAmount(
+  unit: IntervalUnit,
+  minSeconds: number = DEFAULT_INTERVAL_MIN_SECONDS,
+): number {
+  const floor =
+    Number.isFinite(minSeconds) && minSeconds > 0
+      ? minSeconds
+      : DEFAULT_INTERVAL_MIN_SECONDS;
+  const unitSeconds = unit === "hours" ? 3600 : unit === "minutes" ? 60 : 1;
+  return Math.max(1, Math.ceil(floor / unitSeconds));
 }
 
 export function clampIntervalAmount(
   amount: number,
   unit: IntervalUnit,
+  minSeconds?: number,
 ): number {
-  const min = minIntervalAmount(unit);
+  const min = minIntervalAmount(unit, minSeconds);
   if (!Number.isFinite(amount)) {
     return min;
   }
@@ -473,7 +482,10 @@ export function describeTaskSchedule(
   }
 
   if (task.schedule_type === "once") {
-    const runAt = typeof spec.run_at === "string" ? spec.run_at : "";
+    const runAt =
+      typeof spec.run_at === "string"
+        ? onceRunAtInstant(spec.run_at, timezone)
+        : "";
     const when = options.time
       ? formatTaskTime(runAt, {
           timeZone: timezone,
@@ -566,6 +578,29 @@ export function utcToZonedLocalInput(iso: string, timezone: string): string {
   return `${local.getUTCFullYear()}-${pad2(local.getUTCMonth() + 1)}-${pad2(
     local.getUTCDate(),
   )}T${pad2(local.getUTCHours())}:${pad2(local.getUTCMinutes())}`;
+}
+
+/**
+ * The instant of a one-time task's stored `run_at`. A chat-created task keeps
+ * `run_at` as the agent sent it, usually a wall-clock time with no offset
+ * ("2026-10-07T09:00:00") meant in the task's zone, the same way the server
+ * reads it; reading it with `new Date()` would use the viewer's zone instead.
+ * A value with an offset is already an instant and is returned unchanged.
+ */
+export function onceRunAtInstant(runAt: string, timezone: string): string {
+  const value = runAt.trim();
+  if (!value || /(?:Z|[+-]\d{2}(?::?\d{2})?)$/i.test(value)) {
+    return value;
+  }
+  const local = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/.exec(value);
+  if (!local) {
+    return value;
+  }
+  try {
+    return zonedLocalToUtcIso(`${local[1]}T${local[2]}`, timezone || "UTC");
+  } catch {
+    return value;
+  }
 }
 
 /** Validate minute-precision YYYY-MM-DDTHH:mm input; invalid or skipped wall times return null. */

@@ -2448,7 +2448,7 @@ Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigge
 - A stop condition is the user's "stop when …" rule. It is stored in its own field (migration `0031`), never inside the task instructions. Only when a run starts does DeerFlow append it to that run's message and ask the run to call `stop_scheduled_task` when the rule holds. While `scheduler.tool_enabled` is on, every scheduled run can stop its own schedule, whether a chat or the tasks page created the task; with it off, the run is asked to report a met rule instead of calling a tool it does not have.
 - Goal tasks created on the tasks page are now evaluated like chat-created ones, and their runs also receive the saved notes and the previous-run reference.
 - Resume computes the next run from now, so a long pause never causes a catch-up run. A one-time task whose time has passed returns `422 once_time_passed` and needs a new time. Resuming an active task changes nothing; pausing a finished task returns `409 task_finished`.
-- `max_runs` is a lifetime total of automatic runs; trial runs never count. Reactivating a task whose cap is used up (Resume, or a PATCH that re-arms a finished task's schedule) returns `409 limits_exhausted` unless the same request raises `max_runs`, moves `end_at` later or clears the cap. `POST /api/scheduled-tasks/{task_id}/resume` accepts an optional `{"max_runs": …, "end_at": …}` body for that (`null` clears a cap; chat-created sub-hourly tasks must keep one). A PATCH that only changes the cap of a finished task saves it and leaves the task finished.
+- `max_runs` is a lifetime total of automatic runs; trial runs never count. Reactivating a task whose cap is used up (Resume, or a PATCH that re-arms a finished task's schedule) returns `409 limits_exhausted` unless the same request renews the limit that ran out: a used-up run limit needs a higher `max_runs` or `null`, a passed end time needs a later `end_at` or `null` (a later `end_at` alone does not renew a used-up `max_runs`). `POST /api/scheduled-tasks/{task_id}/resume` accepts an optional `{"max_runs": …, "end_at": …}` body for that (`null` clears a cap; chat-created sub-hourly tasks must keep one). A PATCH that only changes the cap of a finished task saves it and leaves the task finished.
 - Goal-check failures (the evaluator failed, or the conversation changed during the check) neither count toward the three-miss automatic pause nor reset it. Changing the goal, the instructions or the stop condition, or adding a note, starts a new count; Resume keeps it.
 - While this Gateway process's scheduler is not running, creating a task (including Duplicate) returns `409 scheduler_not_running`, because the task would never run on schedule. `GET /api/features` reports `scheduled_tasks.available`, `running`, `tool_enabled` and `min_interval_seconds`.
 - Errors from `/api/scheduled-tasks*` are `{"detail": {"code", "message", "params"}}`; see [`backend/docs/API.md`](backend/docs/API.md#scheduled-tasks) and `contracts/scheduled_task_errors_contract.json`.
@@ -2472,8 +2472,8 @@ schedule, the next run and the stop condition in plain text.
 - **Edits keep the task.** Changing the time, instructions, goal, stop condition
   or safety cap is an `update` of the same task, so its ID and run history stay.
   `resume` restarts a paused or finished task without a catch-up run. When the
-  cap is used up, the agent asks whether to raise `max_runs`, move `end_at` or
-  remove the cap, and sends that with the resume.
+  cap is used up, the agent asks how to renew the limit that ran out (a higher
+  `max_runs` or none; a later `end_at` or none) and sends that with the resume.
 - **Timezone.** A zone you name wins. Otherwise a new task uses the browser
   timezone the web app sends with each message (`context.client_timezone`, read
   only for this), and the result says which zone was used. Intervals and

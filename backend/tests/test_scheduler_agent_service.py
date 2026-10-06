@@ -393,10 +393,19 @@ async def test_trial_on_paused_task_keeps_pause_marker(scheduler, marker_kind, t
     assert run["status"] == {"success": "success", "failure": "failed", "launch_failure": "failed"}[trial_outcome]
 
 
+def _live_scheduler_config(monkeypatch, *, tool_enabled):
+    from deerflow.config import app_config
+
+    live = SimpleNamespace(scheduler=SimpleNamespace(enabled=True, tool_enabled=tool_enabled))
+    monkeypatch.setattr(app_config, "get_app_config", lambda: live)
+    return live
+
+
 @pytest.mark.anyio
-async def test_launch_appends_stop_rule_only_at_launch(scheduler):
+async def test_launch_appends_stop_rule_only_at_launch(scheduler, monkeypatch):
     from deerflow.scheduler.stop_rule import STOP_RULE_PREFIX
 
+    _live_scheduler_config(monkeypatch, tool_enabled=True)
     sf, tasks, _occurrences, service, launches, _deliveries = scheduler
     stored_prompt = "Read the supplied materials and prepare the meeting."
     task = await create_page_task(tasks, stop_condition="every item on the checklist is checked")
@@ -421,3 +430,20 @@ async def test_launch_prompt_without_own_stop(scheduler):
     await without_tool.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
     assert launches[0]["prompt"].endswith(f"\n\n{STOP_RULE_NO_TOOL_PREFIX}the release shipped")
     assert "stop_scheduled_task" not in launches[0]["prompt"]
+
+
+@pytest.mark.anyio
+async def test_stop_rule_phrasing_follows_the_live_tool_setting(scheduler, monkeypatch):
+    from deerflow.scheduler.stop_rule import STOP_RULE_NO_TOOL_PREFIX, STOP_RULE_PREFIX
+
+    sf, tasks, _occurrences, service, launches, _deliveries = scheduler
+    live = _live_scheduler_config(monkeypatch, tool_enabled=True)
+    task = await create_page_task(tasks, stop_condition="the release shipped")
+    await service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
+    assert launches[0]["prompt"].endswith(f"\n\n{STOP_RULE_PREFIX}the release shipped")
+    await finish(sf, service, launches[0], {"run_id": "run-1"})
+    # A config reload turns the tool off: the next launch must not mention it.
+    live.scheduler.tool_enabled = False
+    await service.dispatch_task(await tasks.get("task-a", user_id="owner"), now=datetime.now(UTC), trigger="manual")
+    assert launches[1]["prompt"].endswith(f"\n\n{STOP_RULE_NO_TOOL_PREFIX}the release shipped")
+    assert "stop_scheduled_task" not in launches[1]["prompt"]

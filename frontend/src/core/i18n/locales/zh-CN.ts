@@ -816,8 +816,17 @@ export const zhCN: Translations = {
       unavailableTitle: "此服务器未提供定时任务功能",
       unavailableBody: "请联系管理员开启。",
       selectHint: "选择一个任务查看详情。",
+      tabCount: "{tab}，{count}",
+      loading: "正在加载任务…",
+      taskNotInChat: "这个任务不属于当前对话。",
     },
     time: {
+      today: "今天 {time}",
+      tomorrow: "明天 {time}",
+      yesterday: "昨天 {time}",
+      yourTime: "你的时间 {time}",
+    },
+    timeInline: {
       today: "今天 {time}",
       tomorrow: "明天 {time}",
       yesterday: "昨天 {time}",
@@ -861,7 +870,7 @@ export const zhCN: Translations = {
     },
     stop: {
       pausesItself: "{condition}，满足后自动暂停",
-      reached: "已于 {time} 满足",
+      reached: "已于{time}满足",
       noRule: "会一直运行，直到你暂停",
       afterRuns: "自动运行 {max} 次后结束",
       atTime: "{time} 结束",
@@ -877,7 +886,7 @@ export const zhCN: Translations = {
     notice: {
       pausedByAgentTitle: "已由智能体暂停",
       pausedByAgentBody:
-        "在 {time} 的运行中，智能体判断停止条件已满足，暂停了任务。如需继续运行，可以恢复。",
+        "在{time}的运行中，智能体判断停止条件已满足，暂停了任务。如需继续运行，可以恢复。",
       seeThatRun: "查看那次运行",
       autoPausedTitle: "已暂停：连续 3 次未达成目标",
       autoPausedBody:
@@ -886,7 +895,8 @@ export const zhCN: Translations = {
       openLatestRun: "查看最近一次运行",
       resumeAnyway: "仍然恢复",
       limitTitle: "已结束：{max} 次运行已全部用完",
-      limitBody: "如需继续，请提高运行次数上限或设置更晚的结束时间，然后恢复。",
+      limitBodyRuns: "如需继续，请提高运行次数上限或取消这项上限，然后恢复。",
+      limitBodyEnd: "如需继续，请设置更晚的结束时间或取消这项上限，然后恢复。",
       endTitle: "已结束：已过结束时间 {time}",
       extendLimit: "延长上限",
       onceFinished: "已结束：这个单次任务已经运行过。",
@@ -895,7 +905,7 @@ export const zhCN: Translations = {
     renew: {
       title: "延长保险上限",
       bodyRuns:
-        "已用 {used}/{max} 次自动运行。提高上限或设置更晚的结束时间后即可恢复。",
+        "已用 {used}/{max} 次自动运行。提高上限或取消这项上限后即可恢复。",
       bodyEnd: "结束时间 {time} 已过，设置更晚的时间后即可恢复。",
       removeCap: "取消这项上限",
       removeCapBlocked:
@@ -917,6 +927,9 @@ export const zhCN: Translations = {
       maxRuns: "保险上限：运行次数",
       maxRunsHint: "任务累计的自动运行次数，不含试运行。目前已用 {used} 次。",
       endAt: "保险上限：结束时间",
+      invalidEndAt: "所选时区中不存在这个结束时间，请选择其他时间。",
+      labelWithZone: "{label}（{tz}）",
+      contextLabel: "运行位置",
       clear: "清除",
       frequentNeedsCap:
         "在对话中创建、且比每小时更频繁的任务需要设置保险上限。",
@@ -946,6 +959,7 @@ export const zhCN: Translations = {
       openChat: "打开对话",
       busyRunning: "正在运行，结束后再试",
       busyQueued: "有一次运行正在排队，暂停即可取消",
+      busyQueuedPaused: "有一次运行正在排队，请等它结束后再试",
       alreadyQueued: "已有一次运行在排队等待开始",
       deleteTitle: "删除“{title}”？",
       deleteBody: "已有的运行对话会保留在对话列表中。此操作不可撤销。",
@@ -968,6 +982,7 @@ export const zhCN: Translations = {
       resume: "恢复定时任务失败",
       trigger: "试运行失败",
       delete: "删除定时任务失败",
+      withReason: "{action}：{reason}",
     },
     status: {
       enabled: "已启用",
@@ -1078,6 +1093,7 @@ export const zhCN: Translations = {
       taskQuotaExceeded:
         "你已有 {limit} 个在对话中创建的任务（含已暂停的），删除一些后才能继续创建。",
       schedulerNotRunning: "此服务器未开启自动运行，暂时无法新建任务。",
+      schedulerUnavailable: "此服务器上的定时任务暂时不可用。",
       triggerFailed: "无法启动这次运行。",
       permissionDenied: "你没有执行此操作的权限。",
     },

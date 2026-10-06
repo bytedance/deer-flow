@@ -36,7 +36,7 @@ This release closes that milestone with **301 merged pull requests**.
   run from now (no catch-up run), refuses a one-time task whose time passed,
   and accepts an optional `{max_runs, end_at}` body; reactivating a task whose
   cap is used up returns `409 limits_exhausted` unless the same request renews
-  it. Pausing a finished task returns `409 task_finished`. Goal-check failures
+  the limit that ran out (a later `end_at` does not renew a used-up `max_runs`). Pausing a finished task returns `409 task_finished`. Goal-check failures
   no longer count toward or reset the three-miss automatic pause, and editing
   the goal, instructions or stop condition, or adding a note, starts a new
   count. Creating a task while this Gateway process's scheduler is not running
@@ -49,7 +49,8 @@ This release closes that milestone with **301 merged pull requests**.
   **Breaking:** errors from `/api/scheduled-tasks*` are now
   `{"detail": {"code", "message", "params"}}` instead of a string `detail`.
   Clients reading `detail` as a string must read `detail.message`. Route
-  permission 403s and FastAPI's 422 for malformed bodies keep their old shape.
+  permission 403s, FastAPI's 422 for malformed bodies and the shared 503 for a
+  missing thread store keep their old shape.
   The code list is in `backend/docs/API.md` and
   `contracts/scheduled_task_errors_contract.json`.
 

@@ -17,7 +17,11 @@ import {
   utcToZonedLocalInput,
   validZonedLocalToUtcIso,
 } from "@/core/scheduled-tasks/cron";
-import { describeScheduledTaskError } from "@/core/scheduled-tasks/errors";
+import { ErrorDetails } from "@/core/scheduled-tasks/error-toast";
+import {
+  describeScheduledTaskError,
+  type ScheduledTaskErrorDescription,
+} from "@/core/scheduled-tasks/errors";
 import { displayTimeZone, formatTaskTime } from "@/core/scheduled-tasks/format";
 import { useResumeScheduledTask } from "@/core/scheduled-tasks/hooks";
 import type {
@@ -106,7 +110,9 @@ export function RenewLimitsDialog({
     task.end_at ? utcToZonedLocalInput(task.end_at, timeZone) : "",
   );
   const [removeEndAt, setRemoveEndAt] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ScheduledTaskErrorDescription | null>(
+    null,
+  );
   const resume = useResumeScheduledTask({ toastOnError: false });
 
   const hasRunsCap = task.max_runs != null;
@@ -145,7 +151,9 @@ export function RenewLimitsDialog({
             labels: st.time,
           }),
         })
-      : st.notice.limitBody;
+      : hasEndCap && !hasRunsCap
+        ? st.notice.limitBodyEnd
+        : st.notice.limitBodyRuns;
 
   const submit = () => {
     if (renewal === "invalid" || !canSubmit) {
@@ -160,9 +168,7 @@ export function RenewLimitsDialog({
           onResumed?.(resumed);
         },
         onError: (cause) =>
-          setError(
-            describeScheduledTaskError(cause, t, { locale, timeZone }).message,
-          ),
+          setError(describeScheduledTaskError(cause, t, { locale, timeZone })),
       },
     );
   };
@@ -208,7 +214,10 @@ export function RenewLimitsDialog({
           {(hasEndCap || !hasRunsCap) && (
             <div className="flex flex-col gap-1.5">
               <label htmlFor={`${ids}-end-at`} className="text-sm font-medium">
-                {st.form.endAt} ({timeZone})
+                {fill(st.form.labelWithZone, {
+                  label: st.form.endAt,
+                  tz: timeZone,
+                })}
               </label>
               <Input
                 id={`${ids}-end-at`}
@@ -234,9 +243,15 @@ export function RenewLimitsDialog({
             </p>
           )}
           {error && (
-            <p role="alert" className="text-destructive text-sm">
-              {error}
-            </p>
+            <div className="text-destructive flex flex-col gap-1">
+              <p role="alert" className="text-sm">
+                {error.message}
+              </p>
+              <ErrorDetails
+                details={error.details}
+                label={st.history.details}
+              />
+            </div>
           )}
         </div>
         <DialogFooter>

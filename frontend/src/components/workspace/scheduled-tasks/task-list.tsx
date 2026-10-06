@@ -17,7 +17,10 @@ import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
 import { describeTaskSchedule } from "@/core/scheduled-tasks/cron";
 import { displayTimeZone, formatTaskTime } from "@/core/scheduled-tasks/format";
-import { describeTaskOutcome } from "@/core/scheduled-tasks/goal-outcome";
+import {
+  agentStopTime,
+  describeTaskOutcome,
+} from "@/core/scheduled-tasks/goal-outcome";
 import { presentTaskStatus } from "@/core/scheduled-tasks/status";
 import { isTaskBusy, type ScheduledTask } from "@/core/scheduled-tasks/types";
 import { cn } from "@/lib/utils";
@@ -67,7 +70,7 @@ export function taskListStatusLine(
         : { text: st.status.enabled, tone: "ok", icon: CalendarClock };
     }
     case "pausedByAgent": {
-      const at = time(task.last_run_at);
+      const at = time(agentStopTime(task));
       return {
         text: at
           ? fill(st.list.pausedByAgentOn, { time: at })

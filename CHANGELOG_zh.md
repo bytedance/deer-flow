@@ -31,7 +31,7 @@
   计数边界），只在运行启动时附加到这次运行的消息里，不会写入保存的任务指令。恢复时
   从当前时间计算下次运行（不补跑），时间已过的单次任务不能直接恢复，并可携带可选的
   `{max_runs, end_at}` 请求体；保险上限已用完的任务重新启用时返回
-  `409 limits_exhausted`，除非同一请求同时放宽了上限。暂停已结束的任务返回
+  `409 limits_exhausted`，除非同一请求放宽了已用完的那项上限。暂停已结束的任务返回
   `409 task_finished`。未能检查目标不再计入、也不再清零连续 3 次未达成的自动暂停
   计数；修改目标、任务指令或停止条件，以及新增备注，会重新计数。当前 Gateway 进程的
   调度器未运行时新建任务返回 `409 scheduler_not_running`。任务响应新增
@@ -41,8 +41,8 @@
 
   **不兼容变更：** `/api/scheduled-tasks*` 的错误改为
   `{"detail": {"code", "message", "params"}}`，不再是字符串 `detail`。把 `detail`
-  当作字符串读取的客户端需要改读 `detail.message`。路由权限产生的 403 和 FastAPI
-  对格式错误请求体返回的 422 保持原格式。错误码列表见 `backend/docs/API.md` 和
+  当作字符串读取的客户端需要改读 `detail.message`。路由权限产生的 403、FastAPI
+  对格式错误请求体返回的 422，以及缺少对话存储时共用的 503 保持原格式。错误码列表见 `backend/docs/API.md` 和
   `contracts/scheduled_task_errors_contract.json`。
 
 - **调度器：** 对话中现在可以 `update`（修改）和 `resume`（恢复）任务：任务 ID 和

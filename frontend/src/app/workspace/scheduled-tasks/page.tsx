@@ -13,6 +13,7 @@ import {
 } from "@/components/workspace/scheduled-tasks/empty-state";
 import { SchedulerStateNotice } from "@/components/workspace/scheduled-tasks/scheduler-state-notice";
 import {
+  fill,
   statusTabOf,
   type StatusTab,
 } from "@/components/workspace/scheduled-tasks/shared";
@@ -29,6 +30,10 @@ import {
 } from "@/components/workspace/workspace-container";
 import { useScheduledTasksFeature } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  ErrorDetails,
+  errorWithReason,
+} from "@/core/scheduled-tasks/error-toast";
 import { describeScheduledTaskError } from "@/core/scheduled-tasks/errors";
 import {
   useScheduledTasks,
@@ -53,21 +58,48 @@ export default function ScheduledTasksPage() {
   const taskIdParam = searchParams.get("task_id");
   const feature = useScheduledTasksFeature();
   const createBlocked = !feature.running;
+  // Until /api/features answers, show what an enabled tool shows (as the chat
+  // card does) instead of flipping copy and "Stops when" once it loads.
+  const toolEnabled = feature.isLoading || feature.toolEnabled;
 
   const allTasksQuery = useScheduledTasks();
   const threadTasksQuery = useThreadScheduledTasks(threadId);
   const query = threadId ? threadTasksQuery : allTasksQuery;
-  const tasks: ScheduledTask[] = useMemo(() => query.data ?? [], [query.data]);
+  const tasks: ScheduledTask[] = useMemo(
+    () =>
+      threadId
+        ? // The chat's own tasks, the ones its header button counts; tasks
+          // that merely ran in this chat are reached from the run itself.
+          (threadTasksQuery.data ?? []).filter(
+            (task) => task.thread_relation !== "run",
+          )
+        : (allTasksQuery.data ?? []),
+    [allTasksQuery.data, threadId, threadTasksQuery.data],
+  );
   const [tab, setTab] = useState<StatusTab>("all");
   const [search, setSearch] = useState("");
   const [formRequest, setFormRequest] = useState<TaskFormRequest | null>(null);
   const detailRef = useRef<HTMLDivElement>(null);
+  // The task shown without a `?task_id=` (the first one in the list) stays
+  // shown after an action moves it to another tab; a tab or search change
+  // picks the new first task.
+  const [shownId, setShownId] = useState<string | null>(null);
 
   const visible = tasks.filter(
     (task) => inTab(task, tab) && matchesScheduledTaskQuery(task, search),
   );
-  const selectedTask =
-    visible.find((task) => task.id === taskIdParam) ?? visible[0] ?? null;
+  const pinnedId = taskIdParam ?? shownId;
+  // Look the selection up in every task, not only the visible ones, so
+  // pausing or resuming it never swaps the detail to another task.
+  const pinnedTask = pinnedId
+    ? (tasks.find((task) => task.id === pinnedId) ?? null)
+    : null;
+  const linkMissing =
+    Boolean(taskIdParam) && query.isSuccess && pinnedTask === null;
+  const selectedTask = linkMissing ? null : (pinnedTask ?? visible[0] ?? null);
+  if (!taskIdParam && selectedTask && selectedTask.id !== shownId) {
+    setShownId(selectedTask.id);
+  }
 
   useEffect(() => {
     document.title = `${t.sidebar.scheduledTasks} - ${t.pages.appName}`;
@@ -95,6 +127,24 @@ export default function ScheduledTasksPage() {
     },
     [pathname, router, threadId],
   );
+
+  // A tab or search change re-picks the shown task when it is filtered out.
+  const changeFilter = (next: { tab?: StatusTab; search?: string }) => {
+    const nextTab = next.tab ?? tab;
+    const nextSearch = next.search ?? search;
+    if (next.tab !== undefined) setTab(nextTab);
+    if (next.search !== undefined) setSearch(nextSearch);
+    if (
+      selectedTask &&
+      !(
+        inTab(selectedTask, nextTab) &&
+        matchesScheduledTaskQuery(selectedTask, nextSearch)
+      )
+    ) {
+      setShownId(null);
+      if (taskIdParam) replaceQuery(null);
+    }
+  };
 
   const selectTask = (taskId: string) => {
     appliedLink.current = taskId;
@@ -132,9 +182,7 @@ export default function ScheduledTasksPage() {
                 {t.sidebar.scheduledTasks}
               </h1>
               <p className="text-muted-foreground text-sm">
-                {feature.toolEnabled
-                  ? st.page.description
-                  : st.page.descriptionNoChat}
+                {toolEnabled ? st.page.description : st.page.descriptionNoChat}
               </p>
             </div>
             {feature.available && (
@@ -172,23 +220,37 @@ export default function ScheduledTasksPage() {
                 </div>
               )}
 
-              {query.error ? (
-                <div
-                  role="alert"
-                  className="text-destructive text-sm"
-                  data-testid="scheduled-task-load-error"
-                >
-                  {st.detail.loadFailed}:{" "}
-                  {
-                    describeScheduledTaskError(query.error, t, { locale })
-                      .message
-                  }
-                </div>
-              ) : null}
+              {query.error
+                ? (() => {
+                    const described = describeScheduledTaskError(
+                      query.error,
+                      t,
+                      { locale },
+                    );
+                    return (
+                      <div
+                        className="text-destructive flex flex-col gap-1 text-sm"
+                        data-testid="scheduled-task-load-error"
+                      >
+                        <p role="alert">
+                          {errorWithReason(
+                            t,
+                            st.detail.loadFailed,
+                            described.message,
+                          )}
+                        </p>
+                        <ErrorDetails
+                          details={described.details}
+                          label={st.history.details}
+                        />
+                      </div>
+                    );
+                  })()
+                : null}
 
               {isEmpty ? (
                 <EmptyState
-                  toolEnabled={feature.toolEnabled}
+                  toolEnabled={toolEnabled}
                   createBlocked={createBlocked}
                   onCreate={openCreate}
                 />
@@ -199,7 +261,7 @@ export default function ScheduledTasksPage() {
                       type="single"
                       value={tab}
                       onValueChange={(value) => {
-                        if (value) setTab(value as StatusTab);
+                        if (value) changeFilter({ tab: value as StatusTab });
                       }}
                       aria-label={st.page.tabsLabel}
                       size="sm"
@@ -210,6 +272,10 @@ export default function ScheduledTasksPage() {
                         <ToggleGroupItem
                           key={value}
                           value={value}
+                          aria-label={fill(st.page.tabCount, {
+                            tab: st.page.tabs[value],
+                            count: tabCount(value),
+                          })}
                           className="data-[state=on]:bg-secondary gap-1 rounded-full px-2.5"
                         >
                           {st.page.tabs[value]}
@@ -228,14 +294,28 @@ export default function ScheduledTasksPage() {
                         aria-label={st.page.search}
                         placeholder={st.page.search}
                         value={search}
-                        onChange={(event) => setSearch(event.target.value)}
+                        onChange={(event) =>
+                          changeFilter({ search: event.target.value })
+                        }
                       />
                       {search && (
-                        <Button variant="outline" onClick={() => setSearch("")}>
+                        <Button
+                          variant="outline"
+                          onClick={() => changeFilter({ search: "" })}
+                        >
                           {st.search.clear}
                         </Button>
                       )}
                     </div>
+                    {query.isPending && !query.error && (
+                      <p
+                        role="status"
+                        data-testid="scheduled-task-list-loading"
+                        className="text-muted-foreground text-sm"
+                      >
+                        {st.page.loading}
+                      </p>
+                    )}
                     {query.isSuccess && visible.length === 0 && (
                       <p
                         role="status"
@@ -252,11 +332,34 @@ export default function ScheduledTasksPage() {
                     />
                   </div>
                   <div ref={detailRef} className="min-w-0 scroll-mt-4">
-                    {selectedTask ? (
+                    {linkMissing ? (
+                      <div
+                        role="status"
+                        data-testid="scheduled-task-link-missing"
+                        className="text-muted-foreground flex flex-col items-center gap-2 rounded-lg border border-dashed p-6 text-center text-sm"
+                      >
+                        <p>
+                          {threadId
+                            ? st.page.taskNotInChat
+                            : st.apiErrors.taskNotFound}
+                        </p>
+                        {threadId && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              replaceQuery(taskIdParam, { keepThread: false })
+                            }
+                          >
+                            {st.page.showAll}
+                          </Button>
+                        )}
+                      </div>
+                    ) : selectedTask ? (
                       <TaskDetail
                         key={selectedTask.id}
                         task={selectedTask}
-                        toolEnabled={feature.toolEnabled}
+                        toolEnabled={toolEnabled}
                         createBlocked={createBlocked}
                         onEdit={(task, focus) =>
                           setFormRequest({ mode: "edit", task, focus })
@@ -282,6 +385,7 @@ export default function ScheduledTasksPage() {
       <TaskFormDialog
         request={formRequest}
         toolEnabled={feature.toolEnabled}
+        minIntervalSeconds={feature.minIntervalSeconds}
         onOpenChange={(open) => {
           if (!open) setFormRequest(null);
         }}

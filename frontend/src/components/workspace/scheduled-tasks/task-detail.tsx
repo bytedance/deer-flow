@@ -14,7 +14,13 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useRef, useState, type ReactNode } from "react";
+import {
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -36,6 +42,7 @@ import type { Translations } from "@/core/i18n/locales/types";
 import { useModels } from "@/core/models/hooks";
 import { availableActions } from "@/core/scheduled-tasks/actions";
 import { describeTaskSchedule } from "@/core/scheduled-tasks/cron";
+import { toastScheduledTaskError } from "@/core/scheduled-tasks/error-toast";
 import {
   describeScheduledTaskError,
   shouldReportScheduledTaskError,
@@ -193,7 +200,13 @@ export function stopLines(
     primary,
     reached:
       condition && reachedAt
-        ? fill(st.stop.reached, { time: at(reachedAt) })
+        ? fill(st.stop.reached, {
+            time: formatTaskTime(reachedAt, {
+              timeZone: tz,
+              locale,
+              labels: st.timeInline,
+            }),
+          })
         : null,
     secondary,
   };
@@ -259,8 +272,12 @@ export function TaskDetail({
   const [renewOpen, setRenewOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [promptExpanded, setPromptExpanded] = useState(false);
-  const promptLong =
-    task.prompt.length > 180 || task.prompt.split("\n").length > 2;
+  const promptRef = useRef<HTMLParagraphElement>(null);
+  const promptClamped = useClampedOverflow(
+    promptRef,
+    task.prompt,
+    !promptExpanded,
+  );
 
   const resumedToast = (resumed: ScheduledTask) => {
     const next = resumed.next_run_at
@@ -291,11 +308,11 @@ export function TaskDetail({
             return;
           }
           if (!shouldReportScheduledTaskError(error)) return;
-          const { message } = describeScheduledTaskError(error, t, {
-            locale,
-            timeZone,
-          });
-          toast.error(`${st.errors.resume}: ${message}`);
+          toastScheduledTaskError(
+            t,
+            st.errors.resume,
+            describeScheduledTaskError(error, t, { locale, timeZone }),
+          );
         },
       },
     );
@@ -551,6 +568,7 @@ export function TaskDetail({
 
       <Section label={st.detail.does}>
         <p
+          ref={promptRef}
           className={cn(
             "break-words whitespace-pre-wrap",
             !promptExpanded && "line-clamp-2",
@@ -559,7 +577,7 @@ export function TaskDetail({
         >
           {task.prompt}
         </p>
-        {promptLong && (
+        {(promptExpanded || promptClamped) && (
           <button
             type="button"
             className="text-muted-foreground mt-1 text-xs hover:underline"
@@ -614,7 +632,12 @@ export function TaskDetail({
       <Section
         label={st.detail.history}
         aside={
-          !history.isPending && !history.isError ? (
+          // A count only when it is the whole history: a page holds at most
+          // one page of runs, so "50 runs" on page 1 would be wrong.
+          !history.isPending &&
+          !history.isError &&
+          history.page === 0 &&
+          !history.hasOlder ? (
             <span className="text-xs" data-testid="scheduled-task-runs">
               {fill(
                 runs.length === 1
@@ -664,35 +687,37 @@ export function TaskDetail({
             ))}
           </ol>
         )}
-        <nav
-          aria-label={st.history.navigation}
-          className="mt-2 flex flex-wrap items-center gap-2"
-        >
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={history.page === 0 || history.isFetching}
-            onClick={history.newer}
+        {(history.page > 0 || history.hasOlder) && (
+          <nav
+            aria-label={st.history.navigation}
+            className="mt-2 flex flex-wrap items-center gap-2"
           >
-            {st.history.newer}
-          </Button>
-          <span className="text-muted-foreground text-xs">
-            {fill(st.history.page, { page: history.page + 1 })}
-          </span>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!history.hasOlder || history.isFetching}
-            onClick={history.older}
-          >
-            {st.history.older}
-          </Button>
-          {history.page > 0 && (
-            <Button variant="outline" size="sm" onClick={history.latest}>
-              {st.history.latest}
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={history.page === 0 || history.isFetching}
+              onClick={history.newer}
+            >
+              {st.history.newer}
             </Button>
-          )}
-        </nav>
+            <span className="text-muted-foreground text-xs">
+              {fill(st.history.page, { page: history.page + 1 })}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!history.hasOlder || history.isFetching}
+              onClick={history.older}
+            >
+              {st.history.older}
+            </Button>
+            {history.page > 0 && (
+              <Button variant="outline" size="sm" onClick={history.latest}>
+                {st.history.latest}
+              </Button>
+            )}
+          </nav>
+        )}
         {history.page > 0 && (
           <p className="text-muted-foreground mt-1 text-xs">
             {st.history.paused}
@@ -740,6 +765,42 @@ export function TaskDetail({
       />
     </article>
   );
+}
+
+/**
+ * Whether a line-clamped element hides text, measured after layout and on
+ * resize (a prompt of 60–180 characters already wraps past two lines on a
+ * phone). Without layout (a hidden element, or a DOM without it) it falls
+ * back to a length guess.
+ */
+function useClampedOverflow(
+  ref: RefObject<HTMLElement | null>,
+  text: string,
+  clamped: boolean,
+): boolean {
+  const guess = text.length > 180 || text.split("\n").length > 2;
+  const [overflows, setOverflows] = useState(guess);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element || !clamped) {
+      return;
+    }
+    const measure = () => {
+      setOverflows(
+        element.clientHeight > 0
+          ? element.scrollHeight > element.clientHeight + 1
+          : guess,
+      );
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [ref, text, clamped, guess]);
+  return overflows;
 }
 
 /** A disabled menu item gets no pointer events; the tooltip hangs on a wrapper. */

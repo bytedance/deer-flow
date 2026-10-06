@@ -150,7 +150,8 @@ async def test_management_invocation_cannot_bypass_mode_subagent_or_config_gate(
 
     capability = _capability(capability_mode)
     result = await schedule_task.coroutine(runtime=_runtime(capability=capability, mode=mode, is_subagent=is_subagent, enabled=enabled, tool_enabled=tool_enabled), action="list")
-    assert "error" in result
+    assert (result["code"], result["status_code"]) == ("scheduler_tools_disabled", 503)
+    assert result["error"]
     capability.manage.assert_not_awaited()
     capability.stop_current_schedule.assert_not_awaited()
 
@@ -189,7 +190,8 @@ async def test_self_stop_requires_a_scheduled_lead_run(mode, is_subagent):
 
     capability = _capability("scheduled")
     result = await stop_scheduled_task.coroutine(runtime=_runtime(capability=capability, mode=mode, is_subagent=is_subagent))
-    assert "error" in result
+    assert (result["code"], result["status_code"]) == ("scheduler_tools_disabled", 503)
+    assert result["error"]
     capability.stop_current_schedule.assert_not_awaited()
 
 

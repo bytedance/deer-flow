@@ -873,11 +873,20 @@ export const enUS: Translations = {
       unavailableTitle: "Scheduled tasks aren't available on this server",
       unavailableBody: "Ask your administrator to turn them on.",
       selectHint: "Select a task to see its details.",
+      tabCount: "{tab}, {count}",
+      loading: "Loading tasks…",
+      taskNotInChat: "This task isn't one of this chat's tasks.",
     },
     time: {
       today: "Today {time}",
       tomorrow: "Tomorrow {time}",
       yesterday: "Yesterday {time}",
+      yourTime: "{time} your time",
+    },
+    timeInline: {
+      today: "today {time}",
+      tomorrow: "tomorrow {time}",
+      yesterday: "yesterday {time}",
       yourTime: "{time} your time",
     },
     list: {
@@ -934,7 +943,7 @@ export const enUS: Translations = {
     notice: {
       pausedByAgentTitle: "Paused by agent",
       pausedByAgentBody:
-        "In the run at {time}, the agent found your stop condition met and paused the task. Resume it only if you want it to keep going.",
+        "In the run from {time}, the agent found your stop condition met and paused the task. Resume it only if you want it to keep going.",
       seeThatRun: "See that run",
       autoPausedTitle: "Paused: missed its goal 3 runs in a row",
       autoPausedBody:
@@ -943,8 +952,10 @@ export const enUS: Translations = {
       openLatestRun: "Open latest run",
       resumeAnyway: "Resume anyway",
       limitTitle: "Finished: all {max} runs used",
-      limitBody:
-        "To keep it running, raise the run limit or set a later end time, then resume.",
+      limitBodyRuns:
+        "To keep it running, raise the run limit or remove it, then resume.",
+      limitBodyEnd:
+        "To keep it running, set a later end time or remove it, then resume.",
       endTitle: "Finished: the end time {time} has passed",
       extendLimit: "Extend limit",
       onceFinished: "Finished: this one-time task has run.",
@@ -954,7 +965,7 @@ export const enUS: Translations = {
     renew: {
       title: "Extend the safety cap",
       bodyRuns:
-        "{used} of {max} automatic runs are used. Raise the limit or set a later end time to resume.",
+        "{used} of {max} automatic runs are used. Raise the limit or remove it to resume.",
       bodyEnd: "The end time {time} has passed. Set a later one to resume.",
       removeCap: "Remove this limit",
       removeCapBlocked:
@@ -977,6 +988,10 @@ export const enUS: Translations = {
       maxRunsHint:
         "Automatic runs over the task's lifetime; trial runs excluded. {used} used so far.",
       endAt: "Safety cap: end by",
+      invalidEndAt:
+        "This end time does not exist in the selected timezone. Choose another time.",
+      labelWithZone: "{label} ({tz})",
+      contextLabel: "Where runs happen",
       clear: "Clear",
       frequentNeedsCap:
         "Tasks created in chat that run more often than hourly need a safety cap.",
@@ -1006,6 +1021,7 @@ export const enUS: Translations = {
       openChat: "Open chat",
       busyRunning: "Running now — try again when it finishes",
       busyQueued: "A run is waiting to start; pause to cancel it",
+      busyQueuedPaused: "A run is waiting to start; try again when it finishes",
       alreadyQueued: "A run is already waiting to start",
       deleteTitle: "Delete “{title}”?",
       deleteBody:
@@ -1030,6 +1046,7 @@ export const enUS: Translations = {
       resume: "Failed to resume scheduled task",
       trigger: "Failed to start a trial run",
       delete: "Failed to delete scheduled task",
+      withReason: "{action}: {reason}",
     },
     status: {
       enabled: "Active",
@@ -1147,6 +1164,8 @@ export const enUS: Translations = {
         "You already have {limit} active tasks created in chats, paused ones included. Delete some to create more.",
       schedulerNotRunning:
         "Automatic runs are off on this server, so new tasks can't be created.",
+      schedulerUnavailable:
+        "Scheduled tasks aren't available on this server right now.",
       triggerFailed: "The run couldn't be started.",
       permissionDenied: "You don't have permission to do this.",
     },
