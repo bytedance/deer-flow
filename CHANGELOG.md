@@ -173,6 +173,23 @@ This release closes that milestone with **301 merged pull requests**.
 
 #### Agents & runtime
 
+- **gateway:** Threads the server creates for you can be noticed without a
+  reload. Runs started by a schedule, an IM channel, a GitHub agent, an
+  extension or an MCP notification now carry a server-owned
+  `metadata.deerflow_origin` (`{kind, provider?, namespace?}`, pinned by the new
+  `contracts/thread_origin_contract.json`) and a denormalized
+  `runs.origin_kind`; a thread created for such a run keeps the same marker.
+  Clients cannot set it: thread create/patch and run admission strip client
+  copies. The new `GET /api/thread-activity` feed pages the caller's run
+  changes over the existing run-change clock and returns only threads changed
+  by server-originated runs, plus a per-user `read_version`; an idle poll is one
+  index seek. `POST /api/threads/{thread_id}/read` stores a per-user,
+  never-decreasing read position, and thread search items gain `unread`. Only
+  the caller's own server-originated runs make a thread unread; interactive
+  runs, other users' runs in shared threads and runs from before the upgrade
+  never do. `GET /api/features` reports `thread_activity.available` (SQL
+  persistence only). ([#6340])
+
 - **uploads:** Add stable cursor pagination to the `list_uploaded_files`
   discovery tool. With more than 100 historical uploads matching the same
   filters the tool could only return the first page, giving an agent no

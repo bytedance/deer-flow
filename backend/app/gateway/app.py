@@ -51,6 +51,7 @@ from app.gateway.routers import (
     subagent_batches,
     subagents,
     suggestions,
+    thread_activity,
     thread_runs,
     threads,
     trash,
@@ -1201,6 +1202,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
     app.include_router(threads.router)
+
+    # Per-user activity feed (own prefix, so /api/threads/{thread_id} never captures it)
+    app.include_router(thread_activity.router)
 
     # Scheduled tasks API is mounted at /api/scheduled-tasks
     app.include_router(scheduled_tasks.router)

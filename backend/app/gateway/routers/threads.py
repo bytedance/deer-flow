@@ -68,6 +68,7 @@ from deerflow.runtime.goal import (
     write_thread_goal,
 )
 from deerflow.runtime.journal import build_branch_history_seed_events
+from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, admit_origin
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.worker import RUN_MESSAGE_IDS_METADATA_KEY, valid_duration_entry, valid_run_message_id_entry
 from deerflow.runtime.secret_context import redact_metadata_secrets
@@ -114,7 +115,9 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 # owner identity through the API surface. Defense-in-depth — the
 # row-level invariant is still ``threads_meta.user_id`` populated from
 # the auth contextvar; this list closes the metadata-blob echo gap.
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY})
+# ``deerflow_origin`` marks a thread the server created for a schedule or an
+# extension; only the server sets it (``create_thread`` below, run admission).
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY})
 _SIDECAR_METADATA_KEY = "deerflow_sidecar"
 _BRANCH_METADATA_KEY = "deerflow_branch"
 _BRANCH_TITLE_SEQUENCE_METADATA_KEY = "branch_title_sequence"
@@ -456,6 +459,14 @@ class ThreadResponse(_MetadataRedactingResponse):
     metadata: dict[str, Any] = Field(default_factory=dict, description="Thread metadata")
     values: dict[str, Any] = Field(default_factory=dict, description="Current state channel values")
     interrupts: dict[str, Any] = Field(default_factory=dict, description="Pending interrupts")
+    unread: bool | None = Field(default=None, description="Thread search only: a server-originated run of the caller changed since the caller last opened the thread; null when unknown")
+
+
+class ThreadReadResponse(BaseModel):
+    """Response of ``POST /api/threads/{thread_id}/read``."""
+
+    unread: bool = Field(default=False)
+    read_version: int = Field(description="The caller's per-user read clock after this call")
 
 
 class ThreadCreateRequest(BaseModel):
@@ -846,6 +857,15 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     except Exception:
         logger.debug("Could not delete scheduled task events for thread %s (not critical)", sanitize_log_param(thread_id))
 
+    # Remove every user's read marker for the thread (best-effort): the thread
+    # is gone, so its unread state is meaningless for all of them.
+    try:
+        thread_read_repo = getattr(request.app.state, "thread_read_repo", None)
+        if thread_read_repo is not None:
+            await thread_read_repo.delete_by_thread(thread_id)
+    except Exception:
+        logger.debug("Could not delete read markers for thread %s (not critical)", sanitize_log_param(thread_id))
+
     # Tear down any live browser session (best-effort). Sessions are keyed only
     # by thread_id, so leaving one alive after the owner deletes the thread lets
     # a later caller who guesses the id reuse the retained page/cookies.
@@ -926,6 +946,11 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
     # ``body.metadata`` is already stripped of server-reserved keys by
     # ``ThreadCreateRequest._strip_reserved`` — see the model definition.
+    # A server-side caller (an extension handle) marks the thread it creates;
+    # request.state is never HTTP input.
+    metadata = dict(body.metadata)
+    if (origin := admit_origin(getattr(request.state, "run_origin", None))) is not None:
+        metadata[DEERFLOW_ORIGIN_KEY] = origin
 
     # Idempotency: return existing record when already present
     existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
@@ -940,7 +965,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             thread_id,
             assistant_id=getattr(body, "assistant_id", None),
             **thread_owner_kwargs,
-            metadata=body.metadata,
+            metadata=metadata,
             project_id=body.project_id,
         )
     except ProjectNotAssignableError:
@@ -978,7 +1003,7 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
             "source": "input",
             "writes": None,
             "parents": {},
-            **body.metadata,
+            **metadata,
             "created_at": now,
         }
         await checkpointer.aput(config, empty_checkpoint(), ckpt_metadata, {})
@@ -1240,6 +1265,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
         )
     except InvalidMetadataFilterError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    unread_ids = await _unread_thread_ids(request, [r["thread_id"] for r in rows])
     return [
         ThreadResponse(
             thread_id=r["thread_id"],
@@ -1252,9 +1278,44 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
             metadata=r.get("metadata", {}),
             values={"title": r["display_name"]} if r.get("display_name") else {},
             interrupts={},
+            unread=(r["thread_id"] in unread_ids) if unread_ids is not None else None,
         )
         for r in rows
     ]
+
+
+async def _unread_thread_ids(request: Request, thread_ids: list[str]) -> set[str] | None:
+    """One query for the page's unread threads; ``None`` (unknown) without SQL read state.
+
+    The list must keep loading when the lookup fails, so a failure degrades to
+    ``None`` instead of failing the search.
+    """
+    repo = getattr(request.app.state, "thread_read_repo", None)
+    if repo is None:
+        return None
+    if not thread_ids:
+        return set()
+    try:
+        return await repo.unread_thread_ids(user_id=str(get_effective_user_id()), thread_ids=thread_ids)
+    except Exception:
+        logger.warning("Could not resolve unread threads for a thread search", exc_info=True)
+        return None
+
+
+@router.post("/{thread_id}/read", response_model=ThreadReadResponse)
+@require_permission("threads", "read", owner_check=True, require_existing=True)
+async def mark_thread_read(thread_id: ThreadId, request: Request) -> ThreadReadResponse:
+    """Mark the thread read for the caller (per user, monotonic across devices).
+
+    A thread already read up to its latest run writes nothing and leaves
+    ``read_version`` unchanged, so other tabs and devices do not refetch.
+    """
+    repo = getattr(request.app.state, "thread_read_repo", None)
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Thread read state is not available")
+    user_id = str(get_effective_user_id())
+    await repo.mark_read(user_id=user_id, thread_id=thread_id)
+    return ThreadReadResponse(unread=False, read_version=await repo.read_version(user_id=user_id))
 
 
 @router.patch("/{thread_id}", response_model=ThreadResponse)

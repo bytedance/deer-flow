@@ -138,6 +138,19 @@
 
 #### 智能体与运行时
 
+- **网关：** 服务端替你创建的对话无需刷新即可被发现。由定时任务、IM 渠道、GitHub
+  智能体、扩展或 MCP 通知发起的运行，现在带有服务端维护的
+  `metadata.deerflow_origin`（`{kind, provider?, namespace?}`，由新增的
+  `contracts/thread_origin_contract.json` 固定），并冗余写入 `runs.origin_kind`；
+  为这类运行新建的对话也带同样的标记。客户端无法设置它：创建、修改对话以及发起运行时
+  都会去掉客户端传入的副本。新增的 `GET /api/thread-activity` 基于现有的运行变更时钟
+  分页读取调用者的运行变化，只返回因服务端发起的运行而变化的对话，并附带每个用户的
+  `read_version`；空闲轮询只需一次索引查找。`POST /api/threads/{thread_id}/read`
+  按用户保存只增不减的已读位置，对话搜索结果新增 `unread`。只有调用者自己的服务端
+  发起的运行才会让对话变为未读；交互式运行、共享对话中其他用户的运行以及升级前的
+  运行都不会。`GET /api/features` 返回 `thread_activity.available`（仅 SQL 持久化
+  可用）。([#6340])
+
 - **上传：** 为 `list_uploaded_files` 发现工具新增稳定的光标分页。
   当同一批过滤条件匹配到超过 100 条历史上传时，
   该工具此前只能返回第一页，智能体没有任何续页途径。现在可选的

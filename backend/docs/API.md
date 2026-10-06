@@ -1067,6 +1067,77 @@ DELETE /api/threads/{thread_id}
 - `422` for invalid thread IDs
 - `500` returns a generic `{"detail": "Failed to delete local thread data."}` response while full exception details stay in server logs
 
+Deleting a thread also removes every user's read marker for it.
+
+### Thread Origin, Activity and Unread State
+
+Runs the server starts for a user (a schedule, an IM channel, a GitHub agent,
+an extension, an MCP notification) carry a server-owned origin in their
+metadata, and so does a thread the server creates for one:
+
+```json
+{ "deerflow_origin": { "kind": "im_channel", "provider": "feishu" } }
+```
+
+`kind` is one of `schedule`, `im_channel`, `github`, `extension`,
+`mcp_notification` (`contracts/thread_origin_contract.json`); `provider`
+(IM/GitHub) and `namespace` (extension plugin) are optional. Clients cannot
+set it: `POST /api/threads` and `PATCH /api/threads/{thread_id}` strip it, run
+admission drops it from `metadata` and `config.metadata`, and only server-side
+launchers and the internal channel caller may stamp it. The run's kind is also
+stored as `runs.origin_kind` (`null` for interactive and pre-upgrade runs). IM
+threads keep `metadata.channel_source` as their marker. This key is unrelated to
+the message-level `additional_kwargs.deerflow_scheduled_origin` of a scheduled
+prompt.
+
+**Activity feed.** Requires SQL persistence (`503` on the memory backend);
+`GET /api/features` reports `{"thread_activity": {"available": true}}`.
+
+```http
+GET /api/thread-activity?cursor=1834:run-42&limit=200
+```
+
+```json
+{
+  "cursor": "1840:run-57",
+  "threads": [{ "thread_id": "…", "origin_kind": "schedule", "status": "success" }],
+  "truncated": false,
+  "read_version": 17
+}
+```
+
+- Without `cursor` the call only seeds: it returns the caller's current
+  position (`"0:"` for a user with no runs) and no threads.
+- With a cursor it pages the caller's run changes in order (`limit` 1-500,
+  default 200). `threads` lists each thread with a change from a
+  server-originated run of the caller in the page, once, with the status of
+  its latest such change. The caller's own interactive runs advance the cursor
+  but are not listed.
+- `cursor` is the position of the last change used, so a `truncated` page
+  continues on the next poll without gaps. Treat it as opaque.
+- `read_version` is the caller's read clock; it changes when a thread is
+  marked read on any device.
+- A malformed cursor returns `422` with `detail.code` `invalid_cursor`.
+- Every query is scoped to the caller; another user's cursor reveals nothing.
+
+**Unread state.** A thread is unread for a user while one of that user's
+server-originated runs in it changed after the user last read it. The user's
+own interactive runs, other users' runs in a shared thread and pre-upgrade runs
+never make a thread unread.
+
+```http
+POST /api/threads/{thread_id}/read
+```
+
+```json
+{ "unread": false, "read_version": 18 }
+```
+
+The read position never moves backwards. A thread already read up to its
+latest run writes nothing and returns the unchanged `read_version`. Items of
+`POST /api/threads/search` carry `unread` (`true`/`false`; `null` without SQL
+persistence); other thread responses return `null`.
+
 ### Projects
 
 #### Get Projects Config

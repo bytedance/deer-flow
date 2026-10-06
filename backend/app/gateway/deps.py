@@ -666,6 +666,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             )
             from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
             from deerflow.persistence.subagent_batches import SubagentBatchRepository
+            from deerflow.persistence.thread_reads import ThreadReadRepository
 
             app.state.project_repo = ProjectRepository(sf)
             app.state.project_document_repo = ProjectDocumentRepository(sf)
@@ -678,6 +679,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 run_repository=app.state.run_store,
             )
             app.state.scheduled_task_event_repo = ScheduledTaskEventRepository(sf)
+            # Per-user unread state and the activity feed's read clock.
+            app.state.thread_read_repo = ThreadReadRepository(sf)
             app.state.mcp_task_repo = McpTaskRepository(sf)
             app.state.subagent_batch_repo = SubagentBatchRepository(sf)
         else:
@@ -688,6 +691,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
             app.state.scheduled_task_event_repo = None
+            app.state.thread_read_repo = None
 
         # RunManager with store backing for persistence
         run_ownership_config = getattr(config, "run_ownership", None)
