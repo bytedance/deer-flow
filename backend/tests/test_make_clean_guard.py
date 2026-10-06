@@ -36,7 +36,13 @@ def _checkout(tmp_path: Path) -> Path:
     (root / "scripts").mkdir(parents=True)
     shutil.copy2(REPO_ROOT / "Makefile", root / "Makefile")
     shutil.copy2(REPO_ROOT / "scripts" / "check-data-not-in-use.sh", root / "scripts" / "check-data-not-in-use.sh")
-    (root / "scripts" / "serve.sh").write_text('#!/usr/bin/env bash\necho "$@" >> stop-calls\n', encoding="utf-8")
+    # Records each stop call and whether the data still existed at that point:
+    # the real serve.sh --stop also stops deer-flow-sandbox* containers, which
+    # bind-mount thread directories under backend/.deer-flow.
+    (root / "scripts" / "serve.sh").write_text(
+        '#!/usr/bin/env bash\nif [ -e backend/.deer-flow ]; then state=data-present; else state=data-gone; fi\necho "$* $state" >> stop-calls\n',
+        encoding="utf-8",
+    )
     data = root / "backend" / ".deer-flow" / "data"
     data.mkdir(parents=True)
     (data / "deerflow.db").write_text("db", encoding="utf-8")
@@ -106,4 +112,21 @@ def test_clean_deletes_runtime_data_when_no_gateway_container_runs(tmp_path: Pat
     assert "Deleting local runtime data in backend/.deer-flow" in result.stdout
     assert not (root / "backend" / ".deer-flow").exists()
     assert not (root / "logs" / "gateway.log").exists()
-    assert (root / "stop-calls").read_text(encoding="utf-8").split() == ["--stop"]
+    # stop (and with it the sandbox-container cleanup) runs before the deletion.
+    assert (root / "stop-calls").read_text(encoding="utf-8").split() == ["--stop", "data-present"]
+
+
+def _listed_contents(line: str, prefix: str) -> list[str]:
+    return line.split(prefix, 1)[1].split(")", 1)[0].split(", ")
+
+
+def test_help_and_deletion_notice_list_the_same_data(tmp_path: Path) -> None:
+    root = _checkout(tmp_path)
+    bin_dir = _bin(tmp_path, None)
+
+    help_line = next(line for line in _make(root, bin_dir, "help").stdout.splitlines() if "make clean" in line)
+    notice = next(line for line in _make(root, bin_dir).stdout.splitlines() if line.startswith("Deleting local runtime data"))
+
+    listed = _listed_contents(help_line, "backend/.deer-flow: ")
+    assert listed == _listed_contents(notice, "backend/.deer-flow (")
+    assert {"database", "users", "threads", "uploads", "memory", "secrets"} <= set(listed)

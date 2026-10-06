@@ -11,6 +11,12 @@
 #
 # Exits 0 when Docker is missing or unreachable: no container can then be
 # holding this checkout's data.
+#
+# Sandbox containers are not checked here: AIO/DooD sandboxes bind-mount thread
+# directories under the same tree, but `make clean` runs `make stop` after this
+# check and before deleting, and `serve.sh --stop` stops every
+# deer-flow-sandbox* container (as `make docker-stop` does). Checking them here
+# would refuse the ordinary local AIO case that stop already cleans up.
 
 set -e
 
