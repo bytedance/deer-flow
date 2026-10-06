@@ -558,6 +558,11 @@
 
 ### 修复
 
+- **make：** `make clean` 现在会说明它删除的内容，并拒绝在运行中的 Docker Gateway 下执行。`make help`
+  此前称其清理"临时文件"，但它实际删除 `backend/.deer-flow`：本地数据库、用户、线程、上传、记忆和密钥。
+  两套 Docker 栈都把该目录挂载进 `deer-flow-gateway` 容器，而 `make stop` 不会停止它，因此数据可能在
+  Gateway 运行时被删除。现在帮助文本和删除前的提示会写明该目录；当该容器仍在运行时，`make clean`
+  会在停止任何服务之前退出，并提示先执行 `make down` 或 `make docker-stop`。([#6351])
 - **TUI：** 新的提示不再与同一会话中被中断的运行发生竞争。按下 `Ctrl+C` 后，该运行的工作线程会
   一直执行到当前步骤返回，因此正在进行的工具调用（例如耗时较长的 shell 命令）仍会完成并写入检查点，
   而下一条提示已在同一线程上运行；最后写入检查点的运行会成为会话历史，新的一轮可能因此悄然消失。
@@ -7303,3 +7308,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6343]: https://github.com/bytedance/deer-flow/pull/6343
 [#6344]: https://github.com/bytedance/deer-flow/pull/6344
 [#6350]: https://github.com/bytedance/deer-flow/pull/6350
+[#6351]: https://github.com/bytedance/deer-flow/pull/6351

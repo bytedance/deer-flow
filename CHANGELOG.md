@@ -623,6 +623,15 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **make:** `make clean` now says what it deletes and refuses to run under a live
+  Docker Gateway. `make help` described it as cleaning up "temporary files", but
+  it deletes `backend/.deer-flow`: the local database, users, threads, uploads,
+  memory, and secrets. Both Docker stacks mount that directory into the
+  `deer-flow-gateway` container, which `make stop` leaves running, so the data
+  could be deleted under a live Gateway. The help text and a notice before
+  deletion now name the directory, and `make clean` stops with a hint to run
+  `make down` or `make docker-stop` while that container is running, before it
+  stops anything. ([#6351])
 - **tui:** A new prompt no longer races an interrupted run in the same
   conversation. After `Ctrl+C` the run's worker keeps going until its current
   step returns, so a tool call already in progress (a long shell command, for
@@ -8835,4 +8844,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6344]: https://github.com/bytedance/deer-flow/pull/6344
 [#6347]: https://github.com/bytedance/deer-flow/pull/6347
 [#6350]: https://github.com/bytedance/deer-flow/pull/6350
+[#6351]: https://github.com/bytedance/deer-flow/pull/6351
 [#6365]: https://github.com/bytedance/deer-flow/pull/6365
