@@ -2217,6 +2217,10 @@ behavior, and current boundaries.
 
 Across sessions, DeerFlow builds a persistent memory of your profile, preferences, and accumulated knowledge. The more you use it, the better it knows you — your writing style, your technical stack, your recurring workflows. Memory is stored locally and stays under your control.
 
+DeerMem and mem0 capture user inputs and final assistant replies. Assistant
+turns that request tools, including malformed or provider-raw calls, are
+excluded from memory extraction even when they contain visible text.
+
 DeerMem remains the default local backend. An opt-in `mem0` backend is also
 available for the hosted mem0 Platform API or API-compatible self-hosted
 servers. Its token-bearing `base_url` must use HTTPS by default; plaintext HTTP
