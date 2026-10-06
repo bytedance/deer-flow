@@ -553,7 +553,7 @@ This release closes that milestone with **301 merged pull requests**.
   remains single-instance (IM channels, WeChat QR login, browser tools).
   Upgrading a release that predates `AUTH_JWT_SECRET` generates a new key and
   signs every browser session out once; the chart README shows how to seed
-  the previous key into the Secret first to keep sessions.
+  the previous key into the Secret first to keep sessions. ([#6347])
 - **persistence:** A second Gateway instance no longer fails startup with
   `TimeoutError` while another instance runs a PostgreSQL schema migration. The
   bootstrap advisory lock was taken with a blocking `pg_advisory_lock` on the
@@ -7850,3 +7850,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
 [#6328]: https://github.com/bytedance/deer-flow/pull/6328
 [#6332]: https://github.com/bytedance/deer-flow/pull/6332
+[#6347]: https://github.com/bytedance/deer-flow/pull/6347
