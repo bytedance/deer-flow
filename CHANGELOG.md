@@ -500,7 +500,7 @@ This release closes that milestone with **301 merged pull requests**.
   mounted it whenever it existed, so later unrestricted runs on the thread kept
   the old allowlist and could not read other enabled or newly added skills
   under `/mnt/skills`. Those runs now use the shared skill views; the thread
-  view is kept and enforced again once host bash is turned off.
+  view is kept and enforced again once host bash is turned off. ([#6344])
 - **skills:** Editing a custom skill no longer runs filesystem work on the event
   loop. `PUT /api/skills/custom/{name}` built the user-scoped skill storage,
   probed the custom, public, legacy and integration roots, validated the
@@ -7832,3 +7832,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
 [#6328]: https://github.com/bytedance/deer-flow/pull/6328
 [#6332]: https://github.com/bytedance/deer-flow/pull/6332
+[#6344]: https://github.com/bytedance/deer-flow/pull/6344

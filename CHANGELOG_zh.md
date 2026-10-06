@@ -435,7 +435,7 @@
 - **沙箱：** 启用 host bash 时，本地沙箱不再把线程固定在上一个受限 Agent 的技能视图上。
   该视图只在 host bash 关闭时维护，但 `LocalSandboxProvider` 只要它存在就会挂载，导致该线程之后
   不受限的运行仍沿用旧的 allowlist，读不到 `/mnt/skills` 下其他已启用或新增的技能。现在这些运行
-  使用共享技能视图；线程视图会保留，并在关闭 host bash 后重新生效。
+  使用共享技能视图；线程视图会保留，并在关闭 host bash 后重新生效。([#6344])
 - **技能：** 编辑自定义技能时，不再在事件循环上执行文件系统操作。
   `PUT /api/skills/custom/{name}` 此前在事件循环上构建用户级技能存储、探测自定义、
   内置、旧版共享与集成目录、把草稿写入临时目录以校验 frontmatter，并读取将被替换的
@@ -6512,3 +6512,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6319]: https://github.com/bytedance/deer-flow/pull/6319
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
 [#6332]: https://github.com/bytedance/deer-flow/pull/6332
+[#6344]: https://github.com/bytedance/deer-flow/pull/6344
