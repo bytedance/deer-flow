@@ -6,6 +6,7 @@ import socket
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -21,9 +22,22 @@ from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
 
+
+def _as_utc(value: datetime | str | None) -> datetime | None:
+    """A stored timestamp (ISO string from the repository, or a datetime) as aware UTC."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(f"{value[:-1]}+00:00" if value.endswith("Z") else value)
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 # Shared so the active-row fast path and the atomic-admission conflict path
 # return byte-identical outcomes for the same active-occurrence condition.
 _ACTIVE_RUN_CONFLICT_ERROR = "task already has an active run"
+# A manual trigger whose task changed between read and admission. The REST
+# trigger and the chat trial map this exact outcome error to ``task_changed``.
+TASK_CHANGED_ERROR = "scheduled task changed before trigger admission"
 _RESTART_RECOVERY_ERROR = RUN_ERROR_RESTARTED
 _LEASE_RECOVERY_ERROR = RUN_ERROR_LEASE_LOST
 _QUEUE_TIMEOUT_ERROR = RUN_ERROR_QUEUE_TIMEOUT
@@ -266,7 +280,7 @@ class ScheduledTaskService:
                 "task_run_id": None,
                 "run_id": None,
                 "thread_id": execution_thread_id,
-                "error": "scheduled task changed before trigger admission",
+                "error": TASK_CHANGED_ERROR,
             }
 
         # Scheduled admission inserted the queue row and released its parent
@@ -350,12 +364,15 @@ class ScheduledTaskService:
                 previous = await previous_lookup(task["id"], before_task_run_id=task_run_id)
                 if previous is not None and previous.get("thread_id") != execution_thread_id:
                     metadata["scheduled_previous_thread_id"] = previous["thread_id"]
+            origin, title = await self._launch_provenance(task, queued, now=now)
             result = await self._launch_run(
                 thread_id=execution_thread_id,
                 assistant_id=task.get("assistant_id"),
                 prompt=prompt,
                 owner_user_id=task.get("user_id"),
                 metadata=metadata,
+                origin=origin,
+                title=title,
             )
             launch_succeeded = True
             launched_run_id = result["run_id"]
@@ -491,6 +508,41 @@ class ScheduledTaskService:
                 "thread_id": execution_thread_id,
                 "error": str(exc),
             }
+
+    async def _launch_provenance(self, task: dict[str, Any], queued: dict[str, Any], *, now: datetime) -> tuple[dict[str, Any], str | None]:
+        """What the run thread shows about this launch, and its title.
+
+        ``origin`` carries the user-language parts (instructions, stop
+        condition, notes) so the run thread never has to show the launched
+        text, which also holds host-written English. The run number is the
+        one the run row shows once the launch is accounted.
+        """
+        trigger = queued["trigger"]
+        scheduled_for = _as_utc(queued.get("scheduled_for")) if trigger == "scheduled" else None
+        scheduled_for = scheduled_for or now
+        run_number = None
+        number_lookup = getattr(self._task_run_repo, "run_number", None)
+        if trigger == "scheduled" and callable(number_lookup):
+            try:
+                run_number = await number_lookup(queued["id"])
+            except Exception:
+                logger.warning("Scheduled task-run %s: run number lookup failed", queued["id"], exc_info=True)
+        origin = {
+            "task_id": task["id"],
+            "task_run_id": queued["id"],
+            "trigger": trigger,
+            "run_number": run_number,
+            "scheduled_for": scheduled_for.isoformat(),
+            "timezone": task["timezone"],
+            "task_title": task.get("title") or "",
+            "instructions": task["prompt"],
+            "stop_condition": task.get("stop_condition"),
+            "standing_notes": list(task.get("standing_notes") or []),
+        }
+        title = None
+        if task.get("context_mode") == "fresh_thread_per_run":
+            title = f"{origin['task_title'][:80]} · {scheduled_for.astimezone(ZoneInfo(task['timezone'])):%m-%d %H:%M}"
+        return origin, title
 
     async def _record_launched_run(
         self,

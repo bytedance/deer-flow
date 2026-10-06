@@ -2456,17 +2456,42 @@ Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigge
 ### Create schedules in a conversation
 
 Set both `scheduler.enabled: true` and `scheduler.tool_enabled: true`, then restart
-Gateway. An authorized interactive turn can use `schedule_task` to create, list,
-pause or delete tasks belonging to that conversation. For example: “Prepare a
-weekly meeting report every Monday at 9 AM in Asia/Shanghai for four weeks.”
-The tool returns the exact prompt, schedule, optional goal and stop method.
-Recurring report/file jobs may offer a manual trial; the trial requires your
-request and does not count toward the scheduled-launch limit.
+Gateway. An authorized interactive turn can use `schedule_task` to create, update,
+list, pause, resume or delete tasks, start a trial run, or save a note. For
+example: “Every weekday at 9:00, check release-checklist.md and tell me what is
+still unchecked; stop when everything is checked.” In the web app the result is a
+live card with the schedule, the stop condition and buttons, and the agent
+replies in one or two sentences; IM and other non-web turns describe the
+schedule, the next run and the stop condition in plain text.
+
+- **Which tasks a conversation manages.** The tasks created in it, and, in a run
+  conversation (the chat a scheduled run posted into), the task that run belongs
+  to: “pause this” or “move it to 10:00” work there too. This applies only to
+  turns you send. A scheduled run itself can only pause its own schedule with
+  `stop_scheduled_task`.
+- **Edits keep the task.** Changing the time, instructions, goal, stop condition
+  or safety cap is an `update` of the same task, so its ID and run history stay.
+  `resume` restarts a paused or finished task without a catch-up run. When the
+  cap is used up, the agent asks whether to raise `max_runs`, move `end_at` or
+  remove the cap, and sends that with the resume.
+- **Timezone.** A zone you name wins. Otherwise a new task uses the browser
+  timezone the web app sends with each message (`context.client_timezone`, read
+  only for this), and the result says which zone was used. Intervals and
+  one-time times with a UTC offset need no zone; for a cron schedule or a local
+  one-time time with no known zone (for example from IM), the agent asks. Edits
+  keep the saved zone; the browser zone never changes an existing task.
+- **Where results appear.** Each run posts its result in a new chat of its own,
+  titled “{task} · {local time}”, or in the originating chat when the task runs
+  there. Nothing else is posted back to the originating conversation. A run chat
+  shows the task instructions as one collapsed “Task instructions” block under
+  the run's header instead of a long user message.
+- **Language.** The agent writes the title, instructions and stop condition in
+  your language, and scheduled runs answer in the language of the instructions.
 
 New tasks default to a fresh conversation for each occurrence. A configured
 `goal_objective` applies only to that occurrence: success does not stop a
 recurring schedule. The running agent can request `stop_scheduled_task` for its
-own schedule when your overall end condition has been met; the request takes
+own schedule when your stop condition has been met; the request takes
 effect during terminal finalization. `max_runs` counts automatic launches only,
 and `end_at` provides a deadline. Either end condition takes precedence over a
 pause request. Tool-created sub-hourly schedules require an end condition; each
@@ -2480,16 +2505,20 @@ goal-check failures do not advance it. Resume retains the streak, so another eli
 pause the task again. Existing notification bindings receive goal-unmet and
 auto-pause notices through the same durable outbox; manual trials stay silent.
 
-You can ask the agent in the originating conversation to save an explicit note
-for future runs (at most 10 notes of 500 characters). Fresh recurring runs may
-read the previous executed occurrence through opt-in `read_conversation`, with
-the same owner and read-permission checks. This provides a source reference,
-not an automatic summary or a post-back into the originating chat.
+You can ask the agent in a conversation that manages the task to save an
+explicit note for future runs (at most 10 notes of 500 characters). Fresh
+recurring runs may read the previous executed occurrence through opt-in
+`read_conversation`, with the same owner and read-permission checks. This
+provides a source reference, not an automatic summary or a post-back into the
+originating chat.
 
-For a trial, send a direct request such as "Run this task now" or "先跑一次".
+For a trial, ask directly, for example “Run it now”, “OK, run it now” or
+“先跑一次吧”; in the web app the card's **Run once now** button does the same.
 The host accepts a bounded set of English/Chinese direct-run requests from the
-current user turn; task mentions, quoted or conditional requests, and a bare
-"yes" do not start a paid run. The agent asks for a direct request when needed.
+current user turn, optionally after a short acknowledgement such as “Sure,” or
+“好的，”. A bare “yes” or “好”, task mentions, and quoted or conditional requests
+do not start a paid run. When a run is already waiting to start, no extra trial
+is added and the agent says so. A trial does not count toward `max_runs`.
 
 A goal occurrence can use up to nine agent turns, with an evaluator request after
 each. Evaluator requests and provider-reported tokens are included in run usage;

@@ -1338,6 +1338,19 @@ scheduler poller runs (tasks fire and can be created). `tool_enabled`: chats
 can manage tasks and scheduled runs can stop their own schedule.
 `min_interval_seconds`: shortest interval and earliest one-time delay.
 
+**Browser timezone for chat-created tasks.** A run request may carry
+`context.client_timezone` (an IANA name, at most 64 characters, for example
+`"Asia/Shanghai"`). It is read only as the default timezone of tasks the
+`schedule_task` tool creates in that turn; an unknown or malformed value is
+ignored, and it never reaches the run config, the checkpoint or the prompt.
+
+**Scheduled run messages.** A scheduled run's prompt message has the id
+`scheduled-<task_run_id>` and carries `additional_kwargs.deerflow_scheduled_origin`
+(`task_id`, `task_run_id`, `trigger`, `run_number`, `scheduled_for`, `timezone`,
+`task_title`, `instructions`, `stop_condition`, `standing_notes`), the
+user-written parts a client shows instead of the launched text. The key is
+server-owned: it is stripped from client-supplied messages and state updates.
+
 ---
 
 ## Error Responses

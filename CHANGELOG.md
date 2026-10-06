@@ -53,6 +53,25 @@ This release closes that milestone with **301 merged pull requests**.
   The code list is in `backend/docs/API.md` and
   `contracts/scheduled_task_errors_contract.json`.
 
+- **scheduler:** Chat can now `update` and `resume` a task (same task ID and
+  history, same validation and error codes as REST, `clear_fields` removes a
+  goal, stop condition or cap) and passes the user's stop rule as its own
+  `stop_condition`. A task's run conversation may manage that task from
+  interactive turns; scheduled runs still only stop their own schedule. New
+  tasks default to the browser timezone the web app sends as
+  `context.client_timezone` (an explicit zone wins; intervals and offset times
+  need none; otherwise the agent asks instead of assuming UTC). Tool results
+  are compact, JSON-safe task views with local times (`next_run_local`,
+  `now_local`), a `display` hint for the web card, and a run's last outcome in
+  `list`; IDs, cron and UTC times are no longer repeated to the user. Trial
+  runs accept more natural direct requests ("OK, run it now", "先跑一次吧")
+  and report `thread_id` and `existing`. Scheduled prompts carry a stable
+  message id and server-owned `deerflow_scheduled_origin` metadata, fresh run
+  chats are titled "{task} · {local time}", goal verdicts record
+  `continuations`, and the lead prompt keeps stored task text and scheduled
+  replies in the user's language. The tools are offered only while the
+  Gateway's scheduler is running. ([#6340])
+
 - **scheduler:** The tasks page shows the per-run goal and end conditions of
   conversation-created tasks. Run history shows whether a goal was met,
   including when it relied on stated assumptions; an unmet run shows a readable

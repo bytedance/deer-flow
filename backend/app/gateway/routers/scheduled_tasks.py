@@ -21,6 +21,7 @@ from app.gateway.deps import (
 )
 from app.gateway.scheduled_task_errors import active_occurrence_error, active_occurrence_message, repository_error, scheduler_error
 from app.gateway.scheduled_task_validation import prepare_resume_updates, validate_scheduled_task_create, validate_scheduled_task_update
+from app.scheduler.service import TASK_CHANGED_ERROR
 from deerflow.config.agents_config import AGENT_NAME_PATTERN, load_agent_config
 from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict, ScheduledTaskQuotaExceeded
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRunStatus
@@ -37,7 +38,6 @@ from deerflow.utils.thread_id import ThreadId
 router = APIRouter(prefix="/api", tags=["scheduled-tasks"])
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
-_TASK_CHANGED_ERROR = "scheduled task changed before trigger admission"
 
 # Kept under its historical name; the coded wrapper is active_occurrence_error.
 _active_occurrence_conflict_detail = active_occurrence_message
@@ -393,7 +393,7 @@ async def trigger_scheduled_task(task_id: str, request: Request):
         raise scheduler_error(404, "task_not_found", result.get("error") or "Scheduled task not found")
     if outcome == "conflict":
         error = result.get("error") or "Scheduled task trigger conflicted with an active run"
-        raise scheduler_error(409, "task_changed" if error == _TASK_CHANGED_ERROR else "task_running", error)
+        raise scheduler_error(409, "task_changed" if error == TASK_CHANGED_ERROR else "task_running", error)
     if outcome == "failed":
         raise scheduler_error(502, "trigger_failed", result.get("error") or "Scheduled task trigger failed")
     return {"id": task_id, "triggered": True, "outcome": outcome, "existing": bool(result.get("existing")), "thread_id": result.get("thread_id")}

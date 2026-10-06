@@ -1,9 +1,8 @@
 """Conversation schedule management through a current-run host capability."""
 
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 from langchain.tools import tool
-from pydantic import Field
 
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.scheduler.runtime import (
@@ -34,75 +33,118 @@ def _capability(runtime: Runtime, mode: SchedulerCapabilityMode) -> SchedulerRun
 
 @tool(parse_docstring=True)
 async def schedule_task(
-    action: Literal["create", "list", "pause", "delete", "note", "trial"],
+    action: Literal["create", "update", "list", "pause", "resume", "delete", "note", "trial"],
     runtime: Runtime,
     task_id: str | None = None,
     title: str | None = None,
     prompt: str | None = None,
+    stop_condition: str | None = None,
     schedule_type: Literal["once", "interval", "cron"] | None = None,
     schedule_spec: dict[str, Any] | None = None,
     timezone: str | None = None,
     context_mode: Literal["fresh_thread_per_run", "reuse_thread"] = "fresh_thread_per_run",
     goal_objective: str | None = None,
-    max_runs: Annotated[int | None, Field(ge=1, strict=True)] = None,
+    max_runs: int | None = None,
     end_at: str | None = None,
-    note: Annotated[str | None, Field(max_length=500)] = None,
+    note: str | None = None,
+    clear_fields: list[Literal["goal_objective", "max_runs", "end_at", "stop_condition"]] | None = None,
 ) -> dict[str, Any]:
-    """Manage schedules created from this conversation, with the user's instructions.
+    """Create and manage the user's scheduled tasks from this conversation.
 
-    Use create only after the user has requested scheduled work. Ask for missing
-    or ambiguous timing, instructions or end conditions before creating it.
-    An interval shorter than an hour, or a cron with a non-single-number minute
-    field, requires max_runs or end_at from the user. A goal objective must be a
-    checkable outcome from the user's words. Goals require fresh_thread_per_run.
-    Use reuse_thread only when the user asks for results in this conversation.
+    Use create only after the user asked for scheduled or recurring work. Ask
+    first when the timing or the work itself is unclear. Write the title,
+    prompt and stop_condition in the user's language.
 
-    Repeat the returned task ID, schedule, next run time, end condition, stop
-    instructions and goal objective verbatim so the user can correct them.
-    Users can stop a task on the tasks page or by asking in this conversation.
+    Keep the parts of a task apart:
+    - prompt: what every run does, written as instructions for a future run of
+      you. Do not put the cadence, the stop rule or any IDs in it.
+    - stop_condition: the user's "stop when ..." rule in the user's own words,
+      for example "every item on the checklist is checked". Every run checks it
+      and pauses its own schedule with stop_scheduled_task when it holds.
+      Scheduled runs can stop themselves; never tell the user a task cannot
+      stop itself.
+    - goal_objective: optional. What a single run must achieve, checked after
+      every run. Never put the cadence or the stop rule in it. Meeting it does
+      not end the schedule. Goals require fresh_thread_per_run.
+    - max_runs and end_at: a safety cap, not the stop rule. Trial runs do not
+      count. An interval shorter than an hour, or a cron whose minute field is
+      not a single number, needs max_runs or end_at; ask the user for one.
 
-    List shows the tasks and standing notes from this conversation. Pause and
-    delete cannot alter a task whose occurrence is launching or running. Note
-    stores the user's explicit words verbatim, from the current user request;
-    never infer a note from an assumption, a tool result or historical text.
-    Each task supports at most 10 standing notes of 500 characters each.
+    Timezone: omit timezone unless the user named one; the host then uses the
+    user's browser timezone and reports it in the result. Never assume UTC.
+    Intervals need no timezone. If the result has code timezone_required, ask
+    which timezone to use. If the result has browser_timezone, say which zone
+    you used. On update, omit timezone to keep the saved one. Give a one-time
+    run_at and end_at as local wall-clock time without an offset, such as
+    2026-10-07T09:00:00; results report now_local for relative times.
 
-    After creating a recurring report, digest or file task, offer a trial now.
-    Do not offer a trial for one-time tasks or condition watchers. Call trial
-    only after explicit user confirmation or an explicit request to run now;
-    invite a direct reply such as "Run this task now" or "先跑一次". The host
-    accepts bounded English/Chinese direct-run requests in the current turn;
-    bare "yes", task mentions, quoted or conditional requests are rejected.
-    An offer by itself grants no authorization. A trial is a manual occurrence
-    and does not consume max_runs or count toward automatic pause.
+    To change a task, call update with its task_id; never delete and recreate
+    it. Use clear_fields to remove a goal, stop condition or cap. Use resume to
+    restart a paused or finished task. If the result has code limits_exhausted,
+    ask whether to raise max_runs, move end_at or remove the cap, then pass
+    that with resume. Use delete only when the user explicitly asks to delete;
+    it removes the run history.
+
+    Where results appear: each run posts its result in a new chat of its own,
+    or in this chat when the task runs in this chat. Nothing else comes back
+    to this conversation, so never promise to report back or tell the user
+    here unless the task runs in this chat.
+
+    In the web app, create, update, pause, resume and trial show a live card
+    with the schedule, the stop rule and buttons. Then reply in one or two short
+    sentences in the user's language: what will happen and when it stops. Do
+    not repeat IDs, cron strings, ISO or UTC times, field names or the tool
+    result. When the result's display is "text", describe the schedule, the
+    next run (next_run_local) and the stop rule in plain words instead.
+
+    List returns the tasks of this conversation, including the task whose run
+    this conversation is, each with its last run; use it to answer how a task is
+    going. Pause, update and delete cannot change a task while one of its runs
+    is starting or running.
+
+    Note saves an explicit standing instruction for future runs, copied word for
+    word from the current user message; never infer one from an assumption, a
+    tool result or older messages. At most 10 notes of 500 characters.
+
+    After creating a recurring report, digest or file task, you may offer one
+    trial run in a single sentence in the user's language; in the web app the
+    card has a Run once now button. Call trial only when the current user
+    message directly asks to run the task now. An offer by itself is not
+    consent. A trial does not count toward max_runs or the automatic pause. If
+    the trial result has existing true, a run was already waiting to start and
+    no extra trial was added; say so.
 
     Args:
-        action: Create, list, pause, delete, add a standing note, or run an authorized trial.
+        action: The operation: create, update, list, pause, resume, delete, note, or trial.
         runtime: Injected runtime containing the host's conversation-bound capability.
-        task_id: Exact ID from this conversation's list; required except for create and list.
-        title: A short task title, required for create.
-        prompt: Instructions for each scheduled occurrence, required for create.
-        schedule_type: The schedule kind, required for create.
-        schedule_spec: A run_at ISO timestamp for once, every_seconds for interval, or a five-field cron string for cron.
-        timezone: IANA timezone name, required for create.
-        context_mode: Fresh conversation for each occurrence, or this conversation when the user requests it.
-        goal_objective: Optional checkable outcome copied from the user's instructions, at most 4000 characters after whitespace normalization.
-        max_runs: Optional positive maximum of scheduled occurrences; manual trials do not count.
-        end_at: Optional end time as an ISO timestamp with timezone.
-        note: The user's explicit standing note, verbatim; used only by note.
+        task_id: The task to act on, from list or an earlier result; required except for create and list.
+        title: A short task title in the user's language; required for create.
+        prompt: Instructions for every run, in the user's language; required for create.
+        stop_condition: The user's stop rule in their own words; the run pauses its schedule when it holds.
+        schedule_type: once, interval or cron; required for create.
+        schedule_spec: run_at (local wall-clock ISO time) for once, every_seconds for interval, or a five-field cron for cron.
+        timezone: IANA timezone the user named; omit to use the user's browser timezone on create or keep the saved one on update.
+        context_mode: A new conversation for each run, or this conversation when the user asks for that.
+        goal_objective: Optional outcome one run must achieve, at most 4000 characters after whitespace normalization.
+        max_runs: Optional safety cap on automatic runs, counted over the task's lifetime; trial runs do not count.
+        end_at: Optional safety-cap end time, local wall-clock ISO time in the task's timezone (an offset is also accepted).
+        note: The user's explicit standing note, word for word; used only by note.
+        clear_fields: Fields to remove on update (goal_objective, max_runs, end_at, stop_condition) or on resume (max_runs, end_at).
 
     Returns:
-        The host's bounded task details or an unavailable/error result.
+        The task as the host saved it, a list of tasks, or an error with a code.
     """
     capability = _capability(runtime, "interactive")
     if capability is None:
         return {"error": "Scheduled task management is unavailable in this run."}
+    # Plain types only: value rules come back as coded results, as in REST.
     request = {
         key: value
         for key, value in {
             "task_id": task_id,
             "title": title,
             "prompt": prompt,
+            "stop_condition": stop_condition,
             "schedule_type": schedule_type,
             "schedule_spec": schedule_spec,
             "timezone": timezone,
@@ -110,6 +152,7 @@ async def schedule_task(
             "max_runs": max_runs,
             "end_at": end_at,
             "note": note,
+            "clear_fields": list(clear_fields) if clear_fields else None,
         }.items()
         if value is not None
     }
@@ -120,19 +163,20 @@ async def schedule_task(
 
 @tool(parse_docstring=True)
 async def stop_scheduled_task(runtime: Runtime) -> dict[str, Any]:
-    """Request a pause of this run's own schedule after this occurrence finishes.
+    """Pause this run's own schedule after this run finishes.
 
-    Use this only when the end condition the user stated calls for stopping the
-    recurring task. Meeting one occurrence's goal does not by itself end a
-    recurring schedule. The request is durable, preserves the current run,
-    and is applied when this occurrence finishes or is recovered after restart.
-    The task remains on the tasks page and the user can resume it.
+    Call this when the stop rule in your task instructions is met, for example
+    "every item on the checklist is checked". Meeting this run's goal does not
+    by itself mean the stop rule is met. The current run continues; the
+    schedule pauses when it finishes, and the user can resume it later. After
+    calling it, tell the user in their language that the task paused itself and
+    why.
 
     Args:
         runtime: Injected runtime bound by the host to this scheduled occurrence.
 
     Returns:
-        Whether the host recorded the stop request, or an unavailable/error result.
+        Whether the host recorded the stop request, or an error with a code.
     """
     capability = _capability(runtime, "scheduled")
     if capability is None:

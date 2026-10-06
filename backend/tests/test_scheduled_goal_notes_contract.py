@@ -62,6 +62,12 @@ def test_contract_version_two_keys():
     assert _CONTRACT["scheduled_origin_key"] == "deerflow_scheduled_origin"
 
 
+def test_scheduled_origin_key_matches_the_gateway_constant():
+    from app.gateway.services import SCHEDULED_ORIGIN_KEY
+
+    assert _CONTRACT["scheduled_origin_key"] == SCHEDULED_ORIGIN_KEY
+
+
 def test_check_failure_codes_match_finalization_and_are_unmet_reasons():
     assert tuple(_CONTRACT["check_failure_codes"]) == finalization.CHECK_FAILURE_CODES
     assert set(_CONTRACT["check_failure_codes"]) <= _CODES

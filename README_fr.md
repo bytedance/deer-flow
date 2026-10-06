@@ -727,7 +727,6 @@ Capacités actuelles du MVP :
 
 Limites actuelles du MVP :
 
-- Pas encore d'outil `schedule_task` créable depuis la conversation
 - Pas de tâches de notification en texte seul
 - Pas de cibles de dispatch canal ou GitHub
 
@@ -743,6 +742,17 @@ Activez le polling en arrière-plan avec `config.yaml -> scheduler.enabled`. Le 
 - Les échecs de vérification de l'objectif (évaluateur en échec, ou conversation modifiée pendant la vérification) ne comptent pas pour la pause automatique après trois échecs et ne remettent pas le compteur à zéro. Modifier l'objectif, les instructions ou la condition d'arrêt, ou ajouter une note, repart d'un nouveau compte ; la reprise le conserve.
 - Tant que le planificateur de ce processus Gateway ne tourne pas, la création d'une tâche (y compris la duplication) renvoie `409 scheduler_not_running`. `GET /api/features` expose `scheduled_tasks.available`, `running`, `tool_enabled` et `min_interval_seconds`.
 - Les erreurs de `/api/scheduled-tasks*` ont la forme `{"detail": {"code", "message", "params"}}` ; voir [`backend/docs/API.md`](backend/docs/API.md#scheduled-tasks) et `contracts/scheduled_task_errors_contract.json`.
+
+### Créer des planifications dans une conversation
+
+Activez `scheduler.enabled: true` et `scheduler.tool_enabled: true`, puis redémarrez le Gateway. Un tour interactif autorisé peut alors utiliser `schedule_task` pour créer, modifier, lister, mettre en pause, reprendre ou supprimer des tâches, lancer une exécution d'essai ou enregistrer une note. Par exemple : « Chaque jour ouvré à 9 h, vérifie release-checklist.md et dis-moi ce qui n'est pas coché ; arrête-toi quand tout est coché. » Dans l'application web, le résultat s'affiche sous forme de carte mise à jour en direct (planification, condition d'arrêt, boutons) et l'agent répond en une ou deux phrases ; dans les messageries (IM) et les autres tours hors web, il décrit en texte la planification, la prochaine exécution et la condition d'arrêt.
+
+- **Tâches gérées par une conversation.** Celles qui y ont été créées et, dans une conversation d'exécution (le chat où une exécution planifiée a publié son résultat), la tâche de cette exécution : « mets-la en pause » ou « passe-la à 10 h » y fonctionnent aussi. Cela ne vaut que pour les messages que vous envoyez ; une exécution planifiée ne peut que mettre en pause sa propre planification avec `stop_scheduled_task`.
+- **Une modification garde la tâche.** Changer l'horaire, les instructions, l'objectif, la condition d'arrêt ou le plafond de sécurité est un `update` de la même tâche : son identifiant et son historique sont conservés. `resume` relance une tâche en pause ou terminée, sans exécution de rattrapage. Si le plafond est atteint, l'agent demande s'il faut relever `max_runs`, repousser `end_at` ou supprimer le plafond, puis l'envoie avec la reprise.
+- **Fuseau horaire.** Un fuseau que vous nommez l'emporte. Sinon, une nouvelle tâche utilise le fuseau du navigateur que l'application web envoie avec chaque message (`context.client_timezone`, lu uniquement pour cela), et le résultat indique le fuseau retenu. Les intervalles et les heures ponctuelles avec décalage UTC n'en ont pas besoin ; pour un cron ou une heure locale ponctuelle sans fuseau connu (par exemple depuis une messagerie), l'agent pose la question. Une modification garde le fuseau enregistré ; le fuseau du navigateur ne change jamais une tâche existante.
+- **Où apparaissent les résultats.** Chaque exécution publie son résultat dans un nouveau chat intitulé « {tâche} · {heure locale} », ou dans le chat d'origine lorsque la tâche s'y exécute. Rien d'autre n'est renvoyé dans la conversation d'origine. Le chat d'exécution affiche les instructions de la tâche dans un bloc replié « Instructions de la tâche » sous l'en-tête de l'exécution.
+- **Langue.** L'agent rédige le titre, les instructions et la condition d'arrêt dans votre langue, et les exécutions planifiées répondent dans la langue des instructions.
+- **Essai.** Demandez-le directement, par exemple « Run it now » ou « 先跑一次吧 » ; le bouton **Run once now** de la carte fait de même. Un simple « yes », une mention de la tâche ou une demande citée ou conditionnelle ne lance pas d'exécution payante. Un essai ne compte pas dans `max_runs`.
 
 ## Atelier terminal (TUI)
 
