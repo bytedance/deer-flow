@@ -558,6 +558,11 @@
 
 ### 修复
 
+- **记忆：** 安装 jieba（`memory-zh` 扩展）时，DeerMem 相关度排序不再把标点计为查询词。
+  `tokenize()` 只过滤了 `jieba.cut` 输出中的空白，而 jieba 会把 `，`、`。`、`,`、`!`
+  切成独立 token，因此同样含逗号的查询与无关事实也会得到非零分，近似去重的相似度被抬高，
+  标点还会在后续查询词之前耗尽 128 个 token 的预算。现在不含字母或数字的 token 会被丢弃，
+  与无 jieba 的回退分词及 FTS5 查询过滤保持一致。([#6388])
 - **中间件：** 工具输出预算不再让子智能体证据丢失失败的 shell 退出码。长度介于
   `externalize_min_chars`（12,000）与沙箱上限（20,000）之间的 bash 结果会被替换为
   以 `Access:` 页脚结尾的预览，结尾的 `Exit Code: N` 不再位于最后，
@@ -7319,3 +7324,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6350]: https://github.com/bytedance/deer-flow/pull/6350
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351
 [#6354]: https://github.com/bytedance/deer-flow/pull/6354
+[#6388]: https://github.com/bytedance/deer-flow/pull/6388

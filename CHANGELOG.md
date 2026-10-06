@@ -623,6 +623,14 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **memory:** DeerMem relevance ranking no longer counts punctuation as query
+  terms when jieba is installed (`memory-zh` extra). `tokenize()` dropped only
+  whitespace from `jieba.cut`, which emits `，`, `。`, `,` and `!` as standalone
+  tokens, so a query and an unrelated fact that both contained a comma scored
+  above zero, near-duplicate similarity was inflated, and punctuation used up the
+  128-token budget before later query terms. Tokens without a letter or digit are
+  now dropped, as the no-jieba fallback and the FTS5 query filter already did.
+  ([#6388])
 - **config:** Every Gateway process that shares one `extensions_config.json`
   now sees the MCP and skill changes made by another one. The parsed file was
   cached once per process and only the process that handled the write
@@ -8856,3 +8864,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351
 [#6354]: https://github.com/bytedance/deer-flow/pull/6354
 [#6386]: https://github.com/bytedance/deer-flow/pull/6386
+[#6388]: https://github.com/bytedance/deer-flow/pull/6388
