@@ -10,9 +10,11 @@
 ## [未发布]
 
 本节累积面向 **2.2.0** 里程碑（[2.2.0](https://github.com/bytedance/deer-flow/milestone/3)）的工作。
-该里程碑随本次发布收尾，共合并 **301 个 pull request**。
+该里程碑随本次发布收尾，共合并 **439 个 pull request**。
 
 ### 新增
+
+#### 调度器
 
 - **调度器：** 按需启用对话工具创建及管理属主绑定的定时任务，支持自动启动上限、
   每次执行的目标评估，以及 Agent 请求停止自身调度。目标未达成与自动暂停复用
@@ -20,8 +22,6 @@
   与这些工具是否启用无关：已有的定时、webhook 和 autonomous goal 运行现在可以接受
   已声明的低风险、可逆假设，并记录为 `relied_on_assumption`；交互式 goal 评估仍保持
   严格。goal 评估器的调用和 token 现在计入运行用量。([#6229])
-
-#### 调度器
 
 - **调度器：** 任务页显示对话创建任务的每次执行目标和结束条件。执行记录显示目标
   是否达成（含依赖已声明假设的情况）；未达成的执行以中性样式显示可读的原因，不再
@@ -49,6 +49,21 @@
   告知客户端丢弃先前收集的页。`total_count`
   仍覆盖全部过滤匹配项，且不涉及任何新的依赖、存储层或 HTTP
   端点。([#5570])
+
+- **智能体：** 中间件声明的工具现在在每条组装路径（主 Agent、原生子智能体与内嵌
+  客户端）上都受 Layer-1 工具授权约束。LangChain 会在宿主显式列表过滤*之后*才把
+  各中间件的 `tools` 合入绑定工具集，因此扩展贡献的工具或 plan mode 的
+  `write_todos` 这类声明此前完全绕过了 `tools` 策略。现在每次构建都会从组装后的
+  中间件栈收集声明，只对普通流程从未裁决过的名字做决定——并以该流程的裁决为种子，
+  构建级被拒的名字（包括提供方失败时的 fail-closed 拒绝）保持拒绝——再在独立的
+  状态保留副本上收窄中间件栈，不会改动调用方持有的中间件实例。**行为变化：** 在
+  `authorization.enabled` 且显式 `tools` 策略不允许 `write_todos` 时，plan mode
+  构建不再绑定 `write_todos`，`TodoMiddleware` 也随之停止注入 todo 系统提示与
+  未完成 todo 的完成提醒；内置 RBAC 默认（缺少工具策略 = 不限制）不变，关闭授权
+  的部署也不受影响。Layer 2 现在还把宿主解析的工具来源写入
+  `AuthzRequest.context["tool_provenance"]`，并把基础设施豁免（生成的
+  `tool_search` 辅助工具）绑定到宿主创建的具体工具对象而非其名字，同名的外来工具
+  不再能继承该豁免。([#6105])
 
 - **智能体：** 自定义智能体现在可以在智能体设置中持久化默认知识
   scope，让专用智能体每次对话都从自己的语料库开始，而不是全部
@@ -98,6 +113,39 @@
   `read_file` 回退——远端工具不支持时保持 `UNVERIFIED`。顶层标量、重复键和语法
   合法的大数字允许；UTF-8 BOM 会被拒绝。只查语法——不做 schema 或业务字段
   检查；既有标准与判定语义不变。([#5947])
+
+- **网关：** 多进程启动门控现在除了 `GATEWAY_WORKERS > 1`，也会在显式
+  `deployment.multi_instance: true`（或 `DEER_FLOW_MULTI_INSTANCE=1`）时触发。
+  worker 数变量只能看到一个进程树，因此拥有多个单 worker Pod 的 Kubernetes
+  Deployment 此前能通过全部检查，而每个 Pod 的启动孤儿调和会在每次滚动更新时把
+  其他 Pod 的无租约运行误判为已崩溃。两条路径都要求 Postgres、
+  `run_events.backend: db`、`run_ownership.heartbeat_enabled: true`，现在还要求
+  Redis stream bridge，并拒绝显式 `sandbox.ownership.type: memory`、进程本地的
+  浏览器工具以及未设置 `scheduler.multi_instance` 的调度器。智能体存储分叉警告、
+  入站 webhook 去重警告与微信扫码登录守卫都遵循同一声明。**行为变化：**
+  `GATEWAY_WORKERS > 1` 且使用 memory stream bridge 时不再启动；请配置
+  `stream_bridge.type: redis` 或 `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`
+  （docker-compose 与 Helm chart 已自动注入）。([#6328])
+
+- **配置：** 新增 `DEER_FLOW_ENV_FILE`，在后端启动时选择一个显式的 UTF-8 dotenv 文件，配置
+  加载、认证启动和调试入口共用；相对路径以后端进程工作目录解析，已有进程环境变量保持
+  优先，选择为空、缺失、不可读或编码无效时直接报错而不回退。不设置时保持默认 dotenv 发现；
+  当 `PYTHON_DOTENV_DISABLED` 禁用加载时，显式选择会报错。([#6227])
+
+- **智能体：** 运行事件携带每次 LLM 调用的遥测：`llm.ai.response` 元数据新增可选键，包括
+  LangChain run id、调用方类别（`lead_agent`、`middleware`、`subagent`、`fallback`）、
+  provider、模型、停止原因、provider 上报的 token 数和渲染后的请求大小；`llm.error` 携带
+  同样的身份信息加 `error_type`；摘要中间件会发出 `middleware:summarize` 事件，标记摘要器
+  输出与既有 `summary_text` 完全相同的情形。仅为观测：提示词、请求与 token 统计不变，所有
+  遥测辅助逻辑失败时只记日志。([#6236])
+
+- **上下文：** 当完全相同的摘要提示词此前已产出与现有摘要逐字节一致的
+  结果时，压缩会跳过摘要器 LLM 调用。中间件维护一个有界缓存，以渲染后的
+  提示词加上有序的模型候选列表为键，只缓存首个候选模型返回与当前摘要一致
+  结果的提示词；因此回退候选产出的未变化结果不会进入缓存，也就不会抑制
+  对失败的首选模型的重试。复用还要求当天的前一条摘要与缓存输出一致，缓存
+  出错则回退到正常生成。`middleware:summarize` 日志事件新增
+  `llm_call_skipped` 与 `skip_count`。([#6318])
 
 #### 记忆
 
@@ -197,6 +245,17 @@
   `Modify`、`ModifyCommercially`）；不设置过滤器时发出的请求与之前
   完全一致。([#5723])
 
+- **搜索：** Serper `web_search` 接受可选的模型参数 `time_range`
+  （`day`、`week`、`month`、`year`），映射为 Serper 的 `tbs` 参数
+  （`qdr:d|w|m|y`）；省略或传 `null` 保持原有的不受限请求，非法值在发起
+  HTTP 请求前即被拒绝，Serper `image_search` 不受影响。([#6113])
+
+- **抓取：** Jina `web_fetch` 支持通过其 `tools` 配置项开启有界重试：
+  `max_retries`（默认 `0`，关闭）与 `retry_budget_seconds`（默认 `30`）。
+  仅 HTTP 502/503/504 与连接建立失败会重试；退避等待在覆盖所有尝试的共享
+  预算内随机化，开启重试最多发出 `1 + max_retries` 个上游请求并增加开销。
+  ([#6143])
+
 #### 技能
 
 - **技能：** 回答会展示其加载了哪些技能，并提供可检视的快照。成功读取受配置管理的
@@ -273,6 +332,12 @@
   身份也不再推送。目前只有企业微信实现了主动推送 `send_notification`，
   其它渠道在实现之前会在 outbox 中显式失败。
   (issue #4254, [#4843], [#6135])
+
+- **频道：** 新增 QQ 频道，通过腾讯 QQ 开放平台官方 WebSocket 网关接入，
+  无需公网回调地址。支持文本单聊（C2C）与群 @ 消息的文本回复，并遵守 QQ
+  被动回复配额（同一来源单聊 60 分钟 4 条、群聊 5 分钟 5 条），支持
+  `allowed_users`、`channel_connections` 一次性 `/connect <code>` 绑定及
+  按发送者隔离的群话题。([#6081])
 
 #### 认证与防护
 
@@ -398,6 +463,44 @@
   惰性，provider 失败与超时会原样放行结果，没有任务存储时的
   运行不会筛检任何内容。([#5833])
 
+- **mcp：** 管理员缓存重置（`POST /api/mcp/cache/reset`）现在会在
+  `extensions_config.json` 旁写入持久的代次标记，共享该目录的每个 Gateway
+  worker 都会在下一次 MCP 查询前清退各自的工具缓存与会话池——从未改动
+  配置文件的远端 `tools/list` 变化也随之生效。响应以 `scope: shared_config`
+  标识共享目录重置，无法解析配置路径时返回 `scope: process`；文件系统
+  相互独立的副本不会被隐式覆盖。([#6126])
+
+- **扩展：** 能力中心的扩展画廊默认展示仓库内置的扩展目录——
+  **行为变化：** 未注册任何插件的部署现在会看到五个示例包，附带本地化的
+  名称、描述、搜索和安装说明链接，而不是空白页面。运行时描述符按显式
+  namespace 合并进同一列表，不产生重复行。仅目录条目只是发现用的元数据：
+  不声称安装或启用状态，也绝不进入模块加载器，在运行时发现进行中或不可用
+  时依然可见。([#6188])
+
+- **扩展：** 全栈插件现在可以向输入框的 `@` 提及选择器提供候选。浏览器
+  模块的可选 `mentionProviders` 会与内置技能、文件、对话一起参与搜索；
+  选中后插入行内令牌，提交时发送可读的 `@label` 文本，并附带带命名空间的
+  `additional_kwargs.extension_mentions` 元数据（最多 16 个引用）。查询
+  有防抖与长度限制，绑定查看者与线程，并在查询、查看者、语言或已安装
+  快照变化时立即失效；某个提供方失败或超时不会影响其他健康候选。这些
+  元数据属于用户输入而非授权凭据——插件必须自行校验被引用对象与查看者
+  权限。([#6189])
+
+- **扩展：** 打包扩展现在可以获得宿主绑定的完整 Agent 运行控制
+  （extension-api 0.2.5）。插件后端动作与模型工具会收到
+  `context.agent_runs`，扩展贡献的路由可调用 `require_agent_runs(request)`，
+  获得 `create_thread`、`start`、`resume`、`get`、`get_state`、`wait`、
+  `cancel` 等操作，全部经由 Gateway 常规准入、检查点与取消机制。该句柄
+  绑定到已认证用户：每次操作都会重新校验权限与属主，仅会话凭据或本机
+  关闭鉴权模式可获得该能力（PAT 与内部/渠道调用方不会获得），幂等键按
+  插件命名空间隔离，句柄不可序列化、也无法跨重启存活。([#6190])
+
+- **扩展：** 新增 agent-teams 示例插件，让已有的完整自定义 Agent 以团队协作：每个
+  成员保留绑定其 Agent 的持久会话，成员通过原生 `@` 提及与定向请求相互委派工作，
+  同级请求异步执行，并在独立的团队页面上共享活动流。团队按用户隔离，通过
+  `config.yaml` 的 `plugins:` 选择性启用；Capability Center 在安装前就会列出该
+  示例并附本地化的安装说明。([#6243])
+
 #### 持久化
 
 - **持久化：** 新增 checkpoint 保留服务，在 #5255 契约之上实现
@@ -416,6 +519,19 @@
   `false`，尚无任何生产方迁移过来（图片查看与外置工具结果是已点名
   的后续项），因此未设置的部署行为与今天完全一致。([#5361])
 
+- **持久化：** 启用 blob 存储后，被外置到虚拟 `read_file` 路径的超大工具结果
+  会同时写入共享 blob 存储，处理下一次模型调用的 Gateway 会在模型读取前在
+  本地恢复经摘要校验的原始字节——此前完整内容只存在于执行工具调用的那台
+  Gateway 上，负载均衡后的后续读取会遇到失效路径。blob 写入失败或超出
+  64 MiB 生产者上限的结果会回退为内联内容，而不是留下不可持久化的路径；
+  blob 存储默认仍为关闭。([#6159])
+
+- **持久化：** 启用 blob 存储后，通过 `view_image` 查看的图片会连同本地路径
+  一起持久化到共享 blob 存储，这样后续落在另一台 Gateway 上的模型调用可以从
+  校验过的共享字节重建图片上下文，而不会因写入方本地文件缺失而丢失。存储
+  写入失败会返回通用工具错误，而不是保存虚假声称跨实例持久的状态；blob
+  存储默认仍为关闭。([#6160])
+
 #### 前端
 
 - **前端：** 将能力中心统一为带插件配置与自定义智能体选择的可搜索
@@ -429,6 +545,16 @@
   改动共享的 MCP 缓存，也不授予任何授权。捆绑钉钉/企业微信群通知与
   HubSpot CRM 工具；既有 MCP 与 Lark 工作流保持不变，也不会自动启
   用任何东西。([#5497])
+
+- **前端：** 输入框支持行内 `@` 引用：在光标处键入 `@` 或点击 `@` 按钮会打开
+  分组选择器，可搜索已启用的技能、当前项目文档和其他会话，插入的原子引用
+  可通过常规编辑删除。一条消息最多可选 16 个去重技能，每个选择在激活前都会
+  经用户注册表与智能体允许列表校验。([#6063])
+
+- **前端：** 输入框的 `/` 菜单现在只列出内置的 `/goal` 与 `/compact` 命令。
+  **行为变更：** 网页端斜杠菜单不再选择技能——请改用 `@` 内联引用选择技能；
+  旧的已选技能气泡被移除，旧草稿中的技能选择会恢复为内联引用，手动输入的
+  旧式斜杠文本仍按普通消息提交。([#6154])
 
 ### 修复
 
@@ -649,12 +775,7 @@
   引号的开头 `~` 会展开），`DEER_FLOW_PROJECT_ROOT` 未设置或为空时取仓库根目录。
   Gateway 会拒绝的覆盖值会让 `config.yaml found` 失败并给出 Gateway 的错误，
   其余配置检查随之跳过。([#5987])
-- **数据库：** `DatabaseConfig` 现在严格校验 `pool_size`、`pool_recycle` 与
-  `command_timeout`。此前，YAML 布尔值（`true`/`false`）会被强制转换为 `1`/`0`，
-  导致 `pool_size: true`（变成仅 1 个连接）和 `command_timeout: true`（变成 1 秒超时）
-  静默通过配置加载；`pool_size` 还接受非正数（`0`、`-1`），`command_timeout` 接受
-  `inf`（导致超时机制永不触发）。现在 `pool_size` 和 `pool_recycle` 强制要求正整数，
-  `command_timeout` 拒绝布尔值与非有限浮点数，同时保留 `null` 显式禁用超时。
+
 - **前端：** 文件上传完成后，乐观显示的用户消息气泡不再丢失引用与对话
   引用标签。上传完成时的更新会用仅含已上传文件的对象替换气泡的
   `additional_kwargs`，因此在服务端回传该消息之前这些标签会消失；随本次
@@ -2302,6 +2423,480 @@
   助函数排空：路由存活到已开始的写入结束，随后原始 `CancelledError` 照常传
   播。只读路径保持既有取消语义。([#6093])
 
+- **沙箱：** 本地容器后端的所有文本模式 `subprocess.run` 调用现在固定
+  `encoding="utf-8"` 与 `errors="replace"`。在非 UTF-8 区域设置的主机（如
+  cp936 中文 Windows）上，此前按平台默认编码解码会丢失整段输出——
+  `stdout`/`stderr` 返回 `None`，导致 JSON 解析调用点崩溃或静默返回空结果。
+  ([#5905])
+
+- **上传：** 取消上传现在会先等待已开始运行的文档转换工作线程结束，再删除其
+  临时源文件，清理不会删掉转换器仍在读取的文件。因此取消的耗时可能与转换本身
+  一样长；取消仍会向外传播，且被取消的转换不会写出 Markdown。([#5999])
+
+- **智能体：** 读前写拦截消息现在会给出目标文件的行数和具体的 `read_file`
+  范围建议，取代笼统的"先读最后约 30 行"；倒置的范围现在返回
+  `(invalid line range: start_line must be <= end_line)`，取代容易被模型
+  误解为"文件比 start_line 短"的"no lines in range"文案。带内无内容的
+  `read_file` 结果也不再盖读标记，避免误开写入门。([#6020])
+
+- **前端：** 工件编辑现在要求完整文件内容：截断的字节范围预览不再被用作编辑
+  基线（预览与完整响应可能携带相同 ETag），修复了"还原编辑仍提示未保存"、
+  "删除预览之外的内容会被悄悄恢复"两类问题。已有草稿可跨部分重载保留，重载
+  处于加载、截断或失败状态时"退出编辑"仍然可用。([#6036])
+
+- **模型：** vLLM 提供方在非流式响应、流式增量及后续工具调用轮次中，若
+  `reasoning` 字段缺失或为 null，会回退读取旧版 `reasoning_content` 字段，
+  旧版 vLLM 兼容端点返回的推理内容不再丢失；两个字段同时存在时保留
+  `reasoning`。([#6048])
+
+- **Discord：** 缺少 `discord.py` 时，Discord 频道的启动报错现在指向可选依赖
+  extra（`uv sync --extra discord`），而非会改写 `pyproject.toml` 的
+  `uv add discord.py`——启动时会以 `uv sync --locked` 重新同步整个依赖树。
+  ([#6054])
+
+- **Telegram：** 出站 Telegram 消息的分段（及流式预览截断）现在按 UTF-16
+  代码单元计量——Telegram 的 4096 字符上限正是以该单位计算——而非 Python
+  码点。此前表情密集的回复虽通过码点检查却超出真实上限，收到确定性的
+  400 "Message is too long" 并在重试后丢失；非 BMP 字符也不会再被拆到两个
+  分段中。([#6067])
+
+- **技能：** 自定义技能变更（编辑、删除、回滚、安装、启用/停用）现在会在
+  请求取消时先排空持久化尾部：写入、历史记录与技能提示词缓存刷新会一起
+  完成后再传播取消，已取消的请求不会再留下缺少对应历史记录的技能文件或
+  过期的提示词缓存。([#6078])
+
+- **子智能体：** `return_direct=True` 工具（包括扩展中间件贡献的工具）的
+  结果现在会返回给调用者，不再被前置的助手消息顶掉：直返输出按工具调用顺序
+  返回；直返批次中任一工具失败时，任务会按既有 `subagent_error` 契约标记为
+  失败，同时保留批次输出（包括成功的同级结果）。([#6083])
+
+- **记忆：** 记忆变更接口（清空、事实的创建/更新/删除及导入）现在通过
+  `await_drained` 在请求取消时先排空持久化写入：已提交的写入会先完成再传播
+  取消，不会在存储工作线程仍在运行时直接中止。([#6092])
+
+- **路径：** 创建宿主机可见路径时，现在会在所有操作系统上拒绝 Windows 保留
+  设备名（`CON`、`PRN`、`AUX`、`NUL`、`COM1-9`、`LPT1-9`）以及以空格或点
+  结尾的路径段，覆盖上传文件名、本地沙箱工具与 bash 路径、自定义技能支持
+  文件路径。已以此类名称存储的现有文件仍可读取和编辑。([#6102])
+
+- **前端：** 网页抓取结果标题不再显示结尾的 ATX 闭合井号：`# Release Notes
+  ###` 在工作区链接中现在显示为 "Release Notes"。字面井号会原样保留（如
+  `C#`、转义井号、后跟非 ASCII 空白的井号），提取改为一次向后扫描，避免
+  长标题上的二次回溯。([#6103])
+
+- **智能体：** 外部化的工具输出现在通过兄弟临时文件写入、再原子重命名发布：
+  写入中途失败（磁盘写满、请求中断）时不会在最终文件名下留下半截文件。
+  外部化文件名改为由清洗后的 tool call id 派生（而非随机后缀），宿主机与
+  沙箱路径对同一次调用使用同一文件名，重复外部化同一输出也不再遗留两个
+  文件。([#6109])
+
+- **认证：** 当 IdP 签发的 ID token 携带非 ASCII 或非字符串的 `nonce` 声明
+  时，OIDC 登录不再以 500 失败。这类声明会走正常校验路径被拒绝，回调与其他
+  nonce 不匹配一样重定向到 `sso_failed`；匹配的非 ASCII nonce 仍按原样
+  接受。([#6115])
+
+- **沙箱：** Lark broker 模式下，AIO 的一次性 Bash 运行会关闭继承的管道
+  stdin，读取默认输入的命令立即得到 EOF 而不再挂起；持久 Shell 命令不受
+  影响，显式管道、heredoc 与文件重定向仍正常提供输入。broker shim 仅在
+  EOF 后转发管道/文件输入，输入空闲超过窗口时以退出码 124 中止且不执行
+  （`DEERFLOW_LARK_BROKER_STDIN_GRACE_SECONDS` /
+  `DEERFLOW_LARK_BROKER_STDIN_TAIL_SECONDS`，默认 2 秒）；broker 日志只记录
+  参数个数、退出码与耗时，不记录参数值。([#6117])
+
+- **上传：** 匹配保留暂存命名 `.upload-*.part` 的文件名现在会在写入任何
+  文件或获取沙箱之前被拒绝，返回 `400` 并提示改名；整批文件先检查后落盘，
+  保留名称不会再留下与临时暂存文件冲突的部分上传。嵌入式 SDK 在复制前
+  校验整批文件名并抛出 `ValueError`；项目资料库遵循同样限制，附加带保留
+  名称的旧资料库文档现在返回 `400` 及改名提示，而非 `500`。
+  **行为变化：** 此前可上传的这类文件名需要先改名再上传，已有的旧上传
+  文件不会被迁移。([#6122])
+
+- **前端：** 重新持久化的消息保持在会话中的原位置。此前去重时，以更晚日志
+  序号重新持久化的历史行会把消息推向会话末尾；现在保留副本会重新锚定到该
+  身份最早出现的序号，并优先取最早的可见副本，隐藏的控制行不会带动其可见
+  副本移动。内容仍收敛为最新副本。([#6128])
+
+- **前端：** `.jl` 文件重新解析为 Julia 语言。此前代码文件扩展名映射把
+  Julia 按语言名而非 `jl` 扩展名作为键，导致 Julia 文件无法命中代码文件
+  检测，编辑器收到的语言标识是扩展名 `jl` 而非 `julia`；映射现在同时提供
+  `jl` 与 `julia` 两个键，均指向 `julia`。([#6130])
+
+- **持久化：** `RunEventStore.list_messages` 现在同时遵循两个游标：同时给出
+  `after_seq` 与 `before_seq` 时，memory、JSONL 与数据库后端都会先应用两个
+  开区间边界再裁剪 `limit`，按升序返回窗口内最早的消息。此前 JSONL 后端在
+  设置 `before_seq` 时会忽略 `after_seq` 并返回窗口末尾；固定 `before_seq`
+  并前移 `after_seq` 即可在有界历史范围内向前翻页。([#6136])
+
+- **路径：** 上传、新建技能支持文件和新的本地沙箱路径现在在所有平台上拒绝
+  Windows 上标数字设备名——Windows 将 `COM¹`/`LPT¹` 至 `COM³`/`LPT³`
+  （含 `com².txt` 之类的带扩展名形式）视为保留设备，此前以此类名称创建的
+  文件在 Windows 上不可用。`COM⁴.txt`、`COM¹notes.txt` 等普通名称仍允许，
+  读取与删除路径保留原有豁免。([#6148])
+
+- **上传：** 保留暂存名检查现在同样拒绝 Win32 别名：去掉末尾点号或空格、
+  忽略大小写后会变成 `.upload-*.part` 的名称（如 `.upload-notes.part.`、
+  `.upload-notes.part `、`.UPLOAD-NOTES.PART`）会在整批文件落盘前以 `400`
+  拒绝——否则 Windows 会将其作为同一个暂存文件打开。项目资料库的上传、
+  晋升与附加沿用同一检查；磁盘上已有的旧别名文件仍可见，不会被清理。
+  ([#6149])
+
+- **智能体：** 并发外部化同一工具输出时不再共享同一个临时文件。每个写入者
+  以独占方式创建各自的 `.tool-output-*.tmp` 兄弟临时文件，关闭后通过原子
+  重命名发布，互相不会截断或删除对方的待发布输出，最后成功发布者的完整
+  内容胜出。发布文件沿用 Gateway 正常的 umask 权限，以其他 UID 运行的挂载
+  沙箱仍可读取；非正常停机仍可能留下 `.tool-output-*.tmp` 残留，系统不会
+  自动清理。([#6150])
+
+- **前端：** 名为 `constructor`、`__proto__` 或 `data.constructor` 等点分形式的
+  工件文件不再被误判为代码文件：语言检测现在只检查语言映射自身的键，而不是
+  其继承属性，这些文件名继续走现有的下载回退，而不会在打开编辑器时失败。
+  ([#6152])
+
+- **模型：** Codex 提供方在收到 `response.completed` SSE 事件后立即返回已完成
+  的响应，不再等待连接关闭，服务端保持打开的流不会再把已完成的回答变成读取
+  超时失败。`response.failed`、`response.incomplete` 与 `error` 事件现在会携带
+  提供方的错误码/消息或不完整原因抛出，部分输出不会被当作成功答案返回。([#6155])
+
+- **nginx：** 通过 `http://127.0.0.1:2026` 或 `http://[::1]:2026` 访问时，现在会以
+  301（仅限安全方法）重定向到 `localhost` 上的同一 URL，这样在一个回环地址下
+  创建的登录会话在另一个地址下也可见。此前浏览器按主机名隔离 Cookie，会把
+  会话拆分到两个源。API 调用与 WebSocket 握手原样通过，非回环主机名不受
+  影响。([#6158])
+
+- **配置：** 面向 Google 官方 OpenAI 兼容端点的 Gemini 示例配置现在改用标准
+  reasoning 契约（`thinking: required`、`dialect: none`、受支持的
+  `reasoning_effort` 取值），运行在 `gemini-3.1-pro-preview` 上；旧示例发送的
+  顶层 `thinking` 字段会被端点以 HTTP 400 `Unknown name "thinking"` 拒绝。
+  文档中的迁移说明覆盖了从旧示例复制而来的配置。([#6161])
+
+- **sandbox：** Tenki 云沙箱提供方现在要求 SDK 1.4.0+，该版本可能在退出码为
+  零时返回 `timed_out=True`。超时命令现在会保留部分输出并报告
+  `Error: command timed out` 与 `Exit Code: 124`，不再伪装成功；命令不会重试，
+  沙箱仍可继续使用。预热池健康探测即使输出中含有 `ok` 行，也会拒绝超时或
+  失败的探测结果。([#6162])
+
+- **上传：** 转换上传文档的大纲与预览现在除设备号、inode 和大小外，还会校验
+  原文件的修改时间戳，因此对已上传文档做等长覆写后，不再展示描述旧内容的
+  大纲。**行为变更：** 缺少原文件时间戳的旧归属记录会被拒绝——启用
+  `uploads.auto_convert_documents: true` 后重新上传原文件即可恢复转换；文件
+  本身仍保留，未通过校验的 Markdown 会在历史列表中作为独立文件显示。([#6165])
+
+- **tui：** TUI 输入框现在是多行编辑器，粘贴的代码、堆栈跟踪和多段 prompt
+  会保留换行与缩进，`Enter` 发送完整内容。上/下方向键先在输入框内移动
+  光标，到首/末可视行（含软换行）时才切换到历史输入；斜杠命令面板与
+  PageUp/PageDown 转写滚动保持不变。([#6168])
+
+- **配置：** `tool_output` 的字符/条数预算与所有 `tool_overrides` 每工具取值
+  现在都要求非负整数：YAML 布尔值会被拒绝，而不再被强转为 `0`/`1`；负数
+  override（此前例如 `tool_overrides: {web_fetch: -1}` 会静默关闭该工具的
+  外置）现在会让配置加载报错，并指明字段与工具。数字字符串、整数值浮点数
+  与显式 0 仍然有效；每工具 override 为 0 时仍只关闭外置。([#6172])
+
+- **telegram：** 富文本消息的长度检查现在按 UTF-16 码元（Telegram 实际执行的
+  计量方式）衡量回复，而不是 Python 码点。此前表情符号较多的回复按码点数
+  能通过检查，却被 Telegram 拒绝并退回分段纯文本，丢失回复的 Markdown
+  排版，还浪费一次 API 往返。([#6174])
+
+- **社区：** Firecrawl 与 fastCRW 的 web 搜索工具现在会先把配置的
+  `max_results` 规范化再交给搜索客户端。此前该 YAML 值未经验证就直接作为
+  请求的 `limit` 发出；布尔值、`3.5` 这类小数、零、负数、非数字字符串和
+  显式 `null` 现在会记录警告并回退到默认值 5，而 `"8"` 这样的整数字符串
+  仍会被接受。([#6175])
+
+- **前端：** HTML 工件预览现在会忽略并非真实元素的 `<base>` 文本。此前
+  用正则判断文档是否已有 base 标签，注释、脚本文本或 `<template>` 内的
+  base 标签也会命中，导致这些报告跳过注入的工件基础 href，相对资源改为
+  按应用源解析，图片与样式随之失效。现在检测在惰性 `<template>` 中解析
+  文档，只认可真实的 `<base>` 元素；不含 base 文本的文档完全不构建 DOM。
+  ([#6176])
+
+- **Artifact：** CSV/TSV 预览现在能正确处理字节区间在 CRLF 行尾中间截断的
+  样本。此前截断样本恰好切在 CRLF 中间时，解析器会把引号字段后残留的
+  CR 当作语法错误并拒绝整个预览；现在解析前会去掉这个多余的 CR，完整行
+  照常渲染，不完整的末行仍按原样丢弃。先 LF 后 CRLF 的文件同样覆盖；
+  纯 CR 行尾的完整文件与真正的引号错误行为不变。([#6180])
+
+- **前端：** 输入框中的行内引用现在可用 Backspace 或 Delete 整体删除，原生
+  撤销也能恢复。已完成的引用是 contenteditable 对象；光标相邻时，删除会先
+  选中整个对象，由浏览器一步移除，撤销也能原样找回，包括对话引用的智能体
+  绑定。删除引用的 `@` 分隔符后移动光标不再重新打开提及选择器，后续编辑
+  也会保留对话引用的标题与智能体绑定。([#6184])
+
+- **调度器：** 定时任务的 PATCH 请求携带显式 `assistant_id: null` 时，任务
+  现在会重置回 `lead_agent`。此前更新处理器用 `exclude_none=True` 构建变更
+  集，null 被静默丢弃，任务一旦绑定自定义智能体便无法解绑。现在按请求
+  实际发送的字段判断：显式 null 重置为 `lead_agent` 且不再解析智能体配置；
+  省略该字段则保留当前智能体，即使该自定义智能体已被删除。
+  ([#6185])
+
+- **配置：** `title.max_words` 与 `title.max_chars` 现在拒绝 YAML 布尔值。
+  此前 Pydantic 会在范围校验前把 `true` 强转成整数 `1`，紧邻布尔开关写串的
+  `true` 会悄悄把生成的线程标题限制在一个词或一个字符；现在两个字段都会
+  在校验时报错 "must be an integer, not a boolean"。`"80"` 这样的数字
+  字符串仍然有效。([#6187])
+
+- **上传：** 上传 Markdown 的大纲不再把缩进的粗体行当作标题。转换得到的
+  PDF 文本常包含 `    **PART II**` 这类示例；四空格或制表符缩进的行此前
+  会被识别为粗体标题，把真实章节挤出标题预览，并在正文出现之前耗尽大纲
+  配额。现在所有标题样式都会跳过根级缩进代码，而保留最多三个前导空格的
+  PDF 风格粗体标题。([#6194])
+
+- **Artifact：** 输出文件被外部原子替换后，工件内容摘要现在会刷新，即使
+  替换保持了相同的大小与修改时间。此前预览/保存用的 SHA-256 按路径、
+  mtime 和大小缓存，沙箱同步这类外部替换会沿用陈旧摘要，刷新预览也拿不到
+  可用于保存的新版本。缓存键现在包含文件身份（设备、inode 与变更时间）；
+  超过 2 MiB 编辑上限的常规文件改用基于 stat 身份的 ETag，不再为每个
+  区间请求整文件哈希；条件区间请求必须匹配 ETag，日期形式的 `If-Range`
+  会收到完整的新文件。([#6195])
+
+- **频道：** 配置或断开频道运行时凭据时，现在把 `runtime-config.json` 的持久化写入与运行中
+  Gateway 内存缓存 `app.state.channels_config` 的同步视为同一个提交单元：请求的
+  `CancelledError` 只在持久化更新和内存缓存都落定后才送达，客户端在提交中途取消也不会再
+  造成磁盘状态与运行中的 Gateway 不一致。([#6198])
+
+- **微信：** 微信扫码登录的每次认证状态写入都会等待落盘：iLink 返回 `confirmed` 后，先把
+  确认的 `bot_token` 与 bot id 写入 `wechat-auth.json`，扫码任务的取消才会继续传播；内存中
+  的凭据不会再先于持久化副本暴露。([#6199])
+
+- **网关：** 创建运行不再在事件循环上导入 lead-agent 代码栈：`start_run()` 改为通过专用
+  assembly 线程池解析 agent 工厂，启动后首次运行（导入需数秒）不会再卡住并发的其他请求、
+  SSE 流和频道消息；工厂导入失败仍会阻止运行被受理。([#6206])
+
+- **MCP：** 五个 MCP 配置端点（更新配置、创建/更新/删除 server、切换 server 状态）现在把
+  `extensions_config.json` 的读-改-写与 MCP 工具缓存重置作为一个取消感知单元执行：被取消的
+  请求不会再脱离持有配置锁的 worker，也不会跳过缓存重置（此前可能让工具缓存与新配置不一致）；
+  两者落定后取消才继续传播。([#6210])
+
+- **通知：** 通知投递的认领现在带有按次生成的 fencing token。当卡住的 worker 在
+  stale-sending 超时把投递重新分配后恢复时，它迟到的 `mark_sent`/`mark_failed` 结果会被
+  忽略，不会再把当前 worker 正在 `sending` 的投递改回 `pending` 并多消耗一次重试；投递离开
+  `sending` 状态时认领 token 会一并清除。([#6211])
+
+- **频道：** 飞书和钉钉频道重启不会再遗弃仍然存活的 SDK worker。当 `stop()` 的有界 join
+  超时而 provider 线程仍在运行时，频道会报告停止失败（`ChannelStopTimeout`），
+  `ChannelService` 保留旧实例并推迟替换，不再把频道当作已停止；该卡死会记为 WARNING 日志，
+  而不是每次重试都输出完整堆栈。([#6215])
+
+- **运行：** thread 与 stateless 的 `wait` 端点现在会对已完成的失败运行返回 SDK 兼容的错误
+  信封。此前在写入新检查点前就失败的运行会把上一次的回答留在 thread 头部，等待它返回的是
+  过期答案且 SDK 不抛错；现在等待会报告当前运行的 `status: error`，Python LangGraph SDK
+  默认将其抛出（传 `raise_error=False` 可改为查看状态与错误）。([#6217])
+
+- **智能体：** lead agent 的 token 预算不再漏计已完成的子任务。在 `token_budget.enabled` 与
+  `token_usage.enabled` 都开启时，已完成子任务的用量会在预算校验前回填到派发消息上（包括
+  最后一批），运行会在配置的预算处停下而不是超支；当前步骤的用量归属仍位于各守卫之后，
+  终态结果会被标记以避免重复计入。([#6218])
+
+- **TUI：** 在输入框中按 Down 时，若输入历史导航未激活，不会再清空未发送的草稿；从历史
+  恢复草稿后连续按 Down 也不会丢弃之后的编辑。切换到较新历史条目的正常导航与草稿恢复
+  （包括空草稿）行为保持不变。([#6219])
+
+- **沙箱：** 当 warm-pool 空闲回收线程仍在执行清理时，关机不再拆除沙箱 provider。若回收
+  线程在 5 秒 join 后仍存活，`_stop_idle_checker()` 会判定失败，AIO、BoxLite、Tenki、
+  OpenSandbox 四个 provider 会重置关机守卫使关机保持可重试，而不会在回收线程仍占用资源时
+  关闭 provider、再把失败的关闭当作已完成。([#6231])
+
+- **模型：** Codex 适配器在转换消息时现在会省略 `tool_call_id` 为空或纯空白的工具结果，
+  避免把此类无效的 `function_call_output` 发给 provider；非空 ID 原样保留，输入历史不会被
+  改写。([#6234])
+
+- **沙箱：** E2B 关闭在维护线程仍存活时保持可重试：提供方现在会先确认租约续期与
+  对账线程确实退出再执行清理；若任一线程超出 join 等待仍在运行，则保留全部已
+  登记的沙箱状态、继续封闭准入（`acquire` 返回 `reason: shutdown`），由后续的
+  `shutdown()` 完成清理。信号处理器与 `atexit` 只记录待完成的清理而不抛错，信号
+  触发的关闭仍会转发原始的 SIGTERM/SIGINT/SIGHUP 动作。([#6244])
+
+- **技能：** SkillScan 的 `secret-env-assignment` 规则现在会报告通过解包绑定的
+  Python 秘密——元组与列表目标按位置与右侧值配对，`host, api_key = "internal",
+  "sk-…"` 不再绕过该门禁——并逐一检查列表、元组、字典与条件表达式中的字面量。
+  字典键只作为结构标签：仅当键本身匹配已知的令牌格式才报告，而持有运行时取值的
+  `"access_token"` 这类标签不会被误报。([#6247])
+
+- **TUI：** 输入历史导航在内容没有变化时不再破坏草稿、光标与撤销历史：没有输入
+  历史时按 `↑` 不再改动输入框；召回的历史条目（或恢复的已存草稿）与当前输入相同
+  时跳过重新加载，保持光标位置与撤销状态。([#6248])
+
+- **TUI：** 运行进行中现在会保护会话切换：`/resume`、`/threads` 与 `/switch` 会
+  提示等待，而不是切离正在输出的会话；线程选择器在应用选择时会重新检查运行状态；
+  中断并切换后，来自旧线程的迟到流事件会被丢弃。无效的 `/resume` 引用只显示错误
+  行，当前会话与 TUI 本身保持可用。([#6249])
+
+- **产物：** 保存已编辑产物时，对现有文件的读取限制在 2 MiB 编辑上限加 1 个检测
+  字节以内；大小检查之后文件若被增大或替换，会以 413 拒绝保存，而不是把超限文件
+  整体读入内存。([#6250])
+
+- **网关：** 多 worker 启动安全门禁现在也会读取 uvicorn 的 `WEB_CONCURRENCY`——
+  在不传 `--workers` 的启动方式（`backend/Dockerfile`、`scripts/serve.sh`）中，
+  worker 数由它决定。**行为变化：** `WEB_CONCURRENCY>1` 且未用 Postgres 数据库、
+  启用了 scheduler 或浏览器工具的部署现在会启动失败，而不是在门禁失效下多进程
+  运行；每条拒绝信息都会指出实际生效的变量。([#6252])
+
+- **网关：** 其余的 worker 数读取方现在与启动门禁使用同一解析逻辑：渠道入站去重
+  存储的警告与运行时浏览器门禁在不传 `--workers` 时也会尊重 uvicorn 的
+  `WEB_CONCURRENCY`，其警告与拒绝信息会指出实际生效的变量。([#6253])
+
+- **上传：** Markdown 大纲识别不再把加粗分段的财务表格行误判为标题：当节号之后
+  的任何块仅由数字、标点或货币符号组成（括号年份、带符号数值、`$€£¥` 金额）时，
+  该行会被跳过，这类行不再挤占大纲的标题配额。含实际文字的标题——包括带标点或
+  非 ASCII 的标题——仍然可以识别。([#6266])
+
+- **技能：** eval 固定样例路径的识别现在会检查包路径中的每一段 `evals/fixtures/`，
+  而不只是第一段 `evals`：位于 `evals/cases/inner/evals/fixtures/` 下的样例文件
+  会被 SkillScan 豁免，不再以嵌套 `SKILL.md` 为由阻断整个包。非样例的嵌套
+  `SKILL.md` 仍为 `CRITICAL`。([#6271])
+
+- **渠道：** 流式 IM 渠道收到后端 `error` 事件帧时，现在走与传输故障相同的路径：
+  渠道会记录错误类型、消息与线程 ID 便于诊断，回复通用错误文案，并且只在发出该
+  最终回复之后才释放入站去重键，使平台重新投递可以重试，而不是把失败的运行当作
+  普通的无回复完成。([#6272])
+
+- **扩展：** agent-teams 的响应大小门禁改为按字符串的原始 UTF-8 字节、结构化中断
+  响应的 UTF-8 JSON 计量：中文或表情符号答案只要不超过文档规定的 8,000 字节上限
+  就会被接受，不再因 JSON 转义放大计量的体积而被拒绝。含未配对 Unicode 代理对
+  的响应会得到正常的校验错误，等待中的任务保持不变。([#6274])
+
+- **技能：** SkillScan 的 `secret-env-assignment` 文本扫描现在会报告键名带引号的
+  凭据：JSON 中的 `{"api_key": "…"}` 与 YAML、`.env`、shell 写法同等识别；凭据
+  词前带分隔符的键（`access_token`、`client_secret`、`MY_API_KEY`）同样匹配。
+  仅包含关键词的普通单词（`tokenizer`、`secretive`）保持不报。([#6276])
+
+- **模型：** CLI 凭据文件（Codex `auth.json`、Claude Code 凭据）现在按 UTF-8 解码
+  并容忍 BOM，不再依赖主机区域设置：包含非 ASCII 文本的有效 JSON 文件在 cp1252
+  类主机上不再读取失败。无效编码按不可读来源处理——Claude Code 在覆盖文件无效时
+  仍会回退到默认文件——`make doctor` 也接受相同的文件。([#6277])
+
+- **路径：** 上传文件、新的本地沙箱写入路径和新的技能支持文件现在也会拒绝
+  Windows 控制台设备别名 `CONIN$` 与 `CONOUT$`（全平台生效）。共享的保留名检查
+  在首个点号前不区分大小写，因此 `conin$.txt`、`assets/CONOUT$/icon.png` 会被
+  拒绝，而 `CONIN$notes.txt` 这类普通名称仍可使用。([#6279])
+
+- **技能：** SkillScan 现在按解析后的 URL authority 而非正则截取来分类 HTTP
+  端点：`http://LOCALHOST:8080` 这类大写本地主机不再被误报为外部明文 HTTP，
+  括号形式 IPv6 回环（`[::1]`）按本地处理而外部 IPv6 端点仍触发网络发现，
+  userinfo 无法隐藏真实主机（`http://localhost@Example.COM` 仍视为外部）。
+  云元数据主机名检测同样不区分大小写。([#6280])
+
+- **脚本：** 手动导出 Claude OAuth 令牌的 `export_claude_code_oauth.py` 现在会
+  在任何导出动作前校验 Keychain JSON：容器必须是对象，`claudeAiOauth` 须为
+  对象且其 `accessToken` 为非空字符串。此前损坏的容器会直接抛出 traceback，
+  `true` 等非字符串令牌会被原样导出；现在两者都以既有的令牌缺失错误失败，
+  且不会回显容器内容。有效令牌原样导出，不做裁剪。([#6281])
+
+- **沙箱：** BoxLite 关闭时会先等待进行中的沙箱获取完成再拆除私有事件循环，
+  并拒绝关闭期间新到的获取请求。若进行中的获取在 5 秒内未结束，关闭会失败并
+  保留仍被占用的资源、可以重试，而不再让循环线程静默运行。([#6283])
+
+- **浏览器：** Live 浏览器流现在会在释放浏览器会话租约前，跨越取消等待自身
+  负责的 `stop_screencast` 清理完成。清理中途到达的网关关闭或客户端取消不再
+  会遗留 screencast 管理器 pin、占用浏览器会话容量；清理完成后会重新抛出首次
+  取消原因。([#6284])
+
+- **项目：** 项目文档架上的显式名称——上传的 `name` 与提升的 `shelf_name`——
+  现在在任何字节落盘前都要经过与普通上传相同的 `normalize_filename` 校验。含
+  NUL、Windows 保留设备名（如 `CON.txt`）、结尾点号等不可移植名称会以 `400`
+  被拒绝且不留暂存文件；既有文档行在读取时不重新校验。([#6287])
+
+- **acp：** ACP 代理的 `timeout_seconds`（默认 1800）现在是一个覆盖初始化、
+  会话创建与 prompt 的共享预算，自子进程启动后计时——此前它只约束 prompt，
+  在 initialize 或 new_session 阶段挂起的代理会让工具调用无限阻塞。超时后
+  DeerFlow 会中止调用并终止子进程；工作区/MCP 准备与子进程清理不计入该预算。([#6292])
+
+- **技能：** SkillScan 的 `shell-env-dump` 规则现在只在 `env`、`printenv` 或
+  `export -p` 出现在 shell 代码的真实命令位置时才触发。此前脚本中这些词的任何
+  出现都会报该发现，因此可移植 shebang `#!/usr/bin/env bash`、
+  `https://env.example.com` 这类 URL、`--env` 之类旗标、参数（`echo env`）、
+  变量（`${env}`）、注释以及 heredoc 正文都会被误报为环境转储。([#6297])
+
+- **代理：** 在 agent-teams 扩展中，被未回答的澄清提问或中断阻塞的排队任务在
+  等待期间不再占用全进程共享的 8 个活动任务预算，因此一个团队停滞的会话不会
+  让其他团队的任务一直排队。已准入的任务——包括启动确认丢失的——仍会占住
+  其槽位。([#6298])
+
+- **代理：** 模型生成的 `write_todos` 调用若带有畸形 status（例如列表或字典），
+  不再导致 token 归属崩溃。计划模式的 token 归属现在会在集合成员判断前跳过
+  非字符串 status，由工具层返回其常规校验错误——代理可以据此纠正——而不是
+  让整个运行中断。([#6299])
+
+- **tui：** 中断之后，上一个运行的迟到流动作不再泄漏到下一个运行的显示、
+  用量、标题或完成状态——即使下一条提问使用同一会话。每个运行现在拥有自己的
+  取消标志与投递身份；若运行无法启动，TUI 会报出可重试的错误并回到空闲状态，
+  而不是卡在忙碌状态。([#6302])
+
+- **频道：** 每个频道的生命周期变更——就绪启动、重启、运行时配置与移除——
+  现在都在同一把按频道划分的锁上串行执行；此前就绪检查使用单独的锁，重启、
+  配置与移除会与之竞争。并发提交的配置现在以 epoch 计数，过期的快照不会再在
+  启动途中覆盖较新的凭据。([#6304])
+
+- **上传：** 伴随记录现在能解析大写后缀的转换 Markdown 文件：转换出的
+  `report.MD` 不再因 `.md` 后缀比较区分大小写而丢失其 Markdown 伴随文件与
+  提取的提纲，也不会回退到原始文件。([#6308])
+
+- **微信：** 出站图片与文件现在在读取时即执行
+  `max_outbound_image_bytes` / `max_outbound_file_bytes`（默认 20 MiB 与
+  50 MiB），包括解析之后仍在增长的文件。超限的读取会在加密/上传前被拒绝并
+  记录跳过日志，而不会发出截断的前缀；非正数限制仍表示关闭对应上限。([#6309])
+
+- **技能：** SkillScan 的 `shell-curl-pipe-shell` 警告现在覆盖真实安装脚本
+  常见的变体：`curl | sudo [flags] bash`、绝对解释器路径（如 `/bin/bash`
+  与 `/usr/local/bin/sh`）、更多 shell（`zsh`、`dash`、`fish`），以及下载
+  与解释器之间任意位置的反斜杠换行续行。管道到 `jq`、`tee` 等非 shell
+  工具仍不触发警告；无管道的下载在遇到连续反斜杠文本时也不会再拖垮匹配
+  器。带取值的 sudo 选项（如 `sudo -u root bash`）仍不属于这条警告级启发
+  式的范围。([#6312])
+
+- **项目：** 并发读取项目文档时，不再因共享字符数缓存的更新竞争而抛出
+  `KeyError`。一个文件 I/O 工作线程刚查到缓存计数，另一线程可能在它调用
+  `move_to_end()` 之前就把该条目逐出，错误沿 `document_char_count()` 传播，
+  使本可正常读取的 `read_project_document` 失败。现在缓存的查找/晋升与
+  插入/逐出都在短锁内进行，完整文件扫描仍在锁外，互不相关的读取保持并发；
+  256 条 LRU 上限与按内容标识的键保持不变。([#6315])
+
+- **子代理：** 关闭常驻的子代理隔离事件循环时，若限时的线程 join 未能确认
+  工作线程已终止，不再丢弃其所有权。原关闭路径在 1 秒 join 后就清空全局的
+  循环/线程句柄，仍然存活的工作线程因此失去可重试的清理句柄，而后续调用
+  还可能另建一个并行的新循环；启动超时路径也有同样的隐患。现在所有权保留
+  到工作线程真正退出为止：清理未决期间新的提交会收到可重试的
+  shutdown-pending 错误，退出后由下一次提交回收并关闭旧循环，再创建替代
+  循环。([#6316])
+
+- **沙箱：** AIO 沙箱关闭时，若租约续期线程在限时停止 join 超时后仍在运行，
+  现在会以失败收场。原来的 `_stop_lease_renewal()` 无视 join 结果，继续
+  分离并销毁所有受跟踪的 warm-pool 条目，而续期线程还活着，重试时已没有
+  可清理的所有权。现在先停止续期、再分离受跟踪的所有权；join 超时会抛出
+  异常，重试仍拥有全部活跃与 warm 条目。信号处理器遇到关闭失败会记录日志
+  并照常转发原信号，而不是因异常中断。([#6317])
+
+- **模型：** 无法解码的 `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` 凭据交接
+  不再导致 Claude 模型构建失败。描述符读取此前只捕获 `OSError`，非 UTF-8
+  字节（如 UTF-16 编码的 token 或被截断的序列）会以 `UnicodeDecodeError`
+  从 `load_claude_code_credential()` 抛出，而不是回退到凭据文件。现在解码
+  失败返回 `None` 且不写入缓存，本次及后续加载仍会尝试
+  `CLAUDE_CODE_CREDENTIALS_PATH` 或 `~/.claude/.credentials.json`，警告
+  日志不包含 token 内容。([#6323])
+
+- **Telegram：** 停止 Telegram 通道时，轮询工作线程若在限时的关闭 join 之后
+  仍在运行，不再被丢弃句柄。原来的 `stop()` 只记一条警告就清空
+  `self._thread`，仍然存活的线程失去可重试的停止句柄，worker 继续轮询时
+  通道却可能看似已停止。现在会抛出 `ChannelStopTimeout`——与 Feishu、
+  DingTalk 已有的保留契约一致——且仅在线程引用仍指向该 worker 时才清空。
+  ([#6333])
+
+- **模型：** Codex 完成响应在 `usage` 为 `null`、缺失或为空时，仍会保留其
+  文本、推理与工具调用。解析器此前使用 `response.get("usage", {})`，显式的
+  JSON `null` 会得到 `None`，后续 `token_usage` 计算抛出 `AttributeError`，
+  使本已完整的回答被丢弃。现在不可用的 usage 会归一化为空映射：
+  `AIMessage.usage_metadata` 保持 `None`，usage 字段报告零值；而有值的
+  usage 映射（包括零计数与缓存/推理 token 明细）不受影响。([#6335])
+
+- **Discord：** `channels.discord.allowed_guilds` 现在按 `config.example.yaml`
+  文档所述的方式解析为公会 ID。此前直接迭代配置值会把标量 `"321"` 拆成
+  公会 1、2、3，未加引号的 YAML 整数会以 `TypeError` 使通道构造崩溃，而
+  静默丢弃无法解析的条目会让已配置的限制退化为“允许所有”，把机器人开放
+  给它加入的每个服务器。现在单个 ID（加引号与否均可）视为一个条目，无效
+  条目在警告中丢弃，而配置了却得不到任何有效 ID 的值会拒绝所有公会并记录
+  错误；未设置、`null`、`[]` 或空白字符串仍允许所有公会。
+  `allowed_channels` 获得同样的标量处理。([#6338])
+
 ### 安全
 
 - **鉴权：** 仅有认证而无权限校验的路由现在会强制执行权限检查，且
@@ -2453,6 +3048,15 @@
   用户（`"123456"` 曾放行用户 1–6 并拦截 123456）；`null` 或单个整数也不再导致
   渠道启动时崩溃；每个被丢弃的条目（`@用户名`、浮点数、布尔值）都会记录警告。([#6230])
 
+- **技能：** 位于 `scripts/` 之外的 Windows 脚本、HTML 应用程序和
+  scriptlet 不再逃过 SkillScan。`.bat`、`.cmd`、`.psm1`、`.jse`、`.vbe`、
+  `.vbs`、`.wsf`、`.hta`、`.sct` 等后缀现在一律视为代码文件（不区分大小
+  写）：含有杂散 NUL 或无效 UTF-8 字节时仍会报
+  `package-undecodable-script` 并在有损解码后继续分析，而不是被直接跳过；
+  安装器的可执行代码策略（warn 即拒绝安装）也适用于包内任意位置的这类
+  文件。此前带一个杂散字节的 `hooks/install.jse` 既得不到静态分析，也
+  不经过可执行代码审查。([#6321])
+
 ### 文档
 
 - **文档：** 修正 Apple Container 的验证说明。
@@ -2554,6 +3158,13 @@
   在本地验证，包括在一次性线程上运行 `--expect vulnerable` /
   `--expect blocked`。([#6059])
 
+- **文档：** 在智能体指导中加入“扩展优先”评估门槛。`AGENTS.md` 与
+  `.github/copilot-instructions.md` 现在要求编码智能体在修改核心代码之前
+  先评估能否以打包扩展交付该功能：自包含能力走扩展；核心保留给缺陷修复
+  以及 agent 循环、记忆、上下文压缩和鉴权相关的变更；既有贡献点无法表达
+  时，为 `extension-api` 增加通用钩子并以扩展实现，而不是把业务逻辑硬编码
+  进核心。([#6178])
+
 ### 内部改进
 
 - **测试：** 为 run-change 时钟修复及其回滚补充历史回归覆盖。从已
@@ -2613,6 +3224,57 @@
   `read_config_with_signature()` 的契约就是原样返回磁盘上的字节，返回值
   正确，测试却失败（10 例中 3 例）。夹具现在改用 `write_bytes(...)`，stat
   过期测试改为二进制追加；产品行为无变化。([#6042])
+
+- **网关：** agents、subagents 与 managed-models 路由的持久写入现在共用一个
+  `run_drained_write` 辅助函数，在客户端断开后先排空写入再传播取消，取代
+  三份各自为政的路由内实现；托管子代理与托管模型的保存现在只按异常类型
+  记录意外失败日志。端点的取消与错误契约保持不变。([#6151])
+
+- **gateway：** 内存变更路由（清空、事实的创建/更新/删除、导入）现在改用其他
+  持久化写入共用的 drained-write 辅助函数，移除该 router 私有的包装。线程外
+  执行与取消排空语义不变；意外失败会额外留下一条仅含异常类型的丢失写入
+  日志。([#6164])
+
+- **tests：** 修复四个在 Windows 开发机上必然失败的后端测试，全部源于测试侧
+  的平台假设：skill-review 的耗时断言改用 `time.perf_counter()`（Windows 上
+  `monotonic` 约 15.6 ms 的时钟粒度会把线性扫描测成 0.0），personal MCP 的
+  owner-only 权限位检查在 `chmod` 无法表达时跳过，project-shelf 的最近优先
+  测试固定严格递增的 `updated_at`，不再依赖时钟粒度。无生产代码变更。([#6167])
+
+- **护栏：** TypeSafe 风险闸门评估脚本
+  （`backend/scripts/eval_typesafe_risk_gate.py`）支持自定义评分标准并记录
+  实际评估的策略。新增 `--instructions`、`--criteria-true`、
+  `--criteria-false` 参数透传 provider 的评分标准覆盖，使阈值、
+  `max_state_chars` 与评分标准可在同一循环中校准；JSON 报告新增 `policy`
+  对象，记录生效的指令与两项标准——自定义标准的运行不再与默认策略运行
+  无法区分。provider 内置文本成为公开常量（`DEFAULT_INSTRUCTIONS`、
+  `DEFAULT_CRITERIA_TRUE`、`DEFAULT_CRITERIA_FALSE`）；护栏运行时行为
+  不变。([#6179])
+
+- **测试：** LangGraph Studio 路由测试在 Windows 上改为优雅停止开发服务器。
+  那里 `terminate()` 等价于 `TerminateProcess`，服务器不会执行任何关闭钩子，
+  开发持久化的 flush 无法落盘——测试所演练的重启后状态因此丢失。fixture
+  现在向子进程组发送 `CTRL_BREAK_EVENT`（uvicorn 按 SIGBREAK 处理），优雅
+  停止超过十秒时再退回强制杀死。POSIX 行为不变。([#6197])
+
+- **配置：** `deerflow/config` 中 14 处布尔值拒绝校验收敛为一个共享助手；此前以不带字段名
+  的消息拒绝布尔的数值字段现在会指出字段名，例如
+  `pool_size must be an integer, not a boolean`。([#6226])
+
+- **测试：** 阻塞 I/O 的 Web 工具 URL 校验回归测试不再依赖平台相关的数字
+  主机解析或外部 DNS。原来的 `http://127.1/` 探针依赖各操作系统解析器把
+  这种简写展开成回环地址；现在改为合成一个 `.invalid` 主机名，通过在真实
+  `socket.getaddrinfo` 包装之下 patch `_socket.getaddrinfo` 的夹具解析到
+  回环地址，并断言每条工具路径都真正到达了该夹具。不支持地址族时会失败，
+  而不是得到伪造的 IPv4 应答；在事件循环上解析仍会被严格门禁判为失败。
+  ([#6314])
+
+- **测试：** `cd backend && make test` 现在把离线测试套件按时长均衡拆成四个
+  分片并行运行，任一分片失败即整体失败，取代原先的单进程串行执行。
+  `TEST_JOBS`（默认 4）控制分片数，`TEST_JOBS=1` 可顺序运行同样的分片；
+  `make test-shard` 与 CI 的分片方式不变，live 与阻塞 I/O 测试仍被排除。
+  新增测试用离线 worker 替身固定了分片并行启动与“等待全部分片再报失败”
+  的行为。([#6324])
 
 ## [2.1.0] — 2026-09-24
 
@@ -6408,6 +7070,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5900]: https://github.com/bytedance/deer-flow/pull/5900
 [#5902]: https://github.com/bytedance/deer-flow/pull/5902
 [#5903]: https://github.com/bytedance/deer-flow/pull/5903
+[#5905]: https://github.com/bytedance/deer-flow/pull/5905
 [#5906]: https://github.com/bytedance/deer-flow/pull/5906
 [#5908]: https://github.com/bytedance/deer-flow/pull/5908
 [#5910]: https://github.com/bytedance/deer-flow/pull/5910
@@ -6452,59 +7115,171 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5991]: https://github.com/bytedance/deer-flow/pull/5991
 [#5994]: https://github.com/bytedance/deer-flow/pull/5994
 [#5998]: https://github.com/bytedance/deer-flow/pull/5998
+[#5999]: https://github.com/bytedance/deer-flow/pull/5999
 [#6009]: https://github.com/bytedance/deer-flow/pull/6009
 [#6013]: https://github.com/bytedance/deer-flow/pull/6013
 [#6015]: https://github.com/bytedance/deer-flow/pull/6015
+[#6017]: https://github.com/bytedance/deer-flow/pull/6017
 [#6018]: https://github.com/bytedance/deer-flow/pull/6018
+[#6020]: https://github.com/bytedance/deer-flow/pull/6020
 [#6023]: https://github.com/bytedance/deer-flow/pull/6023
 [#6024]: https://github.com/bytedance/deer-flow/pull/6024
 [#6026]: https://github.com/bytedance/deer-flow/pull/6026
 [#6034]: https://github.com/bytedance/deer-flow/pull/6034
+[#6036]: https://github.com/bytedance/deer-flow/pull/6036
 [#6040]: https://github.com/bytedance/deer-flow/pull/6040
 [#6042]: https://github.com/bytedance/deer-flow/pull/6042
 [#6045]: https://github.com/bytedance/deer-flow/pull/6045
 [#6046]: https://github.com/bytedance/deer-flow/pull/6046
+[#6048]: https://github.com/bytedance/deer-flow/pull/6048
+[#6054]: https://github.com/bytedance/deer-flow/pull/6054
 [#6056]: https://github.com/bytedance/deer-flow/pull/6056
 [#6057]: https://github.com/bytedance/deer-flow/pull/6057
 [#6058]: https://github.com/bytedance/deer-flow/pull/6058
 [#6059]: https://github.com/bytedance/deer-flow/pull/6059
 [#6062]: https://github.com/bytedance/deer-flow/pull/6062
+[#6063]: https://github.com/bytedance/deer-flow/pull/6063
 [#6066]: https://github.com/bytedance/deer-flow/pull/6066
+[#6067]: https://github.com/bytedance/deer-flow/pull/6067
 [#6068]: https://github.com/bytedance/deer-flow/pull/6068
 [#6069]: https://github.com/bytedance/deer-flow/pull/6069
 [#6070]: https://github.com/bytedance/deer-flow/pull/6070
 [#6073]: https://github.com/bytedance/deer-flow/pull/6073
 [#6074]: https://github.com/bytedance/deer-flow/pull/6074
 [#6076]: https://github.com/bytedance/deer-flow/pull/6076
+[#6078]: https://github.com/bytedance/deer-flow/pull/6078
+[#6081]: https://github.com/bytedance/deer-flow/pull/6081
 [#6082]: https://github.com/bytedance/deer-flow/pull/6082
+[#6083]: https://github.com/bytedance/deer-flow/pull/6083
 [#6087]: https://github.com/bytedance/deer-flow/pull/6087
 [#6088]: https://github.com/bytedance/deer-flow/pull/6088
 [#6089]: https://github.com/bytedance/deer-flow/pull/6089
 [#6091]: https://github.com/bytedance/deer-flow/pull/6091
+[#6092]: https://github.com/bytedance/deer-flow/pull/6092
 [#6093]: https://github.com/bytedance/deer-flow/pull/6093
 [#6101]: https://github.com/bytedance/deer-flow/pull/6101
+[#6102]: https://github.com/bytedance/deer-flow/pull/6102
+[#6103]: https://github.com/bytedance/deer-flow/pull/6103
+[#6105]: https://github.com/bytedance/deer-flow/pull/6105
+[#6109]: https://github.com/bytedance/deer-flow/pull/6109
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
+[#6113]: https://github.com/bytedance/deer-flow/pull/6113
+[#6115]: https://github.com/bytedance/deer-flow/pull/6115
+[#6117]: https://github.com/bytedance/deer-flow/pull/6117
+[#6122]: https://github.com/bytedance/deer-flow/pull/6122
+[#6126]: https://github.com/bytedance/deer-flow/pull/6126
+[#6128]: https://github.com/bytedance/deer-flow/pull/6128
+[#6130]: https://github.com/bytedance/deer-flow/pull/6130
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
 [#6135]: https://github.com/bytedance/deer-flow/pull/6135
+[#6136]: https://github.com/bytedance/deer-flow/pull/6136
 [#6138]: https://github.com/bytedance/deer-flow/pull/6138
 [#6140]: https://github.com/bytedance/deer-flow/pull/6140
+[#6143]: https://github.com/bytedance/deer-flow/pull/6143
+[#6148]: https://github.com/bytedance/deer-flow/pull/6148
+[#6149]: https://github.com/bytedance/deer-flow/pull/6149
+[#6150]: https://github.com/bytedance/deer-flow/pull/6150
+[#6151]: https://github.com/bytedance/deer-flow/pull/6151
+[#6152]: https://github.com/bytedance/deer-flow/pull/6152
+[#6154]: https://github.com/bytedance/deer-flow/pull/6154
+[#6155]: https://github.com/bytedance/deer-flow/pull/6155
+[#6158]: https://github.com/bytedance/deer-flow/pull/6158
+[#6159]: https://github.com/bytedance/deer-flow/pull/6159
+[#6160]: https://github.com/bytedance/deer-flow/pull/6160
+[#6161]: https://github.com/bytedance/deer-flow/pull/6161
+[#6162]: https://github.com/bytedance/deer-flow/pull/6162
+[#6164]: https://github.com/bytedance/deer-flow/pull/6164
+[#6165]: https://github.com/bytedance/deer-flow/pull/6165
+[#6167]: https://github.com/bytedance/deer-flow/pull/6167
+[#6168]: https://github.com/bytedance/deer-flow/pull/6168
 [#6171]: https://github.com/bytedance/deer-flow/pull/6171
+[#6172]: https://github.com/bytedance/deer-flow/pull/6172
+[#6174]: https://github.com/bytedance/deer-flow/pull/6174
+[#6175]: https://github.com/bytedance/deer-flow/pull/6175
+[#6176]: https://github.com/bytedance/deer-flow/pull/6176
+[#6178]: https://github.com/bytedance/deer-flow/pull/6178
+[#6179]: https://github.com/bytedance/deer-flow/pull/6179
+[#6180]: https://github.com/bytedance/deer-flow/pull/6180
+[#6184]: https://github.com/bytedance/deer-flow/pull/6184
+[#6185]: https://github.com/bytedance/deer-flow/pull/6185
+[#6187]: https://github.com/bytedance/deer-flow/pull/6187
+[#6188]: https://github.com/bytedance/deer-flow/pull/6188
+[#6189]: https://github.com/bytedance/deer-flow/pull/6189
+[#6190]: https://github.com/bytedance/deer-flow/pull/6190
+[#6194]: https://github.com/bytedance/deer-flow/pull/6194
+[#6195]: https://github.com/bytedance/deer-flow/pull/6195
+[#6197]: https://github.com/bytedance/deer-flow/pull/6197
+[#6198]: https://github.com/bytedance/deer-flow/pull/6198
+[#6199]: https://github.com/bytedance/deer-flow/pull/6199
 [#6201]: https://github.com/bytedance/deer-flow/pull/6201
 [#6202]: https://github.com/bytedance/deer-flow/pull/6202
+[#6206]: https://github.com/bytedance/deer-flow/pull/6206
+[#6210]: https://github.com/bytedance/deer-flow/pull/6210
+[#6211]: https://github.com/bytedance/deer-flow/pull/6211
 [#6212]: https://github.com/bytedance/deer-flow/pull/6212
 [#6214]: https://github.com/bytedance/deer-flow/pull/6214
+[#6215]: https://github.com/bytedance/deer-flow/pull/6215
+[#6217]: https://github.com/bytedance/deer-flow/pull/6217
+[#6218]: https://github.com/bytedance/deer-flow/pull/6218
+[#6219]: https://github.com/bytedance/deer-flow/pull/6219
+[#6226]: https://github.com/bytedance/deer-flow/pull/6226
+[#6227]: https://github.com/bytedance/deer-flow/pull/6227
 [#6229]: https://github.com/bytedance/deer-flow/pull/6229
 [#6230]: https://github.com/bytedance/deer-flow/pull/6230
+[#6231]: https://github.com/bytedance/deer-flow/pull/6231
 [#6232]: https://github.com/bytedance/deer-flow/pull/6232
+[#6234]: https://github.com/bytedance/deer-flow/pull/6234
+[#6236]: https://github.com/bytedance/deer-flow/pull/6236
 [#6238]: https://github.com/bytedance/deer-flow/pull/6238
+[#6243]: https://github.com/bytedance/deer-flow/pull/6243
+[#6244]: https://github.com/bytedance/deer-flow/pull/6244
+[#6247]: https://github.com/bytedance/deer-flow/pull/6247
+[#6248]: https://github.com/bytedance/deer-flow/pull/6248
+[#6249]: https://github.com/bytedance/deer-flow/pull/6249
+[#6250]: https://github.com/bytedance/deer-flow/pull/6250
+[#6252]: https://github.com/bytedance/deer-flow/pull/6252
+[#6253]: https://github.com/bytedance/deer-flow/pull/6253
 [#6255]: https://github.com/bytedance/deer-flow/pull/6255
 [#6263]: https://github.com/bytedance/deer-flow/pull/6263
+[#6266]: https://github.com/bytedance/deer-flow/pull/6266
+[#6271]: https://github.com/bytedance/deer-flow/pull/6271
+[#6272]: https://github.com/bytedance/deer-flow/pull/6272
+[#6274]: https://github.com/bytedance/deer-flow/pull/6274
+[#6276]: https://github.com/bytedance/deer-flow/pull/6276
+[#6277]: https://github.com/bytedance/deer-flow/pull/6277
+[#6279]: https://github.com/bytedance/deer-flow/pull/6279
+[#6280]: https://github.com/bytedance/deer-flow/pull/6280
+[#6281]: https://github.com/bytedance/deer-flow/pull/6281
 [#6282]: https://github.com/bytedance/deer-flow/pull/6282
+[#6283]: https://github.com/bytedance/deer-flow/pull/6283
+[#6284]: https://github.com/bytedance/deer-flow/pull/6284
+[#6287]: https://github.com/bytedance/deer-flow/pull/6287
+[#6292]: https://github.com/bytedance/deer-flow/pull/6292
+[#6297]: https://github.com/bytedance/deer-flow/pull/6297
+[#6298]: https://github.com/bytedance/deer-flow/pull/6298
+[#6299]: https://github.com/bytedance/deer-flow/pull/6299
+[#6302]: https://github.com/bytedance/deer-flow/pull/6302
+[#6304]: https://github.com/bytedance/deer-flow/pull/6304
 [#6305]: https://github.com/bytedance/deer-flow/pull/6305
 [#6306]: https://github.com/bytedance/deer-flow/pull/6306
 [#6307]: https://github.com/bytedance/deer-flow/pull/6307
+[#6308]: https://github.com/bytedance/deer-flow/pull/6308
+[#6309]: https://github.com/bytedance/deer-flow/pull/6309
+[#6312]: https://github.com/bytedance/deer-flow/pull/6312
 [#6313]: https://github.com/bytedance/deer-flow/pull/6313
+[#6314]: https://github.com/bytedance/deer-flow/pull/6314
+[#6315]: https://github.com/bytedance/deer-flow/pull/6315
+[#6316]: https://github.com/bytedance/deer-flow/pull/6316
+[#6317]: https://github.com/bytedance/deer-flow/pull/6317
+[#6318]: https://github.com/bytedance/deer-flow/pull/6318
 [#6319]: https://github.com/bytedance/deer-flow/pull/6319
+[#6321]: https://github.com/bytedance/deer-flow/pull/6321
+[#6323]: https://github.com/bytedance/deer-flow/pull/6323
+[#6324]: https://github.com/bytedance/deer-flow/pull/6324
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
+[#6328]: https://github.com/bytedance/deer-flow/pull/6328
 [#6332]: https://github.com/bytedance/deer-flow/pull/6332
+[#6333]: https://github.com/bytedance/deer-flow/pull/6333
+[#6335]: https://github.com/bytedance/deer-flow/pull/6335
+[#6338]: https://github.com/bytedance/deer-flow/pull/6338
