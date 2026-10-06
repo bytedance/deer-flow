@@ -558,6 +558,11 @@
 
 ### 修复
 
+- **make：** `make clean` 现在会说明它删除的内容，并拒绝在运行中的 Docker Gateway 下执行。`make help`
+  此前称其清理"临时文件"，但它实际删除 `backend/.deer-flow`：本地数据库、用户、线程、上传、记忆和密钥。
+  两套 Docker 栈都把该目录挂载进 `deer-flow-gateway` 容器，而 `make stop` 不会停止它，因此数据可能在
+  Gateway 运行时被删除。现在帮助文本和删除前的提示会写明该目录；当该容器仍在运行时，`make clean`
+  会在停止任何服务之前退出，并提示先执行 `make down` 或 `make docker-stop`。
 - **沙箱：** 启用 host bash 时，本地沙箱不再把线程固定在上一个受限 Agent 的技能视图上。
   该视图只在 host bash 关闭时维护，但 `LocalSandboxProvider` 只要它存在就会挂载，导致该线程之后
   不受限的运行仍沿用旧的 allowlist，读不到 `/mnt/skills` 下其他已启用或新增的技能。现在这些运行
