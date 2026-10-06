@@ -221,7 +221,7 @@ class CodexChatModel(BaseChatModel):
                 "parameters": fn.get("parameters", {}),
             }
             # Omitting strict is not equivalent to the caller's explicit False.
-            if "strict" in fn:
+            if fn.get("strict") is not None:
                 converted["strict"] = fn["strict"]
             responses_tools.append(converted)
         return responses_tools
@@ -471,14 +471,7 @@ class CodexChatModel(BaseChatModel):
             if isinstance(tool, BaseTool):
                 try:
                     fn = convert_to_openai_function(tool)
-                    formatted_tools.append(
-                        {
-                            "type": "function",
-                            "name": fn["name"],
-                            "description": fn.get("description", ""),
-                            "parameters": fn.get("parameters", {}),
-                        }
-                    )
+                    formatted_tools.extend(self._convert_tools([fn]))
                 except Exception:
                     formatted_tools.append(
                         {

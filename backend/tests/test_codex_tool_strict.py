@@ -9,14 +9,15 @@ import json
 import httpx
 import pytest
 from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.tools import StructuredTool
+from langchain_core.utils import function_calling
 
 from deerflow.models import openai_codex_provider as provider
 from deerflow.models.credential_loader import CodexCliCredential
 
 
-@pytest.mark.parametrize("shape", ["wrapped", "flat", "bare"])
+@pytest.mark.parametrize("shape,binding", [(shape, binding) for shape in ("wrapped", "flat", "bare") for binding in ("direct", "bound")] + [("base_tool", "bound")])
 @pytest.mark.parametrize("strict", [True, False, None, "omitted"])
-@pytest.mark.parametrize("binding", ["direct", "bound"])
 @pytest.mark.parametrize("invocation", ["invoke", "ainvoke"])
 def test_function_strictness_survives_tool_followup(monkeypatch, shape, strict, binding, invocation):
     function = {
@@ -35,10 +36,26 @@ def test_function_strictness_survives_tool_followup(monkeypatch, shape, strict, 
         definition = {"type": "function", "function": function}
     elif shape == "flat":
         definition = {"type": "function", **function}
-    else:
+    elif shape == "bare":
         definition = function
+    else:
+        definition = StructuredTool.from_function(lambda query, limit=None: "unused", name=function["name"], description=function["description"], args_schema=function["parameters"])
+        convert = function_calling.convert_to_openai_function
+
+        def convert_with_strict(tool):
+            converted = convert(tool)
+            if "strict" in function:
+                converted["strict"] = function["strict"]
+            return converted
+
+        if "strict" in function:
+            # Exercise a converter-emitted setting without claiming the locked
+            # LangChain release currently adds strictness to BaseTool schemas.
+            monkeypatch.setattr(function_calling, "convert_to_openai_function", convert_with_strict)
     original_definition = copy.deepcopy(definition)
     expected_tool = {"type": "function", **function}
+    if expected_tool.get("strict") is None:
+        expected_tool.pop("strict", None)
     arguments = {"query": "quarterly"}
     if strict is not False:
         arguments["limit"] = None
