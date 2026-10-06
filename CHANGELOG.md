@@ -634,6 +634,7 @@ This release closes that milestone with **439 merged pull requests**.
   after the preview, and the storage-unavailable fallback reserves it from the
   `fallback_max_chars` budget the way sandbox truncation does. Only `bash` and
   `bash_tool` results are affected; the persisted full output is unchanged.
+  ([#6354])
 - **make:** `make clean` now says what it deletes and refuses to run under a live
   Docker Gateway. `make help` described it as cleaning up "temporary files", but
   it deletes `backend/.deer-flow`: the local database, users, threads, uploads,
@@ -8839,3 +8840,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6347]: https://github.com/bytedance/deer-flow/pull/6347
 [#6350]: https://github.com/bytedance/deer-flow/pull/6350
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351
+[#6354]: https://github.com/bytedance/deer-flow/pull/6354

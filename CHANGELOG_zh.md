@@ -566,7 +566,7 @@
   `ToolOutputBudgetMiddleware` 会在预览之后重新追加原始结尾的 `Exit Code: N` /
   `Command exited with code N`；存储不可用时的回退截断也像沙箱截断一样，从
   `fallback_max_chars` 预算中为它预留位置。仅影响 `bash` 与 `bash_tool` 的结果，
-  落盘的完整输出保持不变。
+  落盘的完整输出保持不变。([#6354])
 - **make：** `make clean` 现在会说明它删除的内容，并拒绝在运行中的 Docker Gateway 下执行。`make help`
   此前称其清理"临时文件"，但它实际删除 `backend/.deer-flow`：本地数据库、用户、线程、上传、记忆和密钥。
   两套 Docker 栈都把该目录挂载进 `deer-flow-gateway` 容器，而 `make stop` 不会停止它，因此数据可能在
@@ -7318,3 +7318,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6344]: https://github.com/bytedance/deer-flow/pull/6344
 [#6350]: https://github.com/bytedance/deer-flow/pull/6350
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351
+[#6354]: https://github.com/bytedance/deer-flow/pull/6354
