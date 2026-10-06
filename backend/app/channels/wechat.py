@@ -655,7 +655,7 @@ class WechatChannel(Channel):
                         self._bot_token = ""
                         self._get_updates_buf = ""
                         await await_drained(asyncio.to_thread(self._save_state))
-                        await asyncio.to_thread(self._save_auth_state, status="expired", bot_token="")
+                        await self._save_auth_state_drained(status="expired", bot_token="")
                         logger.error("[WeChat] bot token expired; scan again or update bot_token and restart the channel")
                         self._running = False
                         break
