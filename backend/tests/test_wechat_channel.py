@@ -395,6 +395,90 @@ def test_allowed_users_filter_blocks_non_whitelisted_sender():
     _run(go())
 
 
+class TestWechatAllowedUsers:
+    """A restriction the operator configured must never silently open the bot."""
+
+    @staticmethod
+    def _channel(config_extra: dict) -> Any:
+        from app.channels.wechat import WechatChannel
+
+        return WechatChannel(bus=MessageBus(), config={"bot_token": "test-token", **config_extra})
+
+    @pytest.mark.parametrize("config_extra", [{}, {"allowed_users": None}, {"allowed_users": []}, {"allowed_users": " "}])
+    def test_unset_or_empty_allowlist_allows_everyone_without_warning(self, config_extra, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.wechat"):
+            channel = self._channel(config_extra)
+
+        assert channel._check_user("wxid-alice")
+        assert channel._check_user("wxid-bob")
+        assert caplog.records == []
+
+    def test_listed_ids_are_allowed_and_others_denied(self):
+        channel = self._channel({"allowed_users": ["wxid-alice", "wxid-bob"]})
+
+        assert channel._check_user("wxid-alice")
+        assert channel._check_user("wxid-bob")
+        assert not channel._check_user("wxid-stranger")
+
+    @pytest.mark.parametrize("allowed_users", ["wxid-alice", 12345], ids=["str", "int"])
+    def test_scalar_user_id_is_one_entry_not_its_characters(self, allowed_users):
+        channel = self._channel({"allowed_users": allowed_users})
+
+        expected = str(allowed_users)
+        assert channel._check_user(expected)
+        assert not channel._check_user(expected[0])
+
+    @pytest.mark.parametrize("bad_entry", ["", "   ", None, True])
+    def test_unparseable_entry_is_dropped_with_warning(self, bad_entry, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.wechat"):
+            channel = self._channel({"allowed_users": ["wxid-alice", bad_entry]})
+
+        assert channel._check_user("wxid-alice")
+        assert not channel._check_user("wxid-stranger")
+        assert repr(bad_entry) in caplog.text
+
+    @pytest.mark.parametrize("allowed_users", [[""], [None], [True], ["   "]])
+    def test_allowlist_without_a_parseable_entry_denies_everyone(self, allowed_users, caplog):
+        with caplog.at_level(logging.ERROR, logger="app.channels.wechat"):
+            channel = self._channel({"allowed_users": allowed_users})
+
+        assert not channel._check_user("wxid-alice")
+        assert not channel._check_user("wxid-bob")
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
+
+    def test_scalar_allowlist_admits_the_id_and_not_a_character(self):
+        from app.channels.wechat import WechatChannel
+
+        async def go():
+            bus = MessageBus()
+            published = []
+
+            async def capture(msg):
+                published.append(msg)
+
+            bus.publish_inbound = capture  # type: ignore[method-assign]
+            channel = WechatChannel(bus=bus, config={"bot_token": "test-token", "allowed_users": "wxid-alice"})
+            await channel._handle_update(
+                {
+                    "message_type": 1,
+                    "from_user_id": "w",
+                    "context_token": "ctx-char",
+                    "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+                }
+            )
+            await channel._handle_update(
+                {
+                    "message_type": 1,
+                    "from_user_id": "wxid-alice",
+                    "context_token": "ctx-user",
+                    "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+                }
+            )
+            assert [msg.user_id for msg in published] == ["wxid-alice"]
+
+        _run(go())
+
+
 def test_connect_code_bypasses_allowed_users_filter(tmp_path: Path):
     from app.channels.wechat import WechatChannel
     from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher

@@ -168,6 +168,51 @@ def _detect_image_extension_and_mime(content: bytes) -> tuple[str, str] | None:
     return None
 
 
+def _parse_wechat_user_id(entry: Any) -> str | None:
+    """A valid iLink user ID from a string or numeric scalar, else ``None``."""
+    if isinstance(entry, bool):
+        # bool is an int subclass: reject booleans before the numeric branch.
+        return None
+    if isinstance(entry, (int, float)):
+        text = str(entry).strip()
+        return text or None
+    if isinstance(entry, str):
+        text = entry.strip()
+        return text or None
+    return None
+
+
+def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
+    """Parse ``channels.wechat.allowed_users``; ``None`` means no allowlist.
+
+    A single user ID is shorthand for a one-entry list. Iterating a scalar
+    instead turns ``"wxid"`` into the characters ``w``, ``x``, ``i`` and ``d``.
+    Entries that are not ID strings or numbers (booleans, nulls, empty strings)
+    are dropped with a warning. If an allowlist was configured but no valid ID
+    remains, the result is an empty frozenset that denies everyone: the operator
+    asked for a restriction, so an unreadable allowlist must fail closed rather
+    than opening the bot to all.
+    """
+    if allowed_users is None or (isinstance(allowed_users, str) and not allowed_users.strip()):
+        return None
+    entries = list(allowed_users) if isinstance(allowed_users, (list, tuple, set, frozenset)) else [allowed_users]
+    if not entries:
+        return None
+    user_ids: set[str] = set()
+    for entry in entries:
+        user_id = _parse_wechat_user_id(entry)
+        if user_id is None:
+            logger.warning(
+                "[WeChat] Ignoring allowed_users entry %r: expected a valid iLink user ID; list several IDs as a YAML list",
+                entry,
+            )
+        else:
+            user_ids.add(user_id)
+    if not user_ids:
+        logger.error("[WeChat] allowed_users has no valid user ID; denying every user until it is fixed")
+    return frozenset(user_ids)
+
+
 class WechatChannel(Channel):
     """WeChat iLink bot channel using long-polling.
 
@@ -175,7 +220,8 @@ class WechatChannel(Channel):
         - ``bot_token``: iLink bot token used for authenticated API calls.
         - ``qrcode_login_enabled``: (optional) Allow first-time QR bootstrap when ``bot_token`` is missing.
         - ``base_url``: (optional) iLink API base URL.
-        - ``allowed_users``: (optional) List of allowed iLink user IDs. Empty = allow all.
+        - ``allowed_users``: (optional) List of allowed iLink user IDs, or a single
+          ID. Empty = allow all; a non-empty list with no valid ID denies everyone.
         - ``allowed_media_hosts``: (optional) Extra host suffixes inbound media URLs may
           be downloaded from, in addition to the platform CDN defaults. Default: ``qq.com``.
         - ``polling_timeout``: (optional) Long-poll timeout in seconds. Default: 35.
@@ -285,7 +331,7 @@ class WechatChannel(Channel):
         self._max_outbound_file_bytes = self._coerce_int(config.get("max_outbound_file_bytes"), self.DEFAULT_MAX_OUTBOUND_FILE_BYTES)
         self._allowed_file_extensions = self._coerce_str_set(config.get("allowed_file_extensions"), self.DEFAULT_ALLOWED_FILE_EXTENSIONS)
         self._allowed_media_hosts = self._coerce_host_suffixes(config.get("allowed_media_hosts"))
-        self._allowed_users: set[str] = {str(uid).strip() for uid in config.get("allowed_users", []) if str(uid).strip()}
+        self._allowed_users: frozenset[str] | None = _parse_allowed_users(config.get("allowed_users"))
         self._bot_token = str(config.get("bot_token") or "").strip()
         self._ilink_bot_id = str(config.get("ilink_bot_id") or "").strip() or None
         self._auth_state: dict[str, Any] = {}
@@ -922,7 +968,7 @@ class WechatChannel(Channel):
         return self._context_tokens_by_chat.get(msg.chat_id)
 
     def _check_user(self, user_id: str) -> bool:
-        if not self._allowed_users:
+        if self._allowed_users is None:
             return True
         return user_id in self._allowed_users
 
