@@ -5246,7 +5246,7 @@ async def test_knowledge_default_lookup_does_not_break_new_agent_bootstrap(_stub
 # --- Scheduled launch provenance and the browser timezone (PR1 WP2) ---------------------------
 
 
-async def _capture_scheduled_launch(*, thread_store=None, **kwargs):
+async def _capture_scheduled_launch(**kwargs):
     from unittest.mock import patch
 
     from app.gateway.services import launch_scheduled_thread_run
@@ -5259,7 +5259,7 @@ async def _capture_scheduled_launch(*, thread_store=None, **kwargs):
         return SimpleNamespace(run_id="run-1", thread_id=thread_id)
 
     with patch("app.gateway.services.start_run", side_effect=fake_start_run):
-        await launch_scheduled_thread_run(thread_id="thread-scheduled", assistant_id="lead_agent", prompt="Check the checklist", app=SimpleNamespace(state=SimpleNamespace(thread_store=thread_store)), owner_user_id="user-1", **kwargs)
+        await launch_scheduled_thread_run(thread_id="thread-scheduled", assistant_id="lead_agent", prompt="Check the checklist", app=SimpleNamespace(state=SimpleNamespace()), owner_user_id="user-1", **kwargs)
     return captured
 
 
@@ -5274,24 +5274,6 @@ async def test_scheduled_launch_message_has_a_stable_id_and_origin_metadata(_stu
     assert body_input["title"] == "Checklist · 10-07 09:00"
     # The id is per occurrence, so a retried launch stays idempotent.
     assert captured["idempotency_key"] == "scheduled-task:task-run-1"
-
-
-@pytest.mark.asyncio
-async def test_scheduled_launch_names_the_run_thread_before_the_run_ends(_stub_app_config):
-    from unittest.mock import AsyncMock
-
-    # The sidebar lists a new run thread while it runs; the worker would only
-    # copy the title when the run ends.
-    store = SimpleNamespace(update_display_name=AsyncMock())
-    await _capture_scheduled_launch(thread_store=store, metadata={"scheduled_task_id": "task-1"}, title="Checklist · 10-07 09:00")
-    store.update_display_name.assert_awaited_once_with("thread-scheduled", "Checklist · 10-07 09:00", user_id="user-1")
-    # A reused chat keeps its own title.
-    store.update_display_name.reset_mock()
-    await _capture_scheduled_launch(thread_store=store, metadata={"scheduled_task_id": "task-1"})
-    store.update_display_name.assert_not_awaited()
-    # A failing store never fails the launch.
-    failing = SimpleNamespace(update_display_name=AsyncMock(side_effect=RuntimeError("db down")))
-    assert (await _capture_scheduled_launch(thread_store=failing, metadata={"scheduled_task_id": "task-1"}, title="T"))["body"].input["title"] == "T"
 
 
 @pytest.mark.asyncio

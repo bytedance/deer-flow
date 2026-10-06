@@ -263,9 +263,15 @@ async def _ensure_thread_metadata(
             # /threads/{id}/move — so the key must not persist either.
             if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY)
         }
+        # A run that names its thread in the input (a scheduled run) creates it
+        # named: the worker copies the title to the thread list only when the
+        # run ends, and a server-created thread is listed as soon as it exists.
+        run_input = (record.kwargs or {}).get("input")
+        title = run_input.get("title") if isinstance(run_input, dict) else None
         existing = await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
+            display_name=title if isinstance(title, str) and title.strip() else None,
             metadata=metadata,
         )
     return existing
@@ -2364,16 +2370,6 @@ async def launch_scheduled_thread_run(
             idempotency_key=idempotency_key,
             scheduled_task_runtime=scheduled_task_runtime,
         )
-    if title:
-        # The worker copies the title to the thread list only when the run
-        # ends; name the thread now, so a sidebar that shows the new run
-        # thread at once does not list it as untitled meanwhile.
-        from app.gateway.deps import get_thread_store
-
-        try:
-            await get_thread_store(request).update_display_name(record.thread_id, title, user_id=owner_user_id)
-        except Exception:
-            logger.debug("Failed to pre-set the title of scheduled run thread %s (non-fatal)", record.thread_id, exc_info=True)
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 
