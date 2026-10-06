@@ -1011,6 +1011,7 @@ export const zhCN: Translations = {
       continuations: "为达成目标额外继续了 {n} 轮",
       details: "详细信息",
       listLabel: "此任务的运行记录",
+      waitingForSlot: "正在等待空闲位置",
     },
     runTrigger: { scheduled: "定时运行", manual: "试运行" },
     runStatus: {
@@ -1096,6 +1097,22 @@ export const zhCN: Translations = {
       schedulerUnavailable: "此服务器上的定时任务暂时不可用。",
       triggerFailed: "无法启动这次运行。",
       permissionDenied: "你没有执行此操作的权限。",
+    },
+    events: {
+      stoppedWithCondition:
+        "{title} 已由智能体暂停。停止条件已满足：{condition}",
+      stopped: "{title} 已由智能体暂停：停止条件已满足。",
+      autoPaused: "{title} 已自动暂停：连续 3 次未达成目标。",
+      finishedRuns: "{title} 已结束：{max} 次运行已全部完成。",
+      finishedEnd: "{title} 已结束：已过结束时间。",
+      finished: "{title} 已结束。",
+      onceDone: "{title} 已运行。",
+      onceFailed: "{title} 没有成功完成。",
+      label: "定时任务通知",
+      suffixLastFailed: "最后一次运行出错了。",
+      suffixLastUnmet: "最后一次运行未达成目标。",
+      suffixLastInterrupted: "最后一次运行被中断了。",
+      untitledTask: "未命名任务",
     },
     card: {
       runs: "运行时间",
@@ -1290,6 +1307,32 @@ export const zhCN: Translations = {
     pinChatFailed: "更新对话置顶状态失败",
   },
 
+  // Thread origin and unread markers
+  threads: {
+    unread: "未读",
+    unreadLabel: "{title}，未读",
+    origin: {
+      schedule: "定时运行",
+      // A Latin name keeps the usual space ("来自 GitHub"); a Chinese one does not ("来自飞书").
+      fromProvider: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider) ? `来自 ${provider}` : `来自${provider}`,
+      github: "来自 GitHub",
+      extension: "来自扩展",
+      providers: {
+        buzz: "Buzz",
+        dingtalk: "钉钉",
+        discord: "Discord",
+        feishu: "飞书",
+        github: "GitHub",
+        qq: "QQ",
+        slack: "Slack",
+        telegram: "Telegram",
+        wechat: "微信",
+        wecom: "企业微信",
+      },
+    },
+  },
+
   // Sidecar
   sidecar: {
     title: "侧边对话",
@@ -1405,6 +1448,10 @@ export const zhCN: Translations = {
       wecom: "通过 DeerFlow AI Bot 接收企业微信消息。",
     },
     connectedAs: (name: string) => `已连接为 ${name}。`,
+    scheduledUpdates: {
+      supported: "定时任务通知：会发送到这里",
+      unsupported: "定时任务通知：此应用暂不支持",
+    },
   },
 
   // Page titles (document title)

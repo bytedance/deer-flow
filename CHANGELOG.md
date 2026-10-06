@@ -154,6 +154,19 @@ This release closes that milestone with **301 merged pull requests**.
   text changed and no longer shows the task or run ID. Rows already queued for
   providers without proactive push end once as `failed` without retries.
 
+- **scheduler:** The web app keeps the account's `locale` preference equal to
+  its interface language (after sign-in with session auth and on every
+  language switch), so scheduled-task IM notices arrive in the language the
+  user reads DeerFlow in; with auth disabled nothing is written and
+  `notification_locale` applies. A queued run in the run history now reads
+  "Waiting for a free slot". The frontend core for server-created threads
+  lands here too: origin markers from `deerflow_origin` (IM provider names
+  localized, `channel_source` and legacy scheduled threads still recognized),
+  activity polling that refetches the thread lists only when a
+  server-originated thread changed or a thread was read on another device,
+  debounced read marking, and the per-chat lifecycle events with their
+  placement in the conversation. ([#6340])
+
 - **scheduler:** The tasks page shows the per-run goal and end conditions of
   conversation-created tasks. Run history shows whether a goal was met,
   including when it relied on stated assumptions; an unmet run shows a readable
