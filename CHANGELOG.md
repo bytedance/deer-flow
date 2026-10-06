@@ -494,6 +494,13 @@ This release closes that milestone with **301 merged pull requests**.
 
 ### Fixed
 
+- **sandbox:** With host bash enabled, the local sandbox no longer keeps a
+  thread on the skill view of the last restricted Agent that ran there. That
+  view is only maintained while host bash is off, but `LocalSandboxProvider`
+  mounted it whenever it existed, so later unrestricted runs on the thread kept
+  the old allowlist and could not read other enabled or newly added skills
+  under `/mnt/skills`. Those runs now use the shared skill views; the thread
+  view is kept and enforced again once host bash is turned off.
 - **skills:** Editing a custom skill no longer runs filesystem work on the event
   loop. `PUT /api/skills/custom/{name}` built the user-scoped skill storage,
   probed the custom, public, legacy and integration roots, validated the
