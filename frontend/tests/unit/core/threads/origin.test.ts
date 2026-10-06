@@ -9,6 +9,7 @@ import {
   labelOfThreadOrigin,
   THREAD_ORIGIN_KINDS,
   threadOriginOf,
+  type ThreadOrigin,
 } from "@/core/threads/origin";
 import {
   channelSourceOfThread,
@@ -104,45 +105,33 @@ describe("threadOriginOf", () => {
 
 describe("origin labels", () => {
   test("each kind reads as its glossary label in English", () => {
-    expect(labelOfThreadOrigin({ kind: "schedule" }, enUS)).toBe(
-      "Scheduled run",
-    );
-    expect(
-      labelOfThreadOrigin({ kind: "im_channel", provider: "feishu" }, enUS),
-    ).toBe("From Feishu");
-    expect(
-      labelOfThreadOrigin({ kind: "github", provider: "github" }, enUS),
-    ).toBe("From GitHub");
-    expect(
-      labelOfThreadOrigin({ kind: "extension", namespace: "x" }, enUS),
-    ).toBe("From an extension");
-    expect(labelOfThreadOrigin({ kind: "mcp_notification" }, enUS)).toBeNull();
-    expect(labelOfThreadOrigin(null, enUS)).toBeNull();
+    const labels: Array<[ThreadOrigin | null, string | null]> = [
+      [{ kind: "schedule" }, "Scheduled run"],
+      [{ kind: "im_channel", provider: "feishu" }, "From Feishu"],
+      [{ kind: "github", provider: "github" }, "From GitHub"],
+      [{ kind: "extension", namespace: "x" }, "From an extension"],
+      [{ kind: "mcp_notification" }, null],
+      [null, null],
+    ];
+    for (const [origin, label] of labels) {
+      expect(labelOfThreadOrigin(origin, enUS)).toBe(label);
+    }
   });
 
   test("Chinese labels use Chinese provider names, never the English ones", () => {
-    const feishu = labelOfThreadOrigin(
-      { kind: "im_channel", provider: "feishu" },
-      zhCN,
-    );
-    const wecom = labelOfThreadOrigin(
-      { kind: "im_channel", provider: "wecom" },
-      zhCN,
-    );
-    expect(feishu).toBe("来自飞书");
-    expect(wecom).toBe("来自企业微信");
-    expect(feishu).not.toContain("Feishu");
-    expect(wecom).not.toContain("WeCom");
-    expect(
-      labelOfThreadOrigin({ kind: "im_channel", provider: "slack" }, zhCN),
-    ).toBe("来自 Slack");
-    expect(labelOfThreadOrigin({ kind: "schedule" }, zhCN)).toBe("定时运行");
-    expect(
-      labelOfThreadOrigin({ kind: "github", provider: "github" }, zhCN),
-    ).toBe("来自 GitHub");
-    expect(
-      labelOfThreadOrigin({ kind: "extension", namespace: null }, zhCN),
-    ).toBe("来自扩展");
+    const labels: Array<[ThreadOrigin, string]> = [
+      [{ kind: "im_channel", provider: "feishu" }, "来自飞书"],
+      [{ kind: "im_channel", provider: "wecom" }, "来自企业微信"],
+      [{ kind: "im_channel", provider: "slack" }, "来自 Slack"],
+      [{ kind: "schedule" }, "定时运行"],
+      [{ kind: "github", provider: "github" }, "来自 GitHub"],
+      [{ kind: "extension", namespace: null }, "来自扩展"],
+    ];
+    for (const [origin, label] of labels) {
+      const text = labelOfThreadOrigin(origin, zhCN);
+      expect(text).toBe(label);
+      expect(text).not.toMatch(/Feishu|WeCom/);
+    }
   });
 
   test("every known provider has a localized name in both locales", () => {

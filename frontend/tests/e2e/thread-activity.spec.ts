@@ -51,6 +51,13 @@ const GITHUB_THREAD: MockThread = {
   },
 };
 
+/** The recorded run's thread, marked as a scheduled run. */
+const scheduledRun = (overrides: Partial<MockThread> = {}): MockThread => ({
+  ...take.runThread,
+  metadata: { deerflow_origin: { kind: "schedule" } },
+  ...overrides,
+});
+
 const sidebar = (page: Page) => page.locator("[data-sidebar='sidebar']");
 const sidebarRow = (page: Page, threadId: string) =>
   sidebar(page).locator(`a[href='/workspace/chats/${threadId}']`);
@@ -155,14 +162,7 @@ test("a read on another device clears the dot after the next poll", async ({
   await page.clock.install();
   const requests = trackRequests(page);
   const api = mockLangGraphAPI(page, {
-    threads: [
-      take.chatThread,
-      {
-        ...take.runThread,
-        metadata: { deerflow_origin: { kind: "schedule" } },
-        unread: true,
-      },
-    ],
+    threads: [take.chatThread, scheduledRun({ unread: true })],
     features: { threadActivity: { available: true } },
   });
   await page.goto(`/workspace/chats/${take.chatThread.thread_id}`);
@@ -174,11 +174,7 @@ test("a read on another device clears the dot after the next poll", async ({
 
   // Another device opened the run: the server's read clock moves and the
   // thread is read there.
-  api.upsertThread({
-    ...take.runThread,
-    metadata: { deerflow_origin: { kind: "schedule" } },
-    unread: false,
-  });
+  api.upsertThread(scheduledRun({ unread: false }));
   api.bumpReadVersion();
   await page.clock.fastForward(16_000);
   await expect(row.getByTestId("thread-unread-dot")).toHaveCount(0);
@@ -190,14 +186,7 @@ test("the chats page shows the same origin marker and unread dot", async ({
 }) => {
   await setLocaleCookie(page, "zh");
   mockLangGraphAPI(page, {
-    threads: [
-      {
-        ...take.runThread,
-        metadata: { deerflow_origin: { kind: "schedule" } },
-        unread: true,
-      },
-      FEISHU_THREAD,
-    ],
+    threads: [scheduledRun({ unread: true }), FEISHU_THREAD],
     features: { threadActivity: { available: true } },
   });
   await page.goto("/workspace/chats");
@@ -230,13 +219,7 @@ test("nothing polls thread activity when the Gateway does not offer it", async (
   await page.clock.install();
   const requests = trackRequests(page);
   const api = mockLangGraphAPI(page, {
-    threads: [
-      take.chatThread,
-      {
-        ...take.runThread,
-        metadata: { deerflow_origin: { kind: "schedule" } },
-      },
-    ],
+    threads: [take.chatThread, scheduledRun()],
   });
   await page.goto(`/workspace/chats/${take.runThread.thread_id}`);
   const row = sidebarRow(page, take.runThread.thread_id);

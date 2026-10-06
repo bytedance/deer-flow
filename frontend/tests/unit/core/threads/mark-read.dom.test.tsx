@@ -49,6 +49,17 @@ function thread(id: string, unread: boolean | null | undefined): AgentThread {
   } as unknown as AgentThread;
 }
 
+function newClient() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  clients.push(queryClient);
+  const wrapper = ({ children }: PropsWithChildren) => (
+    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+  );
+  return { queryClient, wrapper };
+}
+
 function setup(
   threadId: string | null,
   {
@@ -56,23 +67,23 @@ function setup(
     infinite = [],
   }: { search?: AgentThread[]; infinite?: AgentThread[] } = {},
 ) {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  clients.push(queryClient);
+  const { queryClient, wrapper } = newClient();
   queryClient.setQueryData(["threads", "search", { limit: 50 }], search);
   queryClient.setQueryData<InfiniteData<AgentThread[]>>(
     [...INFINITE_THREADS_QUERY_KEY_PREFIX, {}],
     { pages: [infinite], pageParams: [0] },
-  );
-  const wrapper = ({ children }: PropsWithChildren) => (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
   const hook = renderHook(({ id }) => useMarkThreadRead(id), {
     wrapper,
     initialProps: { id: threadId },
   });
   return { queryClient, hook };
+}
+
+async function advance(ms = MARK_THREAD_READ_DEBOUNCE_MS) {
+  await act(async () => {
+    await rs.advanceTimersByTimeAsync(ms);
+  });
 }
 
 function readPosts() {
@@ -103,14 +114,10 @@ describe("useMarkThreadRead", () => {
       hook.result.current();
       hook.result.current();
     });
-    await act(async () => {
-      await rs.advanceTimersByTimeAsync(MARK_THREAD_READ_DEBOUNCE_MS - 1);
-    });
+    await advance(MARK_THREAD_READ_DEBOUNCE_MS - 1);
     expect(readPosts()).toHaveLength(0);
     act(() => hook.result.current());
-    await act(async () => {
-      await rs.advanceTimersByTimeAsync(MARK_THREAD_READ_DEBOUNCE_MS);
-    });
+    await advance();
     expect(readPosts()).toHaveLength(1);
     expect(String(readPosts()[0]![0])).toBe("/api/threads/t-1/read");
   });
@@ -128,9 +135,7 @@ describe("useMarkThreadRead", () => {
       infinite: [thread("t-1", true)],
     });
     act(() => hook.result.current());
-    await act(async () => {
-      await rs.advanceTimersByTimeAsync(MARK_THREAD_READ_DEBOUNCE_MS);
-    });
+    await advance();
     // Optimistic: patched before the POST answers.
     expect(readPosts()).toHaveLength(1);
     expect(cachedThreadUnread(queryClient, "t-1")).toBe(false);
@@ -152,18 +157,14 @@ describe("useMarkThreadRead", () => {
       infinite: [thread("t-1", false)],
     });
     act(() => hook.result.current());
-    await act(async () => {
-      await rs.advanceTimersByTimeAsync(MARK_THREAD_READ_DEBOUNCE_MS * 2);
-    });
+    await advance(MARK_THREAD_READ_DEBOUNCE_MS * 2);
     expect(readPosts()).toHaveLength(0);
   });
 
   test("posts when no loaded list knows the thread", async () => {
     const { hook } = setup("t-9", { search: [thread("t-1", false)] });
     act(() => hook.result.current());
-    await act(async () => {
-      await rs.advanceTimersByTimeAsync(MARK_THREAD_READ_DEBOUNCE_MS);
-    });
+    await advance();
     expect(readPosts()).toHaveLength(1);
   });
 
@@ -171,9 +172,7 @@ describe("useMarkThreadRead", () => {
     mocks.available = false;
     const { hook } = setup("t-1", { search: [thread("t-1", true)] });
     act(() => hook.result.current());
-    await act(async () => {
-      await rs.advanceTimersByTimeAsync(MARK_THREAD_READ_DEBOUNCE_MS * 2);
-    });
+    await advance(MARK_THREAD_READ_DEBOUNCE_MS * 2);
     expect(mocks.fetch).not.toHaveBeenCalled();
   });
 
@@ -181,9 +180,7 @@ describe("useMarkThreadRead", () => {
     const { hook } = setup("t-1", { search: [thread("t-1", true)] });
     act(() => hook.result.current());
     hook.rerender({ id: "t-2" });
-    await act(async () => {
-      await rs.advanceTimersByTimeAsync(MARK_THREAD_READ_DEBOUNCE_MS * 2);
-    });
+    await advance(MARK_THREAD_READ_DEBOUNCE_MS * 2);
     expect(readPosts()).toHaveLength(0);
   });
 
@@ -195,9 +192,7 @@ describe("useMarkThreadRead", () => {
     state.cursor = "5:run-5";
     state.readVersion = 6;
     act(() => hook.result.current());
-    await act(async () => {
-      await rs.advanceTimersByTimeAsync(MARK_THREAD_READ_DEBOUNCE_MS);
-    });
+    await advance();
     expect(state.readVersion).toBe(7);
     const outcome = applyThreadActivity(queryClient, state, {
       cursor: "5:run-5",
@@ -217,9 +212,7 @@ describe("useMarkThreadRead", () => {
     });
     const invalidate = rs.spyOn(queryClient, "invalidateQueries");
     act(() => hook.result.current());
-    await act(async () => {
-      await rs.advanceTimersByTimeAsync(MARK_THREAD_READ_DEBOUNCE_MS);
-    });
+    await advance();
     expect(invalidate).toHaveBeenCalledWith({
       queryKey: ["threads", "search"],
     });
@@ -229,13 +222,7 @@ describe("useMarkThreadRead", () => {
 describe("useThreadActivity", () => {
   test("leaving the workspace forgets the cursor and read clock (another account may sign in)", () => {
     mocks.available = false;
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    clients.push(queryClient);
-    const wrapper = ({ children }: PropsWithChildren) => (
-      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-    );
+    const { queryClient, wrapper } = newClient();
     const hook = renderHook(() => useThreadActivity(), { wrapper });
     const state = threadActivityState(queryClient);
     state.cursor = "40:run-40";

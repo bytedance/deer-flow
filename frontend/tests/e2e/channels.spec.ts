@@ -1,6 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
+import { setLocaleCookie } from "./utils/scheduled-fixtures";
 
 const channelProviders = [
   ["buzz", "Buzz", "binding_code"],
@@ -837,7 +838,6 @@ for (const entry of ["sidebar", "settings"] as const) {
 test.describe("scheduled task updates per app", () => {
   const COPY = {
     en: {
-      locale: "en-US",
       supported: "Scheduled task updates: sent here",
       unsupported: "Scheduled task updates: not available for this app yet",
       dialog: "Settings",
@@ -845,7 +845,6 @@ test.describe("scheduled task updates per app", () => {
       feishu: "Feishu",
     },
     zh: {
-      locale: "zh-CN",
       supported: "定时任务通知：会发送到这里",
       unsupported: "定时任务通知：此应用暂不支持",
       dialog: "设置",
@@ -859,11 +858,7 @@ test.describe("scheduled task updates per app", () => {
       page,
     }) => {
       const copy = COPY[lang];
-      await page
-        .context()
-        .addCookies([
-          { name: "locale", value: copy.locale, url: "http://localhost:3000" },
-        ]);
+      await setLocaleCookie(page, lang);
       mockLangGraphAPI(page);
       mockChannelsAPI(
         page,
@@ -880,14 +875,10 @@ test.describe("scheduled task updates per app", () => {
       const dialog = page.getByRole("dialog", { name: copy.dialog });
       // Cards carry the provider's name in the UI language, the same label
       // the thread origin markers use, not the backend's English name.
-      const wecomName = copy.wecom;
-      const feishuName = copy.feishu;
-      const wecomCard = dialog
-        .locator("[data-slot='item']")
-        .filter({ hasText: wecomName });
-      const feishuCard = dialog
-        .locator("[data-slot='item']")
-        .filter({ hasText: feishuName });
+      const card = (name: string) =>
+        dialog.locator("[data-slot='item']").filter({ hasText: name });
+      const wecomCard = card(copy.wecom);
+      const feishuCard = card(copy.feishu);
       await expect(
         wecomCard.getByTestId("channel-scheduled-updates"),
       ).toHaveText(copy.supported);
@@ -905,10 +896,10 @@ test.describe("scheduled task updates per app", () => {
       const lines = sidebar.getByTestId("channel-scheduled-updates");
       await expect(lines).toHaveCount(2);
       await expect(
-        sidebar.locator("li").filter({ hasText: wecomName }),
+        sidebar.locator("li").filter({ hasText: copy.wecom }),
       ).toContainText(copy.supported);
       await expect(
-        sidebar.locator("li").filter({ hasText: feishuName }),
+        sidebar.locator("li").filter({ hasText: copy.feishu }),
       ).toContainText(copy.unsupported);
     });
   }

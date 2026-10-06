@@ -56,13 +56,31 @@ function spyInvalidations(queryClient: QueryClient) {
   return keys;
 }
 
-function seeded(queryClient: QueryClient, readVersion = 0) {
+/** A client past its seeding response, with its later invalidations recorded. */
+function seededClient(readVersion = 0) {
+  const queryClient = client();
   applyThreadActivity(
     queryClient,
     threadActivityState(queryClient),
     response({ read_version: readVersion }),
   );
+  return { queryClient, keys: spyInvalidations(queryClient) };
 }
+
+/** Apply one poll response to the client's own activity state. */
+function apply(
+  queryClient: QueryClient,
+  overrides: Partial<ThreadActivityResponse>,
+) {
+  return applyThreadActivity(
+    queryClient,
+    threadActivityState(queryClient),
+    response(overrides),
+  );
+}
+
+/** Both thread lists, in the order a change invalidates them. */
+const LIST_KEYS = [["threads", "search"], INFINITE_THREADS_QUERY_KEY_PREFIX];
 
 beforeEach(() => {
   mocks.fetch.mockReset();
@@ -96,78 +114,46 @@ describe("activity responses", () => {
   });
 
   test("a server-originated thread invalidates both thread lists", () => {
-    const queryClient = client();
-    seeded(queryClient);
-    const keys = spyInvalidations(queryClient);
-    const outcome = applyThreadActivity(
-      queryClient,
-      threadActivityState(queryClient),
-      response({
-        cursor: "12:run-12",
-        threads: [
-          { thread_id: "t-1", origin_kind: "im_channel", status: "success" },
-        ],
-      }),
-    );
+    const { queryClient, keys } = seededClient();
+    const outcome = apply(queryClient, {
+      cursor: "12:run-12",
+      threads: [
+        { thread_id: "t-1", origin_kind: "im_channel", status: "success" },
+      ],
+    });
     expect(outcome.threads).toBe(true);
     expect(outcome.scheduledTasks).toBe(false);
-    expect(keys).toEqual([
-      ["threads", "search"],
-      INFINITE_THREADS_QUERY_KEY_PREFIX,
-    ]);
+    expect(keys).toEqual(LIST_KEYS);
     expect(threadActivityState(queryClient).cursor).toBe("12:run-12");
   });
 
   test("a scheduled thread also refreshes the scheduled-task queries", () => {
-    const queryClient = client();
-    seeded(queryClient);
-    const keys = spyInvalidations(queryClient);
-    applyThreadActivity(
-      queryClient,
-      threadActivityState(queryClient),
-      response({
-        threads: [
-          { thread_id: "t-1", origin_kind: "schedule", status: "running" },
-        ],
-      }),
-    );
+    const { queryClient, keys } = seededClient();
+    apply(queryClient, {
+      threads: [
+        { thread_id: "t-1", origin_kind: "schedule", status: "running" },
+      ],
+    });
     expect(keys).toContainEqual(["scheduled-tasks"]);
     expect(keys).toContainEqual(["threads", "search"]);
   });
 
   test("a higher read_version alone (a read on another device) invalidates the lists", () => {
-    const queryClient = client();
-    seeded(queryClient, 3);
-    const keys = spyInvalidations(queryClient);
-    const outcome = applyThreadActivity(
-      queryClient,
-      threadActivityState(queryClient),
-      response({ read_version: 4 }),
-    );
+    const { queryClient, keys } = seededClient(3);
+    const outcome = apply(queryClient, { read_version: 4 });
     expect(outcome.threads).toBe(true);
-    expect(keys).toEqual([
-      ["threads", "search"],
-      INFINITE_THREADS_QUERY_KEY_PREFIX,
-    ]);
+    expect(keys).toEqual(LIST_KEYS);
     expect(threadActivityState(queryClient).readVersion).toBe(4);
   });
 
   test("a truncated page invalidates even without listed threads", () => {
-    const queryClient = client();
-    seeded(queryClient);
-    const keys = spyInvalidations(queryClient);
-    applyThreadActivity(
-      queryClient,
-      threadActivityState(queryClient),
-      response({ truncated: true }),
-    );
+    const { queryClient, keys } = seededClient();
+    apply(queryClient, { truncated: true });
     expect(keys).toHaveLength(2);
   });
 
   test("an idle poll, interactive rows and an older read_version change nothing", () => {
-    const queryClient = client();
-    seeded(queryClient, 5);
-    const keys = spyInvalidations(queryClient);
+    const { queryClient, keys } = seededClient(5);
     const state = threadActivityState(queryClient);
     applyThreadActivity(queryClient, state, response({ read_version: 5 }));
     applyThreadActivity(
@@ -202,9 +188,7 @@ describe("polling", () => {
   });
 
   test("an invalid cursor re-seeds and refetches the lists once", async () => {
-    const queryClient = client();
-    seeded(queryClient);
-    const keys = spyInvalidations(queryClient);
+    const { queryClient, keys } = seededClient();
     mocks.fetch
       .mockResolvedValueOnce(
         Response.json(
@@ -216,10 +200,7 @@ describe("polling", () => {
     await pollThreadActivity(queryClient);
     expect(String(mocks.fetch.mock.calls[1]![0])).not.toContain("cursor=");
     expect(threadActivityState(queryClient).cursor).toBe("1:run-z");
-    expect(keys).toEqual([
-      ["threads", "search"],
-      INFINITE_THREADS_QUERY_KEY_PREFIX,
-    ]);
+    expect(keys).toEqual(LIST_KEYS);
   });
 
   test("query options poll every 15 s, on focus, and never in the background", () => {
