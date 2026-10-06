@@ -628,7 +628,7 @@ This release closes that milestone with **439 merged pull requests**.
   `make up` does not create them, but the production compose file required
   both. Its `env_file` entries are now optional, as in the development compose
   file: Compose loads them when present and skips them otherwise. This needs
-  Docker Compose 2.24 or newer, the floor the README already documents.
+  Docker Compose 2.24 or newer, the floor the README already documents. ([#6370])
 - **make:** `make clean` now says what it deletes and refuses to run under a live
   Docker Gateway. `make help` described it as cleaning up "temporary files", but
   it deletes `backend/.deer-flow`: the local database, users, threads, uploads,
@@ -8834,3 +8834,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6347]: https://github.com/bytedance/deer-flow/pull/6347
 [#6350]: https://github.com/bytedance/deer-flow/pull/6350
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351
+[#6370]: https://github.com/bytedance/deer-flow/pull/6370
