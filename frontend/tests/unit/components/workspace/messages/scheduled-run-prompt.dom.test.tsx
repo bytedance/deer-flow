@@ -182,7 +182,9 @@ describe("ScheduledRunPrompt", () => {
         "en-US",
       );
       const block = screen.getByTestId("scheduled-run-prompt");
-      expect(block.textContent).toContain("01:00 · 09:00 your time");
+      // Between 16:00 and 24:00 UTC the two zones are on different days, so
+      // the viewer's time carries its own day ("Today 09:00 your time").
+      expect(block.textContent).toMatch(/01:00 · (?:\S+ )?09:00 your time/);
     });
   });
 });
