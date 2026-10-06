@@ -227,3 +227,36 @@ def test_reload_after_own_write_records_the_written_revision(config_path: Path) 
 
     assert _allowed_paths_of(reloaded) == ["/data/beta"]
     assert get_extensions_config() is reloaded
+
+
+def test_reload_with_explicit_path_follows_that_file(config_path: Path, tmp_path: Path) -> None:
+    get_extensions_config()
+    explicit = tmp_path / "other-extensions.json"
+    _write_from_peer_process(explicit, _filesystem_server_payload("/data/explicit"))
+
+    reloaded = reload_extensions_config(str(explicit))
+    assert _allowed_paths_of(reloaded) == ["/data/explicit"]
+    assert get_extensions_config() is reloaded, "default resolution must not pull the cache back"
+
+    # Edits to the explicitly chosen file are followed; the default file is not.
+    _write_from_peer_process(explicit, _filesystem_server_payload("/data/explicit-2"))
+    assert _allowed_paths_of(get_extensions_config()) == ["/data/explicit-2"]
+    _write_from_peer_process(config_path, _filesystem_server_payload("/data/beta"))
+    assert _allowed_paths_of(get_extensions_config()) == ["/data/explicit-2"]
+
+    explicit.unlink()
+    assert _allowed_paths_of(get_extensions_config()) == ["/data/explicit-2"]
+
+    # An argument-less reload returns to default resolution.
+    assert _allowed_paths_of(reload_extensions_config()) == ["/data/beta"]
+    assert _allowed_paths_of(get_extensions_config()) == ["/data/beta"]
+
+
+def test_reset_forgets_an_explicitly_reloaded_path(config_path: Path, tmp_path: Path) -> None:
+    explicit = tmp_path / "other-extensions.json"
+    _write_from_peer_process(explicit, _filesystem_server_payload("/data/explicit"))
+    reload_extensions_config(str(explicit))
+
+    reset_extensions_config()
+
+    assert _allowed_paths_of(get_extensions_config()) == ["/data/alpha"]

@@ -626,6 +626,13 @@ _extensions_config: ExtensionsConfig | None = None
 _extensions_config_path: Path | None = None
 _extensions_config_signature: ConfigSignature | None = None
 _extensions_config_is_custom = False
+# The explicit ``config_path`` the cached revision was loaded from, when
+# ``reload_extensions_config(config_path=...)`` chose a file that default
+# resolution would not. The probe and later reloads follow that file until
+# ``reset_extensions_config()`` or an argument-less reload; probing the
+# default resolution instead would either flip the cache back to the default
+# file or pin a stale copy of the explicit one.
+_extensions_config_source: str | None = None
 # ``(path, signature)`` of the on-disk revision that most recently could not
 # be loaded after a successful load (file gone, truncated or invalid). The
 # cache keeps serving the last-known-good configuration and warns once per
@@ -789,8 +796,10 @@ def set_raw_skill_enabled(raw_data: dict[str, Any], skill_name: str, enabled: bo
 def _probe_extensions_config_state() -> tuple[Path | None, ConfigSignature | None]:
     """Return the currently resolved config path and its content signature.
 
-    Only used once a configuration has been loaded. An explicit path or
-    ``DEER_FLOW_EXTENSIONS_CONFIG_PATH`` that no longer exists makes
+    Only used once a configuration has been loaded. The explicit path the
+    cache was reloaded from, if any, takes precedence over default
+    resolution. An explicit path or ``DEER_FLOW_EXTENSIONS_CONFIG_PATH`` that
+    no longer exists makes
     ``resolve_config_path`` raise; for a loaded cache that means "no usable
     file right now" and is reported as ``(None, None)`` so the caller keeps
     the last-known-good configuration instead of failing a hot path. The
@@ -798,7 +807,7 @@ def _probe_extensions_config_state() -> tuple[Path | None, ConfigSignature | Non
     explicit file.
     """
     try:
-        path = ExtensionsConfig.resolve_config_path()
+        path = ExtensionsConfig.resolve_config_path(_extensions_config_source)
     except FileNotFoundError:
         return None, None
     if path is None:
@@ -817,7 +826,7 @@ def _load_and_cache_extensions_config(config_path: str | None = None) -> Extensi
     stale state the comparison could never detect.
     """
     global _extensions_config, _extensions_config_path, _extensions_config_signature
-    global _extensions_config_is_custom, _extensions_config_rejected
+    global _extensions_config_is_custom, _extensions_config_source, _extensions_config_rejected
 
     resolved_path = ExtensionsConfig.resolve_config_path(config_path)
     signature = get_config_signature(resolved_path) if resolved_path is not None else None
@@ -829,6 +838,7 @@ def _load_and_cache_extensions_config(config_path: str | None = None) -> Extensi
     _extensions_config_path = resolved_path
     _extensions_config_signature = signature
     _extensions_config_is_custom = False
+    _extensions_config_source = config_path or None
     _extensions_config_rejected = None
     return loaded
 
@@ -894,7 +904,7 @@ def get_extensions_config() -> ExtensionsConfig:
             return _extensions_config
 
         try:
-            loaded = ExtensionsConfig.from_file()
+            loaded = ExtensionsConfig.from_file(_extensions_config_source) if _extensions_config_source else ExtensionsConfig.from_file()
         except Exception as exc:
             _keep_last_known_good(current_path, current_signature, "Extensions config at %s changed but could not be loaded (%s)", current_path, _describe_load_failure(exc))
             return _extensions_config
@@ -978,7 +988,10 @@ def reload_extensions_config(config_path: str | None = None) -> ExtensionsConfig
                      uses the default resolution strategy.
 
     The loaded revision is recorded, so a following `get_extensions_config()`
-    does not reload it again.
+    does not reload it again. When *config_path* is given, the cache keeps
+    following that file (its later edits are picked up and default
+    resolution is not consulted) until `reset_extensions_config()` or an
+    argument-less reload.
 
     Returns:
         The newly loaded ExtensionsConfig instance.
@@ -995,13 +1008,14 @@ def reset_extensions_config() -> None:
     or when switching between different configurations.
     """
     global _extensions_config, _extensions_config_path, _extensions_config_signature
-    global _extensions_config_is_custom, _extensions_config_rejected
+    global _extensions_config_is_custom, _extensions_config_source, _extensions_config_rejected
 
     with _extensions_config_lock:
         _extensions_config = None
         _extensions_config_path = None
         _extensions_config_signature = None
         _extensions_config_is_custom = False
+        _extensions_config_source = None
         _extensions_config_rejected = None
 
 
@@ -1016,11 +1030,12 @@ def set_extensions_config(config: ExtensionsConfig) -> None:
         config: The ExtensionsConfig instance to use.
     """
     global _extensions_config, _extensions_config_path, _extensions_config_signature
-    global _extensions_config_is_custom, _extensions_config_rejected
+    global _extensions_config_is_custom, _extensions_config_source, _extensions_config_rejected
 
     with _extensions_config_lock:
         _extensions_config = config
         _extensions_config_path = None
         _extensions_config_signature = None
         _extensions_config_is_custom = True
+        _extensions_config_source = None
         _extensions_config_rejected = None
