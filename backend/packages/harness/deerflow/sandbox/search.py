@@ -249,8 +249,14 @@ def find_grep_matches(
                 continue
             if file_path.stat().st_size > max_file_size or is_binary_file(file_path):
                 continue
-            with file_path.open(encoding="utf-8", errors="replace") as handle:
+            # newline="\n" ends lines where LocalSandbox.read_file does, so a
+            # hit's line_number is the start_line that reads it back; a bare
+            # "\r" stays content. A CRLF terminator still reads as "\n", so $
+            # anchors match as before.
+            with file_path.open(encoding="utf-8", errors="replace", newline="\n") as handle:
                 for line_number, line in enumerate(handle, start=1):
+                    if line.endswith("\r\n"):
+                        line = line[:-2] + "\n"
                     if len(line) > _max_line_chars:
                         continue
                     if regex.search(line):

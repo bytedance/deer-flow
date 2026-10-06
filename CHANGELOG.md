@@ -501,6 +501,19 @@ This release closes that milestone with **301 merged pull requests**.
   the old allowlist and could not read other enabled or newly added skills
   under `/mnt/skills`. Those runs now use the shared skill views; the thread
   view is kept and enforced again once host bash is turned off. ([#6344])
+- **sandbox:** The local sandbox no longer rewrites line endings. `read_file`
+  translated CRLF to LF, so `str_replace` on a CRLF file wrote every line back as
+  LF, and the read-before-write gate could not see a change that only touched
+  line endings; on Windows, `write_file` turned LF content into CRLF, breaking
+  scripts such as `bash run.sh`. Local reads and writes now keep line endings as
+  stored, like the remote providers, and `str_replace` spells a `\n`-written
+  `old_str`/`new_str` with CRLF when the file uses it, which also lets
+  multi-line edits match CRLF files on remote providers. Local `grep` ends lines
+  at `\n` like `read_file`, so a hit's line number is the line a ranged read
+  returns even when the file contains a bare `\r`. On Windows, oversized
+  tool output saved under `outputs/.tool-results/` was likewise written as CRLF,
+  no longer matched its stamped blob reference, and was deleted on the next
+  model call when no blob store was configured; it is now written byte-exact. ([#6343])
 - **skills:** Editing a custom skill no longer runs filesystem work on the event
   loop. `PUT /api/skills/custom/{name}` built the user-scoped skill storage,
   probed the custom, public, legacy and integration roots, validated the
@@ -7832,4 +7845,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6326]: https://github.com/bytedance/deer-flow/pull/6326
 [#6328]: https://github.com/bytedance/deer-flow/pull/6328
 [#6332]: https://github.com/bytedance/deer-flow/pull/6332
+[#6343]: https://github.com/bytedance/deer-flow/pull/6343
 [#6344]: https://github.com/bytedance/deer-flow/pull/6344

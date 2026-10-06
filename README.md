@@ -289,6 +289,11 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
 
    For vLLM 0.19.0, use `deerflow.models.vllm_provider:VllmChatModel`. For Qwen-style reasoning models, DeerFlow toggles reasoning with `extra_body.chat_template_kwargs.enable_thinking` and preserves vLLM's non-standard `reasoning` field across multi-turn tool-call conversations. Legacy `thinking` configs are normalized automatically for backward compatibility. If the endpoint reports a cumulative usage snapshot on every streaming chunk, set `cumulative_stream_usage: true` so DeerFlow converts those snapshots into per-chunk deltas; the option is disabled by default and leaves usage unchanged when a stable completion id is unavailable. Reasoning models may also require the server to be started with `--reasoning-parser ...`. If your local vLLM deployment accepts any non-empty API key, you can still set `VLLM_API_KEY` to a placeholder value.
 
+   When prompt caching is enabled for a model configured with
+   `deerflow.models.claude_provider:ClaudeChatModel`, DeerFlow preserves thinking
+   and redacted-thinking history without placing cache breakpoints directly on
+   those blocks. Extended-thinking tool follow-ups can keep using prompt caching.
+
    CLI-backed provider examples:
 
    ```yaml
@@ -1873,6 +1878,11 @@ For example, independent read-only research can run concurrently when the wall-c
 ### Sandbox & File System
 
 Host-externalized tool outputs use the Gateway's normal file-creation umask.
+Host and sandbox outputs use deterministic filenames hashed from the raw tool
+call ID and output content. Missing, colliding, or oversized IDs cannot overwrite
+different output or make the filename too long; identical output can reuse its path.
+Host and remote sandbox persistence failures, including invalid Unicode during filename
+hashing, use the configured inline fallback.
 `tool_output` character/count budgets, including per-tool overrides, require
 non-negative integers; YAML booleans are rejected rather than treated as 0 or 1.
 An explicit zero per-tool override disables externalization while preserving
