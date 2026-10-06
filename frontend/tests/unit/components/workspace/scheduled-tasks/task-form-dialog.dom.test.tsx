@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 
 import {
+  createPayload,
   TaskFormDialog,
   updatePayload,
   validateForm,
@@ -192,6 +193,25 @@ describe("TaskFormDialog", () => {
     });
   });
 
+  test("a title-only edit leaves an end time in a repeated hour alone", async () => {
+    // 06:30Z is the second 01:30 of the New York fall-back; the field shows
+    // 01:30, which alone would read as the first one (05:30Z).
+    const source = task({
+      timezone: "America/New_York",
+      end_at: "2026-11-01T06:30:00Z",
+    });
+    updateTask.mockResolvedValue({ ...source, title: "Checklist v2" });
+    renderForm({ mode: "edit", task: source });
+    fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {
+      target: { value: "Checklist v2" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(updateTask).toHaveBeenCalledTimes(1));
+    expect(updateTask).toHaveBeenCalledWith("task-1", {
+      title: "Checklist v2",
+    });
+  });
+
   test("a duplicate keeps the stop condition even while its field is hidden", async () => {
     createTask.mockResolvedValue(task({ id: "task-2" }));
     renderForm({ mode: "duplicate", task: task() }, { toolEnabled: false });
@@ -306,6 +326,23 @@ describe("form payload helpers", () => {
     expect(state.stopCondition).toBe("every item is checked");
     expect(state.maxRuns).toBe("10");
     expect(state.assistantId).toBe("bot");
+  });
+
+  test("duplicate copies an end time in a repeated hour as the same instant", () => {
+    const source = task({
+      timezone: "America/New_York",
+      end_at: "2026-11-01T06:30:00Z",
+    });
+    const { state } = initialFormState(
+      { mode: "duplicate", task: source },
+      "(copy)",
+      new Date("2026-10-06T00:00:00Z"),
+    );
+    expect(state.endAtLocal).toBe("2026-11-01T01:30");
+    const valid = validateForm(state, source.end_at);
+    expect(valid.ok).toBe(true);
+    if (!valid.ok) return;
+    expect(createPayload(state, valid).end_at).toBe("2026-11-01T06:30:00Z");
   });
 
   test("a goal with reuse-thread runs is rejected", () => {

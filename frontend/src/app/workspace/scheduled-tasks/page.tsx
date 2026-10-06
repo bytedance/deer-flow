@@ -392,7 +392,13 @@ export default function ScheduledTasksPage() {
         onSaved={(task, mode) => {
           if (mode !== "edit") {
             appliedLink.current = null;
-            replaceQuery(task.id);
+            // A new task this chat doesn't own (the default fresh-thread
+            // mode has no chat) is not in the chat's list: drop the filter.
+            const ownedByChat =
+              threadId !== null &&
+              (task.thread_id === threadId ||
+                task.origin_thread_id === threadId);
+            replaceQuery(task.id, { keepThread: ownedByChat });
           }
         }}
       />

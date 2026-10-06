@@ -215,6 +215,47 @@ test("New task creates a task with the default agent and selects it", async ({
   expect(creates[0]).not.toHaveProperty("max_runs");
 });
 
+for (const via of ["New task", "Duplicate"] as const) {
+  test(`${via} from a chat's tasks shows the new task, which that chat doesn't own`, async ({
+    page,
+  }) => {
+    await openPage(
+      page,
+      {
+        scheduledTasks: [
+          task({
+            id: "task-1",
+            title: "Thread task",
+            origin_thread_id: MOCK_THREAD_ID,
+          }),
+        ],
+      },
+      `?thread_id=${MOCK_THREAD_ID}`,
+    );
+    await expect(detail(page).getByRole("heading")).toHaveText("Thread task");
+    if (via === "New task") {
+      await page.getByTestId("scheduled-task-new").click();
+    } else {
+      await detail(page).getByRole("button", { name: "More actions" }).click();
+      await page.getByRole("menuitem", { name: "Duplicate" }).click();
+    }
+    const dialog = form(page);
+    await dialog.getByLabel("Title", { exact: true }).fill("Not this chat's");
+    await dialog.getByLabel("Instructions").fill("Summarize thread");
+    await dialog.getByRole("button", { name: "Create", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    // A fresh-thread task has no chat, so the chat filter is dropped.
+    await expect(page).toHaveURL(/task_id=task-created/);
+    await expect(page).not.toHaveURL(/thread_id=/);
+    await expect(page.getByTestId("scheduled-task-link-missing")).toHaveCount(
+      0,
+    );
+    await expect(detail(page).getByRole("heading")).toHaveText(
+      "Not this chat's",
+    );
+  });
+}
+
 test("?task_id= selects that task and clicking another updates the URL", async ({
   page,
 }) => {
@@ -476,6 +517,52 @@ test("Resume of an exhausted task opens the renew dialog and sends the new cap",
   await again.getByRole("button", { name: "Resume" }).click();
   await expect(again).toHaveCount(0);
   expect(resumes.at(-1)).toEqual({ max_runs: null });
+});
+
+test("raising the run limit leaves an untouched end time out of the renewal", async ({
+  page,
+}) => {
+  const resumes = writesTo(page, "POST", "/api/scheduled-tasks/limited/resume");
+  await openPage(page, {
+    scheduledTasks: [
+      task({
+        id: "limited",
+        title: "Limited task",
+        status: "paused",
+        max_runs: 5,
+        automatic_runs_used: 5,
+        // The second 01:30 of a New York fall-back, with seconds: the
+        // minute-precision field shows 01:30, which alone reads as 05:30Z.
+        timezone: "America/New_York",
+        end_at: "2030-11-03T06:30:45+00:00",
+      }),
+    ],
+  });
+  await page.route("**/api/scheduled-tasks/limited/resume", (route) =>
+    route.request().postData()
+      ? route.fallback()
+      : route.fulfill({
+          status: 409,
+          json: {
+            detail: {
+              code: "limits_exhausted",
+              message: "All 5 automatic runs are used.",
+              params: {
+                limit: "max_runs",
+                used: 5,
+                max_runs: 5,
+                end_at: "2030-11-03T06:30:45+00:00",
+              },
+            },
+          },
+        }),
+  );
+  await detail(page).getByRole("button", { name: "Resume" }).click();
+  const dialog = page.getByRole("dialog", { name: "Extend the safety cap" });
+  await dialog.getByLabel("Safety cap: number of runs").fill("70");
+  await dialog.getByRole("button", { name: "Resume" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(resumes.at(-1)).toEqual({ max_runs: 70 });
 });
 
 test("a finished task offers no Pause and explains how to extend it", async ({

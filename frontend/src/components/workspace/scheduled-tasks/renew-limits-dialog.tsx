@@ -14,8 +14,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  editedZonedLocalToUtcIso,
   utcToZonedLocalInput,
-  validZonedLocalToUtcIso,
 } from "@/core/scheduled-tasks/cron";
 import { ErrorDetails } from "@/core/scheduled-tasks/error-toast";
 import {
@@ -126,8 +126,10 @@ export function RenewLimitsDialog({
   const removeRunsBlocked = needsCap && (!hasEndCap || removeEndAt);
   const removeEndBlocked = needsCap && (!hasRunsCap || removeMaxRuns);
 
+  // An untouched end time keeps its stored instant, seconds included, so
+  // it is not sent.
   const endAtIso = endAtLocal
-    ? validZonedLocalToUtcIso(endAtLocal, timeZone)
+    ? editedZonedLocalToUtcIso(endAtLocal, timeZone, task.end_at)
     : null;
   const renewal = renewalFromForm(task, {
     maxRuns,

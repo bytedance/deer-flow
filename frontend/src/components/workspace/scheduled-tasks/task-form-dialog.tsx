@@ -41,10 +41,10 @@ import type {
   ScheduledTaskUpdatePayload,
 } from "@/core/scheduled-tasks/api";
 import {
+  editedZonedLocalToUtcIso,
   hasScheduleSpec,
   onceRunAtInstant,
   utcToZonedLocalInput,
-  validZonedLocalToUtcIso,
 } from "@/core/scheduled-tasks/cron";
 import { browserTimeZone } from "@/core/scheduled-tasks/format";
 import {
@@ -198,7 +198,14 @@ export type FormValidation =
       error: "required" | "invalidMaxRuns" | "invalidEndAt" | "goalNeedsFresh";
     };
 
-export function validateForm(state: TaskFormState): FormValidation {
+/**
+ * `storedEndAt` is the source task's end time (edit and duplicate): kept
+ * as is while the end-time field still shows it.
+ */
+export function validateForm(
+  state: TaskFormState,
+  storedEndAt?: string | null,
+): FormValidation {
   if (
     !state.title.trim() ||
     !state.prompt.trim() ||
@@ -217,9 +224,10 @@ export function validateForm(state: TaskFormState): FormValidation {
   }
   let endAt: string | null = null;
   if (state.endAtLocal) {
-    endAt = validZonedLocalToUtcIso(
+    endAt = editedZonedLocalToUtcIso(
       state.endAtLocal,
       state.schedule.timezone || browserTimeZone(),
+      storedEndAt,
     );
     if (!endAt) {
       return { ok: false, error: "invalidEndAt" };
@@ -424,7 +432,7 @@ function TaskForm({
   };
 
   const submit = () => {
-    const valid = validateForm(state);
+    const valid = validateForm(state, task?.end_at);
     if (!valid.ok) {
       setError(
         valid.error === "required"

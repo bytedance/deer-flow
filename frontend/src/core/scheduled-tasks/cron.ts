@@ -626,6 +626,24 @@ export function validZonedLocalToUtcIso(
   }
 }
 
+/**
+ * The instant of an edited wall value that started as `stored`. A
+ * minute-precision wall time cannot keep seconds or name the later instant
+ * of a repeated (DST fall-back) hour, so while it still shows `stored` in
+ * `timezone` the stored instant is kept; otherwise it reads as
+ * `validZonedLocalToUtcIso`.
+ */
+export function editedZonedLocalToUtcIso(
+  localValue: string,
+  timezone: string,
+  stored: string | null | undefined,
+): string | null {
+  if (stored && utcToZonedLocalInput(stored, timezone) === localValue) {
+    return stored;
+  }
+  return validZonedLocalToUtcIso(localValue, timezone);
+}
+
 function tzOffsetMs(timezone: string, date: Date): number {
   const tzParts = formatParts(timezone, date);
   const utcParts = formatParts("UTC", date);
