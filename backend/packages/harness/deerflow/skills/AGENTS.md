@@ -1,5 +1,7 @@
 ### Skills System (`packages/harness/deerflow/skills/`)
 
+- **SkillScan API tokens**: `secret-cloud-token` accepts `-` and `_` in the `sk-` family, matching the character class used by PII redaction. Legacy, OpenAI project/service-account/admin, and Anthropic keys must trigger `CRITICAL` even in a Bearer header without a secret assignment. Keep evidence fully redacted and preserve the minimum length, word boundaries, and placeholder filtering; synthetic regressions live in `tests/test_skillscan_native.py`.
+
 - **SkillScan shell pipes**: the `shell-curl-pipe-shell` warning covers sudo, common shell interpreter paths/names, and real backslash-newline continuations, including between `sudo`, its flags, and the interpreter. Keep repeated regex alternatives disjoint; failed matches on literal backslash text must not stall scanning. Value-bearing sudo flags (`sudo -u root bash`) are intentionally out of scope for this warning-level heuristic. Tests in `tests/test_skillscan_native.py` include a subprocess timeout regression and non-shell pipe controls.
 
 - **Integration package boundaries**: recurse through provider and namespace directories, but stop at each package's `SKILL.md`. Nested fixtures must neither become catalog entries nor shadow real public skills; regression coverage lives in `tests/test_user_scoped_skill_storage.py`.

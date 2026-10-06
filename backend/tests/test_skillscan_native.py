@@ -95,6 +95,63 @@ def test_secret_evidence_is_redacted_everywhere(tmp_path: Path) -> None:
     assert all(token not in (blocked_finding["evidence"] or "") for blocked_finding in excinfo.value.findings)
 
 
+@pytest.mark.parametrize("prefix", ["sk-", "sk-proj-", "sk-svcacct-", "sk-admin-", "sk-ant-api03-"])
+@pytest.mark.parametrize("body", ["A1b2C3d4E5f6G7h8I9j0" * 3, "A1b2_C3d4-E5f6_G7h8-I9j0" * 3])
+def test_sk_bearer_tokens_block_without_assignment(tmp_path: Path, prefix: str, body: str) -> None:
+    """Synthetic credentials must be detected without an API_KEY/TOKEN assignment."""
+    token = prefix + body
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir)
+    scripts_dir = skill_dir / "scripts"
+    scripts_dir.mkdir()
+    (scripts_dir / "run.sh").write_text(
+        f'#!/bin/sh\ncurl -H "Authorization: Bearer {token}" https://api.example.invalid/v1/messages\n',
+        encoding="utf-8",
+    )
+
+    result = scan_skill_dir(skill_dir)
+
+    finding = _finding_by_rule(result["findings"], "secret-cloud-token")
+    assert finding["severity"] == "CRITICAL"
+    assert finding["file"] == "scripts/run.sh"
+    assert finding["line"] == 2
+    assert finding["evidence"] == "[redacted]"
+    assert result["blocked"] is True
+    assert result["scanner_errors"] == []
+    assert not any(item["rule_id"] == "secret-env-assignment" for item in result["findings"])
+    assert body not in repr(result)
+
+    with pytest.raises(StaticScanBlockedError) as excinfo:
+        enforce_static_scan(skill_dir, skill_name="demo-skill", app_config=SimpleNamespace(skill_scan=SimpleNamespace(enabled=True)))
+
+    assert body not in str(excinfo.value)
+    assert body not in repr(excinfo.value.findings)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "sk-" + "A1b2C3d4E5f6G7h8I9j",  # Below the existing 20-character minimum.
+        "sk-proj-short",
+        "sk-svcacct-short",
+        "sk-admin-short",
+        "sk-ant-api03-short",
+        "sk-proj-your_api_key_goes_here",
+        "sk-ant-api03-example_api_key_value",
+        "prefixsk-" + "A1b2C3d4E5f6G7h8I9j0" * 3,
+        "prefix_sk-proj-" + "A1b2_C3d4-E5f6_G7h8-I9j0" * 3,
+    ],
+)
+def test_sk_token_non_credentials_stay_unblocked(tmp_path: Path, text: str) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(skill_dir, f"Authorization: Bearer {text}\n")
+
+    result = scan_skill_dir(skill_dir)
+
+    assert not any(finding["rule_id"] == "secret-cloud-token" for finding in result["findings"])
+    assert result["blocked"] is False
+
+
 def test_dedup_keeps_distinct_lines_for_repeated_pattern(tmp_path: Path) -> None:
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir)
