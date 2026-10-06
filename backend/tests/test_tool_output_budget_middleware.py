@@ -731,6 +731,37 @@ class TestToolOutputBlobPersistence:
             }
         ]
 
+    def test_host_externalized_file_keeps_its_blob_ref_bytes_under_windows_newlines(self, monkeypatch, tmp_path):
+        # Windows text mode wrote "\n" as "\r\n", so the file no longer matched
+        # the ref stamped from content.encode() and the next model call on this
+        # Gateway deleted it as a mismatch when no blob store was configured.
+        from deerflow.agents.middlewares import tool_output_budget_middleware as mod
+
+        content = "first line\nsecond line\n" * 20
+        builtin_open = open
+
+        def windows_open(file, mode="r", *args, **kwargs):
+            if "b" not in mode and any(flag in mode for flag in "wax+"):
+                kwargs.setdefault("newline", "\r\n")
+            return builtin_open(file, mode, *args, **kwargs)
+
+        class RecordingStore:
+            def put_bytes(self, data: bytes, **kwargs) -> BlobRef:
+                return BlobRef(sha256=hashlib.sha256(data).hexdigest(), size=len(data), kind=kwargs["kind"], content_type=kwargs["content_type"])
+
+        monkeypatch.setattr(mod, "open", windows_open, raising=False)
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: RecordingStore())
+        mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig(externalize_min_chars=50, preview_head_chars=20, preview_tail_chars=10))
+        result = mw.wrap_tool_call(_make_request(outputs_path=str(tmp_path)), lambda _: _tm(content, name="remote_executor"))
+        saved = tmp_path / ".tool-results" / os.path.basename(result.additional_kwargs[TOOL_OUTPUT_BLOB_KEY]["virtual_path"])
+        assert saved.read_bytes() == content.encode()
+
+        monkeypatch.setattr(mod, "get_blob_store_if_enabled", lambda: None)
+        request = ModelRequest(model=None, messages=[result], tools=[], state={"thread_data": {"outputs_path": str(tmp_path)}})
+        mw.wrap_model_call(request, lambda prepared: [])
+
+        assert saved.read_bytes() == content.encode()
+
     def test_configured_blob_write_failure_falls_back_inline(self, monkeypatch, tmp_path):
         from deerflow.agents.middlewares import tool_output_budget_middleware as mod
 

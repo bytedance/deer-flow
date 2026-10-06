@@ -5,7 +5,7 @@ each tool call creates a new MCP session. For stateful servers like Playwright,
 this means browser state (opened pages, filled forms) is lost between calls.
 
 This module provides a session pool that maintains persistent MCP sessions,
-scoped by ``(server_name, scope_key, owning_loop)``. Consecutive calls on
+scoped by ``(server_name, scope_key, owning_loop, ownership_domain)``. Consecutive calls on
 the same loop share server-side state; independent loops use separate sessions.
 The sync wrapper uses a fresh loop per call, so it does not preserve that state.
 Sessions are evicted in LRU order when the pool reaches capacity.
@@ -45,7 +45,7 @@ import asyncio
 import logging
 import threading
 from collections import OrderedDict
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 from mcp import ClientSession
@@ -55,6 +55,8 @@ from mcp.types import CONNECTION_CLOSED
 from deerflow.mcp_scope import mcp_scope_belongs_to_thread
 
 logger = logging.getLogger(__name__)
+
+MCPPoolDomain = Literal["deployment", "personal"]
 
 _MCP_CLOSED_STREAM_ERRORS = (
     anyio.ClosedResourceError,
@@ -110,20 +112,22 @@ async def call_pooled_session_tool(
     tool_name: str,
     arguments: dict[str, Any],
     call_kwargs: dict[str, Any],
+    domain: MCPPoolDomain = "deployment",
 ) -> Any:
     """Call a pooled session and evict it only after an explicit disconnect."""
     try:
         return await session.call_tool(tool_name, arguments, **call_kwargs)
     except Exception as error:
         if _is_mcp_transport_disconnect(error):
-            cleanup = asyncio.create_task(pool.close_session_if_current(server_name, scope_key, session))
+            cleanup_call = pool.close_session_if_current(server_name, scope_key, session) if domain == "deployment" else pool.close_session_if_current(server_name, scope_key, session, domain=domain)
+            cleanup = asyncio.create_task(cleanup_call)
             if await _finish_session_cleanup(cleanup, server_name):
                 raise asyncio.CancelledError
         raise
 
 
 class MCPSessionPool:
-    """Manages persistent MCP sessions scoped by ``(server_name, scope_key, owning_loop)``."""
+    """Manages persistent MCP sessions scoped by ``(server_name, scope_key, owning_loop, ownership_domain)``."""
 
     MAX_SESSIONS = 256
     SESSION_CLOSE_TIMEOUT = 5.0  # seconds to wait when closing a session on a foreign loop
@@ -131,7 +135,7 @@ class MCPSessionPool:
     def __init__(self) -> None:
         # Each entry: (session, owning_loop, owner_task, close_event).
         self._entries: OrderedDict[
-            tuple[str, str, asyncio.AbstractEventLoop],
+            tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
             tuple[
                 ClientSession,
                 asyncio.AbstractEventLoop,
@@ -139,7 +143,7 @@ class MCPSessionPool:
                 asyncio.Event,
             ],
         ] = OrderedDict()
-        # In-flight creations, keyed by (server, scope, owning_loop). Lets concurrent callers
+        # In-flight creations, keyed by (server, scope, owning_loop, ownership_domain). Lets concurrent callers
         # on the same loop share a single creation instead of each spawning a
         # duplicate session. Value: (loop, ready_future, owner_task, close_event).
         # The owner task promotes the record into ``_entries`` and resolves
@@ -147,7 +151,7 @@ class MCPSessionPool:
         # ``_run_session``), so ``ready`` resolving with a *result* always means
         # the session is registered — never merely handed to one caller.
         self._inflight: dict[
-            tuple[str, str, asyncio.AbstractEventLoop],
+            tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
             tuple[
                 asyncio.AbstractEventLoop,
                 asyncio.Future[ClientSession],
@@ -169,7 +173,11 @@ class MCPSessionPool:
     # Session owner task
     # ------------------------------------------------------------------
 
-    def _discard_owner(self, key: tuple[str, str, asyncio.AbstractEventLoop], owner: asyncio.Task[Any]) -> None:
+    def _discard_owner(
+        self,
+        key: tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
+        owner: asyncio.Task[Any],
+    ) -> None:
         """Retire only this owner, including after asyncio.run shuts its loop down."""
         with self._lock:
             entry = self._entries.get(key)
@@ -181,7 +189,7 @@ class MCPSessionPool:
 
     async def _run_session(
         self,
-        key: tuple[str, str, asyncio.AbstractEventLoop],
+        key: tuple[str, str, asyncio.AbstractEventLoop, MCPPoolDomain],
         connection: dict[str, Any],
         ready: asyncio.Future[ClientSession],
         close_evt: asyncio.Event,
@@ -271,6 +279,8 @@ class MCPSessionPool:
         server_name: str,
         scope_key: str,
         connection: dict[str, Any],
+        *,
+        domain: MCPPoolDomain = "deployment",
     ) -> ClientSession:
         """Get or create a persistent MCP session.
 
@@ -281,12 +291,14 @@ class MCPSessionPool:
             server_name: MCP server name.
             scope_key: Isolation key (typically thread_id).
             connection: Connection configuration for ``create_session``.
+            domain: Ownership namespace for the connection. Deployment and
+                personal resources with the same server/scope remain isolated.
 
         Returns:
             An initialized ``ClientSession``.
         """
         current_loop = asyncio.get_running_loop()
-        key = (server_name, scope_key, current_loop)
+        key = (server_name, scope_key, current_loop, domain)
 
         # Phase 1: inspect/mutate the registry under the thread lock (no awaits).
         # Decide one of three outcomes atomically: return an existing session,
@@ -615,7 +627,7 @@ class MCPSessionPool:
             await self._shutdown_entry(loop, ent_task, ent_close, ready=ent_ready)
 
     async def close_scope(self, scope_key: str) -> None:
-        """Close all sessions for a given scope (e.g. thread_id)."""
+        """Close all sessions for a scope across ownership domains."""
         with self._lock:
             keys = [k for k in self._entries if k[1] == scope_key]
             entries = [(self._entries.pop(k)) for k in keys]
@@ -624,7 +636,7 @@ class MCPSessionPool:
         await self._close_owners(entries, inflight)
 
     async def close_thread_scope(self, *, user_id: str, thread_id: str) -> None:
-        """Close every session scoped to one user/thread identity.
+        """Close every session scoped to one user/thread identity across ownership domains.
 
         Differs from :meth:`close_scope` in matching *all incarnations* of the
         thread rather than one exact scope key. A thread-deletion path knows the
@@ -649,12 +661,18 @@ class MCPSessionPool:
             inflight = [self._inflight.pop(k) for k in inflight_keys]
         await self._close_owners(entries, inflight)
 
-    async def close_session(self, server_name: str, scope_key: str) -> None:
-        """Close every session for this server/scope across all owning loops."""
+    async def close_session(
+        self,
+        server_name: str,
+        scope_key: str,
+        *,
+        domain: MCPPoolDomain = "deployment",
+    ) -> None:
+        """Close this ownership domain's session for a server/scope across loops."""
         with self._lock:
-            keys = [k for k in self._entries if k[:2] == (server_name, scope_key)]
+            keys = [k for k in self._entries if k[:2] == (server_name, scope_key) and k[3] == domain]
             entries = [self._entries.pop(k) for k in keys]
-            keys = [k for k in self._inflight if k[:2] == (server_name, scope_key)]
+            keys = [k for k in self._inflight if k[:2] == (server_name, scope_key) and k[3] == domain]
             inflight = [self._inflight.pop(k) for k in keys]
         await self._close_owners(entries, inflight)
 
@@ -663,10 +681,15 @@ class MCPSessionPool:
         server_name: str,
         scope_key: str,
         session: ClientSession,
+        *,
+        domain: MCPPoolDomain = "deployment",
     ) -> bool:
-        """Close *session* only if it is still the registered entry for the key."""
+        """Close *session* only if it is current in the requested ownership domain."""
         with self._lock:
-            key = next((k for k, entry in self._entries.items() if k[:2] == (server_name, scope_key) and entry[0] is session), None)
+            key = next(
+                (k for k, entry in self._entries.items() if k[:2] == (server_name, scope_key) and k[3] == domain and entry[0] is session),
+                None,
+            )
             if key is None:
                 return False
             entry = self._entries.pop(key)
@@ -674,12 +697,12 @@ class MCPSessionPool:
         await self._shutdown_entry(loop, task, close_evt)
         return True
 
-    async def close_server(self, server_name: str) -> None:
-        """Close all sessions for a given server."""
+    async def close_server(self, server_name: str, *, domain: MCPPoolDomain = "deployment") -> None:
+        """Close one ownership domain's sessions for a given server."""
         with self._lock:
-            keys = [k for k in self._entries if k[0] == server_name]
+            keys = [k for k in self._entries if k[0] == server_name and k[3] == domain]
             entries = [(self._entries.pop(k)) for k in keys]
-            inflight_keys = [k for k in self._inflight if k[0] == server_name]
+            inflight_keys = [k for k in self._inflight if k[0] == server_name and k[3] == domain]
             inflight = [self._inflight.pop(k) for k in inflight_keys]
         await self._close_owners(entries, inflight)
 

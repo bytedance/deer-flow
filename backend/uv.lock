@@ -856,6 +856,7 @@ redis = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "anthropic" },
     { name = "blockbuster" },
     { name = "hypothesis" },
     { name = "jsonschema" },
@@ -904,6 +905,7 @@ provides-extras = ["postgres", "redis", "discord", "buzz", "monocle", "ollama", 
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "anthropic", specifier = ">=0.97.0" },
     { name = "blockbuster", specifier = ">=1.5.26,<1.6" },
     { name = "hypothesis", specifier = ">=6.100,<7" },
     { name = "jsonschema", specifier = ">=4.26.0" },
