@@ -222,7 +222,9 @@ def _externalize(
         candidate_path = os.path.join(storage_dir, f".tool-output-{uuid.uuid4().hex}.tmp")
         # Exclusive creation keeps per-writer ownership while honoring umask,
         # unlike NamedTemporaryFile's fixed 0600 mode on mounted outputs.
-        with open(candidate_path, "x", encoding="utf-8") as f:
+        # newline="" keeps the bytes equal to the stamped blob ref; Windows
+        # text mode would write CRLF and restore would discard the file.
+        with open(candidate_path, "x", encoding="utf-8", newline="") as f:
             tmp_path = candidate_path
             f.write(content)
         os.replace(tmp_path, filepath)

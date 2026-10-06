@@ -14,7 +14,10 @@ file publication, allowing the tool wrappers to use the configured inline fallba
 creation (`open(..., "x")`). Its mode is `0o666 & ~umask`, preserving ordinary
 file-creation permissions without reading or changing the process-wide umask.
 This matters when a mounted sandbox reads the output under a different UID.
-Restrictive operator umasks remain restrictive.
+Restrictive operator umasks remain restrictive. It also passes `newline=""`, so
+the file holds exactly the bytes of the stamped blob ref on every platform;
+Windows text mode would write CRLF, and restore discards a file whose size or
+digest does not match.
 
 The writer closes its file before atomically replacing the deterministic final
 path. Concurrent publishers of identical output can safely reuse that path;
