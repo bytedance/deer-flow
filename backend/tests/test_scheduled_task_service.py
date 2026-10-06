@@ -1494,3 +1494,180 @@ async def test_completion_without_the_outbox_does_not_read_the_task():
 
     assert task_repo.completions[-1][1]["status"] == "success"
     assert task_repo.reads == 0
+
+
+@pytest.mark.asyncio
+async def test_trigger_while_a_scheduled_occurrence_is_queued_reports_the_existing_row():
+    launched = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        return {"run_id": "run-x", "thread_id": kwargs["thread_id"]}
+
+    class QueuedRunRepo(DummyRunRepo):
+        async def get_active_run(self, task_id):
+            return {"id": "task-run-waiting", "task_id": task_id, "thread_id": "thread-waiting", "status": "queued", "trigger": "scheduled"}
+
+    row = _once_task_row(task_id="task-waiting")
+    row.update({"schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}, "status": "enabled"})
+    run_repo = QueuedRunRepo()
+    service = ScheduledTaskService(task_repo=DummyTaskRepo([row]), task_run_repo=run_repo, launch_run=fake_launch, poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3)
+
+    result = await service.dispatch_task(row, now=datetime.now(UTC), trigger="manual")
+
+    assert result["outcome"] == "queued"
+    assert result["existing"] is True
+    assert result["task_run_id"] == "task-run-waiting"
+    assert result["thread_id"] == "thread-waiting"
+    assert run_repo.created is None
+    assert launched == []
+
+
+@pytest.mark.asyncio
+async def test_a_new_queued_trial_is_not_reported_as_existing():
+    async def fake_launch(**kwargs):
+        raise AssertionError("budget is exhausted; nothing launches")
+
+    row = _once_task_row(task_id="task-budget")
+    row.update({"schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}, "status": "enabled"})
+    run_repo = DummyRunRepo(active_count=3)
+    service = ScheduledTaskService(task_repo=DummyTaskRepo([row]), task_run_repo=run_repo, launch_run=fake_launch, poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3)
+
+    result = await service.dispatch_task(row, now=datetime.now(UTC), trigger="manual")
+
+    assert result["outcome"] == "queued"
+    assert result["existing"] is False
+    assert run_repo.created is not None
+
+
+@pytest.mark.asyncio
+async def test_is_running_reflects_the_poller_task():
+    service = ScheduledTaskService(task_repo=DummyTaskRepo([]), task_run_repo=DummyRunRepo(), launch_run=None, poll_interval_seconds=60, lease_seconds=120, max_concurrent_runs=1)
+    assert service.is_running is False
+    await service.start()
+    try:
+        assert service.is_running is True
+    finally:
+        await service.stop()
+    assert service.is_running is False
+
+
+class NumberedRunRepo(DummyRunRepo):
+    def __init__(self, number):
+        super().__init__()
+        self.number = number
+        self.number_calls = []
+
+    async def run_number(self, task_run_id):
+        self.number_calls.append(task_run_id)
+        return self.number
+
+
+def _provenance_task(**updates):
+    return {
+        "id": "task-prov",
+        "user_id": "user-1",
+        "thread_id": None,
+        "context_mode": "fresh_thread_per_run",
+        "assistant_id": "lead_agent",
+        "title": "检查发布清单",
+        "prompt": "检查 release-checklist.md，列出没勾的项",
+        "stop_condition": "清单全部勾完",
+        "standing_notes": ["用 develop 分支"],
+        "schedule_type": "cron",
+        "schedule_spec": {"cron": "0 9 * * 1-5"},
+        "timezone": "Asia/Shanghai",
+        "status": "enabled",
+        **updates,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger", ["scheduled", "manual"])
+async def test_launch_passes_user_language_origin_and_run_thread_title(trigger):
+    launches = []
+
+    async def fake_launch(**kwargs):
+        launches.append(kwargs)
+        return {"run_id": "run-prov", "thread_id": kwargs["thread_id"]}
+
+    task_repo = DummyTaskRepo([_provenance_task()])
+    run_repo = NumberedRunRepo(4)
+    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=run_repo, launch_run=fake_launch, poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3, own_stop_available=True)
+    now = datetime(2026, 10, 7, 1, 0, tzinfo=UTC)
+
+    await service.dispatch_task(task_repo.rows[0], now=now, trigger=trigger)
+
+    (launch,) = launches
+    origin = launch["origin"]
+    task_run_id = run_repo.created["run_record_id"]
+    assert origin == {
+        "task_id": "task-prov",
+        "task_run_id": task_run_id,
+        "trigger": trigger,
+        "run_number": 4 if trigger == "scheduled" else None,
+        "scheduled_for": now.isoformat(),
+        "timezone": "Asia/Shanghai",
+        "schedule_type": "cron",
+        "task_title": "检查发布清单",
+        "instructions": "检查 release-checklist.md，列出没勾的项",
+        "stop_condition": "清单全部勾完",
+        "standing_notes": ["用 develop 分支"],
+    }
+    assert run_repo.number_calls == ([task_run_id] if trigger == "scheduled" else [])
+    # The launched text carries the host-written stop rule and notes block; the
+    # origin keeps only the user's own words.
+    assert launch["prompt"].startswith(origin["instructions"])
+    assert "stop_scheduled_task" in launch["prompt"] and "<standing_notes>" in launch["prompt"]
+    assert launch["title"] == "检查发布清单 · 10-07 09:00"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("updates", "trigger", "expected"),
+    [
+        ({"schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "UTC"}, "scheduled", "检查发布清单 · #4"),
+        ({"schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "UTC"}, "manual", "检查发布清单"),
+        ({"schedule_type": "once", "schedule_spec": {"run_at": "2026-10-07T01:00:00+00:00"}, "timezone": "UTC"}, "scheduled", "检查发布清单 · #4"),
+        ({"schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "Asia/Shanghai"}, "scheduled", "检查发布清单 · 10-07 09:00"),
+        ({"schedule_type": "cron", "schedule_spec": {"cron": "0 1 * * *"}, "timezone": "UTC"}, "scheduled", "检查发布清单 · 10-07 01:00"),
+    ],
+    ids=["interval-placeholder", "interval-placeholder-trial", "once-offset-placeholder", "interval-real-zone", "cron-real-utc"],
+)
+async def test_run_thread_title_never_shows_a_placeholder_utc_time(updates, trigger, expected):
+    launches = []
+
+    async def fake_launch(**kwargs):
+        launches.append(kwargs)
+        return {"run_id": "run-prov", "thread_id": kwargs["thread_id"]}
+
+    task_repo = DummyTaskRepo([_provenance_task(**updates)])
+    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=NumberedRunRepo(4), launch_run=fake_launch, poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3, own_stop_available=True)
+    await service.dispatch_task(task_repo.rows[0], now=datetime(2026, 10, 7, 1, 0, tzinfo=UTC), trigger=trigger)
+    (launch,) = launches
+    assert launch["title"] == expected
+    assert launch["origin"]["schedule_type"] == updates["schedule_type"]
+
+
+@pytest.mark.asyncio
+async def test_reuse_thread_launch_has_no_title_and_survives_a_missing_run_number():
+    launches = []
+
+    async def fake_launch(**kwargs):
+        launches.append(kwargs)
+        return {"run_id": "run-prov", "thread_id": kwargs["thread_id"]}
+
+    class BrokenNumberRepo(DummyRunRepo):
+        async def run_number(self, task_run_id):
+            raise RuntimeError("database unavailable")
+
+    task_repo = DummyTaskRepo([_provenance_task(context_mode="reuse_thread", thread_id="thread-1", stop_condition=None, standing_notes=None)])
+    service = ScheduledTaskService(task_repo=task_repo, task_run_repo=BrokenNumberRepo(), launch_run=fake_launch, poll_interval_seconds=5, lease_seconds=120, max_concurrent_runs=3)
+
+    result = await service.dispatch_task(task_repo.rows[0], now=datetime(2026, 10, 7, 1, 0, tzinfo=UTC), trigger="scheduled")
+
+    assert result["outcome"] == "launched"
+    (launch,) = launches
+    assert launch["title"] is None
+    assert launch["origin"]["run_number"] is None
+    assert (launch["origin"]["stop_condition"], launch["origin"]["standing_notes"]) == (None, [])

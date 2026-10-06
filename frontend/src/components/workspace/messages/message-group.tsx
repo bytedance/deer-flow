@@ -1,6 +1,8 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import {
   BookOpenTextIcon,
+  CalendarClockIcon,
+  CalendarX2Icon,
   ChevronUp,
   CoinsIcon,
   FileIcon,
@@ -632,6 +634,56 @@ function browserToolLabel(
   }
 }
 
+const SCHEDULE_TASK_LABEL_KEYS = {
+  create: "scheduleTaskCreate",
+  update: "scheduleTaskUpdate",
+  list: "scheduleTaskList",
+  pause: "scheduleTaskPause",
+  resume: "scheduleTaskResume",
+  delete: "scheduleTaskDelete",
+  note: "scheduleTaskNote",
+  trial: "scheduleTaskTrial",
+} as const;
+
+/**
+ * Human step labels for the scheduler tools ("Scheduled a task", "Paused this
+ * scheduled task …"), never `Use "schedule_task" tool`. `result` is the parsed
+ * tool result when it has arrived; a coded error or unparsable text reads as
+ * a failed change.
+ */
+export function scheduleToolLabel(
+  name: string,
+  args: Record<string, unknown> | null | undefined,
+  result: string | Record<string, unknown> | undefined,
+  t: ReturnType<typeof useI18n>["t"],
+): string | null {
+  if (name !== "schedule_task" && name !== "stop_scheduled_task") {
+    return null;
+  }
+  // Both tools always return a JSON object, so text that does not parse is a
+  // tool-level failure (for example rejected arguments), never a success.
+  if (
+    (typeof result === "string" && result.trim() !== "") ||
+    (typeof result === "object" &&
+      result !== null &&
+      ("error" in result || "code" in result))
+  ) {
+    return t.toolCalls.scheduleTaskFailed;
+  }
+  if (name === "stop_scheduled_task") {
+    return t.toolCalls.stopScheduledTask;
+  }
+  const action = args?.action;
+  const key =
+    typeof action === "string" &&
+    Object.hasOwn(SCHEDULE_TASK_LABEL_KEYS, action)
+      ? SCHEDULE_TASK_LABEL_KEYS[
+          action as keyof typeof SCHEDULE_TASK_LABEL_KEYS
+        ]
+      : "scheduleTaskGeneric";
+  return t.toolCalls[key];
+}
+
 // Shared routing for result conversion and specialized rendering.
 function getToolCallKind(name: string) {
   if (name.startsWith("browser_")) return "browser";
@@ -646,6 +698,8 @@ function getToolCallKind(name: string) {
     case "bash":
     case "ask_clarification":
     case "write_todos":
+    case "schedule_task":
+    case "stop_scheduled_task":
       return name;
     default:
       return "generic";
@@ -1018,6 +1072,26 @@ function ToolCall({
         label={resolveLabel(t.toolCalls.writeTodos)}
         icon={ListTodoIcon}
       ></ChainOfThoughtStep>
+    );
+  } else if (kind === "schedule_task" || kind === "stop_scheduled_task") {
+    const stop = kind === "stop_scheduled_task";
+    return (
+      <ChainOfThoughtStep
+        key={id}
+        label={resolveLabel(scheduleToolLabel(name, args, result, t))}
+        icon={stop ? CalendarX2Icon : CalendarClockIcon}
+        className={stop ? "text-sky-700 dark:text-sky-400" : undefined}
+        data-testid={stop ? "scheduled-stop-step" : undefined}
+      >
+        {showDetails && (
+          <ToolCallDetails
+            name={name}
+            callId={id}
+            args={args}
+            resultMessage={resultMessage}
+          />
+        )}
+      </ChainOfThoughtStep>
     );
   } else {
     const description: string | undefined = (args as { description: string })

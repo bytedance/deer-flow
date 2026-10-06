@@ -25,6 +25,80 @@ This release closes that milestone with **439 merged pull requests**.
   `relied_on_assumption`; interactive goal evaluation stays strict. Goal
   evaluator calls and tokens now count toward run usage. ([#6229])
 
+- **scheduler:** Scheduled-task lifecycle and limits behave the same on the
+  tasks page, over REST and in chat. Page-created tasks accept a per-run goal,
+  a safety cap (`max_runs`, `end_at`) and a new stop condition, and are
+  evaluated and allowed to stop their own schedule like chat-created ones. The
+  stop condition is stored in a new nullable `scheduled_tasks.stop_condition`
+  column (migration `0031_scheduled_streak_boundary`, which also adds the
+  internal `unmet_streak_after_seq` boundary) and is appended to a run's
+  message only at launch, never to the stored prompt. Resume computes the next
+  run from now (no catch-up run), refuses a one-time task whose time passed,
+  and accepts an optional `{max_runs, end_at}` body; reactivating a task whose
+  cap is used up returns `409 limits_exhausted` unless the same request renews
+  the limit that ran out (a later `end_at` does not renew a used-up `max_runs`). Pausing a finished task returns `409 task_finished`. Goal-check failures
+  no longer count toward or reset the three-miss automatic pause, and editing
+  the goal, instructions or stop condition, or adding a note, starts a new
+  count. Creating a task while this Gateway process's scheduler is not running
+  returns `409 scheduler_not_running`. Task responses add
+  `automatic_runs_used` and `active_run_status`; run rows add `run_number`,
+  `total_tokens` and `summary`; thread task rows add `thread_relation`;
+  `/api/features` adds `scheduled_tasks`; trigger returns `outcome`,
+  `existing` and `thread_id`. ([#6378])
+
+  **Breaking:** errors from `/api/scheduled-tasks*` are now
+  `{"detail": {"code", "message", "params"}}` instead of a string `detail`.
+  Clients reading `detail` as a string must read `detail.message`. Route
+  permission 403s, FastAPI's 422 for malformed bodies and the shared 503 for a
+  missing thread store keep their old shape.
+  The code list is in `backend/docs/API.md` and
+  `contracts/scheduled_task_errors_contract.json`.
+
+- **scheduler:** Chat can now `update` and `resume` a task (same task ID and
+  history, same validation and error codes as REST, `clear_fields` removes a
+  goal, stop condition or cap) and passes the user's stop rule as its own
+  `stop_condition`. A task's run conversation may manage that task from
+  interactive turns; scheduled runs still only stop their own schedule. New
+  tasks default to the browser timezone the web app sends as
+  `context.client_timezone` (an explicit zone wins; intervals and offset times
+  need none; otherwise the agent asks instead of assuming UTC). Tool results
+  are compact, JSON-safe task views with local times (`next_run_local`,
+  `now_local`), a `display` hint for the web card, and a run's last outcome in
+  `list`; IDs, cron and UTC times are no longer repeated to the user. Trial
+  runs accept more natural direct requests ("OK, run it now", "先跑一次吧")
+  and report `thread_id` and `existing`. Scheduled prompts carry a stable
+  message id and server-owned `deerflow_scheduled_origin` metadata, fresh run
+  chats are titled "{task} · {local time}", goal verdicts record
+  `continuations`, and the lead prompt keeps stored task text and scheduled
+  replies in the user's language. The tools are offered only while the
+  Gateway's scheduler is running. ([#6378])
+
+- **scheduler:** In web chat, `schedule_task` results render as a live task card
+  (schedule, stop condition with the safety cap, results, "Run once now",
+  Pause/Resume and "Open task") that follows the task's state while it is on
+  screen. A scheduled run's chat shows one "Scheduled run · task · run n" block
+  with the task instructions collapsed instead of the launched prompt, the
+  scheduler tool steps have readable labels, and the chat header's "Scheduled
+  tasks" button shows how many tasks a chat has (a run's chat links to its
+  task). ([#6378])
+
+- **scheduler:** The Scheduled tasks page is list-first: status tabs and search
+  above the task list, a "New task" dialog (create, edit and duplicate, including
+  the per-run goal, the stop condition and the safety cap), and a detail view with
+  Runs, Stops when, Does, notes from chat and History. Each run row shows its
+  number, a one-line summary, the goal result, token usage and an "Open chat"
+  link; raw errors stay behind "Details". Tasks paused by their agent, auto-paused
+  after three missed goals or finished by their safety cap explain why, with
+  "See that run", "Edit goal" or "Extend limit". `?task_id=` deep-links a task,
+  and the page explains when the scheduler is off. ([#6378])
+
+- **scheduler:** The web app sends the browser timezone with chat runs
+  (`context.client_timezone`), shows scheduled-task API errors as localized
+  messages chosen by error code (raw server text only behind "Details"), and
+  uses one scheduled-task vocabulary in English and Chinese (定时任务, 运行,
+  智能体; no `lead_agent` in labels). Untitled chats and the Scheduled tasks and
+  Agents breadcrumbs follow the interface language. ([#6378])
+
 - **scheduler:** The tasks page shows the per-run goal and end conditions of
   conversation-created tasks. Run history shows whether a goal was met,
   including when it relied on stated assumptions; an unmet run shows a readable
@@ -623,6 +697,12 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **deploy:** `make up`, `make down` and `make prod-logs` no longer stop on a
+  fresh checkout with `env file .../.env not found`. `.env` and `frontend/.env` are gitignored and
+  `make up` does not create them, but the production compose file required
+  both. Its `env_file` entries are now optional, as in the development compose
+  file: Compose loads them when present and skips them otherwise. This needs
+  Docker Compose 2.24 or newer, the floor the README already documents. ([#6370])
 - **memory:** DeerMem relevance ranking no longer counts punctuation as query
   terms when jieba is installed (`memory-zh` extra). `tokenize()` dropped only
   whitespace from `jieba.cut`, which emits `，`, `。`, `,` and `!` as standalone
@@ -8883,5 +8963,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351
 [#6354]: https://github.com/bytedance/deer-flow/pull/6354
 [#6365]: https://github.com/bytedance/deer-flow/pull/6365
+[#6370]: https://github.com/bytedance/deer-flow/pull/6370
+[#6378]: https://github.com/bytedance/deer-flow/pull/6378
 [#6386]: https://github.com/bytedance/deer-flow/pull/6386
 [#6388]: https://github.com/bytedance/deer-flow/pull/6388

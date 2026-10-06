@@ -23,6 +23,63 @@
   已声明的低风险、可逆假设，并记录为 `relied_on_assumption`；交互式 goal 评估仍保持
   严格。goal 评估器的调用和 token 现在计入运行用量。([#6229])
 
+- **调度器：** 定时任务的生命周期和上限规则在任务页面、REST 和对话中保持一致。
+  在任务页面创建的任务也可以设置每次运行的目标、保险上限（`max_runs`、`end_at`）
+  和新增的停止条件，并且会像对话中创建的任务一样检查目标、在条件满足时暂停自己的
+  定时任务。停止条件保存在新增的可空列 `scheduled_tasks.stop_condition` 中（迁移
+  `0031_scheduled_streak_boundary`，同时新增内部使用的 `unmet_streak_after_seq`
+  计数边界），只在运行启动时附加到这次运行的消息里，不会写入保存的任务指令。恢复时
+  从当前时间计算下次运行（不补跑），时间已过的单次任务不能直接恢复，并可携带可选的
+  `{max_runs, end_at}` 请求体；保险上限已用完的任务重新启用时返回
+  `409 limits_exhausted`，除非同一请求放宽了已用完的那项上限。暂停已结束的任务返回
+  `409 task_finished`。未能检查目标不再计入、也不再清零连续 3 次未达成的自动暂停
+  计数；修改目标、任务指令或停止条件，以及新增备注，会重新计数。当前 Gateway 进程的
+  调度器未运行时新建任务返回 `409 scheduler_not_running`。任务响应新增
+  `automatic_runs_used` 和 `active_run_status`；运行记录新增 `run_number`、
+  `total_tokens` 和 `summary`；对话关联任务新增 `thread_relation`；`/api/features`
+  新增 `scheduled_tasks`；手动触发返回 `outcome`、`existing` 和 `thread_id`。([#6378])
+
+  **不兼容变更：** `/api/scheduled-tasks*` 的错误改为
+  `{"detail": {"code", "message", "params"}}`，不再是字符串 `detail`。把 `detail`
+  当作字符串读取的客户端需要改读 `detail.message`。路由权限产生的 403、FastAPI
+  对格式错误请求体返回的 422，以及缺少对话存储时共用的 503 保持原格式。错误码列表见 `backend/docs/API.md` 和
+  `contracts/scheduled_task_errors_contract.json`。
+
+- **调度器：** 对话中现在可以 `update`（修改）和 `resume`（恢复）任务：任务 ID 和
+  运行记录不变，校验规则和错误码与 REST 相同，`clear_fields` 可以取消目标、停止
+  条件或保险上限；用户“满足条件就停”的规则作为单独的 `stop_condition` 传入。在某个
+  任务的运行对话里，你发出的消息也能管理这个任务；定时运行本身仍只能暂停自己的
+  定时任务。新任务默认使用 Web 应用通过 `context.client_timezone` 发送的浏览器时区
+  （明确指定的时区优先；按间隔运行和带偏移的时间不需要时区；其余情况由智能体询问，
+  不再默认按 UTC 处理）。工具结果改为精简、可 JSON 序列化的任务视图，使用本地时间
+  （`next_run_local`、`now_local`），带有供 Web 卡片使用的 `display` 字段，`list`
+  还会返回最近一次运行的结果；智能体不再向用户复述 ID、cron 表达式和 UTC 时间。
+  试运行接受更自然的直接请求（如“先跑一次吧”“OK, run it now”），并返回
+  `thread_id` 和 `existing`。定时运行的消息使用稳定的消息 ID，并带有由服务端维护的
+  `deerflow_scheduled_origin` 元数据；新建的运行对话标题为“任务名 · 本地时间”；目标
+  评估结果记录 `continuations`；主 Agent 提示词要求保存的任务文本和定时运行的回复
+  使用用户的语言。只有 Gateway 的调度器在运行时才会提供这些工具。([#6378])
+
+- **调度器：** Web 对话中，`schedule_task` 的结果显示为实时任务卡片（运行时间、
+  停止条件和保险上限、结果去向，以及“立即试运行”、暂停/恢复和“查看任务”），卡片在
+  可见时会跟随任务状态更新。定时运行的对话顶部显示一行“定时运行 · 任务 · 第 n 次”，
+  任务指令默认折叠，不再显示自动发送的原始提示词；调度工具的步骤改为易读的文案；
+  对话页头的“定时任务”按钮显示本对话的任务数，运行对话中则直接链接到所属任务。
+  ([#6378])
+
+- **调度器：** 定时任务页改为以列表为主：任务列表上方是状态标签和搜索，“新建任务”
+  对话框可以新建、编辑和复制任务（含每次运行的目标、停止条件和保险上限）；详情页
+  分为运行时间、何时停止、执行内容、对话中保存的备注和运行记录。每条运行记录显示
+  第几次运行、一行摘要、目标结果、token 用量和“打开对话”链接，原始错误只在“详细
+  信息”中显示。由智能体暂停、连续 3 次未达成目标而自动暂停、或因保险上限而结束的
+  任务会说明原因，并提供“查看那次运行”“修改目标”或“延长上限”。`?task_id=` 可直接
+  打开某个任务；调度器未开启时页面会说明。([#6378])
+
+- **调度器：** Web 应用在对话请求中附带浏览器时区（`context.client_timezone`）；
+  定时任务接口的错误按错误码显示为本地化文案，服务端原文只在“详细信息”中显示；
+  中英文界面统一使用一套定时任务用语（定时任务、运行、智能体，标签中不再出现
+  `lead_agent`）。未命名对话以及“定时任务”“智能体”面包屑也会跟随界面语言。([#6378])
+
 - **调度器：** 任务页显示对话创建任务的每次执行目标和结束条件。执行记录显示目标
   是否达成（含依赖已声明假设的情况）；未达成的执行以中性样式显示可读的原因，不再
   按执行错误标红显示原始代码；请求停止调度的那次执行会被标出。任务详情里由 Agent
@@ -558,6 +615,11 @@
 
 ### 修复
 
+- **部署：** 在全新检出的仓库上，`make up`、`make down` 与 `make prod-logs` 
+  不再因 `env file .../.env not found` 而中止。`.env` 与
+  `frontend/.env` 已被 gitignore，`make up` 也不会创建它们，但生产 compose 文件此前要求两者都存在。
+  现在其 `env_file` 条目与开发 compose 文件一样为可选：文件存在时加载，不存在时跳过。此写法需要
+  Docker Compose 2.24 或更高版本，即 README 已注明的最低版本。([#6370])
 - **记忆：** 安装 jieba（`memory-zh` 扩展）时，DeerMem 相关度排序不再把标点计为查询词。
   `tokenize()` 只过滤了 `jieba.cut` 输出中的空白，而 jieba 会把 `，`、`。`、`,`、`!`
   切成独立 token，因此同样含逗号的查询与无关事实也会得到非零分，近似去重的相似度被抬高，
@@ -7324,4 +7386,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6350]: https://github.com/bytedance/deer-flow/pull/6350
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351
 [#6354]: https://github.com/bytedance/deer-flow/pull/6354
+[#6370]: https://github.com/bytedance/deer-flow/pull/6370
+[#6378]: https://github.com/bytedance/deer-flow/pull/6378
 [#6388]: https://github.com/bytedance/deer-flow/pull/6388

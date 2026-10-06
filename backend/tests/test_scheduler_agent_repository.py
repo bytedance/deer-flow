@@ -15,7 +15,7 @@ from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_tasks import ScheduledTaskQuotaExceeded, ScheduledTaskRepository
+from deerflow.persistence.scheduled_tasks import ScheduledTaskLimitsExhausted, ScheduledTaskRepository
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.scheduled_tasks.sql import ActiveScheduledTaskMutationConflict
 
@@ -166,7 +166,14 @@ async def test_manual_trial_does_not_consume_limit_and_deadline_prevents_admissi
             current = await tasks.get("task", user_id="owner")
             assert current["status"] == ("completed" if suffix == "second" else "enabled")
         assert current["run_count"] == 3
-        await tasks.update("task", user_id="owner", updates={"status": "enabled"})
+        # Reactivating a task whose cap is used up is refused at the repository.
+        with pytest.raises(ScheduledTaskLimitsExhausted):
+            await tasks.update("task", user_id="owner", updates={"status": "enabled"})
+        assert (await tasks.get("task", user_id="owner"))["status"] == "completed"
+        # A row enabled by an older writer is still completed before admission.
+        async with sf() as session:
+            (await session.get(ScheduledTaskRow, "task")).status = "enabled"
+            await session.commit()
         assert await tasks.complete_if_ended("task", user_id="owner", now=NOW) is True
         await task(tasks, "expired", end_at=NOW - timedelta(seconds=1))
         assert await tasks.complete_if_ended("expired", now=NOW) is True
@@ -458,20 +465,16 @@ async def test_create_and_update_preserve_valid_goal_text(tmp_path, database_bac
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("live_count", [19, 20])
-async def test_terminal_pause_obeys_quota_and_repeated_pause_preserves_slot(tmp_path, database_backend, live_count):
+async def test_terminal_pause_is_finished_and_takes_no_quota_slot(tmp_path, database_backend, live_count):
     async with database(tmp_path, backend=database_backend) as (_sf, tasks, _runs):
         await task(tasks, "terminal")
         await tasks.update("terminal", user_id="owner", updates={"status": "completed"})
         for index in range(live_count):
             await task(tasks, f"live-{index}")
-        if live_count == 20:
-            with pytest.raises(ScheduledTaskQuotaExceeded):
-                await tasks.pause_with_queue_cancellation("terminal", user_id="owner", error="pause", now=NOW)
-            assert (await tasks.get("terminal", user_id="owner"))["status"] == "completed"
-        else:
-            assert await tasks.pause_with_queue_cancellation("terminal", user_id="owner", error="pause", now=NOW) == "paused"
-            assert await tasks.pause_with_queue_cancellation("terminal", user_id="owner", error="pause again", now=NOW) == "paused"
-        assert sum(row["status"] in {"enabled", "running", "paused"} for row in await tasks.list_by_origin_thread("owner", "origin")) == 20
+        before = await tasks.get("terminal", user_id="owner")
+        assert await tasks.pause_with_queue_cancellation("terminal", user_id="owner", error="pause", now=NOW) == "finished"
+        assert await tasks.get("terminal", user_id="owner") == before
+        assert sum(row["status"] in {"enabled", "running", "paused"} for row in await tasks.list_by_origin_thread("owner", "origin")) == live_count
         await tasks.create(
             task_id="legacy",
             user_id="owner",
@@ -486,17 +489,17 @@ async def test_terminal_pause_obeys_quota_and_repeated_pause_preserves_slot(tmp_
             next_run_at=NOW,
         )
         await tasks.update("legacy", user_id="owner", updates={"status": "completed"})
-        assert await tasks.pause_with_queue_cancellation("legacy", user_id="owner", error="legacy pause", now=NOW) == "paused"
+        assert await tasks.pause_with_queue_cancellation("legacy", user_id="owner", error="legacy pause", now=NOW) == "finished"
 
 
 @pytest.mark.asyncio
-async def test_terminal_pause_and_create_share_owner_quota_order(tmp_path, database_backend):
+async def test_terminal_pause_cannot_race_a_create_out_of_its_quota_slot(tmp_path, database_backend):
     async with database(tmp_path, backend=database_backend) as (_sf, tasks, _runs):
         await task(tasks, "terminal")
         await tasks.update("terminal", user_id="owner", updates={"status": "completed"})
         for index in range(19):
             await task(tasks, f"live-{index}")
         results = await asyncio.gather(tasks.pause_with_queue_cancellation("terminal", user_id="owner", error="pause", now=NOW), task(tasks, "new"), return_exceptions=True)
-        assert sum(not isinstance(result, Exception) for result in results) == 1
-        assert isinstance(next(result for result in results if isinstance(result, Exception)), ScheduledTaskQuotaExceeded)
+        assert results[0] == "finished"
+        assert isinstance(results[1], dict)
         assert sum(row["status"] in {"enabled", "running", "paused"} for row in await tasks.list_by_origin_thread("owner", "origin")) == 20
