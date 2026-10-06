@@ -135,8 +135,8 @@ _SECRET_TOKEN_PATTERNS = tuple(
     )
 )
 _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
-_EXTERNAL_HTTP_RE = re.compile(r"http://(?:[^/?#\s)'\"<>]*@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::\d+)?(?:/|\b|(?=$|[\s)'\"<>?#]))")
-_URL_RE = re.compile(r"https?://[^\s)'\"<>]+")
+_EXTERNAL_HTTP_RE = re.compile(r"(?i:http)://(?:[^/?#\s)'\"<>]*@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::\d+)?(?:/|\b|(?=$|[\s)'\"<>?#]))")
+_URL_RE = re.compile(r"(?i:https?)://[^\s)'\"<>]+")
 _LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 # `rm` with a recursive flag (any order/combination, optional --no-preserve-root)
 # targeting the filesystem root, a wildcard, or a complete system-root directory.
@@ -624,7 +624,7 @@ def _scan_declaration(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.append(_finding_from_match("declaration-sensitive-path", rel_path, text, match))
 
     for match in _URL_RE.finditer(text):
-        if match.group(0).startswith("http://"):
+        if match.group(0)[:7].lower() == "http://":
             host = _http_host(match.group(0))
             if host and host not in _LOCAL_HTTP_HOSTS:
                 findings.append(_finding_from_match("declaration-external-endpoint", rel_path, text, match))
@@ -1017,7 +1017,7 @@ def _looks_like_placeholder(value: str) -> bool:
 
 
 def _http_host(url: str) -> str | None:
-    if not url.startswith(("http://", "https://")):
+    if not url[:8].lower().startswith(("http://", "https://")):
         return None
     try:
         # Parse the authority so IPv6 brackets and userinfo cannot be mistaken
@@ -1029,7 +1029,7 @@ def _http_host(url: str) -> str | None:
 
 
 def _is_outbound_url(value: str) -> bool:
-    return bool(value.startswith(("http://", "https://")) and (_http_host(value) or "") not in _LOCAL_HTTP_HOSTS)
+    return bool(value[:8].lower().startswith(("http://", "https://")) and (_http_host(value) or "") not in _LOCAL_HTTP_HOSTS)
 
 
 def _collect_python_aliases(tree: ast.AST) -> dict[str, str]:

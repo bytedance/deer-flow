@@ -1324,7 +1324,7 @@ Skill installs and agent-managed skill edits run through **SkillScan**, a native
 Windows scripts (`.bat`, `.cmd`, `.ps1`, `.psm1`, `.js`, `.jse`, `.vbs`, `.vbe`, `.wsf`), HTML applications (`.hta`), and scriptlets (`.sct`) count as code even outside `scripts/`, regardless of filename case. They receive both SkillScan analysis and the installer's executable-code policy.
 SkillScan warns about remote downloads piped into common shells, including sudo, interpreter paths, and shell line continuations. Pipes to non-shell tools such as `jq` and `tee` do not trigger this warning.
 
-SkillScan treats HTTP hostnames case-insensitively and recognizes bracketed IPv6
+SkillScan treats HTTP/HTTPS scheme spellings and HTTP hostnames case-insensitively and recognizes bracketed IPv6
 loopback (`[::1]`) URLs as local. External IPv6 endpoints still trigger network findings,
 and cloud-metadata hostname detection is case-insensitive.
 
