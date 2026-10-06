@@ -99,6 +99,29 @@ def test_ranged_read_line_numbers_agree_with_count_file_lines(tmp_path) -> None:
     assert [sandbox.read_file(str(path), start_line=n, end_line=n) for n in (1, 2, 3, 4)] == ["a\rb", "c", "d", ""]
 
 
+def test_grep_line_numbers_are_the_lines_ranged_read_file_returns(tmp_path) -> None:
+    # grep ends lines where read_file does, so a hit's line_number is the
+    # start_line that reads it back, even with a bare CR inside a line.
+    path = tmp_path / "mixed.txt"
+    path.write_bytes(b"alpha\nlineB\rbeta\ngamma\r\n")
+    sandbox = LocalSandbox("t")
+
+    matches, _ = sandbox.grep(str(path), "beta|gamma")
+
+    assert [(match.line_number, match.line) for match in matches] == [(2, "lineB\rbeta"), (3, "gamma")]
+    for match in matches:
+        assert sandbox.read_file(str(path), start_line=match.line_number, end_line=match.line_number) == match.line
+
+
+def test_grep_end_anchor_still_matches_a_crlf_line(tmp_path) -> None:
+    path = tmp_path / "crlf.txt"
+    path.write_bytes(CRLF_SOURCE)
+
+    matches, _ = LocalSandbox("t").grep(str(path), "second$")
+
+    assert [(match.line_number, match.line) for match in matches] == [(2, "second")]
+
+
 def test_write_file_keeps_lf_under_windows_text_defaults(tmp_path, monkeypatch) -> None:
     path = tmp_path / "run.sh"
     _emulate_windows_text_writes(monkeypatch)

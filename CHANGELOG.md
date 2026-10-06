@@ -501,7 +501,9 @@ This release closes that milestone with **301 merged pull requests**.
   scripts such as `bash run.sh`. Local reads and writes now keep line endings as
   stored, like the remote providers, and `str_replace` spells a `\n`-written
   `old_str`/`new_str` with CRLF when the file uses it, which also lets
-  multi-line edits match CRLF files on remote providers. On Windows, oversized
+  multi-line edits match CRLF files on remote providers. Local `grep` ends lines
+  at `\n` like `read_file`, so a hit's line number is the line a ranged read
+  returns even when the file contains a bare `\r`. On Windows, oversized
   tool output saved under `outputs/.tool-results/` was likewise written as CRLF,
   no longer matched its stamped blob reference, and was deleted on the next
   model call when no blob store was configured; it is now written byte-exact. ([#6343])
