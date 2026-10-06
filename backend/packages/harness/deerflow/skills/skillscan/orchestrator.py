@@ -132,6 +132,14 @@ _SECRET_TOKEN_PATTERNS = tuple(
         r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b",
         r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b",
         r"\bsk-[A-Za-z0-9]{20,}\b",
+        # The canonical API-key detector in
+        # `pii_redaction_middleware._API_KEY_PATTERN` also recognises GitHub
+        # fine-grained PATs and Google API keys. Without these two families a
+        # bare embedded key (with no `KEY=`/`KEY:` assignment to lean on) is
+        # reported by neither this list nor `_SECRET_ASSIGNMENT_RE`, so a
+        # `CRITICAL` cloud-token finding is missed entirely.
+        r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
+        r"\bAIza[0-9A-Za-z_-]{35}\b",
     )
 )
 _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
