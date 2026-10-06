@@ -1929,6 +1929,9 @@ export function useThreadStream({
   // Keep completed IDs across recovery-state resets so stale "running" data
   // cannot restart a submitted or natively reconnected stream.
   const completedRunIdsRef = useRef(new Set<string>());
+  // onCreated fires only for runs this hook submitted. A failed submit stays
+  // with the submit flow; only SDK reconnects are handed to recovery.
+  const submittedRunIdRef = useRef<string | null>(null);
 
   // Keep listeners ref updated with latest callbacks
   useEffect(() => {
@@ -1987,6 +1990,19 @@ export function useThreadStream({
       const rejoin = activeRunRejoinRef.current;
       // SDK 1.6.0 LGP joinStream errors include { thread_id, run_id }; history
       // errors omit it. Re-verify this callback contract when upgrading the SDK.
+      if (
+        run &&
+        !rejoin.inFlight &&
+        run.run_id !== submittedRunIdRef.current &&
+        readReconnectRun(run.thread_id) === run.run_id
+      ) {
+        // The SDK's same-tab reconnect tries once and keeps its pointer on
+        // error, so the recovery effect would keep deferring to a stream that
+        // no longer exists. Release the pointer and let recovery take over.
+        clearReconnectRun(run.thread_id, run.run_id);
+        setActiveRunRejoinRetry((current) => current + 1);
+        return;
+      }
       if (
         !rejoin.inFlight ||
         !rejoin.threadId ||
@@ -2057,6 +2073,7 @@ export function useThreadStream({
     // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
     onCreated(meta) {
+      submittedRunIdRef.current = meta.run_id;
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
       upsertThreadInSearchCache(queryClient, {
@@ -2275,7 +2292,8 @@ export function useThreadStream({
     }
 
     // A matching pointer means the SDK's native same-tab reconnect owns this
-    // run. Do not create a second SSE consumer.
+    // run. Do not create a second SSE consumer; if that reconnect fails,
+    // scheduleActiveRunRejoinRetry releases the pointer.
     if (readReconnectRun(resolvedThreadId) === resolvedRunId) {
       return;
     }

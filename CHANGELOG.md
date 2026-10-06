@@ -623,6 +623,14 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **frontend:** A failed reconnect after a page refresh is now retried in the same
+  tab. The SDK reconnects once from the tab's `lg:stream` pointer and keeps that
+  pointer on error, and active-run recovery skipped any run with a matching
+  pointer, so the live stream stayed detached until another refresh. When that
+  reconnect fails, including a drop mid-stream, recovery now releases the pointer
+  and rejoins the run if the server still reports it active, with its existing
+  bounded retries (immediately, then after 1s and 2s). Failed submitted runs are
+  unchanged.
 - **deploy:** `make up`, `make down` and `make prod-logs` no longer stop on a
   fresh checkout with `env file .../.env not found`. `.env` and `frontend/.env` are gitignored and
   `make up` does not create them, but the production compose file required
