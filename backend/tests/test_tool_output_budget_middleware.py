@@ -9,7 +9,9 @@ per-tool overrides, edge cases, and both sync/async code paths.
 from __future__ import annotations
 
 import contextlib
+import csv
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -626,6 +628,57 @@ class TestToolOutputSynopsis:
         assert "a fine, brilliant logician" in first_row
         # The re-joined comma-broken row is the failure mode we are guarding.
         assert "Ada,a fine, brilliant" not in first_row
+
+    @pytest.mark.parametrize("delimiter,kind", [(",", "csv"), ("\t", "tsv")])
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    @pytest.mark.parametrize("count", [6, 60])
+    def test_table_synopsis_counts_logical_records(self, delimiter, kind, newline, count):
+        """Count logical records even beyond the physical-line recognition sample."""
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer, delimiter=delimiter, lineterminator=newline)
+        writer.writerow(["id", "description", "score"])
+        for index in range(count):
+            writer.writerow([index, f"first{delimiter}part{newline}second part", 90])
+        content = buffer.getvalue()
+        synopsis = build_tool_output_synopsis(content)
+        assert synopsis.kind == kind
+        assert synopsis.summary == [f"{kind.upper()} table with {count} data rows and 3 columns."]
+        preview = _build_preview(content, tool_name="bash", virtual_path="/mnt/test/table", head_chars=100, tail_chars=100)
+        assert synopsis.summary[0] in preview
+
+    @pytest.mark.parametrize("delimiter,kind", [(",", "csv"), ("\t", "tsv")])
+    def test_table_synopsis_ignores_blank_records(self, delimiter, kind):
+        """Ignore blank records while preserving blank lines inside quoted fields."""
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer, delimiter=delimiter)
+        writer.writerow(["id", "description"])
+        for index in range(6):
+            writer.writerow([index, "first\n\nlast"])
+            writer.writerow([])
+            writer.writerow([" ", ""])
+        synopsis = build_tool_output_synopsis(buffer.getvalue())
+        assert synopsis.kind == kind
+        assert synopsis.summary == [f"{kind.upper()} table with 6 data rows and 2 columns."]
+
+    @pytest.mark.parametrize("delimiter,kind", [(",", "csv"), ("\t", "tsv")])
+    @pytest.mark.parametrize("suffix", ['"unterminated', '"closed"invalid', "field_limit"])
+    def test_table_synopsis_does_not_invent_count_after_parse_failure(self, delimiter, kind, suffix):
+        """Do not report an exact total when parsing fails beyond the sample."""
+        content = f"id{delimiter}description\n" + "".join(f"{index}{delimiter}ok\n" for index in range(60))
+        original_limit = csv.field_size_limit()
+        if suffix == "field_limit":
+            suffix = "x" * (original_limit + 1)
+        synopsis = build_tool_output_synopsis(content + f"61{delimiter}{suffix}")
+        assert synopsis.kind == kind
+        assert synopsis.summary == [f"{kind.upper()} table with an undetermined number of data rows and 2 columns."]
+        assert csv.field_size_limit() == original_limit
+
+    def test_table_synopsis_preserves_oversized_input_guard(self):
+        """Skip structured parsing when the input exceeds the byte budget."""
+        content = "id,description\n" + "1,ok\n" * 6 + "x" * 5_000_000
+        synopsis = build_tool_output_synopsis(content)
+        assert synopsis.kind == "unknown"
+        assert "Parsing skipped due to size limit" in synopsis.summary[0]
 
     def test_review_9_tsv_detector_rejects_tab_indented_bash(self):
         # Tab-indented output (ls -l, tree, indented logs) used to be

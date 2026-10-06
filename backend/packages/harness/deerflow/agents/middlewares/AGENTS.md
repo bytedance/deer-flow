@@ -1,5 +1,10 @@
 ### Middleware Chain
 
+Table synopses count nonblank CSV/TSV logical records, excluding the header.
+Preserve the recognition sample and 5,000,000 UTF-8-byte guard. Count incrementally;
+on parsing or field-limit errors, report an undetermined count rather than a
+physical-line or sample total.
+
 Compaction keeps state `SystemMessage`s; transient instructions use request
 wrappers, and fully rescued partitions skip compaction. If latest-user rescue
 empties an AI/Tool-only window, use `_build_summary_input_text(strategy="last")`;

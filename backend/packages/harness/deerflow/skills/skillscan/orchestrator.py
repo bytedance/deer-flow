@@ -270,12 +270,22 @@ def scan_skill_dir(skill_dir: Path) -> ScanResult:
     for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
         rel_path = _relative_file(path, root)
         try:
-            file_bytes = path.read_bytes()
+            file_size = path.stat().st_size
+        except OSError as e:
+            scanner_errors.append(f"{rel_path}: failed to stat file: {e}")
+            continue
+        try:
+            # One bounded read for every file: files smaller than MAX_FILE_BYTES
+            # come back whole, oversized ones are truncated and recorded below —
+            # no unbounded read regardless of growth between stat() and here
+            # (mirrors _read_archive_member).
+            with path.open("rb") as handle:
+                file_bytes = handle.read(MAX_FILE_BYTES + 1)
         except OSError as e:
             scanner_errors.append(f"{rel_path}: failed to read file: {e}")
             continue
 
-        findings.extend(_scan_file_package_properties(rel_path, file_bytes, path.stat().st_size))
+        findings.extend(_scan_file_package_properties(rel_path, file_bytes, file_size))
         text = _decode_text_for_analysis(file_bytes)
         if text is None:
             text = _decode_script_lossily(rel_path, file_bytes)

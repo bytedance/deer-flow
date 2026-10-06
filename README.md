@@ -2129,6 +2129,8 @@ request the binary capability retain the legacy JSON/base64 frame protocol.
 
 ### Context Engineering
 
+**Table Tool-Output Synopses**: CSV/TSV row counts reflect logical records, so newlines inside quoted fields do not add rows. If parsing fails or exceeds the field limit, the synopsis reports an undetermined count. Outputs beyond the input-size limit still skip structured parsing.
+
 **Isolated Sub-Agent Context**: Each sub-agent runs in its own isolated context. This means that the sub-agent will not be able to see the context of the main agent or other sub-agents. This is important to ensure that the sub-agent is able to focus on the task at hand and not be distracted by the context of the main agent or other sub-agents.
 
 **Summarization**: Within a session, DeerFlow manages context aggressively — summarizing completed sub-tasks, offloading intermediate results to the filesystem, compressing what's no longer immediately relevant. This lets it stay sharp across long, multi-step tasks without blowing the context window.
