@@ -151,7 +151,7 @@ Helm chart 默认 `gateway.replicas: 1`。当所有副本共享同一个 Postgre
 - `run_ownership.heartbeat_enabled: true`，新启动的 Pod 只回收属主确实已死的 run
 - `stream_bridge.type: redis`，SSE 流与断线重连在任意 Pod 上都可用（沙箱所有权租约由此推断）
 
-当 `gateway.replicas > 1` 时，chart 会导出 `DEER_FLOW_MULTI_INSTANCE=true`，缺少上述任一项时 Gateway 会拒绝启动。如果你通过 `kubectl scale` 或 HPA 而不是 `gateway.replicas` 扩容，请先设置 `gateway.multiInstance: true`：它们在不执行 Helm upgrade 的情况下改变副本数，否则该声明、PodDisruptionBudget 和必需的共享 `AUTH_JWT_SECRET` 都会停留在单副本的渲染结果上。多节点集群还需要把 `persistence.home.accessMode` 设为 `ReadWriteMany`（上传、产物、记忆与 `extensions_config.json` 都在该卷上），并设置 `agent_storage.backend: db` 让自定义 agent 在每个 Pod 上可见。
+当 `gateway.replicas > 1` 时，chart 会导出 `DEER_FLOW_MULTI_INSTANCE=true`，缺少上述任一项时 Gateway 会拒绝启动。如果你通过 `kubectl scale` 或 HPA 而不是 `gateway.replicas` 扩容，请先设置 `gateway.multiInstance: true`：它们在不执行 Helm upgrade 的情况下改变副本数，否则该声明、PodDisruptionBudget 和必需的共享 `AUTH_JWT_SECRET` 都会停留在单副本的渲染结果上（在真正扩容之前，PodDisruptionBudget 会阻止驱逐唯一的 Pod 和排空节点；如有需要，可在此期间设置 `gateway.podDisruptionBudget.enabled: false`）。多节点集群还需要把 `persistence.home.accessMode` 设为 `ReadWriteMany`（上传、产物、记忆与 `extensions_config.json` 都在该卷上），并设置 `agent_storage.backend: db` 让自定义 agent 在每个 Pod 上可见。
 
 仍然只能单实例运行的部分：IM 通道（每个 Pod 都会连接所有平台）、WeChat 扫码登录、浏览器工具。启用这些功能时请保持 1 个副本。
 

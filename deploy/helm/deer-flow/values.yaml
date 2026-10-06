@@ -45,7 +45,10 @@ gateway:
   # `kubectl scale` or an HPA: those change the replica count without a Helm
   # upgrade, so the derived DEER_FLOW_MULTI_INSTANCE, the PodDisruptionBudget
   # and the required shared AUTH_JWT_SECRET would otherwise keep their
-  # single-replica rendering.
+  # single-replica rendering. Note the PodDisruptionBudget (minAvailable: 1)
+  # is rendered as soon as this is true: until the scale-up actually happens
+  # it blocks voluntary evictions and node drains of the single Pod. Set
+  # podDisruptionBudget.enabled: false for that interim if you need to drain.
   multiInstance: null
   # Rollout strategy. Surge-then-drain keeps one Pod serving while a peer
   # starts; with run-ownership heartbeats the new Pod leaves the old Pod's live
@@ -69,9 +72,12 @@ gateway:
   # 0 closes open connections immediately on SIGTERM.
   uvicornGracefulShutdownSeconds: 10
   # Pod termination grace period (seconds). MUST exceed the Gateway's graceful
-  # shutdown work: preStopSleepSeconds + uvicornGracefulShutdownSeconds +
-  # channel stop (~5s) + in-flight run drain (5s) + memory queue drain
-  # (memory.shutdown_flush_timeout_seconds, default 30s) + buffer. K8s defaults
+  # shutdown work: preStopSleepSeconds + uvicornGracefulShutdownSeconds + the
+  # lifespan's worst case (five 5s-bounded hooks: trash sweep, notification
+  # worker, channel service, browser sessions, MCP session pool; the 1s
+  # retrieval-warm wait; the 5s run drain; the memory queue drain,
+  # memory.shutdown_flush_timeout_seconds, default 30s -- about 61s) + buffer.
+  # backend/tests/_gateway_shutdown_budget.py pins the arithmetic. K8s defaults
   # to 30s, which SIGKILLs the memory drain mid-flight and silently re-introduces
   # the memory loss that shutdown_flush is fixing. Raise this when you raise the
   # memory timeout. See gateway-deployment.yaml + README "Graceful shutdown".

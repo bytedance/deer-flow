@@ -116,12 +116,17 @@ services:
     # below -- the Gateway refuses to start otherwise. IM channels, the WeChat
     # QR login and browser tools stay worker-local, so keep one worker while
     # they are enabled. --timeout-graceful-shutdown bounds how long open SSE
-    # connections may delay lifespan shutdown (memory flush, run drain) after
-    # SIGTERM; stop_grace_period below must cover that bound plus the drain.
+    # connections may delay lifespan shutdown after SIGTERM; stop_grace_period
+    # below must cover that bound plus the lifespan's worst case: five hooks
+    # bounded at 5s each (trash sweep, notification worker, channel service,
+    # browser sessions, MCP session pool), the 1s retrieval-warm wait, the 5s
+    # run drain and the 30s memory flush (memory.shutdown_flush_timeout_seconds)
+    # -- about 61s -- plus slack. backend/tests/_gateway_shutdown_budget.py
+    # pins the arithmetic.
     command: sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1} --timeout-graceful-shutdown 10"
     # Docker's 10s default SIGKILLed the 30s memory queue flush
     # (memory.shutdown_flush_timeout_seconds) on every restart.
-    stop_grace_period: 60s
+    stop_grace_period: 90s
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       # Writable on purpose: the Gateway edits this file at runtime (MCP

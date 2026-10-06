@@ -267,7 +267,7 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `%40`). The chart uses an external `databaseUrl` verbatim and does not
   rewrite the DSN in a user-managed Secret.
 
-- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 90s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s), and bounds uvicorn's `--timeout-graceful-shutdown` (`gateway.uvicornGracefulShutdownSeconds`, default 10s) so an idle SSE connection cannot hold up lifespan shutdown indefinitely. The grace period MUST exceed the Gateway's graceful-shutdown work — the preStop sleep, the uvicorn timeout, channel stop (~5s), the in-flight run drain (5s) and the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s) plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (preStop + uvicorn timeout + channel stop + run drain + memory drain + buffer).
+- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 90s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s), and bounds uvicorn's `--timeout-graceful-shutdown` (`gateway.uvicornGracefulShutdownSeconds`, default 10s) so an idle SSE connection cannot hold up lifespan shutdown indefinitely. The grace period MUST exceed the Gateway's graceful-shutdown work — the preStop sleep, the uvicorn timeout, and the lifespan's worst case: five hooks bounded at 5s each (startup trash sweep, notification delivery worker, channel service, browser sessions, MCP session pool), the 1s retrieval-warm wait, the in-flight run drain (5s) and the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s), about 61s in total, plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. `backend/tests/_gateway_shutdown_budget.py` reads these bounds from the Gateway and pins the chart and compose budgets against them. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (preStop + uvicorn timeout + ~31s of bounded hooks and drains + memory drain + buffer).
 - **Gateway replicas.** Run control is cross-pod-safe since the work tracked
   by [issue #3948](https://github.com/bytedance/deer-flow/issues/3948) landed
   (#4003, #4064, #4500): admission is a durable one-active-run-per-thread
@@ -285,7 +285,11 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   first: those change the replica count without a Helm upgrade, so the
   derived declaration, the PodDisruptionBudget and the required shared
   `AUTH_JWT_SECRET` would otherwise keep their single-replica rendering.
-  `gateway.replicas: 1` stays the
+  Mind the window between setting it and the actual scale-up: the
+  PodDisruptionBudget (`minAvailable: 1`) is rendered immediately and blocks
+  every voluntary eviction and node drain while only one Pod exists, so set
+  `gateway.podDisruptionBudget.enabled: false` for that interim if you need
+  to drain nodes first. `gateway.replicas: 1` stays the
   default because the following are still single-instance: **IM channels**
   (every Pod would connect to every platform — Telegram polling conflicts and
   Discord double-processes; keep 1 replica while channels are enabled), the

@@ -28,10 +28,13 @@ spec:
         checksum/extensions: {{ include "deer-flow.extensionsChecksum" . }}
     spec:
       {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
-      # MUST exceed preStop sleep + uvicorn --timeout-graceful-shutdown + channel
-      # stop (~5s) + run drain (5s) + memory shutdown_flush_timeout_seconds
-      # (default 30s) + buffer, or K8s SIGKILLs the memory drain mid-flight
-      # (values.yaml gateway.terminationGracePeriodSeconds). K8s defaults to 30s.
+      # MUST exceed preStop sleep + uvicorn --timeout-graceful-shutdown + the
+      # lifespan's worst case -- five hooks bounded at 5s each (trash sweep,
+      # notification worker, channel service, browser sessions, MCP session
+      # pool), the 1s retrieval-warm wait, the 5s run drain and the memory
+      # shutdown_flush_timeout_seconds (default 30s): ~61s -- plus buffer, or
+      # K8s SIGKILLs the memory drain mid-flight (values.yaml
+      # gateway.terminationGracePeriodSeconds). K8s defaults to 30s.
       terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | default 90 }}
       securityContext:
         # Non-root: the gateway image has no USER directive and would otherwise

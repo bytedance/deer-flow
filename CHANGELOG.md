@@ -567,8 +567,9 @@ This release closes that milestone with **301 merged pull requests**.
   every consumer (the gateway and frontend kept referencing the generated
   `<release>-app` Secret, which was not rendered, so Pods never started).
   Both compose files bound the same uvicorn timeout and set
-  `stop_grace_period: 60s` (Docker's 10s default cut the 30s memory flush
-  short). The chart README and compose comments stop citing the long-closed
+  `stop_grace_period: 90s` (Docker's 10s default cut the 30s memory flush
+  short; the lifespan's worst case is about 61s once every bounded teardown
+  hook is counted, and the tests read those bounds from the Gateway). The chart README and compose comments stop citing the long-closed
   issue #3948 as the reason to stay at one replica and list what actually
   remains single-instance (IM channels, WeChat QR login, browser tools).
   Upgrading a release that predates `AUTH_JWT_SECRET` generates a new key and

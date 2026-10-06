@@ -16,12 +16,13 @@ import re
 from pathlib import Path
 
 import yaml
-from _gateway_shutdown_budget import lifespan_shutdown_seconds
+from _gateway_shutdown_budget import HOOKS_BOUNDED_BY_SHUTDOWN_HOOK_TIMEOUT, lifespan_shutdown_seconds
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO_ROOT / "docker" / "docker-compose.yaml"
 DEV_COMPOSE_PATH = REPO_ROOT / "docker" / "docker-compose-dev.yaml"
 DEV_ENTRYPOINT_PATH = REPO_ROOT / "docker" / "dev-entrypoint.sh"
+GATEWAY_APP_PATH = REPO_ROOT / "backend" / "app" / "gateway" / "app.py"
 
 
 def _gateway_command() -> str:
@@ -64,7 +65,7 @@ def _stop_grace_seconds(compose_path: Path) -> int:
 
 
 def test_gateway_bounds_uvicorn_graceful_shutdown():
-    """Open SSE connections must not hold lifespan shutdown (memory flush, run drain) past the stop grace period."""
+    """Open SSE connections must not hold lifespan shutdown (bounded hooks, run drain, memory flush) past the stop grace period."""
     assert _graceful_shutdown_bound(_gateway_command()) <= 30
 
 
@@ -78,3 +79,14 @@ def test_dev_gateway_bounds_uvicorn_graceful_shutdown_and_covers_it():
     bound = _graceful_shutdown_bound(DEV_ENTRYPOINT_PATH.read_text(encoding="utf-8"))
     assert bound <= 30
     assert _stop_grace_seconds(DEV_COMPOSE_PATH) >= bound + lifespan_shutdown_seconds()
+
+
+def test_shutdown_budget_models_every_bounded_lifespan_hook():
+    """Each ``wait_for(..., timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)`` in the lifespan is a sequential 5s worst case the grace periods must cover."""
+    source = GATEWAY_APP_PATH.read_text(encoding="utf-8")
+    bounded_sites = source.count("timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS")
+    assert bounded_sites == len(HOOKS_BOUNDED_BY_SHUTDOWN_HOOK_TIMEOUT), (
+        f"app.gateway.app bounds {bounded_sites} teardown hook(s) with _SHUTDOWN_HOOK_TIMEOUT_SECONDS but "
+        f"_gateway_shutdown_budget models {len(HOOKS_BOUNDED_BY_SHUTDOWN_HOOK_TIMEOUT)}; update HOOKS_BOUNDED_BY_SHUTDOWN_HOOK_TIMEOUT "
+        "so the chart and compose grace periods keep covering the worst case"
+    )
