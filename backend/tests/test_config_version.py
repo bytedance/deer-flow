@@ -691,6 +691,54 @@ def test_config_upgrade_skips_with_a_warning_when_the_environment_is_absent(tmp_
     assert (checkout / "config.yaml").read_text(encoding="utf-8") == original_config
 
 
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_fresh_checkout_startup_ends_with_the_config_upgraded_and_startable(tmp_path):
+    """serve.sh runs the upgrade pre-install (skipped without an environment) and
+    again after the sync — one startup must leave even a fresh checkout with an
+    upgraded, startable config (Huixin615's v46 pii_redaction scenario)."""
+    checkout = tmp_path / "checkout"
+    _write_outdated_config(checkout / "config.yaml")
+    (checkout / "backend").mkdir()
+    (checkout / "scripts").mkdir()
+    shutil.copy2(Path(__file__).resolve().parents[2] / "scripts" / "config-upgrade.sh", checkout / "scripts" / "config-upgrade.sh")
+    shutil.copy2(Path(__file__).resolve().parents[2] / "config.example.yaml", checkout / "config.example.yaml")
+    script = str(checkout / "scripts" / "config-upgrade.sh")
+
+    # Phase 1 — before serve.sh's dependency install: no environment yet.
+    absent = os.environ.copy()
+    absent["UV_PROJECT"] = str(REPO_ROOT_BACKEND)
+    absent["UV_PROJECT_ENVIRONMENT"] = str(tmp_path / "absent-venv")
+    absent.pop("VIRTUAL_ENV", None)
+    skipped = subprocess.run([SCRIPT_BASH, script], cwd=str(checkout), env=absent, capture_output=True, text=True)
+    assert skipped.returncode == 0, skipped.stdout + skipped.stderr
+    assert "skipping the config upgrade" in skipped.stdout
+
+    # Phase 2 — the sync has created the environment; the re-run must land.
+    installed = os.environ.copy()
+    installed["UV_PROJECT"] = str(REPO_ROOT_BACKEND)
+    installed.pop("UV_PROJECT_ENVIRONMENT", None)
+    upgraded = subprocess.run([SCRIPT_BASH, script], cwd=str(checkout), env=installed, capture_output=True, text=True)
+    assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+
+    expected_version = yaml.safe_load((checkout / "config.example.yaml").read_text(encoding="utf-8"))["config_version"]
+    upgraded_config = yaml.safe_load((checkout / "config.yaml").read_text(encoding="utf-8"))
+    assert upgraded_config["config_version"] == expected_version
+    AppConfig.model_validate(upgraded_config)
+
+
+def test_serve_reruns_the_config_upgrade_after_dependency_install() -> None:
+    """Textual pin for the serve.sh wiring: one upgrade call before the sync
+    (extras detection needs the pre-upgrade config) and exactly one after it
+    (the Gateway needs the upgraded config), never after the Gateway starts.
+    """
+    serve_lines = (Path(__file__).resolve().parents[2] / "scripts" / "serve.sh").read_text(encoding="utf-8").splitlines()
+    upgrade_calls = [i for i, line in enumerate(serve_lines) if "config-upgrade.sh" in line]
+    sync_line = next(i for i, line in enumerate(serve_lines) if "uv sync --locked" in line)
+    gateway_start = next(i for i, line in enumerate(serve_lines) if "Starting DeerFlow" in line)
+    assert len(upgrade_calls) == 2
+    assert upgrade_calls[0] < sync_line < upgrade_calls[1] < gateway_start
+
+
 def _run_config_upgrade_in_checkout(checkout: Path, **env_overrides: str):
     """Run a copy of scripts/config-upgrade.sh from a throwaway checkout.
 
