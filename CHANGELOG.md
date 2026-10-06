@@ -154,6 +154,17 @@ This release closes that milestone with **301 merged pull requests**.
   text changed and no longer shows the task or run ID. Rows already queued for
   providers without proactive push end once as `failed` without retries.
 
+- **frontend:** Threads the server creates now show who created them and
+  whether they are new. In the sidebar and on the Chats page, a scheduled run
+  has a clock icon ("Scheduled run"), an IM thread its app's icon ("From
+  Feishu"), a GitHub thread the GitHub mark and an extension thread a puzzle
+  icon. An unread dot follows the title until the thread is opened (never on
+  the open thread; announced as "{title}, unread"). New and changed
+  server-created threads appear within 15 seconds without a reload, opening
+  one clears its dot on every device, and the open chat stays read while a
+  scheduled run in it updates. Nothing polls when the Gateway has no thread
+  activity (memory persistence). ([#6340])
+
 - **scheduler:** The web app keeps the account's `locale` preference equal to
   its interface language (after sign-in with session auth and on every
   language switch), so scheduled-task IM notices arrive in the language the

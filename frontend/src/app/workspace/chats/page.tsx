@@ -10,7 +10,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   ThreadChannelBadge,
-  ThreadChannelIcon,
+  ThreadOriginIcon,
+  ThreadUnreadDot,
+  unreadLabelOfThread,
 } from "@/components/workspace/thread-channel-source";
 import { VirtualThreadList } from "@/components/workspace/thread-list-virtualizer";
 import { useThreadArchiveAction } from "@/components/workspace/use-thread-archive-action";
@@ -21,6 +23,7 @@ import {
 } from "@/components/workspace/workspace-container";
 import { useI18n } from "@/core/i18n/hooks";
 import { useInfiniteThreads } from "@/core/threads/hooks";
+import { threadOriginOf } from "@/core/threads/origin";
 import { buildThreadListModel } from "@/core/threads/thread-list-model";
 import {
   channelSourceOfThread,
@@ -144,22 +147,31 @@ export default function ChatsPage() {
                     items={filteredThreads}
                     scrollParentSelector='[data-slot="scroll-area-viewport"]'
                     renderItem={(thread) => {
-                      const channelSource = channelSourceOfThread(thread);
+                      const channelSource = channelSourceOfThread(thread, t);
+                      const title = titleOfThread(thread, t.pages.untitled);
+                      const unread = thread.unread === true;
                       return (
                         <div
                           key={thread.thread_id}
                           className="flex items-center gap-2 border-b"
                         >
                           <Link
+                            aria-label={
+                              unread ? unreadLabelOfThread(title, t) : undefined
+                            }
                             className="min-w-0 flex-1"
+                            data-unread={unread ? "true" : undefined}
                             href={pathOfThread(thread)}
                           >
                             <div className="flex flex-col gap-2 p-4">
                               <div className="flex min-w-0 items-center gap-2">
-                                <ThreadChannelIcon source={channelSource} />
-                                <div className="min-w-0 flex-1 truncate">
-                                  {titleOfThread(thread, t.pages.untitled)}
-                                </div>
+                                <ThreadOriginIcon
+                                  origin={threadOriginOf(thread)}
+                                  className="text-muted-foreground"
+                                />
+                                <div className="min-w-0 truncate">{title}</div>
+                                {unread && <ThreadUnreadDot />}
+                                <div className="flex-1" />
                                 <ThreadChannelBadge
                                   source={channelSource}
                                   className="hidden sm:inline-flex"
