@@ -96,7 +96,7 @@ test("scheduled tasks page is reachable from sidebar", async ({ page }) => {
   await expect(page.getByTestId("scheduled-task-runs")).toContainText("0 runs");
 });
 
-test("thread page opens the chat's tasks and Show all clears the filter", async ({
+test("thread header button opens the chat's tasks and Show all clears the filter", async ({
   page,
 }) => {
   mockLangGraphAPI(page, {
@@ -114,23 +114,29 @@ test("thread page opens the chat's tasks and Show all clears the filter", async 
         origin_thread_id: MOCK_THREAD_ID,
       }),
       task({ id: "task-2", title: "Other task" }),
+      task({
+        id: "task-3",
+        title: "Second thread task",
+        origin_thread_id: MOCK_THREAD_ID,
+      }),
     ],
   });
 
   await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
-  await page
+  const button = page
     .locator("header")
-    .getByRole("link", { name: /scheduled tasks/i })
-    .click();
+    .getByRole("link", { name: "2 scheduled tasks in this chat" });
+  await expect(button).toContainText("2");
+  await button.click();
   await page.waitForURL(new RegExp(`thread_id=${MOCK_THREAD_ID}`));
   const chip = page.getByTestId("scheduled-task-thread-filter");
   await expect(chip).toContainText("Showing tasks from this chat");
   await expect(chip).not.toContainText(MOCK_THREAD_ID);
   const list = page.getByTestId("scheduled-task-list");
-  await expect(list.getByRole("button")).toHaveCount(1);
+  await expect(list.getByRole("button")).toHaveCount(2);
   await chip.getByRole("button", { name: "Show all" }).click();
   await expect(page).not.toHaveURL(/thread_id=/);
-  await expect(list.getByRole("button")).toHaveCount(2);
+  await expect(list.getByRole("button")).toHaveCount(3);
 });
 
 test("a chat without tasks of its own does not claim there are no tasks", async ({

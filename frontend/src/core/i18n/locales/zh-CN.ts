@@ -1087,7 +1087,6 @@ export const zhCN: Translations = {
       results: "结果",
       resultsFresh: "每次运行都会新建一个对话",
       resultsReuse: "发在本对话中",
-      next: "下次：{time}",
       footer: "试运行不计入上限。想改时间或停止条件，直接在这里说就行。",
       deleted: "这个任务已删除。",
       trialStarted: "试运行已开始",
@@ -1106,6 +1105,7 @@ export const zhCN: Translations = {
     },
     header: {
       countLabel: "本对话有 {count} 个定时任务",
+      countLabelOne: "本对话有 1 个定时任务",
       runTask: "所属定时任务",
     },
     recipes: {

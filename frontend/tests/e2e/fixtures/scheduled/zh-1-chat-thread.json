@@ -1,0 +1,83 @@
+{
+  "_provenance": "Assembled from ux-audit/evidence/takes/zh-1 (replies/*.txt, api/task.final.json, api/task-runs.final.json, api/origin-thread-tasks.after-create.json). The takes predate the PR1 contracts, so the schedule_task results, the scheduled origin metadata and the agent's chat replies are reshaped to the new contracts (1-2 sentence replies, no IDs); facts, ids and times are the recorded ones. Regenerate from ux-audit/impl/live/ after the live checklist run.",
+  "thread_id": "f71edb2f-7fbe-45e3-84cf-a3f47c5c0635",
+  "title": "每分钟读一下 /mnt/demo/release-checklist.md，把还没勾选的项和负责人写进 status.m",
+  "updated_at": "2026-10-05T12:19:57Z",
+  "messages": [
+    {
+      "type": "human",
+      "id": "human-create",
+      "content": "每分钟读一下 /mnt/demo/release-checklist.md，把还没勾选的项和负责人写进 status.md。每次运行的目标：status.md 列出所有未勾选的项。全部勾完就写一份最终总结，并停掉这个定时任务。最多运行 5 次，时区 Asia/Shanghai。"
+    },
+    {
+      "type": "ai",
+      "id": "ai-create-call",
+      "content": "我来创建这个定时任务。",
+      "tool_calls": [
+        {
+          "id": "call-create",
+          "name": "schedule_task",
+          "args": {
+            "action": "create",
+            "title": "发布清单未完成项监控",
+            "prompt": "读取 /mnt/demo/release-checklist.md，将其中所有未勾选（`- [ ]`）的项及其负责人写入 /mnt/user-data/outputs/status.md。status.md 必须列出所有未勾选的项和对应负责人。如果清单中所有项都已勾选（没有未勾选项），则改为写一份最终总结（说明清单已全部完成、完成时间与各项负责人），并停止这个定时任务。",
+            "stop_condition": "清单上的所有项都已勾选",
+            "schedule_type": "interval",
+            "schedule_spec": {
+              "every_seconds": 60
+            },
+            "timezone": "Asia/Shanghai",
+            "goal_objective": "status.md 列出所有未勾选的项",
+            "max_runs": 5
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool",
+      "id": "tool-create",
+      "name": "schedule_task",
+      "tool_call_id": "call-create",
+      "status": "success",
+      "content": "{\"action\": \"create\", \"display\": \"card\", \"task\": {\"id\": \"task-b62845adb9bb46db94f70443c65fee3d\", \"title\": \"发布清单未完成项监控\", \"status\": \"enabled\", \"schedule_type\": \"interval\", \"schedule_spec\": {\"every_seconds\": 60}, \"timezone\": \"Asia/Shanghai\", \"timezone_source\": \"explicit\", \"next_run_local\": \"2026-10-05 20:24 (Asia/Shanghai)\", \"active_run_status\": null, \"prompt\": \"读取 /mnt/demo/release-checklist.md，将其中所有未勾选（`- [ ]`）的项及其负责人写入 /mnt/user-data/outputs/status.md。status.md 必须列出所有未勾选的项和对应负责人。如果清单中所有项都已勾选（没有未勾选项），则改为写一份最终总结（说明清单已全部完成、完成时间与各项负责人），并停止这个定时任务。\", \"stop_condition\": \"清单上的所有项都已勾选\", \"goal_objective\": \"status.md 列出所有未勾选的项\", \"max_runs\": 5, \"end_at_local\": null, \"automatic_runs_used\": 0, \"context_mode\": \"fresh_thread_per_run\", \"standing_notes\": []}, \"now_local\": \"2026-10-05 20:23 (Asia/Shanghai)\"}"
+    },
+    {
+      "type": "ai",
+      "id": "ai-create-reply",
+      "content": "好了，之后每分钟检查一次发布清单，把未勾选的项和负责人写进 status.md；全部勾完后任务会自动暂停，最多运行 5 次。目前还有两项没勾：发布 Docker 镜像（王可）和发布更新说明（赵宁）。"
+    },
+    {
+      "type": "human",
+      "id": "human-trial",
+      "content": "先跑一次"
+    },
+    {
+      "type": "ai",
+      "id": "ai-trial-call",
+      "content": "",
+      "tool_calls": [
+        {
+          "id": "call-trial",
+          "name": "schedule_task",
+          "args": {
+            "action": "trial",
+            "task_id": "task-b62845adb9bb46db94f70443c65fee3d"
+          }
+        }
+      ]
+    },
+    {
+      "type": "tool",
+      "id": "tool-trial",
+      "name": "schedule_task",
+      "tool_call_id": "call-trial",
+      "status": "success",
+      "content": "{\"action\": \"trial\", \"display\": \"card\", \"task\": {\"id\": \"task-b62845adb9bb46db94f70443c65fee3d\", \"title\": \"发布清单未完成项监控\", \"status\": \"enabled\", \"schedule_type\": \"interval\", \"schedule_spec\": {\"every_seconds\": 60}, \"timezone\": \"Asia/Shanghai\", \"next_run_local\": \"2026-10-05 20:24 (Asia/Shanghai)\", \"active_run_status\": \"running\", \"prompt\": \"读取 /mnt/demo/release-checklist.md，将其中所有未勾选（`- [ ]`）的项及其负责人写入 /mnt/user-data/outputs/status.md。status.md 必须列出所有未勾选的项和对应负责人。如果清单中所有项都已勾选（没有未勾选项），则改为写一份最终总结（说明清单已全部完成、完成时间与各项负责人），并停止这个定时任务。\", \"stop_condition\": \"清单上的所有项都已勾选\", \"goal_objective\": \"status.md 列出所有未勾选的项\", \"max_runs\": 5, \"end_at_local\": null, \"automatic_runs_used\": 0, \"context_mode\": \"fresh_thread_per_run\", \"standing_notes\": []}, \"trial\": {\"outcome\": \"launched\", \"existing\": false, \"thread_id\": \"56e080c4-4fdc-48ce-9697-260acf3bcc21\"}}"
+    },
+    {
+      "type": "ai",
+      "id": "ai-trial-reply",
+      "content": "试运行已经在一个新对话里开始了，不占用 5 次自动运行额度。"
+    }
+  ]
+}

@@ -1156,7 +1156,6 @@ export const enUS: Translations = {
       results: "Results",
       resultsFresh: "Each run opens a new chat",
       resultsReuse: "Posted in this chat",
-      next: "Next: {time}",
       footer:
         "Trial runs don't count toward the cap. To change the time or the stop condition, just say so here.",
       deleted: "This task was deleted.",
@@ -1177,6 +1176,7 @@ export const enUS: Translations = {
     },
     header: {
       countLabel: "{count} scheduled tasks in this chat",
+      countLabelOne: "1 scheduled task in this chat",
       runTask: "Scheduled task",
     },
     recipes: {

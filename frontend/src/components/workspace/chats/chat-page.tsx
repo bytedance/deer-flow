@@ -31,7 +31,7 @@ import {
 import { ThreadArchiveStatus } from "@/components/workspace/thread-archive-status";
 import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
 import { ThreadExtensionActions } from "@/components/workspace/thread-extension-actions";
-import { ThreadScheduledTasksLink } from "@/components/workspace/thread-scheduled-tasks-link";
+import { ThreadScheduledTasksButton } from "@/components/workspace/thread-scheduled-tasks-button";
 import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
@@ -480,7 +480,7 @@ export default function ChatPage() {
                     <ThreadSubagentBatches threadId={threadId} />
                   )}
                 {!isNewThread && !isMock && (
-                  <ThreadScheduledTasksLink threadId={threadId} />
+                  <ThreadScheduledTasksButton threadId={threadId} />
                 )}
                 {tokenUsageEnabled ? (
                   <TokenUsageIndicator

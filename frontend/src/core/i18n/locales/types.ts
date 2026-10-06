@@ -962,7 +962,6 @@ export interface Translations {
       results: string;
       resultsFresh: string;
       resultsReuse: string;
-      next: string;
       footer: string;
       deleted: string;
       trialStarted: string;
@@ -981,6 +980,7 @@ export interface Translations {
     };
     header: {
       countLabel: string;
+      countLabelOne: string;
       runTask: string;
     };
     recipes: {

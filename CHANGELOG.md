@@ -72,6 +72,15 @@ This release closes that milestone with **301 merged pull requests**.
   replies in the user's language. The tools are offered only while the
   Gateway's scheduler is running. ([#6340])
 
+- **scheduler:** In web chat, `schedule_task` results render as a live task card
+  (schedule, stop condition with the safety cap, results, "Run once now",
+  Pause/Resume and "Open task") that follows the task's state while it is on
+  screen. A scheduled run's chat shows one "Scheduled run · task · run n" block
+  with the task instructions collapsed instead of the launched prompt, the
+  scheduler tool steps have readable labels, and the chat header's "Scheduled
+  tasks" button shows how many tasks a chat has (a run's chat links to its
+  task). ([#6340])
+
 - **scheduler:** The Scheduled tasks page is list-first: status tabs and search
   above the task list, a "New task" dialog (create, edit and duplicate, including
   the per-run goal, the stop condition and the safety cap), and a detail view with
