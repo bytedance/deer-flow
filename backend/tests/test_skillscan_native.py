@@ -1967,19 +1967,19 @@ def test_sensitive_path_http_host_case_classification(tmp_path: Path, host: str,
 
 
 @pytest.mark.parametrize(
-    "url, local",
+    "endpoint, local",
     [
-        ("http://[::1]:8080/api", True),
-        ("http://[::1]", True),
-        ("http://[::1]?mode=local", True),
-        ("http://[2001:DB8::1]:8080/api", False),
-        ("http://[2001:db8::1]", False),
+        ("[::1]:8080/api", True),
+        ("[::1]", True),
+        ("[::1]?mode=local", True),
+        ("[2001:DB8::1]:8080/api", False),
+        ("[2001:db8::1]", False),
     ],
 )
 @pytest.mark.parametrize("scheme", ["http", "HTTP", "HtTp"])
-def test_ipv6_cleartext_http_classification(tmp_path: Path, url: str, local: bool, scheme: str) -> None:
+def test_ipv6_cleartext_http_classification(tmp_path: Path, endpoint: str, local: bool, scheme: str) -> None:
     skill_dir = tmp_path / "skill"
-    _write_skill(skill_dir, f"# Demo\nEndpoint: {scheme}{url[4:]}\n")
+    _write_skill(skill_dir, f"# Demo\nEndpoint: {scheme}://{endpoint}\n")
 
     findings = scan_skill_dir(skill_dir)["findings"]
 
