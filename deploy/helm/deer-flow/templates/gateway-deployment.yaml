@@ -88,7 +88,7 @@ spec:
           workingDir: /app
           command: ["sh", "-c"]
           args:
-            - cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1 --timeout-graceful-shutdown {{ .Values.gateway.uvicornGracefulShutdownSeconds | default 10 | int }}
+            - cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1 --timeout-graceful-shutdown {{ .Values.gateway.uvicornGracefulShutdownSeconds | int }}
           env:
             - name: CI
               value: "true"
@@ -124,21 +124,25 @@ spec:
                   name: {{ include "deer-flow.appSecret" . }}
                   key: DEER_FLOW_INTERNAL_AUTH_TOKEN
             # Session-cookie signing key shared by every Pod. Without it each
-            # Pod generates its own .jwt_secret and sessions break across
-            # replicas. Optional so a user-managed existingAppSecret without
-            # the key still boots (a single Pod then falls back to .jwt_secret
-            # on the home volume).
+            # Pod runs _load_or_create_secret(), which read-then-writes
+            # .jwt_secret on the home volume: concurrently booting replicas race
+            # and sign sessions with different keys. The key is therefore
+            # required whenever more than one instance runs; only a single Pod
+            # with a user-managed existingAppSecret that lacks it may fall back
+            # to the file.
             - name: AUTH_JWT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "deer-flow.appSecret" . }}
                   key: AUTH_JWT_SECRET
-                  optional: true
+                  optional: {{ ne (include "deer-flow.gatewayMultiInstance" .) "true" }}
             # Tells the Gateway's startup gate that peers share the database;
-            # its GATEWAY_WORKERS count only sees this Pod. Derived from the
-            # replica count so the declaration cannot drift from the topology.
+            # its GATEWAY_WORKERS count only sees this Pod. Derived from
+            # gateway.replicas unless gateway.multiInstance is set explicitly:
+            # kubectl scale and HPAs change the replica count without a Helm
+            # upgrade, so set multiInstance: true before scaling that way.
             - name: DEER_FLOW_MULTI_INSTANCE
-              value: {{ gt (int .Values.gateway.replicas) 1 | quote }}
+              value: {{ include "deer-flow.gatewayMultiInstance" . | quote }}
             {{- /* PostgreSQL DSN — only mounted when postgres is configured
                   (bundled StatefulSet, external databaseUrl, or an existing
                   Secret). In sqlite/memory mode the env is omitted and

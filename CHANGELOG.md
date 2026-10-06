@@ -533,17 +533,27 @@ This release closes that milestone with **301 merged pull requests**.
   trap. The chart's default `config` enables `run_ownership.heartbeat_enabled`
   and `run_events.backend: db` (so a starting Pod only reclaims runs whose
   owner is really gone, and message history is shared across Pods), exports
-  `DEER_FLOW_MULTI_INSTANCE` from `gateway.replicas` for the Gateway's startup
-  gate, generates and injects a shared `AUTH_JWT_SECRET` (per-Pod `.jwt_secret`
-  files logged users out across replicas), declares a surge-then-drain rollout
-  strategy, renders a `PodDisruptionBudget` when replicas > 1, and bounds
-  uvicorn's graceful shutdown (`gateway.uvicornGracefulShutdownSeconds`, 10s)
-  inside a 90s termination grace period so an idle SSE stream cannot push the
-  memory drain into SIGKILL. docker-compose bounds the same uvicorn timeout and
-  sets `stop_grace_period: 60s` (Docker's 10s default cut the 30s memory flush
+  `DEER_FLOW_MULTI_INSTANCE` for the Gateway's startup gate from
+  `gateway.replicas` or an explicit `gateway.multiInstance` (set it before
+  scaling with `kubectl scale` or an HPA, which the chart cannot see),
+  generates and injects a shared `AUTH_JWT_SECRET` (per-Pod `.jwt_secret`
+  files logged users out across replicas; the key is required whenever the
+  gateway is multi-instance so concurrently booting Pods cannot race to write
+  different keys), declares a surge-then-drain rollout strategy, renders a
+  `PodDisruptionBudget` for a multi-instance gateway, and bounds uvicorn's
+  graceful shutdown (`gateway.uvicornGracefulShutdownSeconds`, 10s; `0` is
+  honored) inside a 90s termination grace period so an idle SSE stream cannot
+  push the memory drain into SIGKILL. `existingAppSecret` is now honored by
+  every consumer (the gateway and frontend kept referencing the generated
+  `<release>-app` Secret, which was not rendered, so Pods never started).
+  Both compose files bound the same uvicorn timeout and set
+  `stop_grace_period: 60s` (Docker's 10s default cut the 30s memory flush
   short). The chart README and compose comments stop citing the long-closed
   issue #3948 as the reason to stay at one replica and list what actually
   remains single-instance (IM channels, WeChat QR login, browser tools).
+  Upgrading a release that predates `AUTH_JWT_SECRET` generates a new key and
+  signs every browser session out once; the chart README shows how to seed
+  the previous key into the Secret first to keep sessions.
 - **persistence:** A second Gateway instance no longer fails startup with
   `TimeoutError` while another instance runs a PostgreSQL schema migration. The
   bootstrap advisory lock was taken with a blocking `pg_advisory_lock` on the

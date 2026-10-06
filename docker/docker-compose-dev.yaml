@@ -194,6 +194,10 @@ services:
     # this file readable and lets the script be linted (shellcheck-clean).
     # See PR #2767 / Issue #2754.
     command: ["sh", "/usr/local/bin/dev-entrypoint.sh"]
+    # Docker's 10s default SIGKILLed the 30s memory queue flush
+    # (memory.shutdown_flush_timeout_seconds) on every `make docker-restart`;
+    # dev-entrypoint.sh bounds uvicorn's graceful shutdown to 10s inside this.
+    stop_grace_period: 60s
     volumes:
       # Mount the dev entrypoint as a read-only file so edits to the script
       # take effect on `make docker-restart` without requiring an image rebuild.

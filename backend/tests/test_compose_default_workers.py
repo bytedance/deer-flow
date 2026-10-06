@@ -16,9 +16,12 @@ import re
 from pathlib import Path
 
 import yaml
+from _gateway_shutdown_budget import lifespan_shutdown_seconds
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO_ROOT / "docker" / "docker-compose.yaml"
+DEV_COMPOSE_PATH = REPO_ROOT / "docker" / "docker-compose-dev.yaml"
+DEV_ENTRYPOINT_PATH = REPO_ROOT / "docker" / "dev-entrypoint.sh"
 
 
 def _gateway_command() -> str:
@@ -45,20 +48,33 @@ def test_gateway_worker_count_remains_overridable():
     assert "${GATEWAY_WORKERS:-1}" in command, f"worker count must use ${{GATEWAY_WORKERS:-1}} so operators can override it; got: {command}"
 
 
+def _graceful_shutdown_bound(launch: str) -> int:
+    """Return uvicorn's ``--timeout-graceful-shutdown`` bound from a launch command or script."""
+    match = re.search(r"--timeout-graceful-shutdown (\d+)", launch)
+    assert match is not None, f"uvicorn launch must bound its graceful shutdown; got: {launch}"
+    return int(match.group(1))
+
+
+def _stop_grace_seconds(compose_path: Path) -> int:
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    grace = compose["services"]["gateway"]["stop_grace_period"]
+    match = re.fullmatch(r"(\d+)s", str(grace))
+    assert match is not None, f"stop_grace_period must be expressed in seconds, got {grace!r}"
+    return int(match.group(1))
+
+
 def test_gateway_bounds_uvicorn_graceful_shutdown():
     """Open SSE connections must not hold lifespan shutdown (memory flush, run drain) past the stop grace period."""
-    command = _gateway_command()
-    match = re.search(r"--timeout-graceful-shutdown (\d+)", command)
-    assert match is not None, f"gateway command must bound uvicorn's graceful shutdown; got: {command}"
-    assert int(match.group(1)) <= 30
+    assert _graceful_shutdown_bound(_gateway_command()) <= 30
 
 
 def test_gateway_stop_grace_period_covers_the_shutdown_work():
     """Docker's 10s default SIGKILLed the 30s memory queue flush on every restart."""
-    compose = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
-    grace = compose["services"]["gateway"]["stop_grace_period"]
-    match = re.fullmatch(r"(\d+)s", str(grace))
-    assert match is not None, f"stop_grace_period must be expressed in seconds, got {grace!r}"
-    uvicorn_timeout = int(re.search(r"--timeout-graceful-shutdown (\d+)", _gateway_command()).group(1))
-    channel_stop, run_drain, memory_flush = 5, 5, 30
-    assert int(match.group(1)) >= uvicorn_timeout + channel_stop + run_drain + memory_flush
+    assert _stop_grace_seconds(COMPOSE_PATH) >= _graceful_shutdown_bound(_gateway_command()) + lifespan_shutdown_seconds()
+
+
+def test_dev_gateway_bounds_uvicorn_graceful_shutdown_and_covers_it():
+    """The dev stack launches uvicorn from dev-entrypoint.sh and is restarted far more often."""
+    bound = _graceful_shutdown_bound(DEV_ENTRYPOINT_PATH.read_text(encoding="utf-8"))
+    assert bound <= 30
+    assert _stop_grace_seconds(DEV_COMPOSE_PATH) >= bound + lifespan_shutdown_seconds()

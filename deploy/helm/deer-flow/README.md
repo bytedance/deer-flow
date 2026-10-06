@@ -280,7 +280,12 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   (sandbox ownership leases are inferred from it) — and exports
   `DEER_FLOW_MULTI_INSTANCE=true` whenever `gateway.replicas > 1`, so the
   Gateway's startup gate verifies those prerequisites instead of staying inert
-  (its worker count only sees one Pod). `gateway.replicas: 1` stays the
+  (its worker count only sees one Pod). If you scale with `kubectl scale` or
+  an HPA instead of `gateway.replicas`, set `gateway.multiInstance: true`
+  first: those change the replica count without a Helm upgrade, so the
+  derived declaration, the PodDisruptionBudget and the required shared
+  `AUTH_JWT_SECRET` would otherwise keep their single-replica rendering.
+  `gateway.replicas: 1` stays the
   default because the following are still single-instance: **IM channels**
   (every Pod would connect to every platform — Telegram polling conflicts and
   Discord double-processes; keep 1 replica while channels are enabled), the
@@ -288,15 +293,27 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `persistence.home.accessMode: ReadWriteMany` on multi-node clusters (thread
   uploads, outputs, memory and `extensions_config.json` live on that volume)
   and `agent_storage.backend: db` so custom agents are visible on every Pod.
-  A `PodDisruptionBudget` (`minAvailable: 1`) is rendered automatically when
-  replicas > 1, and the rollout strategy is surge-then-drain (`maxSurge: 1`,
-  `maxUnavailable: 0`).
+  A `PodDisruptionBudget` (`minAvailable: 1`) is rendered automatically for a
+  multi-instance gateway (same rule), and the rollout strategy is
+  surge-then-drain (`maxSurge: 1`, `maxUnavailable: 0`).
 - **App secret.** `<release>-app` holds `BETTER_AUTH_SECRET`,
   `DEER_FLOW_INTERNAL_AUTH_TOKEN` and `AUTH_JWT_SECRET` (the session-cookie
   signing key), each generated once and preserved across upgrades via
-  `lookup`. With `existingAppSecret`, add an `AUTH_JWT_SECRET` key so every
-  Pod signs sessions with the same key; the env is optional, and a single Pod
-  without it falls back to a `.jwt_secret` file on the home volume.
+  `lookup`. `existingAppSecret` points the gateway and frontend at a Secret
+  you manage instead (no `<release>-app` is generated); it must carry all
+  three keys. `AUTH_JWT_SECRET` is required whenever the gateway is
+  multi-instance — without it, concurrently booting Pods race to write their
+  own `.jwt_secret` on the home volume and sign sessions with different keys —
+  and only a single Pod may omit it and fall back to that file. **Upgrading a
+  release that predates `AUTH_JWT_SECRET`** generates a new key, so every
+  existing browser session is signed out once. To keep sessions, copy the key
+  the gateway has been using into the Secret before upgrading; `lookup` then
+  preserves it like the other app secrets:
+
+  ```bash
+  JWT=$(kubectl -n deer-flow exec deploy/deer-flow-gateway -- cat /app/backend/.deer-flow/.jwt_secret)
+  kubectl -n deer-flow patch secret deer-flow-app -p "{\"stringData\":{\"AUTH_JWT_SECRET\":\"$JWT\"}}"
+  ```
 - **Scheduled task recovery.** If a deployment explicitly enables
   `scheduler.multi_instance: true`, it must use shared Postgres,
   `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`.

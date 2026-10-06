@@ -1,11 +1,12 @@
 {{- /*
-  PodDisruptionBudget for the gateway. Rendered only when more than one
-  replica runs: with a single replica a budget of 1 would block every node
-  drain, and with several it keeps at least one Pod serving (and renewing its
-  run leases) while nodes are drained.
+  PodDisruptionBudget for the gateway. Rendered only for a multi-instance
+  gateway (gateway.replicas > 1, or gateway.multiInstance: true for
+  deployments scaled with kubectl/HPA): with a single replica a budget of 1
+  would block every node drain, and with several it keeps at least one Pod
+  serving (and renewing its run leases) while nodes are drained.
 */ -}}
 {{- $pdb := .Values.gateway.podDisruptionBudget | default dict -}}
-{{- if and $pdb.enabled (gt (int .Values.gateway.replicas) 1) }}
+{{- if and $pdb.enabled (eq (include "deer-flow.gatewayMultiInstance" .) "true") }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -15,7 +16,7 @@ metadata:
     {{- include "deer-flow.labels" . | nindent 4 }}
     app.kubernetes.io/component: gateway
 spec:
-  minAvailable: {{ $pdb.minAvailable | default 1 }}
+  minAvailable: {{ $pdb.minAvailable | default 1 | int }}
   selector:
     matchLabels:
       {{- include "deer-flow.selectorLabels" . | nindent 6 }}

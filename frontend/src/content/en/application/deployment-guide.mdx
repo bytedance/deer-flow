@@ -154,7 +154,7 @@ The Helm chart ships `gateway.replicas: 1`. Raising it is supported for the web 
 - `run_ownership.heartbeat_enabled: true`, so a starting Pod only reclaims runs whose owner is really gone
 - `stream_bridge.type: redis`, so SSE streams and reconnects work from any Pod (sandbox ownership leases are inferred from it)
 
-The chart exports `DEER_FLOW_MULTI_INSTANCE=true` when `gateway.replicas > 1`, and the Gateway refuses to start if any of these is missing. On multi-node clusters also set `persistence.home.accessMode: ReadWriteMany` (uploads, outputs, memory and `extensions_config.json` live on that volume) and `agent_storage.backend: db` so custom agents are visible on every Pod.
+The chart exports `DEER_FLOW_MULTI_INSTANCE=true` when `gateway.replicas > 1`, and the Gateway refuses to start if any of these is missing. If you scale with `kubectl scale` or an HPA instead of `gateway.replicas`, set `gateway.multiInstance: true` first so the declaration, the PodDisruptionBudget and the required shared `AUTH_JWT_SECRET` do not keep their single-replica rendering. On multi-node clusters also set `persistence.home.accessMode: ReadWriteMany` (uploads, outputs, memory and `extensions_config.json` live on that volume) and `agent_storage.backend: db` so custom agents are visible on every Pod.
 
 Still single-instance: IM channels (every Pod would connect to every platform), the WeChat QR login, and browser tools. Keep one replica while those are enabled.
 

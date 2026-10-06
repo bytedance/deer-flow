@@ -40,6 +40,13 @@ gateway:
   # Scheduler multi_instance recovery is safe only when its config
   # prerequisites are met; max_concurrent_runs is shared across Pods then.
   replicas: 1
+  # Explicit multi-instance declaration (boolean). Leave unset (null) to derive
+  # it from `replicas` above. Set `true` before scaling the gateway with
+  # `kubectl scale` or an HPA: those change the replica count without a Helm
+  # upgrade, so the derived DEER_FLOW_MULTI_INSTANCE, the PodDisruptionBudget
+  # and the required shared AUTH_JWT_SECRET would otherwise keep their
+  # single-replica rendering.
+  multiInstance: null
   # Rollout strategy. Surge-then-drain keeps one Pod serving while a peer
   # starts; with run-ownership heartbeats the new Pod leaves the old Pod's live
   # runs alone (their leases keep renewing) while the old Pod drains them.
@@ -48,8 +55,10 @@ gateway:
     rollingUpdate:
       maxSurge: 1
       maxUnavailable: 0
-  # PodDisruptionBudget, rendered only when replicas > 1 (a budget of 1 on a
-  # single replica would block node drains).
+  # PodDisruptionBudget, rendered only for a multi-instance gateway (replicas
+  # > 1 or multiInstance: true; a budget of 1 on a single replica would block
+  # node drains). minAvailable falls back to 1 when unset; disable the budget
+  # rather than setting it to 0.
   podDisruptionBudget:
     enabled: true
     minAvailable: 1
@@ -57,6 +66,7 @@ gateway:
   # connections (long SSE streams included) may hold up lifespan shutdown
   # after SIGTERM before uvicorn closes them. Without a bound one idle SSE
   # client can push the whole shutdown past the grace period into SIGKILL.
+  # 0 closes open connections immediately on SIGTERM.
   uvicornGracefulShutdownSeconds: 10
   # Pod termination grace period (seconds). MUST exceed the Gateway's graceful
   # shutdown work: preStopSleepSeconds + uvicornGracefulShutdownSeconds +
@@ -271,6 +281,11 @@ skills:
 secrets: {}
 # -- Use an existing Secret instead of creating one from `secrets` above.
 existingSecret: ""
+# -- Use an existing Secret for the app secrets instead of generating
+#    `<release>-app`. It must hold BETTER_AUTH_SECRET (frontend),
+#    DEER_FLOW_INTERNAL_AUTH_TOKEN and, for more than one gateway instance,
+#    AUTH_JWT_SECRET (the session-cookie signing key every Pod must share).
+existingAppSecret: ""
 
 # -- Ingress in front of nginx (port 2026). nginx preserves all internal routing.
 ingress:
