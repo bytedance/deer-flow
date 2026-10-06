@@ -28,6 +28,34 @@ export function runHistoryRefetchInterval(
   return (runs ?? []).some(isActiveRun) ? ACTIVE_POLL_MS : IDLE_POLL_MS;
 }
 
+/** One history page, plus one run to tell whether an older page exists. */
+function runPageQuery(taskId: string | undefined, page: number) {
+  return {
+    queryKey: ["scheduled-tasks", "runs", taskId, page],
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      fetchScheduledTaskRuns(taskId ?? "", {
+        limit: RUN_HISTORY_PAGE_SIZE + 1,
+        offset: page * RUN_HISTORY_PAGE_SIZE,
+        signal,
+      }),
+    enabled: Boolean(taskId),
+  };
+}
+
+/**
+ * The newest runs (the latest history page) whichever page the history
+ * shows, for what describes the task's current state. It shares the latest
+ * page's cache entry, so it adds no request while that page is shown.
+ */
+export function useLatestScheduledTaskRuns(
+  taskId: string | undefined,
+): readonly ScheduledTaskRun[] {
+  const { data } = useQuery(runPageQuery(taskId, 0));
+  return data?.slice(0, RUN_HISTORY_PAGE_SIZE) ?? NO_RUNS;
+}
+
+const NO_RUNS: readonly ScheduledTaskRun[] = [];
+
 export function useScheduledTaskRunHistory(taskId: string | undefined) {
   const client = useQueryClient();
   const [position, setPosition] = useState({ taskId, page: 0 });
@@ -36,14 +64,7 @@ export function useScheduledTaskRunHistory(taskId: string | undefined) {
     setPosition({ taskId, page: 0 });
   }
   const query = useQuery({
-    queryKey: ["scheduled-tasks", "runs", taskId, page],
-    queryFn: ({ signal }) =>
-      fetchScheduledTaskRuns(taskId ?? "", {
-        limit: RUN_HISTORY_PAGE_SIZE + 1,
-        offset: page * RUN_HISTORY_PAGE_SIZE,
-        signal,
-      }),
-    enabled: Boolean(taskId),
+    ...runPageQuery(taskId, page),
     refetchInterval: (q) => runHistoryRefetchInterval(q.state.data, page),
     refetchIntervalInBackground: false,
     refetchOnMount: page === 0,

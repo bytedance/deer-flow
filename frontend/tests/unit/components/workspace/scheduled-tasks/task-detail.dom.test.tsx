@@ -119,14 +119,21 @@ function renderDetail(
     toolEnabled = true,
     createBlocked = false,
   }: {
-    runs?: ScheduledTaskRun[];
+    /** One history, or the page at each offset. */
+    runs?: ScheduledTaskRun[] | ((offset: number) => ScheduledTaskRun[]);
     locale?: "en-US" | "zh-CN";
     toolEnabled?: boolean;
     createBlocked?: boolean;
   } = {},
 ) {
   document.cookie = `locale=${locale}; path=/`;
-  fetchRuns.mockResolvedValue(runs);
+  if (typeof runs === "function") {
+    fetchRuns.mockImplementation(
+      async (_taskId: string, { offset }: { offset: number }) => runs(offset),
+    );
+  } else {
+    fetchRuns.mockResolvedValue(runs);
+  }
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -459,6 +466,72 @@ describe("TaskDetail", () => {
       "disabled",
       false,
     );
+  });
+
+  test("an older history page never moves the pause notice to an earlier stop or miss", async () => {
+    // Page 1 is the latest 50 runs plus one; page 2 holds an earlier stop
+    // and an earlier miss, neither of which made the current pause.
+    const latest = [
+      run({
+        id: "task-run-current0000000000",
+        run_id: "run-current",
+        thread_id: "thread-current",
+        stop_requested_run_id: "run-current",
+        status: "unmet",
+        error: "blocked:missing_evidence",
+        started_at: "2026-10-05T12:21:55+00:00",
+      }),
+      ...Array.from({ length: 50 }, (_, index) =>
+        run({ id: `task-run-${String(index).padStart(20, "0")}` }),
+      ),
+    ];
+    const older = [
+      run({
+        id: "task-run-old00000000000000",
+        run_id: "run-old",
+        thread_id: "thread-old",
+        stop_requested_run_id: "run-old",
+        status: "unmet",
+        error: "no_verdict",
+        summary: "An earlier miss",
+        started_at: "2026-10-01T12:21:55+00:00",
+      }),
+    ];
+    for (const lastError of [
+      "stopped by the agent in run run-current",
+      // contracts/scheduled_goal_notes_contract.json auto_pause_last_error
+      "paused after 3 unmet scheduled goal runs",
+    ]) {
+      fetchRuns.mockClear();
+      const view = renderDetail(
+        task({
+          status: "paused",
+          goal_objective: "every item is checked",
+          last_error: lastError,
+          last_run_id: "run-current",
+          last_run_at: "2026-10-05T12:21:55+00:00",
+        }),
+        { runs: (offset) => (offset === 0 ? latest : older) },
+      );
+      const notice = await screen.findByTestId("scheduled-task-outcome");
+      await waitFor(() =>
+        expect(
+          notice.querySelector('a[href*="thread-current"]'),
+        ).not.toBeNull(),
+      );
+      const before = notice.textContent;
+      // The notice shares the latest page's request.
+      expect(
+        fetchRuns.mock.calls.filter(([, options]) => options.offset === 0),
+      ).toHaveLength(1);
+      fireEvent.click(screen.getByRole("button", { name: "Older runs" }));
+      await screen.findByText("An earlier miss");
+      // The notice still reads the latest page: same words, same run.
+      expect(notice.textContent).toBe(before);
+      expect(notice.querySelector('a[href*="thread-current"]')).not.toBeNull();
+      expect(notice.querySelector('a[href*="thread-old"]')).toBeNull();
+      view.unmount();
+    }
   });
 
   test("an auto-pause quotes one sentence of the run's summary, punctuated once", async () => {
