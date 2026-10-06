@@ -11,9 +11,8 @@ anchor red (mutation-verified style of this suite).
 from __future__ import annotations
 
 import functools
-from types import SimpleNamespace
-
 import os
+from types import SimpleNamespace
 
 import pytest
 

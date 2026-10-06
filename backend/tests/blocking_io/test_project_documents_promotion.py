@@ -13,9 +13,8 @@ an offload drops the dispatch and turns the anchor red.
 from __future__ import annotations
 
 import functools
-from types import SimpleNamespace
-
 import os
+from types import SimpleNamespace
 
 import pytest
 

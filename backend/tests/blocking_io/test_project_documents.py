@@ -20,9 +20,8 @@ from __future__ import annotations
 
 import functools
 import json
-from types import SimpleNamespace
-
 import os
+from types import SimpleNamespace
 
 import pytest
 
