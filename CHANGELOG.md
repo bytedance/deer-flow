@@ -630,6 +630,7 @@ This release closes that milestone with **439 merged pull requests**.
   above zero, near-duplicate similarity was inflated, and punctuation used up the
   128-token budget before later query terms. Tokens without a letter or digit are
   now dropped, as the no-jieba fallback and the FTS5 query filter already did.
+  ([#6388])
 - **middleware:** Tool-output budgeting no longer hides a failed shell exit from
   subagent evidence. A bash result between `externalize_min_chars` (12,000) and
   the sandbox limit (20,000) was replaced by a preview ending in its `Access:`
@@ -8848,3 +8849,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6350]: https://github.com/bytedance/deer-flow/pull/6350
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351
 [#6354]: https://github.com/bytedance/deer-flow/pull/6354
+[#6388]: https://github.com/bytedance/deer-flow/pull/6388
