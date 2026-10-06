@@ -45,11 +45,8 @@ so malformed values cannot abort compaction/model calls.
 `tool_calls` update: adapters resend stale `content` tool-call blocks, which
 strict providers reject.
 
-Read-before-write marks belong to the requested `tool_call_id`. Select only a
-matching `ToolMessage`, including inside `Command.update.messages`; unrelated
-results must neither gain a mark nor determine read success. Missing matches
-skip content inspection and log the unmatched request ID at debug level.
-Graph coverage: `tests/test_read_mark_tool_call_correlation.py`.
+Read marks bind to request `tool_call_id`, including `Command` results.
+No match: skip inspection, log ID. Tests: `test_read_mark_tool_call_correlation.py`.
 
 **Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
 
