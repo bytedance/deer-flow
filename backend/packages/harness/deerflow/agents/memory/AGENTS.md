@@ -93,6 +93,10 @@ An empty parsed call list does not make an attempted call a final response.
 Keep both portable backend filters aligned without importing host helpers;
 test the real queue/HTTP write boundary in `tests/test_memory_tool_call_intent.py`.
 
+Memory enqueue redaction also covers `invalid_tool_calls` arguments/error text
+and legacy `function_call` payloads. Keep sync, async and compaction admission
+aligned; preserve original messages and detector policy.
+
 `memory.mode: tool` registers the four memory tools.
 The model chooses when to search or change facts.
 Tool mode still uses `MemoryMiddleware` for passive writes on supported remote backends.

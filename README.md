@@ -1749,12 +1749,13 @@ call. Skipped or failed compaction leaves the existing messages unchanged.
 
 Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
 remote tool results, compaction input, reinjected summaries, and configured
-LLM title input. It is off by default. Existing summary placeholders reserve
-indices so new values do not reuse them after compaction. No PII mapping is
-persisted, so repeated values cannot be linked to a compacted source; numbering
-may change when history or summary placeholders disappear. Raw thread text and
-local fallback titles remain available for display; memory extraction is outside
-this feature's scope.
+LLM title input. Memory admission, including pre-compaction flushes, also redacts
+detected identifiers in supported text/JSON content, parsed and invalid call arguments/error text,
+provider-raw/legacy function calls and supported user-content provenance.
+It is off by default; enabled deployments supply a secret for stable, keyed
+value-derived placeholders. No token-to-raw mapping is persisted. Raw thread
+text and local fallback titles remain available for display; memory redaction
+copies messages without changing the caller's history or tool execution.
 
 The Web UI preserves persisted message order when merging history with live updates. Streaming steps around a persisted result inside the loaded history stay together, including steps that arrive after the result. Steps captured during compaction also remain visible before their persisted result when history has not refreshed and the UI has not rendered them yet.
 
