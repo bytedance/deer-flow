@@ -2,8 +2,8 @@
 
 Bridges external messaging platforms (Feishu, Slack, Telegram, Discord, DingTalk, GitHub) to the DeerFlow agent via Gateway's LangGraph-compatible API.
 
-WeChat's off-loop `_read_outbound_bytes` owns cap + 1 reads and rejects overflow
-with `None` before encryption/upload. Non-positive caps stay unlimited.
+WeChat `_read_outbound_bytes` reads cap+1 off-loop; overflow returns `None` before encryption/upload; caps <=0 are unlimited.
+Cursor writes drain before cancellation; token expiry drains cursor/auth clearing under `_auth_lock`.
 
 **Architecture**: Channels communicate with Gateway through the `langgraph-sdk` HTTP client (same as the frontend), ensuring threads are created and managed server-side. The internal SDK client injects process-local internal auth plus a matching CSRF cookie/header pair so Gateway accepts state-changing thread/run requests from channel workers without relying on browser session cookies.
 
@@ -62,7 +62,7 @@ The cached value is reused for both the blocking (`runs.wait`) and streaming (`_
 - No public IP, OAuth callback URL, or provider webhook route is required by the current implementation.
 - Telegram binds via deep-link `/start <code>` over long polling; Slack, Discord, Feishu/Lark, DingTalk, WeChat, and WeCom use `/connect <code>` through their outbound workers.
 - WeChat `polling_timeout`, `polling_retry_delay`, `qrcode_poll_interval`, and `qrcode_poll_timeout` require positive finite seconds; invalid values use defaults to prevent hot loops or endless sleeps.
-- `allowed_users.py` shares WeChat/Telegram fail-closed parsing with channel-specific ID coercion: unset/null/empty collections/blank string allow all; invalid entries warn, all-invalid values deny all and log an error. WeChat stores integer-valued numbers as integer text, warns on scalar commas/interior whitespace without splitting, and rejects denied senders before media downloads.
+- `allowed_users.py` uses WeChat/Telegram ID coercers: unset/null/empty collections/blank strings allow all; invalid entries warn; all-invalid input denies all with an error. WeChat stores integer-valued numbers as integer text, warns without splitting scalar separators, and gates users before media downloads.
 - WeCom serializes `start()` and `stop()` for each channel instance. The SDK `connect()` task covers connection setup only; after the handshake, the SDK owns a separate receive task. Shutdown cancels an in-progress connection attempt and awaits the SDK's actual asynchronous receive-task/socket cleanup before releasing lifecycle state or allowing a restart. Cancellation of `stop()` still propagates, but only after owned cleanup finishes and lifecycle references are cleared; real connection failures remain reported by `_on_ws_task_done`.
 - WeCom outbound content is capped at the protocol's 20480 UTF-8 bytes: stream replies clip on a character boundary with a truncation marker (one stream carries the whole reply and cannot split mid-way), while proactive pushes split into at most 10 sequential markdown messages per push, with the remaining tail clipped and marker-terminated. Both paths measure bytes, not characters. A per-chat send lock serializes each split batch end to end, because manager workers run concurrently and two long pushes to the same chat would otherwise interleave chunks; locks are reference-counted and reclaimed once no sender holds or waits on them, so the registry does not grow for the life of the Gateway.
 - Frontend APIs: `GET /api/channels/providers`, `GET /api/channels/connections`, `POST /api/channels/{provider}/connect`, and `DELETE /api/channels/connections/{connection_id}`.
