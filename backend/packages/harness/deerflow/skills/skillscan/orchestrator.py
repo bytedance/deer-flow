@@ -1005,8 +1005,15 @@ def _is_python_path(rel_path: str, text: str) -> bool:
 
 
 def _is_shell_path(rel_path: str, text: str) -> bool:
+    # `.zsh` belongs to the same family as `.sh` and `.bash`: the shebang branch
+    # below already accepts a zsh interpreter, and `package_files.CODE_SUFFIXES`
+    # already classifies a `.zsh` member as code. Leaving it out of the suffix set
+    # meant the identical bytes were reported in `run.sh` but skipped in `run.zsh`
+    # once the shebang was dropped, so a `.zsh` payload escaped every shell rule
+    # (`shell-reverse-shell`, `shell-curl-pipe-shell`, `shell-destructive-command`,
+    # `shell-sensitive-exfil`) by renaming the file.
     suffix = PurePosixPath(rel_path).suffix.lower()
-    return suffix in {".sh", ".bash"} or text.startswith("#!") and any(shell in text.splitlines()[0].lower() for shell in ("sh", "bash", "zsh"))
+    return suffix in {".sh", ".bash", ".zsh"} or text.startswith("#!") and any(shell in text.splitlines()[0].lower() for shell in ("sh", "bash", "zsh"))
 
 
 def _looks_like_placeholder(value: str) -> bool:
