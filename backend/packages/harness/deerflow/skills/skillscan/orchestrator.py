@@ -795,17 +795,19 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         r"\b(?:curl|wget)\b(?:[^\\\r\n|;]|\\\r?\n|\\[^\r\n])*"
         r"\|(?:\s|\\\r?\n)*(?:sudo(?:\s|\\\r?\n)+"
         # A sudo option that takes a separate value (`-u user`, `-g group`,
-        # ...) must swallow that value too: otherwise `| sudo -u deploy bash`
-        # leaves the matcher parked on the username and misses the shell.
-        # Standalone flags (`-E`, `-H`, ...) stay handled by the next branch.
-        r"(?:-[acCDgprRtTuU]\b(?:\s|\\\r?\n)+[^\s|;\\]+(?:\s|\\\r?\n)+"
+        # `-h host`, ...) must swallow that value too: otherwise
+        # `| sudo -u deploy bash` leaves the matcher parked on the username and
+        # misses the shell. This class is hand-maintained, so an option that
+        # takes a value must be listed here or it regresses to a miss; the
+        # case-sensitivity also keeps `-H` (no value) in the next branch.
+        r"(?:-[acCDghprRtTuU]\b(?:\s|\\\r?\n)+[^\s|;\\]+(?:\s|\\\r?\n)+"
         # The standalone branch must not re-consume a value-taking option:
         # `-u` would otherwise match both alternatives, and a chain of them
         # inside `*?` lets the matcher explore every one-/two-token partition
         # (exponential) before the non-shell tail fails. The lookahead keeps
         # the two branches mutually exclusive, so each token is consumed in
         # exactly one way and a failing chain stays linear.
-        r"|-(?![acCDgprRtTuU]\b)\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
+        r"|-(?![acCDghprRtTuU]\b)\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
         r"(?:bash|zsh|dash|fish|sh)\b",
         text,
     ):
