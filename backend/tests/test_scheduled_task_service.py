@@ -1411,7 +1411,7 @@ async def test_max_runs_finish_sends_task_finished_with_summary_enrichment(outbo
     assert [(row["event"], row["run_id"]) for row in notices] == [("task_finished", run_id)]
     assert (notices[0]["payload"]["reason_code"], notices[0]["payload"]["max_runs"], notices[0]["payload"]["run_status"]) == ("max_runs", 1, "success")
     (text,) = await _deliver_all(outbox)
-    assert text.splitlines()[1:3] == ["Finished: all 1 automatic runs are done.", "Result: Done: the checklist is complete"]
+    assert text.splitlines()[1:3] == ["Finished: its one automatic run is done.", "Result: Done: the checklist is complete"]
 
 
 @pytest.mark.asyncio
@@ -1423,7 +1423,7 @@ async def test_max_runs_finish_after_failed_run_says_last_run_failed(outbox):
     notices = await _notices(outbox)
     assert [row["event"] for row in notices] == ["task_finished"]
     (text,) = await _deliver_all(outbox)
-    assert text.splitlines()[1] == "Finished: all 1 automatic runs are done. The last run failed."
+    assert text.splitlines()[1] == "Finished: its one automatic run is done. The last run failed."
     assert "partial work" not in text and "timeout" not in text
 
 
