@@ -50,6 +50,14 @@ class _Run:
     thread_id: str
     cancelled: Event = field(default_factory=Event)
     finished: bool = False
+    # Set by the worker thread itself. Textual marks a cancelled thread worker
+    # finished at once, while the synchronous agent stream keeps running.
+    started: Event = field(default_factory=Event)
+    stopped: Event = field(default_factory=Event)
+
+    def worker_running(self) -> bool:
+        """Whether this run's worker may still write to its thread."""
+        return self.started.is_set() and not self.stopped.is_set()
 
 
 _TRANSPARENT_CSS = """
@@ -202,6 +210,7 @@ class DeerFlowTUI(App):
         self._spinner_idx = 0
         self._streaming = False
         self._run: _Run | None = None
+        self._interrupted_runs: list[_Run] = []
         self._skills_meta: list[dict] = []
         self._model_override: str | None = None
         self._palette_open = False
@@ -653,6 +662,14 @@ class DeerFlowTUI(App):
         if self._streaming:
             self._dispatch_still_working()
             return
+        # An interrupted worker cannot be killed: it stops at its next stream
+        # event, so a long tool call keeps running and then checkpoints. A new
+        # run on the same thread would race it, and whichever checkpoint lands
+        # last becomes the thread's state, dropping the other turn.
+        self._interrupted_runs = [run for run in self._interrupted_runs if run.worker_running()]
+        if any(run.thread_id == self._conv_thread_id for run in self._interrupted_runs):
+            self._dispatch(SystemMessage("The interrupted run is still stopping on this thread. Send again once it finishes, or use /new or /resume to continue elsewhere.", tone="info"))
+            return
         if self._conv_thread_id is None:
             self._conv_thread_id = str(uuid.uuid4())
         run = _Run(self._conv_thread_id)
@@ -673,6 +690,15 @@ class DeerFlowTUI(App):
             self._dispatch(SystemMessage("Could not start the run. Please try again.", tone="error"))
 
     def _stream_worker(self, text: str, run: _Run) -> None:
+        # Mark the start before checking cancellation: an interrupt either
+        # stops this worker here or sees it started and waits for it.
+        run.started.set()
+        try:
+            self._stream_run(text, run)
+        finally:
+            run.stopped.set()
+
+    def _stream_run(self, text: str, run: _Run) -> None:
         if run.cancelled.is_set():
             return
         thread_id = run.thread_id
@@ -748,6 +774,7 @@ class DeerFlowTUI(App):
     def _interrupt_run(self) -> None:
         if self._run is not None:
             self._run.cancelled.set()
+            self._interrupted_runs.append(self._run)
         self.workers.cancel_group(self, "agent")
         self._streaming = False
         self.state = reduce(self.state, RunEnded())

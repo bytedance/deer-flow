@@ -632,6 +632,14 @@ This release closes that milestone with **439 merged pull requests**.
   deletion now name the directory, and `make clean` stops with a hint to run
   `make down` or `make docker-stop` while that container is running, before it
   stops anything. ([#6351])
+- **tui:** A new prompt no longer races an interrupted run in the same
+  conversation. After `Ctrl+C` the run's worker keeps going until its current
+  step returns, so a tool call already in progress (a long shell command, for
+  example) still finished and checkpointed while the next prompt ran on the same
+  thread; whichever run checkpointed last became the conversation's history, so
+  the new turn could silently disappear from it. Until the interrupted worker
+  returns, a prompt in that conversation now shows a notice instead of starting a
+  second run; other conversations stay available through `/new` and `/resume`. ([#6350])
 - **sandbox:** With host bash enabled, the local sandbox no longer keeps a
   thread on the skill view of the last restricted Agent that ran there. That
   view is only maintained while host bash is off, but `LocalSandboxProvider`
@@ -8818,4 +8826,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6343]: https://github.com/bytedance/deer-flow/pull/6343
 [#6344]: https://github.com/bytedance/deer-flow/pull/6344
 [#6347]: https://github.com/bytedance/deer-flow/pull/6347
+[#6350]: https://github.com/bytedance/deer-flow/pull/6350
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351

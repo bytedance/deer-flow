@@ -1,9 +1,10 @@
 # Jina web fetch
 
-Jina opt-in retries stay provider-local: `max_retries=0` preserves one attempt;
-`retry_budget_seconds` bounds enabled request sequences and asynchronous backoff
-with one asyncio deadline. Only 502/503/504 and connection-establishment failures
-retry; cancellation propagates. Backoff ceilings double from 0.5 to 4 seconds.
-Each wait caps the ceiling by the remaining budget, then multiplies it by a fresh
-uniform random factor from 0.5 to 1.0 to avoid synchronized retries.
-Offline coverage: `tests/test_jina_retries.py`.
+Retries stay provider-local; default `max_retries=0` sends once. One monotonic
+budget bounds requests/waits; cancellation propagates. Retry 502/503/504 and
+connection-establishment failures; 429 requires valid Retry-After. Parse ASCII
+integer seconds or HTTP dates (including obsolete forms); past dates floor at
+zero. Wait max(server floor, existing budget-capped jittered 0.5–4s backoff).
+Never reduce server floors; unfit waits return the HTTP error. Reset hints each
+attempt. Auth/payment errors stay terminal. Tests: `test_jina_retries.py` and
+`test_jina_retry_after.py` (offline, not hosted-provider validation).

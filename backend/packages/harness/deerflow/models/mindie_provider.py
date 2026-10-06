@@ -29,6 +29,20 @@ def _fix_messages(messages: list) -> list:
                     parts.append(block)
                 elif isinstance(block, dict) and block.get("type") == "text":
                     parts.append(block.get("text", ""))
+                elif isinstance(msg, ToolMessage) and isinstance(block, dict) and block.get("type") == "json" and "json" in block:
+                    # Structured tool results ride the same text channel; serialize
+                    # them or the model sees an empty <tool_response>. ToolMessage
+                    # only: InputSanitizationMiddleware scans just strings and text
+                    # blocks, so a json block smuggled into a genuine user message
+                    # would reach the model unescaped if it were rendered here.
+                    # Those keep the old drop behavior, as does a block with no
+                    # "json" key (rather than emitting a literal "null"). Circular
+                    # payloads raise ValueError, other non-serializable values
+                    # TypeError; degrade both to str().
+                    try:
+                        parts.append(json.dumps(block["json"], ensure_ascii=False))
+                    except (TypeError, ValueError):
+                        parts.append(str(block["json"]))
             text = "".join(parts)
         else:
             text = msg.content or ""

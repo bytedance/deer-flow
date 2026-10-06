@@ -563,6 +563,11 @@
   两套 Docker 栈都把该目录挂载进 `deer-flow-gateway` 容器，而 `make stop` 不会停止它，因此数据可能在
   Gateway 运行时被删除。现在帮助文本和删除前的提示会写明该目录；当该容器仍在运行时，`make clean`
   会在停止任何服务之前退出，并提示先执行 `make down` 或 `make docker-stop`。([#6351])
+- **TUI：** 新的提示不再与同一会话中被中断的运行发生竞争。按下 `Ctrl+C` 后，该运行的工作线程会
+  一直执行到当前步骤返回，因此正在进行的工具调用（例如耗时较长的 shell 命令）仍会完成并写入检查点，
+  而下一条提示已在同一线程上运行；最后写入检查点的运行会成为会话历史，新的一轮可能因此悄然消失。
+  现在在被中断的工作线程返回之前，在该会话中发送提示会显示提示信息而不会启动第二个运行；
+  其他会话仍可通过 `/new` 和 `/resume` 使用。([#6350])
 - **沙箱：** 启用 host bash 时，本地沙箱不再把线程固定在上一个受限 Agent 的技能视图上。
   该视图只在 host bash 关闭时维护，但 `LocalSandboxProvider` 只要它存在就会挂载，导致该线程之后
   不受限的运行仍沿用旧的 allowlist，读不到 `/mnt/skills` 下其他已启用或新增的技能。现在这些运行
@@ -7302,4 +7307,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6338]: https://github.com/bytedance/deer-flow/pull/6338
 [#6343]: https://github.com/bytedance/deer-flow/pull/6343
 [#6344]: https://github.com/bytedance/deer-flow/pull/6344
+[#6350]: https://github.com/bytedance/deer-flow/pull/6350
 [#6351]: https://github.com/bytedance/deer-flow/pull/6351

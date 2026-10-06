@@ -113,6 +113,18 @@ async def _late_delivery(monkeypatch, gate, switch_thread=False, restart=True):
                 if switch_thread:
                     app.query_one("#composer").value = "/resume thread-b"
                     await pilot.press("enter")
+                else:
+                    # The old worker is still running on this thread, so a
+                    # send there waits for it (see
+                    # test_tui_interrupted_run_drain.py); its late action is
+                    # still discarded once delivered.
+                    app.query_one("#composer").value = "new question"
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    assert client.calls == [("old question", "thread-a")]
+                    assert any("still stopping" in row.text for row in app.state.rows if row.kind == "system")
+                    deliver.set()
+                    await _settle(pilot, old_done.is_set)
                 app.query_one("#composer").value = "new question"
                 await pilot.press("enter")
                 await _settle(pilot, lambda: client.new_started.is_set() and app._streaming)
