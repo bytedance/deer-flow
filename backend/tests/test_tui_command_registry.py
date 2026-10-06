@@ -1,6 +1,8 @@
 """Tests for the slash-command registry (pure)."""
 
-from deerflow.skills.slash import RESERVED_SLASH_SKILL_NAMES
+import pytest
+
+from deerflow.skills.slash import RESERVED_SLASH_SKILL_NAMES, parse_slash_skill_reference
 from deerflow.tui.command_registry import (
     BUILTIN_COMMANDS,
     build_registry,
@@ -176,3 +178,53 @@ def test_help_has_no_duplicate_commands():
 
 def test_help_starts_with_commands_label():
     assert format_command_help().startswith("Commands:  /")
+
+
+# --------------------------------------------------------------------------- #
+# shared slash grammar <-> picker parity
+# --------------------------------------------------------------------------- #
+
+
+#: Names a mounted skill root can produce (``parser.py`` only requires a
+#: non-empty string) that ``/name`` can never activate, so the agent runtime
+#: resolves them as unknown commands.
+_UNACTIVATABLE_SKILL_NAMES = ["Web_Search", "WebSearch", "-lead", "trail-", "a--b", "with space", "good_skill"]
+_MIXED_SKILL_NAMES = ["good-skill", "Web_Search", "a7", "trail-", "with space", "context"]
+
+
+def _mixed_rows(names: list[str]) -> list[dict]:
+    return [{"name": name, "description": f"{name} description", "enabled": True} for name in names]
+
+
+@pytest.mark.parametrize("odd_name", _UNACTIVATABLE_SKILL_NAMES)
+def test_build_registry_omits_skills_the_slash_grammar_cannot_activate(odd_name):
+    registry = build_registry(_mixed_rows([odd_name, "good-skill"]))
+
+    offered = [command.name for command in registry if command.category == "skill"]
+    assert offered == ["good-skill"], odd_name
+    assert resolve(f"/{odd_name} task", skills=offered).kind == "unknown", odd_name
+
+
+def test_build_registry_keeps_every_activatable_skill_name():
+    registry = build_registry(_mixed_rows(_MIXED_SKILL_NAMES))
+
+    offered = [command.name for command in registry if command.category == "skill"]
+    assert offered == ["good-skill", "a7", "context"]
+
+
+def test_every_offered_skill_command_round_trips_through_the_shared_parser():
+    offered = [command.name for command in build_registry(_mixed_rows(_MIXED_SKILL_NAMES)) if command.category == "skill"]
+
+    for name in offered:
+        reference = parse_slash_skill_reference(f"/{name} task")
+        assert reference is not None, name
+        assert reference.name == name, name
+
+
+def test_no_offered_skill_command_resolves_as_unknown():
+    registry = build_registry(_mixed_rows(_MIXED_SKILL_NAMES))
+    skill_names = [command.name for command in registry if command.category == "skill"]
+
+    for name in skill_names:
+        resolved = resolve(f"/{name} task", skills=skill_names)
+        assert resolved.kind == "skill", (name, resolved.kind)
