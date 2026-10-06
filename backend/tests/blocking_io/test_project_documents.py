@@ -2,8 +2,8 @@
 
 Guards the Phase-2 Slice-B filesystem surfaces (spec §13): upload staging
 and the atomic rename into the document namespace, dedup-hit staging
-cleanup, the conversion publish path (temp file + atomic rename of
-``derived/converted.md``), and the ``read_project_document`` tool's sampled
+cleanup, the conversion publish path (``.staging/`` conversion + atomic
+rename into ``derived/converted.md``), and the ``read_project_document`` tool's sampled
 text detection and content reads.
 
 A real ``init_engine`` cannot run under the strict Blockbuster gate
@@ -167,9 +167,10 @@ async def test_tool_read_dispatches_off_the_loop(tmp_path, monkeypatch) -> None:
 
 async def test_conversion_publish_path_dispatches_off_the_loop(tmp_path, monkeypatch) -> None:
     """First read of a convertible document validates the original
-    (``_content_intact``) and runs the whole convert + temp write + atomic
-    rename (``_convert_and_publish``, inside the locked conversion callback)
-    through the offload."""
+    (``_content_intact``), converts into ``.staging/`` (``_convert_to_staging``,
+    outside any transaction), publishes with an atomic rename
+    (``_publish_converted``, inside the locked publish callback) and removes
+    the staging file (``_remove_staging``) — all through the offload."""
 
     async def fake_convert(file_path, output_path=None):
         output_path.write_text("# converted markdown", encoding="utf-8")
@@ -188,7 +189,9 @@ async def test_conversion_publish_path_dispatches_off_the_loop(tmp_path, monkeyp
         assert payload["content"] == "# converted markdown"
         assert "_content_intact" in calls
         assert "resolve_document_paths" in calls
-        assert "_convert_and_publish" in calls
+        assert "_convert_to_staging" in calls
+        assert "_publish_converted" in calls
+        assert "_remove_staging" in calls
         assert "_read_text_window" in calls
         assert "_cached_char_count" in calls
     finally:

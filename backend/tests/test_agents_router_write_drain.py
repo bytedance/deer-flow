@@ -62,15 +62,68 @@ async def test_agent_persistent_writes_route_through_write_drain(_agent_env, mon
         assert isinstance(expected_errors, tuple)
         return func(*args, **kwargs)
 
-    monkeypatch.setattr(router, "_drained_write", drained)
+    monkeypatch.setattr(router, "run_drained_write", drained)
 
     await create_agent_endpoint(AgentCreateRequest(name="planner", model="agent-model"))
+    await router.import_agent_package(router.AgentPackage(format="deerflow.custom-agent", version=1, agent=router.AgentPackageAgent(name="imported-planner", model="agent-model")))
     await update_agent("planner", AgentUpdateRequest(description="later"))
     await get_agent("planner")
     await update_user_profile(UserProfileUpdateRequest(content="prefs"))
     await router.delete_agent("planner")
 
-    assert calls == ["Create agent", "Update agent", "Update user profile", "Delete agent"]
+    assert calls == ["Create agent", "Create agent", "Update agent", "Update user profile", "Delete agent"]
+
+
+@pytest.mark.parametrize("import_package", [False, True], ids=["create", "import"])
+async def test_agent_creation_drains_store_write_across_repeated_cancellation(_agent_env, monkeypatch, import_package):
+    from app.gateway.routers import agents as router
+
+    store = router.get_agent_store()
+    user_id = router.get_effective_user_id()
+    create = store.create
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_create(*args, **kwargs):
+        started.set()
+        assert release.wait(timeout=5)
+        return create(*args, **kwargs)
+
+    monkeypatch.setattr(store, "create", blocked_create)
+    monkeypatch.setattr(router, "get_agent_store", lambda: store)
+
+    if import_package:
+        request = router.import_agent_package(
+            router.AgentPackage(
+                format="deerflow.custom-agent",
+                version=1,
+                agent=router.AgentPackageAgent(name="planner", model="agent-model", soul="Keep working.", memory_enabled=False),
+            )
+        )
+    else:
+        request = create_agent_endpoint(AgentCreateRequest(name="planner", model="agent-model", soul="Keep working."))
+
+    task = asyncio.create_task(request)
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    config = router.load_agent_config("planner", user_id=user_id)
+    assert config.memory_enabled is (not import_package)
+    assert router.load_agent_soul("planner", user_id=user_id) == "Keep working."
 
 
 async def test_agent_update_drains_started_store_write_across_repeated_cancellation(_agent_env, monkeypatch):
@@ -140,7 +193,7 @@ async def test_agent_update_logs_lost_worker_failure_after_cancellation(_agent_e
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
 
-    failures = [record for record in caplog.records if record.name == router.__name__ and "Update agent failed" in record.message]
+    failures = [record for record in caplog.records if record.name == "app.gateway.persistent_writes" and "Update agent failed" in record.message]
     assert len(failures) == 1
     assert "OSError" in failures[0].message
     assert "worker-secret" not in caplog.text

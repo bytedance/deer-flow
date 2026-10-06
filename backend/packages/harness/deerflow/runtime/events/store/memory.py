@@ -128,14 +128,16 @@ class MemoryRunEventStore(RunEventStore):
         # contiguous slice located with bisect (O(log m)) rather than a full scan.
         messages = self._messages.get(thread_id, [])
 
-        if before_seq is not None:
+        if after_seq is not None:
+            # Page forward within both exclusive bounds, without copying the
+            # whole window before applying the limit.
+            lo = bisect.bisect_right(messages, after_seq, key=lambda e: e["seq"])
+            hi = len(messages) if before_seq is None else bisect.bisect_left(messages, before_seq, key=lambda e: e["seq"])
+            return messages[lo : min(hi, lo + limit)]
+        elif before_seq is not None:
             # Records with seq < before_seq, then the last `limit` of them.
             hi = bisect.bisect_left(messages, before_seq, key=lambda e: e["seq"])
             return messages[max(0, hi - limit) : hi]
-        elif after_seq is not None:
-            # Records with seq > after_seq, then the first `limit` of them.
-            lo = bisect.bisect_right(messages, after_seq, key=lambda e: e["seq"])
-            return messages[lo : lo + limit]
         else:
             # Return the latest `limit` records, ascending.
             return messages[-limit:]
@@ -162,7 +164,7 @@ class MemoryRunEventStore(RunEventStore):
             run_events = [e for e in run_events if e.get("seq", 0) > after_seq]
         return run_events[:limit]
 
-    async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None):
+    async def list_messages_by_run(self, thread_id, run_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         # Per-run, messages-only, seq-sorted: the seq window is a contiguous
         # slice located with bisect (O(log m_run)) over only this run's
         # messages, instead of re-scanning the whole thread's event log.

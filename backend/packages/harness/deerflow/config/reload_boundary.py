@@ -82,6 +82,10 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     ),
     "subagent_runtime": ("the shared native-subagent admission controller and isolated execution loop are configured once during Gateway lifespan startup; changing process slots, queue policy, or queue bounds requires a restart."),
     "subagent_batches": ("the durable subagent batch service is constructed and started once during Gateway lifespan startup; scheduler limits, leases, and recovery behavior are captured by that service instance."),
+    "deployment": (
+        "langgraph_runtime() evaluates deployment.multi_instance once at startup inside the multi-process safety gate (_enforce_postgres_for_multi_worker); "
+        "the gate never re-runs on config.yaml edits, so declaring or withdrawing a multi-instance topology needs a Gateway restart on every instance."
+    ),
     "run_ownership": (
         "RunOwnershipConfig is captured once into RunManager at langgraph_runtime() startup; the lease heartbeat background task is created and "
         "started there, and heartbeat_enabled / lease_seconds / grace_seconds are not re-read on config.yaml edits."

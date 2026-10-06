@@ -1,5 +1,6 @@
 import asyncio
 import re
+import threading
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -34,6 +35,8 @@ from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.uploads.companions import companion_names, register_companion, resolve_companion
+from deerflow.utils.file_outline import extract_outline_for_file
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
@@ -743,6 +746,55 @@ def test_delete_thread_route_rejects_active_thread_operation_without_deleting_me
 
     assert response.status_code == 409
     assert asyncio.run(store.aget(THREADS_NS, "thread-active-delete")) is not None
+
+
+def test_delete_thread_route_holds_reservation_until_cancelled_removal_finishes(tmp_path):
+    """A cancelled delete must not release its reservation mid-rmtree.
+
+    The removal runs on a file-IO worker. Cancelling the request abandons the
+    await, not the worker, so a bare await would let ``reserve_thread_operation``
+    exit -- and admit a new run on the thread -- while its files are still
+    being deleted. The stalled removal below makes that window observable.
+    """
+    events: list[str] = []
+    removal_started = threading.Event()
+    release_removal = threading.Event()
+
+    class RecordingRunManager(_ThreadTestRunManager):
+        @asynccontextmanager
+        async def reserve_thread_operation(self, _thread_id: str, **_kwargs):
+            try:
+                yield
+            finally:
+                events.append("reservation released")
+
+    def stalled_delete_thread_dir(_thread_id, *, user_id=None):
+        removal_started.set()
+        release_removal.wait(timeout=5)
+        events.append("removal finished")
+
+    paths = Paths(tmp_path)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(run_manager=RecordingRunManager(), checkpointer=None)))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(threads.delete_thread_data.__wrapped__("thread-cancelled-delete", request))
+        assert await asyncio.to_thread(removal_started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        # Cancellation is deferred while the removal is still running.
+        assert not task.done()
+        assert events == []
+        release_removal.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    with (
+        patch("app.gateway.routers.threads.get_paths", return_value=paths),
+        patch.object(paths, "delete_thread_dir", side_effect=stalled_delete_thread_dir),
+    ):
+        asyncio.run(scenario())
+
+    assert events == ["removal finished", "reservation released"]
 
 
 def test_branch_thread_route_rejects_concurrent_source_operation_without_creating_child():
@@ -3896,6 +3948,13 @@ def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:
     source_uploads.mkdir(parents=True, exist_ok=True)
     (source_outputs / "result.txt").write_text("answer", encoding="utf-8")
     (source_uploads / ".upload-stale.part").write_text("partial", encoding="utf-8")
+    original = source_uploads / "report.pdf"
+    markdown = source_uploads / "report.md"
+    original.write_bytes(b"%PDF")
+    markdown.write_text("# Converted report\n", encoding="utf-8")
+    register_companion(original, markdown)
+    (source_uploads / "unrelated.pdf").write_bytes(b"%PDF")
+    (source_uploads / "unrelated.md").write_text("# User notes\n", encoding="utf-8")
 
     human = HumanMessage(id="human-file", content="Make a file")
     ai = AIMessage(id="ai-file", content="Done")
@@ -3928,6 +3987,11 @@ def test_branch_thread_best_effort_copies_current_workspace(tmp_path) -> None:
     assert target_user_data.exists()
     assert (target_user_data / "outputs" / "result.txt").read_text(encoding="utf-8") == "answer"
     assert not (target_user_data / "uploads" / ".upload-stale.part").exists()
+    branch_original = target_user_data / "uploads" / "report.pdf"
+    assert resolve_companion(branch_original) == target_user_data / "uploads" / "report.md"
+    assert extract_outline_for_file(branch_original)[0] == [{"title": "Converted report", "line": 1}]
+    assert companion_names(target_user_data / "uploads") == {"report.md"}
+    assert resolve_companion(target_user_data / "uploads" / "unrelated.pdf") is None
     assert source_user_data.exists()
 
 
