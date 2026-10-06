@@ -509,12 +509,28 @@ class TestWechatAllowedUsers:
         assert mapping._allowed_users == frozenset()
         assert not mapping._check_user("wxid-alice")
 
-    def test_comma_separated_string_is_one_id(self):
-        channel = self._channel({"allowed_users": "wxid-alice,wxid-bob"})
+    @pytest.mark.parametrize("separator", [",", ", ", " ", "\t", "\n", "\u2003"])
+    def test_scalar_ids_with_separators_warn_but_remain_one_id(self, separator, caplog):
+        literal_id = f"wxid-alice{separator}wxid-bob"
+        with caplog.at_level(logging.WARNING, logger="app.channels.wechat"):
+            channel = self._channel({"allowed_users": literal_id})
 
-        assert channel._check_user("wxid-alice,wxid-bob")
+        assert channel._check_user(literal_id)
         assert not channel._check_user("wxid-alice")
+        assert not channel._check_user("wxid-bob")
         assert not channel._check_user("w")
+        assert "one literal user ID" in caplog.text
+        assert "YAML list" in caplog.text
+        assert "wxid-alice" not in caplog.text
+        assert "wxid-bob" not in caplog.text
+
+    @pytest.mark.parametrize("user_id", ["wxid-alice", " \twxid-alice\n "])
+    def test_scalar_id_padding_does_not_warn(self, user_id, caplog):
+        with caplog.at_level(logging.WARNING, logger="app.channels.wechat"):
+            channel = self._channel({"allowed_users": user_id})
+
+        assert channel._check_user("wxid-alice")
+        assert caplog.records == []
 
     def test_gate_uses_ilink_user_id_and_skips_media_for_strangers(self):
         async def go():

@@ -204,6 +204,8 @@ def _parse_allowed_users(allowed_users: Any) -> frozenset[str] | None:
     """
     if allowed_users is None or (isinstance(allowed_users, str) and not allowed_users.strip()):
         return None
+    if isinstance(allowed_users, str) and ("," in allowed_users or any(char.isspace() for char in allowed_users.strip())):
+        logger.warning("[WeChat] allowed_users is a scalar string containing separators; treating it as one literal user ID. Use a YAML list for multiple IDs")
     entries = list(allowed_users) if isinstance(allowed_users, (list, tuple, set, frozenset)) else [allowed_users]
     if not entries:
         return None
