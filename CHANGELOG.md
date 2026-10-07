@@ -697,6 +697,13 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **channels:** Opening an IM-channel conversation on the web while its run is still
+  going no longer shows the user's message twice. Channel run input carried no
+  message id, so the Gateway stored it id-less in the run record while the
+  checkpoint copy received a generated uuid, and the web client's reconnect
+  hydration, which matches the two copies by id, kept both until the run
+  finished. Channel human messages now carry their own id, so both copies share
+  it.
 - **deploy:** `make up`, `make down` and `make prod-logs` no longer stop on a
   fresh checkout with `env file .../.env not found`. `.env` and `frontend/.env` are gitignored and
   `make up` does not create them, but the production compose file required

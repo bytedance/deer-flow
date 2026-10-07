@@ -615,6 +615,9 @@
 
 ### 修复
 
+- **渠道：** 在 IM 渠道会话的运行尚未结束时从网页打开它，用户消息不再显示两次。渠道运行输入此前不带消息 id，
+  Gateway 在运行记录中按原样保存无 id 的消息，而检查点中的副本会被分配新的 uuid；网页客户端重连时按 id
+  合并这两份副本，因此在运行结束前两条都会显示。现在渠道发送的人类消息自带 id，两份副本共享同一 id。
 - **部署：** 在全新检出的仓库上，`make up`、`make down` 与 `make prod-logs` 
   不再因 `env file .../.env not found` 而中止。`.env` 与
   `frontend/.env` 已被 gitignore，`make up` 也不会创建它们，但生产 compose 文件此前要求两者都存在。
