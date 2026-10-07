@@ -757,55 +757,59 @@ class DeerFlowClient:
             pass
         return {"goal": None}
 
-    def list_threads(self, limit: int = 10) -> dict:
+    def list_threads(self, limit: int = 10, *, sort_by: Literal["created_at", "updated_at"] = "created_at") -> dict:
         """List the recent N threads.
+
+        Threads are found through their root checkpoint (metadata
+        ``step == -1`` in the root namespace). A thread gets exactly one: its
+        first graph run writes it, and so do the Gateway and goal paths that
+        create a thread before any run. Scanning roots rather than every
+        checkpoint keeps ``limit`` counting threads, so one long thread cannot
+        crowd the others out, and costs one row per thread.
 
         Args:
             limit: Maximum number of threads to return. Default is 10.
+            sort_by: ``"created_at"`` (default) or ``"updated_at"`` — the
+                timestamp to sort by, newest first. ``"updated_at"`` reads the
+                latest checkpoint of every thread; ``"created_at"`` only of the
+                returned ones.
 
         Returns:
             Dict with "thread_list" key containing list of thread info dicts,
-            sorted by thread creation time descending.
+            sorted by ``sort_by`` descending.
         """
+        if sort_by not in ("created_at", "updated_at"):
+            raise ValueError(f"sort_by must be 'created_at' or 'updated_at', got {sort_by!r}")
         checkpointer = self._get_thread_checkpointer()
 
-        thread_info_map = {}
-
-        for cp in checkpointer.list(config=None, limit=limit):
+        created_at: dict[str, str | None] = {}
+        for cp in checkpointer.list(config=None, filter={"step": -1}):
             cfg = cp.config.get("configurable", {})
             thread_id = cfg.get("thread_id")
-            if not thread_id:
+            # Subgraph namespaces have roots of their own; only the root namespace's marks the thread.
+            if not thread_id or cfg.get("checkpoint_ns"):
                 continue
+            created_at[thread_id] = cp.checkpoint.get("ts")
 
-            ts = cp.checkpoint.get("ts")
-            checkpoint_id = cfg.get("checkpoint_id")
+        thread_ids = sorted(created_at, key=lambda tid: created_at[tid] or "", reverse=True)
+        if sort_by == "created_at":
+            thread_ids = thread_ids[:limit]
 
-            if thread_id not in thread_info_map:
-                channel_values = cp.checkpoint.get("channel_values", {})
-                thread_info_map[thread_id] = {
+        threads = []
+        for thread_id in thread_ids:
+            latest = checkpointer.get_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+            if latest is None:
+                continue
+            threads.append(
+                {
                     "thread_id": thread_id,
-                    "created_at": ts,
-                    "updated_at": ts,
-                    "latest_checkpoint_id": checkpoint_id,
-                    "title": channel_values.get("title"),
+                    "created_at": created_at[thread_id],
+                    "updated_at": latest.checkpoint.get("ts"),
+                    "latest_checkpoint_id": latest.config.get("configurable", {}).get("checkpoint_id"),
+                    "title": latest.checkpoint.get("channel_values", {}).get("title"),
                 }
-            else:
-                # Explicitly compare timestamps to ensure accuracy when iterating over unordered namespaces.
-                # Treat None as "missing" and only compare when existing values are non-None.
-                if ts is not None:
-                    current_created = thread_info_map[thread_id]["created_at"]
-                    if current_created is None or ts < current_created:
-                        thread_info_map[thread_id]["created_at"] = ts
-
-                    current_updated = thread_info_map[thread_id]["updated_at"]
-                    if current_updated is None or ts > current_updated:
-                        thread_info_map[thread_id]["updated_at"] = ts
-                        thread_info_map[thread_id]["latest_checkpoint_id"] = checkpoint_id
-                        channel_values = cp.checkpoint.get("channel_values", {})
-                        thread_info_map[thread_id]["title"] = channel_values.get("title")
-
-        threads = list(thread_info_map.values())
-        threads.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+            )
+        threads.sort(key=lambda x: x.get(sort_by) or "", reverse=True)
 
         return {"thread_list": threads[:limit]}
 

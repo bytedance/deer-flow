@@ -2218,44 +2218,122 @@ class TestThreadQueries:
         snapshot.created_at = checkpoint_tuple.checkpoint["ts"]
         return snapshot
 
-    def test_list_threads_empty(self, client):
-        mock_checkpointer = MagicMock()
-        mock_checkpointer.list.return_value = []
-        client._checkpointer = mock_checkpointer
+    @pytest.fixture(params=["memory", "sqlite"])
+    def saver(self, request):
+        """A real checkpointer: InMemorySaver lists per thread, SqliteSaver newest-first across threads."""
+        if request.param == "memory":
+            from langgraph.checkpoint.memory import InMemorySaver
 
-        result = client.list_threads()
-        assert result == {"thread_list": []}
-        mock_checkpointer.list.assert_called_once_with(config=None, limit=10)
+            yield InMemorySaver()
+            return
+        import sqlite3
 
-    def test_list_threads_basic(self, client):
-        mock_checkpointer = MagicMock()
-        client._checkpointer = mock_checkpointer
+        from langgraph.checkpoint.sqlite import SqliteSaver
 
-        cp1 = self._make_mock_checkpoint_tuple("t1", "c1", "2023-01-01T10:00:00Z", title="Thread 1")
-        cp2 = self._make_mock_checkpoint_tuple("t1", "c2", "2023-01-01T10:05:00Z", title="Thread 1 Updated")
-        cp3 = self._make_mock_checkpoint_tuple("t2", "c3", "2023-01-02T10:00:00Z", title="Thread 2")
-        cp_empty = self._make_mock_checkpoint_tuple("", "c4", "2023-01-03T10:00:00Z", title="Thread Empty")
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+        yield SqliteSaver(conn)
+        conn.close()
 
-        # Mock list returns out of order to test the timestamp sorting/comparison
-        # Also includes a checkpoint with an empty thread_id which should be skipped
-        mock_checkpointer.list.return_value = [cp2, cp1, cp_empty, cp3]
+    @staticmethod
+    def _put_thread(saver, thread_id: str, timestamps: list[str], *, title: str | None = None, checkpoint_ns: str = "") -> list[str]:
+        """Write a run-shaped history: a step -1 root, then one checkpoint per later timestamp."""
+        from langgraph.checkpoint.base import empty_checkpoint
 
-        result = client.list_threads(limit=5)
-        mock_checkpointer.list.assert_called_once_with(config=None, limit=5)
+        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}}
+        checkpoint_ids = []
+        for step, ts in enumerate(timestamps, start=-1):
+            checkpoint = empty_checkpoint()
+            checkpoint["ts"] = ts
+            new_versions = {}
+            if title:
+                # InMemorySaver keeps channel values as blobs keyed by version.
+                new_versions = {"title": step + 2}
+                checkpoint["channel_values"] = {"title": f"{title} #{step}"}
+                checkpoint["channel_versions"] = dict(new_versions)
+            metadata = {"source": "input" if step == -1 else "loop", "step": step, "parents": {}}
+            config = saver.put(config, checkpoint, metadata, new_versions)
+            checkpoint_ids.append(config["configurable"]["checkpoint_id"])
+        return checkpoint_ids
 
-        threads = result["thread_list"]
-        assert len(threads) == 2
+    def test_list_threads_empty(self, client, saver):
+        client._checkpointer = saver
 
-        # t2 should be first because its created_at (2023-01-02) is newer than t1 (2023-01-01)
-        assert threads[0]["thread_id"] == "t2"
-        assert threads[0]["created_at"] == "2023-01-02T10:00:00Z"
-        assert threads[0]["title"] == "Thread 2"
+        assert client.list_threads() == {"thread_list": []}
 
-        assert threads[1]["thread_id"] == "t1"
-        assert threads[1]["created_at"] == "2023-01-01T10:00:00Z"
-        assert threads[1]["updated_at"] == "2023-01-01T10:05:00Z"
-        assert threads[1]["latest_checkpoint_id"] == "c2"
-        assert threads[1]["title"] == "Thread 1 Updated"
+    def test_list_threads_limit_counts_threads_not_checkpoints(self, client, saver):
+        client._checkpointer = saver
+        self._put_thread(saver, "t-old", ["2023-01-01T10:00:00Z", "2023-01-01T10:01:00Z"])
+        # A long conversation writes far more checkpoints than the limit.
+        self._put_thread(saver, "t-busy", [f"2023-01-02T10:{minute:02d}:00Z" for minute in range(30)])
+
+        threads = client.list_threads(limit=2)["thread_list"]
+
+        assert [t["thread_id"] for t in threads] == ["t-busy", "t-old"]
+
+    def test_list_threads_reports_root_creation_and_latest_checkpoint(self, client, saver):
+        client._checkpointer = saver
+        checkpoint_ids = self._put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:05:00Z", "2023-01-01T10:09:00Z"], title="Thread 1")
+
+        (thread,) = client.list_threads()["thread_list"]
+
+        assert thread == {
+            "thread_id": "t1",
+            "created_at": "2023-01-01T10:00:00Z",
+            "updated_at": "2023-01-01T10:09:00Z",
+            "latest_checkpoint_id": checkpoint_ids[-1],
+            "title": "Thread 1 #1",
+        }
+
+    def test_list_threads_sorts_by_creation_then_slices(self, client, saver):
+        client._checkpointer = saver
+        self._put_thread(saver, "t-first", ["2023-01-01T10:00:00Z", "2023-01-05T10:00:00Z"])
+        self._put_thread(saver, "t-second", ["2023-01-02T10:00:00Z"])
+        self._put_thread(saver, "t-third", ["2023-01-03T10:00:00Z"])
+
+        threads = client.list_threads(limit=2)["thread_list"]
+
+        assert [t["thread_id"] for t in threads] == ["t-third", "t-second"]
+
+    def test_list_threads_sort_by_updated_at_returns_most_recently_active(self, client, saver):
+        client._checkpointer = saver
+        self._put_thread(saver, "t-first", ["2023-01-01T10:00:00Z", "2023-01-05T10:00:00Z"])
+        self._put_thread(saver, "t-second", ["2023-01-02T10:00:00Z"])
+        self._put_thread(saver, "t-third", ["2023-01-03T10:00:00Z"])
+
+        threads = client.list_threads(limit=2, sort_by="updated_at")["thread_list"]
+
+        assert [t["thread_id"] for t in threads] == ["t-first", "t-third"]
+
+    def test_list_threads_ignores_subgraph_namespace_roots(self, client, saver):
+        client._checkpointer = saver
+        self._put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:05:00Z"])
+        # A subgraph's own root is newer than the thread's but does not create a thread.
+        self._put_thread(saver, "t1", ["2023-01-01T10:02:00Z"], checkpoint_ns="subgraph")
+
+        (thread,) = client.list_threads()["thread_list"]
+
+        assert thread["created_at"] == "2023-01-01T10:00:00Z"
+        assert thread["updated_at"] == "2023-01-01T10:05:00Z"
+
+    def test_list_threads_rejects_unknown_sort_key(self, client, saver):
+        client._checkpointer = saver
+
+        with pytest.raises(ValueError, match="sort_by"):
+            client.list_threads(sort_by="title")
+
+    def test_tui_session_resolves_past_a_busy_thread(self, client, saver):
+        from deerflow.tui.cli import LaunchPlan
+        from deerflow.tui.session import Session
+
+        client._checkpointer = saver
+        self._put_thread(saver, "t-old", ["2023-01-01T10:00:00Z", "2023-01-09T10:00:00Z"], title="Old chat")
+        self._put_thread(saver, "t-busy", [f"2023-01-02T10:{minute:02d}:00Z" for minute in range(120)], title="Busy chat")
+        session = Session(client=client)
+
+        # --resume <title> finds a thread whose checkpoints fall outside the newest 100.
+        assert session.resolve_ref("Old chat #0") == "t-old"
+        # --continue resumes the most recently active thread, not the most recently created one.
+        assert session.resolve_thread(LaunchPlan(mode="tui", continue_recent=True)) == "t-old"
 
     def test_list_threads_fallback_checkpointer(self, client):
         mock_checkpointer = MagicMock()
