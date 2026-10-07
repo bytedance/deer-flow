@@ -47,6 +47,7 @@ from deerflow.runtime.events.catalog import (
     RUN_ERROR_EVENT,
     RUN_START_EVENT,
 )
+from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import message_to_text, restore_original_human_message
 
 if TYPE_CHECKING:
@@ -411,7 +412,7 @@ class RunJournal(BaseCallbackHandler):
         is_ai_message = isinstance(message, AIMessage) or getattr(message, "type", None) == "ai"
         if not is_ai_message or (caller is not None and caller != "lead_agent"):
             return None
-        text = self._message_text(message).strip()
+        text = strip_leading_think_blocks(self._message_text(message))
         return text[:2000] if text else None
 
     def _record_message_summary(self, message: BaseMessage, *, caller: str | None = None) -> None:

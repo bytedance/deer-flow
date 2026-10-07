@@ -1343,6 +1343,8 @@ and cloud-metadata hostname detection is case-insensitive.
 
 For Python credential mappings, SkillScan checks literal values while treating ordinary dictionary keys as labels. A mapping such as `tokens = {"access_token": os.getenv("ACCESS_TOKEN")}` does not report a hardcoded credential. Keys matching a recognized cloud or API token format are still checked as embedded credentials.
 
+SkillScan blocks embedded legacy and modern `sk-` API tokens, including OpenAI project, service-account, and admin keys and Anthropic keys, even in Bearer headers without a secret assignment. Token bodies may contain `-` and `_`; finding evidence is fully redacted. Placeholder examples do not suppress detection of later credentials in the same file. Scheduled-task notification summaries also redact these key formats before sending them to external IM platforms.
+
 DeerFlow also ships with **skill-reviewer**, a public skill for read-only skill quality review. It uses the built-in `review_skill_package` tool to inspect installed skills, local packages, archives, or pasted `SKILL.md` content without activating the target skill, binding its secrets, executing its scripts, or installing it. The tool returns a compact, tag-neutralized JSON payload to the model context and keeps the full raw review payload in the tool artifact for programmatic consumers. The deterministic review core reuses DeerFlow parsing and SkillScan facts, emits versioned JSON contracts under `contracts/skill_review/`, and can be run from the backend CLI:
 
 ```bash
@@ -2160,6 +2162,8 @@ request the binary capability retain the legacy JSON/base64 frame protocol.
 
 **Summarization**: Within a session, DeerFlow manages context aggressively — summarizing completed sub-tasks, offloading intermediate results to the filesystem, compressing what's no longer immediately relevant. This lets it stay sharp across long, multi-step tasks without blowing the context window.
 
+**Tool Output Preview Budget**: Structured synopses of externalized results have a character budget. Long JSON keys and paths are shortened with `...`, and oversized synopsis bodies include a truncation notice. Raw head/tail samples, the full file reference, and `read_file` guidance are preserved; read the saved file for exact keys or complete output.
+
 **Strict Tool-Call Recovery**: When a provider or middleware interrupts a tool-call loop, DeerFlow now strips provider-level raw tool-call metadata on forced-stop assistant messages and injects placeholder tool results for dangling calls before the next model invocation. This keeps OpenAI-compatible reasoning models that strictly validate `tool_call_id` sequences from failing with malformed history errors.
 
 **Visible Tool-Run Completion**: For interactive turns, DeerFlow retries an empty post-tool final response once, then surfaces a visible error instead of reporting a silent successful run.
@@ -2486,6 +2490,8 @@ Current MVP capabilities:
 - Execute scheduled work through the normal DeerFlow run lifecycle
 - When `channel_connections.enabled: true`, send scheduled task updates to the task owner's connected IM identities (outbox + delivery worker) on apps that support proactive push, which today is WeCom; Settings shows for each app whether updates are sent there, and other apps get none. Each occurrence sends at most one message: a finished, failed or goal-missed run, the automatic pause after three missed goals, a pause by the agent (its stop condition was met) or the task finishing (all `max_runs` done, `end_at` reached); when several apply, the pause or finish wins and still says how the last run went. A one-time task sends only its run's outcome. The message is queued in the same database transaction that records the outcome, so runs finalized after a crash or a lost lease notify exactly once. It reads on its own, in your web UI language (else `channel_connections.notification_locale`): the task title, what happened, a one-line result when the agent replied, and "Open DeerFlow → Scheduled tasks for details.", with no IDs and no links. Plain manual "run now" trials and interrupted runs stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart). Channel/transport outages park deliveries without exhausting retries, for up to about a day; platform rejections retry for roughly 15 minutes before settling as `failed`. An identity you disconnect while a delivery is waiting is never pushed to: the row is dropped as `failed`.
 - Browse execution history in pages of 50; older pages pause automatic refresh, with an explicit return to the latest runs. Counts appear only after a successful read; loading and failed reads are not reported as zero runs.
+
+Derived run summaries omit leading inline `<think>` reasoning before limiting the text, so a long thought does not replace the actual answer in previews or scheduled notices. Original response history and literal tags in the answer are unchanged; previously stored run summaries are not rewritten.
 
 **Filter execution history through the API**
 
