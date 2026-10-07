@@ -1075,7 +1075,7 @@ def _extract_retry_after_ms(exc: BaseException) -> int | None:
     try:
         multiplier = 1 if "ms" in header_name.lower() else 1000
         return max(0, int(float(raw) * multiplier))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         try:
             target = parsedate_to_datetime(str(raw))
             delta = target.timestamp() - time.time()
