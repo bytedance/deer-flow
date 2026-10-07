@@ -1,7 +1,8 @@
 """SQL repository for the scheduled-task notification delivery outbox.
 
-The completion hook calls :meth:`NotificationDeliveryRepository.enqueue`
-(idempotent), and the delivery worker uses ``claim_due_deliveries`` /
+The scheduler's finalization observer calls
+:meth:`NotificationDeliveryRepository.enqueue_in_session` (idempotent, inside
+the outcome's transaction), and the delivery worker uses ``claim_due_deliveries`` /
 ``mark_sent`` / ``mark_failed``. Claim flips rows ``pending -> sending``
 inside one transaction guarded by ``status = 'pending'`` and stamps a fresh
 ``claim_token``. Completion writes that carry the token are conditionally

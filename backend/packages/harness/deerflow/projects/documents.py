@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config.paths import Paths
-from deerflow.uploads.manager import is_reserved_upload_filename
+from deerflow.uploads.manager import normalize_filename
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.text_detection import is_text_file_by_content
@@ -46,8 +46,6 @@ if TYPE_CHECKING:
     from deerflow.persistence.projects import ProjectDocumentRepository
 
 logger = logging.getLogger(__name__)
-
-_MAX_FILENAME_BYTES = 255
 
 
 class ShelfUploadTooLargeError(Exception):
@@ -64,17 +62,9 @@ def validate_shelf_filename(name: str) -> str:
     including Win32 aliases; existing shelf rows are not revalidated on reads.
     """
     candidate = name.strip() if name else ""
-    if not candidate:
-        raise ValueError("Filename is empty")
     if "/" in candidate or "\\" in candidate:
         raise ValueError(f"Filename contains a path separator: {name!r}")
-    if candidate in {".", ".."}:
-        raise ValueError(f"Filename is unsafe: {name!r}")
-    if len(candidate.encode("utf-8")) > _MAX_FILENAME_BYTES:
-        raise ValueError(f"Filename exceeds {_MAX_FILENAME_BYTES} UTF-8 bytes")
-    if is_reserved_upload_filename(candidate):
-        raise ValueError(f"Filename uses reserved upload staging pattern: {name!r}")
-    return candidate
+    return normalize_filename(candidate)
 
 
 def shelf_relpath(project_id: str, sha256: str, document_id: str) -> str:
@@ -494,6 +484,7 @@ _TEXT_READ_CHUNK = 65536
 #: an entry until LRU eviction — no invalidation hook needed.
 _CHAR_COUNT_CACHE: OrderedDict[tuple[str, str], int] = OrderedDict()
 _CHAR_COUNT_CACHE_MAX = 256
+_CHAR_COUNT_CACHE_LOCK = threading.Lock()
 
 
 def _read_text_window(path: Path, *, offset: int, limit: int) -> str:
@@ -538,14 +529,17 @@ def _count_text_chars(path: Path) -> int:
 def _cached_char_count(document_id: str, sha256: str, path: Path) -> int:
     """Worker-thread: character count of an immutable document, cached by content identity."""
     key = (document_id, sha256)
-    cached = _CHAR_COUNT_CACHE.get(key)
-    if cached is not None:
-        _CHAR_COUNT_CACHE.move_to_end(key)
-        return cached
+    with _CHAR_COUNT_CACHE_LOCK:
+        cached = _CHAR_COUNT_CACHE.get(key)
+        if cached is not None:
+            _CHAR_COUNT_CACHE.move_to_end(key)
+            return cached
+    # Only cache metadata is serialized; scans of unrelated files stay concurrent.
     total = _count_text_chars(path)
-    _CHAR_COUNT_CACHE[key] = total
-    while len(_CHAR_COUNT_CACHE) > _CHAR_COUNT_CACHE_MAX:
-        _CHAR_COUNT_CACHE.popitem(last=False)
+    with _CHAR_COUNT_CACHE_LOCK:
+        _CHAR_COUNT_CACHE[key] = total
+        while len(_CHAR_COUNT_CACHE) > _CHAR_COUNT_CACHE_MAX:
+            _CHAR_COUNT_CACHE.popitem(last=False)
     return total
 
 

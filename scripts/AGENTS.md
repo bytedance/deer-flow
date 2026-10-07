@@ -29,6 +29,15 @@ synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
 
+Both compose files mark `../.env` and `../frontend/.env` optional
+(`path`/`required: false`, Compose 2.24+), so `make up`, `make down` and
+`make prod-logs` on a fresh checkout neither abort nor create them; an
+unreadable `.env` still fails. Do not seed them from the examples in
+`deploy.sh` as `docker.sh start` does: `.env.example` holds placeholder API
+keys the production Gateway would receive, and `make config` skips files that
+exist. Pinned by `backend/tests/test_compose_default_bind_host.py` and
+`backend/tests/test_gateway_startup.py`.
+
 `deploy.sh` never sources the repo-root `.env`; Compose reads it via
 `--env-file`, and shell exports outrank that file during interpolation (an
 exported-but-empty variable still wins). So `BETTER_AUTH_SECRET` and
@@ -89,6 +98,14 @@ Git Bash wrapper. Shell scripts that invoke sibling repository scripts must
 likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
+
+`make clean` deletes `backend/.deer-flow` (database, users, threads, uploads,
+secrets), which both compose stacks mount into `deer-flow-gateway`. Its recipe
+runs `check-data-not-in-use.sh` before `make stop` (which would stop a live
+stack's sandboxes) and refuses while that container runs; an absent or
+unreachable Docker passes. `make stop` must still run before the delete: it
+stops `deer-flow-sandbox*` containers, whose thread mounts live in that tree.
+`RUNTIME_DATA_CONTENTS` feeds both the help line and the deletion notice.
 
 Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
 Python (`os.name == "nt"`), it checks `pnpm.cmd` before the generic `pnpm`
@@ -339,3 +356,12 @@ receive a JSON error and close code 1008.
 The support bundle's `extensions_config.json` reader accepts UTF-8 with or
 without a leading BOM, matching the runtime loader. Preserve redaction and
 avoid flagging a valid BOM-prefixed file as a syntax error in triage output.
+
+Support-bundle and doctor tool captures explicitly decode UTF-8 with replacement
+for invalid bytes. Set `PYTHONIOENCODING=utf-8:backslashreplace` only in the copied
+support-bundle child environment so Python helpers can print Unicode and escape
+surrogates without aborting diagnostics or changing the parent.
+Keep exit codes, timeouts and redaction intact; do not rely on the host locale.
+Regressions use real local children, including ASCII/GBK capture defaults,
+nonzero exits, surrogate characters and malformed output, without invoking
+provider diagnostics. Doctor covers both `_run` streams and pnpm runner capture.

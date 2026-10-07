@@ -1,3 +1,13 @@
+### MindIE XML numeric arguments (`mindie_provider.py`)
+
+The XML parser recognizes JSON numeric syntax, including signed, fractional,
+and exponent values. Invalid numeric forms such as `007`, `3.`, and `+3` remain
+strings. Numeric conversion failures preserve the entire argument, including
+lists or objects with overflowing or underflowing floats or oversized integers.
+Only JSON syntax errors may use the existing Python-literal fallback; never retry
+numeric conversion failures through `ast.literal_eval`, which can silently turn
+nested underflow into zero. Regression coverage is in `tests/test_mindie_provider.py`.
+
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 
 Request-admission waits follow the next scheduled admission and configured
@@ -76,7 +86,20 @@ Each omitted tool result emits a warning with its normalized content length;
 the warning never includes the result content.
 Coverage: `tests/test_codex_provider.py`.
 
+Codex function-tool conversion preserves explicit `strict=True` and `False`
+for wrapped and flat dictionaries; missing or `None` stays omitted to preserve
+the provider default. Wrapped dictionaries and converted `BaseTool` schemas
+share `_convert_tools` so binding cannot discard the setting. Keep caller
+schemas and definitions unchanged. Offline sync/async request and tool-followup
+coverage: `tests/test_codex_tool_strict.py`.
+
 ### Codex SSE termination (`packages/harness/deerflow/models/openai_codex_provider.py`)
+
+Completed responses with null, omitted, or empty `usage` retain their text,
+reasoning, and tool calls. Normalize unavailable usage to the existing empty
+mapping fallback while keeping `AIMessage.usage_metadata` as `None`; populated
+usage mappings, including zero counts and cached/reasoning token details, remain
+unchanged.
 
 `response.completed` ends stream consumption immediately, before transport EOF;
 retain the output-item recovery path for empty completed output. Terminal
@@ -90,13 +113,14 @@ Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
 ### Claude Code Credentials (`packages/harness/deerflow/models/credential_loader.py`)
 
 - `ClaudeChatModel.model_post_init` calls `load_claude_code_credential()` for every instance, and `create_chat_model` builds fresh instances per run (lead agent, title, summarization, subagents)
-- `$CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` is a one-shot handoff: a pipe returns EOF and a file keeps its advanced offset. `_read_secret_from_file_descriptor` therefore caches a non-empty secret per `(env_var, fd)` under a lock held across the read. Do not drop the cache or the lock — later instances would get no credential, and the Anthropic SDK raises `TypeError: Could not resolve authentication method` before sending. Empty reads and `OSError` are not cached. The key is the descriptor number on purpose — a closed handoff keeps serving its token, and a secret placed on a recycled number in-process is not re-read unless the cache is cleared. The cache is per process, so a new process (e.g. a uvicorn `--reload` worker) cannot recover a drained descriptor. Pinned by `tests/test_credential_loader.py`, including a two-instance `ClaudeChatModel` test
+- `$CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` is a one-shot handoff: a pipe returns EOF and a file keeps its advanced offset. `_read_secret_from_file_descriptor` therefore caches a non-empty secret per `(env_var, fd)` under a lock held across the read. Do not drop the cache or the lock — later instances would get no credential, and the Anthropic SDK raises `TypeError: Could not resolve authentication method` before sending. Empty reads, `OSError`, and UTF-8 decode failures are not cached; unreadable handoffs return `None` so the loader can try credential files. Warnings must not include token contents. The key is the descriptor number on purpose — a closed handoff keeps serving its token, and a secret placed on a recycled number in-process is not re-read unless the cache is cleared. The cache is per process, so a new process (e.g. a uvicorn `--reload` worker) cannot recover a drained descriptor. Pinned by `tests/test_credential_loader.py` and `tests/test_claude_fd_encoding.py`, including two-instance `ClaudeChatModel` tests
 
 ### Claude Prompt Caching (`packages/harness/deerflow/models/claude_provider.py`)
 
 - The request payload shares objects with the caller: langchain-anthropic forwards Claude-native blocks (an image or document with a `source`, search results) and list-form system blocks by reference, and a reused tool binding passes its own tool dicts (the lead agent re-binds per call, so its tool dicts are fresh). Writing `cache_control` in place checkpointed the markers with the thread's messages, and the stale ones pushed every later request past the 4-breakpoint limit
 - Every request goes through `_strip_cache_control`, with caching on or off, so markers stored by older checkpoints never reach the API. It copies a marked block without its marker and replaces the system, message, content and tool lists and every message dict with copies; langchain-anthropic already builds fresh message dicts and content lists, so that part is defensive
 - `_apply_prompt_caching` must call `_strip_cache_control` first: it then replaces slots in those payload-owned lists with marked copies and writes `msg["content"]` on copied message dicts, placing at most four breakpoints. Pinned by `tests/test_claude_provider_prompt_caching.py`
+- Exclude `thinking` and `redacted_thinking` blocks before selecting the last four cache candidates: Anthropic forbids direct `cache_control` on these blocks. Keep their content, signatures/data and order intact so they remain part of the prefix covered by a later eligible breakpoint. Stripping stale markers must not add them back to thinking blocks or mutate caller-owned history. The same suite exercises real sync/async SDK tool-followup requests through offline transports.
 
 ### vLLM Provider (`packages/harness/deerflow/models/vllm_provider.py`)
 
@@ -104,6 +128,17 @@ Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
 - Preserves vLLM's non-standard assistant `reasoning` field on full responses, streaming deltas, and follow-up tool-call turns, falling back to the legacy `reasoning_content` wire field when `reasoning` is absent or null (a payload carrying both keeps `reasoning`); `_pick_reasoning` owns this precedence across all three paths and preserves empty-string `reasoning` rather than falling back
 - Designed for configs that enable thinking through `extra_body.chat_template_kwargs.enable_thinking` on vLLM 0.19.0 Qwen reasoning models, while accepting the older `thinking` alias
 - `cumulative_stream_usage` is an opt-in model setting (default `false`) for endpoints that repeat cumulative token totals on each streaming chunk. The provider converts snapshots to deltas only when a stable completion id is present, isolates interleaved streams by id, and leaves the original usage untouched otherwise. Per-model tracking is lock-protected and cleared on the trailing empty-`choices` frame whether or not that frame carries usage. A soft cap of 1024 ids evicts only entries idle for at least one hour; active streams may temporarily exceed the cap so eviction cannot corrupt their deltas. Regression coverage lives in `tests/test_vllm_provider.py`.
+
+### MindIE Provider (`packages/harness/deerflow/models/mindie_provider.py`)
+
+`_fix_messages` converts tool results to the XML text format expected by MindIE.
+Only tool-message `type=json` payloads join the text channel; other non-text
+blocks remain omitted. Keep the `<tool_response>` escaping boundary and the
+non-serializable/circular JSON fallback. Output limits belong to
+`ToolOutputBudgetMiddleware`, including mixed JSON/media results and configured
+exemptions. Enabled PII redaction scans JSON keys and values before serialization.
+Regression coverage: `test_mindie_provider.py`, `test_pii_redaction_middleware.py`,
+and `test_tool_output_budget_middleware.py` in `tests/`.
 
 ### Managed shared models (`config/managed_models.py`)
 

@@ -18,6 +18,7 @@ SCHEDULER_INT_FIELDS = (
     "poll_interval_seconds",
     "lease_seconds",
     "max_concurrent_runs",
+    "max_concurrent_runs_per_user",
     "queue_timeout_seconds",
     "min_once_delay_seconds",
     "recursion_limit",

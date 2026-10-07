@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import logging
+import threading
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, override, runtime_checkable
@@ -34,6 +37,13 @@ _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
 _COMPACTION_TRANSFORM_KIND = "summarization"
 _COMPACTION_TRANSFORM_VERSION = "1"
 _UNSET = object()
+_NOOP_CACHE_MAX_ENTRIES = 128
+
+
+class _ReusedSummary(str):
+    """Marks a summary reused from an identical, previously no-op prompt (no LLM call)."""
+
+
 # Valid non-generated summaries for the empty / too-long-to-summarize edges; these
 # short-circuit model invocation (and must not be treated as generation failures).
 _CANNED_SUMMARIES = frozenset(
@@ -166,6 +176,11 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         self._extensions = extensions
         self.summary_call_count = 0
         self.summary_noop_count = 0
+        self.summary_skip_count = 0
+        self._summary_counters_lock = threading.Lock()
+        # P1: exact prompt fingerprints whose summarizer output equalled the existing summary.
+        self._noop_prompt_cache: OrderedDict[str, str] = OrderedDict()
+        self._noop_prompt_cache_lock = threading.Lock()
         # Nostream generation models are either prebuilt by the factory or built
         # lazily by name. An eagerly seeded ``None`` pins the run-model fallback for
         # this middleware instance; unlike the legacy path, it does not allow one
@@ -315,9 +330,16 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # and any failure at any stage falls through to the next candidate. When all
         # candidates fail the caller leaves compaction state unchanged.
         names = self._generation_candidate_names()
+        noop_key = self._noop_cache_key(prompt, names)
+        reused = self._reuse_noop_summary(noop_key, previous_summary)
+        if reused is not None:
+            return reused
         for index, name in enumerate(names):
             text = self._invoke_summary(self._model_for(name), prompt, last=index == len(names) - 1)
             if text is not None:
+                # A fallback no-op must not suppress retrying a failed earlier candidate.
+                if index == 0:
+                    self._remember_noop_summary(noop_key, text, previous_summary)
                 return text
         return None
 
@@ -333,6 +355,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if prompt is None or prompt in _CANNED_SUMMARIES:
             return prompt
         names = self._generation_candidate_names()
+        noop_key = self._noop_cache_key(prompt, names)
+        reused = self._reuse_noop_summary(noop_key, previous_summary)
+        if reused is not None:
+            return reused
         for index, name in enumerate(names):
             text = await self._ainvoke_summary(
                 self._model_for(name),
@@ -342,8 +368,54 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 task_store=task_store,
             )
             if text is not None:
+                if index == 0:
+                    self._remember_noop_summary(noop_key, text, previous_summary)
                 return text
         return None
+
+    @staticmethod
+    def _noop_cache_key(prompt: str, candidate_names: list[str | None]) -> str | None:
+        """Fingerprint of the exact summarizer input: the rendered prompt plus the candidate models."""
+        try:
+            payload = "|".join([*(repr(name) for name in candidate_names), prompt])
+            return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        except Exception:
+            logger.warning("Summarization no-op cache key failed", exc_info=True)
+            return None
+
+    def _reuse_noop_summary(self, key: str | None, previous_summary: str | None) -> str | None:
+        """Return the existing summary instead of calling the LLM for a proven no-op input.
+
+        Only an input whose first candidate produced output byte-identical to
+        ``previous_summary`` is cached, and reuse additionally requires today's
+        ``previous_summary`` to equal that cached output, so the reused value is exactly
+        the existing ``summary_text``. Any failure falls through to the normal LLM call.
+        """
+        if key is None or not previous_summary:
+            return None
+        try:
+            with self._noop_prompt_cache_lock:
+                cached = self._noop_prompt_cache.get(key)
+                if cached is None or cached != previous_summary:
+                    return None
+                self._noop_prompt_cache.move_to_end(key)
+            logger.info("Summarization skipped: identical input previously produced an unchanged summary")
+            return _ReusedSummary(cached)
+        except Exception:
+            logger.warning("Summarization no-op cache lookup failed", exc_info=True)
+            return None
+
+    def _remember_noop_summary(self, key: str | None, summary: str, previous_summary: str | None) -> None:
+        if key is None or not previous_summary or summary != previous_summary:
+            return
+        try:
+            with self._noop_prompt_cache_lock:
+                self._noop_prompt_cache[key] = summary
+                self._noop_prompt_cache.move_to_end(key)
+                while len(self._noop_prompt_cache) > _NOOP_CACHE_MAX_ENTRIES:
+                    self._noop_prompt_cache.popitem(last=False)
+        except Exception:
+            logger.warning("Summarization no-op cache store failed", exc_info=True)
 
     def _invoke_summary(self, model: Any | None, prompt: str, *, last: bool = False) -> str | None:
         """Invoke ``model`` for a summary; ``None`` on error or a blank response.
@@ -661,17 +733,23 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         )
         notify_context_compacted(event, extensions=self._extensions)
 
-    def _record_summary_telemetry(self, runtime: Runtime, previous_summary: str | None, summary: str, summarized_count: int) -> None:
-        """P0 measurement only: count summarizer calls whose output equals the prior ``summary_text``.
+    def _record_summary_telemetry(self, runtime: Runtime, previous_summary: str | None, summary: str, summarized_count: int, *, llm_call_skipped: bool = False) -> None:
+        """Count successful summary results, unchanged results, and no-op cache reuse.
 
-        Never skips or alters the summarizer call; fails soft.
+        ``call_count`` includes reuse and canned results, not individual LLM requests.
+        Counters and event snapshots update atomically; telemetry failures stay soft.
         """
         try:
             noop = previous_summary is not None and summary.encode("utf-8") == previous_summary.encode("utf-8")
-            self.summary_call_count = self.summary_call_count + 1
+            with self._summary_counters_lock:
+                self.summary_call_count += 1
+                self.summary_noop_count += int(noop)
+                self.summary_skip_count += int(llm_call_skipped)
+                call_count = self.summary_call_count
+                noop_count = self.summary_noop_count
+                skip_count = self.summary_skip_count
             if noop:
-                self.summary_noop_count = self.summary_noop_count + 1
-                logger.info("Summarization no-op: summarizer output identical to existing summary_text (%d chars)", len(summary))
+                logger.info("Summarization no-op: result identical to existing summary_text (%d chars)", len(summary))
             context = getattr(runtime, "context", None)
             journal = context.get("__run_journal") if isinstance(context, dict) else None
             if journal is None:
@@ -683,11 +761,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 action="summary_result",
                 changes={
                     "noop": noop,
+                    "llm_call_skipped": llm_call_skipped,
                     "summary_chars": len(summary),
                     "previous_summary_chars": len(previous_summary) if previous_summary is not None else None,
                     "summarized_message_count": summarized_count,
-                    "noop_count": self.summary_noop_count,
-                    "call_count": self.summary_call_count,
+                    "noop_count": noop_count,
+                    "call_count": call_count,
+                    "skip_count": skip_count,
                 },
             )
         except Exception:
@@ -719,7 +799,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             if raise_on_failure:
                 raise SummaryGenerationError("summary generation failed")
             return None
-        self._record_summary_telemetry(runtime, previous_summary, summary, len(messages_to_summarize))
+        llm_call_skipped = isinstance(summary, _ReusedSummary)
+        summary = str(summary)
+        self._record_summary_telemetry(runtime, previous_summary, summary, len(messages_to_summarize), llm_call_skipped=llm_call_skipped)
         # Fire hooks only once a replacement summary exists — flushing pre-compaction
         # messages into durable memory for a summary that never materializes would
         # duplicate that work on the next attempt. Messages are still removed after
@@ -769,7 +851,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             if raise_on_failure:
                 raise SummaryGenerationError("summary generation failed")
             return None
-        self._record_summary_telemetry(runtime, previous_summary, summary, len(messages_to_summarize))
+        llm_call_skipped = isinstance(summary, _ReusedSummary)
+        summary = str(summary)
+        self._record_summary_telemetry(runtime, previous_summary, summary, len(messages_to_summarize), llm_call_skipped=llm_call_skipped)
         # Fire hooks only once a replacement summary exists (see compact_state).
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
         self._record_compaction(

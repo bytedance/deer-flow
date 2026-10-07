@@ -27,6 +27,8 @@ backend character/UTF-8 byte limits. Use host theme tokens for action colors.
 Validate user-entered team names, goals, tasks and clarification answers against
 both backend bounds without truncating the draft. Native mention labels must fit
 the host's 120 UTF-16-unit limit; keep routing IDs independent of display labels.
+Measure string responses as raw UTF-8 and structured interrupt responses as UTF-8
+JSON. Reject malformed Unicode before changing a waiting job or admitting a run.
 
 Ordinary human-input artifacts end runs successfully without a graph interrupt.
 Keep unanswered requests waiting; persist text-response inputs and idempotency

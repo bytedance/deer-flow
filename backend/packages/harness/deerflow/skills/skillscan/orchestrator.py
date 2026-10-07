@@ -135,8 +135,8 @@ _SECRET_TOKEN_PATTERNS = tuple(
     )
 )
 _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
-_EXTERNAL_HTTP_RE = re.compile(r"http://(?:[^/?#\s)'\"<>]*@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::\d+)?(?:/|\b|(?=$|[\s)'\"<>?#]))")
-_URL_RE = re.compile(r"https?://[^\s)'\"<>]+")
+_EXTERNAL_HTTP_RE = re.compile(r"(?i:http)://(?:[^/?#\s)'\"<>]*@)?(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::\d+)?(?:/|\b|(?=$|[\s)'\"<>?#]))")
+_URL_RE = re.compile(r"(?i:https?)://[^\s)'\"<>]+")
 _LOCAL_HTTP_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 # `rm` with a recursive flag (any order/combination, optional --no-preserve-root)
 # targeting the filesystem root, a wildcard, or a complete system-root directory.
@@ -270,12 +270,22 @@ def scan_skill_dir(skill_dir: Path) -> ScanResult:
     for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
         rel_path = _relative_file(path, root)
         try:
-            file_bytes = path.read_bytes()
+            file_size = path.stat().st_size
+        except OSError as e:
+            scanner_errors.append(f"{rel_path}: failed to stat file: {e}")
+            continue
+        try:
+            # One bounded read for every file: files smaller than MAX_FILE_BYTES
+            # come back whole, oversized ones are truncated and recorded below —
+            # no unbounded read regardless of growth between stat() and here
+            # (mirrors _read_archive_member).
+            with path.open("rb") as handle:
+                file_bytes = handle.read(MAX_FILE_BYTES + 1)
         except OSError as e:
             scanner_errors.append(f"{rel_path}: failed to read file: {e}")
             continue
 
-        findings.extend(_scan_file_package_properties(rel_path, file_bytes, path.stat().st_size))
+        findings.extend(_scan_file_package_properties(rel_path, file_bytes, file_size))
         text = _decode_text_for_analysis(file_bytes)
         if text is None:
             text = _decode_script_lossily(rel_path, file_bytes)
@@ -624,7 +634,7 @@ def _scan_declaration(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.append(_finding_from_match("declaration-sensitive-path", rel_path, text, match))
 
     for match in _URL_RE.finditer(text):
-        if match.group(0).startswith("http://"):
+        if match.group(0)[:7].lower() == "http://":
             host = _http_host(match.group(0))
             if host and host not in _LOCAL_HTTP_HOSTS:
                 findings.append(_finding_from_match("declaration-external-endpoint", rel_path, text, match))
@@ -788,7 +798,29 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.append(_finding_from_match("shell-reverse-shell-heuristic", rel_path, text, match))
     if re.search(r"(/etc/shadow|/etc/passwd)", text) and re.search(r"\b(curl|wget|nc|scp)\b", text):
         findings.append(_finding_for_text("shell-sensitive-exfil", rel_path, text, "/etc"))
-    if match := re.search(r"\b(curl|wget)\b[^\n|;]*\|\s*(?:sh|bash)\b", text):
+    if match := re.search(
+        # Each repeated alternative consumes a distinct first character (or
+        # a backslash plus a distinct following character), avoiding nested
+        # overlapping repeats when a download command has no pipe.
+        r"\b(?:curl|wget)\b(?:[^\\\r\n|;]|\\\r?\n|\\[^\r\n])*"
+        r"\|(?:\s|\\\r?\n)*(?:sudo(?:\s|\\\r?\n)+"
+        # A sudo option that takes a separate value (`-u user`, `-g group`,
+        # `-h host`, ...) must swallow that value too: otherwise
+        # `| sudo -u deploy bash` leaves the matcher parked on the username and
+        # misses the shell. This class is hand-maintained, so an option that
+        # takes a value must be listed here or it regresses to a miss; the
+        # case-sensitivity also keeps `-H` (no value) in the next branch.
+        r"(?:-[acCDghprRtTuU]\b(?:\s|\\\r?\n)+[^\s|;\\]+(?:\s|\\\r?\n)+"
+        # The standalone branch must not re-consume a value-taking option:
+        # `-u` would otherwise match both alternatives, and a chain of them
+        # inside `*?` lets the matcher explore every one-/two-token partition
+        # (exponential) before the non-shell tail fails. The lookahead keeps
+        # the two branches mutually exclusive, so each token is consumed in
+        # exactly one way and a failing chain stays linear.
+        r"|-(?![acCDghprRtTuU]\b)\S+(?:\s|\\\r?\n)+)*?)?(?:/usr/(?:local/)?bin/|/bin/)?"
+        r"(?:bash|zsh|dash|fish|sh)\b",
+        text,
+    ):
         findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, text, match))
     if match := re.search(_DESTRUCTIVE_RM_RE + r"|:\(\)\{\s*:\|:&\s*\};:|dd\s+[^#\n]*\bof=/dev/", text):
         findings.append(_finding_from_match("shell-destructive-command", rel_path, text, match))
@@ -1008,7 +1040,7 @@ def _looks_like_placeholder(value: str) -> bool:
 
 
 def _http_host(url: str) -> str | None:
-    if not url.startswith(("http://", "https://")):
+    if not url[:8].lower().startswith(("http://", "https://")):
         return None
     try:
         # Parse the authority so IPv6 brackets and userinfo cannot be mistaken
@@ -1020,7 +1052,7 @@ def _http_host(url: str) -> str | None:
 
 
 def _is_outbound_url(value: str) -> bool:
-    return bool(value.startswith(("http://", "https://")) and (_http_host(value) or "") not in _LOCAL_HTTP_HOSTS)
+    return bool(value[:8].lower().startswith(("http://", "https://")) and (_http_host(value) or "") not in _LOCAL_HTTP_HOSTS)
 
 
 def _collect_python_aliases(tree: ast.AST) -> dict[str, str]:

@@ -12,6 +12,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from app.channels.capabilities import supports_proactive_notifications
 from app.channels.runtime_config_store import (
     ChannelRuntimeConfigStore,
     apply_runtime_connection_config,
@@ -21,6 +22,7 @@ from app.channels.wechat_qr_login import QRLoginError, WechatQRLogin
 from app.gateway.deps import require_admin_user
 from app.gateway.persistent_writes import run_drained_write
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+from deerflow.config.deployment_config import multi_instance_declaration
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
 from deerflow.persistence.engine import get_session_factory
 from deerflow.utils.file_io import await_drained
@@ -52,6 +54,9 @@ class ChannelProviderResponse(BaseModel):
     connection_status: str
     credential_fields: list[ChannelCredentialFieldResponse] = Field(default_factory=list)
     credential_values: dict[str, str] = Field(default_factory=dict)
+    # Whether scheduled-task updates can be pushed to this app (the provider
+    # implements proactive push); Settings labels each provider card with it.
+    proactive_notifications: bool = False
 
 
 class ChannelProvidersResponse(BaseModel):
@@ -476,6 +481,7 @@ def _provider_response(
         connection_status=connection_status,
         credential_fields=_credential_fields(provider),
         credential_values=credential_values,
+        proactive_notifications=supports_proactive_notifications(provider),
     )
 
 
@@ -772,10 +778,14 @@ async def _require_wechat_qr_login(request: Request) -> ChannelConnectionsConfig
         workers = int(os.environ.get("GATEWAY_WORKERS") or os.environ.get("WEB_CONCURRENCY") or "1")
     except ValueError:
         workers = 0
-    if workers != 1:
+    # Kubernetes replicas run one worker each; they declare their peers instead.
+    if workers != 1 or multi_instance_declaration(_get_app_config()) is not None:
         raise HTTPException(
             status_code=503,
-            detail="WeChat QR login requires a single Gateway worker. Set GATEWAY_WORKERS=1 (or WEB_CONCURRENCY=1 when using Uvicorn directly), or enter a bot token manually.",
+            detail=(
+                "WeChat QR login requires a single Gateway worker. Set GATEWAY_WORKERS=1 (or WEB_CONCURRENCY=1 when using Uvicorn directly), "
+                "run one Gateway instance without deployment.multi_instance / DEER_FLOW_MULTI_INSTANCE, or enter a bot token manually."
+            ),
         )
     return config
 

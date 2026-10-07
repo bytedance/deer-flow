@@ -111,8 +111,15 @@ semantics as elsewhere in DeerFlow). `/model` and `/threads` open modal pickers.
 opens the thread picker. During an active run, `/resume`, `/threads`, and `/switch`
 ask you to wait instead of switching away from in-flight output. An invalid
 `/resume` reference displays an error and leaves the current conversation intact.
-After an interrupt and conversation switch, late stream actions from the previous
-thread are discarded when they reach the UI.
+After an interrupt, late stream actions from the previous run are discarded when
+they reach the UI, even if the next prompt uses the same conversation. Its final
+usage, title, and completion event cannot replace those of the new run.
+An interrupted run cannot be stopped mid-step, so a tool call already in progress
+(a long shell command, for example) finishes first. Until it does, sending to the
+same conversation shows a notice instead of starting a second run there — two runs
+on one thread would overwrite each other's history. Send again once it finishes,
+or use `/new` or `/resume` to continue in another conversation meanwhile.
+If a run cannot start, the TUI reports an error and returns to idle so you can retry.
 
 Use `/goal <condition>` to set the active thread goal, `/goal` to show it, and
 `/goal clear` to clear it.

@@ -32,7 +32,7 @@ Only standalone tool discovery without a model falls back to the base profile.
 3. **Built-in tools**:
    - `present_files` - Make output files visible to user (only `/mnt/user-data/outputs`); virtual paths use `resolve_runtime_user_id(runtime)` so validation resolves the same user-scoped outputs directory established by `ThreadDataMiddleware`
    - `ask_clarification` - Request clarification (intercepted by ClarificationMiddleware, which preserves text fallback and adds `artifact.human_input` for Web UI Human Input Cards). Beyond free text and single choice, the request-side v2 protocol supports `fields` (structured form card collecting several values at once; field types: text/textarea/number/select/multi_select/checkbox/date, validated and normalized server-side in the middleware — invalid entries are dropped, unknown types degrade to `text`; a standalone multi-select question is a one-field form). Replies stay on the v1 response protocol (`text`/`option`): the form card submits a readable text summary
-   - `view_image` - Read image bytes for vision-capable models; both sync and async entry points require `sandbox:execute` before any host or sandbox read. Live sandbox bytes win for the same sandbox generation, replacement-sandbox recovery uses only SHA-256-verified synchronized host bytes, and async tool invocation drains blocking reads before cancellation may release the sandbox lease
+   - `view_image` - Read image bytes for vision-capable models; both sync and async entry points require `sandbox:execute` before any host or sandbox read. With blob storage enabled, validated bytes are persisted as `kind="viewed-image"` and the checkpoint carries a JSON-safe ref beside the compatibility host path; store initialization/write failures return a generic tool error. Blob-backed model reads validate the ref against the separate image metadata before use and fall through to validated compatibility paths on any store failure. Live sandbox bytes remain the fallback for the same sandbox generation, replacement-sandbox recovery uses only SHA-256-verified synchronized host bytes, and async tool invocation drains blocking reads before cancellation may release the sandbox lease
    - `setup_agent` - Bootstrap-only: persist a custom agent's `SOUL.md` and `config.yaml`. Re-bootstrapping preserves the owner's existing `display_name`. Bound only when `is_bootstrap=True`.
    - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
 4. **Subagent tool** (if enabled):
@@ -44,11 +44,14 @@ Only standalone tool discovery without a model falls back to the base profile.
 The ordinary `task` boundary carries one narrow parent-loop middleware recorder into the isolated subagent runtime under separate loop-detection, tool-promotion, and tool-progress keys. It schedules only `record_middleware` calls back onto the loop that owns `RunJournal`, keeps an execution-local atomic promotion claim so parallel searches do not double-report one new schema, is fenced and drained once before `task` returns, and never exposes the journal or event store to the child loop. Durable batch tasks have no parent run journal and do not use this bridge.
 
 Scheduled-task runtime note:
-- Trial admission matches the entire current user turn against bounded English/Chinese
+- Trial admission matches the entire current user turn, after at most two leading
+  acknowledgements and one trailing particle, against bounded English/Chinese
   direct-run forms. Bare confirmations, task mentions, quotes and conditional or
   compound text do not dispatch. Never interpolate titles into authorization text;
   only fixed commands and opaque task-ID forms are accepted. This host gate is
   deliberately conservative, not a general intent parser.
+- `schedule_task` parameters carry types only; value rules come back as the same
+  coded results as REST (`contracts/scheduled_task_errors_contract.json`).
 - Scheduled background runs resolve to the `scheduled` interaction policy through trusted `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. The legacy `context.non_interactive=true` key remains accepted only for internally authenticated scheduler calls during migration; arbitrary HTTP/IM clients cannot set it.
 
 Durable MCP task-management tools are added only while the process-local task submitter is installed. They expose bounded local task fields, including whether cancellation was requested, but never the remote handle. Cancellation records that request durably and returns immediately; the background service owns the remote call and retries. These remain ordinary business tools under an active skill's `allowed-tools` policy and must be declared explicitly.

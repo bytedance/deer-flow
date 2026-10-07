@@ -18,10 +18,22 @@ and when applying the picker callback, which may outlive the idle state in which
 it opened. Keep the current thread and transcript unchanged when rejecting a
 switch. Report invalid resume references as error rows without relaxing the
 canonical thread-id validation or terminating the app.
-Worker actions must carry their originating thread id into the UI callback.
-Check it against the displayed thread on delivery, not just before scheduling:
-an interrupt/switch can race with the worker's cancellation check. Drop actions
-for another thread before they reach the reducer or change streaming state.
+Reserve the run identity and busy state when accepting input, before its worker
+starts. Each run owns its cancellation flag; a later send must not reset it.
+If worker creation fails, cancel and clear that reserved run, restore idle state,
+and show a retryable error. Do not cancel a previously completed run's title write.
+Worker callbacks check both run identity and thread id on UI delivery, rejecting
+cancelled, completed, or superseded runs before updating the reducer. Keep the
+completed run's state available for its worker's title persistence check. An
+uncancelled, normally completed run still writes its title to its original
+thread after the UI moves on; keep that write off the UI thread. This does not
+order completed title writes, roll back a write already in progress, or force
+stop synchronous backend work.
+An interrupted worker keeps streaming until its next event, so a long tool step
+still checkpoints. Until that worker returns (`_Run.started`/`stopped`, set by the
+worker itself; Textual reports a cancelled thread worker finished at once), reject
+sends on its thread: whichever run checkpoints last would drop the other turn.
+Other threads stay usable; a worker cancelled before it started holds nothing.
 
 `InputHistory.down()` returns `None` when history navigation is inactive; the
 app must then leave the composer untouched, including its cursor and undo state.

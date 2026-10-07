@@ -50,6 +50,15 @@ class BackgroundTaskState(TypedDict):
     updated_at: str
 
 
+class BlobRefData(TypedDict):
+    """JSON-safe checkpoint representation of ``deerflow.storage.BlobRef``."""
+
+    sha256: str
+    size: int
+    kind: str
+    content_type: NotRequired[str | None]
+
+
 class ViewedImageData(TypedDict):
     """Metadata for a viewed image file.
 
@@ -64,6 +73,7 @@ class ViewedImageData(TypedDict):
     actual_path: str
     sha256: str
     source_sandbox_id: NotRequired[str]
+    blob_ref: NotRequired[BlobRefData]
 
 
 def merge_sandbox(existing: SandboxState | None, new: SandboxState | None) -> SandboxState | None:

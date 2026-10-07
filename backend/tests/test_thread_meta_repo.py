@@ -633,6 +633,26 @@ class TestThreadMetaRepository:
         assert "deerflow_project_id" not in row.metadata_json
 
     @pytest.mark.anyio
+    async def test_run_admission_names_a_new_thread_from_its_input_title(self, repo):
+        """A scheduled run names its fresh thread in the input. The thread is
+        created with that name, so a sidebar listing it at once shows it; the
+        worker would copy the title only when the run ends."""
+        from app.gateway.services import _ensure_thread_metadata
+        from deerflow.persistence.thread_meta.model import ThreadMetaRow
+        from deerflow.runtime.runs.manager import RunRecord
+        from deerflow.runtime.runs.schemas import DisconnectMode, RunStatus
+        from deerflow.runtime.runs.worker import RunContext
+
+        run_ctx = RunContext(checkpointer=None, thread_store=repo)
+        cases = [("t1", {"title": "Checklist · 10-07 09:00", "messages": []}, "Checklist · 10-07 09:00"), ("t2", {"messages": []}, None), ("t3", {"title": "  "}, None)]
+        for thread_id, run_input, expected in cases:
+            record = RunRecord(run_id=f"run-{thread_id}", thread_id=thread_id, assistant_id="lead-agent", status=RunStatus.pending, on_disconnect=DisconnectMode.cancel, kwargs={"input": run_input})
+            await _ensure_thread_metadata(run_ctx, record, owner_user_id=None)
+            async with repo._sf() as session:
+                row = await session.get(ThreadMetaRow, thread_id)
+            assert row is not None and row.display_name == expected
+
+    @pytest.mark.anyio
     async def test_create_with_project_assignment_and_rejection(self, repo):
         from deerflow.persistence.projects import ProjectNotAssignableError, ProjectRepository
 
