@@ -2445,6 +2445,11 @@ follow ordinary upload filename validation. Names containing NUL, Windows
 reserved device names (such as `CON.txt`), or trailing dots are rejected with
 `400` before bytes are staged.
 
+On native Windows, the document shelf uses extended-length filesystem paths
+so deep workspace directories and long filenames can be uploaded, downloaded,
+restored, and purged without enabling the system-wide long-path setting.
+Filesystem limits on individual path components still apply.
+
 Runs on member threads also receive a bounded `<documents>` index rendered per
 run from the pinned snapshot (capped by `projects.shelf_index_max_entries` and
 `projects.shelf_index_max_bytes`), and the agent can page the shelf and read
