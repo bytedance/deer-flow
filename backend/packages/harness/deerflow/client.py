@@ -763,9 +763,10 @@ class DeerFlowClient:
         Threads are found through their root checkpoint (metadata
         ``step == -1`` in the root namespace). A thread gets exactly one: its
         first graph run writes it, and so do the Gateway and goal paths that
-        create a thread before any run. Scanning roots rather than every
+        create a thread before any run. Listing roots rather than every
         checkpoint keeps ``limit`` counting threads, so one long thread cannot
-        crowd the others out, and costs one row per thread.
+        crowd the others out, and loads one checkpoint per thread instead of
+        a thread's whole history.
 
         Args:
             limit: Maximum number of threads to return. Default is 10.

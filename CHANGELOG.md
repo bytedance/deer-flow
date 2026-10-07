@@ -809,7 +809,8 @@ This release closes that milestone with **439 merged pull requests**.
   and one turn writes several checkpoints, so a single long conversation filled
   the limit: the TUI thread picker and `--resume <title>` saw only the latest one
   or two threads, and an older title failed to resolve. Threads are now found
-  through their single root checkpoint, so the scan costs one row per thread.
+  through their single root checkpoint, so only one checkpoint per thread is
+  loaded.
   A new `sort_by="updated_at"` option lets `--continue` keep resuming the most
   recently active thread; the default order stays newest created first.
 - **frontend:** A failed side-chat send no longer clears the composer. The side
