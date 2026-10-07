@@ -90,7 +90,7 @@ afterEach(() => {
 });
 
 describe("activity responses", () => {
-  test("the first response only seeds the cursor and invalidates nothing", () => {
+  test("the first response seeds the cursor and refreshes the lists once", () => {
     const queryClient = client();
     const keys = spyInvalidations(queryClient);
     const state = threadActivityState(queryClient);
@@ -104,12 +104,14 @@ describe("activity responses", () => {
         read_version: 4,
       }),
     );
+    // The lists may predate a run the seed already counts: later polls start
+    // after it, so only this refresh can show that thread.
     expect(outcome).toEqual({
       seeded: true,
-      threads: false,
+      threads: true,
       scheduledTasks: false,
     });
-    expect(keys).toEqual([]);
+    expect(keys).toEqual(LIST_KEYS);
     expect(state).toEqual({ cursor: "10:run-10", readVersion: 4 });
   });
 

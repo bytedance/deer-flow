@@ -195,7 +195,10 @@ export function applyThreadActivity(
   if (state.cursor === null) {
     state.cursor = response.cursor;
     state.readVersion = Math.max(state.readVersion ?? 0, response.read_version);
-    return { seeded: true, threads: false, scheduledTasks: false };
+    // The lists loaded on their own, possibly before a run this seed already
+    // counts; later polls start after it, so refresh them once now.
+    invalidateThreadLists(queryClient);
+    return { seeded: true, threads: true, scheduledTasks: false };
   }
   // Defensive: an older backend may still list interactive (null-origin) rows.
   const relevant = response.threads.filter(
@@ -242,12 +245,11 @@ export async function pollThreadActivity(
     if (state.cursor === null || !isInvalidCursor(error)) {
       throw error;
     }
-    // The server no longer accepts the cursor: seed again, and refetch the
-    // lists once because changes since the old cursor cannot be listed.
+    // The server no longer accepts the cursor: seed again. Seeding refetches
+    // the lists once, which covers the changes the old cursor cannot list.
     state.cursor = null;
     const response = await fetchThreadActivity(null, { signal });
     applyThreadActivity(queryClient, state, response);
-    invalidateThreadLists(queryClient);
     return response;
   }
 }
@@ -340,7 +342,8 @@ export function setThreadUnreadInCaches(
 /**
  * Mark a thread read now: patch the caches optimistically, post the read and
  * record the returned `read_version` so the next poll does not refetch the
- * lists for this tab's own read. On failure the lists are refetched so the
+ * lists for this tab's own read; reads from other devices that the version
+ * also covers refetch them. On failure the lists are refetched so the
  * server's state shows again.
  */
 export async function markThreadRead(
@@ -351,7 +354,14 @@ export async function markThreadRead(
   try {
     const { read_version } = await postThreadRead(threadId);
     const state = threadActivityState(queryClient);
-    state.readVersion = Math.max(state.readVersion ?? 0, read_version);
+    const previous = state.readVersion;
+    // The returned clock is the user's, not this read's: a jump past this one
+    // read includes reads on other devices, whose threads the non-polling
+    // lists may still show unread, so refresh them instead of skipping those.
+    if (previous !== null && read_version > previous + 1) {
+      invalidateThreadLists(queryClient);
+    }
+    state.readVersion = Math.max(previous ?? 0, read_version);
   } catch {
     invalidateThreadLists(queryClient);
   }

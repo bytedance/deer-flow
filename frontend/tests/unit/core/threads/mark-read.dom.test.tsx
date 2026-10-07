@@ -203,6 +203,26 @@ describe("useMarkThreadRead", () => {
     expect(outcome.threads).toBe(false);
   });
 
+  test("a returned version that also covers reads on other devices refetches the lists", async () => {
+    // Version 6 seen here; another device read Y (7), then this tab reads X (8).
+    mocks.fetch.mockImplementation(async () =>
+      Response.json({ unread: false, read_version: 8 }),
+    );
+    const { queryClient, hook } = setup("t-1", {
+      search: [thread("t-1", true)],
+    });
+    const state = threadActivityState(queryClient);
+    state.cursor = "5:run-5";
+    state.readVersion = 6;
+    const invalidate = rs.spyOn(queryClient, "invalidateQueries");
+    act(() => hook.result.current());
+    await advance();
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+    });
+    expect(state.readVersion).toBe(8);
+  });
+
   test("a failed POST refetches the lists to show the server state again", async () => {
     mocks.fetch.mockImplementation(async () =>
       Response.json({ detail: "Thread not found" }, { status: 404 }),
