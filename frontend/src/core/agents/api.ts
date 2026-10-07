@@ -48,6 +48,15 @@ export async function listAgents(): Promise<Agent[]> {
   return data.agents;
 }
 
+export async function listAgentToolGroups(): Promise<string[]> {
+  const res = await fetch(`${getBackendBaseURL()}/api/agent-tool-groups`);
+  if (!res.ok) {
+    throw new Error(`Failed to load agent tool groups: ${res.statusText}`);
+  }
+  const data = (await res.json()) as { tool_groups: string[] };
+  return data.tool_groups;
+}
+
 export async function getAgent(name: string): Promise<Agent> {
   const res = await fetch(`${getBackendBaseURL()}/api/agents/${name}`);
   if (!res.ok) throw new Error(`Agent '${name}' not found`);

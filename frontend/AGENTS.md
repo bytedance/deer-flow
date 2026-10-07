@@ -109,6 +109,11 @@ keep `name` for React identity, URLs, requests, and runtime `agent_name`.
 The 100-code-point budget uses `[...value.trim()].length`, matching Pydantic;
 do not use HTML `maxLength`, which counts UTF-16 code units instead.
 
+Custom Agent tool access is edited from the configured names returned by
+`GET /api/agent-tool-groups`. Preserve the `null` / `[]` / explicit-list
+contract (inherit all / disable all / allowlist), retain missing selected names
+as removable entries, and submit `tool_groups` only when the user changes it.
+
 Custom Agent portability uses the versioned `deerflow.custom-agent` JSON
 document through `core/agents/api.ts`. Keep file parsing client-side only for
 previewing the proposed local name; the Gateway is authoritative for schema,

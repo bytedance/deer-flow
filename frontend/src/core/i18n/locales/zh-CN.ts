@@ -1230,6 +1230,11 @@ export const zhCN: Translations = {
     settingsDisplayName: "显示名称",
     settingsDisplayNameTooLong: "显示名称不能超过 100 个 Unicode 码点。",
     settingsDisplayNameHint: "支持中文等 Unicode 字符，留空时使用智能体标识",
+    settingsToolGroups: "工具权限",
+    settingsToolGroupsHint: "限制该智能体及其委派任务可以使用的已配置工具组。",
+    settingsToolGroupsAll: "使用全部已配置工具组",
+    settingsToolGroupsLoadFailed: "无法加载工具组。",
+    settingsToolGroupUnavailable: "不可用",
     settingsDescription:
       "为该智能体设置显示名称和默认模型，模型修改在下一条消息生效。",
     settingsKnowledge: "默认知识库",

@@ -1081,6 +1081,11 @@ export interface Translations {
     settingsDisplayName: string;
     settingsDisplayNameTooLong: string;
     settingsDisplayNameHint: string;
+    settingsToolGroups: string;
+    settingsToolGroupsHint: string;
+    settingsToolGroupsAll: string;
+    settingsToolGroupsLoadFailed: string;
+    settingsToolGroupUnavailable: string;
     settingsDescription: string;
     settingsKnowledge: string;
     settingsKnowledgeHint: string;

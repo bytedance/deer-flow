@@ -1313,6 +1313,12 @@ export const enUS: Translations = {
       "Display name must be at most 100 Unicode code points.",
     settingsDisplayNameHint:
       "Supports Unicode. Leave blank to use the agent identifier",
+    settingsToolGroups: "Tool access",
+    settingsToolGroupsHint:
+      "Restrict which configured tool groups this agent and its delegated tasks may use.",
+    settingsToolGroupsAll: "Use every configured tool group",
+    settingsToolGroupsLoadFailed: "Tool groups could not be loaded.",
+    settingsToolGroupUnavailable: "unavailable",
     settingsDescription:
       "Choose a display name and model defaults for this agent. Model changes take effect on the next message.",
     settingsKnowledge: "Default knowledge",
