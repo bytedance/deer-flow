@@ -14,6 +14,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
 from deerflow.models.mindie_provider import (
     MindIEChatModel,
+    _decode_escaped_newlines_outside_fences,
     _fix_messages,
     _parse_xml_tool_call_to_dict,
 )
@@ -737,6 +738,90 @@ class TestAStream:
             chunks = await self._collect(model._astream([HumanMessage(content="x")]))
 
         assert chunks[0].message.content == "a\nb"
+
+    @pytest.mark.asyncio
+    async def test_no_tools_stream_keeps_escaped_newlines_inside_fences(self):
+        """A fence spanning several chunks must still protect its literal `\\n`.
+
+        The one-shot decode needs a complete ```...``` pair to tell fenced code
+        from prose; a token-sized chunk almost never contains both delimiters,
+        so decoding each chunk independently rewrote code like print("a\\nb")
+        into a real newline mid-stream. The joined stream must match the
+        non-streaming decode of the same reply.
+        """
+        from langchain_core.messages import AIMessageChunk
+        from langchain_core.outputs import ChatGenerationChunk
+
+        raw_chunks = ['intro\\n```python\\nprint("a\\nb")', "\\n```\\noutro\\nend"]
+
+        async def fake_stream(*args, **kwargs):
+            for text in raw_chunks:
+                yield ChatGenerationChunk(message=AIMessageChunk(content=text))
+
+        with patch("deerflow.models.mindie_provider.ChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
+            model = MindIEChatModel.__new__(MindIEChatModel)
+            chunks = await self._collect(model._astream([HumanMessage(content="write example code")]))
+
+        streamed = "".join(c.message.content for c in chunks)
+
+        # Code inside the fence keeps its literal backslash-n; prose outside decodes.
+        assert 'print("a\\nb")' in streamed
+        assert streamed.endswith("outro\nend")
+        assert streamed == _decode_escaped_newlines_outside_fences("".join(raw_chunks))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "raw_chunks",
+        [
+            # One chunk carries a complete fence pair: already decodable alone.
+            ["a\\n```py\\nx\\ny```\\nb"],
+            # Fence opens and closes across chunk boundaries.
+            ['intro\\n```python\\nprint("a\\nb")', "\\n```\\noutro\\nend"],
+            # Escape sequence split across the chunk boundary, outside any fence.
+            ["outside\\", "ncode"],
+            # Fence delimiter itself split across the chunk boundary.
+            ["text\\n``", "`python\\nx\\ny", "\\n```\\nend"],
+            # Two fences with prose between them, escaped prose still decodes.
+            ["```a\\n1```\\nmid\\n```b\\n2", "```\\ntail\\nend"],
+        ],
+        ids=["single-chunk-fence", "fence-spans-chunks", "escape-split-across-chunks", "fence-delimiter-split", "two-fences"],
+    )
+    async def test_no_tools_stream_decode_matches_non_streaming(self, raw_chunks):
+        """The joined native stream equals the one-shot decode of the full reply."""
+        from langchain_core.messages import AIMessageChunk
+        from langchain_core.outputs import ChatGenerationChunk
+
+        async def fake_stream(*args, **kwargs):
+            for text in raw_chunks:
+                yield ChatGenerationChunk(message=AIMessageChunk(content=text))
+
+        with patch("deerflow.models.mindie_provider.ChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
+            model = MindIEChatModel.__new__(MindIEChatModel)
+            chunks = await self._collect(model._astream([HumanMessage(content="q")]))
+
+        streamed = "".join(c.message.content for c in chunks)
+
+        assert streamed == _decode_escaped_newlines_outside_fences("".join(raw_chunks))
+
+    @pytest.mark.asyncio
+    async def test_no_tools_stream_flushes_trailing_partial_fences(self):
+        """Text held back for a partial ```/`\\n` at stream end is not dropped."""
+        from langchain_core.messages import AIMessageChunk
+        from langchain_core.outputs import ChatGenerationChunk
+
+        raw_chunks = ["plain\\ntext", "``"]
+
+        async def fake_stream(*args, **kwargs):
+            for text in raw_chunks:
+                yield ChatGenerationChunk(message=AIMessageChunk(content=text))
+
+        with patch("deerflow.models.mindie_provider.ChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
+            model = MindIEChatModel.__new__(MindIEChatModel)
+            chunks = await self._collect(model._astream([HumanMessage(content="q")]))
+
+        streamed = "".join(c.message.content for c in chunks)
+
+        assert streamed == _decode_escaped_newlines_outside_fences("".join(raw_chunks))
 
     @pytest.mark.asyncio
     async def test_with_tools_fake_streams_text_in_chunks(self):
