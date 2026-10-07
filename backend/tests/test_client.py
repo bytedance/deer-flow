@@ -1483,7 +1483,7 @@ class TestClientMcpSelection:
             config["metadata"] = {"existing": "preserved", "mcp_plugins": ["installation-B"]}
             client._ensure_agent(config)
             keys.append(client._agent_config_key)
-            assert config["metadata"] == {"existing": "preserved", "mcp_plugins": selection}
+            assert config["metadata"] == {"existing": "preserved", "mcp_plugins": selection, "available_skills": None}
 
             # Changing the saved config takes effect only after reset_agent().
             mcp_client.load_config.return_value = AgentConfig(name="researcher", mcp_plugins=["installation-B"])
