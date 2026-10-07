@@ -58,6 +58,13 @@ def test_extract_max_tokens_various_inputs():
     # Floats
     assert _extract_max_tokens({"max_tokens": 4096.0}) == 4096
 
+    # Non-finite numbers (YAML .inf / .nan) must be rejected, not crash with OverflowError
+    assert _extract_max_tokens({"max_tokens": float("inf")}) is None
+    assert _extract_max_tokens({"max_tokens": float("-inf")}) is None
+    assert _extract_max_tokens({"max_tokens": float("nan")}) is None
+    assert _extract_max_tokens({"max_tokens": "inf"}) is None
+    assert _extract_max_tokens({"max_tokens": "nan"}) is None
+
     # Unparseable strings
     assert _extract_max_tokens({"max_tokens": "unlimited"}) is None
 

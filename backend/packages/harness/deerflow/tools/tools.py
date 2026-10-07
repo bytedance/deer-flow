@@ -76,7 +76,8 @@ def _extract_max_tokens(model_config: object | None) -> int | None:
 
     Handles ModelConfig (where max_tokens may be stored as an extra dynamic field),
     dicts, SimpleNamespace, or test stubs. Rejects booleans, mocks, non-numeric
-    values, negative numbers, zero, and None.
+    values, non-finite numbers (inf/nan, e.g. YAML ``.inf``), negative numbers,
+    zero, and None.
     """
     if model_config is None:
         return None
@@ -86,7 +87,7 @@ def _extract_max_tokens(model_config: object | None) -> int | None:
     try:
         val = int(raw)
         return val if val > 0 else None
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return None
 
 
