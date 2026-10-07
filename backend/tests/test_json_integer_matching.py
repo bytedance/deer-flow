@@ -93,8 +93,14 @@ async def test_float_filter_ignores_out_of_range_stored_numbers(json_table, expe
         {"id": "negative-underflow", "data": '{"x": -1e-400}'},
         {"id": "beyond-numeric", "data": '{"x": ' + "9" * 131073 + "}"},
         {"id": "huge-exponent", "data": '{"x": 1e100000}'},
+        # NUMERIC keeps at most 16383 fractional digits, so these raised
+        # inside the NUMERIC bounds check despite a five-digit exponent.
+        {"id": "deep-underflow", "data": '{"x": 1e-16384}'},
+        {"id": "deeper-underflow", "data": '{"x": -1e-20000}'},
         {"id": "overflow-ulp", "data": '{"x": 1.7976931348623159e+308}'},
         {"id": "zero-huge-exp", "data": '{"x": 0e400}'},
+        # JSON allows leading zeros in the exponent; this is 1.5 and must match.
+        {"id": "padded-exponent", "data": '{"x": 15e-000001}'},
         {"id": "integer", "data": '{"x": 42}'},
         {"id": "string", "data": json.dumps({"x": str(expected)})},
         {"id": "nan-string", "data": '{"x": "NaN"}'},
@@ -106,4 +112,5 @@ async def test_float_filter_ignores_out_of_range_stored_numbers(json_table, expe
     await connection.execute(text("INSERT INTO json_integer_matching (id, data) VALUES (:id, :data)"), rows)
     result = await connection.execute(select(table.c.id).where(json_match(table.c.data, "x", expected)))
     expected_ids = {str(expected)} | ({"integer"} if expected == 42 else set())
+    expected_ids |= {"padded-exponent"} if expected == 1.5 else set()
     assert set(result.scalars()) == expected_ids

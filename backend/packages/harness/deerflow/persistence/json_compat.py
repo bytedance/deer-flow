@@ -184,9 +184,14 @@ def _type_check(typeof: str, types: tuple[str, ...]) -> str:
 _FLOAT8_MAX = "1.7976931348623158e+308"
 # Half the min positive denormal: that exact spelling raises; anything larger rounds to 5e-324.
 _FLOAT8_HALF_MIN_DENORM = "2.4703282292062327e-324"
-# CAST AS NUMERIC raises around 1e140000 / 131073 nines; stay well under both.
+# CAST AS NUMERIC raises past 131072 integer digits (1e131072, 131073 nines) and
+# past 16383 fractional digits (1e-16384). 10,000 characters plus an exponent of
+# at most 6,000 stays under both, and float8 needs far less than either.
 _NUMERIC_SAFE_CHARS = 10000
+_NUMERIC_SAFE_EXPONENT = 6000
 _ZERO_SPELLING = r"^-?0(\.0+)?([eE][+-]?[0-9]+)?$"
+# Exponent digits without sign; JSON allows leading zeros (1.5e-0001 == 0.15).
+_EXPONENT_DIGITS = r"[eE][+-]?([0-9]+)$"
 
 
 def _pg_float_guard(typeof: str, extract: str, comparison: str, bp: str) -> str:
@@ -195,19 +200,24 @@ def _pg_float_guard(typeof: str, extract: str, comparison: str, bp: str) -> str:
     Portable to PostgreSQL 14: do not use ``pg_input_is_valid`` (PostgreSQL 16+).
     CASE, unlike AND, guarantees evaluation order so the raising float8 cast only
     runs after cheaper, non-raising checks. CAST AS NUMERIC itself raises on
-    ~1e140000 / 131073 nines, so exponent length and ``char_length`` run first.
+    1e131072 and on 1e-16384, so ``char_length`` and the exponent magnitude run
+    first. The exponent is compared as a number after stripping leading zeros:
+    its digit count is checked before CAST AS INTEGER so that cast cannot fail.
     Exact-zero spellings (including ``0e400``) are matched without a numeric cast
     so a huge exponent cannot overflow NUMERIC on a stored zero; they still match
     a ``0.0`` filter. Underflow such as ``1e-400`` is not an exact zero and never
     matches, whereas SQLite saturates it to 0.0.
     """
     n = f"CAST({extract} AS NUMERIC)"
+    # NULL without an exponent, so both exponent WHENs fall through.
+    exponent = f"ltrim(substring({extract} FROM '{_EXPONENT_DIGITS}'), '0')"
     return (
         "CASE "
         f"WHEN {typeof} <> 'number' THEN false "
         f"WHEN {extract} ~ '{_ZERO_SPELLING}' THEN {bp} = 0 "
         f"WHEN char_length({extract}) > {_NUMERIC_SAFE_CHARS} THEN false "
-        f"WHEN char_length(ltrim(substring({extract} FROM '[eE]([+-]?[0-9]+)$'), '+-')) >= 6 THEN false "
+        f"WHEN char_length({exponent}) > {len(str(_NUMERIC_SAFE_EXPONENT))} THEN false "
+        f"WHEN CAST('0' || {exponent} AS INTEGER) > {_NUMERIC_SAFE_EXPONENT} THEN false "
         f"WHEN abs({n}) > CAST('{_FLOAT8_MAX}' AS NUMERIC) THEN false "
         f"WHEN abs({n}) <= CAST('{_FLOAT8_HALF_MIN_DENORM}' AS NUMERIC) THEN false "
         f"ELSE {comparison} END"
