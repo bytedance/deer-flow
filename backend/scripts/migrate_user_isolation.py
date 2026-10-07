@@ -6,13 +6,22 @@ Usage (from the repository root):
 Use the installed backend environment and the Gateway's exported runtime
 selectors; relative paths remain anchored to the caller's directory.
 
+Thread owners come from the ``threads_meta`` table of the Gateway's configured
+database (``database`` in config.yaml). If legacy threads exist but that
+table cannot be read, the script stops before moving anything; pass
+``--allow-missing-thread-owners`` only for installs that never recorded owners.
+
 The script is idempotent — re-running it after a successful migration is a no-op.
 """
 
 import argparse
 import logging
 import shutil
+import sys
+from pathlib import Path
 
+from deerflow.config.app_config import get_app_config
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.paths import Paths, get_paths
 
 logger = logging.getLogger(__name__)
@@ -285,30 +294,48 @@ def migrate_user_profile(
         shutil.move(str(legacy_profile), str(dest))
 
 
-def _build_owner_map_from_db(paths: Paths) -> dict[str, str]:
-    """Query threads_meta table for thread_id -> user_id mapping.
+class OwnerMapUnavailable(RuntimeError):
+    """The configured database cannot say who owns the legacy threads."""
 
-    Uses raw sqlite3 to avoid async dependencies.
+
+def _has_legacy_thread_dirs(paths: Paths) -> bool:
+    legacy_threads = paths.base_dir / "threads"
+    return legacy_threads.is_dir() and any(entry.is_dir() for entry in legacy_threads.iterdir())
+
+
+def _build_owner_map_from_db(database: DatabaseConfig) -> dict[str, str]:
+    """Query the Gateway database's threads_meta table for thread_id -> user_id.
+
+    Uses a synchronous engine on the same database the Gateway uses
+    (``app_sync_sqlalchemy_url``) to avoid async dependencies.
+
+    Raises:
+        OwnerMapUnavailable: no database to read, or threads_meta cannot be queried.
     """
-    import sqlite3
+    if database.backend not in ("sqlite", "postgres"):
+        raise OwnerMapUnavailable(f"database.backend is {database.backend!r}, which does not persist thread owners")
+    # Connecting would create an empty SQLite file, hiding a wrong path.
+    if database.backend == "sqlite" and not Path(database.sqlite_path).is_file():
+        raise OwnerMapUnavailable(f"no SQLite database at {database.sqlite_path}")
 
-    db_path = paths.base_dir / "deer-flow.db"
-    if not db_path.exists():
-        logger.info("No database found at %s — using empty owner map.", db_path)
-        return {}
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.exc import SQLAlchemyError
 
-    conn = sqlite3.connect(str(db_path))
     try:
-        cursor = conn.execute("SELECT thread_id, user_id FROM threads_meta WHERE user_id IS NOT NULL")
-        return {row[0]: row[1] for row in cursor.fetchall()}
-    except sqlite3.OperationalError as e:
-        logger.warning("Failed to query threads_meta: %s", e)
-        return {}
+        engine = create_engine(database.app_sync_sqlalchemy_url)
+    except ImportError as e:
+        raise OwnerMapUnavailable(f"database driver is not installed ({e})") from e
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("SELECT thread_id, user_id FROM threads_meta WHERE user_id IS NOT NULL")).all()
+    except SQLAlchemyError as e:
+        raise OwnerMapUnavailable(f"failed to query threads_meta ({e.__class__.__name__}: {getattr(e, 'orig', None) or e})") from e
     finally:
-        conn.close()
+        engine.dispose()
+    return {thread_id: user_id for thread_id, user_id in rows}
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description="Migrate DeerFlow data to per-user layout")
     parser.add_argument("--dry-run", action="store_true", help="Log actions without making changes")
     parser.add_argument(
@@ -317,6 +344,14 @@ def main() -> None:
         metavar="USER_ID",
         help=(
             "User ID to claim un-owned legacy data (global memory.json, USER.md profile, and legacy custom agents). Defaults to 'default'. In multi-user installs, set this to the operator account that should inherit those legacy artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--allow-missing-thread-owners",
+        action="store_true",
+        help=(
+            "Proceed when the configured database cannot provide thread owners (no database file, a 'memory' backend, or an unreadable threads_meta table); "
+            "every legacy thread is then assigned to 'default'. Only for installs that never recorded thread owners."
         ),
     )
     args = parser.parse_args()
@@ -328,8 +363,19 @@ def main() -> None:
     logger.info("Dry run: %s", args.dry_run)
     logger.info("Claiming un-owned legacy data for user_id=%s", args.user_id)
 
-    owner_map = _build_owner_map_from_db(paths)
-    logger.info("Found %d thread ownership records in DB", len(owner_map))
+    owner_map: dict[str, str] = {}
+    if _has_legacy_thread_dirs(paths):
+        try:
+            owner_map = _build_owner_map_from_db(get_app_config().database)
+        except OwnerMapUnavailable as e:
+            if not args.allow_missing_thread_owners:
+                logger.error(
+                    "Cannot read thread owners: %s. Run from the Gateway's working directory with its runtime selectors and config, or pass --allow-missing-thread-owners if this install never recorded thread owners. Nothing was migrated.",
+                    e,
+                )
+                return 1
+            logger.warning("Cannot read thread owners: %s. Assigning every legacy thread to 'default' (--allow-missing-thread-owners).", e)
+        logger.info("Found %d thread ownership records in DB", len(owner_map))
 
     report = migrate_thread_dirs(paths, owner_map, dry_run=args.dry_run)
     migrate_memory(paths, user_id=args.user_id, dry_run=args.dry_run)
@@ -378,6 +424,8 @@ def main() -> None:
             args.user_id,
         )
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

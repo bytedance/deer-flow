@@ -420,6 +420,8 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 
 迁移脚本覆盖 legacy `memory.json`、`threads/` 和 `agents/` 到 per-user layout。
 
+thread 归属读取 Gateway 所配置数据库（`config.yaml` 的 `database`）中 `threads_meta.user_id`，未记录归属的 thread 归入 `default`。若存在 legacy thread 但无法读取该表（数据库文件不存在、`memory` 后端或查询失败），脚本在移动任何数据前退出；只有从未记录过 thread 归属的安装才应传 `--allow-missing-thread-owners`，此时所有 legacy thread 归入 `default`。
+
 ## 安全不变量
 
 必须长期保持的不变量：
