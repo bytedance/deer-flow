@@ -707,11 +707,60 @@ cannot cancel work already started by Jina. Enabling retries can send up to `1 +
 and incur additional cost. Successful content and final `Error:` results retain
 the existing contract.
 
+#### Jina request admission
+
+On the Jina `web_fetch` tool entry, `request_admission` is omitted/null by default
+(disabled). To enable it, supply all three fields as YAML numbers:
+
+```yaml
+request_admission:
+  max_concurrent_requests: 3
+  max_queue_size: 32
+  max_wait_seconds: 10
+```
+
+These are example values, not recommended or measured optimal limits. Concurrency
+must be a positive integer, queue capacity a nonnegative integer (zero rejects
+whenever all permits are held), and wait a finite positive number. Booleans,
+strings, missing/unknown fields and malformed values return `Error:` before client
+creation. The public tool arguments remain unchanged.
+
+Before the first enabled call, omitted/null settings bypass admission and do not
+initialize a policy. The first enabled call freezes one policy for the process.
+After that, identical and omitted/null settings reuse it, so a live config reload
+cannot silently bypass the active cap; conflicts return `restart required`.
+Restart to change or disable enabled settings. Lead/subagents, client instances,
+threads and event loops share the enabled budget. Each worker process or replica
+has its own budget; this is neither a distributed quota nor a per-user/account
+limit, and it does not control requests per minute.
+
+Each physical attempt holds a permit through response consumption and response
+stream close, including errors and cancellation. One HTTP client is reused across
+the logical crawl's retries; closing its idle connection pool happens after the
+final attempt and does not hold an attempt permit. Enabled admission streams even
+without a byte cap, preserving complete text and charset decoding. Response cleanup
+drains before release, so cancellation or a retry deadline may take longer to return
+if local close is slow; cancellation still wins if cleanup also fails. This cannot
+stop work already running remotely. Readability extraction and retry backoff hold no
+permit. Every retry joins admission again. Existing retry eligibility, Retry-After
+floors and decoded response byte caps apply.
+
+Waiting is bounded FIFO: full queues return terminal local
+`Error: Local Jina request admission rejected: queue full` without HTTP dispatch.
+Expired waits return `Error: Local Jina request admission rejected: wait expired`.
+Neither is described as a provider/network failure, fabricates a provider 429, or
+triggers a retry. Cancellation removes queued tickets. Waiting consumes the original
+retry budget when retries are enabled; the earlier of that deadline and
+`max_wait_seconds` applies and is checked again at dispatch. With retries disabled,
+only queue wait is bounded by admission, and the existing HTTP timeout semantics
+still apply.
+
 #### Jina response byte budget
 
 On the same Jina `web_fetch` tool entry, optionally set `max_response_bytes: 1048576`
 (for example, 1 MiB). This uses existing tool configuration extras; no model-facing
-argument is added. Omitted or `null` preserves the buffered default. An enabled
+argument is added. Omitted or `null` preserves the buffered default unless request
+admission is enabled. An enabled
 value must be a positive integer; booleans, strings, fractions, zero and negative
 values return `Error:` before HTTP client creation or network activity.
 

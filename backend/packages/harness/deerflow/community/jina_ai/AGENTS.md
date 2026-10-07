@@ -1,18 +1,16 @@
 # Jina web fetch
 
-Retries stay provider-local; default `max_retries=0` sends once. One monotonic
-budget bounds requests/waits; cancellation propagates. Retry 502/503/504 and
-connection-establishment failures; 429 requires valid Retry-After. Parse ASCII
-integer seconds or HTTP dates (including obsolete forms); past dates floor at
-zero. Wait max(server floor, existing budget-capped jittered 0.5–4s backoff).
-Never reduce server floors; unfit waits return the HTTP error. Reset hints each
-attempt. Auth/payment errors stay terminal. Tests: `test_jina_retries.py` and
-`test_jina_retry_after.py` (offline, not hosted-provider validation).
+Retries default to zero; one monotonic budget covers attempts/waits. Retry 502/503/504 and connect failures; 429 requires valid Retry-After.
+Accept ASCII seconds or HTTP dates (also obsolete); past dates floor at zero. Wait max(server floor, budget-capped jittered 0.5–4s backoff); unfit floors
+return HTTP errors. Reset hints each attempt; auth/payment errors stay terminal.
 
-`max_response_bytes`: null/omitted keeps buffered POST; otherwise positive int
-(excluding bool), validated before client creation. Stream `aiter_bytes`, count
-content-decoded bytes before text decoding; exact limit passes, excess closes
-and returns a body-free terminal Error before extraction, for every status.
-Keep one retry loop/deadline and reset the counter per response. Never re-decode
-compression or mutate HTTPX internals. Decoder allocations/wire bytes are outside
-the cap. Offline transports: `tests/test_jina_response_limit.py`.
+`max_response_bytes`: null keeps buffered POST unless admission is enabled.
+Positive int, not bool; validate before client creation. Count decoded
+`aiter_bytes` before retaining chunks; exact limit passes. Excess closes and
+returns a body-free terminal Error before extraction. Reset per
+response; never re-decode compression. Decoder/wire bytes are uncapped.
+
+`request_admission.py` owns one immutable process policy. Locked FIFO reserves before loop-safe wakeup. Cancellation/expiry return grants;
+leases cover response stream cleanup, never retry backoff, idle client-pool close, or readability. Reuse one client across retries. Drain stream/client close on cancellation, with cancellation taking precedence over cleanup errors. Null bypasses only before first enablement; afterward all callers reuse the frozen policy until restart.
+Config: `backend/docs/CONFIGURATION.md`. Tests:
+`tests/test_jina_{client,retries,retry_after,response_limit,request_admission}.py`.
