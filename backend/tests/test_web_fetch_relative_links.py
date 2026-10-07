@@ -135,6 +135,32 @@ def test_unavailable_readabilityjs_fallback_keeps_multi_article_pages(monkeypatc
     assert "# Real Story" in markdown
 
 
+def test_unavailable_readabilityjs_fallback_keeps_article_owned_aside(monkeypatch):
+    """An <aside> the article owns keeps its warning text and resolved link."""
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_available", lambda: False)
+    html = _article('<p>Run the deployment command.</p><aside><p>Do not use this command in production.</p><a href="../safe">Safe procedure</a></aside>')
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+
+    assert "Run the deployment command." in markdown
+    assert "Do not use this command in production." in markdown
+    assert "[Safe procedure](https://example.com/safe)" in markdown
+
+
+def test_unavailable_readabilityjs_fallback_drops_site_chrome_aside_link(monkeypatch):
+    """A sidebar <aside> no content container owns is still pruned."""
+    from deerflow.utils import readability
+
+    monkeypatch.setattr(readability, "_readability_available", lambda: False)
+    html = f'<html><head><title>Guide</title></head><body><aside><a href="../promo">Promo</a><p>Sidebar teaser.</p></aside><p>{"Body prose. " * 30}</p></body></html>'
+    markdown = ReadabilityExtractor().extract_article(html, url=PAGE_URL).to_markdown()
+
+    assert "Sidebar teaser." not in markdown
+    assert "[Promo]" not in markdown
+    assert "Body prose." in markdown
+
+
 def test_unavailable_readabilityjs_fallback_title_sources(monkeypatch):
     """og:title and entry <h1> headlines outrank a generic or missing <title>."""
     from deerflow.utils import readability

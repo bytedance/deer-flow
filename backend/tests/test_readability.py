@@ -181,6 +181,57 @@ def test_python_fallback_title_keeps_words_across_inline_elements():
     assert _python_fallback_article_json(html)["title"] == "Real Story Today"
 
 
+def test_python_fallback_keeps_article_owned_aside():
+    """An <aside> the article owns is content: its prose and links must survive."""
+    from deerflow.utils.readability import _python_fallback_article_json
+
+    html = "<html><body><main><article><p>Run the deployment command.</p><aside><p>Do not use this command in production.</p><a href='/safe'>Safe procedure</a></aside></article></main></body></html>"
+
+    content = _python_fallback_article_json(html)["content"]
+
+    assert "Run the deployment command." in content
+    assert "Do not use this command in production." in content
+    assert "Safe procedure" in content
+
+
+def test_python_fallback_keeps_article_owned_aside_without_main():
+    """The same rule holds when the dominant article is the selected root."""
+    from deerflow.utils.readability import _python_fallback_article_json
+
+    prose = "<p>Story prose. </p>" * 20
+    html = f"<html><head><title>Doc</title></head><body><article><h1>Main Article</h1>{prose}<aside><p>Warning: check the quota first.</p></aside></article><p>Cookie notice.</p></body></html>"
+
+    content = _python_fallback_article_json(html)["content"]
+
+    assert "Warning: check the quota first." in content
+    assert "Cookie notice." not in content
+
+
+def test_python_fallback_drops_site_chrome_aside_outside_content():
+    """A sidebar <aside> that no article/main owns is still pruned."""
+    from deerflow.utils.readability import _python_fallback_article_json
+
+    html = f"<html><body><aside><h2>Related stories</h2><p>Sidebar teaser.</p></aside><p>{'Body prose. ' * 30}</p></body></html>"
+
+    content = _python_fallback_article_json(html)["content"]
+
+    assert "Sidebar teaser." not in content
+    assert "Body prose." in content
+
+
+def test_python_fallback_drops_site_nav_and_footer():
+    """Site-level nav/footer chrome stays pruned when the body is the root."""
+    from deerflow.utils.readability import _python_fallback_article_json
+
+    html = f"<html><body><nav><a href='/home'>Home</a></nav><p>{'Body prose. ' * 30}</p><footer><p>Copyright notice.</p></footer></body></html>"
+
+    content = _python_fallback_article_json(html)["content"]
+
+    assert "Copyright notice." not in content
+    assert ">Home<" not in content
+    assert "Body prose." in content
+
+
 def test_probe_caches_unavailability_when_npm_install_fails(monkeypatch):
     """A failing npm install must be cached as unavailability, not retried per fetch."""
     from deerflow.utils.readability import _readability_available

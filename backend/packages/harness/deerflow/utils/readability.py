@@ -171,11 +171,7 @@ def _readability_available() -> bool:
     if have_node is None:
         # readabilipy reorganized its internals; the probe must degrade to the
         # link-preserving Python fallback rather than fail the module import.
-        logger.warning(
-            "readabilipy does not expose simple_json.have_node; Readability.js "
-            "extraction is disabled and the link-preserving Python fallback "
-            "will be used for every fetch"
-        )
+        logger.warning("readabilipy does not expose simple_json.have_node; Readability.js extraction is disabled and the link-preserving Python fallback will be used for every fetch")
         return False
     try:
         return bool(have_node())
@@ -189,7 +185,20 @@ def _readability_available() -> bool:
         return False
 
 
-_FALLBACK_DROP_TAGS = ("script", "style", "noscript", "template", "iframe", "svg", "nav", "footer", "aside", "form", "button")
+# Markup that never carries model-visible prose or links.
+_FALLBACK_DROP_TAGS = ("script", "style", "noscript", "template", "iframe", "svg", "form", "button")
+
+# Site chrome, removed only when no content container owns the element: an
+# ``<aside>`` inside the article is the article's own warning or callout and
+# carries prose and resolved links the model must still see, while a bare
+# sidebar ``<aside>`` — or a site-level ``<nav>``/``<footer>`` — is chrome.
+# readabilipy's own Python fallback whitelists ``aside`` for the same reason.
+_FALLBACK_CHROME_TAGS = ("nav", "footer", "aside")
+
+# The containers that make an element article-owned. Shared with
+# ``_fallback_article_title``'s site-header rule so both agree on what
+# "owned by the content" means.
+_FALLBACK_CONTENT_CONTAINERS = ("article", "main")
 
 
 def _fallback_article_title(soup: BeautifulSoup, root=None) -> str:
@@ -212,7 +221,7 @@ def _fallback_article_title(soup: BeautifulSoup, root=None) -> str:
     container = root if root is not None else soup
     for h1 in container.find_all("h1"):
         header = h1.find_parent("header")
-        if header is not None and header.find_parent(["article", "main"]) is None:
+        if header is not None and header.find_parent(_FALLBACK_CONTENT_CONTAINERS) is None:
             continue  # A site-level chrome heading, not an article headline.
         candidate = " ".join(h1.get_text(" ", strip=True).split())
         if candidate:
@@ -245,6 +254,26 @@ def _fallback_content_root(soup: BeautifulSoup):
     return body
 
 
+def _prune_fallback_chrome(soup: BeautifulSoup) -> None:
+    """Drop site chrome, keeping the chrome a content container owns.
+
+    ``<aside>`` inside the selected article/main is tangent prose — a warning,
+    a callout, a pull quote — so removing it silently deletes instruction text
+    and resolved links the model is supposed to read. Only chrome outside every
+    content container is dropped.
+
+    The decision is made before :func:`_fallback_content_root` runs, because
+    sidebar text must not count towards the "does one article dominate the
+    page" measurement, so it is phrased as "does a content container own this
+    element" rather than "is this element inside the selected root".
+    """
+    for element in soup.find_all(_FALLBACK_CHROME_TAGS):
+        if element.parent is None:
+            continue  # Already removed together with a chrome ancestor.
+        if element.find_parent(_FALLBACK_CONTENT_CONTAINERS) is None:
+            element.decompose()
+
+
 def _python_fallback_article_json(html: str) -> dict[str, str | None]:
     """Link-preserving extraction used when Readability.js is unavailable.
 
@@ -252,11 +281,14 @@ def _python_fallback_article_json(html: str) -> dict[str, str | None]:
     the ``href``/``src`` destinations that ``_resolve_html_urls`` has just
     resolved. This fallback keeps the resolved destinations so the
     model-visible Markdown stays navigable on hosts where Readability.js
-    can never run (Windows, npm-less containers).
+    can never run (Windows, npm-less containers). It also keeps prose that
+    lives in chrome elements the content container owns, such as the
+    article's own ``<aside>`` warning.
     """
     soup = BeautifulSoup(html, "html5lib")
     for element in soup.find_all(_FALLBACK_DROP_TAGS):
         element.decompose()
+    _prune_fallback_chrome(soup)
     root = _fallback_content_root(soup)
     return {
         "title": _fallback_article_title(soup, root),
