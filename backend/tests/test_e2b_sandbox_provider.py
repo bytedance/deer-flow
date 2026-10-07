@@ -5653,8 +5653,9 @@ def test_list_dir_raises_when_client_closed():
 
 @pytest.mark.parametrize("marker, error", [("missing", FileNotFoundError), ("1", OSError)])
 def test_list_dir_classifies_empty_failure(marker, error):
-    listing = SimpleNamespace(stdout=f"\n__DF_FIND_STATUS__:{marker}\n", stderr="", exit_code=1)
-    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    # The listing script exits 1 for both; the SDK raises CommandExitException,
+    # whose stdout still carries the status marker the parser classifies by.
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit(f"\n__DF_FIND_STATUS__:{marker}\n", "", 1)]))
     sb = _make_sandbox(client)
 
     with pytest.raises(error) as exc:
@@ -5662,9 +5663,19 @@ def test_list_dir_classifies_empty_failure(marker, error):
     assert type(exc.value) is error
 
 
+def test_list_dir_returns_entries_when_head_truncation_exits_141():
+    """``head`` closing the pipe on a large listing kills ``find`` with SIGPIPE
+    (141), a successful truncation. The SDK raises for the nonzero exit; the
+    listing must still be returned, not surface as ``OSError``."""
+    stdout = "/home/user\n/home/user/a\n/home/user/b\n\n__DF_FIND_STATUS__:141\n"
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit(stdout, "", 141)]))
+    sb = _make_sandbox(client)
+
+    assert sb.list_dir("/home/user") == ["/home/user", "/home/user/a", "/home/user/b"]
+
+
 def test_list_dir_raises_oserror_when_find_exit_is_not_missing_path():
-    listing = SimpleNamespace(stdout="", stderr="", exit_code=127)
-    client = FakeClient(commands=FakeCommandsAPI([listing]))
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("", "", 127)]))
     sb = _make_sandbox(client)
 
     with pytest.raises(OSError, match="exited with code 127"):

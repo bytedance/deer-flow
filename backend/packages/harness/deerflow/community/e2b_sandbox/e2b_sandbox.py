@@ -353,6 +353,12 @@ class E2BSandbox(Sandbox):
                 raise RuntimeError("sandbox client has been closed")
             try:
                 result = client.commands.run(remote_list_dir_command(resolved, max_depth))
+            except CommandExitException as exc:
+                # The listing script exits nonzero on reachable outcomes (missing
+                # root: 1; head truncating a large listing: SIGPIPE 141). The SDK
+                # raises for those, but the exception carries stdout, whose
+                # status marker the parser trusts over the exit code.
+                result = exc
             except Exception as e:
                 logger.error("Failed to list_dir %s in e2b sandbox: %s", resolved, e)
                 raise OSError(f"Failed to list_dir {resolved} in e2b sandbox: {e}") from e

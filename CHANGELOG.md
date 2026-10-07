@@ -813,7 +813,9 @@ This release closes that milestone with **439 merged pull requests**.
   `tests_passed` acceptance criterion. The exception carries the command's
   stdout, stderr and exit code, and is now formatted like a returned result. A
   failed command whose stderr mentions "sandbox not found" no longer marks the
-  sandbox as reaped. ([#6441])
+  sandbox as reaped. `list_dir` on e2b handles the same exception, so a missing
+  directory raises `FileNotFoundError` and a listing truncated at 500 entries
+  (SIGPIPE 141) is returned instead of failing with `OSError`. ([#6441])
 - **frontend:** Retrying a message after its attachment upload fails now keeps
   the context that was attached to it. The composer dropped its quotes,
   conversation references, staged project files and stored draft as soon as a
