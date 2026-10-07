@@ -110,7 +110,8 @@ async def test_float_filter_ignores_out_of_range_stored_numbers(json_table, expe
         {"id": "padded-exponent", "data": '{"x": 15e-000001}'},
         # API-storable exact integers above the shortened DBL_MAX spelling
         # (1.7976931348623158e+308) that still round to DBL_MAX, the last one
-        # just below the overflow midpoint; they must match a DBL_MAX filter.
+        # just below the overflow midpoint; on PostgreSQL they must match a
+        # DBL_MAX filter.
         {"id": "near-max", "data": json.dumps({"x": 1797693134862315805 * 10**290})},
         {"id": "below-overflow-midpoint", "data": json.dumps({"x": 2**1024 - 2**970 - 1})},
         {"id": "integer", "data": '{"x": 42}'},
@@ -125,10 +126,15 @@ async def test_float_filter_ignores_out_of_range_stored_numbers(json_table, expe
     result = await connection.execute(select(table.c.id).where(json_match(table.c.data, "x", expected)))
     expected_ids = {str(expected)} | ({"integer"} if expected == 42 else set())
     expected_ids |= {"padded-exponent"} if expected == 1.5 else set()
-    if expected == 1.7976931348623157e308:
+    matched = set(result.scalars())
+    near_max_ids = {"near-max", "below-overflow-midpoint", "overflow-midpoint"}
+    if connection.dialect.name == "sqlite":
+        # SQLite's own conversion of 309-digit integer text is platform-dependent:
+        # DBL_MAX on Windows, inf on x86-64 Linux (CI), even below the midpoint.
+        # The guard is PostgreSQL-only, so these rows say nothing about it here.
+        matched -= near_max_ids
+    elif expected == 1.7976931348623157e308:
+        # PostgreSQL rounds correctly: below the midpoint is DBL_MAX, the tie is
+        # inf (22003), so the guard skips it.
         expected_ids |= {"near-max", "below-overflow-midpoint"}
-        # SQLite's own text-to-REAL conversion rounds the exact tie down to
-        # DBL_MAX; PostgreSQL rounds it to inf (22003), so the guard skips it.
-        if connection.dialect.name == "sqlite":
-            expected_ids |= {"overflow-midpoint"}
-    assert set(result.scalars()) == expected_ids
+    assert matched == expected_ids

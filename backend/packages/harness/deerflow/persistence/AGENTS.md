@@ -25,6 +25,10 @@ evaluation-order guarantee) behind non-raising checks, using PostgreSQL 14 SQL
 only. Its range bounds are the exact float8 rounding midpoints, not shortened
 spellings like `1.7976931348623158e+308`, which drop values that round to
 DBL_MAX. Such values never match on PostgreSQL; SQLite saturates them instead.
+The length (10000 chars) and exponent (6000) pre-checks also skip a few
+pathological in-range spellings that the app's serializer never writes.
+SQLite's REAL for integer text near DBL_MAX is platform-dependent (inf on
+x86-64 Linux, DBL_MAX on Windows), so tests do not pin it.
 `tests/test_json_integer_matching.py` exercises both dialects; PostgreSQL opts in
 with `DEERFLOW_TEST_POSTGRES_URL` and uses connection-local temporary tables.
 ## Scheduled-task lifecycle
