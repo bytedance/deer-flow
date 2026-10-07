@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -85,6 +86,69 @@ def test_oauth_token_manager_fetches_and_caches_token(monkeypatch):
     assert len(post_calls) == 1
     assert post_calls[0]["url"] == "https://auth.example.com/oauth/token"
     assert post_calls[0]["data"]["grant_type"] == "client_credentials"
+
+
+@pytest.mark.parametrize(
+    "expires_in",
+    [
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        1e30,
+        10**30,
+        "not-a-number",
+    ],
+)
+def test_unusable_expires_in_falls_back_to_the_default_lifetime(monkeypatch, expires_in):
+    """A malformed ``expires_in`` must not abort the token fetch.
+
+    ``json.loads`` accepts ``Infinity``/``NaN`` and ``timedelta`` raises
+    ``OverflowError`` above 999_999_999 days, so a token endpoint returning any
+    of these used to escape ``_fetch_token`` and fail the server's OAuth
+    connection outright instead of falling back to the one-hour default.
+    """
+    post_calls: list[dict[str, Any]] = []
+
+    def _client_factory(*args, **kwargs):
+        return _MockAsyncClient(
+            payload={
+                "access_token": "token-123",
+                "token_type": "Bearer",
+                "expires_in": expires_in,
+            },
+            post_calls=post_calls,
+            **kwargs,
+        )
+
+    monkeypatch.setattr("httpx.AsyncClient", _client_factory)
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "secure-http": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://api.example.com/mcp",
+                    "oauth": {
+                        "enabled": True,
+                        "token_url": "https://auth.example.com/oauth/token",
+                        "grant_type": "client_credentials",
+                        "client_id": "client-id",
+                        "client_secret": "client-secret",
+                    },
+                }
+            }
+        }
+    )
+    manager = OAuthTokenManager.from_extensions_config(config)
+
+    before = datetime.now(UTC)
+    header = asyncio.run(manager.get_authorization_header("secure-http"))
+
+    assert header == "Bearer token-123"
+    token = manager._states["secure-http"].token
+    assert token is not None
+    assert timedelta(minutes=59) < token.expires_at - before < timedelta(minutes=61)
 
 
 def test_oauth_extra_token_params_cannot_override_grant_type(monkeypatch):

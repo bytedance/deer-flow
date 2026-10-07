@@ -14,6 +14,14 @@ from deerflow.mcp.headers import apply_header_overrides, header_spellings, illeg
 
 logger = logging.getLogger(__name__)
 
+# Used when the token endpoint omits ``expires_in`` or returns a value the
+# manager cannot turn into a lifetime.
+_DEFAULT_TOKEN_LIFETIME_SECONDS = 3600
+# ``timedelta`` cannot represent more than 999_999_999 days, so a larger
+# lifetime is not an expiry the manager can store; ``timedelta(seconds=...)``
+# raises ``OverflowError`` past its own range.
+_MAX_TOKEN_LIFETIME_SECONDS = int(timedelta.max.total_seconds())
+
 
 @dataclass
 class _OAuthToken:
@@ -224,11 +232,18 @@ class OAuthTokenManager:
 
         token_type = str(payload.get(oauth.token_type_field, oauth.default_token_type) or oauth.default_token_type)
 
-        expires_in_raw = payload.get(oauth.expires_in_field, 3600)
+        expires_in_raw = payload.get(oauth.expires_in_field, _DEFAULT_TOKEN_LIFETIME_SECONDS)
         try:
             expires_in = int(expires_in_raw)
-        except (TypeError, ValueError):
-            expires_in = 3600
+        except (TypeError, ValueError, OverflowError):
+            # ``OverflowError``: ``json.loads`` accepts ``Infinity``/``NaN``, and
+            # ``int()`` rejects a non-finite float. Treat it like any other
+            # unusable value instead of failing the whole token fetch.
+            expires_in = _DEFAULT_TOKEN_LIFETIME_SECONDS
+        if expires_in > _MAX_TOKEN_LIFETIME_SECONDS:
+            # Not a real expiry, and ``timedelta`` would raise ``OverflowError``
+            # on it; fall back to the default rather than crash the fetch.
+            expires_in = _DEFAULT_TOKEN_LIFETIME_SECONDS
 
         expires_at = datetime.now(UTC) + timedelta(seconds=max(expires_in, 1))
         return _OAuthToken(access_token=access_token, token_type=token_type, expires_at=expires_at)
