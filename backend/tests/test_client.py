@@ -2476,15 +2476,17 @@ class TestThreadQueries:
 
 
 class TestGoalManagement:
-    def test_goal_round_trip_uses_checkpoint(self, client):
-        from langgraph.checkpoint.memory import InMemorySaver
+    # ``sqlite`` and ``cached-sqlite`` are the TUI/embedded defaults: sync-only
+    # savers whose async methods exist but raise NotImplementedError.
+    @pytest.mark.parametrize("saver_kind", SAVER_KINDS)
+    def test_goal_round_trip_uses_checkpoint(self, client, saver_kind):
+        with make_saver(saver_kind) as saver:
+            client._checkpointer = saver
 
-        client._checkpointer = InMemorySaver()
-
-        set_result = client.set_goal("goal-thread", "finish all tests", max_continuations=3)
-        get_result = client.get_goal("goal-thread")
-        clear_result = client.clear_goal("goal-thread")
-        after_clear = client.get_goal("goal-thread")
+            set_result = client.set_goal("goal-thread", "finish all tests", max_continuations=3)
+            get_result = client.get_goal("goal-thread")
+            clear_result = client.clear_goal("goal-thread")
+            after_clear = client.get_goal("goal-thread")
 
         assert set_result["goal"]["objective"] == "finish all tests"
         assert set_result["goal"]["max_continuations"] == 3

@@ -620,10 +620,18 @@ def make_goal_continuation_message(goal: GoalState, evaluation: GoalEvaluation) 
 
 async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_name: str, *args: Any, **kwargs: Any) -> Any:
     async_method = getattr(checkpointer, async_name, None)
-    if async_method is not None:
-        result = async_method(*args, **kwargs)
-        return await result if inspect.isawaitable(result) else result
     sync_method = getattr(checkpointer, sync_name, None)
+    if async_method is not None:
+        try:
+            result = async_method(*args, **kwargs)
+            return await result if inspect.isawaitable(result) else result
+        except NotImplementedError:
+            # Every BaseCheckpointSaver defines the async methods, so their
+            # presence proves nothing: the sync SqliteSaver/PostgresSaver used by
+            # the TUI and embedded client (also behind CachedHistorySaver) raise
+            # NotImplementedError from them. Those must use the sync method.
+            if sync_method is None:
+                raise
     if sync_method is None:
         raise AttributeError(f"Missing checkpointer method: {async_name}/{sync_name}")
     # Offload the synchronous checkpointer call so its blocking IO never runs on
