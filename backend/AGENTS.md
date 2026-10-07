@@ -381,6 +381,29 @@ For models with `supports_vision: true`:
 - `view_image_tool` added to agent's toolset
 - Images are converted to base64 and appended to the model request as a hidden message carrying both a reserved ID prefix and a server-owned metadata marker; Gateway strips that marker from untrusted input, and the middleware requires both identifiers to recognize its own message. The middleware injects inside `wrap_model_call`, so the payload never enters graph state: checkpoints retain only lightweight `viewed_images` metadata, while client-chosen IDs survive. It also sweeps its own message out of every request before rebuilding it, so a payload stranded in an older checkpoint by an interrupted run stops being resent
 
+### Local Knowledge Base (Knowledge Extension)
+
+The first-phase RAG knowledge base is a self-hosted, in-repo plugin —
+`packages/knowledge-extension/` (import `deerflow_knowledge.*`, distribution
+`deerflow-knowledge-extension`). It is inert until a `plugins:` record enables
+it, and the record must declare `table_prefix: kb_`.
+- Host-side seams: the `knowledge_search` tool lives in
+  `packages/harness/deerflow/tools/builtins/hybrid_search_tool.py` and resolves
+  its knowledge scope through a lazy `deerflow_knowledge.access` import;
+  `app/gateway/routers/features.py` reports the capability from
+  `config.knowledge_base.enabled`; the `rag` agent asset admits the tool via its
+  `tools:` entry (opt-in).
+- Routers (`/api/knowledge-bases/*`, `/api/rag/config`) mount through the
+  plugin loader only. `/api/rag/config` is admin-only and masks secrets on
+  every read.
+- Schema: private `MetaData` + own alembic chain (`kb_alembic_version`),
+  upgraded from the extension service's `start()`; host migrations ignore
+  `kb_*` because the plugin record declares the prefix.
+- Tests: `tests/knowledge/` (unit + acceptance style) and the packaging pin
+  `tests/test_knowledge_extension_packaging.py`.
+- Ops (install/enable/disable, tables, backup/restore, deployment positions,
+  rebuild cost): [packages/knowledge-extension/README.md](packages/knowledge-extension/README.md).
+
 ## Code Style
 
 - Uses `ruff` for linting and formatting

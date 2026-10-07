@@ -84,6 +84,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Skills \& Tools](#skills--tools)
       - [Exporting Custom Skills](#exporting-custom-skills)
       - [Claude Code Integration](#claude-code-integration)
+    - [Local Knowledge Base (built-in)](#local-knowledge-base-built-in)
     - [Private Knowledge Retrieval (RAGFlow)](#private-knowledge-retrieval-ragflow)
     - [Chat Archive](#chat-archive)
     - [Session Goals](#session-goals)
@@ -1409,6 +1410,45 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 ```
 
 See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) for the full API reference.
+
+### Local Knowledge Base (built-in)
+
+DeerFlow optionally runs a self-hosted knowledge base for private document
+retrieval, shipped in-repo as the `deerflow-knowledge-extension` plugin
+(`backend/packages/knowledge-extension/`). The extension is fully inert until
+its `plugins:` record is added and enabled: a deployment without it creates no
+knowledge tables, starts no ingestion worker, probes no model or parsing
+services, and the workspace shows no Knowledge entry.
+
+With the extension enabled, a **Knowledge** item appears in the workspace
+sidebar. Knowledge bases are owner-scoped — each user sees and manages their
+own — and support uploads of 15 suffixes: `md`, `markdown`, `txt`, `pdf`,
+`doc`, `docx`, `ppt`, `pptx`, `xls`, `xlsx`, `csv`, `tsv`, `png`, `jpg`,
+`jpeg`. Documents are parsed (locally; PDF/Office/image parsing goes through
+the configured MinerU service), chunked, and indexed into a hybrid dense +
+sparse vector index with a reranking pass. Each knowledge base has its own
+chat column that answers only from its own documents and cites retrieved
+slices as numbered evidence; switching libraries never reuses the previous
+library's conversation.
+
+Failures stay visible and recoverable: a failed or degraded document can be
+retried in place with the same document ID (its old slices are replaced as the
+new run writes), and after a model or endpoint change a library can be
+re-embedded without re-parsing from **Settings → Models → Rebuild index**.
+Qdrant may be absent at startup without blocking the rest of DeerFlow —
+knowledge uploads fail per document until it becomes reachable. Global model
+and service configuration for the knowledge base is an admin-only surface.
+
+The retrieval pipeline is also covered by a no-cloud path in CI
+(`.github/workflows/rag-eval-nocloud.yml`): the fixture library is rebuilt and
+run end to end with recorded model outputs served by an in-repo replay service —
+no cloud model, parsing service, or credentials involved — and drift in the
+recording is refused loudly. Live-service smoke runs are reported separately.
+
+The first phase delivers the single-library document loop; graph, wiki, video,
+cards, and the evaluation UI are out of scope. Install/enable/disable, table
+prefix, backup/restore, deployment positions, and rebuild cost are documented
+in the [extension README](backend/packages/knowledge-extension/README.md).
 
 ### Private Knowledge Retrieval (RAGFlow)
 

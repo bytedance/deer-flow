@@ -301,6 +301,25 @@ components directly. On a legacy model, `resolveReasoningEffort` keeps only its
 advertised generic values; this drops a remembered provider-specific token after
 a model switch without changing the backend's direct legacy-request behavior.
 
+## Local knowledge base UI
+
+The built-in knowledge base surface (extension-backed, first phase):
+
+- Workspace pages: `app/workspace/knowledge/` renders the KB list, document
+  panel and per-KB chat column from `components/workspace/knowledge/*`;
+  `core/knowledge/*` owns the API client, citation rendering
+  (`rehype-citation-marks`, `citation-mark`), duplicate checks and status
+  polling.
+- Feature gate: `useKnowledgeBaseEnabled` in `core/features/hooks.ts` reads
+  `/api/features`; when off, the workspace nav entry is hidden and no extension
+  endpoint is polled.
+- Settings surface: `settings/functional-models-view.tsx` (admin-only) adds the
+  **Rebuild index** dialog and the width-migration dialog, backed by
+  `core/rag/*`; deep-link `?settings=models`.
+- Chat integration: KB conversations live under
+  `/workspace/agents/rag/chats/<thread_id>`, with `metadata.kb_id` binding the
+  library; answers render numbered citations through the shared source cards.
+
 ## Full-stack plugin UI
 
 `core/extensions/` loads authenticated deployment-installed ES modules from `/api/plugins`.
