@@ -453,7 +453,6 @@ export default function AgentChatPage() {
                   threadId={threadId}
                   thread={thread}
                   scheduledTaskEvents={scheduledTaskEvents.data}
-                  scheduledTaskEventsAgentName={agent_name}
                   enableConversationOutline
                   paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                   hasMoreHistory={hasMoreHistory}

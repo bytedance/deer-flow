@@ -52,11 +52,7 @@ function eventOf(overrides: Partial<ScheduledTaskEvent>): ScheduledTaskEvent {
   };
 }
 
-function renderLine(
-  locale: Locale,
-  event: ScheduledTaskEvent,
-  agentName?: string,
-) {
+function renderLine(locale: Locale, event: ScheduledTaskEvent) {
   return render(
     <I18nContext.Provider
       value={{
@@ -65,7 +61,7 @@ function renderLine(
         t: locale === "zh-CN" ? zhCN : enUS,
       }}
     >
-      <ScheduledTaskEventLine event={event} agentName={agentName} />
+      <ScheduledTaskEventLine event={event} />
     </I18nContext.Provider>,
   );
 }
@@ -370,18 +366,25 @@ describe("ScheduledTaskEventLine", () => {
     expect(document.body.textContent).not.toContain(TASK_ID);
   });
 
-  test("See that run opens the run chat on the custom agent of this chat", () => {
-    renderLine("en-US", eventOf({}), "release-bot");
-    expect(action().getAttribute("href")).toBe(
-      `/workspace/agents/release-bot/chats/${RUN_THREAD_ID}`,
-    );
+  test.each([
+    // The agent that ran it, whatever chat the line is shown in: a task's
+    // agent can change after the chat created it.
+    ["release-bot", `/workspace/agents/release-bot/chats/${RUN_THREAD_ID}`],
+    ["lead_agent", `/workspace/chats/${RUN_THREAD_ID}`],
+    [null, `/workspace/chats/${RUN_THREAD_ID}`],
+  ])("See that run opens the run chat on the route of %s", (agent, href) => {
+    renderLine("en-US", eventOf({ run_agent_name: agent }));
+    expect(action().getAttribute("href")).toBe(href);
   });
 
-  test("Open task is not rerouted by the chat's agent", () => {
+  test("Open task goes to the tasks page", () => {
     renderLine(
       "en-US",
-      eventOf({ event: "task_paused", reason_code: "consecutive_unmet" }),
-      "release-bot",
+      eventOf({
+        event: "task_paused",
+        reason_code: "consecutive_unmet",
+        run_agent_name: "release-bot",
+      }),
     );
     expect(action().getAttribute("href")).toBe(TASK_HREF);
   });

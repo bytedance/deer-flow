@@ -336,7 +336,6 @@ export function MessageList({
   initialScroll = "smooth",
   resizeScroll = "smooth",
   scheduledTaskEvents,
-  scheduledTaskEventsAgentName,
 }: {
   archiveDownloadsEnabled?: boolean;
   className?: string;
@@ -374,8 +373,6 @@ export function MessageList({
   resizeScroll?: ConversationProps["resize"];
   /** Lifecycle events of schedules created in this chat, one line each. */
   scheduledTaskEvents?: readonly ScheduledTaskEvent[];
-  /** The custom agent of this chat, for the event lines' run links. */
-  scheduledTaskEventsAgentName?: string | null;
 }) {
   const { t } = useI18n();
   const sidecar = useMaybeSidecar();
@@ -1176,11 +1173,7 @@ export function MessageList({
     events && events.length > 0 ? (
       <div className={cn("flex w-full flex-col gap-3", className)}>
         {events.map((event) => (
-          <ScheduledTaskEventLine
-            key={event.id}
-            event={event}
-            agentName={scheduledTaskEventsAgentName}
-          />
+          <ScheduledTaskEventLine key={event.id} event={event} />
         ))}
       </div>
     ) : null;

@@ -18,7 +18,6 @@ import {
   type TaskEventKind,
 } from "@/core/scheduled-tasks/events";
 import { browserTimeZone, formatTaskTime } from "@/core/scheduled-tasks/format";
-import { pathOfThread } from "@/core/threads/utils";
 import { cn } from "@/lib/utils";
 
 const ICONS: Record<TaskEventKind, LucideIcon> = {
@@ -34,18 +33,14 @@ const ICONS: Record<TaskEventKind, LucideIcon> = {
  * created it (mockup m2, marker 4): "Release checklist was paused by the
  * agent …  Today 09:01   See that run ›". The line is history: it stays when
  * the task is later deleted ("Open task" then shows the deleted state).
- *
- * `agentName` is the custom agent of the chat the line is shown in. A task
- * created in that chat runs with the same agent, so "See that run" opens the
- * run chat on that agent's route.
+ * "See that run" opens the run chat on the route of the agent that ran it,
+ * recorded with the event; a task's agent can change after it is created.
  */
 export function ScheduledTaskEventLine({
   event,
-  agentName,
   className,
 }: {
   event: ScheduledTaskEvent;
-  agentName?: string | null;
   className?: string;
 }) {
   const { t, locale } = useI18n();
@@ -56,11 +51,7 @@ export function ScheduledTaskEventLine({
   }
 
   const Icon = ICONS[description.kind];
-  const runThreadId = event.run_thread_id?.trim();
-  const href =
-    description.action.kind === "seeThatRun" && agentName && runThreadId
-      ? pathOfThread(runThreadId, { agent_name: agentName })
-      : description.action.href;
+  const href = description.action.href;
   const time = formatTaskTime(event.created_at, {
     timeZone: browserTimeZone(),
     locale,

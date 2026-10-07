@@ -91,10 +91,15 @@ def _chat_event_payload(task, occurrence, event: str, *, run_number: int | None)
     stop_condition = getattr(task, "stop_condition", None)
     end_at = _as_utc_or_none(getattr(task, "end_at", None))
     run_status = getattr(occurrence, "status", None) if occurrence is not None else None
+    launched = occurrence is not None and occurrence.run_id is not None
+    # The agent that ran it (edits are refused while a run is active), so the
+    # run link opens on that agent's route, not the originating chat's.
+    agent = getattr(task, "assistant_id", None)
     return {
         "task_title": title or None,
         "stop_condition": stop_condition if event == "task_stopped" and isinstance(stop_condition, str) and stop_condition.strip() else None,
-        "run_thread_id": occurrence.thread_id if occurrence is not None and occurrence.run_id is not None else None,
+        "run_thread_id": occurrence.thread_id if launched else None,
+        "run_agent_name": agent.strip() if launched and isinstance(agent, str) and agent.strip() else None,
         "run_number": run_number,
         "run_status": run_status,
         "latest_reason_code": occurrence.error if run_status == "unmet" and isinstance(occurrence.error, str) else None,

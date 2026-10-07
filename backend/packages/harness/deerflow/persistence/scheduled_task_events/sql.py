@@ -22,7 +22,7 @@ from deerflow.persistence.scheduled_task_events.model import ScheduledTaskEventR
 from deerflow.utils.time import coerce_iso
 
 # Payload keys the events route returns next to the row columns.
-_PAYLOAD_FIELDS = ("task_title", "stop_condition", "run_thread_id", "run_number", "run_status", "max_runs", "end_at", "schedule_type")
+_PAYLOAD_FIELDS = ("task_title", "stop_condition", "run_thread_id", "run_agent_name", "run_number", "run_status", "max_runs", "end_at", "schedule_type")
 
 
 class ScheduledTaskEventRepository:

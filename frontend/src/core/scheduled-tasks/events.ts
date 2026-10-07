@@ -62,6 +62,8 @@ export type ScheduledTaskEvent = {
   schedule_type: ScheduledTask["schedule_type"] | null;
   /** The newest run of the chat when the event was recorded (placement anchor). */
   after_run_id: string | null;
+  /** The agent that ran the run (`run_thread_id`), for its chat's route. */
+  run_agent_name?: string | null;
   created_at: string;
 };
 
@@ -289,7 +291,12 @@ export function describeTaskEvent(
     ? {
         kind: "seeThatRun",
         label: st.notice.seeThatRun,
-        href: pathOfThread(runThreadId),
+        href: pathOfThread(
+          runThreadId,
+          event.run_agent_name && event.run_agent_name !== "lead_agent"
+            ? { agent_name: event.run_agent_name }
+            : null,
+        ),
       }
     : null;
   const openTask: TaskEventAction = {

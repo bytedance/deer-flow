@@ -53,7 +53,7 @@ _OWNER = User(id=UUID("6c1f3d0e-8a8f-4a35-9a51-0d2f5d1b7c11"), email="events@exa
 _OTHER = User(id=UUID("0b9d2c47-55e3-4d47-8f0c-a3b0f1f4d222"), email="other@example.com", password_hash="unused", system_role="user")
 OWNER = str(_OWNER.id)
 _TABLES = [ScheduledTaskRow, ScheduledTaskRunRow, RunRow, ThreadMetaRow, ScheduledTaskEventRow, NotificationDeliveryRow, ChannelConnectionRow, UserRow, UserPreferenceRow]
-_API_FIELDS = {"id", "task_id", "event", "reason_code", "task_title", "stop_condition", "run_thread_id", "run_number", "run_status", "max_runs", "end_at", "schedule_type", "after_run_id", "created_at"}
+_API_FIELDS = {"id", "task_id", "event", "reason_code", "task_title", "stop_condition", "run_thread_id", "run_agent_name", "run_number", "run_status", "max_runs", "end_at", "schedule_type", "after_run_id", "created_at"}
 
 
 @pytest.fixture(params=["sqlite", "postgres"])
@@ -95,13 +95,13 @@ def service_for(tasks, runs, **kwargs):
     return ScheduledTaskService(task_repo=tasks, task_run_repo=runs, launch_run=None, poll_interval_seconds=60, lease_seconds=30, max_concurrent_runs=3, **kwargs)
 
 
-async def make_task(tasks, task_id="task", *, origin_thread_id="origin", title="Check the release checklist", **extra):
+async def make_task(tasks, task_id="task", *, origin_thread_id="origin", title="Check the release checklist", assistant_id=None, **extra):
     return await tasks.create(
         task_id=task_id,
         user_id=OWNER,
         thread_id=None,
         context_mode="fresh_thread_per_run",
-        assistant_id=None,
+        assistant_id=assistant_id,
         title=title,
         prompt="Check release-checklist.md.",
         schedule_type="interval",
@@ -376,6 +376,7 @@ async def test_skipped_occurrence_payload_has_no_run_thread(tmp_path):
         (row,) = await event_rows(sf)
         assert (row.event, row.reason_code) == ("task_finished", "end_at")
         assert row.payload_json["run_thread_id"] is None
+        assert row.payload_json["run_agent_name"] is None
         assert row.payload_json["run_number"] is None
         assert row.payload_json["run_status"] == "skipped"
 
@@ -493,7 +494,8 @@ async def test_thread_delete_removes_events(tmp_path):
 @pytest.mark.asyncio
 async def test_payload_has_title_condition_run_number(tmp_path):
     async with database(tmp_path) as (sf, tasks, runs):
-        await make_task(tasks, stop_condition="all items are ticked", end_at=NOW + timedelta(days=30))
+        # The task runs on a custom agent: the run link must open on its route.
+        await make_task(tasks, stop_condition="all items are ticked", end_at=NOW + timedelta(days=30), assistant_id="release-bot")
         await chat(sf, runs=[("chat-run", NOW - timedelta(minutes=5), "run")])
         service_for(tasks, runs)
         first, first_run = await occurrence(sf, runs, suffix="1")
@@ -507,6 +509,7 @@ async def test_payload_has_title_condition_run_number(tmp_path):
             "task_title": "Check the release checklist",
             "stop_condition": "all items are ticked",
             "run_thread_id": "task-thread-2",
+            "run_agent_name": "release-bot",
             "run_number": 2,
             "run_status": "success",
             "latest_reason_code": None,
@@ -517,7 +520,7 @@ async def test_payload_has_title_condition_run_number(tmp_path):
         async with http_client(sf) as client:
             (line,) = (await client.get("/api/threads/origin/scheduled-task-events")).json()["events"]
         assert set(line) == _API_FIELDS
-        assert (line["run_number"], line["stop_condition"], line["after_run_id"], line["run_thread_id"]) == (2, "all items are ticked", "chat-run", "task-thread-2")
+        assert (line["run_number"], line["stop_condition"], line["after_run_id"], line["run_thread_id"], line["run_agent_name"]) == (2, "all items are ticked", "chat-run", "task-thread-2", "release-bot")
 
 
 def _task(**values):

@@ -1388,7 +1388,7 @@ that created tasks, oldest first:
 ```json
 { "events": [ { "id": "evt-…", "task_id": "task-…", "event": "task_stopped", "reason_code": "agent_stop",
   "task_title": "Check the release checklist", "stop_condition": "all items are ticked",
-  "run_thread_id": "…", "run_number": 4, "run_status": "success", "max_runs": null, "end_at": null,
+  "run_thread_id": "…", "run_agent_name": "lead_agent", "run_number": 4, "run_status": "success", "max_runs": null, "end_at": null,
   "schedule_type": "cron", "after_run_id": "…", "created_at": "2026-10-06T09:00:03+00:00" } ] }
 ```
 
@@ -1400,7 +1400,8 @@ that created tasks, oldest first:
 same transaction as the state change it reports and is unique per task,
 transition and event, so recovery never adds a second one. `run_status` is the
 last run's outcome (a stop or finish after a failed run says so);
-`run_thread_id` is null when the occurrence never launched; `after_run_id` is
+`run_thread_id` is null when the occurrence never launched, and
+`run_agent_name` is the agent that ran it (its run chat's route); `after_run_id` is
 the newest run of the chat when the event was written (the chat shows the line
 after that turn, else at the end). Rows keep a title snapshot and stay after
 the task is deleted; deleting the chat removes them. Tasks created on the
