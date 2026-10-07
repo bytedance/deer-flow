@@ -804,6 +804,33 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **uploads:** The Gateway's startup sweep of orphaned `.upload-*.part` staging
+  files now skips files younger than 24 hours. The sweep removed every staging
+  file it found, which was right for one Gateway but not for several replicas
+  sharing a home volume: a replica starting during a rolling update deleted the
+  staging file of an upload another replica was still writing, and that upload
+  then failed at its atomic commit. Chunk writes refresh the staging file's
+  mtime, so an upload in flight stays younger than the guard; a crash leftover
+  is collected by the first startup more than 24 hours later, the same guard
+  project-document staging already uses. A staging file that already shares
+  its inode with the published upload (a crash between the atomic link and the
+  staged-name removal) is still reclaimed on the next startup at any age, so
+  that destination does not fail the multi-link safety check on its next
+  replacement. ([#6445])
+- **gateway:** `GET /health/ready` now reports unready while the Redis stream
+  bridge is unreachable. The bridge's Redis client connects lazily and nothing
+  pinged it, so a gateway whose Redis was down started, answered `200 ready` to
+  the Kubernetes readiness probe and the Compose healthcheck, and kept
+  receiving traffic while every run's first publish failed; with the
+  multi-instance gate making the Redis bridge mandatory, such a replica is not
+  serviceable at all. `StreamBridge` gains `ping()`, the response body gains a
+  `stream_bridge` verdict (`not_configured` for the memory bridge) that flips
+  the endpoint to 503 when unreachable, and a report-only `provisioner` verdict
+  from the sandbox provisioner's own `/health` when `sandbox.provisioner_url`
+  is set, which never changes the status code because every replica shares one
+  provisioner. A probe that overruns the endpoint deadline is now the only one
+  marked unreachable, and the public probe gate is one lock per probe kind.
+  ([#6447])
 - **frontend:** Retrying a message after its attachment upload fails now keeps
   the context that was attached to it. The composer dropped its quotes,
   conversation references, staged project files and stored draft as soon as a
@@ -9137,4 +9164,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6407]: https://github.com/bytedance/deer-flow/pull/6407
 [#6412]: https://github.com/bytedance/deer-flow/pull/6412
 [#6426]: https://github.com/bytedance/deer-flow/pull/6426
+[#6445]: https://github.com/bytedance/deer-flow/pull/6445
+[#6447]: https://github.com/bytedance/deer-flow/pull/6447
 [#6448]: https://github.com/bytedance/deer-flow/pull/6448

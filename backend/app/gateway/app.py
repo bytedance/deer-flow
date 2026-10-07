@@ -19,7 +19,7 @@ from app.gateway.browser_capability import ensure_browser_runtime_available
 from app.gateway.config import get_gateway_config
 from app.gateway.csrf_middleware import CORS_EXPOSED_HEADERS, CSRFMiddleware, get_configured_cors_origins
 from app.gateway.deps import langgraph_runtime
-from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, readiness_payload
+from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, READINESS_PROVISIONER_URL_ATTR, readiness_payload
 from app.gateway.routers import (
     agents,
     artifacts,
@@ -1307,19 +1307,26 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     @app.get("/health/ready", tags=["health"])
     async def readiness_check(request: Request, response: Response) -> dict[str, str]:
-        """Readiness endpoint: 200 when the persistence backends are reachable.
+        """Readiness endpoint: 200 when the backends behind agent runs are reachable.
 
-        Probes the ORM engine behind ``database:`` and the effective LangGraph
+        Probes the ORM engine behind ``database:``, the effective LangGraph
         checkpointer/Store backend (legacy ``checkpointer:`` section, otherwise
-        derived from ``database:``) concurrently beneath one bounded deadline.
-        The checkpointer config comes from the startup snapshot recorded by
-        ``langgraph_runtime`` (never hot-reloaded config), so orchestrators can
-        gate on the gateway actually being ready rather than merely alive.
-        Returns 503 with ``status: degraded`` when either probe fails or the
-        startup backend cannot be resolved.
+        derived from ``database:``) and the stream bridge's Redis backend
+        concurrently beneath one bounded deadline, and reports the sandbox
+        provisioner's own ``/health`` without gating on it. Targets come from
+        the startup snapshot recorded by ``langgraph_runtime`` (never
+        hot-reloaded config), so orchestrators can gate on the gateway actually
+        being ready rather than merely alive. Returns 503 with
+        ``status: degraded`` when a gating probe fails or a startup target
+        cannot be resolved; the provisioner verdict is informational because
+        every replica shares one provisioner.
         """
-        checkpointer_config = getattr(request.app.state, READINESS_CHECKPOINTER_CONFIG_ATTR, None)
-        status_code, payload = await readiness_payload(checkpointer_config)
+        state = request.app.state
+        status_code, payload = await readiness_payload(
+            getattr(state, READINESS_CHECKPOINTER_CONFIG_ATTR, None),
+            stream_bridge=getattr(state, "stream_bridge", None),
+            provisioner_url=getattr(state, READINESS_PROVISIONER_URL_ATTR, None),
+        )
         response.status_code = status_code
         return payload
 

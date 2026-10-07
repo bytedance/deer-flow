@@ -180,8 +180,10 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      # /health/ready runs both probes concurrently within a 3s endpoint
-      # deadline; the client timeout must stay above that bound.
+      # /health/ready runs its probes (database, checkpointer, Redis stream
+      # bridge, provisioner) concurrently within a 3s endpoint deadline; the
+      # client timeout must stay above that bound. The gateway is unhealthy
+      # while Redis is unreachable; the provisioner verdict is report-only.
       test: ["CMD", "python", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=5); raise SystemExit(0 if response.status == 200 else 1)"]
       interval: 5s
       timeout: 5s
