@@ -57,6 +57,93 @@ describe("speech recognition helpers", () => {
     });
   });
 
+  it("separates unpadded final and interim segments", () => {
+    // WebKit-style providers trim final transcripts; without an explicit
+    // separator the finalized text glues onto the interim hypothesis.
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "hello world" } },
+        1: { isFinal: false, length: 1, 0: { transcript: "today is" } },
+      }),
+    ).toEqual({
+      finalText: "hello world",
+      interimText: "today is",
+      text: "hello world today is",
+    });
+  });
+
+  it("separates consecutive unpadded final segments", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "hello" } },
+        1: { isFinal: true, length: 1, 0: { transcript: "world" } },
+      }),
+    ).toEqual({
+      finalText: "hello world",
+      interimText: "",
+      text: "hello world",
+    });
+  });
+
+  it("keeps no-space scripts concatenated without inserting separators", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 3,
+        0: { isFinal: true, length: 1, 0: { transcript: "你好" } },
+        1: { isFinal: true, length: 1, 0: { transcript: "世界" } },
+        2: { isFinal: false, length: 1, 0: { transcript: "早上好" } },
+      }),
+    ).toEqual({
+      finalText: "你好世界",
+      interimText: "早上好",
+      text: "你好世界早上好",
+    });
+  });
+
+  it("keeps mixed-script boundaries concatenated", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "你好" } },
+        1: { isFinal: false, length: 1, 0: { transcript: "hello" } },
+      }),
+    ).toEqual({
+      finalText: "你好",
+      interimText: "hello",
+      text: "你好hello",
+    });
+  });
+
+  it("keeps CJK clause-final punctuation boundaries concatenated", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "こんにちは、" } },
+        1: { isFinal: false, length: 1, 0: { transcript: "iPhone" } },
+      }),
+    ).toEqual({
+      finalText: "こんにちは、",
+      interimText: "iPhone",
+      text: "こんにちは、iPhone",
+    });
+  });
+
+  it("joins Korean segments with a space like other space-delimited scripts", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "안녕" } },
+        1: { isFinal: false, length: 1, 0: { transcript: "하세요" } },
+      }),
+    ).toEqual({
+      finalText: "안녕",
+      interimText: "하세요",
+      text: "안녕 하세요",
+    });
+  });
+
   it("appends transcript to an existing draft without duplicating whitespace", () => {
     expect(appendSpeechTranscript("", "  hello  world ")).toBe("hello world");
     expect(appendSpeechTranscript("Draft", "voice text")).toBe(
