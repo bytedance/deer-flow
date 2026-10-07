@@ -348,9 +348,11 @@ The support bundle's `extensions_config.json` reader accepts UTF-8 with or
 without a leading BOM, matching the runtime loader. Preserve redaction and
 avoid flagging a valid BOM-prefixed file as a syntax error in triage output.
 
-Support-bundle subprocess capture explicitly decodes UTF-8 with replacement
-for invalid bytes. Set `PYTHONIOENCODING=utf-8` only in the copied child
-environment so Python helpers can print Unicode without changing the parent.
+Support-bundle and doctor tool captures explicitly decode UTF-8 with replacement
+for invalid bytes. Set `PYTHONIOENCODING=utf-8:backslashreplace` only in the copied
+support-bundle child environment so Python helpers can print Unicode and escape
+surrogates without aborting diagnostics or changing the parent.
 Keep exit codes, timeouts and redaction intact; do not rely on the host locale.
 Regressions use real local children, including ASCII/GBK capture defaults,
-nonzero exits and malformed output, without invoking provider diagnostics.
+nonzero exits, surrogate characters and malformed output, without invoking
+provider diagnostics. Doctor covers both `_run` streams and pnpm runner capture.

@@ -185,7 +185,8 @@ def _run_command(args: list[str], cwd: Path, timeout_s: int = 10) -> dict[str, A
             errors="replace",
             # Python helpers (doctor, pnpm) must emit the encoding we capture,
             # even when the host or inherited stdio setting is not UTF-8.
-            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            # Escape surrogate characters rather than aborting diagnostics.
+            env={**os.environ, "PYTHONIOENCODING": "utf-8:backslashreplace"},
             timeout=timeout_s,
             check=False,
         )

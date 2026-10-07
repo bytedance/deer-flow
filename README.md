@@ -179,8 +179,9 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
    `triage.json`; the bundle includes redacted diagnostics and file manifests
    only, and does not include `.env`, raw conversation messages, or user file
    contents. Subprocess diagnostics are captured as UTF-8, with Python helpers
-   emitting UTF-8 even on non-UTF-8 hosts. Invalid bytes are replaced so the
-   remaining diagnostic output stays available.
+   emitting UTF-8 even on non-UTF-8 hosts and escaping unencodable characters.
+   Doctor's internal tool probes also decode UTF-8 with replacement for invalid
+   bytes so the remaining diagnostic output stays available.
 
    > **Advanced / manual configuration**: If you prefer to edit `config.yaml` directly, run `make config` instead to copy the full template. Optional dependency auto-detection accepts UTF-8 configuration files with or without a byte-order mark (BOM). See `config.example.yaml` for the complete reference including CLI-backed providers (Codex CLI, Claude Code OAuth), OpenRouter, Responses API, subagent runtime caps such as `subagents.max_total_per_run`, and more.
 

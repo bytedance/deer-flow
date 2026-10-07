@@ -62,6 +62,23 @@ def test_run_command_preserves_diagnostics_with_invalid_utf8(tmp_path, returncod
     }
 
 
+@pytest.mark.parametrize("returncode", [0, 7])
+def test_run_command_preserves_diagnostics_with_surrogate_characters(tmp_path, monkeypatch, returncode):
+    monkeypatch.setenv("PYTHONIOENCODING", "ascii:strict")
+    stdout = "✓ path \udcff Bearer fake.stdout.secret\ncontinued stdout"
+    stderr = "✗ path \udcff Bearer fake.stderr.secret\ncontinued stderr"
+    code = f"import sys; sys.stdout.write({ascii(stdout)}); sys.stderr.write({ascii(stderr)}); sys.exit({returncode})"
+
+    result = support_bundle._run_command([sys.executable, "-c", code], cwd=tmp_path)
+
+    assert result == {
+        "ok": returncode == 0,
+        "returncode": returncode,
+        "stdout": "✓ path \\udcff Bearer <redacted>\ncontinued stdout",
+        "stderr": "✗ path \\udcff Bearer <redacted>\ncontinued stderr",
+    }
+
+
 def test_collect_environment_routes_pnpm_through_shared_runner(tmp_path, monkeypatch):
     calls = []
 
