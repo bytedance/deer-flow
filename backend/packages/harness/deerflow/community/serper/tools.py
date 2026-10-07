@@ -265,6 +265,9 @@ def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, t
 
     try:
         with httpx.Client(timeout=30) as client:
+            base_url = os.getenv("SERPER_BASE_URL")
+            if base_url:
+                endpoint = base_url.rstrip("/") + "/" + endpoint.rsplit("/", 1)[-1]
             response = client.post(endpoint, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
