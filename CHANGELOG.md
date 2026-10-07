@@ -704,7 +704,7 @@ This release closes that milestone with **439 merged pull requests**.
   a new side chat was also cleared as soon as it was queued, before it was sent.
   The handler now rejects after the toast, and the queued first send settles the
   submit with its own outcome, so the draft stays for a retry and clears only
-  once the message is sent.
+  once the message is sent. ([#6407])
 - **channels:** Opening an IM-channel conversation on the web while its run is still
   going no longer shows the user's message twice. Channel run input carried no
   message id, so the Gateway stored it id-less in the run record while the
@@ -8983,3 +8983,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6386]: https://github.com/bytedance/deer-flow/pull/6386
 [#6388]: https://github.com/bytedance/deer-flow/pull/6388
 [#6401]: https://github.com/bytedance/deer-flow/pull/6401
+[#6407]: https://github.com/bytedance/deer-flow/pull/6407
