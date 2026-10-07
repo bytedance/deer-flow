@@ -128,8 +128,9 @@ the same file: the process cache revalidates the file's path and content
 signature on each read, so uvicorn workers and multi-instance Pods sharing one
 volume converge without a restart or a per-Pod reload call. A change made through
 an API call on one instance is visible to the others on their next request. A
-partially written or invalid file keeps the previously loaded configuration until
-a complete revision lands; the Gateway logs one warning per such revision.
+missing, partially written or invalid file keeps the previously loaded configuration
+until a complete revision lands, including when it disappears during a reload;
+the Gateway logs one warning per such revision.
 
 ### Recursion Limits
 

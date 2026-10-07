@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+import deerflow.config.extensions_config as extensions_config_module
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
     McpServerConfig,
@@ -174,6 +175,41 @@ def test_deleted_file_keeps_last_known_good_until_it_returns(config_path: Path, 
     warnings = _warnings(caplog)
     assert len(warnings) == 1
     assert _KEEPING_PREVIOUS in warnings[0].getMessage()
+
+    _write_from_peer_process(config_path, _filesystem_server_payload("/data/beta"))
+    assert _allowed_paths_of(get_extensions_config()) == ["/data/beta"]
+
+
+@pytest.mark.parametrize("deletion_stage", ["before-signature", "after-signature"])
+def test_search_mode_deletion_during_reload_keeps_last_known_good(config_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, deletion_stage: str) -> None:
+    monkeypatch.delenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH")
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+    # Keep search-mode fallback locations isolated from the checkout's config.
+    monkeypatch.setattr(extensions_config_module, "__file__", str(tmp_path / "isolated/backend/packages/harness/deerflow/config/extensions_config.py"))
+    assert ExtensionsConfig.resolve_config_path() == config_path
+    first = get_extensions_config()
+    _write_from_peer_process(config_path, _filesystem_server_payload("/data/beta"))
+    original_signature = extensions_config_module.get_config_signature
+
+    def signature_with_peer_deletion(path: Path):
+        assert path == config_path
+        if deletion_stage == "before-signature":
+            path.unlink()
+        signature = original_signature(path)
+        if deletion_stage == "after-signature":
+            path.unlink()
+        return signature
+
+    with monkeypatch.context() as race:
+        race.setattr(extensions_config_module, "get_config_signature", signature_with_peer_deletion)
+        with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
+            assert get_extensions_config() is first
+
+    assert len(_warnings(caplog)) == 1
+    assert _KEEPING_PREVIOUS in _warnings(caplog)[0].getMessage()
+    assert ExtensionsConfig.resolve_config_path() is None
+    assert get_extensions_config() is first
+    assert _get_mcp_allowed_paths() == ["/data/alpha/"]
 
     _write_from_peer_process(config_path, _filesystem_server_payload("/data/beta"))
     assert _allowed_paths_of(get_extensions_config()) == ["/data/beta"]

@@ -904,7 +904,9 @@ def get_extensions_config() -> ExtensionsConfig:
             return _extensions_config
 
         try:
-            loaded = ExtensionsConfig.from_file(_extensions_config_source) if _extensions_config_source else ExtensionsConfig.from_file()
+            # Parse the probed file: a second search could publish an empty
+            # config if that file disappeared before parsing.
+            loaded = ExtensionsConfig.from_file(str(current_path))
         except Exception as exc:
             _keep_last_known_good(current_path, current_signature, "Extensions config at %s changed but could not be loaded (%s)", current_path, _describe_load_failure(exc))
             return _extensions_config

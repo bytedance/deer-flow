@@ -9,6 +9,7 @@ import yaml
 from pydantic import ValidationError
 
 import deerflow.config.app_config as app_config_module
+import deerflow.config.extensions_config as extensions_config_module
 from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.agents_api_config import get_agents_api_config, load_agents_api_config_from_dict
 from deerflow.config.app_config import AppConfig, get_app_config, peek_loaded_app_config, reset_app_config
@@ -1026,6 +1027,42 @@ def test_get_app_config_keeps_extensions_snapshot_while_extensions_file_is_half_
 
         _peer_writes_extensions(extensions_path, middlewares=["pkg.second:SecondMiddleware"])
         assert get_app_config().extensions.middlewares == ["pkg.second:SecondMiddleware"]
+    finally:
+        _reset_config_singletons()
+
+
+def test_get_app_config_keeps_extensions_snapshot_when_search_file_disappears_during_reload(tmp_path, monkeypatch):
+    extensions_path = _stage_singleton_configs(tmp_path, monkeypatch, middlewares=["pkg.first:FirstMiddleware"])
+    monkeypatch.delenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH")
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(extensions_config_module, "__file__", str(tmp_path / "isolated/backend/packages/harness/deerflow/config/extensions_config.py"))
+
+    try:
+        initial = get_app_config()
+        loaded = peek_loaded_app_config()
+        yaml_signature = app_config_module._app_config_signature
+        assert initial.extensions.middlewares == ["pkg.first:FirstMiddleware"]
+        _peer_writes_extensions(extensions_path, middlewares=["pkg.second:SecondMiddleware"])
+        original_signature = extensions_config_module.get_config_signature
+
+        def signature_with_peer_deletion(path: Path):
+            assert path == extensions_path
+            signature = original_signature(path)
+            path.unlink()
+            return signature
+
+        with monkeypatch.context() as race:
+            race.setattr(extensions_config_module, "get_config_signature", signature_with_peer_deletion)
+            assert get_app_config().extensions.middlewares == ["pkg.first:FirstMiddleware"]
+
+        assert peek_loaded_app_config() is loaded
+        assert app_config_module._app_config_signature == yaml_signature
+        assert get_app_config().extensions.middlewares == ["pkg.first:FirstMiddleware"]
+
+        _peer_writes_extensions(extensions_path, middlewares=["pkg.second:SecondMiddleware"])
+        assert get_app_config().extensions.middlewares == ["pkg.second:SecondMiddleware"]
+        assert peek_loaded_app_config() is not loaded
+        assert app_config_module._app_config_signature == yaml_signature
     finally:
         _reset_config_singletons()
 
