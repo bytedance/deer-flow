@@ -1,6 +1,6 @@
 /**
  * Citation extraction from retrieval tool messages (spec §4.6): the rag
- * agent's tools return JSON payloads — hybrid_search ``results`` (chunk
+ * agent's tools return JSON payloads — knowledge_search ``results`` (chunk
  * level), graph_search ``evidence`` (chunk level), wiki_search ``entries``
  * (entry level). The assistant's ``[n]`` markers map onto the merged,
  * deduped source list of its own turn.
@@ -64,14 +64,14 @@ const WIKI_MIXED = {
 };
 
 describe("parseRetrievalToolContent", () => {
-  test("parses hybrid_search results into chunk citations", () => {
-    const citations = parseRetrievalToolContent("hybrid_search", JSON.stringify(HYBRID));
+  test("parses knowledge_search results into chunk citations", () => {
+    const citations = parseRetrievalToolContent("knowledge_search", JSON.stringify(HYBRID));
     expect(citations).toHaveLength(2);
     expect(citations[0]).toMatchObject({ chunk_id: "c1", doc_name: "手册.pdf", page: 3, text: "切片一" });
   });
 
   test("stamps source_type from the tool name (phase-2 batch-1: zero backend change)", () => {
-    expect(parseRetrievalToolContent("hybrid_search", JSON.stringify(HYBRID))[0]?.source_type).toBe("chunk");
+    expect(parseRetrievalToolContent("knowledge_search", JSON.stringify(HYBRID))[0]?.source_type).toBe("chunk");
     expect(parseRetrievalToolContent("graph_search", JSON.stringify(GRAPH))[0]?.source_type).toBe("chunk");
     expect(parseRetrievalToolContent("wiki_search", JSON.stringify(WIKI))[0]?.source_type).toBe("wiki");
   });
@@ -95,9 +95,9 @@ describe("parseRetrievalToolContent", () => {
   });
 
   test("tolerates malformed JSON and unknown tools by returning nothing", () => {
-    expect(parseRetrievalToolContent("hybrid_search", "not-json")).toEqual([]);
+    expect(parseRetrievalToolContent("knowledge_search", "not-json")).toEqual([]);
     expect(parseRetrievalToolContent("web_search", JSON.stringify(HYBRID))).toEqual([]);
-    expect(parseRetrievalToolContent("hybrid_search", JSON.stringify({ results: [], message: "空" }))).toEqual([]);
+    expect(parseRetrievalToolContent("knowledge_search", JSON.stringify({ results: [], message: "空" }))).toEqual([]);
   });
 });
 
@@ -105,7 +105,7 @@ describe("sourcesForAssistantMessage", () => {
   test("merges retrieval results between the previous human message and the answer, deduped by chunk_id", () => {
     const messages = [
       human("h1"),
-      toolMessage("hybrid_search", HYBRID, "t1"),
+      toolMessage("knowledge_search", HYBRID, "t1"),
       toolMessage("wiki_search", WIKI, "t2"),
       toolMessage("graph_search", GRAPH, "t3"),
       ai("a1"),
@@ -117,7 +117,7 @@ describe("sourcesForAssistantMessage", () => {
   test("scopes to the message's own turn (earlier turns are invisible)", () => {
     const messages = [
       human("h1"),
-      toolMessage("hybrid_search", HYBRID, "t1"),
+      toolMessage("knowledge_search", HYBRID, "t1"),
       ai("a1"),
       human("h2"),
       toolMessage("wiki_search", WIKI, "t2"),
@@ -131,7 +131,7 @@ describe("sourcesForAssistantMessage", () => {
     const graphSame = { ...GRAPH, evidence: [{ ...GRAPH.evidence[0], chunk_id: "c1" }] };
     const messages = [
       human("h1"),
-      toolMessage("hybrid_search", HYBRID, "t1"),
+      toolMessage("knowledge_search", HYBRID, "t1"),
       toolMessage("graph_search", graphSame, "t3"),
       ai("a1"),
     ];
@@ -150,7 +150,7 @@ describe("sourcesForAssistantMessage", () => {
     const wiki = {
       entries: [{ entry_id: "e1", title: "条目", content: "全文", score: 0.7, citation_no: 1 }],
     };
-    expect(parseRetrievalToolContent("hybrid_search", JSON.stringify(hybrid))[0]?.citation_nos).toEqual([4]);
+    expect(parseRetrievalToolContent("knowledge_search", JSON.stringify(hybrid))[0]?.citation_nos).toEqual([4]);
     expect(parseRetrievalToolContent("graph_search", JSON.stringify(graph))[0]?.citation_nos).toEqual([9]);
     expect(parseRetrievalToolContent("wiki_search", JSON.stringify(wiki))[0]?.citation_nos).toEqual([1]);
   });
@@ -186,7 +186,7 @@ describe("sourcesForAssistantMessage", () => {
       human("h1"),
       toolMessage("wiki_search", wiki3, "t1"),
       toolMessage("graph_search", graph4, "t2"),
-      toolMessage("hybrid_search", hybrid5, "t3"),
+      toolMessage("knowledge_search", hybrid5, "t3"),
       ai("a1"),
     ];
     const sources = sourcesForAssistantMessage(messages, "a1");
@@ -227,7 +227,7 @@ describe("sourcesForAssistantMessage", () => {
     const messages = [
       human("h1"),
       toolMessage("graph_search", graph, "t1"),
-      toolMessage("hybrid_search", hybrid, "t2"),
+      toolMessage("knowledge_search", hybrid, "t2"),
       toolMessage("wiki_search", wiki, "t3"),
       ai("a1"),
     ];
@@ -252,7 +252,7 @@ describe("latestRetrievalTurn", () => {
     // 最后一轮无引用 → 不更新叠加（保留旧 overlay，由调用方决定）。
     const messages = [
       human("h1"),
-      toolMessage("hybrid_search", HYBRID, "t1"),
+      toolMessage("knowledge_search", HYBRID, "t1"),
       ai("a1"),
       { type: "human", id: "h2", content: "闲聊" } as unknown as Message,
       ai("a2"),
@@ -261,7 +261,7 @@ describe("latestRetrievalTurn", () => {
   });
 
   test("extracts the latest turn: question text, merged citations, answer id", () => {
-    const messages = [human("h1"), toolMessage("hybrid_search", HYBRID, "t1"), ai("a1")];
+    const messages = [human("h1"), toolMessage("knowledge_search", HYBRID, "t1"), ai("a1")];
     const turn = latestRetrievalTurn(messages);
     expect(turn?.messageId).toBe("a1");
     expect(turn?.text).toBe("问题");
@@ -271,7 +271,7 @@ describe("latestRetrievalTurn", () => {
   test("keeps the LAST turn when the transcript has several", () => {
     const messages = [
       human("h1"),
-      toolMessage("hybrid_search", HYBRID, "t1"),
+      toolMessage("knowledge_search", HYBRID, "t1"),
       ai("a1"),
       { type: "human", id: "h2", content: "第二个问题" } as unknown as Message,
       toolMessage("graph_search", GRAPH, "t2"),
@@ -295,7 +295,7 @@ describe("latestRetrievalTurn", () => {
         content: '{"type":"human_input_response","answer":"展开说说"}',
         additional_kwargs: { hide_from_ui: true },
       } as unknown as Message,
-      toolMessage("hybrid_search", HYBRID, "t1"),
+      toolMessage("knowledge_search", HYBRID, "t1"),
       ai("a2"),
     ];
     const turn = latestRetrievalTurn(messages);
@@ -310,7 +310,7 @@ describe("latestRetrievalTurn", () => {
         id: "h1",
         content: [{ type: "text", text: "数组形态提问" }],
       } as unknown as Message,
-      toolMessage("hybrid_search", HYBRID, "t1"),
+      toolMessage("knowledge_search", HYBRID, "t1"),
       ai("a1"),
     ];
     expect(latestRetrievalTurn(messages)?.text).toBe("数组形态提问");
@@ -378,7 +378,7 @@ describe("latestGraphTraceTurn", () => {
 
   test("returns null when the latest turn ran no graph_search (or the trace is empty)", () => {
     // 最后一轮只走了 hybrid 路 → 图谱叠加不更新（语义对齐 latestRetrievalTurn）。
-    const hybridOnly = [human("h1"), toolMessage("hybrid_search", HYBRID, "t1"), ai("a1")];
+    const hybridOnly = [human("h1"), toolMessage("knowledge_search", HYBRID, "t1"), ai("a1")];
     expect(latestGraphTraceTurn(hybridOnly)).toBeNull();
     // graph_search 空命中（trace 三层全空）→ 同样不更新（避免全图无意义淡化）。
     const emptyTrace = {

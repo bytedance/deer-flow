@@ -120,7 +120,7 @@ def test_assembly_keeps_ordinary_and_unaffected_plugin_tools_on_collision(instal
         registry.plugin(plugin)
         registry.plugin(healthy)
     config = SimpleNamespace(
-        tools=[SimpleNamespace(name=name, use="test:ordinary", group="extensions")] if source == "config" else [],
+        tools=[SimpleNamespace(name=name, use="test:ordinary", group="extensions", opt_in=False)] if source == "config" else [],
         models=[],
         acp_agents={"test": {}} if source == "acp" else {},
     )

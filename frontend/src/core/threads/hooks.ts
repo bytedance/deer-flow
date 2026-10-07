@@ -73,6 +73,7 @@ import type {
   ThreadTokenUsageResponse,
 } from "./types";
 import {
+  buildThreadCreatedMetadata,
   THREAD_PINNED_METADATA_KEY,
   THREAD_PROJECT_METADATA_KEY,
 } from "./utils";
@@ -2059,11 +2060,12 @@ export function useThreadStream({
     onCreated(meta) {
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
+      const createdMetadata = buildThreadCreatedMetadata(context);
       upsertThreadInSearchCache(queryClient, {
         thread_id: meta.thread_id,
         created_at: now,
         updated_at: now,
-        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
+        metadata: createdMetadata,
         status: "busy",
         values: {
           title: t.pages.newChat,
@@ -2076,7 +2078,7 @@ export function useThreadStream({
         thread_id: meta.thread_id,
         created_at: now,
         updated_at: now,
-        metadata: context.agent_name ? { agent_name: context.agent_name } : {},
+        metadata: createdMetadata,
         status: "busy",
         values: {
           title: t.pages.newChat,
@@ -2085,10 +2087,10 @@ export function useThreadStream({
         },
         interrupts: {},
       });
-      if (context.agent_name && !isMock) {
+      if (Object.keys(createdMetadata).length > 0 && !isMock) {
         void getAPIClient()
           .threads.update(meta.thread_id, {
-            metadata: { agent_name: context.agent_name },
+            metadata: createdMetadata,
           })
           .catch(() => ({}));
       }

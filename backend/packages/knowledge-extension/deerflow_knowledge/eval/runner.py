@@ -344,15 +344,27 @@ def build_default_searchers(
 ) -> dict[str, SearchFn]:
     """Wire the online hybrid-search impl as the vector searcher.
 
-    Mirrors the online retrieval wiring; impl parameters are injectable for tests.
+    Mirrors the online retrieval wiring (the turn's scope selects the kb
+    under test); impl parameters are injectable for tests.
     """
+    from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, local_dataset_id
+
     if hybrid_impl is None:
         from deerflow.tools.builtins.hybrid_search_tool import _hybrid_search_impl as hybrid_impl
 
-    runtime = SimpleNamespace(context={"kb_id": kb_id, "user_id": user_id})
+    runtime = SimpleNamespace(
+        context={
+            KNOWLEDGE_SCOPE_RUNTIME_KEY: {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": [local_dataset_id(kb_id)],
+            },
+            "user_id": user_id,
+        }
+    )
 
     async def vector_fn(query: str, top_k: int) -> tuple[ScoredHit, ...]:
-        raw = await hybrid_impl(query, runtime, store=store, vector_store=vector_store, top_k=top_k)
+        raw, _ = await hybrid_impl(query, runtime, store=store, vector_store=vector_store, top_k=top_k)
         return tuple(ScoredHit(item["chunk_id"], item.get("score")) for item in raw.get("results", []))
 
     return {"vector": vector_fn}

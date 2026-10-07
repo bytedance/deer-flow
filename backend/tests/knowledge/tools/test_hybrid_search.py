@@ -1,22 +1,24 @@
-"""Tests for hybrid_search (spec §4.1): RRF prefetch → rerank → top-k.
+"""Tests for knowledge_search (spec §4.1): RRF prefetch → rerank → top-k.
 
 Chunk text always comes from the business-DB ``chunks`` table (fetched by
 ``chunk_id``); the Qdrant payload only supplies display metadata
-(``doc_name``/``page``/``heading_path``) for citations.
+(``doc_name``/``page``/``heading_path``) for citations. The turn's knowledge
+scope resolves the bound KB; the returned source artifact mirrors the slices.
 """
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 import pytest
-from deerflow_knowledge.access import ACCESS_DENIED_MESSAGE, NO_KB_GUIDANCE
+from deerflow_knowledge.access import ACCESS_DENIED_MESSAGE, KB_MISSING_MESSAGE, NO_KB_GUIDANCE
 from deerflow_knowledge.reranker import RerankerError
 
 from deerflow.tools.builtins.hybrid_search_tool import _hybrid_search_impl
 
 from ..conftest import requires_qdrant
-from .conftest import KB_ID, OWNER_ID
+from .conftest import OWNER_ID, scope_runtime
 
 
 class _StubReranker:
@@ -37,19 +39,15 @@ class _FailingReranker:
         raise RerankerError("rerank down")
 
 
-def _runtime(**context) -> SimpleNamespace:
-    return SimpleNamespace(context=context)
-
-
 @requires_qdrant
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_hybrid_search_end_to_end(tools_env):
     reranker = _StubReranker()
 
-    result = await _hybrid_search_impl(
+    result, artifact = await _hybrid_search_impl(
         "Gateway 的作用是什么",
-        _runtime(kb_id=KB_ID, user_id=OWNER_ID),
+        scope_runtime(),
         store=tools_env["store"],
         vector_store=tools_env["vector_store"],
         embedder=tools_env["embedder"],
@@ -71,14 +69,31 @@ async def test_hybrid_search_end_to_end(tools_env):
     assert top["heading_path"] == ["架构"]
     assert "message" in result
 
+    # The shared source artifact mirrors exactly the returned slices (#5551).
+    assert artifact is not None
+    sources = artifact["knowledge_sources"]["sources"]
+    assert artifact["knowledge_sources"]["version"] == 1
+    assert [source["provider"] for source in sources] == ["local", "local"]
+    assert [source["chunk_id"] for source in sources] == [item["chunk_id"] for item in results]
+    assert sources[0]["dataset_id"] == "kb-t"
+    assert sources[0]["document_id"] == "doc-t"
+    assert sources[0]["dataset_name"] == "工具测试库"
+    assert sources[0]["document_name"] == "架构.md"
+    assert sources[0]["text"] == top["text"]
+    assert sources[0]["pages"] == [1]
+    assert sources[0]["truncated"] is False
+    # Provider-independent id shape shared with the RAGFlow formatter.
+    assert re.fullmatch(r"[a-f0-9]{32}-1", sources[0]["id"])
+    assert sources[0]["id"].rsplit("-", 1)[0] == sources[1]["id"].rsplit("-", 1)[0]
+
 
 @requires_qdrant
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_hybrid_search_no_match_returns_honest_message(tools_env):
-    result = await _hybrid_search_impl(
+    result, _ = await _hybrid_search_impl(
         "zzz-完全无关-zzz",
-        _runtime(kb_id=KB_ID, user_id=OWNER_ID),
+        scope_runtime(),
         store=tools_env["store"],
         vector_store=tools_env["vector_store"],
         embedder=tools_env["embedder"],
@@ -93,10 +108,10 @@ async def test_hybrid_search_no_match_returns_honest_message(tools_env):
 @requires_qdrant
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_hybrid_search_without_kb_returns_guidance(tools_env):
-    result = await _hybrid_search_impl(
+async def test_hybrid_search_without_scope_returns_guidance(tools_env):
+    result, artifact = await _hybrid_search_impl(
         "任意问题",
-        _runtime(user_id=OWNER_ID),
+        SimpleNamespace(context={"user_id": OWNER_ID}),
         store=tools_env["store"],
         vector_store=tools_env["vector_store"],
         embedder=tools_env["embedder"],
@@ -104,15 +119,16 @@ async def test_hybrid_search_without_kb_returns_guidance(tools_env):
     )
     assert result["results"] == []
     assert result["message"] == NO_KB_GUIDANCE
+    assert artifact is None
 
 
 @requires_qdrant
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_hybrid_search_denies_non_owner(tools_env):
-    result = await _hybrid_search_impl(
+    result, _ = await _hybrid_search_impl(
         "Gateway",
-        _runtime(kb_id=KB_ID, user_id="user-2"),
+        scope_runtime(user_id="user-2"),
         store=tools_env["store"],
         vector_store=tools_env["vector_store"],
         embedder=tools_env["embedder"],
@@ -125,11 +141,27 @@ async def test_hybrid_search_denies_non_owner(tools_env):
 @requires_qdrant
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_hybrid_search_reports_deleted_kb(tools_env):
+    result, _ = await _hybrid_search_impl(
+        "Gateway",
+        scope_runtime(kb_id="kb-gone"),
+        store=tools_env["store"],
+        vector_store=tools_env["vector_store"],
+        embedder=tools_env["embedder"],
+        reranker=_StubReranker(),
+    )
+    assert result["results"] == []
+    assert result["message"] == KB_MISSING_MESSAGE
+
+
+@requires_qdrant
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_hybrid_search_rerank_failure_degrades_to_rrf_order(tools_env):
     """A reranker outage must not kill the vector path (spec §4.4)."""
-    result = await _hybrid_search_impl(
+    result, _ = await _hybrid_search_impl(
         "Gateway",
-        _runtime(kb_id=KB_ID, user_id=OWNER_ID),
+        scope_runtime(),
         store=tools_env["store"],
         vector_store=tools_env["vector_store"],
         embedder=tools_env["embedder"],

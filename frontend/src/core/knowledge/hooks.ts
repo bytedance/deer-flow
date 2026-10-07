@@ -43,8 +43,12 @@ export function knowledgeChunksKey(kbId: string, docId: string, offset: number, 
   return ["knowledge-bases", kbId, "documents", docId, "chunks", { offset, limit }] as const;
 }
 
-export function useKnowledgeBases() {
-  return useQuery({ queryKey: knowledgeBasesKey(), queryFn: api.listKnowledgeBases });
+export function useKnowledgeBases(enabled = true) {
+  return useQuery({
+    queryKey: knowledgeBasesKey(),
+    queryFn: api.listKnowledgeBases,
+    enabled,
+  });
 }
 
 export function supportedFormatsKey() {

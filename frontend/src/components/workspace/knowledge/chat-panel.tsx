@@ -37,6 +37,11 @@ import { MessageList } from "@/components/workspace/messages";
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useAgentsApiEnabled } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  buildKnowledgeScopeSnapshot,
+  KNOWLEDGE_SCOPE_KEY,
+  localDatasetId,
+} from "@/core/knowledge";
 import { latestGraphTraceTurn, latestRetrievalTurn, parseGraphSearchTrace, sourcesForAssistantMessage } from "@/core/knowledge/citations";
 import { threadsForKb } from "@/core/knowledge/kb-threads";
 import type { GraphRetrievalTrace, GraphRetrievalOverlay, KnowledgeBase } from "@/core/knowledge/types";
@@ -175,6 +180,27 @@ export function KnowledgeChatPanel({
       deep_research: deepResearch,
     }),
     [kbId, deepResearch, selectedModelName],
+  );
+
+  // Per-message knowledge scope (#5238): one provider-qualified dataset id
+  // for the bound kb, display block included for the history summary. The
+  // run context above only carries the binding for thread-creation metadata;
+  // retrieval reads this snapshot.
+  const knowledgeScopeSnapshot = useMemo(
+    () =>
+      kb
+        ? buildKnowledgeScopeSnapshot({
+            mode: "selected",
+            datasets: [
+              {
+                id: localDatasetId(kb.id),
+                name: kb.name,
+                documents: { mode: "all" },
+              },
+            ],
+          })
+        : null,
+    [kb],
   );
 
   /** 本线程内收到的实时检索轨迹缓存（tool_call_id → trace）；切线程即清空。
@@ -322,9 +348,16 @@ const handleSelectThread = useCallback((nextThreadId: string) => {
     if (!kbId || !text || thread.isLoading) {
       return;
     }
-    void sendMessage(threadId, { text, files: [] });
+    void sendMessage(
+      threadId,
+      { text, files: [] },
+      undefined,
+      knowledgeScopeSnapshot
+        ? { additionalKwargs: { [KNOWLEDGE_SCOPE_KEY]: knowledgeScopeSnapshot } }
+        : undefined,
+    );
     setDraft("");
-  }, [draft, kbId, sendMessage, thread.isLoading, threadId]);
+  }, [draft, kbId, knowledgeScopeSnapshot, sendMessage, thread.isLoading, threadId]);
 
   const renderMessageFooter = useCallback(
     (message: Message) => {
@@ -380,6 +413,9 @@ const handleSelectThread = useCallback((nextThreadId: string) => {
           additionalKwargs: {
             hide_from_ui: true,
             human_input_response: response,
+            ...(knowledgeScopeSnapshot
+              ? { [KNOWLEDGE_SCOPE_KEY]: knowledgeScopeSnapshot }
+              : {}),
           },
           onSent: () => {
             sent = true;
@@ -388,7 +424,7 @@ const handleSelectThread = useCallback((nextThreadId: string) => {
       );
       return sent;
     },
-    [sendMessage, threadId],
+    [knowledgeScopeSnapshot, sendMessage, threadId],
   );
 
   // ── 会话刻度轨（2026-09-08，文档详情切片刻度轨同款方案）──────────

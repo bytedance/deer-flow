@@ -2,9 +2,14 @@ import type { Message } from "@langchain/langgraph-sdk";
 
 import { maskCitationCode } from "@/core/citations/sources";
 
+/** Source providers whose records may render as knowledge citations. */
+const KNOWLEDGE_SOURCE_PROVIDERS = new Set(["ragflow", "local"]);
+
+export type KnowledgeSourceProvider = "ragflow" | "local";
+
 export type KnowledgeSource = {
   id: string;
-  provider: "ragflow";
+  provider: KnowledgeSourceProvider;
   dataset_name: string;
   document_name: string;
   text: string;
@@ -42,7 +47,8 @@ export function collectKnowledgeSources(messages: readonly Message[]) {
         !record(raw) ||
         typeof raw.id !== "string" ||
         !SOURCE_ID.test(raw.id) ||
-        raw.provider !== "ragflow"
+        typeof raw.provider !== "string" ||
+        !KNOWLEDGE_SOURCE_PROVIDERS.has(raw.provider)
       )
         continue;
       if (
@@ -66,7 +72,7 @@ export function collectKnowledgeSources(messages: readonly Message[]) {
         continue;
       const source: KnowledgeSource = {
         id: raw.id,
-        provider: "ragflow",
+        provider: raw.provider as KnowledgeSourceProvider,
         dataset_name: raw.dataset_name,
         document_name: raw.document_name,
         text: raw.text,

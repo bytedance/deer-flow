@@ -3,11 +3,17 @@
 The message snapshot may contain an untrusted display block for historical
 UI rendering. Runtime consumers must use execution_scope, which projects only
 the fields that can constrain retrieval.
+
+Dataset ids are provider-qualified. External providers (RAGFlow, LightRAG)
+keep their raw dataset identifiers; built-in knowledge bases managed by the
+knowledge extension ride the ``local:`` prefix, so one scope shape can carry
+either kind without the two id spaces ever colliding.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -15,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 KNOWLEDGE_SCOPE_KEY = "knowledge_scope"
 KNOWLEDGE_SCOPE_RUNTIME_KEY = "__knowledge_scope_execution"
 KNOWLEDGE_SCOPE_VERSION = 1
+LOCAL_DATASET_ID_PREFIX = "local:"
 MAX_KNOWLEDGE_SCOPE_BYTES = 64 * 1024
 MAX_DATASET_IDS = 100
 MAX_DOCUMENT_IDS = 1000
@@ -22,6 +29,29 @@ MAX_DISPLAY_DATASETS = 20
 MAX_DISPLAY_DOCUMENTS = 50
 MAX_ID_CODEPOINTS = 256
 MAX_DISPLAY_NAME_CODEPOINTS = 256
+
+
+def local_dataset_id(kb_id: str) -> str:
+    """Qualify a built-in knowledge-base id for the shared scope contract."""
+    return f"{LOCAL_DATASET_ID_PREFIX}{kb_id}"
+
+
+def parse_local_dataset_id(value: object) -> str | None:
+    """Return the built-in KB id carried by *value*, or None for other providers."""
+    if not isinstance(value, str) or not value.startswith(LOCAL_DATASET_ID_PREFIX):
+        return None
+    kb_id = value[len(LOCAL_DATASET_ID_PREFIX) :].strip()
+    return kb_id or None
+
+
+def local_dataset_ids(scope: Mapping[str, Any]) -> list[str]:
+    """Built-in KB ids selected by a canonical execution scope (``selected`` only)."""
+    if scope.get("mode") != "selected":
+        return []
+    dataset_ids = scope.get("dataset_ids")
+    if not isinstance(dataset_ids, list):
+        return []
+    return [kb_id for kb_id in (parse_local_dataset_id(item) for item in dataset_ids) if kb_id]
 
 
 class _StrictModel(BaseModel):

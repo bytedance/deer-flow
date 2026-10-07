@@ -36,6 +36,17 @@ describe("knowledge citation provenance", () => {
     expect(knowledgeSourceId(`#knowledge-${id}`)).toBe(id);
     expect(knowledgeSourceId(`#user-content-knowledge-${id}`)).toBe(id);
   });
+  it("accepts built-in knowledge-extension sources and rejects unknown providers", () => {
+    const withProvider = (provider: string) => {
+      const payload = { ...source, provider };
+      return {
+        ...message,
+        artifact: { knowledge_sources: { version: 1, sources: [payload] } },
+      } as Message;
+    };
+    expect(collectKnowledgeSources([withProvider("local")]).size).toBe(1);
+    expect(collectKnowledgeSources([withProvider("ghost")]).size).toBe(0);
+  });
   it("does not let model labels or human artifacts invent a source", () => {
     const sources = collectKnowledgeSources([
       { ...message, type: "human" } as Message,

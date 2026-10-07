@@ -51,7 +51,7 @@ from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MES
 from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
-from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY, local_dataset_ids
 from deerflow.mcp_scope import (
     THREAD_INCARNATION_METADATA_GUARD_KEY,
     is_valid_thread_incarnation,
@@ -1680,6 +1680,34 @@ async def _validate_scope_thread_binding(
         )
 
 
+async def _validate_local_kb_binding(
+    run_ctx: RunContext,
+    *,
+    thread_id: str,
+    scope: Mapping[str, Any],
+) -> None:
+    """Refuse a built-in-KB scope that disagrees with the thread's own binding.
+
+    2026-10-06 defect batch (D2=甲/D3=甲), reshaped onto the #5238 scope
+    contract: the thread's stored ``metadata.kb_id`` is the conversation's
+    binding, and a turn whose scope selects a different built-in KB — or
+    several — must be refused instead of silently retrieving across KBs.
+    Unbound threads are not blocked; a bound thread whose scope carries no
+    built-in KB keeps the existing no-retrieval behavior.
+    """
+    local_ids = local_dataset_ids(scope)
+    if not local_ids:
+        return
+    existing = await run_ctx.thread_store.get(thread_id)
+    if not isinstance(existing, Mapping):
+        return
+    bound = (existing.get("metadata") or {}).get("kb_id")
+    if not isinstance(bound, str) or not bound:
+        return
+    if local_ids != [bound]:
+        raise HTTPException(status_code=403, detail="对话与知识库绑定不一致")
+
+
 # ---------------------------------------------------------------------------
 # Run lifecycle
 # ---------------------------------------------------------------------------
@@ -1908,6 +1936,11 @@ async def start_run(
                 run_ctx,
                 thread_id=thread_id,
                 assistant_id=body.assistant_id,
+            )
+            await _validate_local_kb_binding(
+                run_ctx,
+                thread_id=thread_id,
+                scope=admitted_knowledge_scope,
             )
         run_record_input = _canonical_run_record_input(body.input, graph_input)
 

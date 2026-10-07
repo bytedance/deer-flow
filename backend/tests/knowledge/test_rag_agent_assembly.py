@@ -49,9 +49,9 @@ def test_builtin_rag_soul_contains_citation_and_refusal_rules():
     assert "不要在回答末尾输出引用清单" in soul, "the redundant trailing reference list must be banned (the structured sources strip covers it)"
     assert "不向用户解释检索过程" in soul, "meta-commentary about retrieval quality must be banned (mainstream products stay silent)"
     assert "知识库中没有找到相关内容" in soul, "refusal policy missing"
-    assert "hybrid_search" in soul
+    assert "knowledge_search" in soul
     # Vector-floor discipline: enumerated discretion, not open-ended "upgrade as
-    # needed" — every factual question must hit hybrid_search at least once.
+    # needed" — every factual question must hit knowledge_search at least once.
     assert "任何事实性问题必须至少调用一次" in soul, "vector-floor rule missing"
 
 
@@ -59,7 +59,7 @@ def test_rag_group_tools_are_exactly_the_retrieval_tool(app_config):
     tools = get_available_tools(groups=["rag"], include_mcp=False, app_config=app_config)
     names = {tool.name for tool in tools}
 
-    assert "hybrid_search" in names
+    assert "knowledge_search" in names
     assert not {"web_search", "bash", "ls", "read_file", "write_file"} & names
 
 
@@ -68,7 +68,7 @@ def test_default_tool_resolution_excludes_opt_in_rag_tools(app_config):
     tools = get_available_tools(groups=None, include_mcp=False, app_config=app_config)
     names = {tool.name for tool in tools}
 
-    assert "hybrid_search" not in names
+    assert "knowledge_search" not in names
 
 
 def test_user_shadow_config_overrides_builtin(tmp_path, monkeypatch):

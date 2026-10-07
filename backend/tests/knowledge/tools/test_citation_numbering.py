@@ -18,16 +18,12 @@ from deerflow_knowledge.citation_counter import claim_citation_range
 from deerflow.tools.builtins.hybrid_search_tool import _hybrid_search_impl
 
 from ..conftest import requires_qdrant
-from .conftest import KB_ID, OWNER_ID
+from .conftest import scope_runtime
 
 
 class _StubReranker:
     async def rerank(self, query: str, documents, *, top_n: int = 5):
         return [(i, 0.9 - i * 0.01) for i in range(min(top_n, len(documents)))]
-
-
-def _runtime() -> SimpleNamespace:
-    return SimpleNamespace(context={"kb_id": KB_ID, "user_id": OWNER_ID})
 
 
 def test_claim_citation_range_allocates_contiguous_ranges() -> None:
@@ -52,7 +48,7 @@ def test_claim_citation_range_without_dict_context_degrades_to_zero() -> None:
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_hybrid_calls_share_one_counter(tools_env) -> None:
-    runtime = _runtime()
+    runtime = scope_runtime()
     kwargs = dict(
         store=tools_env["store"],
         vector_store=tools_env["vector_store"],
@@ -60,8 +56,8 @@ async def test_hybrid_calls_share_one_counter(tools_env) -> None:
         reranker=_StubReranker(),
         top_k=2,
     )
-    first = await _hybrid_search_impl("Gateway 的作用", runtime, **kwargs)
-    second = await _hybrid_search_impl("MinerU 的角色", runtime, **kwargs)
+    first, _ = await _hybrid_search_impl("Gateway 的作用", runtime, **kwargs)
+    second, _ = await _hybrid_search_impl("MinerU 的角色", runtime, **kwargs)
     assert [item["citation_no"] for item in first["results"]] == [1, 2]
     assert "引用编号 [1]-[2]" in first["message"], "the span must be stated in prose (JSON fields get little attention)"
     assert [item["citation_no"] for item in second["results"]] == [3, 4], "the second call must continue the shared counter instead of renumbering from 1"

@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from app.gateway.browser_capability import browser_capability
 from app.gateway.conversation_access import conversation_references_enabled
 from app.gateway.deps import get_config
-from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
+from app.gateway.knowledge_scope_admission import KNOWLEDGE_SEARCH_PROVIDERS
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
 from deerflow.config.app_config import AppConfig
 from deerflow.subagents.capacity import configured_subagent_max_running
@@ -115,9 +115,9 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
 
 
 def _knowledge_scope_selection_enabled(config: AppConfig) -> bool:
-    """Fail closed unless the effective knowledge_search entry is RAGFlow."""
+    """Fail closed unless the effective knowledge_search entry is scope-aware."""
     settings = config.knowledge_base
     if not settings.enabled or not settings.scope_selection_enabled:
         return False
     tool = config.get_tool_config("knowledge_search")
-    return tool is not None and tool.use == RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
+    return tool is not None and tool.use in KNOWLEDGE_SEARCH_PROVIDERS

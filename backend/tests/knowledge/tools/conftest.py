@@ -11,6 +11,7 @@ from __future__ import annotations
 import uuid
 import zlib
 from collections.abc import AsyncIterator, Sequence
+from types import SimpleNamespace
 
 import pytest_asyncio
 from deerflow_knowledge.embedder import EmbeddingResult
@@ -19,11 +20,38 @@ from deerflow_knowledge.vector_store import ChunkUpsert, KnowledgeVectorStore
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import SparseVector
 
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, local_dataset_id
+
 from ..conftest import QDRANT_TEST_URL
 
 KB_ID = "kb-t"
 DOC_ID = "doc-t"
 OWNER_ID = "user-1"
+
+
+def scope_runtime(
+    kb_id: str | None = KB_ID,
+    *,
+    user_id: str = OWNER_ID,
+    mode: str = "selected",
+) -> SimpleNamespace:
+    """Runtime carrying one admitted execution scope in its context dict.
+
+    Mirrors what KnowledgeScopeMiddleware injects: the runtime-context carrier
+    only, provider-qualified dataset ids (``local:<kb_id>``).
+    """
+    context: dict = {"user_id": user_id}
+    if mode == "selected":
+        if kb_id is not None:
+            context[KNOWLEDGE_SCOPE_RUNTIME_KEY] = {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": [local_dataset_id(kb_id)],
+            }
+    else:
+        context[KNOWLEDGE_SCOPE_RUNTIME_KEY] = {"version": 1, "mode": mode}
+    return SimpleNamespace(context=context)
+
 
 #: keyword → one-hot dimension (deterministic "semantic" layout for tests).
 KEYWORD_DIMS = {"Gateway": 10, "MinerU": 20, "DeerFlow": 30}

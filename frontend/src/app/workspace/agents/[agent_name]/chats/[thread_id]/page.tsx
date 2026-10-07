@@ -49,8 +49,11 @@ import {
   knowledgeScopeToSelection,
   buildKnowledgeScopeSnapshot,
   KNOWLEDGE_SCOPE_KEY,
+  localDatasetId,
   type KnowledgeScopeSelection,
 } from "@/core/knowledge";
+import { useKnowledgeBases } from "@/core/knowledge/hooks";
+import { kbIdOfThread } from "@/core/knowledge/kb-threads";
 import {
   buildHumanInputResponseText,
   hasOpenHumanInputRequest,
@@ -149,12 +152,38 @@ export default function AgentChatPage() {
     };
   }, [agent_name, isNewThread, selectorVisible, threadId]);
 
+  // KB-bound threads can be opened on the full agents page too: the thread's
+  // stored binding (metadata.kb_id) becomes this turn's knowledge scope, so
+  // retrieval keeps working here exactly as it does inside the knowledge
+  // panel — independent of the scope selector, which only serves
+  // catalog-backed providers.
+  const kbThreadId = useMemo(
+    () => (threadMetadata.data ? kbIdOfThread(threadMetadata.data) : null),
+    [threadMetadata.data],
+  );
+  const { data: kbList } = useKnowledgeBases(Boolean(kbThreadId));
+  const kbThreadScope = useMemo(() => {
+    if (!kbThreadId) return null;
+    const kbName = kbList?.find((item) => item.id === kbThreadId)?.name;
+    return buildKnowledgeScopeSnapshot({
+      mode: "selected",
+      datasets: [
+        {
+          id: localDatasetId(kbThreadId),
+          name: kbName ?? kbThreadId,
+          documents: { mode: "all" },
+        },
+      ],
+    });
+  }, [kbList, kbThreadId]);
+
   const currentKnowledgeScopeSnapshot = useMemo(
     () =>
-      selectorVisible && agentKnowledgeEnabled && knowledgeScope
+      kbThreadScope ??
+      (selectorVisible && agentKnowledgeEnabled && knowledgeScope
         ? buildKnowledgeScopeSnapshot(knowledgeScope)
-        : null,
-    [agentKnowledgeEnabled, knowledgeScope, selectorVisible],
+        : null),
+    [agentKnowledgeEnabled, kbThreadScope, knowledgeScope, selectorVisible],
   );
 
   useEffect(() => {

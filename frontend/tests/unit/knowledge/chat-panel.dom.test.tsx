@@ -213,11 +213,24 @@ describe("KnowledgeChatPanel", () => {
     fireEvent.change(textarea, { target: { value: "这个产品支持哪些格式？" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     expect(mockSendMessage).toHaveBeenCalledTimes(1);
-    const [threadId, message] = mockSendMessage.mock.calls[0] as [string, { text: string; files: unknown[] }];
+    const [threadId, message, , options] = mockSendMessage.mock.calls[0] as [
+      string,
+      { text: string; files: unknown[] },
+      unknown,
+      { additionalKwargs?: Record<string, unknown> },
+    ];
     expect(typeof threadId).toBe("string");
     expect(threadId.length).toBeGreaterThan(0);
     expect(message.text).toBe("这个产品支持哪些格式？");
     expect(message.files).toEqual([]);
+    // The turn carries the bound kb as a provider-qualified scope snapshot
+    // (#5238): retrieval reads this, not the run context.
+    expect(options?.additionalKwargs?.knowledge_scope).toEqual({
+      version: 1,
+      mode: "selected",
+      dataset_ids: ["local:kb-1"],
+      display: { datasets: [{ id: "local:kb-1", name: "产品知识库" }] },
+    });
     expect(textarea).toHaveProperty("value", "");
   });
 
@@ -399,7 +412,7 @@ describe("KnowledgeChatPanel", () => {
     const toolMessage = {
       id: "tool-1",
       type: "tool",
-      name: "hybrid_search",
+      name: "knowledge_search",
       content: JSON.stringify({
         results: [
           {
@@ -494,7 +507,7 @@ describe("KnowledgeChatPanel 检索联动上报", () => {
     {
       id: "tool-1",
       type: "tool",
-      name: "hybrid_search",
+      name: "knowledge_search",
       content: JSON.stringify({
         results: [
           {

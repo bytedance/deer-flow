@@ -4,6 +4,9 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+#: Providers whose source records this shared forwarding path understands.
+_KNOWLEDGE_SOURCE_PROVIDERS = frozenset({"ragflow", "local"})
+
 
 def budget_source_artifact(content: str, artifact: object, max_chars: int, *, summary: str = "") -> tuple[str, dict[str, Any] | None] | None:
     """Keep whole evidence records and their links together within a tool budget.
@@ -28,7 +31,7 @@ def budget_source_artifact(content: str, artifact: object, max_chars: int, *, su
             continue
         if source_id in seen or f"](#knowledge-{source_id})" not in content:
             continue
-        if source.get("provider") != "ragflow" or not all(isinstance(source.get(field), str) for field in ("text", "dataset_name", "document_name")):
+        if source.get("provider") not in _KNOWLEDGE_SOURCE_PROVIDERS or not all(isinstance(source.get(field), str) for field in ("text", "dataset_name", "document_name")):
             continue
         seen.add(source_id)
         sources.append(source)

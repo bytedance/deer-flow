@@ -5241,3 +5241,122 @@ async def test_knowledge_default_lookup_does_not_break_new_agent_bootstrap(_stub
         record = await start_run(RunCreateRequest(assistant_id="new-researcher", input={"messages": [{"type": "human", "content": "Create this agent"}]}, **bootstrap_kwargs), "thread-bootstrap-default", request)
         await record.task
     load.assert_not_awaited()
+
+
+def _scope_app_config():
+    """App config whose knowledge_search entry is the scope-aware built-in provider."""
+    from app.gateway.knowledge_scope_admission import LOCAL_KNOWLEDGE_SEARCH_PROVIDER
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True},
+                "tools": [
+                    {
+                        "name": "knowledge_search",
+                        "group": "rag",
+                        "use": LOCAL_KNOWLEDGE_SEARCH_PROVIDER,
+                        "opt_in": True,
+                    }
+                ],
+            }
+        )
+    )
+
+
+def _scoped_run_create_request(dataset_ids):
+    """Run body whose sole HumanMessage carries one built-in-KB scope (or none)."""
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY
+
+    message = {"role": "user", "content": "question"}
+    if dataset_ids is not None:
+        message["additional_kwargs"] = {
+            KNOWLEDGE_SCOPE_KEY: {
+                "version": 1,
+                "mode": "selected",
+                "dataset_ids": dataset_ids,
+            }
+        }
+    return RunCreateRequest(input={"messages": [message]})
+
+
+@pytest.mark.asyncio
+async def test_start_run_rejects_local_kb_scope_against_a_different_binding(_stub_app_config):
+    """切库隔离（缺陷批 D2=甲/D3=甲 的 #5238 形态）：scope 选中的内置库与线程既有绑定不一致、或扩大 ⇒ 403。"""
+    from unittest.mock import AsyncMock, patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import start_run
+    from deerflow.knowledge_scope import local_dataset_id
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    _scope_app_config()
+
+    async def fake_run_agent(*_args, **_kwargs):
+        return None
+
+    def bound_store():
+        return SimpleNamespace(
+            get=AsyncMock(return_value={"user_id": "user-1", "metadata": {"kb_id": "kb-A"}}),
+            create=AsyncMock(),
+            update_owner=AsyncMock(),
+        )
+
+    for dataset_ids in (
+        [local_dataset_id("kb-B")],
+        [local_dataset_id("kb-A"), local_dataset_id("kb-B")],
+    ):
+        run_manager = RunManager(store=MemoryRunStore())
+        request = _make_start_run_request(run_manager, thread_store=bound_store())
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        ):
+            with pytest.raises(HTTPException) as excinfo:
+                await start_run(_scoped_run_create_request(dataset_ids), "thread-kb-bound", request)
+        assert excinfo.value.status_code == 403
+        assert excinfo.value.detail == "对话与知识库绑定不一致"
+
+
+@pytest.mark.asyncio
+async def test_start_run_allows_matching_unbound_or_absent_local_kb_scope(_stub_app_config):
+    """一致 / 无绑定 / 无此行 / 请求不带 scope 四种情况都不拦（D2=甲）。"""
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.services import start_run
+    from deerflow.knowledge_scope import local_dataset_id
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    _scope_app_config()
+
+    async def fake_run_agent(*_args, **_kwargs):
+        return None
+
+    def store_with(row):
+        return SimpleNamespace(
+            get=AsyncMock(return_value=row),
+            create=AsyncMock(),
+            update_owner=AsyncMock(),
+        )
+
+    cases = [
+        ("thread-kb-match", {"user_id": "user-1", "metadata": {"kb_id": "kb-A"}}, [local_dataset_id("kb-A")]),
+        ("thread-kb-unbound", {"user_id": "user-1", "metadata": {}}, [local_dataset_id("kb-B")]),
+        ("thread-kb-missing-row", None, [local_dataset_id("kb-B")]),
+        ("thread-kb-no-scope", {"user_id": "user-1", "metadata": {"kb_id": "kb-A"}}, None),
+    ]
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        for thread_id, row, dataset_ids in cases:
+            run_manager = RunManager(store=MemoryRunStore())
+            request = _make_start_run_request(run_manager, thread_store=store_with(row))
+            record = await start_run(_scoped_run_create_request(dataset_ids), thread_id, request)
+            assert record.thread_id == thread_id
+            await asyncio.wait_for(record.task, timeout=1)

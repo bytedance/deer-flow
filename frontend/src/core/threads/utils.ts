@@ -1,5 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
+import { KB_ID_METADATA_KEY } from "@/core/knowledge/kb-threads";
+
 import type { AgentThread, AgentThreadContext } from "./types";
 
 // Namespaced to match other internal metadata keys (``deerflow_sidecar``,
@@ -17,6 +19,26 @@ export function isThreadArchived(thread: Pick<AgentThread, "metadata">) {
 // (``metadata.deerflow_project_id``). Keep in sync with the backend
 // thread_meta constant and the E2E mock-api constant.
 export const THREAD_PROJECT_METADATA_KEY = "deerflow_project_id";
+
+/**
+ * Metadata persisted on thread creation (the ``onCreated`` hook in
+ * `core/threads/hooks.ts`). ``agent_name`` has always been stored; ``kb_id``
+ * joins it for knowledge-page conversations so the global recent-chat list
+ * can exclude them, the per-kb history popover can find them, and run
+ * admission can hold later turns to the same binding (spec §5.2).
+ */
+export function buildThreadCreatedMetadata(
+  context: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const metadata: Record<string, unknown> = {};
+  if (typeof context.agent_name === "string" && context.agent_name) {
+    metadata.agent_name = context.agent_name;
+  }
+  if (typeof context.kb_id === "string" && context.kb_id) {
+    metadata[KB_ID_METADATA_KEY] = context.kb_id;
+  }
+  return metadata;
+}
 
 export type ChannelThreadSource = {
   type: "im_channel";

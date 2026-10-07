@@ -1,7 +1,7 @@
 /**
  * Citation extraction from retrieval tool messages (spec §4.6).
  *
- * The rag agent's tools return JSON payloads: hybrid_search ``results`` and
+ * The rag agent's tools return JSON payloads: knowledge_search ``results`` and
  * graph_search ``evidence`` are chunk-level sources; wiki_search ``entries``
  * are entry-level (title as the source name, full content as the text). An
  * assistant answer's ``[n]`` markers map onto the merged, deduped source list
@@ -14,7 +14,7 @@ import { extractTextFromMessage } from "@/core/messages/utils";
 
 import type { GraphRetrievalTrace, KnowledgeCitation } from "./types";
 
-const RETRIEVAL_TOOLS = new Set(["hybrid_search", "wiki_search", "graph_search"]);
+const RETRIEVAL_TOOLS = new Set(["knowledge_search", "wiki_search", "graph_search"]);
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
@@ -61,7 +61,7 @@ export function parseRetrievalToolContent(toolName: string | null | undefined, c
   if (!record) {
     return [];
   }
-  const key = toolName === "hybrid_search" ? "results" : toolName === "wiki_search" ? "entries" : "evidence";
+  const key = toolName === "knowledge_search" ? "results" : toolName === "wiki_search" ? "entries" : "evidence";
   // source_type falls back to the tool the payload came through; phase-3 P6
   // payloads may override it per item (manual cards ride wiki_search).
   const sourceType = toolName === "wiki_search" ? "wiki" : "chunk";

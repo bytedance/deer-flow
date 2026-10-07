@@ -4,13 +4,17 @@ import pytest
 from fastapi import HTTPException
 from langchain_core.messages import AIMessage, HumanMessage
 
-from app.gateway.knowledge_scope_admission import admit_message_knowledge_scope
+from app.gateway.knowledge_scope_admission import (
+    LOCAL_KNOWLEDGE_SEARCH_PROVIDER,
+    RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER,
+    admit_message_knowledge_scope,
+)
 from app.gateway.services import strip_internal_context_keys
 from deerflow.config.tool_config import ToolConfig
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
 
 
-def _app_config(provider: str = "deerflow.community.ragflow.tools:knowledge_search_tool"):
+def _app_config(provider: str = RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER):
     tool_config = ToolConfig(
         name="knowledge_search",
         group="knowledge",
@@ -107,6 +111,42 @@ def test_admission_accepts_main_agent_with_configured_ragflow_provider() -> None
     )
 
     assert admitted == {"version": 1, "mode": "all"}
+
+
+@pytest.mark.parametrize(
+    ("provider", "tool_groups"),
+    [
+        (LOCAL_KNOWLEDGE_SEARCH_PROVIDER, ["rag"]),
+        (LOCAL_KNOWLEDGE_SEARCH_PROVIDER, ["knowledge"]),
+        (RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER, ["rag"]),
+    ],
+)
+def test_admission_accepts_either_scope_provider_with_either_knowledge_group(
+    provider: str,
+    tool_groups: list[str],
+) -> None:
+    """The accept sets are unions: RAGFlow∪local providers, knowledge∪rag groups."""
+    graph_input = _input(
+        HumanMessage(
+            content="question",
+            additional_kwargs={
+                KNOWLEDGE_SCOPE_KEY: {
+                    "version": 1,
+                    "mode": "selected",
+                    "dataset_ids": ["local:kb-1"],
+                }
+            },
+        )
+    )
+
+    admitted = admit_message_knowledge_scope(
+        graph_input,
+        assistant_id="rag",
+        app_config=_app_config(provider),
+        agent_config=_agent_config(tool_groups),
+    )
+
+    assert admitted == {"version": 1, "mode": "selected", "dataset_ids": ["local:kb-1"]}
 
 
 def test_scope_on_non_human_or_multiple_humans_is_rejected() -> None:

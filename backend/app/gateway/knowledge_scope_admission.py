@@ -15,6 +15,9 @@ from deerflow.knowledge_scope import (
 )
 
 RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER = "deerflow.community.ragflow.tools:knowledge_search_tool"
+LOCAL_KNOWLEDGE_SEARCH_PROVIDER = "deerflow.tools.builtins.hybrid_search_tool:knowledge_search"
+#: Providers whose ``knowledge_search`` entry can honor a per-message scope.
+KNOWLEDGE_SEARCH_PROVIDERS = frozenset({RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER, LOCAL_KNOWLEDGE_SEARCH_PROVIDER})
 
 
 def assistant_supports_knowledge_scope(
@@ -31,7 +34,7 @@ def assistant_supports_knowledge_scope(
         return False
     get_tool_config = getattr(app_config, "get_tool_config", None)
     tool = get_tool_config("knowledge_search") if callable(get_tool_config) else None
-    if getattr(tool, "use", None) != RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER:
+    if getattr(tool, "use", None) not in KNOWLEDGE_SEARCH_PROVIDERS:
         return False
     # The main assistant has no custom-agent config row. Its knowledge tool is
     # controlled solely by the app-level provider configuration.
@@ -40,7 +43,7 @@ def assistant_supports_knowledge_scope(
     if agent_config is None:
         return False
     tool_groups = getattr(agent_config, "tool_groups", None)
-    return tool_groups is None or "knowledge" in tool_groups
+    return tool_groups is None or "knowledge" in tool_groups or "rag" in tool_groups
 
 
 def _replace_scope(message: HumanMessage, scope: dict[str, Any] | None) -> HumanMessage:

@@ -1,5 +1,14 @@
 export const KNOWLEDGE_SCOPE_KEY = "knowledge_scope";
 
+// Provider-qualified dataset ids: external providers keep their raw dataset
+// identifiers, built-in knowledge bases ride the `local:` prefix so one scope
+// shape can carry either kind. Mirrors deerflow/knowledge_scope.py.
+export const LOCAL_DATASET_ID_PREFIX = "local:";
+
+export function localDatasetId(kbId: string): string {
+  return `${LOCAL_DATASET_ID_PREFIX}${kbId}`;
+}
+
 const MAX_DATASETS = 100;
 const MAX_DOCUMENTS = 1000;
 const MAX_DISPLAY_DATASETS = 20;
