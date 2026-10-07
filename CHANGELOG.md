@@ -697,6 +697,14 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **frontend:** A failed reconnect after a page refresh is now retried in the same
+  tab. The SDK reconnects once from the tab's `lg:stream` pointer and keeps that
+  pointer on error, and active-run recovery skipped any run with a matching
+  pointer, so the live stream stayed detached until another refresh. When that
+  reconnect fails, including a drop mid-stream, recovery now releases the pointer
+  and rejoins the run if the server still reports it active, with its existing
+  bounded retries (immediately, then after 1s and 2s). Failed submitted runs are
+  unchanged. ([#6400])
 - **channels:** Opening an IM-channel conversation on the web while its run is still
   going no longer shows the user's message twice. Channel run input carried no
   message id, so the Gateway stored it id-less in the run record while the
@@ -8974,4 +8982,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6378]: https://github.com/bytedance/deer-flow/pull/6378
 [#6386]: https://github.com/bytedance/deer-flow/pull/6386
 [#6388]: https://github.com/bytedance/deer-flow/pull/6388
+[#6400]: https://github.com/bytedance/deer-flow/pull/6400
 [#6401]: https://github.com/bytedance/deer-flow/pull/6401
