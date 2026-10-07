@@ -91,6 +91,51 @@ describe("speech recognition helpers", () => {
     ).toBe("你好世界今天");
   });
 
+  it("separates consecutive trimmed finals accumulated over a session", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 3,
+        0: { isFinal: true, length: 1, 0: { transcript: "hello" } },
+        1: { isFinal: true, length: 1, 0: { transcript: "world" } },
+        2: { isFinal: false, length: 1, 0: { transcript: "today" } },
+      }),
+    ).toEqual({
+      finalText: "hello world",
+      interimText: "today",
+      text: "hello world today",
+    });
+  });
+
+  it("separates accented Latin words the ASCII allowlist missed", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "cet été" } },
+        1: { isFinal: false, length: 1, 0: { transcript: "demain" } },
+      }).text,
+    ).toBe("cet été demain");
+  });
+
+  it("separates Hangul segments since Korean spells with spaces", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "안녕" } },
+        1: { isFinal: false, length: 1, 0: { transcript: "하세요" } },
+      }).text,
+    ).toBe("안녕 하세요");
+  });
+
+  it("keeps digit and symbol boundaries glued", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "up to 50" } },
+        1: { isFinal: false, length: 1, 0: { transcript: "%" } },
+      }).text,
+    ).toBe("up to 50%");
+  });
+
   it("appends transcript to an existing draft without duplicating whitespace", () => {
     expect(appendSpeechTranscript("", "  hello  world ")).toBe("hello world");
     expect(appendSpeechTranscript("Draft", "voice text")).toBe(

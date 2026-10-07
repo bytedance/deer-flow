@@ -106,8 +106,8 @@ export function shouldRestartSpeechRecognition(
 export function readSpeechRecognitionTranscript(
   results: SpeechRecognitionResultListLike,
 ): { finalText: string; interimText: string; text: string } {
-  let finalText = "";
-  let interimText = "";
+  const finalParts: string[] = [];
+  const interimParts: string[] = [];
 
   for (const result of Array.from(
     { length: results.length },
@@ -115,35 +115,56 @@ export function readSpeechRecognitionTranscript(
   )) {
     const transcript = result?.[0]?.transcript ?? "";
     if (result?.isFinal) {
-      finalText += transcript;
+      finalParts.push(transcript);
     } else {
-      interimText += transcript;
+      interimParts.push(transcript);
     }
   }
 
   return {
-    finalText: normalizeSpeechTranscript(finalText),
-    interimText: normalizeSpeechTranscript(interimText),
-    text: normalizeSpeechTranscript(joinSpeechSegments(finalText, interimText)),
+    finalText: normalizeSpeechTranscript(joinSpeechSegments(finalParts)),
+    interimText: normalizeSpeechTranscript(joinSpeechSegments(interimParts)),
+    text: normalizeSpeechTranscript(
+      joinSpeechSegments([...finalParts, ...interimParts]),
+    ),
   };
 }
 
 // Providers are expected to pad result boundaries with whitespace, but some
-// (WebKit, several Android WebViews) trim final transcripts. Re-insert the
-// separator only where gluing is certainly wrong: two ASCII word characters
-// meeting at the boundary. CJK dictation relies on the glue, so it must not
-// gain a space; provider-emitted boundary whitespace also passes through
-// unchanged since it fails the word-character test.
-function joinSpeechSegments(finalText: string, interimText: string): string {
-  if (!finalText || !interimText) {
-    return `${finalText}${interimText}`;
+// (WebKit, several Android WebViews) trim transcripts. Re-insert the
+// separator only where gluing is certainly wrong: two word characters
+// (letters or digits, any alphabet) meeting at the boundary. Han, kana and
+// their full-width forms rely on the glue, so they must not gain a space,
+// while Korean Hangul spells with eojeol spaces and joins like any other
+// alphabet. Symbol boundaries ("50" + "%") stay glued, and provider-emitted
+// boundary whitespace passes through since whitespace fails the test.
+// Boundaries compare single UTF-16 code units, so supplementary-plane Han
+// never matches; fine for ASR output.
+const NO_SPACE_SCRIPT_BOUNDARY =
+  /[\u3000-\u303f\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uff9f]/;
+const WORD_CHARACTER = /[\p{L}\p{N}]/u;
+
+function joinSpeechSegments(parts: string[]): string {
+  let joined = "";
+  for (const part of parts) {
+    if (!joined || !part) {
+      joined = `${joined}${part}`;
+      continue;
+    }
+    const tail = joined[joined.length - 1]!;
+    const head = part[0]!;
+    if (
+      WORD_CHARACTER.test(tail) &&
+      WORD_CHARACTER.test(head) &&
+      !NO_SPACE_SCRIPT_BOUNDARY.test(tail) &&
+      !NO_SPACE_SCRIPT_BOUNDARY.test(head)
+    ) {
+      joined = `${joined} ${part}`;
+    } else {
+      joined = `${joined}${part}`;
+    }
   }
-  const tail = finalText[finalText.length - 1]!;
-  const head = interimText[0]!;
-  if (/[A-Za-z0-9]/.test(tail) && /[A-Za-z0-9]/.test(head)) {
-    return `${finalText} ${interimText}`;
-  }
-  return `${finalText}${interimText}`;
+  return joined;
 }
 
 export function appendSpeechTranscript(baseText: string, transcript: string) {
