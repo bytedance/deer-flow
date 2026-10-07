@@ -652,12 +652,7 @@ class WechatChannel(Channel):
                 if ret not in (0, None):
                     errcode = data.get("errcode")
                     if errcode == -14:
-                        self._bot_token = ""
-                        self._get_updates_buf = ""
-                        await asyncio.to_thread(self._save_state)
-                        await asyncio.to_thread(self._save_auth_state, status="expired", bot_token="")
-                        logger.error("[WeChat] bot token expired; scan again or update bot_token and restart the channel")
-                        self._running = False
+                        await await_drained(self._persist_expired_auth())
                         break
                     logger.warning(
                         "[WeChat] getupdates returned ret=%s errcode=%s errmsg=%s",
@@ -693,12 +688,22 @@ class WechatChannel(Channel):
                 next_buf = data.get("get_updates_buf")
                 if isinstance(next_buf, str) and next_buf != self._get_updates_buf:
                     self._get_updates_buf = next_buf
-                    await asyncio.to_thread(self._save_state)
+                    await await_drained(asyncio.to_thread(self._save_state))
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("[WeChat] polling loop failed")
                 await asyncio.sleep(self._retry_delay)
+
+    async def _persist_expired_auth(self) -> None:
+        """Persist both expiry writes under the auth lock; the poller drains this whole operation."""
+        async with self._auth_lock:
+            self._bot_token = ""
+            self._get_updates_buf = ""
+            await asyncio.to_thread(self._save_state)
+            await self._save_auth_state_drained(status="expired", bot_token="")
+            logger.error("[WeChat] bot token expired; scan again or update bot_token and restart the channel")
+            self._running = False
 
     async def _handle_update(self, raw_message: Any) -> None:
         if not isinstance(raw_message, dict):
@@ -843,7 +848,7 @@ class WechatChannel(Channel):
         qrcode: str | None = None,
         qrcode_img_content: str | None = None,
     ) -> dict[str, Any]:
-        """Persist QR auth state before propagating caller cancellation.
+        """Persist auth state before propagating caller cancellation.
 
         The write is a small local state-file update and is intentionally drained
         while _auth_lock is held so cancellation cannot expose an in-memory

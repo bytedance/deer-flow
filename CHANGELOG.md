@@ -804,6 +804,13 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **channels:** Opening an IM-channel conversation on the web while its run is still
+  going no longer shows the user's message twice. Channel run input carried no
+  message id, so the Gateway stored it id-less in the run record while the
+  checkpoint copy received a generated uuid, and the web client's reconnect
+  hydration, which matches the two copies by id, kept both until the run
+  finished. Channel human messages now carry their own id, so both copies share
+  it. ([#6401])
 - **deploy:** `make up`, `make down` and `make prod-logs` no longer stop on a
   fresh checkout with `env file .../.env not found`. `.env` and `frontend/.env` are gitignored and
   `make up` does not create them, but the production compose file required
@@ -9068,3 +9075,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6378]: https://github.com/bytedance/deer-flow/pull/6378
 [#6388]: https://github.com/bytedance/deer-flow/pull/6388
 [#6393]: https://github.com/bytedance/deer-flow/pull/6393
+[#6401]: https://github.com/bytedance/deer-flow/pull/6401

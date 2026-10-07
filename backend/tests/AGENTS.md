@@ -2,6 +2,10 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Channel reload cancellation regressions must assert the worker returned the
+stale snapshot before checking that newer runtime config survived. Completion
+alone cannot prove the race: loader exceptions are caught and return `None`.
+
 Browser egress session-close tests retain the real listener and its sockets,
 verify a SOCKS handshake, then check listener shutdown, closed socket descriptors
 and EOF on the established client. A new connection to the old port is not a
