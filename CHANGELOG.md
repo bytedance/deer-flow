@@ -697,6 +697,14 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **frontend:** A failed side-chat send no longer clears the composer. The side
+  chat's submit handler showed the error toast and then resolved, which the
+  composer treats as success, so the typed text and attachments were lost when
+  creating the side chat or uploading an attachment failed. The first message to
+  a new side chat was also cleared as soon as it was queued, before it was sent.
+  The handler now rejects after the toast, and the queued first send settles the
+  submit with its own outcome, so the draft stays for a retry and clears only
+  once the message is sent.
 - **channels:** Opening an IM-channel conversation on the web while its run is still
   going no longer shows the user's message twice. Channel run input carried no
   message id, so the Gateway stored it id-less in the run record while the
