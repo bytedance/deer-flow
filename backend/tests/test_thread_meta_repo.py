@@ -778,6 +778,9 @@ class TestJsonMatchCompilation:
         assert "json_type" in sql
         assert "IN ('integer', 'real')" in sql
         assert "REAL" in sql
+        # SQLite's REAL cast saturates instead of raising, so it needs no guard
+        assert "pg_input_is_valid" not in sql
+        assert "AS NUMERIC" not in sql
 
         str_expr = json_match(t.c.data, "k", "hello")
         sql = str(str_expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
@@ -813,12 +816,23 @@ class TestJsonMatchCompilation:
         assert "CAST" not in sql
         assert "(t.data ->> 'k') = '42'" in sql
 
-        # float: uses DOUBLE PRECISION cast
+        # float: uses DOUBLE PRECISION cast, guarded so out-of-range stored
+        # spellings (1e400, 1e-400) never reach the raising cast. The guard is
+        # CASE + NUMERIC bounds (PostgreSQL 14+), not pg_input_is_valid (16+).
         float_expr = json_match(t.c.data, "k", 3.14)
         sql = str(float_expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
         assert "json_typeof" in sql
         assert "'number'" in sql
         assert "DOUBLE PRECISION" in sql
+        assert "CASE WHEN" in sql
+        assert "AS NUMERIC" in sql
+        # exact float8 rounding midpoints, not the shortened round-trip spellings
+        assert f">= CAST('{2**1024 - 2**970}' AS NUMERIC)" in sql
+        assert f"<= CAST('{5**1075}e-1075' AS NUMERIC)" in sql
+        assert "1.7976931348623158e+308" not in sql
+        # exponent magnitude bound, so CAST AS NUMERIC cannot overflow on 1e-16384
+        assert "AS INTEGER) > 6000" in sql
+        assert "pg_input_is_valid" not in sql
 
         str_expr = json_match(t.c.data, "k", "hello")
         sql = str(str_expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))

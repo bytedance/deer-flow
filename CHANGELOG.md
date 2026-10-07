@@ -804,6 +804,15 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **persistence:** On PostgreSQL, a float JSON metadata filter no longer fails
+  the whole search when some stored value on that key is a number outside
+  DOUBLE PRECISION range, such as an integer above about 1.8e308 like `10**309`
+  (which the API accepts) or `1e400`. The cast raised SQLSTATE 22003; such
+  values now never match, while in-range values, including the float8 bounds,
+  match as before (except pathological spellings over 10000 characters or with
+  an exponent beyond 6000, which the app never writes). The guard uses only PostgreSQL 14 SQL, and SQLite is
+  unchanged. Follow-up to [#6000], which fixed the same failure for integer
+  filters. ([#6429])
 - **frontend:** Retrying a message after its attachment upload fails now keeps
   the context that was attached to it. The composer dropped its quotes,
   conversation references, staged project files and stored draft as soon as a
@@ -8946,6 +8955,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#5994]: https://github.com/bytedance/deer-flow/pull/5994
 [#5998]: https://github.com/bytedance/deer-flow/pull/5998
 [#5999]: https://github.com/bytedance/deer-flow/pull/5999
+[#6000]: https://github.com/bytedance/deer-flow/pull/6000
 [#6009]: https://github.com/bytedance/deer-flow/pull/6009
 [#6013]: https://github.com/bytedance/deer-flow/pull/6013
 [#6015]: https://github.com/bytedance/deer-flow/pull/6015
@@ -9130,3 +9140,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6407]: https://github.com/bytedance/deer-flow/pull/6407
 [#6412]: https://github.com/bytedance/deer-flow/pull/6412
 [#6426]: https://github.com/bytedance/deer-flow/pull/6426
+[#6429]: https://github.com/bytedance/deer-flow/pull/6429

@@ -1,4 +1,4 @@
-"""Execute integer predicates against JSON values, including oversized numbers."""
+"""Execute numeric predicates against JSON values, including out-of-range numbers."""
 
 import json
 import os
@@ -15,7 +15,7 @@ async def json_table(request):
     if request.param == "postgresql":
         url = os.getenv("DEERFLOW_TEST_POSTGRES_URL")
         if not url:
-            pytest.skip("set DEERFLOW_TEST_POSTGRES_URL to exercise real PostgreSQL integer matching")
+            pytest.skip("set DEERFLOW_TEST_POSTGRES_URL to exercise real PostgreSQL numeric matching")
         if url.startswith("postgresql://"):
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
     else:
@@ -62,3 +62,79 @@ async def test_integer_filter_ignores_unrepresentable_stored_numbers(json_table,
     result = await connection.execute(select(table.c.id).where(json_match(table.c.data, "x", expected)))
     expected_ids = {str(expected)} | ({"negative-zero"} if expected == 0 else set())
     assert set(result.scalars()) == expected_ids
+
+
+# Zero and infinite filters are left out on purpose: SQLite saturates stored
+# spellings beyond DOUBLE PRECISION to +/-0.0 or +/-inf, whereas PostgreSQL
+# treats them as never matching, so only those filters differ by backend.
+# (Exact-zero spellings such as 0e400 still match 0.0 on both backends.)
+_FINITE_FLOATS = [-1.7976931348623157e308, -1.5, -5e-324, 5e-324, 1.5, 42.0, 1.7976931348623157e308]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("expected", _FINITE_FLOATS)
+async def test_float_filter_ignores_out_of_range_stored_numbers(json_table, expected):
+    connection, table = json_table
+    rows = [{"id": str(value), "data": json.dumps({"x": value})} for value in _FINITE_FLOATS]
+    rows += [
+        # PostgreSQL refuses to cast these spellings to DOUBLE PRECISION:
+        # overflow and underflow to zero both raise SQLSTATE 22003, so a
+        # single such row used to fail every float filter on the table.
+        # beyond-numeric / huge-exponent would also overflow the NUMERIC
+        # bounds check, and 0e400 must take the exact-zero branch for the
+        # same reason; overflow-ulp is the first spelling above DBL_MAX.
+        # big-integer is the spelling the API can store: json.loads keeps
+        # integers exact, while 1e400 becomes inf, which PostgreSQL's json
+        # type rejects on write.
+        {"id": "big-integer", "data": json.dumps({"x": 10**309})},
+        {"id": "overflow", "data": '{"x": 1e400}'},
+        {"id": "negative-overflow", "data": '{"x": -1e400}'},
+        {"id": "underflow", "data": '{"x": 1e-400}'},
+        {"id": "negative-underflow", "data": '{"x": -1e-400}'},
+        {"id": "beyond-numeric", "data": '{"x": ' + "9" * 131073 + "}"},
+        {"id": "huge-exponent", "data": '{"x": 1e100000}'},
+        # NUMERIC keeps at most 16383 fractional digits, so these raised
+        # inside the NUMERIC bounds check despite a five-digit exponent.
+        {"id": "deep-underflow", "data": '{"x": 1e-16384}'},
+        {"id": "deeper-underflow", "data": '{"x": -1e-20000}'},
+        # Above the shortened half-denorm spelling (2.4703282292062327e-324)
+        # but below the exact underflow midpoint 2**-1075: rounds to 0 and
+        # raised past the old bound. The midpoint itself ties to 0.
+        {"id": "near-underflow", "data": '{"x": 2.47032822920623272e-324}'},
+        {"id": "underflow-midpoint", "data": '{"x": ' + f"{5**1075}e-1075" + "}"},
+        {"id": "overflow-ulp", "data": '{"x": 1.7976931348623159e+308}'},
+        # Exact float8 overflow midpoint (DBL_MAX + half an ulp) ties to inf.
+        {"id": "overflow-midpoint", "data": json.dumps({"x": 2**1024 - 2**970})},
+        {"id": "zero-huge-exp", "data": '{"x": 0e400}'},
+        # JSON allows leading zeros in the exponent; this is 1.5 and must match.
+        {"id": "padded-exponent", "data": '{"x": 15e-000001}'},
+        # API-storable exact integers above the shortened DBL_MAX spelling
+        # (1.7976931348623158e+308) that still round to DBL_MAX, the last one
+        # just below the overflow midpoint; on PostgreSQL they must match a
+        # DBL_MAX filter.
+        {"id": "near-max", "data": json.dumps({"x": 1797693134862315805 * 10**290})},
+        {"id": "below-overflow-midpoint", "data": json.dumps({"x": 2**1024 - 2**970 - 1})},
+        {"id": "integer", "data": '{"x": 42}'},
+        {"id": "string", "data": json.dumps({"x": str(expected)})},
+        {"id": "nan-string", "data": '{"x": "NaN"}'},
+        {"id": "boolean", "data": '{"x": true}'},
+        {"id": "null", "data": '{"x": null}'},
+        {"id": "array", "data": json.dumps({"x": [expected]})},
+        {"id": "missing", "data": "{}"},
+    ]
+    await connection.execute(text("INSERT INTO json_integer_matching (id, data) VALUES (:id, :data)"), rows)
+    result = await connection.execute(select(table.c.id).where(json_match(table.c.data, "x", expected)))
+    expected_ids = {str(expected)} | ({"integer"} if expected == 42 else set())
+    expected_ids |= {"padded-exponent"} if expected == 1.5 else set()
+    matched = set(result.scalars())
+    near_max_ids = {"near-max", "below-overflow-midpoint", "overflow-midpoint"}
+    if connection.dialect.name == "sqlite":
+        # SQLite's own conversion of 309-digit integer text is platform-dependent:
+        # DBL_MAX on Windows, inf on x86-64 Linux (CI), even below the midpoint.
+        # The guard is PostgreSQL-only, so these rows say nothing about it here.
+        matched -= near_max_ids
+    elif expected == 1.7976931348623157e308:
+        # PostgreSQL rounds correctly: below the midpoint is DBL_MAX, the tie is
+        # inf (22003), so the guard skips it.
+        expected_ids |= {"near-max", "below-overflow-midpoint"}
+    assert matched == expected_ids

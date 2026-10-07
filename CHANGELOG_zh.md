@@ -694,6 +694,11 @@
 
 ### 修复
 
+- **持久化：** 在 PostgreSQL 上，只要某个键下存有超出 DOUBLE PRECISION 范围的数字（例如 API 可以接受的大于约 1.8e308 的整数 `10**309`，
+  或 `1e400`），对该键的浮点 JSON 元数据过滤就会因类型转换抛出 SQLSTATE 22003，导致整个搜索失败。现在这类值一律不匹配，
+  范围内的值（包括 float8 边界值）照常匹配，只有超过 10000 字符或指数绝对值超过 6000 的病态写法例外，
+  应用自身不会写出这种值。该防护只使用 PostgreSQL 14 已有的 SQL，SQLite 行为不变。这是 [#6000]
+  的后续修复，后者解决了整数过滤的同类失败。([#6429])
 - **前端：** 附件上传失败后重试发送时，现在会保留原先附带的上下文。输入框此前在发送开始时（附件上传之前）就清除了
   引用、对话引用、已暂存的项目文件和已保存的草稿，因此上传失败后文字和文件虽仍在，重试发送却缺少这些上下文。
   现在这些一次性状态只在发送真正派发（上传完成）后才清除；若上传完成时用户已切换对话或离开页面，只清除该次发送
@@ -7321,6 +7326,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5994]: https://github.com/bytedance/deer-flow/pull/5994
 [#5998]: https://github.com/bytedance/deer-flow/pull/5998
 [#5999]: https://github.com/bytedance/deer-flow/pull/5999
+[#6000]: https://github.com/bytedance/deer-flow/pull/6000
 [#6009]: https://github.com/bytedance/deer-flow/pull/6009
 [#6013]: https://github.com/bytedance/deer-flow/pull/6013
 [#6015]: https://github.com/bytedance/deer-flow/pull/6015
@@ -7502,3 +7508,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6407]: https://github.com/bytedance/deer-flow/pull/6407
 [#6412]: https://github.com/bytedance/deer-flow/pull/6412
 [#6426]: https://github.com/bytedance/deer-flow/pull/6426
+[#6429]: https://github.com/bytedance/deer-flow/pull/6429

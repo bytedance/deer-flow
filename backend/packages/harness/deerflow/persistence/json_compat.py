@@ -134,6 +134,9 @@ class _Dialect:
     null_type: str
     num_types: tuple[str, ...]
     num_cast: str
+    # PostgreSQL raises on JSON numbers outside DOUBLE PRECISION range; SQLite's
+    # REAL cast saturates to +/-inf or +/-0.0 instead.
+    num_cast_raises: bool
     int_types: tuple[str, ...]
     # PostgreSQL ->> returns the JSON number spelling; SQLite json_extract
     # returns a native integer or a (possibly lossy) real for large integers.
@@ -146,6 +149,7 @@ _SQLITE = _Dialect(
     null_type="null",
     num_types=("integer", "real"),
     num_cast="REAL",
+    num_cast_raises=False,
     int_types=("integer",),
     int_as_text=False,
     string_type="text",
@@ -156,6 +160,7 @@ _PG = _Dialect(
     null_type="null",
     num_types=("number",),
     num_cast="DOUBLE PRECISION",
+    num_cast_raises=True,
     int_types=("number",),
     int_as_text=True,
     string_type="string",
@@ -173,6 +178,55 @@ def _type_check(typeof: str, types: tuple[str, ...]) -> str:
         return f"{typeof} = '{types[0]}'"
     quoted = ", ".join(f"'{t}'" for t in types)
     return f"{typeof} IN ({quoted})"
+
+
+# Exact float8 rounding midpoints. Shortened spellings such as 1.7976931348623158e+308
+# only round-trip; they do not mark where rounding flips. Both midpoints tie away
+# from a finite nonzero float8 under ties-to-even (to inf and to 0), so they raise.
+# DBL_MAX + half an ulp, a 309-digit integer.
+_FLOAT8_OVERFLOW_MIDPOINT = str(2**1024 - 2**970)
+# Half the min positive denormal, 2**-1075 == 5**1075 * 10**-1075, exactly.
+_FLOAT8_UNDERFLOW_MIDPOINT = f"{5**1075}e-1075"
+# CAST AS NUMERIC raises past 131072 integer digits (1e131072, 131073 nines) and
+# past 16383 fractional digits (1e-16384). 10,000 characters plus an exponent of
+# at most 6,000 stays under both, and float8 needs far less than either.
+_NUMERIC_SAFE_CHARS = 10000
+_NUMERIC_SAFE_EXPONENT = 6000
+_ZERO_SPELLING = r"^-?0(\.0+)?([eE][+-]?[0-9]+)?$"
+# Exponent digits without sign; JSON allows leading zeros (1.5e-0001 == 0.15).
+_EXPONENT_DIGITS = r"[eE][+-]?([0-9]+)$"
+
+
+def _pg_float_guard(typeof: str, extract: str, comparison: str, bp: str) -> str:
+    """Skip JSON numbers that CAST AS DOUBLE PRECISION would reject (SQLSTATE 22003).
+
+    Portable to PostgreSQL 14: do not use ``pg_input_is_valid`` (PostgreSQL 16+).
+    CASE, unlike AND, guarantees evaluation order so the raising float8 cast only
+    runs after cheaper, non-raising checks. CAST AS NUMERIC itself raises on
+    1e131072 and on 1e-16384, so ``char_length`` and the exponent magnitude run
+    first. The exponent is compared as a number after stripping leading zeros:
+    its digit count is checked before CAST AS INTEGER so that cast cannot fail.
+    Exact-zero spellings (including ``0e400``) are matched without a numeric cast
+    so a huge exponent cannot overflow NUMERIC on a stored zero; they still match
+    a ``0.0`` filter. Underflow such as ``1e-400`` is not an exact zero and never
+    matches, whereas SQLite saturates it to 0.0. The float8 range check uses the
+    exact rounding midpoints, so a value that rounds to DBL_MAX or 5e-324 still
+    matches and one that rounds to inf or 0 is skipped instead of raising.
+    """
+    n = f"CAST({extract} AS NUMERIC)"
+    # NULL without an exponent, so both exponent WHENs fall through.
+    exponent = f"ltrim(substring({extract} FROM '{_EXPONENT_DIGITS}'), '0')"
+    return (
+        "CASE "
+        f"WHEN {typeof} <> 'number' THEN false "
+        f"WHEN {extract} ~ '{_ZERO_SPELLING}' THEN {bp} = 0 "
+        f"WHEN char_length({extract}) > {_NUMERIC_SAFE_CHARS} THEN false "
+        f"WHEN char_length({exponent}) > {len(str(_NUMERIC_SAFE_EXPONENT))} THEN false "
+        f"WHEN CAST('0' || {exponent} AS INTEGER) > {_NUMERIC_SAFE_EXPONENT} THEN false "
+        f"WHEN abs({n}) >= CAST('{_FLOAT8_OVERFLOW_MIDPOINT}' AS NUMERIC) THEN false "
+        f"WHEN abs({n}) <= CAST('{_FLOAT8_UNDERFLOW_MIDPOINT}' AS NUMERIC) THEN false "
+        f"ELSE {comparison} END"
+    )
 
 
 def _build_clause(compiler: SQLCompiler, typeof: str, extract: str, value: object, dialect: _Dialect, **kw: Any) -> str:
@@ -200,7 +254,13 @@ def _build_clause(compiler: SQLCompiler, typeof: str, extract: str, value: objec
         return f"({_type_check(typeof, dialect.int_types)} AND {comparison})"
     if isinstance(value, float):
         bp = _bind(compiler, value, Float(), **kw)
-        return f"({_type_check(typeof, dialect.num_types)} AND CAST({extract} AS {dialect.num_cast}) = {bp})"
+        comparison = f"CAST({extract} AS {dialect.num_cast}) = {bp}"
+        if dialect.num_cast_raises:
+            # Overflow (1e400) and underflow to zero (1e-400) both raise 22003,
+            # so one such stored value would fail the whole query. The CASE
+            # folds the type check in: AND has no evaluation-order guarantee.
+            return f"({_pg_float_guard(typeof, extract, comparison, bp)})"
+        return f"({_type_check(typeof, dialect.num_types)} AND {comparison})"
     bp = _bind(compiler, str(value), String(), **kw)
     return f"({typeof} = '{dialect.string_type}' AND {extract} = {bp})"
 

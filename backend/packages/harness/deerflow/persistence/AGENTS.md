@@ -10,13 +10,25 @@ Alembic stamp/upgrade workers started inside `bootstrap_schema()` remain owned b
 
 On SQLite, `BEGIN IMMEDIATE` takes the database-wide write lock, so every unrelated writer (run status, thread metadata, the scheduler) waits for the transaction and fails with `database is locked` after `busy_timeout` (30s). Do slow work such as document conversion before opening a locked transaction; lock only to revalidate and publish, as `ProjectDocumentRepository.publish_under_live_lock` does. `tests/test_project_document_tools.py::TestConversionSerialization` pins this.
 
-## JSON integer filters
+## JSON numeric filters
 
 Stored JSON integers are not bounded by the signed-64-bit filter input contract.
 SQLite predicates must check the extracted SQL value's `typeof`, not only JSON
 `json_type`, to exclude oversized integers decoded as REAL. PostgreSQL predicates
 compare integer text (including `-0` for zero) without casting arbitrary stored
 numbers to BIGINT or NUMERIC. Preserve integer/float/boolean/string distinctions.
+
+PostgreSQL float filters must not let `CAST(... AS DOUBLE PRECISION)` see stored
+numbers outside float8 range (SQLSTATE 22003, e.g. the integer `10**309`):
+`_pg_float_guard` keeps the cast inside a CASE (not `AND`, which has no
+evaluation-order guarantee) behind non-raising checks, using PostgreSQL 14 SQL
+only. Its range bounds are the exact float8 rounding midpoints, not shortened
+spellings like `1.7976931348623158e+308`, which drop values that round to
+DBL_MAX. Such values never match on PostgreSQL; SQLite saturates them instead.
+The length (10000 chars) and exponent (6000) pre-checks also skip a few
+pathological in-range spellings that the app's serializer never writes.
+SQLite's REAL for integer text near DBL_MAX is platform-dependent (inf on
+x86-64 Linux, DBL_MAX on Windows), so tests do not pin it.
 `tests/test_json_integer_matching.py` exercises both dialects; PostgreSQL opts in
 with `DEERFLOW_TEST_POSTGRES_URL` and uses connection-local temporary tables.
 ## Scheduled-task lifecycle
