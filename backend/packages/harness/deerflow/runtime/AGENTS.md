@@ -28,10 +28,10 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Thread message cursors:** `list_messages` applies both exclusive bounds before `limit`, paging forward whenever `after_seq` is supplied.
 
-**Human-input capture** (`runtime/journal.py`): track capture separately from
-the optional display summary. Image-only input has no text but must still stop
-the batch scan and later model calls from appending another human-input event.
-`tests/test_run_journal.py` covers callback and full/delta graph paths.
+**Journal capture**: Image-only input stops batch scans and later human-event
+capture despite an empty summary. AI summaries strip leading think sections
+before the 2000-character cap, preserving events, literal answer tags, and
+prior useful summaries. Tests: `test_run_journal*.py` (callbacks, full/delta).
 
 **Per-call LLM telemetry** (`runtime/journal.py`): `RunJournal` adds observation-only keys
 to `llm.ai.response` metadata and to `llm.error` metadata (previously empty): `langchain_run_id`,

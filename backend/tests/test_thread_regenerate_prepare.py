@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 from langgraph.checkpoint.memory import InMemorySaver
 
-from deerflow.runtime import RunStatus
+from deerflow.runtime import DisconnectMode, RunRecord, RunStatus
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 
@@ -1541,18 +1541,28 @@ def test_prepare_regenerate_payload_rejects_non_latest_assistant():
     assert exc.value.detail == "Only the latest assistant message can be regenerated"
 
 
-def test_prepare_regenerate_payload_falls_back_to_matching_run_when_events_are_missing():
+@pytest.mark.parametrize(
+    ("content", "summary"),
+    [
+        ("answer", "answer"),
+        ("<think>Reasoning.</think>answer", "<think>Reasoning.</think>answer"),
+        ("<think>Reasoning.</think>answer", "answer"),
+        ("<think>" + "r" * 2400 + "</think>" + "a" * 2500, "a" * 2000),
+    ],
+    ids=["plain", "legacy-summary", "visible-summary", "long-reasoning"],
+)
+def test_prepare_regenerate_payload_falls_back_to_matching_run_when_events_are_missing(content, summary):
     from app.gateway.routers.thread_runs import _prepare_regenerate_payload
 
     human = HumanMessage(id="human-1", content="question")
-    ai = AIMessage(id="ai-1", content="answer")
+    ai = AIMessage(id="ai-1", content=content)
     base = _checkpoint("ckpt-base", [])
     after_human = _checkpoint("ckpt-human", [human])
     latest = _checkpoint("ckpt-ai", [human, ai])
     checkpointer = FakeCheckpointer([latest, after_human, base])
     run_manager = FakeRunManager(
         [
-            SimpleNamespace(run_id="run-latest", status=RunStatus.success, last_ai_message="answer"),
+            RunRecord(run_id="run-latest", thread_id="thread-1", assistant_id="lead_agent", status=RunStatus.success, on_disconnect=DisconnectMode.continue_, last_ai_message=summary),
             SimpleNamespace(run_id="run-older", status=RunStatus.error, last_ai_message="answer"),
         ]
     )
