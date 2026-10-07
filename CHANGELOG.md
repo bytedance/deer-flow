@@ -804,6 +804,14 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **client:** `DeerFlowClient.list_threads(limit)` now limits threads rather
+  than checkpoints. It passed `limit` to a checkpoint scan across every thread,
+  and one turn writes several checkpoints, so a single long conversation filled
+  the limit: the TUI thread picker and `--resume <title>` saw only the latest one
+  or two threads, and an older title failed to resolve. Threads are now found
+  through their single root checkpoint, so the scan costs one row per thread.
+  A new `sort_by="updated_at"` option lets `--continue` keep resuming the most
+  recently active thread; the default order stays newest created first.
 - **frontend:** A failed side-chat send no longer clears the composer. The side
   chat's submit handler showed the error toast and then resolved, which the
   composer treats as success, so the typed text and attachments were lost when

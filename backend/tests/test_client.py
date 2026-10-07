@@ -2304,11 +2304,30 @@ class TestThreadQueries:
 
         assert [t["thread_id"] for t in threads] == ["t-first", "t-third"]
 
+    def test_list_threads_scans_one_root_per_thread(self, client, saver):
+        client._checkpointer = saver
+        self._put_thread(saver, "t-old", ["2023-01-01T10:00:00Z", "2023-01-01T10:01:00Z"])
+        self._put_thread(saver, "t-busy", [f"2023-01-02T10:{minute:02d}:00Z" for minute in range(30)])
+        scanned = []
+        original_list = saver.list
+
+        def counting_list(*args, **kwargs):
+            for item in original_list(*args, **kwargs):
+                scanned.append(item)
+                yield item
+
+        with patch.object(saver, "list", counting_list):
+            client.list_threads(limit=2)
+
+        assert len(scanned) == 2
+
     def test_list_threads_ignores_subgraph_namespace_roots(self, client, saver):
         client._checkpointer = saver
+        # Subgraph namespaces have roots of their own; they sit on both sides of
+        # the thread's root in every backend's iteration order.
+        self._put_thread(saver, "t1", ["2023-01-01T09:00:00Z"], checkpoint_ns="subgraph-a")
         self._put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:05:00Z"])
-        # A subgraph's own root is newer than the thread's but does not create a thread.
-        self._put_thread(saver, "t1", ["2023-01-01T10:02:00Z"], checkpoint_ns="subgraph")
+        self._put_thread(saver, "t1", ["2023-01-01T10:02:00Z"], checkpoint_ns="subgraph-b")
 
         (thread,) = client.list_threads()["thread_list"]
 

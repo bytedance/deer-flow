@@ -24,7 +24,7 @@ Launch modes:
 | `deerflow --tui-transparent` | Use the terminal's default background when launching the TUI |
 | `deerflow --cli` | Force headless/classic mode for one invocation |
 | `deerflow chat` | Same TUI conversation surface |
-| `deerflow --continue` | Resume the most recent thread |
+| `deerflow --continue` | Resume the most recently active thread |
 | `deerflow --resume THREAD` | Resume a thread by id |
 | `deerflow --print "question"` | Headless one-shot answer to stdout; on failure a concise stderr line and exit 1 |
 | `deerflow --json "question"` | Headless newline-delimited `StreamEvent`s; on failure one terminal `{"type": "error"}` record and exit 1 |
