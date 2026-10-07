@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
+import importlib.util
 import json
 import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -22,7 +24,8 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from e2b import FileNotFoundException, TimeoutException
+from e2b import CommandExitException, FileNotFoundException, TimeoutException
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import ValidationError
 
 from deerflow.community.e2b_sandbox.capacity import (
@@ -1751,13 +1754,77 @@ def test_execute_command_returns_stdout_on_success():
     assert sb.is_dead is False
 
 
+def _raise_exit(stdout: str, stderr: str, exit_code: int):
+    """The real SDK raises ``CommandExitException`` on a nonzero exit; it
+    never returns a result with ``exit_code != 0``."""
+
+    def run(_cmd: str) -> Any:
+        raise CommandExitException(stderr=stderr, stdout=stdout, exit_code=exit_code, error=f"exit status {exit_code}")
+
+    return run
+
+
 def test_execute_command_appends_exit_marker_when_failure_has_output():
     """LocalSandbox parity: a nonzero exit must survive in the output text
     even when the command produced output, so evidence consumers (acceptance
     checklist) recover the actual shell status."""
-    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="5 passed, 1 error\n", stderr="", exit_code=1)]))
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("5 passed, 1 error\n", "", 1)]))
     sb = _make_sandbox(client)
     assert sb.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+
+
+def test_execute_command_keeps_stdout_and_stderr_on_nonzero_exit():
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("12 passed\n", "coverage below 80%\n", 2)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("pytest -q") == "12 passed\n\ncoverage below 80%\n\nExit Code: 2"
+    assert sb.is_dead is False
+
+
+def test_execute_command_reports_exit_code_when_failure_has_no_output():
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("", "", 1)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("false") == "Command exited with code 1"
+
+
+def test_execute_command_nonzero_exit_mentioning_not_found_does_not_mark_dead():
+    """A command's own stderr can contain "sandbox not found"; that is a failed
+    command, not a reaped VM."""
+    client = FakeClient(commands=FakeCommandsAPI([_raise_exit("", "error: sandbox not found\n", 1)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("mytool status") == "error: sandbox not found\n\nExit Code: 1"
+    assert sb.is_dead is False
+
+
+def test_execute_command_nonzero_exit_is_harvested_as_error():
+    """End-to-end with the real executor harvest. ``tests/conftest.py`` mocks
+    ``deerflow.subagents.executor``, so it is loaded under a unique name."""
+    path = Path(__file__).parents[1] / "packages/harness/deerflow/subagents/executor.py"
+    spec = importlib.util.spec_from_file_location("_e2b_exit_marker_executor", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    try:
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        from deerflow.subagents import acceptance_checks
+
+        client = FakeClient(commands=FakeCommandsAPI([_raise_exit("12 passed\n", "coverage below 80%\n", 1)]))
+        out = _make_sandbox(client).execute_command("pytest -q")
+
+        cmd = "pytest -q"
+        ai = AIMessage(content="", tool_calls=[{"name": "bash", "args": {"command": cmd}, "id": "tc-1", "type": "tool_call"}])
+        tm = ToolMessage(content=out, tool_call_id="tc-1", name="bash")
+        executions = module._harvest_bash_executions({"messages": [HumanMessage(content="task"), ai, tm]})
+        assert executions, "harvest returned no bash executions"
+        for entry in executions:
+            entry["shell_persistent"] = False
+        assert executions[-1]["status"] == "error"
+        assert executions[-1]["status_marker"] == "Exit Code: 1"
+        assert acceptance_checks._check_tests_passed_leaf(cmd, executions)["holds"] is False
+    finally:
+        sys.modules.pop(spec.name, None)
+        shutdown = getattr(module, "_shutdown_isolated_subagent_loop", None)
+        if shutdown is not None:
+            shutdown()
 
 
 def test_execute_command_does_not_mark_dead_on_unrelated_error():

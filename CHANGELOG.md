@@ -804,6 +804,16 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **sandbox:** A failed command in the e2b sandbox now keeps its output and exit
+  code. The e2b SDK raises `CommandExitException` on a nonzero exit instead of
+  returning a result, so `E2BSandbox.execute_command` returned
+  `Error: Command exited with code N and error: ...`: stdout was dropped, the
+  `Exit Code: N` marker was never added, and `_bash_evidence_status` fell back to
+  `deerflow_tool_meta` (`success`), so a failed `pytest` could satisfy a
+  `tests_passed` acceptance criterion. The exception carries the command's
+  stdout, stderr and exit code, and is now formatted like a returned result. A
+  failed command whose stderr mentions "sandbox not found" no longer marks the
+  sandbox as reaped.
 - **frontend:** Retrying a message after its attachment upload fails now keeps
   the context that was attached to it. The composer dropped its quotes,
   conversation references, staged project files and stored draft as soon as a
