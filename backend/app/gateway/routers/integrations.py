@@ -272,23 +272,24 @@ async def get_lark_status(request: Request, config: AppConfig = Depends(get_conf
 @router.post("/lark/install", response_model=LarkInstallResponse, summary="Install Lark/Feishu Skill Pack")
 async def install_lark(request: Request, config: AppConfig = Depends(get_config)) -> LarkInstallResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
-    try:
-        async def _install_and_refresh() -> LarkInstallResult:
-            try:
-                result = await asyncio.to_thread(
-                    install_lark_integration,
-                    get_effective_user_id(),
-                    config,
-                )
-                await refresh_skills_system_prompt_cache_async()
-                return result
-            except Exception as exc:
-                logger.error(
-                    "Lark integration install finalization failed (%s)",
-                    type(exc).__name__,
-                )
-                raise
 
+    async def _install_and_refresh() -> LarkInstallResult:
+        try:
+            result = await asyncio.to_thread(
+                install_lark_integration,
+                get_effective_user_id(),
+                config,
+            )
+            await refresh_skills_system_prompt_cache_async()
+            return result
+        except Exception as exc:
+            logger.error(
+                "Lark integration install finalization failed (%s)",
+                type(exc).__name__,
+            )
+            raise
+
+    try:
         result = await await_drained(_install_and_refresh())
         return _install_to_response(result)
     except FileNotFoundError as e:
