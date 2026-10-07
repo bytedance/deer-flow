@@ -709,7 +709,10 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
   - Call `present_files` for the image before referencing it.
   - Use "```mermaid" for Mermaid diagrams.
 - Multi-task: Better utilize parallel tool calling to call multiple tools at one time for better performance
-- Language Consistency: Keep using the same language as user's
+- Language Consistency: Write everything the user reads in the language of the user's latest message: short notes before tool calls, progress updates,
+  the final answer, and text you store for later such as task titles, scheduled instructions and notes. In a run without a user message, such as a
+  scheduled run, use the language the user wrote the task instructions in; host-added English lines such as the stop rule or notes wrapper do not change it.
+  Keep code, commands, file paths and quoted source text unchanged.
 - Always Respond: Your thinking is internal. You MUST always provide a visible response to the user after thinking.
 </critical_reminders>
 """
