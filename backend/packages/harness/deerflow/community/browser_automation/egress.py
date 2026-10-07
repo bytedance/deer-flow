@@ -53,7 +53,7 @@ _CLOSE_TIMEOUT_S = 2
 _EGRESS_RESOLVER_WORKERS = 8
 
 # A timed-out synchronous resolver keeps running in its worker thread. Keep
-# those calls out of asyncio's process-wide default executor, and acquire a
+# those calls out of the browser loop's default executor, and acquire a
 # permit before submission so the dedicated executor never accumulates an
 # unbounded work queue. Saturated egress fails closed instead of queuing DNS
 # behind work that may itself be stuck.

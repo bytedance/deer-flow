@@ -225,34 +225,38 @@ async def test_proxy_bounds_a_stuck_resolution(monkeypatch):
     assert reply == 0x04
 
 
-def test_timed_out_egress_resolution_does_not_starve_gateway_default_executor(monkeypatch):
+def test_timed_out_egress_resolution_does_not_starve_browser_request_guard(monkeypatch):
+    browser_loop = session_mod._PlaywrightLoopThread()
+    browser_executor = ThreadPoolExecutor(max_workers=1)
+    gateway_executor = ThreadPoolExecutor(max_workers=1)
+    resolver_executor = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(egress, "_RESOLVER_EXECUTOR", resolver_executor, raising=False)
+    monkeypatch.setattr(egress, "_RESOLVER_SLOTS", threading.BoundedSemaphore(1), raising=False)
+    monkeypatch.setattr(egress, "_RESOLVE_TIMEOUT_S", 0.1)
+    resolver_started = threading.Event()
+    release_resolver = threading.Event()
+    resolver_calls: list[str] = []
+
+    def resolve(host: str) -> list[str]:
+        resolver_calls.append(host)
+        resolver_started.set()
+        release_resolver.wait(timeout=10)
+        return ["127.0.0.1"]
+
+    guard = MagicMock(return_value=None)
+    session = BrowserSession(browser_loop, headless=True, timeout_ms=1000, viewport={}, url_guard=guard, egress_resolver=resolve)
+    session._context = SimpleNamespace(route=AsyncMock(), close=AsyncMock())
+
+    async def start_session_proxy():
+        asyncio.get_running_loop().set_default_executor(browser_executor)
+        await session._install_request_guard()
+        return (await session._egress_proxy_settings())["server"]
+
     async def scenario():
-        loop = asyncio.get_running_loop()
-        default_executor = ThreadPoolExecutor(max_workers=1)
-        resolver_executor = ThreadPoolExecutor(max_workers=1)
-        loop.set_default_executor(default_executor)
-        monkeypatch.setattr(egress, "_RESOLVER_EXECUTOR", resolver_executor, raising=False)
-        monkeypatch.setattr(egress, "_RESOLVER_SLOTS", threading.BoundedSemaphore(1), raising=False)
-        monkeypatch.setattr(egress, "_RESOLVE_TIMEOUT_S", 0.1)
-
-        resolver_started = asyncio.Event()
-        counter_started = asyncio.Event()
-        release_resolver = threading.Event()
-        resolver_calls: list[str] = []
-        resolver_context = ContextVar("test_browser_egress_context")
-        context_token = resolver_context.set("request-context")
-        observed_context: list[str | None] = []
-
-        def resolve(host: str) -> list[str]:
-            resolver_calls.append(host)
-            observed_context.append(resolver_context.get(None))
-            loop.call_soon_threadsafe(resolver_started.set)
-            release_resolver.wait()
-            return ["127.0.0.1"]
-
-        def count_messages(_messages) -> int:
-            loop.call_soon_threadsafe(counter_started.set)
-            return 250
+        gateway_loop = asyncio.get_running_loop()
+        gateway_loop.set_default_executor(gateway_executor)
+        assert gateway_loop is not browser_loop._loop
+        assert gateway_executor is not browser_executor
 
         messages = [SimpleNamespace(content="hello")]
         snapshot = SimpleNamespace(values={"messages": messages})
@@ -271,57 +275,98 @@ def test_timed_out_egress_resolution_does_not_starve_gateway_default_executor(mo
         async def build_accessor(_request, *, thread_id):
             return Accessor(), {"configurable": {"thread_id": thread_id}}
 
-        monkeypatch.setattr(context_usage, "_count_messages_approximately", count_messages)
+        monkeypatch.setattr(context_usage, "_count_messages_approximately", lambda _messages: 250)
         monkeypatch.setattr(context_usage, "build_thread_checkpoint_state_accessor", build_accessor)
         monkeypatch.setattr(context_usage, "get_config", lambda: app_config)
 
-        proxy = BrowserEgressProxy(resolve)
-        usage_task = None
+        connect_task = None
+        guard_task = None
         try:
-            proxy_url = await proxy.start()
+            # Use the production session entry point: SOCKS DNS runs on the
+            # private Playwright loop, not the caller's Gateway loop.
+            proxy_url = await browser_loop.run(start_session_proxy())
             connect_task = asyncio.create_task(_socks_connect(proxy_url, 0x03, _domain("wedged.example"), 80))
-            await asyncio.wait_for(resolver_started.wait(), timeout=2)
+            assert await asyncio.wait_for(asyncio.to_thread(resolver_started.wait, 2), timeout=3)
             _method, reply, _reader, writer = await asyncio.wait_for(connect_task, timeout=2)
             writer.close()
+            await writer.wait_closed()
             assert reply == 0x04
-            assert observed_context == ["request-context"]
+            assert not release_resolver.is_set()
 
-            # The first resolver is still running despite its SOCKS timeout.
-            # The sole admission slot must stay occupied and reject a second
-            # lookup instead of queuing another worker job.
-            _method, overloaded_reply, _reader, overloaded_writer = await asyncio.wait_for(
-                _socks_connect(proxy_url, 0x03, _domain("second.example"), 80),
-                timeout=2,
-            )
+            _method, overloaded_reply, _reader, overloaded_writer = await asyncio.wait_for(_socks_connect(proxy_url, 0x03, _domain("second.example"), 80), timeout=2)
             overloaded_writer.close()
+            await overloaded_writer.wait_closed()
             assert overloaded_reply == 0x04
             assert resolver_calls == ["wedged.example"]
 
-            usage_task = asyncio.create_task(
-                context_usage.build_context_usage(
-                    request=SimpleNamespace(app=SimpleNamespace()),
-                    thread_id="thread-1",
-                    run_store=RunStore(),
-                )
-            )
-            # This is the same token-counting path used by the Gateway's
-            # GET /threads/{thread_id}/token-usage handler.
-            await asyncio.wait_for(counter_started.wait(), timeout=2)
-            assert await usage_task == {
-                "token_count": 250,
-                "max_context_tokens": 1000,
-                "percentage": 25.0,
-            }
+            # Gateway token counting has its own default pool and succeeds on
+            # both the base and PR head while the browser resolver is held.
+            assert await asyncio.wait_for(
+                context_usage.build_context_usage(request=SimpleNamespace(app=SimpleNamespace()), thread_id="thread-1", run_store=RunStore()),
+                timeout=2,
+            ) == {"token_count": 250, "max_context_tokens": 1000, "percentage": 25.0}
+
+            # The actual contention is on the browser loop: its installed route
+            # callback must still run the synchronous request guard.
+            route = SimpleNamespace(request=SimpleNamespace(url="https://public.example/"), continue_=AsyncMock(), abort=AsyncMock())
+            route_handler = session._context.route.await_args.args[1]
+            guard_task = asyncio.create_task(browser_loop.run(route_handler(route)))
+            await asyncio.wait_for(guard_task, timeout=2)
+            guard.assert_called_once_with("https://public.example/")
+            route.continue_.assert_awaited_once()
+            route.abort.assert_not_awaited()
+            assert not release_resolver.is_set()
         finally:
             release_resolver.set()
-            if usage_task is not None and not usage_task.done():
-                await asyncio.wait_for(usage_task, timeout=2)
-            await proxy.close()
-            resolver_context.reset(context_token)
-            resolver_executor.shutdown(wait=True, cancel_futures=True)
-            default_executor.shutdown(wait=True, cancel_futures=True)
+            for task in (connect_task, guard_task):
+                if task is not None:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            await browser_loop.run(session._close())
+            await browser_loop.run(browser_loop._loop.shutdown_default_executor())
 
-    asyncio.run(scenario())
+    try:
+        asyncio.run(scenario())
+    finally:
+        release_resolver.set()
+        resolver_executor.shutdown(wait=True, cancel_futures=True)
+        browser_executor.shutdown(wait=True, cancel_futures=True)
+        gateway_executor.shutdown(wait=True, cancel_futures=True)
+        browser_loop._loop.call_soon_threadsafe(browser_loop._loop.stop)
+        browser_loop._thread.join(timeout=3)
+        assert not browser_loop._thread.is_alive()
+        browser_loop._loop.close()
+
+
+@pytest.mark.asyncio
+async def test_egress_resolver_propagates_caller_context(monkeypatch):
+    executor = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(egress, "_RESOLVER_EXECUTOR", executor)
+    monkeypatch.setattr(egress, "_RESOLVER_SLOTS", threading.BoundedSemaphore(1))
+    resolver_context = ContextVar("test_browser_egress_context", default="worker-default")
+    token = resolver_context.set("request-context")
+    try:
+        assert await egress._resolve_with_timeout(lambda _host: [resolver_context.get()], "public.example") == ["request-context"]
+    finally:
+        resolver_context.reset(token)
+        executor.shutdown(wait=True, cancel_futures=True)
+    assert resolver_context.get() == "worker-default"
+
+
+@pytest.mark.asyncio
+async def test_egress_resolver_submission_failure_releases_slot(monkeypatch):
+    executor = ThreadPoolExecutor(max_workers=1)
+    slots = threading.BoundedSemaphore(1)
+    monkeypatch.setattr(egress, "_RESOLVER_EXECUTOR", executor)
+    monkeypatch.setattr(egress, "_RESOLVER_SLOTS", slots)
+    try:
+        executor.shutdown(wait=True)
+        with pytest.raises(RuntimeError, match="cannot schedule new futures after shutdown"):
+            await egress._resolve_with_timeout(MagicMock(), "public.example")
+        assert slots.acquire(blocking=False), "failed submission must return its permit"
+        slots.release()
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def test_timed_out_resolver_releases_slot_after_event_loop_closes(monkeypatch):
@@ -337,28 +382,33 @@ def test_timed_out_resolver_releases_slot_after_event_loop_closes(monkeypatch):
 
     def resolve(_host: str) -> list[str]:
         resolver_started.set()
-        release_resolver.wait()
+        release_resolver.wait(timeout=10)
         resolver_finished.set()
         return ["127.0.0.1"]
 
     async def time_out_resolver():
         task = asyncio.create_task(egress._resolve_with_timeout(resolve, "wedged.example"))
-        assert await asyncio.wait_for(asyncio.to_thread(resolver_started.wait), timeout=2)
-        with pytest.raises(TimeoutError):
-            await task
+        try:
+            # Cancelling to_thread's awaiter cannot interrupt Event.wait itself.
+            assert await asyncio.wait_for(asyncio.to_thread(resolver_started.wait, 2), timeout=3)
+            with pytest.raises(TimeoutError):
+                await task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(time_out_resolver())
-    finally:
-        loop.close()
-        release_resolver.set()
-
-    try:
+        try:
+            loop.run_until_complete(time_out_resolver())
+        finally:
+            loop.close()
+            release_resolver.set()
         assert resolver_finished.wait(timeout=2)
         assert slots.acquire(timeout=2), "resolver worker completion must release capacity without its event loop"
         slots.release()
     finally:
+        release_resolver.set()
         executor.shutdown(wait=True, cancel_futures=True)
 
 
