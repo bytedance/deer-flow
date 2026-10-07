@@ -808,10 +808,11 @@ This release closes that milestone with **439 merged pull requests**.
   than checkpoints. It passed `limit` to a checkpoint scan across every thread,
   and one turn writes several checkpoints, so a single long conversation filled
   the limit: the TUI thread picker and `--resume <title>` saw only the latest one
-  or two threads, and an older title failed to resolve. Threads are now found
-  through their single root checkpoint, so only one checkpoint per thread is
-  loaded.
-  A new `sort_by="updated_at"` option lets `--continue` keep resuming the most
+  or two threads, and an older title failed to resolve. SQLite and Postgres now
+  list threads from their checkpoint index, and only each returned thread's
+  first and latest checkpoints are loaded. Gateway branches are listed, and order
+  follows checkpoint write order, so a goal-only write counts as activity. A new
+  `sort_by="updated_at"` option lets `--continue` keep resuming the most
   recently active thread; the default order stays newest created first. ([#6426])
 - **frontend:** A failed side-chat send no longer clears the composer. The side
   chat's submit handler showed the error toast and then resolved, which the

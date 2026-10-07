@@ -760,59 +760,48 @@ class DeerFlowClient:
     def list_threads(self, limit: int = 10, *, sort_by: Literal["created_at", "updated_at"] = "created_at") -> dict:
         """List the recent N threads.
 
-        Threads are found through their root checkpoint (metadata
-        ``step == -1`` in the root namespace). A thread gets exactly one: its
-        first graph run writes it, and so do the Gateway and goal paths that
-        create a thread before any run. Listing roots rather than every
-        checkpoint keeps ``limit`` counting threads, so one long thread cannot
-        crowd the others out, and loads one checkpoint per thread instead of
-        a thread's whole history.
+        ``limit`` counts threads, not checkpoints, and only each returned
+        thread's first and latest checkpoints are loaded (see
+        :mod:`deerflow.runtime.checkpointer.thread_spans`).
 
         Args:
             limit: Maximum number of threads to return. Default is 10.
-            sort_by: ``"created_at"`` (default) or ``"updated_at"`` — the
-                timestamp to sort by, newest first. ``"updated_at"`` reads the
-                latest checkpoint of every thread; ``"created_at"`` only of the
-                returned ones.
+            sort_by: ``"created_at"`` (default) orders by each thread's first
+                checkpoint, ``"updated_at"`` by its latest. Both follow
+                checkpoint write order, which the reported ``ts`` values can
+                lag: a goal write keeps the previous checkpoint's ``ts``.
 
         Returns:
             Dict with "thread_list" key containing list of thread info dicts,
-            sorted by ``sort_by`` descending.
+            newest first by ``sort_by``.
         """
+        from deerflow.runtime.checkpointer.thread_spans import list_thread_spans
+
         if sort_by not in ("created_at", "updated_at"):
             raise ValueError(f"sort_by must be 'created_at' or 'updated_at', got {sort_by!r}")
         checkpointer = self._get_thread_checkpointer()
+        spans = list_thread_spans(checkpointer, order_by="first" if sort_by == "created_at" else "latest", limit=limit)
 
-        created_at: dict[str, str | None] = {}
-        for cp in checkpointer.list(config=None, filter={"step": -1}):
-            cfg = cp.config.get("configurable", {})
-            thread_id = cfg.get("thread_id")
-            # Subgraph namespaces have roots of their own; only the root namespace's marks the thread.
-            if not thread_id or cfg.get("checkpoint_ns"):
-                continue
-            created_at[thread_id] = cp.checkpoint.get("ts")
-
-        thread_ids = sorted(created_at, key=lambda tid: created_at[tid] or "", reverse=True)
-        if sort_by == "created_at":
-            thread_ids = thread_ids[:limit]
+        def _checkpoint(thread_id: str, checkpoint_id: str):
+            return checkpointer.get_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": checkpoint_id}})
 
         threads = []
-        for thread_id in thread_ids:
-            latest = checkpointer.get_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+        for span in spans:
+            latest = _checkpoint(span.thread_id, span.latest_checkpoint_id)
             if latest is None:
                 continue
+            first = latest if span.first_checkpoint_id == span.latest_checkpoint_id else _checkpoint(span.thread_id, span.first_checkpoint_id)
             threads.append(
                 {
-                    "thread_id": thread_id,
-                    "created_at": created_at[thread_id],
+                    "thread_id": span.thread_id,
+                    "created_at": first.checkpoint.get("ts") if first is not None else None,
                     "updated_at": latest.checkpoint.get("ts"),
-                    "latest_checkpoint_id": latest.config.get("configurable", {}).get("checkpoint_id"),
+                    "latest_checkpoint_id": span.latest_checkpoint_id,
                     "title": latest.checkpoint.get("channel_values", {}).get("title"),
                 }
             )
-        threads.sort(key=lambda x: x.get(sort_by) or "", reverse=True)
 
-        return {"thread_list": threads[:limit]}
+        return {"thread_list": threads}
 
     def get_thread(self, thread_id: str) -> dict:
         """Get the complete materialized checkpoint history for a thread."""

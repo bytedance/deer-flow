@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
+from _thread_checkpoint_helpers import INDEXED_SAVER_KINDS, SAVER_KINDS, make_saver, put_goal_write, put_thread
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage, ToolMessage  # noqa: F401
 from langchain_core.tools import StructuredTool
 
@@ -2218,42 +2219,11 @@ class TestThreadQueries:
         snapshot.created_at = checkpoint_tuple.checkpoint["ts"]
         return snapshot
 
-    @pytest.fixture(params=["memory", "sqlite"])
+    @pytest.fixture(params=SAVER_KINDS)
     def saver(self, request):
-        """A real checkpointer: InMemorySaver lists per thread, SqliteSaver newest-first across threads."""
-        if request.param == "memory":
-            from langgraph.checkpoint.memory import InMemorySaver
-
-            yield InMemorySaver()
-            return
-        import sqlite3
-
-        from langgraph.checkpoint.sqlite import SqliteSaver
-
-        conn = sqlite3.connect(":memory:", check_same_thread=False)
-        yield SqliteSaver(conn)
-        conn.close()
-
-    @staticmethod
-    def _put_thread(saver, thread_id: str, timestamps: list[str], *, title: str | None = None, checkpoint_ns: str = "") -> list[str]:
-        """Write a run-shaped history: a step -1 root, then one checkpoint per later timestamp."""
-        from langgraph.checkpoint.base import empty_checkpoint
-
-        config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns}}
-        checkpoint_ids = []
-        for step, ts in enumerate(timestamps, start=-1):
-            checkpoint = empty_checkpoint()
-            checkpoint["ts"] = ts
-            new_versions = {}
-            if title:
-                # InMemorySaver keeps channel values as blobs keyed by version.
-                new_versions = {"title": step + 2}
-                checkpoint["channel_values"] = {"title": f"{title} #{step}"}
-                checkpoint["channel_versions"] = dict(new_versions)
-            metadata = {"source": "input" if step == -1 else "loop", "step": step, "parents": {}}
-            config = saver.put(config, checkpoint, metadata, new_versions)
-            checkpoint_ids.append(config["configurable"]["checkpoint_id"])
-        return checkpoint_ids
+        with make_saver(request.param) as saver:
+            saver.kind = request.param
+            yield saver
 
     def test_list_threads_empty(self, client, saver):
         client._checkpointer = saver
@@ -2262,17 +2232,17 @@ class TestThreadQueries:
 
     def test_list_threads_limit_counts_threads_not_checkpoints(self, client, saver):
         client._checkpointer = saver
-        self._put_thread(saver, "t-old", ["2023-01-01T10:00:00Z", "2023-01-01T10:01:00Z"])
+        put_thread(saver, "t-old", ["2023-01-01T10:00:00Z", "2023-01-01T10:01:00Z"])
         # A long conversation writes far more checkpoints than the limit.
-        self._put_thread(saver, "t-busy", [f"2023-01-02T10:{minute:02d}:00Z" for minute in range(30)])
+        put_thread(saver, "t-busy", [f"2023-01-02T10:{minute:02d}:00Z" for minute in range(30)])
 
         threads = client.list_threads(limit=2)["thread_list"]
 
         assert [t["thread_id"] for t in threads] == ["t-busy", "t-old"]
 
-    def test_list_threads_reports_root_creation_and_latest_checkpoint(self, client, saver):
+    def test_list_threads_reports_first_and_latest_checkpoint(self, client, saver):
         client._checkpointer = saver
-        checkpoint_ids = self._put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:05:00Z", "2023-01-01T10:09:00Z"], title="Thread 1")
+        checkpoint_ids = put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:05:00Z", "2023-01-01T10:09:00Z"], title="Thread 1")
 
         (thread,) = client.list_threads()["thread_list"]
 
@@ -2281,58 +2251,77 @@ class TestThreadQueries:
             "created_at": "2023-01-01T10:00:00Z",
             "updated_at": "2023-01-01T10:09:00Z",
             "latest_checkpoint_id": checkpoint_ids[-1],
-            "title": "Thread 1 #1",
+            "title": "Thread 1 #2",
         }
 
     def test_list_threads_sorts_by_creation_then_slices(self, client, saver):
         client._checkpointer = saver
-        self._put_thread(saver, "t-first", ["2023-01-01T10:00:00Z", "2023-01-05T10:00:00Z"])
-        self._put_thread(saver, "t-second", ["2023-01-02T10:00:00Z"])
-        self._put_thread(saver, "t-third", ["2023-01-03T10:00:00Z"])
+        put_thread(saver, "t-first", ["2023-01-01T10:00:00Z"])
+        put_thread(saver, "t-second", ["2023-01-02T10:00:00Z"])
+        put_thread(saver, "t-third", ["2023-01-03T10:00:00Z"])
+        put_thread(saver, "t-first", ["2023-01-05T10:00:00Z"])  # later activity does not change creation order
 
         threads = client.list_threads(limit=2)["thread_list"]
 
         assert [t["thread_id"] for t in threads] == ["t-third", "t-second"]
 
-    def test_list_threads_sort_by_updated_at_returns_most_recently_active(self, client, saver):
+    def test_list_threads_sort_by_updated_at_returns_most_recently_written(self, client, saver):
         client._checkpointer = saver
-        self._put_thread(saver, "t-first", ["2023-01-01T10:00:00Z", "2023-01-05T10:00:00Z"])
-        self._put_thread(saver, "t-second", ["2023-01-02T10:00:00Z"])
-        self._put_thread(saver, "t-third", ["2023-01-03T10:00:00Z"])
+        put_thread(saver, "t-first", ["2023-01-01T10:00:00Z"])
+        put_thread(saver, "t-second", ["2023-01-02T10:00:00Z"])
+        put_thread(saver, "t-third", ["2023-01-03T10:00:00Z"])
+        put_thread(saver, "t-first", ["2023-01-05T10:00:00Z"])
 
         threads = client.list_threads(limit=2, sort_by="updated_at")["thread_list"]
 
         assert [t["thread_id"] for t in threads] == ["t-first", "t-third"]
 
-    def test_list_threads_scans_one_root_per_thread(self, client, saver):
+    def test_list_threads_includes_threads_seeded_without_an_input_checkpoint(self, client, saver):
         client._checkpointer = saver
-        self._put_thread(saver, "t-old", ["2023-01-01T10:00:00Z", "2023-01-01T10:01:00Z"])
-        self._put_thread(saver, "t-busy", [f"2023-01-02T10:{minute:02d}:00Z" for minute in range(30)])
-        scanned = []
-        original_list = saver.list
+        put_thread(saver, "t-run", ["2023-01-01T10:00:00Z", "2023-01-01T10:01:00Z"])
+        # The Gateway seeds a branch through update_state, so its first checkpoint is step 0.
+        put_thread(saver, "t-branch", ["2023-01-02T10:00:00Z", "2023-01-02T10:00:01Z"], title="My branch", first_step=0, first_source="branch")
 
-        def counting_list(*args, **kwargs):
-            for item in original_list(*args, **kwargs):
-                scanned.append(item)
-                yield item
+        threads = client.list_threads()["thread_list"]
 
-        with patch.object(saver, "list", counting_list):
-            client.list_threads(limit=2)
+        assert [(t["thread_id"], t["created_at"]) for t in threads] == [("t-branch", "2023-01-02T10:00:00Z"), ("t-run", "2023-01-01T10:00:00Z")]
 
-        assert len(scanned) == 2
-
-    def test_list_threads_ignores_subgraph_namespace_roots(self, client, saver):
+    def test_list_threads_orders_goal_writes_by_checkpoint_not_ts(self, client, saver):
         client._checkpointer = saver
-        # Subgraph namespaces have roots of their own; they sit on both sides of
-        # the thread's root in every backend's iteration order.
-        self._put_thread(saver, "t1", ["2023-01-01T09:00:00Z"], checkpoint_ns="subgraph-a")
-        self._put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:05:00Z"])
-        self._put_thread(saver, "t1", ["2023-01-01T10:02:00Z"], checkpoint_ns="subgraph-b")
+        put_thread(saver, "t-a", ["2023-01-01T10:00:00Z"])
+        put_thread(saver, "t-b", ["2023-01-02T10:00:00Z"])
+        # A goal write keeps the copied checkpoint's ts but is the newest write.
+        goal_checkpoint_id = put_goal_write(saver, "t-a")
+
+        (thread,) = client.list_threads(limit=1, sort_by="updated_at")["thread_list"]
+
+        assert thread["thread_id"] == "t-a"
+        assert thread["latest_checkpoint_id"] == goal_checkpoint_id
+        assert thread["updated_at"] == "2023-01-01T10:00:00Z"
+
+    def test_list_threads_ignores_subgraph_namespaces(self, client, saver):
+        client._checkpointer = saver
+        # Subgraph checkpoints are written both before and after the thread's own.
+        put_thread(saver, "t1", ["2023-01-01T09:00:00Z"], checkpoint_ns="subgraph-a")
+        checkpoint_ids = put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:05:00Z"])
+        put_thread(saver, "t1", ["2023-01-01T10:09:00Z"], checkpoint_ns="subgraph-b")
 
         (thread,) = client.list_threads()["thread_list"]
 
         assert thread["created_at"] == "2023-01-01T10:00:00Z"
         assert thread["updated_at"] == "2023-01-01T10:05:00Z"
+        assert thread["latest_checkpoint_id"] == checkpoint_ids[-1]
+
+    def test_list_threads_reads_sql_savers_from_the_index(self, client, saver):
+        if saver.kind not in INDEXED_SAVER_KINDS:
+            pytest.skip("only SQL savers have a thread index")
+        client._checkpointer = saver
+        put_thread(saver, "t1", ["2023-01-01T10:00:00Z", "2023-01-01T10:01:00Z"])
+
+        with patch.object(type(saver), "list", side_effect=AssertionError("walked every checkpoint")):
+            threads = client.list_threads()["thread_list"]
+
+        assert [t["thread_id"] for t in threads] == ["t1"]
 
     def test_list_threads_rejects_unknown_sort_key(self, client, saver):
         client._checkpointer = saver
@@ -2345,13 +2334,17 @@ class TestThreadQueries:
         from deerflow.tui.session import Session
 
         client._checkpointer = saver
-        self._put_thread(saver, "t-old", ["2023-01-01T10:00:00Z", "2023-01-09T10:00:00Z"], title="Old chat")
-        self._put_thread(saver, "t-busy", [f"2023-01-02T10:{minute:02d}:00Z" for minute in range(120)], title="Busy chat")
+        put_thread(saver, "t-old", ["2023-01-01T10:00:00Z"], title="Old chat")
+        put_thread(saver, "t-branch", ["2023-01-01T11:00:00Z"], title="My branch", first_step=0, first_source="branch")
+        put_thread(saver, "t-busy", [f"2023-01-02T10:{minute:02d}:00Z" for minute in range(120)], title="Busy chat")
+        put_goal_write(saver, "t-old")
         session = Session(client=client)
 
-        # --resume <title> finds a thread whose checkpoints fall outside the newest 100.
+        # --resume <title> finds threads whose checkpoints fall outside the newest 100,
+        # including a branch that never had an input checkpoint.
         assert session.resolve_ref("Old chat #0") == "t-old"
-        # --continue resumes the most recently active thread, not the most recently created one.
+        assert session.resolve_ref("My branch #0") == "t-branch"
+        # --continue resumes the thread written most recently, even by a goal write.
         assert session.resolve_thread(LaunchPlan(mode="tui", continue_recent=True)) == "t-old"
 
     def test_list_threads_fallback_checkpointer(self, client):
