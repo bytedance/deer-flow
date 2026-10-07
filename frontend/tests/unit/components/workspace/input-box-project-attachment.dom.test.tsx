@@ -26,7 +26,9 @@ import {
 import type { AttachProjectDocumentResult } from "@/core/projects/types";
 import {
   buildComposerDraftKey,
+  getSessionComposerDraftStorage,
   readComposerDraft,
+  writeComposerDraft,
 } from "@/core/threads/composer-draft";
 
 rs.mock("next/navigation", () => ({
@@ -321,4 +323,98 @@ describe("InputBox staged project attachments", () => {
     expect(readProjectAttachments("thread-1")).toEqual([]);
     expect(readComposerDraft(storage, sendingDraftKey)).toBeNull();
   });
+
+  it("keeps a replacement draft saved under the same key after an unmounted composer's send is dispatched", async () => {
+    let dispatched!: () => void;
+    const onSubmit: SubmitSpy = rs.fn(
+      (_message: unknown, options?: InputBoxSubmitOptions) => {
+        dispatched = () => options?.onSent?.();
+        return new Promise<void>(() => undefined);
+      },
+    );
+    const { container, unmount } = renderComposer({ onSubmit });
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "first question" },
+    });
+    fireEvent.click(getSubmitButton(container));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+
+    // Leaving mid-upload persists the pending draft so a failed send could
+    // be retried; a later composer for the same key then saves its own.
+    unmount();
+    const draftKey = buildComposerDraftKey({
+      userId: "user-1",
+      threadId: "thread-1",
+    });
+    const storage = getSessionComposerDraftStorage();
+    expect(readComposerDraft(storage, draftKey)?.text).toBe("first question");
+    writeComposerDraft(storage, draftKey, {
+      text: "a different question",
+      skillName: null,
+    });
+    dispatched();
+
+    expect(readComposerDraft(storage, draftKey)?.text).toBe(
+      "a different question",
+    );
+  });
+
+  it("retires an unmounted composer's sent draft once its send is dispatched", async () => {
+    let dispatched!: () => void;
+    const onSubmit: SubmitSpy = rs.fn(
+      (_message: unknown, options?: InputBoxSubmitOptions) => {
+        dispatched = () => options?.onSent?.();
+        return new Promise<void>(() => undefined);
+      },
+    );
+    const { container, unmount } = renderComposer({ onSubmit });
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "first question" },
+    });
+    fireEvent.click(getSubmitButton(container));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+
+    unmount();
+    const draftKey = buildComposerDraftKey({
+      userId: "user-1",
+      threadId: "thread-1",
+    });
+    const storage = getSessionComposerDraftStorage();
+    expect(readComposerDraft(storage, draftKey)?.text).toBe("first question");
+    dispatched();
+
+    expect(readComposerDraft(storage, draftKey)).toBeNull();
+  });
+
+  it.each(["switches threads", "unmounts"] as const)(
+    "keeps a document staged during the upload after the composer %s",
+    async (leave) => {
+      stageProjectAttachment("thread-1", ATTACHMENT);
+      let dispatched!: () => void;
+      const onSubmit: SubmitSpy = rs.fn(
+        (_message: unknown, options?: InputBoxSubmitOptions) => {
+          dispatched = () => options?.onSent?.();
+          return new Promise<void>(() => undefined);
+        },
+      );
+      const { container, switchThread, unmount } = renderComposer({
+        onSubmit,
+      });
+      await screen.findByTestId("project-attachment-chip");
+      fireEvent.click(getSubmitButton(container));
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+
+      if (leave === "unmounts") {
+        unmount();
+      } else {
+        switchThread("thread-2");
+      }
+      // Attached from the project page while the first send still uploads;
+      // that send cannot carry it, so the next message must.
+      stageProjectAttachment("thread-1", OTHER_ATTACHMENT);
+      dispatched();
+
+      expect(readProjectAttachments("thread-1")).toEqual([OTHER_ATTACHMENT]);
+    },
+  );
 });

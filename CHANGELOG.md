@@ -810,8 +810,9 @@ This release closes that milestone with **439 merged pull requests**.
   send started, before the attachments uploaded, so after a failed upload the
   text and files were still there but a retry went out without that context.
   That one-time state now clears only once the send is dispatched, after the
-  upload. A send that finishes uploading after the user has switched to another
-  conversation clears only its own conversation's stored draft and staged files. ([#6412])
+  upload. A send that finishes uploading after the user has switched
+  conversations or left the page clears only the stored draft and staged files
+  it carried, keeping a draft saved or a document attached since. ([#6412])
 - **frontend:** A failed side-chat send no longer clears the composer. The side
   chat's submit handler showed the error toast and then resolved, which the
   composer treats as success, so the typed text and attachments were lost when

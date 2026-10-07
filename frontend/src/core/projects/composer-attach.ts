@@ -19,9 +19,10 @@ import type { AttachProjectDocumentResult } from "./types";
  *   between attaches cannot drop the earlier attachment.
  * - Mounting the composer only *reads* the list — nothing is consumed on
  *   mount, so a reload or a remount before submission keeps every chip.
- * - ``setAttachments`` writes every change through, and submission clears
- *   the list in its ``onSent`` callback, which only fires once the send is
- *   dispatched (after any upload), so a failed upload keeps the chip.
+ * - ``setAttachments`` writes every change through, and submission retires
+ *   the entries it sent in its ``onSent`` callback, which only fires once the
+ *   send is dispatched (after any upload), so a failed upload keeps the chip
+ *   and a document staged during the upload is kept for the next message.
  *
  * sessionStorage (not module memory) so the pending list also survives a
  * full page load of the target thread.
@@ -107,12 +108,28 @@ export function readProjectAttachments(
 }
 
 /**
- * Drop a thread's pending attachments from storage without touching any
- * mounted composer state. For a send that is dispatched after the composer
- * has already moved on to another thread.
+ * Drop the given attachments from a thread's pending list, keeping any staged
+ * since. For a send dispatched after its composer has unmounted or moved on to
+ * another thread: that send carries only what it captured, so documents
+ * attached to the thread meanwhile must stay for the next message.
  */
-export function clearProjectAttachments(threadId: string): void {
-  safeSessionStorage()?.removeItem(storageKey(threadId));
+export function retireProjectAttachments(
+  threadId: string,
+  sent: readonly AttachProjectDocumentResult[],
+): void {
+  const storage = safeSessionStorage();
+  if (!storage) {
+    return;
+  }
+  const sentPaths = new Set(sent.map((attachment) => attachment.virtual_path));
+  const remaining = readProjectAttachments(threadId).filter(
+    (attachment) => !sentPaths.has(attachment.virtual_path),
+  );
+  if (remaining.length === 0) {
+    storage.removeItem(storageKey(threadId));
+  } else {
+    storage.setItem(storageKey(threadId), JSON.stringify(remaining));
+  }
 }
 
 /**

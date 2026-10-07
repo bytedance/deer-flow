@@ -102,7 +102,7 @@ import {
 } from "@/core/models/reasoning";
 import { attachProjectDocument } from "@/core/projects/api";
 import {
-  clearProjectAttachments,
+  retireProjectAttachments,
   useStagedProjectAttachments,
 } from "@/core/projects/composer-attach";
 import {
@@ -121,6 +121,7 @@ import {
   getSessionComposerDraftStorage,
   readComposerDraft,
   resolveComposerDraft,
+  retireSentComposerDraft,
   type ComposerDraft,
   writeComposerDraft,
 } from "@/core/threads/composer-draft";
@@ -587,9 +588,10 @@ export function InputBox({
   } | null>(null);
   const draftSaveTimerRef = useRef<number | null>(null);
   const draftSaveGenerationRef = useRef(0);
-  // The conversation the composer shows now; a send's onSent can arrive
-  // after an attachment upload, when it already shows another one.
-  const currentDraftKeyRef = useRef<string | null>(null);
+  // Bumped whenever the composer stops showing a conversation (switch or
+  // unmount). A send's onSent can arrive after an attachment upload, when
+  // the composer that sent it shows another conversation or is gone.
+  const composerLifetimeRef = useRef(0);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const { data: suggestionsConfig } = useSuggestionsConfig();
@@ -1022,7 +1024,7 @@ export function InputBox({
   }, [thread.messages]);
 
   useLayoutEffect(() => {
-    currentDraftKeyRef.current = draftKey;
+    composerLifetimeRef.current += 1;
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
     setTextInput("");
@@ -1041,6 +1043,7 @@ export function InputBox({
     latestDraftRef.current = null;
     invalidateDraftSaveTimer();
     return () => {
+      composerLifetimeRef.current += 1;
       mentionEpoch.current += 1;
       flushLatestDraft(draftKey);
     };
@@ -1437,12 +1440,13 @@ export function InputBox({
           ),
         );
       }
-      const activeConversations = reconcileConversationReferences(
+      const reconciledDraft = reconcileConversationReferences(
         textInput.value,
         conversationReferences,
         conversationCapability,
         threadId,
-      ).references;
+      );
+      const activeConversations = reconciledDraft.references;
       const referenceIds = activeConversations.map(
         (reference) => reference.threadId,
       );
@@ -1489,6 +1493,12 @@ export function InputBox({
         text: textInput.value,
         skillName: null,
       };
+      // What this send carries, so a late onSent retires only that.
+      const sendingLifetime = composerLifetimeRef.current;
+      const sentDraftTexts = [textInput.value, reconciledDraft.text];
+      const sentAttachmentPaths = new Set(
+        projectAttachments.map((attachment) => attachment.virtual_path),
+      );
       const additionalKwargs = {
         ...extensionMetadata,
         ...(skillReferences.length
@@ -1518,12 +1528,17 @@ export function InputBox({
         // `onSent` never fires for a dropped send or a failed attachment
         // upload, so a retry keeps its quotes, references and staged files.
         onSent: () => {
-          if (currentDraftKeyRef.current !== draftKey) {
+          if (composerLifetimeRef.current !== sendingLifetime) {
             // The upload finished after the composer moved to another
-            // conversation. Its live state belongs to that one now; retire
-            // only what this send left persisted for its own conversation.
-            clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
-            clearProjectAttachments(threadId);
+            // conversation or unmounted. Leave live state alone and retire
+            // only what this send persisted, keeping anything a later
+            // composer saved or staged since.
+            retireSentComposerDraft(
+              getSessionComposerDraftStorage(),
+              draftKey,
+              sentDraftTexts,
+            );
+            retireProjectAttachments(threadId, projectAttachments);
             return;
           }
           setMentionQuery(null);
@@ -1541,7 +1556,11 @@ export function InputBox({
           }
           sidecar?.clearConversationQuotes(quoteIds);
           setConversationReferences([]);
-          setProjectAttachments([]);
+          setProjectAttachments((previous) =>
+            previous.filter(
+              (attachment) => !sentAttachmentPaths.has(attachment.virtual_path),
+            ),
+          );
         },
       };
       const submit = () => onSubmit?.(message, submitOptions);
