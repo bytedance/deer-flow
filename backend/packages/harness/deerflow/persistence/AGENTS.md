@@ -18,19 +18,11 @@ SQLite predicates must check the extracted SQL value's `typeof`, not only JSON
 compare integer text (including `-0` for zero) without casting arbitrary stored
 numbers to BIGINT or NUMERIC. Preserve integer/float/boolean/string distinctions.
 
-Float filters cast stored numbers to DOUBLE PRECISION. PostgreSQL raises SQLSTATE
-22003 on spellings outside that range (overflow such as `1e400` and underflow to
-zero such as `1e-400`). The float8 cast sits inside a CASE that first rejects
-non-numbers, exact-zero spellings (matched without a numeric cast), strings
-longer than 10,000 characters, exponents with six or more digits, and NUMERIC
-values outside float8's finite range. Do not move the float8 cast into an `AND`
-(no evaluation-order guarantee), and do not use `pg_input_is_valid` (PostgreSQL
-16+ only). CAST AS NUMERIC itself raises on ~1e140000 / 131073 nines, which is
-why exponent length and `char_length` run first. Such values never match on
-PostgreSQL, while SQLite's REAL cast saturates them to +/-inf or +/-0.0 — zero
-and infinite float filters are the only ones whose results differ by backend.
-Exact-zero spellings like `0e400` are not underflow and match `0.0` on both.
-The CASE uses only SQL that exists in PostgreSQL 14; keep it that way.
+PostgreSQL float filters must not let `CAST(... AS DOUBLE PRECISION)` see stored
+numbers outside float8 range (SQLSTATE 22003, e.g. a 309-digit integer):
+`_pg_float_guard` keeps the cast inside a CASE (not `AND`, which has no
+evaluation-order guarantee) behind non-raising checks, using PostgreSQL 14 SQL
+only. Such values never match on PostgreSQL; SQLite saturates them instead.
 `tests/test_json_integer_matching.py` exercises both dialects; PostgreSQL opts in
 with `DEERFLOW_TEST_POSTGRES_URL` and uses connection-local temporary tables.
 ## Scheduled-task lifecycle
