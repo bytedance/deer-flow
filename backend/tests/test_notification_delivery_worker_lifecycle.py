@@ -38,8 +38,7 @@ async def test_restart_waits_for_in_progress_stop_to_release_poller_ownership() 
     assert first_poller is not None
 
     stop_task = asyncio.create_task(worker.stop())
-    while not worker._stop.is_set():
-        await asyncio.sleep(0)
+    await asyncio.wait_for(worker._stop.wait(), timeout=5)
 
     assert worker._task is first_poller
 
