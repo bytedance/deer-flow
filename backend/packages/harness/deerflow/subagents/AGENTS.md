@@ -7,6 +7,13 @@ Registry overrides must not mutate `BUILTIN_SUBAGENTS`.
 Direct returns use the compiled tool registry, including middleware tools. Match current-turn IDs in call order; error ToolMessages fail the task with outputs preserved.
 Durable batch specs store overlays as JSON and restore them before execution.
 
+Batch evidence uses nullable `result_artifact` (migration 0032), persisted with
+successful results under the same lease fence. Only full-result exports expose
+bounded, cited RAG snapshots; compact item projections omit them. Cancelled,
+failed and stale attempts cannot publish evidence; retry clears it. Cover the
+formatter/step capture -> worker -> reopened SQLite -> authorized export chain
+in `tests/test_batch_rag_evidence.py`; no provider fetch or preview UI is added.
+
 **Remote empty files**: GNU stat's `regular file`/`regular empty file` are regular files. Empty files pass exists/file_written, fail non-empty; reject symlinks, directories, FIFOs.
 
 **Context**: Capture after validation, before setup. Keep genuine replies, even hidden clarifications; exclude framework state and unpaired calls. Mark unserializable media as omitted.

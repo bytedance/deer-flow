@@ -1,5 +1,6 @@
-"""Bounded source-artifact forwarding across ordinary subagent results."""
+"""Bounded captured-source forwarding for ordinary and durable subagent results."""
 
+import json
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -71,9 +72,10 @@ def budget_source_artifact(content: str, artifact: object, max_chars: int, *, su
     return "\n\n".join(entries), updated or None
 
 
-def cited_source_artifact(messages: list[dict[str, Any]], content: str) -> dict[str, Any] | None:
+def cited_source_artifact(messages: list[dict[str, Any]], content: str, *, include_omissions: bool = False) -> dict[str, Any] | None:
     """Carry only actual captured sources cited in the child's final result."""
     sources: dict[str, dict[str, Any]] = {}
+    omitted_ids: set[str] = set()
     remaining = 1_000_000
     for message in messages:
         if message.get("type") != "tool" or message.get("name") not in {"knowledge_search", "task"}:
@@ -92,10 +94,54 @@ def cited_source_artifact(messages: list[dict[str, Any]], content: str) -> dict[
             text = source.get("text")
             if not isinstance(source_id, str) or not isinstance(text, str) or f"](#knowledge-{source_id})" not in content:
                 continue
-            if source_id in sources:
+            if source_id in sources or (include_omissions and source_id in omitted_ids):
                 continue
             if len(sources) >= 100 or len(text) > remaining:
+                if include_omissions:
+                    omitted_ids.add(source_id)
                 continue
             sources[source_id] = dict(source)
             remaining -= len(text)
+    if include_omissions and (sources or omitted_ids):
+        return {"knowledge_sources": {"version": 1, "sources": list(sources.values()), "omitted_count": len(omitted_ids)}}
     return {"knowledge_sources": {"version": 1, "sources": list(sources.values())}} if sources else None
+
+
+def durable_source_artifact(messages: list[dict[str, Any]], content: str, *, max_chars: int) -> dict[str, Any] | None:
+    """Project cited evidence into a bounded, self-contained batch export.
+
+    The report may already be truncated. Only complete references in that
+    stored report select sources. Excerpts are never shortened under their IDs;
+    records exceeding the separate JSON character budget are explicitly omitted.
+    This does not persist arbitrary child artifacts or fetch provider data.
+    """
+    artifact = cited_source_artifact(messages, content, include_omissions=True)
+    if artifact is None:
+        return None
+    candidates = artifact["knowledge_sources"]["sources"]
+    payload = {"version": 1, "sources": [], "omitted_count": len(candidates) + artifact["knowledge_sources"]["omitted_count"]}
+    # Reserve the largest omission counter and the complete JSON envelope.
+    remaining = max_chars - len(json.dumps({"knowledge_sources": payload}, ensure_ascii=False))
+    if remaining < 0:
+        return None
+    fields = ("id", "provider", "dataset_id", "document_id", "chunk_id", "dataset_name", "document_name", "text")
+    for source in candidates:
+        if not all(isinstance(source.get(field), str) for field in fields):
+            continue
+        if source["provider"] != "ragflow" or not re.fullmatch(r"[a-f0-9]{32}-[1-9][0-9]{0,2}", source["id"]):
+            continue
+        if not all(0 < len(source[field]) <= 256 for field in ("dataset_id", "document_id", "chunk_id")):
+            continue
+        if any(len(source[field]) > 512 for field in ("dataset_name", "document_name")):
+            continue
+        record = {field: source[field] for field in fields}
+        pages = source.get("pages")
+        record["pages"] = sorted({page for page in pages[:100] if isinstance(page, int) and not isinstance(page, bool) and 1 <= page <= 1_000_000}) if isinstance(pages, list) else []
+        record["truncated"] = source.get("truncated") is True
+        cost = len(json.dumps(record, ensure_ascii=False)) + (2 if payload["sources"] else 0)
+        if cost > remaining:
+            continue
+        payload["sources"].append(record)
+        remaining -= cost
+        payload["omitted_count"] -= 1
+    return {"knowledge_sources": payload}

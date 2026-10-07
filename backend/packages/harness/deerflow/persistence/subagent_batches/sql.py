@@ -88,6 +88,7 @@ class SubagentBatchRepository:
         data["acceptance_verdict"] = validate_acceptance_verdict(row.acceptance_verdict)
         if include_result:
             data["result"] = row.result
+            data["result_artifact"] = row.result_artifact
         for key in _ITEM_TIMESTAMP_FIELDS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
@@ -412,6 +413,7 @@ class SubagentBatchRepository:
         model_name: str | None,
         completed_at: datetime,
         acceptance_verdict: AcceptanceVerdict | None = None,
+        result_artifact: dict[str, Any] | None = None,
     ) -> bool:
         async with self._sf() as session:
             item = (
@@ -436,6 +438,7 @@ class SubagentBatchRepository:
             item.token_usage = token_usage
             item.updated_at = completed_at
             item.acceptance_verdict = None
+            item.result_artifact = None
             if cancelled:
                 item.status = "cancelled"
                 item.error = "Cancelled by user"
@@ -444,6 +447,7 @@ class SubagentBatchRepository:
                 item.status = "succeeded"
                 item.acceptance_verdict = validate_acceptance_verdict(acceptance_verdict)
                 item.result = result
+                item.result_artifact = result_artifact
                 item.result_preview = result_preview
                 item.result_truncated = result_truncated
                 item.error = None
@@ -579,6 +583,7 @@ class SubagentBatchRepository:
             item.attempt = 0
             item.error = None
             item.result = None
+            item.result_artifact = None
             item.result_preview = None
             item.result_truncated = False
             item.acceptance_verdict = None

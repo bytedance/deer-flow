@@ -10,8 +10,11 @@ to the model and mark truncation; do not fetch a fresh chunk and present it as
 historical evidence. Direct `knowledge_search()` callers retain its string API.
 `sources.py` forwards only captured sources cited by ordinary subagent results,
 with count/text budgets. The source dialog uses stored thread messages and
-introduces no unauthenticated document proxy. Durable batch result storage and
-standalone Markdown do not include native source artifacts.
+introduces no unauthenticated document proxy. Durable batch exports retain
+schema-projected snapshots via `durable_source_artifact`; standalone Markdown
+does not include native source artifacts. Preserve entire excerpts and only
+select citations in the stored report. Bound the serialized JSON by the batch
+result cap, retain forwarding limits, and count omissions without refetching.
 
 Output budgeting retains complete evidence entries and their source records
 together, including delegated results and model-request history. Never shorten

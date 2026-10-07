@@ -7,6 +7,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from deerflow.community.ragflow.sources import durable_source_artifact
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
@@ -321,6 +322,11 @@ class SubagentBatchService:
             truncated = len(raw_result) > self._config.max_result_chars
             stored_result = raw_result[: self._config.max_result_chars] if raw_result else None
             preview = raw_result[: self._config.result_preview_max_chars] if raw_result else None
+            result_artifact = durable_source_artifact(
+                getattr(result, "ai_messages", None) or [],
+                stored_result or "",
+                max_chars=self._config.max_result_chars,
+            )
             acceptance_verdict = None
             if result.status is SubagentStatus.COMPLETED and item.get("acceptance_criteria"):
                 try:
@@ -344,6 +350,7 @@ class SubagentBatchService:
                 model_name=effective_model,
                 completed_at=datetime.now(UTC),
                 acceptance_verdict=acceptance_verdict,
+                result_artifact=result_artifact,
             )
         except asyncio.CancelledError:
             if execution_id is not None:
