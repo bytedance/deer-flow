@@ -162,7 +162,7 @@ def test_registered_contributions_publish_one_shared_stats_snapshot() -> None:
             after_stop.status_code,
         )
 
-    with patch("deerflow_extension_example.plugin.monotonic_ns", side_effect=[0, 10_000_000], create=True):
+    with patch("deerflow_extension_example.plugin.monotonic_ns", side_effect=[0, 10_000_000]):
         before_start, status_code, body, after_stop = asyncio.run(exercise_contributions())
 
     assert before_start == 503

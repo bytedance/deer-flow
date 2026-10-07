@@ -47,7 +47,7 @@ def test_preserves_result_exception_and_single_invocation(asynchronous, outcome)
             return asyncio.run(middleware.awrap_tool_call(request, async_handler))
         return middleware.wrap_tool_call(request, handler)
 
-    with patch("deerflow_extension_example.plugin.monotonic_ns", side_effect=[0, 10_000_000], create=True):
+    with patch("deerflow_extension_example.plugin.monotonic_ns", side_effect=[0, 10_000_000]):
         if outcome == "returned":
             assert invoke() is result
         else:
@@ -89,7 +89,7 @@ def test_actual_task_cancellation_propagates_and_is_counted():
         assert running.cancelled()
         await lifecycle.on_task_stop(app, task, info, TaskOutcome.ABORTED)
 
-    with patch("deerflow_extension_example.plugin.monotonic_ns", side_effect=[0, 20_000_000], create=True):
+    with patch("deerflow_extension_example.plugin.monotonic_ns", side_effect=[0, 20_000_000]):
         asyncio.run(exercise())
     assert len(calls) == 1 and calls[0] is request
     snapshot = app.get(ExampleStats).snapshot()
@@ -137,7 +137,7 @@ def test_concurrent_sync_calls_and_duplicate_finalization():
         assert ExampleMiddleware().wrap_tool_call(request, handler) is request
 
     # A constant clock also verifies that zero durations still produce samples.
-    with patch("deerflow_extension_example.plugin.monotonic_ns", return_value=42, create=True):
+    with patch("deerflow_extension_example.plugin.monotonic_ns", return_value=42):
         with ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(invoke, range(8)))
     assert app.get(ExampleStats) is None
@@ -180,7 +180,7 @@ def test_overlapping_async_calls_merge_outcomes_and_elapsed_time():
         await lifecycle.on_task_stop(app, task, info, TaskOutcome.COMPLETED)
 
     # Three starts at zero, then completions after 10, 20 and 30 milliseconds.
-    with patch("deerflow_extension_example.plugin.monotonic_ns", side_effect=[0, 0, 0, 10_000_000, 20_000_000, 30_000_000], create=True):
+    with patch("deerflow_extension_example.plugin.monotonic_ns", side_effect=[0, 0, 0, 10_000_000, 20_000_000, 30_000_000]):
         asyncio.run(exercise())
     snapshot = app.get(ExampleStats).snapshot()
     assert snapshot["tool_calls"] == 3

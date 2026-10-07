@@ -45,6 +45,10 @@ response also includes these fields (this is illustrative output, not a benchmar
   actual task cancellation. `raised` counts other escaping exceptions, including
   LangGraph `GraphBubbleUp` control-flow signals such as graph interrupts.
   Results and exceptions propagate unchanged; each wrapper calls its handler once.
+  Resuming an interrupted tool node re-executes it and re-enters the wrapper:
+  the interrupted attempt adds a `raised` sample, and the resumed attempt adds
+  its own `tool_calls` increment, duration sample, and outcome. These statistics
+  count observed attempts, not unique logical tool calls across interrupt/resume.
 - Each completed observation adds one duration sample, including zero-duration
   calls. Elapsed time uses a monotonic clock and includes downstream middleware
   processing. Durations of overlapping lead/subagent calls are summed, so this
