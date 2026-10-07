@@ -811,7 +811,7 @@ This release closes that milestone with **439 merged pull requests**.
   text and files were still there but a retry went out without that context.
   That one-time state now clears only once the send is dispatched, after the
   upload. A send that finishes uploading after the user has switched to another
-  conversation clears only its own conversation's stored draft and staged files.
+  conversation clears only its own conversation's stored draft and staged files. ([#6412])
 - **frontend:** A failed reconnect after a page refresh is now retried in the same
   tab. The SDK reconnects once from the tab's `lg:stream` pointer and keeps that
   pointer on error, and active-run recovery skipped any run with a matching
@@ -9108,3 +9108,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6393]: https://github.com/bytedance/deer-flow/pull/6393
 [#6400]: https://github.com/bytedance/deer-flow/pull/6400
 [#6401]: https://github.com/bytedance/deer-flow/pull/6401
+[#6412]: https://github.com/bytedance/deer-flow/pull/6412
