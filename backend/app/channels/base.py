@@ -121,13 +121,29 @@ class Channel(ABC):
         platform identity (e.g. the ``external_account_id`` recorded by the
         bind flow). Used by the notification delivery worker to deliver
         scheduled-task outcomes. Channels without proactive push support keep
-        the default, which raises so the delivery outbox records a failure
-        instead of silently dropping the notification.
+        the default, which raises so a stray delivery is recorded as a failure
+        instead of being silently dropped.
 
         Connectivity preconditions should raise :class:`ChannelUnavailable`
         (not a generic ``RuntimeError``) so the outbox can park the row without
         consuming its retry budget. Platform rejections of a well-formed send
         remain ordinary exceptions that count as attempts.
+
+        The scheduler never imports channel classes: it reads the static
+        ``proactive_notifications`` flag in ``app/channels/capabilities.py``,
+        and providers without it get no outbox rows at all. To add proactive
+        push to a provider:
+
+        1. override this method and return only after the platform ACKs the send;
+        2. raise :class:`ChannelUnavailable` for transient transport failures
+           (not connected, socket closed, timeout); any other exception counts
+           against the retry budget;
+        3. set ``proactive_notifications`` to ``True`` for that provider in
+           ``CHANNEL_CAPABILITIES`` (a test fails while the flag and this
+           override disagree).
+
+        The outbox, deduplication, retries, localized text and the Settings
+        label are shared and need no provider code.
         """
         if not self.is_running:
             raise ChannelUnavailable(f"channel '{self.name}' is not running")

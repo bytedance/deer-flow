@@ -36,7 +36,7 @@ return `503`.
 
 ### Account Preferences
 
-`GET /api/v1/auth/preferences` returns the signed-in browser user's four
+`GET /api/v1/auth/preferences` returns the signed-in browser user's five
 preferences. `PATCH` updates only explicitly supplied fields and returns `204`.
 Both require `X-Expected-User-Id` matching the session user; PATCH also requires
 the normal `X-CSRF-Token` header. The expected ID is a stale-tab guard, not an
@@ -48,17 +48,22 @@ authorization credential. PAT, internal, and auth-disabled callers receive
   "notification_enabled": false,
   "model_name": "my-model",
   "mode": "pro",
-  "reasoning_effort": "high"
+  "reasoning_effort": "high",
+  "locale": "zh-CN"
 }
 ```
 
-All four fields accept `null` to restore the default. `mode` accepts `flash`,
+All five fields accept `null` to restore the default. `mode` accepts `flash`,
 `thinking`, `pro`, or `ultra`; `reasoning_effort` accepts `minimal`, `low`,
-`medium`, or `high`; model names are at most 200 characters. Unknown fields and
+`medium`, or `high`; `locale` accepts `en-US` or `zh-CN`; model names are at
+most 200 characters. Unknown fields and
 invalid values return `422`. Missing preferences read as `null`. Separate-field
 patches preserve each other's changes, and same-field writes are last-commit-wins.
 Storage requires SQLite or PostgreSQL (`503` when unavailable). Browser
 notification permission remains device-local and is not changed by this API.
+`locale` is the web UI language; the web app writes it after sign-in and on
+every language switch, and scheduled-task IM notices are written in it (without
+it they use `channel_connections.notification_locale`).
 
 ### Personal Access Tokens
 
@@ -1092,6 +1097,77 @@ DELETE /api/threads/{thread_id}
 - `422` for invalid thread IDs
 - `500` returns a generic `{"detail": "Failed to delete local thread data."}` response while full exception details stay in server logs
 
+Deleting a thread also removes every user's read marker for it.
+
+### Thread Origin, Activity and Unread State
+
+Runs the server starts for a user (a schedule, an IM channel, a GitHub agent,
+an extension, an MCP notification) carry a server-owned origin in their
+metadata, and so does a thread the server creates for one:
+
+```json
+{ "deerflow_origin": { "kind": "im_channel", "provider": "feishu" } }
+```
+
+`kind` is one of `schedule`, `im_channel`, `github`, `extension`,
+`mcp_notification` (`contracts/thread_origin_contract.json`); `provider`
+(IM/GitHub) and `namespace` (extension plugin) are optional. Clients cannot
+set it: `POST /api/threads` and `PATCH /api/threads/{thread_id}` strip it, run
+admission drops it from `metadata` and `config.metadata`, and only server-side
+launchers and the internal channel caller may stamp it. The run's kind is also
+stored as `runs.origin_kind` (`null` for interactive and pre-upgrade runs). IM
+threads keep `metadata.channel_source` as their marker. This key is unrelated to
+the message-level `additional_kwargs.deerflow_scheduled_origin` of a scheduled
+prompt.
+
+**Activity feed.** Requires SQL persistence (`503` on the memory backend);
+`GET /api/features` reports `{"thread_activity": {"available": true}}`.
+
+```http
+GET /api/thread-activity?cursor=1834:run-42&limit=200
+```
+
+```json
+{
+  "cursor": "1840:run-57",
+  "threads": [{ "thread_id": "…", "origin_kind": "schedule", "status": "success" }],
+  "truncated": false,
+  "read_version": 17
+}
+```
+
+- Without `cursor` the call only seeds: it returns the caller's current
+  position (`"0:"` for a user with no runs) and no threads.
+- With a cursor it pages the caller's run changes in order (`limit` 1-500,
+  default 200). `threads` lists each thread with a change from a
+  server-originated run of the caller in the page, once, with the status of
+  its latest such change. The caller's own interactive runs advance the cursor
+  but are not listed.
+- `cursor` is the position of the last change used, so a `truncated` page
+  continues on the next poll without gaps. Treat it as opaque.
+- `read_version` is the caller's read clock; it changes when a thread is
+  marked read on any device.
+- A malformed cursor returns `422` with `detail.code` `invalid_cursor`.
+- Every query is scoped to the caller; another user's cursor reveals nothing.
+
+**Unread state.** A thread is unread for a user while one of that user's
+server-originated runs in it changed after the user last read it. The user's
+own interactive runs, other users' runs in a shared thread and pre-upgrade runs
+never make a thread unread.
+
+```http
+POST /api/threads/{thread_id}/read
+```
+
+```json
+{ "unread": false, "read_version": 18 }
+```
+
+The read position never moves backwards. A thread already read up to its
+latest run writes nothing and returns the unchanged `read_version`. Items of
+`POST /api/threads/search` carry `unread` (`true`/`false`; `null` without SQL
+persistence); other thread responses return `null`.
+
 ### Projects
 
 #### Get Projects Config
@@ -1273,6 +1349,7 @@ POST   /api/scheduled-tasks/{task_id}/resume
 POST   /api/scheduled-tasks/{task_id}/trigger
 GET    /api/scheduled-tasks/{task_id}/runs?status=&limit=&offset=
 GET    /api/threads/{thread_id}/scheduled-tasks
+GET    /api/threads/{thread_id}/scheduled-task-events?limit=50
 POST   /api/scheduled-tasks/preview-cron
 ```
 
@@ -1303,6 +1380,33 @@ while its run executes, so check `active_run_status` for "is a run active".
 (`origin`: created in the chat, `reuse`: runs in the chat, `run`: the chat is
 one of its runs) and `thread_run` (`{"run_number", "trigger", "scheduled_for",
 "status"}` for `run`, else null).
+
+`GET /api/threads/{thread_id}/scheduled-task-events` (thread owner check;
+`limit` 1–200, default 50) returns the caller's lifecycle events for a chat
+that created tasks, oldest first:
+
+```json
+{ "events": [ { "id": "evt-…", "task_id": "task-…", "event": "task_stopped", "reason_code": "agent_stop",
+  "task_title": "Check the release checklist", "stop_condition": "all items are ticked",
+  "run_thread_id": "…", "run_agent_name": "lead_agent", "run_number": 4, "run_status": "success", "max_runs": null, "end_at": null,
+  "schedule_type": "cron", "after_run_id": "…", "created_at": "2026-10-06T09:00:03+00:00" } ] }
+```
+
+`event` is `task_stopped` (the agent paused its own schedule, reason
+`agent_stop`), `task_paused` (automatic pause, `consecutive_unmet`) or
+`task_finished` (`max_runs`, `end_at`, or a one-time task's `once_done` /
+`once_failed`); the vocabulary is pinned in
+`contracts/scheduled_goal_notes_contract.json`. Each row is written in the
+same transaction as the state change it reports and is unique per task,
+transition and event, so recovery never adds a second one. `run_status` is the
+last run's outcome (a stop or finish after a failed run says so);
+`run_thread_id` is null when the occurrence never launched, and
+`run_agent_name` is the agent that ran it (its run chat's route); `after_run_id` is
+the newest run of the chat when the event was written (the chat shows the line
+after that turn, else at the end). Rows keep a title snapshot and stay after
+the task is deleted; deleting the chat removes them. Tasks created on the
+Scheduled tasks page have no originating chat and no rows. IDs are for links
+only.
 
 **Create** returns `409 scheduler_not_running` (after the request validates)
 while this Gateway process's scheduler is not running; the tasks page's
@@ -1390,6 +1494,19 @@ other runs in `timezone`. A new run conversation is titled
 `"{task title} · MM-DD HH:MM"` in the task's zone, or `"{task title} · #{run}"`
 when that zone is only the placeholder. The key is server-owned: it is
 stripped from client-supplied messages and state updates.
+
+**IM notices ("scheduled task updates").** With `channel_connections.enabled`,
+each item of `GET /api/channels/providers` carries
+`proactive_notifications` (bool): whether scheduled-task updates are pushed to
+that app. Only providers with proactive push (WeCom today) get notices; the
+others get none, and Settings says so. An occurrence sends at most one message,
+in the owner's `locale` preference (see Account Preferences), else
+`channel_connections.notification_locale`. Notices carry no IDs and no links;
+see `backend/docs/CONFIGURATION.md` for the events and the merge rule.
+
+```json
+{ "provider": "wecom", "display_name": "WeCom", "connection_status": "connected", "proactive_notifications": true }
+```
 
 ---
 
@@ -1505,6 +1622,21 @@ Accept: text/event-stream
 Both endpoints return `Content-Location: /api/threads/{thread_id}/runs/{run_id}`.
 The DeerFlow web UI and LangGraph SDK clients rely on this header to discover the
 assigned `thread_id` and `run_id` on the first message of a new chat.
+
+Every SSE response (both create endpoints above, `GET /api/threads/{thread_id}/runs/{run_id}/join`
+and `GET`/`POST /api/threads/{thread_id}/runs/{run_id}/stream`) carries the same headers:
+
+```http
+Content-Type: text/event-stream
+Cache-Control: no-cache, no-transform
+Connection: keep-alive
+X-Accel-Buffering: no
+```
+
+`no-transform` keeps compressing proxies (for example the Next.js rewrite proxy
+when the frontend runs with `pnpm start` and no nginx) from gzipping and therefore
+buffering the stream; `X-Accel-Buffering: no` does the same for nginx. A reverse
+proxy you put in front of the Gateway should not compress `text/event-stream`.
 
 ### SSE replay retention and gaps
 

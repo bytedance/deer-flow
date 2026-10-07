@@ -158,8 +158,9 @@ test.each([
   },
 );
 
-test("contract v2 pins the check-failure codes the UI treats as unchecked", () => {
-  expect(CONTRACT.version).toBe(2);
+test("contract v3 pins the check-failure codes the UI treats as unchecked", () => {
+  // v3 only adds the lifecycle vocabulary; the v2 keys read here are unchanged.
+  expect(CONTRACT.version).toBe(3);
   expect([...CHECK_FAILURE_CODES].sort()).toEqual(
     [...CONTRACT.check_failure_codes].sort(),
   );

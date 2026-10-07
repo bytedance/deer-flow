@@ -35,7 +35,7 @@ async def test_upgrade_downgrade_and_reupgrade_preserve_report(tmp_path, backend
         if schema:
             async with engine.begin() as conn:
                 await conn.execute(sa.text(f'CREATE SCHEMA "{schema}"'))
-        await asyncio.to_thread(bootstrap._upgrade, cfg, "0031_scheduled_streak_boundary")
+        await asyncio.to_thread(bootstrap._upgrade, cfg, "0032_activity_and_task_events")
         async with engine.begin() as conn:
             await conn.execute(
                 sa.text(
@@ -59,7 +59,7 @@ async def test_upgrade_downgrade_and_reupgrade_preserve_report(tmp_path, backend
             await conn.execute(sa.update(SubagentBatchItemRow).where(SubagentBatchItemRow.id == "i").values(result_artifact=snapshot))
         async with engine.connect() as conn:
             assert (await conn.execute(sa.select(SubagentBatchItemRow.result_artifact).where(SubagentBatchItemRow.id == "i"))).scalar_one() == snapshot
-        await asyncio.to_thread(command.downgrade, cfg, "0031_scheduled_streak_boundary")
+        await asyncio.to_thread(command.downgrade, cfg, "0032_activity_and_task_events")
         async with engine.connect() as conn:
             columns = await conn.run_sync(lambda sync: {column["name"] for column in sa.inspect(sync).get_columns("subagent_batch_items")})
             assert "result_artifact" not in columns

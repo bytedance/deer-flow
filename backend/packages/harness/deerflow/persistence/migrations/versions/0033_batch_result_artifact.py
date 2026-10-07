@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 
-revision = "0032_batch_result_artifact"
-down_revision = "0031_scheduled_streak_boundary"
+revision = "0033_batch_result_artifact"
+down_revision = "0032_activity_and_task_events"
 branch_labels = None
 depends_on = None
 

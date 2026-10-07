@@ -1,6 +1,6 @@
 {
-  "version": 2,
-  "description": "Cross-language contract fixture for the host-written scheduled-task strings the tasks page and IM notices translate. The backend writes these values to scheduled_task_runs.error and scheduled_tasks.last_error during goal and stop finalization and host-side run bookkeeping; the frontend (core/scheduled-tasks/goal-outcome.ts) and the IM notice renderer map them to readable text, so neither shows the raw value.",
+  "version": 3,
+  "description": "Cross-language contract fixture for the host-written scheduled-task strings the tasks page and IM notices translate. The backend writes these values to scheduled_task_runs.error and scheduled_tasks.last_error during goal and stop finalization and host-side run bookkeeping; the frontend (core/scheduled-tasks/goal-outcome.ts) and the IM notice renderer map them to readable text, so neither shows the raw value. Version 3 adds the lifecycle vocabulary: lifecycle_events and their lifecycle_reasons (the rows the originating chat shows, GET /api/threads/{thread_id}/scheduled-task-events) and notification_events (the outbox event names).",
   "agent_stop_last_error_prefix": "stopped by the agent in run ",
   "auto_pause_last_error": "paused after 3 unmet scheduled goal runs",
   "unmet_reason_codes": [
@@ -33,5 +33,12 @@
     "deleted_while_queued": "scheduled task was deleted while queued",
     "end_reached": "schedule end condition reached",
     "interrupted": "run was interrupted before completion"
-  }
+  },
+  "lifecycle_events": ["task_stopped", "task_paused", "task_finished"],
+  "lifecycle_reasons": {
+    "task_stopped": ["agent_stop"],
+    "task_paused": ["consecutive_unmet"],
+    "task_finished": ["max_runs", "end_at", "once_done", "once_failed"]
+  },
+  "notification_events": ["run_completed", "run_failed", "run_unmet", "task_paused", "task_stopped", "task_finished"]
 }

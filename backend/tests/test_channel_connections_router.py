@@ -199,6 +199,17 @@ def test_get_providers_uses_existing_channels_config(tmp_path):
         "bot_id": "wecom-bot",
         "bot_secret": "********",
     }
+    # Scheduled-task updates are pushed only where the provider implements
+    # proactive push; Settings shows that per provider card.
+    assert {name: item["proactive_notifications"] for name, item in by_provider.items()} == {
+        "telegram": False,
+        "slack": False,
+        "discord": False,
+        "feishu": False,
+        "dingtalk": False,
+        "wechat": False,
+        "wecom": True,
+    }
 
     anyio.run(repo.close)
 
@@ -1523,6 +1534,7 @@ def test_qq_provider_exposes_binding_flow_and_masks_secret(tmp_path):
             assert provider["auth_mode"] == "binding_code"
             assert provider["configured"] is True
             assert provider["connectable"] is True
+            assert provider["proactive_notifications"] is False
             assert "fixture-private-secret" not in response.text
             fields = {field["name"]: field for field in provider["credential_fields"]}
             assert fields["app_id"]["type"] == "text"

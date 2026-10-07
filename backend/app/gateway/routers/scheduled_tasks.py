@@ -13,6 +13,7 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import (
     get_config,
     get_optional_user_from_request,
+    get_scheduled_task_event_repo,
     get_scheduled_task_repo,
     get_scheduled_task_run_repo,
     get_scheduled_task_service,
@@ -449,3 +450,19 @@ async def list_thread_scheduled_tasks(thread_id: ThreadId, request: Request):
     if user is None:
         raise _authentication_required()
     return await _with_run_state(repo, await repo.list_by_user_and_thread(str(user.id), thread_id))
+
+
+@router.get("/threads/{thread_id}/scheduled-task-events")
+@require_permission("threads", "read", owner_check=True)
+async def list_thread_scheduled_task_events(thread_id: ThreadId, request: Request, limit: int = Query(default=50, ge=1, le=200)):
+    """Lifecycle events of the caller's tasks for this originating chat, oldest first.
+
+    Each row is one line in the chat ("Paused by agent", "Auto-paused",
+    "Finished"). Rows outlive their task (they carry a title snapshot), so
+    this route does not look the task up. IDs are for links only.
+    """
+    repo = get_scheduled_task_event_repo(request)
+    user = await get_optional_user_from_request(request)
+    if user is None:
+        raise _authentication_required()
+    return {"events": await repo.list_for_thread(user_id=str(user.id), thread_id=thread_id, limit=limit)}

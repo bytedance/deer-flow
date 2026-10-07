@@ -249,7 +249,7 @@ test("rows link to their chat; a queued run without a chat does not", async ({
   await page.goto("/workspace/scheduled-tasks");
   const rows = page.getByTestId("scheduled-run-row");
   await expect(rows).toHaveCount(2);
-  await expect(rows.nth(0)).toContainText("Queued");
+  await expect(rows.nth(0)).toContainText("Waiting for a free slot");
   await expect(rows.nth(0).getByRole("link")).toHaveCount(0);
   await expect(
     rowOf(page, "execution-done").getByRole("link", { name: "Open chat" }),

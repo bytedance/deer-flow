@@ -84,6 +84,12 @@ ACTIVE_RUN_STATUSES: frozenset[str] = frozenset(
     }
 )
 
+# Parent task lifecycle: a live task can still run (or be resumed); a terminal
+# one is finished. Defined here, next to the run statuses, so the finalization
+# module can use them without importing ``scheduled_tasks.sql`` (import cycle).
+TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
+LIVE_TASK_STATUSES: frozenset[str] = frozenset({"enabled", "running", "paused"})
+
 # Parent ``once`` task status projected from a terminal occurrence status.
 # Shared by the completion path and both recovery paths so the mapping
 # cannot drift between them.

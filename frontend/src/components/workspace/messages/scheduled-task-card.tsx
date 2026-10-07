@@ -37,6 +37,7 @@ import {
   describeScheduledTaskError,
   shouldReportScheduledTaskError,
 } from "@/core/scheduled-tasks/errors";
+import { taskPagePath } from "@/core/scheduled-tasks/events";
 import { displayTimeZone, formatTaskTime } from "@/core/scheduled-tasks/format";
 import { describeTaskOutcome } from "@/core/scheduled-tasks/goal-outcome";
 import {
@@ -65,10 +66,8 @@ const BADGE_TONE: Record<string, string> = {
   danger: "bg-destructive/10 text-destructive",
 };
 
-/** Deep link to the task on the tasks page. */
-export function taskPagePath(taskId: string): string {
-  return `/workspace/scheduled-tasks?task_id=${encodeURIComponent(taskId)}`;
-}
+// One deep-link helper for the card, the run prompt and the chat event lines.
+export { taskPagePath };
 
 function Row({
   icon,

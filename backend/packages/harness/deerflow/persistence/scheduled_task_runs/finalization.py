@@ -13,11 +13,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
 from deerflow.scheduler.schedules import next_run_at
+from deerflow.utils.time import coerce_iso
 
 if TYPE_CHECKING:
     from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 
 FinalizationObserver = Callable[..., Awaitable[None]]
+
+# Lifecycle vocabulary, pinned as ``lifecycle_events``, ``lifecycle_reasons``
+# and ``notification_events`` in contracts/scheduled_goal_notes_contract.json.
+# ``task_paused`` is the automatic pause; the agent's own stop is
+# ``task_stopped``; ``task_finished`` is a once task's outcome or a reached
+# ``max_runs`` / ``end_at``.
+RUN_EVENT_BY_STATUS: dict[str, str] = {"success": "run_completed", "failed": "run_failed", "unmet": "run_unmet"}
+LIFECYCLE_EVENTS: tuple[str, ...] = ("task_stopped", "task_paused", "task_finished")
+LIFECYCLE_REASONS: dict[str, tuple[str, ...]] = {
+    "task_stopped": ("agent_stop",),
+    "task_paused": ("consecutive_unmet",),
+    "task_finished": ("max_runs", "end_at", "once_done", "once_failed"),
+}
+NOTIFICATION_EVENTS: tuple[str, ...] = (*RUN_EVENT_BY_STATUS.values(), "task_paused", "task_stopped", "task_finished")
+# A once task's ``task_finished`` reports its own run outcome only for these.
+_ONCE_OUTCOME_STATUSES = frozenset(RUN_EVENT_BY_STATUS)
 
 # Host-written task ``last_error`` values that the tasks page translates;
 # contracts/scheduled_goal_notes_contract.json pins them for the frontend.
@@ -105,7 +122,7 @@ async def finalize_occurrence(
     observer: FinalizationObserver | None = None,
 ) -> bool:
     """Terminalize once; receipts may still be repaired by the launch helpers."""
-    from deerflow.persistence.scheduled_tasks.model import ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES
+    from deerflow.persistence.scheduled_tasks.model import LIVE_TASK_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES
 
     if occurrence.status in TERMINAL_RUN_STATUSES:
         return False
@@ -126,6 +143,9 @@ async def finalize_occurrence(
     occurrence.lease_expires_at = None
     if task is None:
         return True
+    # The lifecycle events below fire only on a real transition, so read the
+    # status before the projection turns ``running`` back into ``enabled``.
+    previous_status = task.status
     if run_id is not None:
         account_launch(task, occurrence, run_id)
     if not can_project(task, occurrence):
@@ -144,17 +164,26 @@ async def finalize_occurrence(
     # agent" / "Auto-paused"); the trial's own outcome stays on its run row.
     if not (occurrence.trigger == "manual" and task.status == "paused" and is_host_pause_marker(task.last_error)):
         task.last_error = error
-    events = {"success": ("run_completed",), "failed": ("run_failed",), "unmet": ("run_unmet",)}.get(status, ())
+    events: tuple[str, ...] = (RUN_EVENT_BY_STATUS[status],) if status in RUN_EVENT_BY_STATUS else ()
     # A once task's result remains meaningful: an unmet once task failed.
     # Limits and agent stop apply to the recurring schedule lifecycle.
     if task.schedule_type == "once":
         task.status = ONCE_TASK_STATUS_BY_RUN_STATUS[status]
+        # A cancel or a skip (``cancelled``) stays silent, like interrupted runs.
+        if status in _ONCE_OUTCOME_STATUSES:
+            events += ("task_finished",)
     elif await end_condition_reached(session, task, now=finished_at):
         task.status = "completed"
         task.next_run_at = None
+        if previous_status in LIVE_TASK_STATUSES:
+            events += ("task_finished",)
     elif occurrence.stop_requested_run_id is not None and occurrence.stop_requested_run_id == run_id:
+        # The stop applies whatever the run's own outcome (PR1 semantics); the
+        # notice carries ``run_status`` so it never claims a clean finish.
         task.status = "paused"
         task.last_error = f"{AGENT_STOP_LAST_ERROR_PREFIX}{run_id}"
+        if previous_status != "paused":
+            events += ("task_stopped",)
     elif occurrence.goal_objective is not None and await _unmet_streak(session, task, occurrence):
         was_paused = task.status == "paused"
         task.status = "paused"
@@ -165,3 +194,86 @@ async def finalize_occurrence(
     if observer is not None:
         await observer(session, task, occurrence, events=events)
     return True
+
+
+async def finish_task_at_end_condition(
+    session: AsyncSession,
+    task: ScheduledTaskRow,
+    *,
+    occurrence: ScheduledTaskRunRow | None,
+    now: datetime,
+    observer: FinalizationObserver | None,
+) -> None:
+    """Complete a task whose ``max_runs`` or ``end_at`` is reached, outside a run.
+
+    The single place, besides ``finalize_occurrence``, that marks a task
+    finished: admission rejected as ended (``occurrence`` None), the claim-time
+    skip of a queued row, and ``complete_if_ended``. The caller holds the parent
+    lock and commits right after, so ``task_finished`` commits with the status
+    change. It is emitted only on a live -> finished transition: a path that
+    already went through ``finalize_occurrence`` (which emits for the same
+    transition) adds nothing here. ``occurrence`` None means an idle finish.
+    """
+    from deerflow.persistence.scheduled_tasks.model import LIVE_TASK_STATUSES
+
+    previous_status = task.status
+    task.status = "completed"
+    task.next_run_at = None
+    task.lease_owner = None
+    task.lease_expires_at = None
+    task.updated_at = now
+    if previous_status in LIVE_TASK_STATUSES and observer is not None:
+        await observer(session, task, occurrence, events=("task_finished",))
+
+
+def _end_at_utc(task: ScheduledTaskRow) -> datetime | None:
+    """The task's end time as aware UTC, or None when unset or unreadable."""
+    value = getattr(task, "end_at", None)
+    if not isinstance(value, datetime):
+        return None
+    try:
+        return utc(value)
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def lifecycle_reason(task: ScheduledTaskRow, event: str, *, now: datetime, occurrence: ScheduledTaskRunRow | None = None) -> str:
+    """Reason code of a lifecycle event (contract ``lifecycle_reasons``).
+
+    A once task's ``task_finished`` reports its run (``once_done`` /
+    ``once_failed``) when it comes from that run's outcome. A finish without
+    such a run (an end time that passed before the once run) is ``end_at`` or
+    ``max_runs`` like a recurring task. An unreadable ``end_at`` reads as
+    ``max_runs``.
+    """
+    if event == "task_stopped":
+        return "agent_stop"
+    if event == "task_paused":
+        return "consecutive_unmet"
+    if task.schedule_type == "once" and occurrence is not None and occurrence.status in _ONCE_OUTCOME_STATUSES:
+        return "once_done" if task.status == "completed" else "once_failed"
+    end_at = _end_at_utc(task)
+    try:
+        reached = end_at is not None and end_at <= utc(now)
+    except (ValueError, TypeError, AttributeError):
+        reached = False
+    return "end_at" if reached else "max_runs"
+
+
+def lifecycle_anchor(task: ScheduledTaskRow, occurrence: ScheduledTaskRunRow | None, *, now: datetime) -> str:
+    """Dedupe anchor of a lifecycle event: one event per transition, replay-safe.
+
+    An occurrence anchors on its id. An idle finish anchors on its reason: the
+    end time (``end:<iso>``) when that end time had passed at ``now`` (reason
+    ``end_at``), else the occurrence sequence high-water mark (``seq:<n>``,
+    reason ``max_runs``). Re-running ``complete_if_ended`` cannot add a row,
+    and an idle ``max_runs`` finish does not take the anchor of a later finish
+    at the task's (then still future) end time. A resume with a new end time
+    followed by a second finish gets a new anchor.
+    """
+    if occurrence is not None:
+        return occurrence.id
+    end_at = _end_at_utc(task)
+    if end_at is not None and lifecycle_reason(task, "task_finished", now=now) == "end_at":
+        return f"end:{coerce_iso(end_at)}"
+    return f"seq:{task.last_occurrence_seq}"

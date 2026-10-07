@@ -7,7 +7,7 @@ Registry overrides must not mutate `BUILTIN_SUBAGENTS`.
 Direct returns use the compiled tool registry, including middleware tools. Match current-turn IDs in call order; error ToolMessages fail the task with outputs preserved.
 Durable batch specs store overlays as JSON and restore them before execution.
 
-Batch evidence uses nullable `result_artifact` (migration 0032), persisted with
+Batch evidence uses nullable `result_artifact` (migration 0033), persisted with
 successful results under the same lease fence. Only full-result exports expose
 bounded, cited RAG snapshots; compact item projections omit them. Cancelled,
 failed and stale attempts cannot publish evidence; retry clears it. Cover the

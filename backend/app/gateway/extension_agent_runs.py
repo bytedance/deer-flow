@@ -15,6 +15,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_SESSION, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import AuthContext, resolve_route_permissions
+from deerflow.runtime.run_origin import make_origin
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.utils.thread_id import ThreadId
 
@@ -100,6 +101,9 @@ class _BoundAgentRuns:
         request.state.user = user
         request.state.auth_source = self._source
         request.state.auth = AuthContext(user, list(permissions))
+        # Host-set, never HTTP input: threads and runs created through this
+        # handle are marked as extension work (activity feed, unread state).
+        request.state.run_origin = make_origin("extension", namespace=self._plugin_namespace)
         token = set_current_user(user)
         try:
             if thread_id is not None:
