@@ -124,8 +124,26 @@ export function readSpeechRecognitionTranscript(
   return {
     finalText: normalizeSpeechTranscript(finalText),
     interimText: normalizeSpeechTranscript(interimText),
-    text: normalizeSpeechTranscript(`${finalText}${interimText}`),
+    text: normalizeSpeechTranscript(joinSpeechSegments(finalText, interimText)),
   };
+}
+
+// Providers are expected to pad result boundaries with whitespace, but some
+// (WebKit, several Android WebViews) trim final transcripts. Re-insert the
+// separator only where gluing is certainly wrong: two ASCII word characters
+// meeting at the boundary. CJK dictation relies on the glue, so it must not
+// gain a space; provider-emitted boundary whitespace also passes through
+// unchanged since it fails the word-character test.
+function joinSpeechSegments(finalText: string, interimText: string): string {
+  if (!finalText || !interimText) {
+    return `${finalText}${interimText}`;
+  }
+  const tail = finalText[finalText.length - 1]!;
+  const head = interimText[0]!;
+  if (/[A-Za-z0-9]/.test(tail) && /[A-Za-z0-9]/.test(head)) {
+    return `${finalText} ${interimText}`;
+  }
+  return `${finalText}${interimText}`;
 }
 
 export function appendSpeechTranscript(baseText: string, transcript: string) {

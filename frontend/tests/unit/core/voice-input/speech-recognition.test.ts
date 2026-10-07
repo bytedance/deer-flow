@@ -57,6 +57,40 @@ describe("speech recognition helpers", () => {
     });
   });
 
+  it("separates segments glued by providers that trim final results", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "hello world" } },
+        1: { isFinal: false, length: 1, 0: { transcript: "today is" } },
+      }),
+    ).toEqual({
+      finalText: "hello world",
+      interimText: "today is",
+      text: "hello world today is",
+    });
+  });
+
+  it("adds no separator when the provider already emitted boundary space", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "hello world " } },
+        1: { isFinal: false, length: 1, 0: { transcript: "today" } },
+      }).text,
+    ).toBe("hello world today");
+  });
+
+  it("keeps CJK segments glued when the provider emits no spaces", () => {
+    expect(
+      readSpeechRecognitionTranscript({
+        length: 2,
+        0: { isFinal: true, length: 1, 0: { transcript: "你好世界" } },
+        1: { isFinal: false, length: 1, 0: { transcript: "今天" } },
+      }).text,
+    ).toBe("你好世界今天");
+  });
+
   it("appends transcript to an existing draft without duplicating whitespace", () => {
     expect(appendSpeechTranscript("", "  hello  world ")).toBe("hello world");
     expect(appendSpeechTranscript("Draft", "voice text")).toBe(
