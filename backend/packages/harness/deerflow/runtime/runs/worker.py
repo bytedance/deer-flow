@@ -75,11 +75,13 @@ from deerflow.runtime.goal import (
     _is_visible_message,
     _message_type,
     attach_goal_evaluation,
+    build_goal_outcome,
     build_goal_state,
     compute_no_progress_count,
     create_goal_evaluator_model,
     evaluate_goal_completion,
     goal_thread_lock,
+    latest_visible_assistant_message_id,
     latest_visible_assistant_signature,
     make_goal_continuation_message,
     read_thread_goal,
@@ -1979,7 +1981,7 @@ async def run_agent(
 class _GoalCompletionCandidate:
     goal: GoalState
     conversation_signature: str
-    evaluation: GoalEvaluation | None = None
+    evaluation: GoalEvaluation
 
 
 def _scheduled_goal_objective(record: RunRecord, scheduled_runtime: Mapping[str, Any] | None) -> str | None:
@@ -2122,12 +2124,14 @@ async def _clear_completed_goal(
                 return
             # Duration bookkeeping may advance the checkpoint after evaluation.
             # Compare goal/conversation above, then guard against stale writes.
+            # The record lands in the same checkpoint as the clear, or not at all.
             values = await write_thread_goal(
                 checkpointer,
                 record.thread_id,
                 None,
                 as_node="goal_evaluator",
                 expected_checkpoint_id=_checkpoint_id(checkpoint_tuple),
+                outcome=build_goal_outcome(candidate.goal, candidate.evaluation, reply_message_id=latest_visible_assistant_message_id(messages)),
             )
             await bridge.publish(record.run_id, "values", serialize(values, mode="values"))
     except GoalWriteConflict:

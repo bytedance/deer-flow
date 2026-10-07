@@ -161,6 +161,17 @@
 
 #### 智能体与运行时
 
+- **目标：** 对话中达成的目标现在会记录在线程上，历史接口的最新一条也会保留目标状态。
+  评估器判定目标达成时，清除目标的同一个 checkpoint 会写入新的 `goal_outcome` 通道：
+  目标原文、设置和达成的时间、已用和允许的续跑次数、评估理由、`relied_on_assumption`
+  以及判定所依据回复的 id。之后任何一次目标写入都会删除它，定时任务的目标不写这条
+  记录。客户端无法写入：`POST /state` 或非内部的运行输入携带 `goal_outcome` 时返回
+  400。`POST /api/threads/{thread_id}/history` 的最新一条现在带上激活的 `goal` 和已
+  达成的 `goal_outcome`，停下的目标不会再在运行结束或刷新页面后从 Web UI 消失；其余
+  条目不变。从较早一轮分支出的对话不会再带回那一轮没有的目标或达成记录。
+  `contracts/thread_goal_contract.json` 固定了停止代码、检查失败代码、达成记录的
+  字段、历史头字段和主机自写的原因文本。([#PR])
+
 - **网关：** 服务端替你创建的对话无需刷新即可被发现。由定时任务、IM 渠道、GitHub
   智能体、扩展或 MCP 通知发起的运行，现在带有服务端维护的
   `metadata.deerflow_origin`（`{kind, provider?, namespace?}`，由新增的

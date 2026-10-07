@@ -23,7 +23,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
 
 import deerflow.utils.llm_text as llm_text
-from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalState
+from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalOutcomeState, GoalState
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import RunInteractionPolicy
 from deerflow.models import create_chat_model
@@ -60,6 +60,8 @@ GOAL_BLOCKERS: set[GoalBlocker] = {
 CONTINUABLE_GOAL_BLOCKERS: set[GoalBlocker] = {"goal_not_met_yet"}
 
 GOAL_CLEAR_ALIASES = frozenset({"clear", "reset", "off"})
+
+GOAL_OUTCOME_CHANNEL = "goal_outcome"
 
 _extract_response_text = llm_text.extract_response_text
 _strip_markdown_code_fence = llm_text.strip_markdown_code_fence
@@ -120,6 +122,29 @@ def build_goal_state(
         max_continuations=capped_max,
         no_progress_count=0,
         max_no_progress_continuations=max(0, int(max_no_progress_continuations)),
+    )
+
+
+def is_active_goal(value: object) -> bool:
+    """Return true when a ``goal`` channel value is an active goal."""
+    return isinstance(value, dict) and value.get("status") == "active"
+
+
+def build_goal_outcome(goal: GoalState, evaluation: GoalEvaluation, *, reply_message_id: str | None, now: str | None = None) -> GoalOutcomeState:
+    """Build the record of a met goal from its satisfied completion verdict."""
+    if evaluation.get("satisfied") is not True:
+        raise ValueError("A goal outcome requires a satisfied evaluation.")
+    # POST /state and run input can store an active goal without created_at.
+    return GoalOutcomeState(
+        status="achieved",
+        objective=str(goal.get("objective") or ""),
+        goal_created_at=str(goal.get("created_at") or ""),
+        achieved_at=now or now_iso(),
+        continuation_count=int(goal.get("continuation_count", 0)),
+        max_continuations=int(goal.get("max_continuations", DEFAULT_MAX_GOAL_CONTINUATIONS)),
+        reason=evaluation.get("reason", ""),
+        relied_on_assumption=evaluation.get("relied_on_assumption") is True,
+        reply_message_id=reply_message_id,
     )
 
 
@@ -560,13 +585,26 @@ def latest_visible_assistant_signature(messages: list[Any]) -> str:
     continuation adds no new visible assistant output, the signature is
     unchanged and the breaker can recognise the stalled turn.
     """
+    reply = _latest_visible_assistant_reply(messages)
+    return hashlib.sha256(reply[1].encode("utf-8")).hexdigest() if reply else ""
+
+
+def latest_visible_assistant_message_id(messages: list[Any]) -> str | None:
+    """Return the id of the reply ``latest_visible_assistant_signature`` keys on."""
+    reply = _latest_visible_assistant_reply(messages)
+    message_id = _message_field(reply[0], "id") if reply else None
+    return message_id if isinstance(message_id, str) and message_id else None
+
+
+def _latest_visible_assistant_reply(messages: list[Any]) -> tuple[Any, str] | None:
+    """Return the latest visible AI message with non-empty text, and that text."""
     for message in reversed(messages):
         if not _is_visible_message(message) or _message_type(message) != "ai":
             continue
         text = message_to_text(message).strip()
         if text:
-            return hashlib.sha256(text.encode("utf-8")).hexdigest()
-    return ""
+            return message, text
+    return None
 
 
 def compute_goal_progress_key(evaluation: GoalEvaluation, *, evidence_signature: str = "") -> str:
@@ -703,11 +741,16 @@ async def write_thread_goal(
     as_node: str = "goal",
     create_if_missing: bool = False,
     expected_checkpoint_id: str | None = None,
+    outcome: GoalOutcomeState | None = None,
 ) -> dict[str, Any]:
     """Write a new checkpoint with the thread goal set or cleared.
 
+    Every goal write removes the ``goal_outcome`` record in the same
+    checkpoint; only the write that clears a met goal passes ``outcome``.
     Returns the updated channel values.
     """
+    if goal is not None and outcome is not None:
+        raise ValueError("A goal outcome is written only when clearing the goal.")
     if create_if_missing:
         await ensure_thread_checkpoint(checkpointer, thread_id)
 
@@ -727,15 +770,20 @@ async def write_thread_goal(
     metadata: dict[str, Any] = dict(getattr(checkpoint_tuple, "metadata", {}) or {})
     channel_values: dict[str, Any] = dict(checkpoint.get("channel_values", {}) or {})
 
-    if goal is None:
-        channel_values.pop("goal", None)
-    else:
-        channel_values["goal"] = copy.deepcopy(goal)
+    writes: dict[str, Any] = {"goal": goal}
+    if GOAL_OUTCOME_CHANNEL in channel_values or outcome is not None:
+        # Threads that never had a record keep their checkpoint shape.
+        writes[GOAL_OUTCOME_CHANNEL] = outcome
+    for channel, value in writes.items():
+        if value is None:
+            channel_values.pop(channel, None)
+        else:
+            channel_values[channel] = copy.deepcopy(value)
 
     channel_versions = dict(checkpoint.get("channel_versions", {}) or {})
-    current_version = channel_versions.get("goal")
-    next_version = _next_channel_version(checkpointer, current_version)
-    channel_versions["goal"] = next_version
+    # The saver stores a channel's value only when its version is in new_versions.
+    new_versions = {channel: _next_channel_version(checkpointer, channel_versions.get(channel)) for channel in writes}
+    channel_versions.update(new_versions)
 
     checkpoint["channel_values"] = channel_values
     checkpoint["channel_versions"] = channel_versions
@@ -743,7 +791,7 @@ async def write_thread_goal(
     metadata["updated_at"] = now_iso()
     metadata["source"] = "update"
     metadata["step"] = metadata.get("step", 0) + 1
-    metadata["writes"] = {as_node: {"goal": goal}}
+    metadata["writes"] = {as_node: writes}
 
     write_config = {
         "configurable": {
@@ -756,7 +804,7 @@ async def write_thread_goal(
             "checkpoint_id": _checkpoint_id_from_tuple(checkpoint_tuple),
         }
     }
-    await _call_checkpointer_method(checkpointer, "aput", "put", write_config, checkpoint, metadata, {"goal": next_version})
+    await _call_checkpointer_method(checkpointer, "aput", "put", write_config, checkpoint, metadata, new_versions)
     return channel_values
 
 

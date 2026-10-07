@@ -482,11 +482,15 @@ def _normalize_input_messages(
     return converted
 
 
+#: State channels only the server writes. ``goal_outcome`` is the "goal met"
+#: record that clearing a satisfied goal writes; a caller copy would forge one.
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome"})
+
+
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and sanitize caller-supplied state values before checkpointing.
 
-    The server-owned ``sandbox``, ``thread_data``, and ``viewed_images`` channels
-    are rejected. The ``messages`` channel
+    The ``SERVER_OWNED_STATE_CHANNELS`` are rejected. The ``messages`` channel
     is canonicalized to a list of ``BaseMessage``
     objects, rejects external system/developer roles with HTTP 400, and strips
     server-owned metadata. Other channels keep their existing shapes while
@@ -498,8 +502,7 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
     transform trails, or privileged message roles. Every channel is walked
     because middleware-contributed channels can also carry message-like values.
     """
-    server_owned_channels = {"sandbox", "thread_data", "viewed_images"}
-    rejected = server_owned_channels.intersection(values)
+    rejected = SERVER_OWNED_STATE_CHANNELS.intersection(values)
     if rejected:
         raise HTTPException(
             status_code=400,
@@ -535,10 +538,10 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
 
-    The ``sandbox``, ``thread_data``, and ``viewed_images`` channels are also
-    server-owned. External callers cannot select a provider resource by id or
-    supply host image paths; trusted internal run admission may carry restored
-    values.
+    The ``SERVER_OWNED_STATE_CHANNELS`` are also rejected. External callers
+    cannot select a provider resource by id, supply host image paths, or forge a
+    met goal; trusted internal run admission may carry restored values. A caller
+    ``goal`` replaces the goal, so it also clears the previous ``goal_outcome``.
 
     ``original_user_content``, dynamic-context reminder markers, the transient
     view-image context marker, the execution-only knowledge-scope marker, tool
@@ -563,8 +566,7 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     if raw_input is None:
         return {}
     if not trusted_internal:
-        server_owned_channels = {"sandbox", "thread_data", "viewed_images"}
-        rejected = server_owned_channels.intersection(raw_input)
+        rejected = SERVER_OWNED_STATE_CHANNELS.intersection(raw_input)
         if rejected:
             raise HTTPException(
                 status_code=400,
@@ -581,6 +583,9 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
             cleaned = [_strip_external_delegation_verdict(entry) for entry in delegations]
             if cleaned != delegations:
                 result = {**result, "delegations": cleaned}
+        # merge_goal ignores None, so only a goal value replaces the goal.
+        if result.get("goal") is not None:
+            result = {**result, "goal_outcome": None}
     return result
 
 
