@@ -694,6 +694,10 @@
 
 ### 修复
 
+- **持久化：** 在 PostgreSQL 上，只要某个键下存有超出 DOUBLE PRECISION 范围的数字（例如 API 可以接受的 309 位及以上整数，
+  或 `1e400`），对该键的浮点 JSON 元数据过滤就会因类型转换抛出 SQLSTATE 22003，导致整个搜索失败。现在这类值一律不匹配，
+  范围内的值（包括 float8 边界值）照常匹配。该防护只使用 PostgreSQL 14 已有的 SQL，SQLite 行为不变。这是 [#6000]
+  的后续修复，后者解决了整数过滤的同类失败。([#6429])
 - **前端：** 侧边对话发送失败时不再清空输入框。侧边对话的提交处理在弹出错误提示后仍以成功返回，输入框据此视为成功，
   因此在创建侧边对话或上传附件失败时，已输入的文字和附件都会丢失；发往新侧边对话的第一条消息也会在排队时（实际发送前）
   就被清空。现在提交处理会在提示后抛出错误，排队的首条发送也以其自身结果完成提交，因此草稿会保留以便重试，只有消息
@@ -7312,6 +7316,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#5994]: https://github.com/bytedance/deer-flow/pull/5994
 [#5998]: https://github.com/bytedance/deer-flow/pull/5998
 [#5999]: https://github.com/bytedance/deer-flow/pull/5999
+[#6000]: https://github.com/bytedance/deer-flow/pull/6000
 [#6009]: https://github.com/bytedance/deer-flow/pull/6009
 [#6013]: https://github.com/bytedance/deer-flow/pull/6013
 [#6015]: https://github.com/bytedance/deer-flow/pull/6015
@@ -7491,3 +7496,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6400]: https://github.com/bytedance/deer-flow/pull/6400
 [#6401]: https://github.com/bytedance/deer-flow/pull/6401
 [#6407]: https://github.com/bytedance/deer-flow/pull/6407
+[#6429]: https://github.com/bytedance/deer-flow/pull/6429
