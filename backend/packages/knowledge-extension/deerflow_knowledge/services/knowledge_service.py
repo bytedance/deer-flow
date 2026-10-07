@@ -103,11 +103,16 @@ class KnowledgeService:
         total = await self.store.count_chunks(doc_id)
         return {"items": items, "total": total, "offset": offset, "limit": limit}
 
-    async def upload_document(self, *, kb_id: str, uploader_id: str, filename: str, content: bytes) -> dict[str, Any]:
-        """Persist the file, create the ``uploaded`` row, enqueue indexing."""
+    async def upload_document(self, *, kb_id: str, uploader_id: str, filename: str, content: bytes, doc_id: str | None = None) -> dict[str, Any]:
+        """Persist the file, create the ``uploaded`` row, enqueue indexing.
+
+        ``doc_id`` pins the id for deterministic seeding (the no-cloud CI rebuilds
+        its fixture library from fixed material and the golden anchors are
+        ``<doc_id>#NNNN``); interactive uploads leave it None and get a uuid4.
+        """
         import hashlib
 
-        doc_id = uuid.uuid4().hex
+        doc_id = doc_id or uuid.uuid4().hex
         safe_name = normalize_filename(filename or "document")
         # Task 6 (spec §6): upload allowlist gate — reject before any file I/O.
         suffix = Path(safe_name).suffix.lower()

@@ -1,0 +1,14 @@
+{
+  "embedding_provider": "dashscope",
+  "embedding_model": "qwen3.7-text-embedding-flash",
+  "embedding_base_url": "http://127.0.0.1:8642",
+  "embedding_api_key": "replay-placeholder",
+  "embedding_dimension": 1024,
+  "embedding_sparse_source": "provider",
+  "rerank_provider": "dashscope",
+  "rerank_model": "qwen3.7-text-rerank",
+  "rerank_base_url": "http://127.0.0.1:8642",
+  "rerank_api_key": "replay-placeholder",
+  "vlm_model": "rag-eval-replay-vlm",
+  "mineru_api_token": "replay-placeholder"
+}

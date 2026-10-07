@@ -1,11 +1,16 @@
 """Deterministic IR metrics for retrieval evaluation (spec 2026-08-23 §6).
 
 Pure functions, no IO. Chunk-level metrics (hit / recall@k / MRR) are computed
-against the union of the three retrieval paths' top-k hits — the question is
-whether *the system* surfaced the annotated chunk — while the per-path
-breakdown stays available for drill-down. Path selection compares each path's
-top-1 score. The baseline diff gates on per-category recall drops only
-(``overall`` is reported but never gates), per the spec's门禁语义.
+against the union of the retrieval paths' top-k hits — the question is whether
+*the system* surfaced the annotated chunk — while the per-path breakdown stays
+available for drill-down. Path selection compares each path's top-1 score. The
+baseline diff gates on per-category recall drops only (``overall`` is reported
+but never gates), per the spec's门禁语义.
+
+The first-phase slice runs the one retrieval tool (vector path), so
+``PATH_ORDER`` is the single-element ("vector",); the precedence/tie logic and
+the per-path shape stay untouched so the machinery keeps working unchanged the
+day a second path returns.
 
 Path correctness uses set membership (spec 2026-08-28 §4): a question carries
 ``expected_paths`` and the run is correct when the actual winning path is any
@@ -22,7 +27,8 @@ from dataclasses import dataclass
 from deerflow_knowledge.eval.dataset import GoldenQuestion
 
 #: Fixed precedence when path top-1 scores tie (deterministic reports).
-PATH_ORDER = ("vector", "graph", "wiki")
+#: First-phase slice: the vector path is the only retrieval path.
+PATH_ORDER = ("vector",)
 
 #: Tolerance for the regression-gate comparison: 0.80 - 0.77 exceeds 0.03 in
 #: binary floating point, so the gate compares against threshold + epsilon.
@@ -134,7 +140,7 @@ def choose_path(paths: Mapping[str, PathResult]) -> str | None:
 
 
 def evaluate_question(question: GoldenQuestion, paths: Mapping[str, PathResult]) -> QuestionMetrics:
-    """Evaluate one question against the three paths' results.
+    """Evaluate one question against the retrieval paths' results.
 
     Chunk metrics use the union of all paths' hits (MRR takes the best rank
     across lists); per-path metrics are kept for drill-down. Questions without

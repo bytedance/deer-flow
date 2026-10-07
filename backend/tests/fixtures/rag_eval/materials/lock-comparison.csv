@@ -1,0 +1,6 @@
+维度,监视器锁(synchronized),ReentrantLock,StampedLock
+获取方式,进入同步代码块隐式获取与释放,显式 lock/unlock，支持可中断、可轮询、可超时获取,乐观读锁与悲观读写锁
+锁类型,非公平（JVM 会做锁升级优化）,公平或非公平可选,非重入
+中断支持,获取锁不可中断,lockInterruptibly 支持中断,不支持中断
+读写分离,不支持,需另用 ReentrantReadWriteLock,原生支持读写与乐观读
+适用场景,简单同步、代码块粒度,需要超时/可中断/公平性的场景,读多写少且读不加锁的场景

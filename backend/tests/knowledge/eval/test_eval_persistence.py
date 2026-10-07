@@ -50,8 +50,8 @@ def _layer1_report_payload() -> dict[str, Any]:
         "meta": {"top_k": 5, "question_count": 2, "generated_at": "2026-08-24T10:00:00+00:00"},
         "overall": {"count": 2, "hit_rate": 0.9, "recall": 0.8, "mrr": 0.7, "path_accuracy": 0.95},
         "by_category": {
-            "fact": {"count": 1, "hit_rate": 1.0, "recall": 1.0, "mrr": 1.0, "path_accuracy": 1.0},
-            "relation": {"count": 1, "hit_rate": 0.8, "recall": 0.6, "mrr": 0.4, "path_accuracy": 0.9},
+            "text": {"count": 1, "hit_rate": 1.0, "recall": 1.0, "mrr": 1.0, "path_accuracy": 1.0},
+            "table": {"count": 1, "hit_rate": 0.8, "recall": 0.6, "mrr": 0.4, "path_accuracy": 0.9},
         },
         "questions": [],
         "diff": None,
@@ -80,7 +80,7 @@ def _layer2_report_payload() -> dict[str, Any]:
     }
 
 
-def _question(qid: str, category: str = "fact", *, entities: tuple[str, ...] = ()) -> GoldenQuestion:
+def _question(qid: str, category: str = "text", *, entities: tuple[str, ...] = ()) -> GoldenQuestion:
     return GoldenQuestion(
         id=qid,
         query=f"query-{qid}",
@@ -113,18 +113,18 @@ class TestLayer1MetricsMapping:
         # Only the batch's categories appear — never a fixed four-key template.
         # ``questions`` is the per-question slim array (bank triage column);
         # ``top_k`` is the scalar retrieval depth for @k column headers.
-        assert set(metrics) == {"summary", "fact", "relation", "questions", "top_k"}
+        assert set(metrics) == {"summary", "text", "table", "questions", "top_k"}
         assert metrics["questions"] == []
         assert metrics["top_k"] == 5
-        assert metrics["fact"] == {
+        assert metrics["text"] == {
             "hit_rate": pytest.approx(1.0),
             "recall_at_k": pytest.approx(1.0),
             "mrr": pytest.approx(1.0),
             "path_accuracy": pytest.approx(1.0),
             "question_count": 1,
         }
-        assert metrics["relation"]["recall_at_k"] == pytest.approx(0.6)
-        assert metrics["relation"]["question_count"] == 1
+        assert metrics["table"]["recall_at_k"] == pytest.approx(0.6)
+        assert metrics["table"]["question_count"] == 1
 
     def test_empty_categories_yield_summary_only(self):
         payload = _layer1_report_payload()
@@ -137,7 +137,7 @@ class TestLayer1MetricsMapping:
         payload["questions"] = [
             {
                 "id": "q1",
-                "category": "fact",
+                "category": "text",
                 "expected_paths": ["vector"],
                 "actual_path": "vector",
                 "path_correct": True,
@@ -148,8 +148,8 @@ class TestLayer1MetricsMapping:
             },
             {
                 "id": "q2",
-                "category": "relation",
-                "expected_paths": ["graph"],
+                "category": "table",
+                "expected_paths": ["vector"],
                 "actual_path": None,
                 "path_correct": False,
                 "hit": 0.0,
@@ -170,7 +170,7 @@ class TestLayer1MetricsMapping:
 
 class TestLayer2MetricsMapping:
     def test_ragas_and_arch_specific_mapping(self):
-        questions = [_question("q1", entities=("实体X",)), _question("q2", category="relation")]
+        questions = [_question("q1", entities=("实体X",)), _question("q2", category="table")]
         metrics = persistence.layer2_metrics_from_report(_layer2_report_payload(), questions=questions)
 
         assert metrics["ragas"] == {"faithfulness": pytest.approx(0.93), "answer_relevancy": None, "context_precision": pytest.approx(0.8), "context_recall": None}
@@ -185,7 +185,7 @@ class TestLayer2MetricsMapping:
         assert metrics["has_graph_questions"] is True
 
     def test_has_graph_questions_false_when_no_entities(self):
-        questions = [_question("q1"), _question("q2", category="relation")]
+        questions = [_question("q1"), _question("q2", category="table")]
         metrics = persistence.layer2_metrics_from_report(_layer2_report_payload(), questions=questions)
 
         assert metrics["has_graph_questions"] is False
@@ -205,9 +205,9 @@ class TestBaselineDiffMapping:
         return {
             "deltas": [
                 {"scope": "overall", "metric": "recall", "before": 0.9, "after": 0.88, "delta": -0.02},
-                {"scope": "fact", "metric": "recall", "before": 0.9, "after": 0.8, "delta": -0.1},
-                {"scope": "relation", "metric": "recall", "before": 0.9, "after": 0.88, "delta": -0.02},
-                {"scope": "fact", "metric": "mrr", "before": 0.9, "after": 0.1, "delta": -0.8},
+                {"scope": "text", "metric": "recall", "before": 0.9, "after": 0.8, "delta": -0.1},
+                {"scope": "table", "metric": "recall", "before": 0.9, "after": 0.88, "delta": -0.02},
+                {"scope": "text", "metric": "mrr", "before": 0.9, "after": 0.1, "delta": -0.8},
             ],
             "regressed_questions": ["q1"],
             "failed": failed,
@@ -230,7 +230,7 @@ class TestBaselineDiffMapping:
         assert diff["threshold_percent"] == pytest.approx(3.0)  # DEFAULT_FAIL_THRESHOLD * 100
         # Only per-category recall drops beyond the threshold are listed —
         # overall never gates, non-recall metrics never gate, sub-threshold drops don't.
-        assert diff["regressed_categories"] == ["fact"]
+        assert diff["regressed_categories"] == ["text"]
 
     def test_threshold_percent_follows_fail_threshold(self):
         payload = _layer1_report_payload()
@@ -241,7 +241,7 @@ class TestBaselineDiffMapping:
         assert diff is not None
         assert diff["threshold_percent"] == pytest.approx(5.0)
         # 10% category drop still exceeds the custom 5% threshold.
-        assert diff["regressed_categories"] == ["fact"]
+        assert diff["regressed_categories"] == ["text"]
 
 
 class TestStatusMapping:
@@ -391,7 +391,7 @@ def _patch_layer1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kb: dict[str,
 class TestLayer1CliPersistence:
     def test_completed_run_writes_layer1_only_row(self, monkeypatch, tmp_path):
         golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"), _golden_entry("q2", "relation"))
+        _write_golden(golden, _golden_entry("q1", "text"), _golden_entry("q2", "table"))
         _patch_layer1(monkeypatch, tmp_path, kb={"owner_id": "u1"}, hit=True)
         out = tmp_path / "out"
 
@@ -404,7 +404,7 @@ class TestLayer1CliPersistence:
         assert row.kb_id == "kb-1"
         assert row.status == "completed"
         assert row.layer2_metrics == {}
-        assert set(row.layer1_metrics) == {"summary", "fact", "relation", "questions", "top_k"}
+        assert set(row.layer1_metrics) == {"summary", "text", "table", "questions", "top_k"}
         assert row.layer1_metrics["summary"]["question_count"] == 2
         assert row.layer1_metrics["summary"]["recall_at_k"] == pytest.approx(1.0)
         assert row.baseline_diff is None
@@ -415,12 +415,12 @@ class TestLayer1CliPersistence:
 
     def test_regression_run_still_completed_with_baseline_diff(self, monkeypatch, tmp_path):
         golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"), _golden_entry("q2", "relation"))
+        _write_golden(golden, _golden_entry("q1", "text"), _golden_entry("q2", "table"))
         baseline = {
             "overall": {"count": 2, "hit_rate": 1.0, "recall": 1.0, "mrr": 1.0, "path_accuracy": 1.0},
             "by_category": {
-                "fact": {"count": 1, "hit_rate": 1.0, "recall": 1.0, "mrr": 1.0, "path_accuracy": 1.0},
-                "relation": {"count": 1, "hit_rate": 1.0, "recall": 1.0, "mrr": 1.0, "path_accuracy": 1.0},
+                "text": {"count": 1, "hit_rate": 1.0, "recall": 1.0, "mrr": 1.0, "path_accuracy": 1.0},
+                "table": {"count": 1, "hit_rate": 1.0, "recall": 1.0, "mrr": 1.0, "path_accuracy": 1.0},
             },
             "questions": [],
         }
@@ -443,11 +443,11 @@ class TestLayer1CliPersistence:
         assert row.baseline_diff["regression_detected"] is True
         assert row.baseline_diff["threshold_percent"] == pytest.approx(3.0)
         assert row.baseline_diff["recall_at_k_delta"] == pytest.approx(-1.0)
-        assert row.baseline_diff["regressed_categories"] == ["fact", "relation"]
+        assert row.baseline_diff["regressed_categories"] == ["table", "text"]
 
     def test_unknown_kb_writes_error_row(self, monkeypatch, tmp_path):
         golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"))
+        _write_golden(golden, _golden_entry("q1", "text"))
         _patch_layer1(monkeypatch, tmp_path, kb=None, hit=True)
 
         code = layer1_cli.main(["--golden", str(golden), "--out", str(tmp_path / "out"), "--kb-id", "kb-absent"], environ=dict(KEYS))
@@ -462,7 +462,7 @@ class TestLayer1CliPersistence:
 
     def test_missing_keys_writes_skipped_row(self, monkeypatch, tmp_path, capsys):
         golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"))
+        _write_golden(golden, _golden_entry("q1", "text"))
         _patch_common(monkeypatch, tmp_path, kb={"owner_id": "u1"})
 
         code = layer1_cli.main(["--golden", str(golden), "--out", str(tmp_path / "out"), "--kb-id", "kb-1"], environ={})
@@ -485,8 +485,8 @@ class TestBaselineReportMapping:
     def test_summary_and_categories_reverse_mapped(self):
         metrics = {
             "summary": {"hit_rate": 0.9, "recall_at_k": 0.8, "mrr": 0.7, "path_accuracy": 0.95, "question_count": 2},
-            "fact": {"hit_rate": 1.0, "recall_at_k": 1.0, "mrr": 1.0, "path_accuracy": 1.0, "question_count": 1},
-            "relation": {"hit_rate": 0.8, "recall_at_k": 0.6, "mrr": 0.4, "path_accuracy": 0.9, "question_count": 1},
+            "text": {"hit_rate": 1.0, "recall_at_k": 1.0, "mrr": 1.0, "path_accuracy": 1.0, "question_count": 1},
+            "table": {"hit_rate": 0.8, "recall_at_k": 0.6, "mrr": 0.4, "path_accuracy": 0.9, "question_count": 1},
         }
 
         baseline = persistence.baseline_report_from_metrics(metrics)
@@ -494,9 +494,9 @@ class TestBaselineReportMapping:
         # runner._baseline_parts 消费报告键名：overall/by_category 内 count + recall
         # （保存时映射的逆运算：summary→overall、recall_at_k→recall、question_count→count）。
         assert baseline["overall"] == {"count": 2, "hit_rate": 0.9, "recall": 0.8, "mrr": 0.7, "path_accuracy": 0.95}
-        assert set(baseline["by_category"]) == {"fact", "relation"}
-        assert baseline["by_category"]["relation"]["recall"] == pytest.approx(0.6)
-        assert baseline["by_category"]["relation"]["count"] == 1
+        assert set(baseline["by_category"]) == {"text", "table"}
+        assert baseline["by_category"]["table"]["recall"] == pytest.approx(0.6)
+        assert baseline["by_category"]["table"]["count"] == 1
         # 逐题明细不入库 —— diff 门禁按 category 粒度工作，regressed_questions 为空。
         assert baseline["questions"] == []
 
@@ -599,7 +599,7 @@ class TestEnvironmentPersistence:
 class TestLayer1CliBaselineAndEnvironment:
     def test_environment_flag_wins_over_inference(self, monkeypatch, tmp_path):
         golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"))
+        _write_golden(golden, _golden_entry("q1", "text"))
         _patch_layer1(monkeypatch, tmp_path, kb={"owner_id": "u1"}, hit=True)
 
         code = layer1_cli.main(
@@ -614,7 +614,7 @@ class TestLayer1CliBaselineAndEnvironment:
 
     def test_ci_inferred_from_environ(self, monkeypatch, tmp_path):
         golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"))
+        _write_golden(golden, _golden_entry("q1", "text"))
         _patch_layer1(monkeypatch, tmp_path, kb={"owner_id": "u1"}, hit=True)
 
         code = layer1_cli.main(["--golden", str(golden), "--out", str(tmp_path / "out"), "--kb-id", "kb-1"], environ={**KEYS, "CI": "true"})
@@ -626,7 +626,7 @@ class TestLayer1CliBaselineAndEnvironment:
 
     def test_default_environment_is_local(self, monkeypatch, tmp_path):
         golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"))
+        _write_golden(golden, _golden_entry("q1", "text"))
         _patch_layer1(monkeypatch, tmp_path, kb={"owner_id": "u1"}, hit=True)
 
         code = layer1_cli.main(["--golden", str(golden), "--out", str(tmp_path / "out"), "--kb-id", "kb-1"], environ=dict(KEYS))
@@ -638,7 +638,7 @@ class TestLayer1CliBaselineAndEnvironment:
 
     def test_skipped_row_carries_inferred_environment(self, monkeypatch, tmp_path):
         golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"))
+        _write_golden(golden, _golden_entry("q1", "text"))
         _patch_common(monkeypatch, tmp_path, kb={"owner_id": "u1"})
 
         code = layer1_cli.main(["--golden", str(golden), "--out", str(tmp_path / "out"), "--kb-id", "kb-1"], environ={"CI": "true"})
@@ -650,7 +650,7 @@ class TestLayer1CliBaselineAndEnvironment:
 
     def test_mark_baseline_marks_row_and_clears_previous(self, monkeypatch, tmp_path):
         golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"))
+        _write_golden(golden, _golden_entry("q1", "text"))
         _patch_layer1(monkeypatch, tmp_path, kb={"owner_id": "u1"}, hit=True)
 
         for _ in range(2):
@@ -668,7 +668,7 @@ class TestLayer1CliBaselineAndEnvironment:
     def test_mark_baseline_on_skipped_run_keeps_previous_baseline_and_notes_stderr(self, monkeypatch, tmp_path, capsys):
         """缺 key → skipped：--mark-baseline 被忽略，stderr 有提示，既有基线保留。"""
         golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"))
+        _write_golden(golden, _golden_entry("q1", "text"))
         _patch_layer1(monkeypatch, tmp_path, kb={"owner_id": "u1"}, hit=True)
 
         code = layer1_cli.main(["--golden", str(golden), "--out", str(tmp_path / "out"), "--kb-id", "kb-1", "--mark-baseline"], environ=dict(KEYS))
@@ -687,7 +687,7 @@ class TestLayer1CliBaselineAndEnvironment:
 
     def test_baseline_auto_diffs_against_marked_row(self, monkeypatch, tmp_path):
         golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"), _golden_entry("q2", "relation"))
+        _write_golden(golden, _golden_entry("q1", "text"), _golden_entry("q2", "table"))
         out = tmp_path / "out"
 
         # 第一次：满分运行并标记为 baseline
@@ -706,12 +706,12 @@ class TestLayer1CliBaselineAndEnvironment:
         assert regression_row.status == "completed"
         assert regression_row.baseline_diff["regression_detected"] is True
         assert regression_row.baseline_diff["recall_at_k_delta"] == pytest.approx(-1.0)
-        assert regression_row.baseline_diff["regressed_categories"] == ["fact", "relation"]
+        assert regression_row.baseline_diff["regressed_categories"] == ["table", "text"]
         assert regression_row.baseline_diff["threshold_percent"] == pytest.approx(3.0)
 
     def test_baseline_auto_without_marked_row_runs_without_diff(self, monkeypatch, tmp_path):
         golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"))
+        _write_golden(golden, _golden_entry("q1", "text"))
         _patch_layer1(monkeypatch, tmp_path, kb={"owner_id": "u1"}, hit=True)
 
         code = layer1_cli.main(["--golden", str(golden), "--out", str(tmp_path / "out"), "--kb-id", "kb-1", "--baseline", "auto"], environ=dict(KEYS))

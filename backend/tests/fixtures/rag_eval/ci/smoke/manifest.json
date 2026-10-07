@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "generated_at": "2026-10-07T17:26:39+00:00",
+  "executed": true,
+  "eval_exit_code": 0,
+  "environment": "local",
+  "combination": {
+    "embedding_provider": "dashscope",
+    "embedding_model": "qwen3.7-text-embedding-flash",
+    "embedding_dimension": 1024,
+    "embedding_sparse_source": "provider",
+    "rerank_provider": "dashscope",
+    "rerank_model": "qwen3.7-text-rerank",
+    "vlm_dialect": "openai",
+    "vlm_model": "qwen3.7-flash",
+    "caption_max_tokens": 1024,
+    "caption_temperature": 0.15,
+    "vlm_thinking": false
+  },
+  "materials": {
+    "dir": "tests/fixtures/rag_eval/materials",
+    "fingerprint": "b433ff213b05f5406e8dd290740ff59be132c1c84711be892011b35a474140ac",
+    "documents": 8
+  },
+  "kb_id": "cbb19135270509ecdceaef1b45bc1fb2",
+  "golden": {
+    "file": "tests/fixtures/rag_eval/golden.jsonl",
+    "questions": 24
+  },
+  "eval": {
+    "top_k": 5,
+    "candidate_limit": 20
+  },
+  "reports": ["report.json", "report.md"],
+  "notes": "Real-stack smoke (RFC v3 A12): the same materials (same index-input fingerprint) and the same golden run end to end against real services — real DashScope embedding/rerank and caption VLM, no replay server and no recorded outputs. Parse/chunk/index write-out/recall/RRF/rerank application/metrics all executed in place; storage isolated (scratch sqlite + Qdrant http://127.0.0.1:6399). Document and chunk identifiers are byte-identical to the CI fixture (chunks.jsonl), so the same golden anchors and the same combination make CI and smoke results directly comparable."
+}

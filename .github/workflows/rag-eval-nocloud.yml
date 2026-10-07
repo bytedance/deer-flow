@@ -1,0 +1,123 @@
+name: RAG Retrieval Evaluation (no-cloud)
+
+# RFC v3 §8.2 — the no-cloud CI path. It rebuilds the fixture library from the
+# committed material and runs the real pipeline end to end: parse (local
+# formats) → chunk → index write → recall → RRF → rerank application → scope
+# checks → source artifact → metrics. The external model outputs (embeddings,
+# rerank scores, the image caption) come from the committed recording, served
+# by the in-repo replay service; SQL (sqlite) and Qdrant are provided by this
+# job. No cloud services and no credentials are involved, and there is no
+# skip path — a missing dependency fails the job.
+#
+# Drift is loud by construction: the replay service refuses to start when the
+# material fingerprint no longer matches the recording's manifest, and refuses
+# to serve any input the recording does not hold (re-record with
+# scripts/rag_eval_record.py).
+
+on:
+  pull_request:
+    paths:
+      - "backend/packages/knowledge-extension/**"
+      - "backend/scripts/run_rag_eval.py"
+      - "backend/scripts/rag_eval_*.py"
+      - "backend/tests/rag_eval_ci/**"
+      - "backend/tests/fixtures/rag_eval/**"
+      - ".github/workflows/rag-eval-nocloud.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: rag-eval-nocloud-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rag-eval-nocloud:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      qdrant:
+        image: qdrant/qdrant:v1.19.0
+        ports:
+          - 6333:6333
+
+    env:
+      QDRANT_URL: http://127.0.0.1:6333
+      DEER_FLOW_HOME: ${{ runner.temp }}/rag-eval-nocloud-home
+      DEER_FLOW_CONFIG_PATH: ${{ github.workspace }}/backend/tests/fixtures/rag_eval/ci/config.ci.yaml
+      DEER_FLOW_RAG_CONFIG_PATH: ${{ github.workspace }}/backend/tests/fixtures/rag_eval/ci/rag_config.ci.json
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_ci_uv_version_pin.py
+          version: "0.11.1"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: uv sync --group dev
+
+      - name: Start the replay service
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          nohup uv run python scripts/rag_eval_replay_server.py \
+            --recording tests/fixtures/rag_eval/ci/recording.jsonl.gz \
+            --materials tests/fixtures/rag_eval/materials \
+            --port 8642 > "$RUNNER_TEMP/replay-server.log" 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8642/healthz > /dev/null; then break; fi
+            if [ "$attempt" = 30 ]; then echo "::error::replay service did not come up"; cat "$RUNNER_TEMP/replay-server.log"; exit 1; fi
+            sleep 1
+          done
+
+      - name: Seed the fixture library from the fixed material
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          uv run python scripts/rag_eval_ci_seed.py | tee "$RUNNER_TEMP/seed-summary.json"
+
+      - name: Run the evaluation against the replay service
+        id: eval
+        working-directory: backend
+        run: |
+          set -uo pipefail
+          KB_ID=$(tail -1 "$RUNNER_TEMP/seed-summary.json" | python -c "import sys, json; print(json.load(sys.stdin)['kb_id'])")
+          set +e
+          uv run python scripts/run_rag_eval.py \
+            --golden tests/fixtures/rag_eval/golden.jsonl \
+            --out "$RUNNER_TEMP/rag-eval-nocloud" \
+            --kb-id "$KB_ID" \
+            --candidate-limit 20 \
+            --environment ci \
+            --baseline tests/fixtures/rag_eval/ci/baseline.json
+          EXIT_CODE=$?
+          set -e
+          echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+          # This path needs no credentials: a skip (3) is a misconfiguration here,
+          # never a pass; 1 (regression) and 2 (usage/IO) fail alike.
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::no-cloud RAG evaluation failed with exit ${EXIT_CODE}"
+            exit 1
+          fi
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rag-eval-nocloud-report
+          path: |
+            ${{ runner.temp }}/rag-eval-nocloud/
+            ${{ runner.temp }}/replay-server.log
+          if-no-files-found: ignore

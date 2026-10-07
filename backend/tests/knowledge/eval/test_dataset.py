@@ -28,7 +28,7 @@ VALID_RAW = {
     "relevant_chunk_ids": ["e1b9e365f63747958337431dc755c620#0007"],
     "relevant_entities": ["StringBuffer", "StringBuilder"],
     "reference_answer": "String 不可变；StringBuffer 可变且线程安全；StringBuilder 可变但非线程安全。",
-    "category": "fact",
+    "category": "text",
 }
 
 
@@ -47,7 +47,7 @@ class TestValidateQuestion:
         assert q.expected_paths == ("vector",)
         assert q.relevant_chunk_ids == ("e1b9e365f63747958337431dc755c620#0007",)
         assert q.relevant_entities == ("StringBuffer", "StringBuilder")
-        assert q.category == "fact"
+        assert q.category == "text"
         assert q.reference_answer is not None
 
     def test_valid_minimal_without_reference_answer(self):
@@ -73,12 +73,12 @@ class TestValidateQuestion:
         with pytest.raises(GoldenDatasetError, match="categroy"):
             validate_question(_raw(categroy="fact"))
 
-    @pytest.mark.parametrize("category", ["facts", "", "GLOBAL", None, 1])
+    @pytest.mark.parametrize("category", ["facts", "", "GLOBAL", "fact", "global", None, 1])
     def test_rejects_invalid_category(self, category):
         with pytest.raises(GoldenDatasetError, match="category"):
             validate_question(_raw(category=category))
 
-    @pytest.mark.parametrize("path", ["vectors", "", "GRAPH", None, 1])
+    @pytest.mark.parametrize("path", ["vectors", "", "GRAPH", "graph", "wiki", None, 1])
     def test_rejects_invalid_expected_path(self, path):
         with pytest.raises(GoldenDatasetError, match="expected_path"):
             validate_question(_raw(expected_path=path))
@@ -88,11 +88,11 @@ class TestValidateQuestion:
     def test_accepts_expected_paths_list(self):
         raw = _raw()
         del raw["expected_path"]
-        raw["expected_paths"] = ["vector", "graph"]
+        raw["expected_paths"] = ["vector"]
 
         q = validate_question(raw)
 
-        assert q.expected_paths == ("vector", "graph")
+        assert q.expected_paths == ("vector",)
         # 首路读取在 Task 3 后无兼容属性——断言全量集合即可。
 
     def test_normalizes_legacy_single_expected_path(self):
@@ -103,9 +103,9 @@ class TestValidateQuestion:
     def test_expected_paths_dedupes_preserving_order(self):
         raw = _raw()
         del raw["expected_path"]
-        raw["expected_paths"] = ["graph", "vector", "graph"]
+        raw["expected_paths"] = ["vector", "vector"]
 
-        assert validate_question(raw).expected_paths == ("graph", "vector")
+        assert validate_question(raw).expected_paths == ("vector",)
 
     def test_rejects_both_expected_path_keys(self):
         raw = _raw(expected_paths=["vector"])
@@ -123,7 +123,7 @@ class TestValidateQuestion:
         with pytest.raises(GoldenDatasetError, match="expected_path"):
             validate_question(raw)
 
-    @pytest.mark.parametrize("paths", [[], ["vectors"], ["vector", 1], "vector", None])
+    @pytest.mark.parametrize("paths", [[], ["vectors"], ["vector", 1], ["graph"], "vector", None])
     def test_rejects_invalid_expected_paths(self, paths):
         raw = _raw()
         del raw["expected_path"]
@@ -183,7 +183,7 @@ class TestLoadGolden:
             [
                 json.dumps(VALID_RAW, ensure_ascii=False),
                 "",
-                json.dumps(_raw(id="q002", category="global", relevant_chunk_ids=[], relevant_entities=[], reference_answer=None), ensure_ascii=False),
+                json.dumps(_raw(id="q002", category="table", relevant_chunk_ids=[], relevant_entities=[], reference_answer=None), ensure_ascii=False),
                 "   ",
             ],
         )
@@ -225,13 +225,14 @@ class TestGoldenFileGuard:
     def test_golden_covers_all_categories(self):
         questions = load_golden(GOLDEN_PATH)
 
-        assert {q.category for q in questions} == {"fact", "relation", "concept", "global"}
+        assert {q.category for q in questions} == {"text", "table", "image"}
 
     def test_golden_legacy_single_path_normalizes_to_paths_tuple(self):
         # 存量 fixture 是单值形态（零迁移策略）——加载器必须归一化为集合。
         questions = load_golden(GOLDEN_PATH)
 
         assert all(len(q.expected_paths) == 1 for q in questions)
+        assert all(q.expected_paths == ("vector",) for q in questions)
 
 
 class TestMixedFormatFile:
@@ -239,11 +240,11 @@ class TestMixedFormatFile:
 
     def test_loads_legacy_and_new_format_lines_together(self, tmp_path: Path):
         legacy = json.dumps(VALID_RAW, ensure_ascii=False)
-        modern = json.dumps(_raw(id="q002", query="多路题"), ensure_ascii=False).replace('"expected_path": "vector"', '"expected_paths": ["vector", "graph"]')
+        modern = json.dumps(_raw(id="q002", query="多路题"), ensure_ascii=False).replace('"expected_path": "vector"', '"expected_paths": ["vector"]')
         path = tmp_path / "golden.jsonl"
         path.write_text(legacy + "\n" + modern + "\n", encoding="utf-8")
 
         questions = load_golden(path)
 
         assert questions[0].expected_paths == ("vector",)
-        assert questions[1].expected_paths == ("vector", "graph")
+        assert questions[1].expected_paths == ("vector",)

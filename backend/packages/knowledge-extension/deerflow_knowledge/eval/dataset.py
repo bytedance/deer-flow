@@ -4,6 +4,13 @@ The golden dataset is a single git-versioned JSONL file, one question per
 line. Validation is deliberately strict — dirty questions silently pollute
 every metric built on top of them, so the guard test in
 ``tests/knowledge/eval/test_dataset.py`` loads the real file on every run.
+
+``category`` is the report's grouping axis (RFC v3 §8.1): ``text`` /
+``table`` / ``image`` partition the bank by the document form the answer
+depends on, so an image-chain failure shows up as its own group instead of
+being averaged away (the first-phase slice replaced the retired
+fact/relation/concept/global axis — relation/concept targeted the cut
+graph/wiki paths).
 """
 
 from __future__ import annotations
@@ -14,8 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-CATEGORIES = ("fact", "relation", "concept", "global")
-EXPECTED_PATHS = ("vector", "graph", "wiki")
+CATEGORIES = ("text", "table", "image")
+EXPECTED_PATHS = ("vector",)
 
 # chunk ids are "<doc_id>#NNNN" — a 32-char lowercase hex doc id plus a
 # zero-padded 4-digit chunk index (see deerflow_knowledge.indexer).

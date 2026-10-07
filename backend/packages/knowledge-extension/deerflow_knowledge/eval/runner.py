@@ -1,16 +1,15 @@
 """Batch retrieval evaluation runner (spec 2026-08-23 §6).
 
-Fans every golden question out to the three retrieval paths through the same
-seam the recall test uses (the online ``_*_impl`` functions, never HTTP), with
-the same degradation contract: one path's exception becomes empty hits plus a
+Fans every golden question out to the retrieval paths through the same seam
+the recall test uses (the online ``_*_impl`` functions, never HTTP), with the
+same degradation contract: one path's exception becomes empty hits plus a
 failure note and never sinks the run — every run produces a complete report.
-Graph-path config parameters mirror ``knowledge_service.recall_test`` wiring so
-the evaluation logic stays byte-identical to the online path.
+The first-phase slice wires the single vector path (the one retrieval tool);
+``PATH_ORDER`` and the per-path report shape keep working unchanged for any
+path added later.
 
-Wiki entries are normalized to their ``source_chunk_ids`` so chunk-level
-metrics credit the wiki path fairly; manual cards have no chunk mapping and
-are skipped. Pure orchestration lives here; CLI concerns (arg parsing, store
-construction) live in ``backend/scripts/run_rag_eval.py``.
+Pure orchestration lives here; CLI concerns (arg parsing, store construction)
+live in ``backend/scripts/run_rag_eval.py``.
 """
 
 from __future__ import annotations
@@ -105,25 +104,23 @@ async def run_evaluation(
     baseline: Mapping[str, Any] | None = None,
     fail_threshold: float = DEFAULT_FAIL_THRESHOLD,
     generated_at: str | None = None,
-    progress_hook: Callable[[str, int, int, int], None] | None = None,
+    meta_extra: Mapping[str, Any] | None = None,
 ) -> EvalReport:
-    """Run every question through the three paths and build the report.
+    """Run every question through the retrieval paths and build the report.
 
     ``baseline`` is a previous ``report_to_dict`` payload; when provided the
     report carries a diff whose gate result drives ``exit_code``.
 
-    ``progress_hook`` (spec 2026-09-06 §9) fires ``(phase, done, failed, total)``
-    once per question (phase ``"layer1"``) so the quick tier's progress bar is
-    determinate instead of an all-or-nothing segment; ``None`` keeps the CLI
-    behavior untouched.
+    ``meta_extra`` (RFC v3 §8.1) carries the run's fixed parameters and the
+    version block the caller resolves from the live config (parse/chunk
+    versions, embedding model and width, sparse way, rerank model/service) —
+    the report must state what produced its numbers.
     """
     question_reports: list[QuestionReport] = []
     for question in questions:
         outcomes = await _fanout(question, searchers, top_k)
         path_results = {path: MetricsPathResult(hits=tuple(hit.chunk_id for hit in outcome.hits), top_score=_top_score(outcome), failure=outcome.failure) for path, outcome in outcomes.items()}
         question_reports.append(QuestionReport(question=question, metrics=evaluate_question(question, path_results), paths=outcomes))
-        if progress_hook is not None:
-            progress_hook("layer1", len(question_reports), 0, len(questions))
 
     metrics = [report.metrics for report in question_reports]
     overall = aggregate(metrics)
@@ -144,7 +141,7 @@ async def run_evaluation(
         )
 
     return EvalReport(
-        meta={"top_k": top_k, "question_count": len(question_reports), "generated_at": generated_at},
+        meta={**(meta_extra or {}), "top_k": top_k, "question_count": len(question_reports), "generated_at": generated_at},
         overall=overall,
         by_category=by_category,
         questions=tuple(question_reports),
@@ -247,8 +244,6 @@ def write_reports(report: EvalReport, out_dir: str | Path) -> tuple[Path, Path]:
 
 # ── rendering ────────────────────────────────────────────────────────────
 
-_SCOPES_EXCLUDING_GLOBAL = "global"  # global 类单独分区（spec §10 设计意图）
-
 
 def _fmt(value: float | None) -> str:
     return "-" if value is None else f"{value:.3f}"
@@ -256,29 +251,34 @@ def _fmt(value: float | None) -> str:
 
 def _summary_rows(report: EvalReport) -> list[tuple[str, AggregateMetrics]]:
     rows = [("overall", report.overall)]
-    rows.extend((scope, agg) for scope, agg in report.by_category.items() if scope != _SCOPES_EXCLUDING_GLOBAL)
+    rows.extend(report.by_category.items())
     return rows
 
 
 def render_summary(report: EvalReport) -> str:
-    """Compact terminal table: one row per scope (global rendered separately)."""
+    """Compact terminal table: one row per scope (overall first)."""
     lines = [f"{'scope':<12} {'count':>5} {'hit_rate':>8} {'recall':>8} {'mrr':>8} {'path_acc':>8}"]
     for scope, agg in _summary_rows(report):
         lines.append(f"{scope:<12} {agg.count:>5} {_fmt(agg.hit_rate):>8} {_fmt(agg.recall):>8} {_fmt(agg.mrr):>8} {_fmt(agg.path_accuracy):>8}")
-    if _SCOPES_EXCLUDING_GLOBAL in report.by_category:
-        agg = report.by_category[_SCOPES_EXCLUDING_GLOBAL]
-        lines.append(f"{_SCOPES_EXCLUDING_GLOBAL:<12} {agg.count:>5} {_fmt(agg.hit_rate):>8} {_fmt(agg.recall):>8} {_fmt(agg.mrr):>8} {_fmt(agg.path_accuracy):>8}  (单独分区，不解读为回退)")
+    lines.append(f"top_k: {report.meta.get('top_k')} · candidate_limit: {report.meta.get('candidate_limit')} · 题目数: {report.meta.get('question_count')}")
     if report.diff is not None:
         lines.append(f"diff: {'FAILED' if report.diff.failed else 'ok'}; regressed: {', '.join(report.diff.regressed_questions) or '-'}")
     return "\n".join(lines) + "\n"
 
 
 def render_markdown(report: EvalReport) -> str:
+    # 报告 meta 版本块（RFC v3 §8.1）：解析/切分/嵌入/稀疏/重排的固定条件随报告存档。
+    meta_lines = [
+        f"- top_k: {report.meta.get('top_k')} · candidate_limit: {report.meta.get('candidate_limit')} · 题目数: {report.meta.get('question_count')} · generated_at: {report.meta.get('generated_at') or '-'}",
+        "- 阈值均为初始拍值（回退 3%），跑两周后按实际抖动校准（spec §4）",
+    ]
+    for key in ("parse_provider", "parse_tier", "chunker", "embedding_model", "embedding_dimension", "embedding_sparse_source", "rerank_model", "rerank_provider"):
+        if report.meta.get(key) is not None:
+            meta_lines.append(f"- {key}: {report.meta.get(key)}")
     lines = [
         "# RAG 检索评估报告",
         "",
-        f"- top_k: {report.meta.get('top_k')} · 题目数: {report.meta.get('question_count')} · generated_at: {report.meta.get('generated_at') or '-'}",
-        "- 阈值均为初始拍值（回退 3%），跑两周后按实际抖动校准（spec §4）",
+        *meta_lines,
         "",
         "## 汇总",
         "",
@@ -287,19 +287,6 @@ def render_markdown(report: EvalReport) -> str:
     ]
     for scope, agg in _summary_rows(report):
         lines.append(f"| {scope} | {agg.count} | {_fmt(agg.hit_rate)} | {_fmt(agg.recall)} | {_fmt(agg.mrr)} | {_fmt(agg.path_accuracy)} |")
-
-    if _SCOPES_EXCLUDING_GLOBAL in report.by_category:
-        agg = report.by_category[_SCOPES_EXCLUDING_GLOBAL]
-        lines += [
-            "",
-            "## global（主题级问题）",
-            "",
-            "global 类题目预期大面积失败——这是设计意图：量化「主题级综述检索路」的能力缺口，不解读为回退（spec §10）。",
-            "",
-            "| scope | count | hit_rate | recall | mrr | path_acc |",
-            "|---|---|---|---|---|---|",
-            f"| global | {agg.count} | {_fmt(agg.hit_rate)} | {_fmt(agg.recall)} | {_fmt(agg.mrr)} | {_fmt(agg.path_accuracy)} |",
-        ]
 
     if report.diff is not None:
         lines += ["", "## Baseline diff", ""]
@@ -333,6 +320,11 @@ def render_markdown(report: EvalReport) -> str:
 
 # ── default searchers ───────────────────────────────────────────────────
 
+#: Fusion candidates entering the rerank leg (RFC v3 §8.1: passed explicitly so the
+#: report states the value the run actually used; mirrors the retrieval tool's own
+#: default of 20).
+DEFAULT_CANDIDATE_LIMIT = 20
+
 
 def build_default_searchers(
     *,
@@ -341,6 +333,7 @@ def build_default_searchers(
     store: Any,
     vector_store: Any,
     hybrid_impl: Any = None,
+    candidate_limit: int = DEFAULT_CANDIDATE_LIMIT,
 ) -> dict[str, SearchFn]:
     """Wire the online hybrid-search impl as the vector searcher.
 
@@ -364,7 +357,7 @@ def build_default_searchers(
     )
 
     async def vector_fn(query: str, top_k: int) -> tuple[ScoredHit, ...]:
-        raw, _ = await hybrid_impl(query, runtime, store=store, vector_store=vector_store, top_k=top_k)
+        raw, _ = await hybrid_impl(query, runtime, store=store, vector_store=vector_store, top_k=top_k, candidate_limit=candidate_limit)
         return tuple(ScoredHit(item["chunk_id"], item.get("score")) for item in raw.get("results", []))
 
     return {"vector": vector_fn}

@@ -1,0 +1,16 @@
+database:
+  backend: sqlite
+  sqlite_dir: .rag-eval-ci/data
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+rag:
+  qdrant_url: $QDRANT_URL
+  caption_max_tokens: 1024
+  caption_temperature: 0.15
+  vlm_thinking: false
+models:
+- name: rag-eval-replay-vlm
+  use: langchain_openai:ChatOpenAI
+  model: qwen3.7-flash
+  base_url: http://127.0.0.1:8642
+  api_key: replay-placeholder

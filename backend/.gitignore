@@ -37,3 +37,6 @@ config.yaml
 # pytest --basetemp workaround dirs (sandbox tmp_path permission)
 .pytest_tmp/
 .pytest_tmp_run/
+
+# No-cloud RAG eval CI scratch (config.ci.yaml database dir)
+.rag-eval-ci/

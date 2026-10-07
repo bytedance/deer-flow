@@ -1,0 +1,987 @@
+{
+  "schema_version": 1,
+  "meta": {
+    "candidate_limit": 20,
+    "parse_provider": "mineru-cloud",
+    "parse_tier": null,
+    "chunker": "structure-max1024/min100/cl100k_base",
+    "embedding_provider": "dashscope",
+    "embedding_model": "qwen3.7-text-embedding-flash",
+    "embedding_dimension": 1024,
+    "embedding_sparse_source": "provider",
+    "rerank_provider": "dashscope",
+    "rerank_model": "qwen3.7-text-rerank",
+    "top_k": 5,
+    "question_count": 24,
+    "generated_at": "2026-10-07T17:00:03+00:00"
+  },
+  "overall": {
+    "count": 24,
+    "hit_rate": 1.0,
+    "recall": 1.0,
+    "mrr": 0.9791666666666666,
+    "path_accuracy": 1.0
+  },
+  "by_category": {
+    "text": {
+      "count": 20,
+      "hit_rate": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "path_accuracy": 1.0
+    },
+    "table": {
+      "count": 2,
+      "hit_rate": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "path_accuracy": 1.0
+    },
+    "image": {
+      "count": 2,
+      "hit_rate": 1.0,
+      "recall": 1.0,
+      "mrr": 0.75,
+      "path_accuracy": 1.0
+    }
+  },
+  "questions": [
+    {
+      "id": "q001",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0003",
+              "score": 0.997488
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.465494
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0004",
+              "score": 0.287854
+            },
+            {
+              "chunk_id": "c8396e1250a9742d8934b1f6d85818dc#0001",
+              "score": 0.211092
+            },
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0002",
+              "score": 0.172291
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q002",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0001",
+              "score": 0.999928
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0004",
+              "score": 0.843321
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.648647
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0002",
+              "score": 0.557779
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0000",
+              "score": 0.378414
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q003",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "1c7e444f929dba2453a81301fbcf432d#0001",
+              "score": 1.0
+            },
+            {
+              "chunk_id": "7b2ee69d274e527f42bbf4470ad20dbc#0000",
+              "score": 0.600797
+            },
+            {
+              "chunk_id": "1c7e444f929dba2453a81301fbcf432d#0003",
+              "score": 0.581712
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.484862
+            },
+            {
+              "chunk_id": "1c7e444f929dba2453a81301fbcf432d#0000",
+              "score": 0.331769
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q004",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0003",
+              "score": 1.0
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0004",
+              "score": 0.541178
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.401439
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0000",
+              "score": 0.292094
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0000",
+              "score": 0.264885
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q005",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0004",
+              "score": 0.999976
+            },
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0001",
+              "score": 0.987378
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.542656
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0000",
+              "score": 0.374071
+            },
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0002",
+              "score": 0.311069
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q006",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0001",
+              "score": 1.0
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.681408
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0001",
+              "score": 0.575485
+            },
+            {
+              "chunk_id": "c8396e1250a9742d8934b1f6d85818dc#0000",
+              "score": 0.346018
+            },
+            {
+              "chunk_id": "c8396e1250a9742d8934b1f6d85818dc#0001",
+              "score": 0.323061
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q007",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0002",
+              "score": 0.999993
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0003",
+              "score": 0.886194
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.550195
+            },
+            {
+              "chunk_id": "1c7e444f929dba2453a81301fbcf432d#0002",
+              "score": 0.285721
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0001",
+              "score": 0.192641
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q008",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0003",
+              "score": 0.999879
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.672661
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0002",
+              "score": 0.627768
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0005",
+              "score": 0.358708
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0001",
+              "score": 0.261191
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q009",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0005",
+              "score": 0.996505
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.564465
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0006",
+              "score": 0.516598
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0000",
+              "score": 0.338477
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0002",
+              "score": 0.251108
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q010",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0001",
+              "score": 0.97651
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.494903
+            },
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0002",
+              "score": 0.454683
+            },
+            {
+              "chunk_id": "50ee22bc2c997f904b269577ffb1dab8#0000",
+              "score": 0.422713
+            },
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0000",
+              "score": 0.286456
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q011",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0001",
+              "score": 0.982623
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0001",
+              "score": 0.845814
+            },
+            {
+              "chunk_id": "c8396e1250a9742d8934b1f6d85818dc#0001",
+              "score": 0.606259
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0000",
+              "score": 0.54657
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0004",
+              "score": 0.536073
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q012",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0006",
+              "score": 0.98613
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0005",
+              "score": 0.793376
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.579494
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0000",
+              "score": 0.335235
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0002",
+              "score": 0.147907
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q013",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "1c7e444f929dba2453a81301fbcf432d#0002",
+              "score": 1.0
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.572666
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0002",
+              "score": 0.389157
+            },
+            {
+              "chunk_id": "1c7e444f929dba2453a81301fbcf432d#0001",
+              "score": 0.354784
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0004",
+              "score": 0.280293
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q014",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0006",
+              "score": 0.888305
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.373882
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0000",
+              "score": 0.281863
+            },
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0000",
+              "score": 0.235473
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0005",
+              "score": 0.223245
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q015",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0002",
+              "score": 1.0
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.439635
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0001",
+              "score": 0.333183
+            },
+            {
+              "chunk_id": "1c7e444f929dba2453a81301fbcf432d#0002",
+              "score": 0.270684
+            },
+            {
+              "chunk_id": "c8396e1250a9742d8934b1f6d85818dc#0001",
+              "score": 0.244012
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q016",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.993658
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0000",
+              "score": 0.839805
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0004",
+              "score": 0.762032
+            },
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0001",
+              "score": 0.723579
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0003",
+              "score": 0.7234
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q017",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0002",
+              "score": 0.99875
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.641917
+            },
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0000",
+              "score": 0.531995
+            },
+            {
+              "chunk_id": "50ee22bc2c997f904b269577ffb1dab8#0000",
+              "score": 0.444338
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0004",
+              "score": 0.257802
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q018",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "1c7e444f929dba2453a81301fbcf432d#0003",
+              "score": 1.0
+            },
+            {
+              "chunk_id": "7b2ee69d274e527f42bbf4470ad20dbc#0000",
+              "score": 0.878038
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.869741
+            },
+            {
+              "chunk_id": "1c7e444f929dba2453a81301fbcf432d#0001",
+              "score": 0.759428
+            },
+            {
+              "chunk_id": "1c7e444f929dba2453a81301fbcf432d#0002",
+              "score": 0.718846
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q019",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0004",
+              "score": 1.0
+            },
+            {
+              "chunk_id": "c8396e1250a9742d8934b1f6d85818dc#0001",
+              "score": 0.853168
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0003",
+              "score": 0.701349
+            },
+            {
+              "chunk_id": "c8396e1250a9742d8934b1f6d85818dc#0000",
+              "score": 0.64017
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.603858
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "q020",
+      "category": "text",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.999989
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0000",
+              "score": 0.583749
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0004",
+              "score": 0.503674
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0003",
+              "score": 0.4883
+            },
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0002",
+              "score": 0.446876
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "qt01",
+      "category": "table",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "7b2ee69d274e527f42bbf4470ad20dbc#0000",
+              "score": 1.0
+            },
+            {
+              "chunk_id": "1c7e444f929dba2453a81301fbcf432d#0003",
+              "score": 0.802185
+            },
+            {
+              "chunk_id": "1c7e444f929dba2453a81301fbcf432d#0001",
+              "score": 0.550473
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.429678
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0000",
+              "score": 0.331742
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "qt02",
+      "category": "table",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "50ee22bc2c997f904b269577ffb1dab8#0000",
+              "score": 0.992867
+            },
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0002",
+              "score": 0.530827
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.414944
+            },
+            {
+              "chunk_id": "c7d5bb4edff9886013586e15245919d5#0000",
+              "score": 0.321647
+            },
+            {
+              "chunk_id": "109fd20d543ae2d3313d1255fd5d406e#0000",
+              "score": 0.3202
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "qi01",
+      "category": "image",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 0.5,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0004",
+              "score": 0.989191
+            },
+            {
+              "chunk_id": "c8396e1250a9742d8934b1f6d85818dc#0001",
+              "score": 0.977692
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.585381
+            },
+            {
+              "chunk_id": "c8396e1250a9742d8934b1f6d85818dc#0000",
+              "score": 0.559407
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0003",
+              "score": 0.209579
+            }
+          ],
+          "failure": null
+        }
+      }
+    },
+    {
+      "id": "qi02",
+      "category": "image",
+      "expected_paths": [
+        "vector"
+      ],
+      "actual_path": "vector",
+      "path_correct": true,
+      "hit": 1.0,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "paths": {
+        "vector": {
+          "hits": [
+            {
+              "chunk_id": "c8396e1250a9742d8934b1f6d85818dc#0001",
+              "score": 0.913324
+            },
+            {
+              "chunk_id": "c8396e1250a9742d8934b1f6d85818dc#0000",
+              "score": 0.715169
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0001",
+              "score": 0.418355
+            },
+            {
+              "chunk_id": "3cb9c8af041653394472cad5ae018323#0004",
+              "score": 0.401973
+            },
+            {
+              "chunk_id": "93f4197d7b4644bd353904a3e2769663#0000",
+              "score": 0.301617
+            }
+          ],
+          "failure": null
+        }
+      }
+    }
+  ],
+  "diff": null
+}

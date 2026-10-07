@@ -120,15 +120,12 @@ async def _seed_table_kb(store: KnowledgeStore, tmp_path) -> tuple[list[str], li
 
 
 def _searchers_hitting(hit_chunk_ids: list[str]) -> dict:
-    """stub searchers：vector 路按序命中给定行卡（模拟向量召回，分数递减）；graph/wiki 空。"""
+    """stub searcher：vector 路按序命中给定行卡（模拟向量召回，分数递减）。"""
 
     async def vector_fn(query: str, top_k: int):
         return tuple(ScoredHit(chunk_id=cid, score=0.9 - 0.01 * i) for i, cid in enumerate(hit_chunk_ids[:top_k]))
 
-    async def empty_fn(query: str, top_k: int):
-        return ()
-
-    return {"vector": vector_fn, "graph": empty_fn, "wiki": empty_fn}
+    return {"vector": vector_fn}
 
 
 async def test_table_row_card_chunk_ids_are_valid_golden_anchors(store, tmp_path) -> None:
@@ -151,7 +148,7 @@ async def test_table_row_card_chunk_ids_are_valid_golden_anchors(store, tmp_path
             "expected_paths": ["vector"],
             "relevant_chunk_ids": all_chunk_ids,
             "relevant_entities": [],
-            "category": "fact",
+            "category": "table",
         }
     )
 
@@ -173,7 +170,7 @@ async def test_table_row_cards_enter_layer1_recall(store, tmp_path) -> None:
                 "expected_paths": ["vector"],
                 "relevant_chunk_ids": [target_card],
                 "relevant_entities": [],
-                "category": "fact",
+                "category": "table",
             },
             ensure_ascii=False,
         )

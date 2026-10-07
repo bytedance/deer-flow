@@ -1,20 +1,22 @@
 """Batch retrieval evaluation CLI (spec 2026-08-23 §6).
 
-Runs the golden dataset through the three online retrieval impls — no gateway
+Runs the golden dataset through the online retrieval impl — no gateway
 needed, so it works in CI containers — writes ``report.json`` / ``report.md``,
 prints the terminal summary, and maps the regression gate to the exit code:
 
 - 0  ok (or no baseline given)
 - 1  regression beyond ``--fail-threshold``
 - 2  usage / IO error (bad golden file, missing baseline, unknown kb)
-- 3  skipped — required API keys absent (explicit, never a fake green)
+- 3  skipped — credentials the configured remote endpoints require are absent
+  (explicit, never a fake green; a local/replay configuration — the no-cloud CI
+  path — demands no credentials and runs to completion)
 
 Usage (from ``backend/``):
 
     uv run python scripts/run_rag_eval.py \
         --kb-id <KB_ID> --golden tests/fixtures/rag_eval/golden.jsonl --out <dir> \
-        [--baseline <prev report.json>|auto] [--top-k 5] [--fail-threshold 0.03] \
-        [--environment local|ci|nightly] [--mark-baseline]
+        [--baseline <prev report.json>|auto] [--top-k 5] [--candidate-limit 20] \
+        [--fail-threshold 0.03] [--environment local|ci|nightly] [--mark-baseline]
 
 ``--baseline auto`` diffs against the KB's marked baseline run (the eval_runs
 ``is_baseline`` row); no marked row means a plain no-diff run.
@@ -22,6 +24,11 @@ Usage (from ``backend/``):
 marker in the same transaction (spec 2026-08-24 §3.1.3). Completed runs only
 (exit 0/1): on an error/skipped run the flag is ignored — the previous
 baseline stays untouched — with a note on stderr.
+
+The report's meta block (RFC v3 §8.1) records the fixed run parameters
+(``top_k``, ``candidate_limit``) and the version block resolved from the live
+config: parse provider/tier, chunker constants, embedding model and width,
+sparse way, rerank model/provider.
 """
 
 from __future__ import annotations
@@ -34,9 +41,11 @@ import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from deerflow_knowledge.eval.metrics import DEFAULT_FAIL_THRESHOLD
 from deerflow_knowledge.eval.persistence import ENV_LOCAL, ENVIRONMENTS, STATUS_COMPLETED, generate_run_id, resolve_environment
+from deerflow_knowledge.eval.runner import DEFAULT_CANDIDATE_LIMIT
 
 EXIT_OK = 0
 EXIT_REGRESSION = 1
@@ -120,11 +129,34 @@ def _persist_quietly(args: argparse.Namespace, *, status: str, environment: str 
         print(f"rag-eval note: eval_runs persistence skipped ({type(exc).__name__}: {exc})", file=sys.stderr)
 
 
-#: The vector path needs embedding + rerank credentials. The graph path's
-#: extraction LLM key resolves through config.yaml model profiles — a missing
-#: ``$VAR`` there makes ``AppConfig.from_file`` raise ValueError, which
-#: ``_async_main`` maps to EXIT_SKIPPED.
+#: Env fallbacks the remote (cloud) embedding/rerank legs read when the rag
+#: config declares no key. Only consulted when a leg points at a remote
+#: endpoint — a loopback endpoint (the no-cloud CI's replay service) needs no
+#: credential and the run proceeds (RFC v3 §8.2).
 REQUIRED_ENV_KEYS = ("DASHSCOPE_EMBEDDING_API_KEY", "DASHSCOPE_RERANK_API_KEY")
+
+_LOCAL_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _is_local_endpoint(url: str | None) -> bool:
+    return bool(url) and (urlparse(url).hostname or "") in _LOCAL_HOSTS
+
+
+def _legs_need_credentials() -> bool:
+    """True when either retrieval leg points at a remote endpoint.
+
+    A missing/unparsable config also answers True — the ``ValueError`` skip
+    path inside ``_async_main`` then produces the same explicit skip.
+    """
+    try:
+        from deerflow.config.app_config import get_app_config
+
+        rag = getattr(get_app_config(), "rag", None)
+    except ValueError:
+        return True
+    if rag is None:
+        return True
+    return not (_is_local_endpoint(rag.embedding_base_url) and _is_local_endpoint(rag.rerank_base_url))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -138,6 +170,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Previous report.json for the regression diff, or 'auto' to diff against the KB's marked baseline run in eval_runs.",
     )
     parser.add_argument("--top-k", type=int, default=5, help="Hits per path per question (default 5).")
+    parser.add_argument(
+        "--candidate-limit",
+        type=int,
+        default=DEFAULT_CANDIDATE_LIMIT,
+        help=f"Fusion candidates entering the rerank leg (default {DEFAULT_CANDIDATE_LIMIT}; fixed along with --top-k and recorded in the report).",
+    )
     parser.add_argument(
         "--fail-threshold",
         type=float,
@@ -177,6 +215,37 @@ async def _load_auto_baseline(kb_id: str) -> dict | None:
         return None
     print(f"rag-eval: diffing against marked baseline run {row.id}")
     return eval_persistence.baseline_report_from_metrics(row.layer1_metrics)
+
+
+def _report_meta(config: object, args: argparse.Namespace) -> dict:
+    """The report's fixed parameters + version block (RFC v3 §8.1).
+
+    Everything here answers "what produced these numbers": the pinned
+    retrieval knobs and the parse/chunk/embed/sparse/rerank versions. Values
+    come from the live config, never from constants duplicated here (except
+    the chunker's own module constants, the single source for chunk sizing).
+    """
+    from deerflow_knowledge.chunker import MAX_CHUNK_TOKENS, MIN_CHUNK_TOKENS
+    from deerflow_knowledge.embedder_factory import effective_dimension
+
+    meta = {"candidate_limit": args.candidate_limit}
+    rag = getattr(config, "rag", None)
+    if rag is None:  # partial configs (tests) — the fixed knobs still ride along
+        return meta
+    meta.update(
+        {
+            "parse_provider": rag.parse_provider,
+            "parse_tier": rag.parse_tier,
+            "chunker": f"structure-max{MAX_CHUNK_TOKENS}/min{MIN_CHUNK_TOKENS}/cl100k_base",
+            "embedding_provider": rag.embedding_provider,
+            "embedding_model": rag.embedding_model,
+            "embedding_dimension": effective_dimension(rag),
+            "embedding_sparse_source": rag.embedding_sparse_source,
+            "rerank_provider": rag.rerank_provider,
+            "rerank_model": rag.rerank_model,
+        }
+    )
+    return meta
 
 
 async def _async_main(args: argparse.Namespace, *, environment: str = ENV_LOCAL) -> int:
@@ -233,6 +302,7 @@ async def _async_main(args: argparse.Namespace, *, environment: str = ENV_LOCAL)
             user_id=kb["owner_id"],
             store=store,
             vector_store=get_vector_store(),
+            candidate_limit=args.candidate_limit,
         )
         report = await run_evaluation(
             questions,
@@ -241,6 +311,7 @@ async def _async_main(args: argparse.Namespace, *, environment: str = ENV_LOCAL)
             baseline=baseline,
             fail_threshold=args.fail_threshold,
             generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            meta_extra=_report_meta(config, args),
         )
         # exit 0/1 both map to `completed` — the regression gate signal lives
         # in baseline_diff and the trend chart needs the regression run's point.
@@ -283,7 +354,7 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
         environ = os.environ
     environment = resolve_environment(args.environment, environ)
     missing = missing_required_keys(environ)
-    if missing:
+    if missing and _legs_need_credentials():
         print(f"rag-eval skipped: missing required API keys: {', '.join(missing)} (exit {EXIT_SKIPPED} — explicit skip, not a pass)")
         _persist_quietly(args, status="skipped", environment=environment)  # 留痕：何时尝试过（best-effort）
         return EXIT_SKIPPED

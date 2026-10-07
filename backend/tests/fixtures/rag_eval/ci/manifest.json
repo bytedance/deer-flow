@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "generated_at": "2026-10-07T16:55:21+00:00",
+  "fingerprint": "b433ff213b05f5406e8dd290740ff59be132c1c84711be892011b35a474140ac",
+  "kb_id": "e8ef9a58b07245c3a27ff6e2a64452ea",
+  "entries": 57,
+  "combination": {
+    "embedding_provider": "dashscope",
+    "embedding_model": "qwen3.7-text-embedding-flash",
+    "embedding_dimension": 1024,
+    "embedding_sparse_source": "provider",
+    "rerank_provider": "dashscope",
+    "rerank_model": "qwen3.7-text-rerank",
+    "vlm_dialect": "openai",
+    "vlm_model": "qwen3.7-flash",
+    "caption_max_tokens": 1024,
+    "caption_temperature": 0.15,
+    "vlm_thinking": false
+  },
+  "ci_rag_config": {
+    "embedding_provider": "dashscope",
+    "embedding_model": "qwen3.7-text-embedding-flash",
+    "embedding_base_url": "http://127.0.0.1:8642",
+    "embedding_api_key": "replay-placeholder",
+    "embedding_dimension": 1024,
+    "embedding_sparse_source": "provider",
+    "rerank_provider": "dashscope",
+    "rerank_model": "qwen3.7-text-rerank",
+    "rerank_base_url": "http://127.0.0.1:8642",
+    "rerank_api_key": "replay-placeholder",
+    "vlm_model": "rag-eval-replay-vlm",
+    "mineru_api_token": "replay-placeholder"
+  }
+}

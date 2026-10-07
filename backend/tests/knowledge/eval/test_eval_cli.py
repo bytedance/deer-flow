@@ -44,13 +44,15 @@ class TestParseArgs:
         args = cli.parse_args(_args())
 
         assert args.top_k == 5
+        assert args.candidate_limit == 20
         assert args.fail_threshold == pytest.approx(0.03)
         assert args.baseline is None
 
     def test_explicit_values(self):
-        args = cli.parse_args(_args("--top-k", "10", "--fail-threshold", "0.05", "--baseline", "prev.json"))
+        args = cli.parse_args(_args("--top-k", "10", "--candidate-limit", "30", "--fail-threshold", "0.05", "--baseline", "prev.json"))
 
         assert args.top_k == 10
+        assert args.candidate_limit == 30
         assert args.fail_threshold == pytest.approx(0.05)
         assert args.baseline == "prev.json"
 
@@ -66,6 +68,36 @@ class TestMissingRequiredKeys:
         assert cli.missing_required_keys({"DASHSCOPE_EMBEDDING_API_KEY": "k"}) == ["DASHSCOPE_RERANK_API_KEY"]
 
 
+class TestCredentialGate:
+    """RFC v3 §8.2：只有远程端点才要凭据；loopback（回放服务）配置无凭据也完整执行。"""
+
+    def test_local_endpoints_demand_no_credentials(self):
+        assert cli._is_local_endpoint("http://127.0.0.1:8642") is True
+        assert cli._is_local_endpoint("http://localhost:8642/v1") is True
+        assert cli._is_local_endpoint(None) is False
+        assert cli._is_local_endpoint("https://dashscope.aliyuncs.com") is False
+
+    def test_legs_need_credentials_follows_the_endpoints(self, monkeypatch):
+        from types import SimpleNamespace
+
+        import deerflow.config.app_config as app_config_module
+
+        def _config(embed: str | None, rerank: str | None):
+            return lambda: SimpleNamespace(rag=SimpleNamespace(embedding_base_url=embed, rerank_base_url=rerank))
+
+        monkeypatch.setattr(app_config_module, "get_app_config", _config("http://127.0.0.1:8642", "http://127.0.0.1:8642"))
+        assert cli._legs_need_credentials() is False
+
+        monkeypatch.setattr(app_config_module, "get_app_config", _config("http://127.0.0.1:8642", "https://dashscope.aliyuncs.com"))
+        assert cli._legs_need_credentials() is True
+
+        def _raise():
+            raise ValueError("unresolved $ENV")
+
+        monkeypatch.setattr(app_config_module, "get_app_config", _raise)
+        assert cli._legs_need_credentials() is True
+
+
 class TestSkipBehavior:
     def test_main_skips_without_keys(self, tmp_path, capsys, monkeypatch):
         # Task 0b: the skip path persists a skipped row (spec §3.1.1) — stubbed
@@ -73,6 +105,7 @@ class TestSkipBehavior:
         # covered in test_eval_persistence.py.
         persisted = []
         monkeypatch.setattr(cli, "_persist_quietly", lambda args, *, status, environment: persisted.append(status))
+        monkeypatch.setattr(cli, "_legs_need_credentials", lambda: True)
         out = tmp_path / "out"
         code = cli.main(["--golden", "g.jsonl", "--out", str(out), "--kb-id", "kb1"], environ={})
 
@@ -83,6 +116,15 @@ class TestSkipBehavior:
         assert "DASHSCOPE_EMBEDDING_API_KEY" in captured.out
         assert not out.exists()  # 无副作用
         assert persisted == ["skipped"]
+
+    def test_main_runs_without_keys_when_endpoints_are_local(self, monkeypatch):
+        # 无云 CI 路径：回放端点在 loopback，缺 env 键不构成跳过。
+        monkeypatch.setattr(cli, "_legs_need_credentials", lambda: False)
+        called = []
+        monkeypatch.setattr(cli, "_run", lambda args, *, environment: called.append(environment) or 0)
+
+        assert cli.main(_args(), environ={}) == 0
+        assert called  # 走到真正执行
 
 
 class TestExitCodeMapping:
@@ -130,7 +172,7 @@ class TestAsyncMainGuards:
                     "expected_path": "vector",
                     "relevant_chunk_ids": ["e1b9e365f63747958337431dc755c620#0007"],
                     "relevant_entities": [],
-                    "category": "fact",
+                    "category": "text",
                 },
                 ensure_ascii=False,
             )
