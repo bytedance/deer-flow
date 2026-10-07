@@ -124,9 +124,10 @@ services:
     # QR login and browser tools stay worker-local, so keep one worker while
     # they are enabled. --timeout-graceful-shutdown bounds how long open SSE
     # connections may delay lifespan shutdown after SIGTERM; stop_grace_period
-    # below must cover that bound plus the lifespan's worst case: five hooks
+    # below must cover that bound plus the lifespan's worst case: seven hooks
     # bounded at 5s each (trash sweep, notification worker, channel service,
-    # browser sessions, MCP session pool), the 1s retrieval-warm wait, the 5s
+    # scheduled task service, subagent batch service, browser sessions,
+    # MCP session pool), the 1s retrieval-warm wait, the 5s
     # run drain and the 30s memory flush (memory.shutdown_flush_timeout_seconds)
     # -- about 61s -- plus slack. backend/tests/_gateway_shutdown_budget.py
     # pins the arithmetic.
