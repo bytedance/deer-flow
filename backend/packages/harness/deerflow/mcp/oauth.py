@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -26,12 +27,13 @@ class _OAuthToken:
 
 @dataclass
 class _OAuthState:
-    """One connection's mutable tokens and cross-loop refresh lock."""
+    """One connection's mutable tokens and loop-independent refresh signal."""
 
     config: McpOAuthConfig
     token: _OAuthToken | None = None
-    # Sync tool wrappers and the Gateway can refresh from different loops.
+    # Protect short state transitions only; never hold this lock across an await.
     lock: threading.Lock = field(default_factory=threading.Lock)
+    refresh_done: Future[None] | None = None
 
 
 class OAuthTokenManager:
@@ -40,16 +42,8 @@ class OAuthTokenManager:
     def __init__(self, oauth_by_server: dict[str, McpOAuthConfig]):
         # Refresh-token rotation belongs to runtime state, not the parsed config
         # used by cache/snapshot validation or custom interceptor builders.
-        # A plain threading.Lock, not asyncio.Lock: the embedded/TUI sync tool-call
-        # path (DeerFlowClient.stream() -> LangGraph ToolNode._func -> a
-        # ThreadPoolExecutor -> deerflow.tools.sync.make_sync_tool_wrapper's
-        # per-call asyncio.run()) invokes get_authorization_header from a fresh
-        # event loop on a fresh OS thread for every concurrent tool call. An
-        # asyncio.Lock binds to whichever loop first contends on it; a second
-        # caller's release/wake-up crossing loops without call_soon_threadsafe
-        # either deadlocks silently or raises "bound to a different event loop".
-        # threading.Lock has no loop affinity, so it is safe to share across
-        # however many event loops/threads call into the same server's lock.
+        # Sync tool wrappers use a fresh asyncio.run() per call. Refresh waiters
+        # therefore need a signal that can be awaited from different loops.
         self._states = {name: _OAuthState(config=oauth.model_copy(deep=True)) for name, oauth in oauth_by_server.items()}
 
     @classmethod
@@ -86,55 +80,32 @@ class OAuthTokenManager:
             return None
 
         oauth = state.config
-        token = state.token
-        if token and not self._is_expiring(token, oauth):
-            return self._authorization_value(token, server_name)
+        while True:
+            with state.lock:
+                token = state.token
+                if token and not self._is_expiring(token, oauth):
+                    return self._authorization_value(token, server_name)
+                refresh_done = state.refresh_done
+                if refresh_done is None:
+                    refresh_done = state.refresh_done = Future()
+                    break
+            # Blocking lock waiters can exhaust the default executor needed by
+            # the refresh owner's DNS lookup. Await a loop-local wrapper instead;
+            # cancelling a waiter must not cancel the shared completion signal.
+            await asyncio.shield(asyncio.wrap_future(refresh_done))
 
-        lock = state.lock
-        # Acquire the OS-level lock off-thread so a blocking wait never blocks this
-        # event loop, then release it synchronously (release() never blocks). This
-        # keeps the de-duplication behavior of the old `async with lock:` (only one
-        # concurrent caller per server actually fetches a token) while remaining
-        # safe when callers are on different event loops/threads.
-        #
-        # The acquisition itself runs as an explicit Task, shielded from this
-        # coroutine's own cancellation. A bare `await asyncio.to_thread(lock.acquire)`
-        # cannot be safely cancelled: once the executor thread has started running
-        # lock.acquire(), Python has no way to stop it, so a cancellation delivered
-        # at that await would still let the thread go on to acquire the lock later
-        # (whenever the current holder releases it) with this coroutine already
-        # gone and nobody left to call release() -- the lock would stay locked
-        # forever and every later call for this server would block permanently at
-        # this same line. Shielding the acquisition task means a cancelled caller
-        # can instead wait for that (unstoppable) acquisition to actually land and
-        # release the lock immediately, rather than leaking ownership of it.
-        acquire_task = asyncio.create_task(asyncio.to_thread(lock.acquire), name=f"oauth-lock-acquire:{server_name}")
         try:
-            await asyncio.shield(acquire_task)
-        except asyncio.CancelledError:
-            # Keep waiting -- shielded on every retry -- until the acquisition
-            # actually finishes, even if this coroutine is cancelled again while
-            # cleaning up: the underlying thread cannot be interrupted, so this is
-            # the only way to learn when the lock becomes ours and release it
-            # right away instead of leaving it locked forever.
-            while not acquire_task.done():
-                try:
-                    await asyncio.shield(acquire_task)
-                except asyncio.CancelledError:
-                    continue
-            lock.release()
-            raise
-        try:
-            token = state.token
-            if token and not self._is_expiring(token, oauth):
-                return self._authorization_value(token, server_name)
-
             fresh = await self._fetch_token(oauth)
-            state.token = fresh
+            with state.lock:
+                state.token = fresh
             logger.info(f"Refreshed OAuth access token for MCP server: {server_name}")
             return self._authorization_value(fresh, server_name)
         finally:
-            lock.release()
+            with state.lock:
+                state.refresh_done = None
+            # Wake every loop even when this caller fails or is cancelled. They
+            # recheck the cache and may elect a new owner. Notify outside the lock.
+            refresh_done.set_result(None)
 
     @staticmethod
     def _authorization_value(token: _OAuthToken, server_name: str) -> str:
