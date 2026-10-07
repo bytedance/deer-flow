@@ -1405,6 +1405,7 @@ models:
 - `DEEPSEEK_API_KEY` - DeepSeek API key
 - `MIMO_API_KEY` - Xiaomi MiMo API key
 - `NOVITA_API_KEY` - Novita API key (OpenAI-compatible endpoint)
+- `OPPER_API_KEY` - Opper API key (OpenAI-compatible endpoint)
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
