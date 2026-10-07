@@ -23,6 +23,7 @@ OUTBOX = "0027_notification_deliveries"
 PARKED = "0028_parked_attempts"
 SCHEDULER = "0029_scheduler_agent_tasks"
 CLAIM_TOKENS = "0030_notification_claim_tokens"
+HEAD = "0032_activity_and_task_events"
 PREVIOUS = "0026_mcp_task_lease_tokens"
 TABLE = "notification_deliveries"
 
@@ -105,7 +106,7 @@ async def test_bootstrap_claim_tokens_preserves_existing_scheduler_and_outbox(tm
             await bootstrap.bootstrap_schema(engine, backend="sqlite")
             await assert_preserved()
             async with engine.connect() as conn:
-                assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == CLAIM_TOKENS
+                assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == HEAD
                 assert (await conn.execute(sa.text("SELECT claim_token FROM notification_deliveries WHERE id='delivery'"))).scalar_one() is None
 
         await asyncio.to_thread(command.downgrade, cfg, SCHEDULER)

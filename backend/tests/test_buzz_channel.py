@@ -46,7 +46,7 @@ def _channel(**overrides) -> BuzzChannel:
 def test_registered_in_framework_registries():
     assert _CHANNEL_REGISTRY["buzz"] == "app.channels.buzz:BuzzChannel"
     assert _CHANNEL_CREDENTIAL_KEYS["buzz"] == ["private_key"]
-    assert CHANNEL_CAPABILITIES["buzz"] == {"supports_streaming": True}
+    assert CHANNEL_CAPABILITIES["buzz"] == {"supports_streaming": True, "proactive_notifications": False}
     policy = CHANNEL_RUN_POLICY["buzz"]
     assert policy.serialize_thread_runs is True and policy.requires_bound_identity is False
 

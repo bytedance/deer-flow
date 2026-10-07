@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 53
+config_version: 55
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -2690,11 +2690,22 @@ agent_storage:
 # ============================================================================
 # Background scheduler for one-time, cron, and interval agent runs.
 # Poller fields (enabled, multi_instance, poll_interval_seconds, lease_seconds,
-# max_concurrent_runs, min_once_delay_seconds) are restart-required.
+# max_concurrent_runs, max_concurrent_runs_per_user, queue_timeout_seconds,
+# min_once_delay_seconds) are restart-required.
 # recursion_limit is read at dispatch and applies to the next scheduled run
 # without a Gateway restart. The default (1000) matches the web UI's
 # interactive budget so scheduled and interactive runs behave identically out
 # of the box. Values above max_recursion_limit are clamped.
+#
+# Execution slots are shared fairly between task owners. Each owner may hold at
+# most max_concurrent_runs_per_user launching/running scheduled runs (manual
+# "run now" included); the default 2 leaves one of the 3 default global slots
+# for everyone else. The waiting queue is drained owner by owner, so one
+# owner's backlog never pushes another owner's run out of the batch, even with
+# the per-owner cap off (0). A run that waits longer than queue_timeout_seconds
+# is skipped; its run history reads "Skipped: it waited too long for a free
+# slot" and no chat or IM notice is sent, so keep queue_timeout_seconds well
+# above an owner's typical run length.
 #
 # The scheduler is single-instance by default. Set multi_instance: true only
 # when every Gateway instance shares Postgres, run ownership heartbeats, and
@@ -2702,8 +2713,15 @@ agent_storage:
 #
 # When channel_connections.enabled is true and IM channels are running, the
 # same poll_interval_seconds also drives the notification delivery worker that
-# pushes scheduled-run outcomes to the owner's bound IM identities (WeCom
-# proactive push today). Manual "run now" and interrupts stay silent.
+# pushes scheduled-task updates to the owner's bound IM identities (only WeCom
+# supports proactive push today; other apps get no notices). Each occurrence
+# sends at most one message: a finished run, a failed run, a missed goal, the
+# automatic pause after three misses, a pause by the agent (stop condition met)
+# or the task finishing (all max_runs done, end_at reached). Notices are queued
+# in the same transaction that records the outcome, so runs finalized by crash
+# or lease recovery notify once. Plain manual "run now" trials and interrupted
+# runs stay silent. The text is in the owner's web UI language (else
+# channel_connections.notification_locale) and has no IDs and no links.
 #
 # scheduler:
 #   enabled: false               # Master switch for the background poller
@@ -2711,6 +2729,7 @@ agent_storage:
 #   poll_interval_seconds: 5     # How often to scan for due tasks (+ IM outbox delivery)
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
 #   max_concurrent_runs: 3       # Global cap on launching/running scheduled runs across multi-instance Pods
+#   max_concurrent_runs_per_user: 2  # Per-owner cap (0 = off); never more than max_concurrent_runs
 #   queue_timeout_seconds: 3600  # Maximum durable queue wait before an occurrence fails
 #   min_once_delay_seconds: 60   # Floor for one-time run_at offset and interval every_seconds
 #   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
@@ -2721,6 +2740,7 @@ scheduler:
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
+  max_concurrent_runs_per_user: 2
   queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
   recursion_limit: 1000
@@ -2861,15 +2881,20 @@ run_ownership:
 # - Telegram uses a deep link when `bot_username` is configured.
 # - Slack, Discord, Feishu, DingTalk, WeChat, WeCom, and QQ use `/connect <code>`
 #   through the already-running bot/app.
-# - When enabled (and channels are running), scheduled-task completions/failures
-#   also enqueue IM pushes to the owner's connected identities (see scheduler
-#   section above). Manual triggers and interrupts do not notify.
+# - When enabled (and channels are running), scheduled-task updates (runs,
+#   pauses, finishes) are pushed to the owner's connected identities on apps
+#   with proactive push, WeCom today (see scheduler section above). Settings
+#   shows per app whether updates are sent there. Plain manual trials and
+#   interrupted runs do not notify. Notices carry no links.
 #
 # channel_connections:
 #   enabled: false
 #   # Security: keep this enabled unless you intentionally want legacy open-bot behavior.
 #   # Disabling it lets unbound external IM users create DeerFlow threads/runs.
 #   require_bound_identity: true
+#   # Language of scheduled-task IM notices (en-US or zh-CN) for owners without
+#   # a web UI language preference (e.g. auth disabled). Restart-required.
+#   notification_locale: en-US
 #
 #   telegram:
 #     enabled: false
@@ -3198,6 +3223,10 @@ run_ownership:
 #       # resource unrestricted for the role**, so list it explicitly to
 #       # constrain it. Declared plugin pages are not gated yet: their
 #       # `plugin_pages` row ships with the page-authorization slice.
+#       #
+#       # Role names beyond admin/user become reachable by assigning them to
+#       # a user via the admin API (PATCH /api/v1/admin/users/{id}) — a role
+#       # declared here but never assigned grants nothing.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}

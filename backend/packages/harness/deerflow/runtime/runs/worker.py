@@ -1501,6 +1501,8 @@ async def run_agent(
                 return
             final_goal_verdict = dict(evaluation)
             final_goal_verdict["relied_on_assumption"] = bool(evaluation.get("relied_on_assumption", False)) if evaluation["satisfied"] else False
+            # Hidden goal turns this run took; the task page shows the count.
+            final_goal_verdict["continuations"] = int(evaluated_goal.get("continuation_count", 0))
             if stand_down_reason:
                 final_goal_verdict["stand_down_reason"] = stand_down_reason
                 if stand_down_reason.startswith("thread_changed"):

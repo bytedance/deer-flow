@@ -144,6 +144,9 @@ It is disabled by default; see the linked guide to enable it.
 For Google's official Gemini OpenAI-compatible endpoint, use the
 [Gemini reasoning profile](backend/docs/CONFIGURATION.md#gemini-via-googles-openai-compatible-endpoint).
 
+For MindIE XML tool calls, see the
+[argument parsing and newline compatibility guide](backend/docs/CONFIGURATION.md#mindie-xml-tool-arguments).
+
 1. **Clone the DeerFlow repository**
 
    ```bash
@@ -167,6 +170,8 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
 
    Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Valid `Retry-After` hints set a minimum wait for HTTP 429/503; 429 without a valid hint stays terminal. Hints that cannot fit the remaining budget stop retries. Local backoff remains randomized. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
 
+   Jina also accepts an opt-in `max_response_bytes` tool setting (positive integer; omitted/null disables it). It stops oversized decoded responses before extraction, with no partial success or retry. This leaves the 4096-character output cap unchanged and does not bound HTTPX decompressor allocations or wire bandwidth; see [response budget](backend/docs/CONFIGURATION.md#jina-response-byte-budget).
+
    Run `make doctor` at any time to verify your setup and get actionable fix hints.
    If you are opening a GitHub issue about a local setup or runtime problem, run
    `make support-bundle`. The command prints reporter next steps, writes a
@@ -178,7 +183,10 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
    alone is not enough. Maintainers and AI triage tools can start with
    `triage.json`; the bundle includes redacted diagnostics and file manifests
    only, and does not include `.env`, raw conversation messages, or user file
-   contents.
+   contents. Subprocess diagnostics are captured as UTF-8, with Python helpers
+   emitting UTF-8 even on non-UTF-8 hosts and escaping unencodable characters.
+   Doctor's internal tool probes also decode UTF-8 with replacement for invalid
+   bytes so the remaining diagnostic output stays available.
 
    > **Advanced / manual configuration**: If you prefer to edit `config.yaml` directly, run `make config` instead to copy the full template. Optional dependency auto-detection accepts UTF-8 configuration files with or without a byte-order mark (BOM). See `config.example.yaml` for the complete reference including CLI-backed providers (Codex CLI, Claude Code OAuth), OpenRouter, Responses API, subagent runtime caps such as `subagents.max_total_per_run`, and more.
 
@@ -393,7 +401,7 @@ Use the table below as a practical starting point when choosing how to run DeerF
 
 Requires Docker Desktop / Docker Engine and **Docker Compose v2.24+**
 (`docker compose version`). Older Compose clients cannot parse the optional
-`env_file` syntax in `docker/docker-compose-dev.yaml`.
+`env_file` syntax in `docker/docker-compose.yaml` and `docker/docker-compose-dev.yaml`.
 
 **Development** (hot-reload, source mounts):
 
@@ -744,7 +752,7 @@ Plugin brand icons are bundled locally. When adding or editing one personal MCP 
 
 Capability Center > Plugins adds, replaces, and deletes one MCP server at a time through targeted mutations that preserve concurrent sibling changes; deletes use a bodyless URL-addressed request. An invalid stdio command on one server no longer blocks toggling another, while enabling that invalid server remains protected by the command allowlist and surfaces the backend validation message in the UI.
 Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport` field for SSE/HTTP servers.
-Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written.
+Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written. Every Gateway worker or instance that reads the same file picks up a new revision on its next read (the cache checks the file's content signature), so MCP and skill changes made through one replica apply to the others without a restart; a missing, truncated, or invalid revision keeps the previous configuration until a complete one lands, including when the file disappears during a reload.
 The admin MCP cache reset advances a durable generation marker in the writable config directory. Every Gateway worker mounting that same directory retires its own cached tools and pooled sessions before the next lookup; replicas with independent filesystems are not implicitly covered. If no config path is available, the API reports a process-local reset instead.
 `extensions_config.json` accepts UTF-8 with or without a leading byte-order mark (BOM), including files saved as UTF-8 with BOM by an editor.
 MCP routing hints can also prefer a specific MCP tool for matching requests without forbidding other tools. When `tool_search` defers MCP schemas, matching routing metadata can auto-promote up to `tool_search.auto_promote_top_k` deferred schemas before the model call.
@@ -779,6 +787,8 @@ cleanup when migrating from legacy metadata credentials.
 #### IM Channels
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
+
+Cancelling a channel restart discards its pending configuration reload, preserving newer runtime settings applied afterward.
 
 DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ, or Buzz from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes.
 
@@ -970,6 +980,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 5. For Docker Compose deployments, keep `state_dir` on a persistent volume so the `get_updates_buf` cursor and saved auth state survive restarts.
 6. Outbound images/files enforce `max_outbound_image_bytes` / `max_outbound_file_bytes` (20 MiB / 50 MiB defaults) while reading, including files that grow after resolution. Oversize reads are rejected before encryption/upload instead of sending a truncated prefix. Non-positive limits disable the corresponding cap.
 7. `allowed_users` takes iLink user IDs. Unset, `null`, `[]`, or a blank string allows everyone. A single ID is one entry, not a sequence of characters, and an unquoted integer-valued number is stored as that integer's text. A scalar string containing commas or interior whitespace logs a warning but remains one literal ID; use a YAML list for multiple IDs. Invalid entries are ignored with a warning; any other configured value that yields no valid ID denies every user and logs an error. `/connect` is still accepted before that check, and a denied sender is dropped before inbound media is downloaded.
+8. Shutdown waits for in-flight cursor writes. On token expiry, DeerFlow persists the cursor reset and removes the saved token before completing poller cancellation.
 
 **WeCom Setup**
 
@@ -1491,7 +1502,7 @@ delete datasets and documents directly in RAGFlow.
 
 Each message can still select up to 1000 documents. When more than 100 documents are selected from a single dataset, DeerFlow validates them in batches of at most 100 while preserving the complete selection. If any batch contains an inaccessible or non-searchable document, retrieval is rejected.
 
-Advanced deployments can enable pluggable authorization with `authorization.enabled` in `config.yaml`. A configured `AuthorizationProvider` filters denied tools before they reach the model or deferred-tool catalog, then the same provider is checked again before every business-tool execution through the existing guardrail middleware. Gateway `threads:*` and `runs:*` route permissions are derived from the same provider, while existing owner checks and admin-only management gates remain in force. Every HTTP route that starts or enables a future Agent run requires `runs:create`: this includes the stateless `POST /api/runs/stream` and `POST /api/runs/wait` endpoints plus scheduled-task create, update, resume, and manual-trigger mutations. Scheduled-task mutations retain their existing `threads:write` requirement, and the stateless routes separately enforce ownership when the optional thread ID is supplied in the request body. A generated `tool_search` may bypass the second tool check only when it fronts the current build's already-filtered deferred catalog. Model access follows the same provider: the Gateway `models` list is filtered per principal, `model:use` is enforced on model detail requests and again when the runtime resolves the agent's model, and a denied default model falls back to the first remaining candidate that also passes `model:use`. The built-in RBAC provider supports per-role `tools`, `routes`, `models`, `skills`, and `sandbox` allow/deny policies and validates that `default_role` names a configured role; authorization is disabled by default. See `config.example.yaml` and the [authorization RFC](docs/plans/2026-07-10-pluggable-authorization-rfc.md).
+Advanced deployments can enable pluggable authorization with `authorization.enabled` in `config.yaml`. A configured `AuthorizationProvider` filters denied tools before they reach the model or deferred-tool catalog, then the same provider is checked again before every business-tool execution through the existing guardrail middleware. Gateway `threads:*` and `runs:*` route permissions are derived from the same provider, while existing owner checks and admin-only management gates remain in force. Every HTTP route that starts or enables a future Agent run requires `runs:create`: this includes the stateless `POST /api/runs/stream` and `POST /api/runs/wait` endpoints plus scheduled-task create, update, resume, and manual-trigger mutations. Scheduled-task mutations retain their existing `threads:write` requirement, and the stateless routes separately enforce ownership when the optional thread ID is supplied in the request body. A generated `tool_search` may bypass the second tool check only when it fronts the current build's already-filtered deferred catalog. Model access follows the same provider: the Gateway `models` list is filtered per principal, `model:use` is enforced on model detail requests and again when the runtime resolves the agent's model, and a denied default model falls back to the first remaining candidate that also passes `model:use`. The built-in RBAC provider supports per-role `tools`, `routes`, `models`, `skills`, and `sandbox` allow/deny policies and validates that `default_role` names a configured role; authorization is disabled by default. Custom roles declared in the provider's `roles` mapping become reachable by assigning them to a user through the admin API (`GET /api/v1/admin/users`, `PATCH /api/v1/admin/users/{id}`; admin-only, last-admin demotion protected) — a declared role nobody holds grants nothing. See `config.example.yaml` and the [authorization RFC](docs/plans/2026-07-10-pluggable-authorization-rfc.md).
 
 Follow-up suggestions also check `model:use` before calling the selected model, including the default model when no name is supplied. A denied model returns HTTP 403 without an LLM call; authorization-provider failures follow the configured `fail_closed` policy.
 
@@ -1751,12 +1762,13 @@ call. Skipped or failed compaction leaves the existing messages unchanged.
 
 Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
 remote tool results, compaction input, reinjected summaries, and configured
-LLM title input. It is off by default. Existing summary placeholders reserve
-indices so new values do not reuse them after compaction. No PII mapping is
-persisted, so repeated values cannot be linked to a compacted source; numbering
-may change when history or summary placeholders disappear. Raw thread text and
-local fallback titles remain available for display; memory extraction is outside
-this feature's scope.
+LLM title input. Memory admission, including pre-compaction flushes, also redacts
+detected identifiers in supported text/JSON content, parsed and invalid call arguments/error text,
+provider-raw/legacy function calls and supported user-content provenance.
+It is off by default; enabled deployments supply a secret for stable, keyed
+value-derived placeholders. No token-to-raw mapping is persisted. Raw thread
+text and local fallback titles remain available for display; memory redaction
+copies messages without changing the caller's history or tool execution.
 
 The Web UI preserves persisted message order when merging history with live updates. Streaming steps around a persisted result inside the loaded history stay together, including steps that arrive after the result. Steps captured during compaction also remain visible before their persisted result when history has not refreshed and the UI has not rendered them yet.
 
@@ -1977,6 +1989,8 @@ cannot accept new acquisitions.
 DeerFlow doesn't just *talk* about doing things. It has its own computer.
 
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
+
+The read-before-write gate ties each read mark to that `read_file` call's result, including custom tools returning multi-message `Command` updates. An unrelated result cannot authorize a write after a failed read or hide a successful read.
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 
@@ -2461,11 +2475,12 @@ Current MVP capabilities:
 - Editing or duplicating an interval task preserves its saved cadence until the interval is explicitly changed, including sub-minute intervals allowed by the operator's scheduler configuration
 - Run background scheduled executions as non-interactive DeerFlow runs (`ask_clarification` is not exposed there)
 - Persist a due execution as `queued` when its reused thread or the global execution budget is busy, then launch it when capacity is available; queued occurrences survive Gateway restarts and fail after `scheduler.queue_timeout_seconds`
+- Share execution slots fairly between task owners: one owner may have at most `scheduler.max_concurrent_runs_per_user` scheduled runs starting or running at a time (default 2, never more than `max_concurrent_runs`; `0` turns the per-owner cap off), and the waiting queue is drained owner by owner, so one owner's backlog never holds back another owner's run. A run that waits longer than `scheduler.queue_timeout_seconds` is skipped, and its history reads "Skipped: it waited too long for a free slot"
 - Freeze a task's definition while an occurrence is `queued`, `launching`, or `running`, so a durable occurrence cannot silently pick up a different prompt, thread, or schedule; transitioning a task to paused or deleting it cancels an existing waiting occurrence, while `launching`/`running` work must finish before those mutations are retried and an explicit manual trigger may still wait and run without resuming a paused schedule
 - Pause, resume, trigger, inspect history, and delete tasks
 - Search task titles or prompts, combined with status/type filters and the current thread scope.
 - Execute scheduled work through the normal DeerFlow run lifecycle
-- When `channel_connections.enabled: true`, push a summary to the task owner's connected IM identities when a scheduled run finishes as success or failed (outbox + delivery worker). Goal tasks send a goal-unmet notice for an `unmet` occurrence instead, plus an auto-pause notice when three unmet occurrences pause the task. Manual "run now" and interrupts stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, restart recovery). Channel/transport outages park deliveries without exhausting retries, for up to about a day; platform rejections retry for roughly 15 minutes before settling as `failed`. An identity you disconnect while a delivery is waiting is never pushed to: the row is dropped as `failed`. Proactive push is currently implemented for WeCom; other connected providers enqueue but fail until they grow a `send_notification` path.
+- When `channel_connections.enabled: true`, send scheduled task updates to the task owner's connected IM identities (outbox + delivery worker) on apps that support proactive push, which today is WeCom; Settings shows for each app whether updates are sent there, and other apps get none. Each occurrence sends at most one message: a finished, failed or goal-missed run, the automatic pause after three missed goals, a pause by the agent (its stop condition was met) or the task finishing (all `max_runs` done, `end_at` reached); when several apply, the pause or finish wins and still says how the last run went. A one-time task sends only its run's outcome. The message is queued in the same database transaction that records the outcome, so runs finalized after a crash or a lost lease notify exactly once. It reads on its own, in your web UI language (else `channel_connections.notification_locale`): the task title, what happened, a one-line result when the agent replied, and "Open DeerFlow → Scheduled tasks for details.", with no IDs and no links. Plain manual "run now" trials and interrupted runs stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart). Channel/transport outages park deliveries without exhausting retries, for up to about a day; platform rejections retry for roughly 15 minutes before settling as `failed`. An identity you disconnect while a delivery is waiting is never pushed to: the row is dropped as `failed`.
 - Browse execution history in pages of 50; older pages pause automatic refresh, with an explicit return to the latest runs. Counts appear only after a successful read; loading and failed reads are not reported as zero runs.
 
 **Filter execution history through the API**
@@ -2481,20 +2496,59 @@ Current MVP limits:
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 
+### Lifecycle, safety caps and stop conditions
+
+- The tasks page and the REST API (`POST` / `PATCH /api/scheduled-tasks`) accept the same per-run goal (`goal_objective`), safety cap (`max_runs`, `end_at`) and stop condition (`stop_condition`) as a conversation. Sending `null` in a PATCH clears any of these four; an `end_at` without a UTC offset is wall-clock time in the task's timezone.
+- A stop condition is the user's "stop when …" rule. It is stored in its own field (migration `0031`), never inside the task instructions. Only when a run starts does DeerFlow append it to that run's message and ask the run to call `stop_scheduled_task` when the rule holds. While `scheduler.tool_enabled` is on, every scheduled run can stop its own schedule, whether a chat or the tasks page created the task; with it off, the run is asked to report a met rule instead of calling a tool it does not have.
+- Goal tasks created on the tasks page are now evaluated like chat-created ones, and their runs also receive the saved notes and the previous-run reference.
+- Resume computes the next run from now, so a long pause never causes a catch-up run. A one-time task whose time has passed returns `422 once_time_passed` and needs a new time. Resuming an active task changes nothing; pausing a finished task returns `409 task_finished`.
+- `max_runs` is a lifetime total of automatic runs; trial runs never count. Reactivating a task whose cap is used up (Resume, or a PATCH that re-arms a finished task's schedule) returns `409 limits_exhausted` unless the same request renews the limit that ran out: a used-up run limit needs a higher `max_runs` or `null`, a passed end time needs a later `end_at` or `null` (a later `end_at` alone does not renew a used-up `max_runs`). `POST /api/scheduled-tasks/{task_id}/resume` accepts an optional `{"max_runs": …, "end_at": …}` body for that (`null` clears a cap; chat-created sub-hourly tasks must keep one). A PATCH that only changes the cap of a finished task saves it and leaves the task finished.
+- Goal-check failures (the evaluator failed, or the conversation changed during the check) neither count toward the three-miss automatic pause nor reset it. Changing the goal, the instructions or the stop condition, or adding a note, starts a new count; Resume keeps it.
+- While this Gateway process's scheduler is not running, creating a task (including Duplicate) returns `409 scheduler_not_running`, because the task would never run on schedule. `GET /api/features` reports `scheduled_tasks.available`, `running`, `tool_enabled` and `min_interval_seconds`.
+- Errors from `/api/scheduled-tasks*` are `{"detail": {"code", "message", "params"}}`; see [`backend/docs/API.md`](backend/docs/API.md#scheduled-tasks) and `contracts/scheduled_task_errors_contract.json`.
+
 ### Create schedules in a conversation
 
 Set both `scheduler.enabled: true` and `scheduler.tool_enabled: true`, then restart
-Gateway. An authorized interactive turn can use `schedule_task` to create, list,
-pause or delete tasks belonging to that conversation. For example: “Prepare a
-weekly meeting report every Monday at 9 AM in Asia/Shanghai for four weeks.”
-The tool returns the exact prompt, schedule, optional goal and stop method.
-Recurring report/file jobs may offer a manual trial; the trial requires your
-request and does not count toward the scheduled-launch limit.
+Gateway. An authorized interactive turn can use `schedule_task` to create, update,
+list, pause, resume or delete tasks, start a trial run, or save a note. For
+example: “Every weekday at 9:00, check release-checklist.md and tell me what is
+still unchecked; stop when everything is checked.” In the web app the result is a
+live card with the schedule, the stop condition and buttons, and the agent
+replies in one or two sentences; IM and other non-web turns describe the
+schedule, the next run and the stop condition in plain text.
+
+- **Which tasks a conversation manages.** The tasks created in it, and, in a run
+  conversation (the chat a scheduled run posted into), the task that run belongs
+  to: “pause this” or “move it to 10:00” work there too. This applies only to
+  turns you send. A scheduled run itself can only pause its own schedule with
+  `stop_scheduled_task`.
+- **Edits keep the task.** Changing the time, instructions, goal, stop condition
+  or safety cap is an `update` of the same task, so its ID and run history stay.
+  `resume` restarts a paused or finished task without a catch-up run. When the
+  cap is used up, the agent asks how to renew the limit that ran out (a higher
+  `max_runs` or none; a later `end_at` or none) and sends that with the resume.
+- **Timezone.** A zone you name wins. Otherwise a new task uses the browser
+  timezone the web app sends with each message (`context.client_timezone`, read
+  only for this), and the result says which zone was used. Intervals and
+  one-time times with a UTC offset need no zone; for a cron schedule or a local
+  one-time time with no known zone (for example from IM), the agent asks. Edits
+  keep the saved zone; the browser zone never changes an existing task.
+- **Where results appear.** Each run posts its result in a new chat of its own,
+  titled “{task} · {local time}”, or in the originating chat when the task runs
+  there. When the schedule is paused by the agent, is paused automatically or
+  finishes, the originating chat shows one line where the conversation stood,
+  with a link to that run or to the task; nothing else is posted back to it.
+  The line stays after the task is deleted. A run chat shows the task
+  instructions as one collapsed “Task instructions” block under the run's
+  header instead of a long user message.
+- **Language.** The agent writes the title, instructions and stop condition in
+  your language, and scheduled runs answer in the language of the instructions.
 
 New tasks default to a fresh conversation for each occurrence. A configured
 `goal_objective` applies only to that occurrence: success does not stop a
 recurring schedule. The running agent can request `stop_scheduled_task` for its
-own schedule when your overall end condition has been met; the request takes
+own schedule when your stop condition has been met; the request takes
 effect during terminal finalization. `max_runs` counts automatic launches only,
 and `end_at` provides a deadline. Either end condition takes precedence over a
 pause request. Tool-created sub-hourly schedules require an end condition; each
@@ -2503,21 +2557,26 @@ owner may keep at most 20 live tool-created tasks, including paused tasks.
 An unmet occurrence is recorded as `unmet`, distinct from an execution failure.
 Three eligible automatic unmet occurrences pause a recurring task. Accepted
 success resets the streak, including a success relying on disclosed assumptions;
-manual trials, interruption, execution failure and external waiting do not
-advance it. Resume retains the streak, so another eligible unmet occurrence can
-pause the task again. Existing notification bindings receive goal-unmet and
-auto-pause notices through the same durable outbox; manual trials stay silent.
+manual trials, interruption, execution failure, external waiting and
+goal-check failures do not advance it. Resume retains the streak, so another eligible unmet occurrence can
+pause the task again. Connected IM apps with proactive push receive one notice
+per occurrence through the same durable outbox (goal missed, auto-paused, paused
+by the agent, finished); plain manual trials stay silent.
 
-You can ask the agent in the originating conversation to save an explicit note
-for future runs (at most 10 notes of 500 characters). Fresh recurring runs may
-read the previous executed occurrence through opt-in `read_conversation`, with
-the same owner and read-permission checks. This provides a source reference,
-not an automatic summary or a post-back into the originating chat.
+You can ask the agent in a conversation that manages the task to save an
+explicit note for future runs (at most 10 notes of 500 characters). Fresh
+recurring runs may read the previous executed occurrence through opt-in
+`read_conversation`, with the same owner and read-permission checks. This
+provides a source reference, not an automatic summary or a post-back into the
+originating chat.
 
-For a trial, send a direct request such as "Run this task now" or "先跑一次".
+For a trial, ask directly, for example “Run it now”, “OK, run it now” or
+“先跑一次吧”; in the web app the card's **Run once now** button does the same.
 The host accepts a bounded set of English/Chinese direct-run requests from the
-current user turn; task mentions, quoted or conditional requests, and a bare
-"yes" do not start a paid run. The agent asks for a direct request when needed.
+current user turn, optionally after a short acknowledgement such as “Sure,” or
+“好的，”. A bare “yes” or “好”, task mentions, and quoted or conditional requests
+do not start a paid run. When a run is already waiting to start, no extra trial
+is added and the agent says so. A trial does not count toward `max_runs`.
 
 A goal occurrence can use up to nine agent turns, with an evaluator request after
 each. Evaluator requests and provider-reported tokens are included in run usage;

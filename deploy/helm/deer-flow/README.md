@@ -135,7 +135,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 53
+  config_version: 55
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -145,6 +145,7 @@ config: |
   sandbox:
     use: deerflow.community.aio_sandbox:AioSandboxProvider
     provisioner_url: http://provisioner:8002
+    provisioner_api_key: $PROVISIONER_API_KEY   # injected from the app Secret
   database:
     backend: postgres
     postgres_url: $DATABASE_URL
@@ -238,7 +239,9 @@ curl http://localhost:2026/health          # gateway health via nginx
 
 Hit the Ingress host (map it in `/etc/hosts` for local clusters) to load the UI.
 
-Provisioner sanity check:
+Provisioner sanity check (`/health` is unauthenticated; `/api/*` requires the
+`PROVISIONER_API_KEY` the chart generates into the app Secret, so a 401 from
+the gateway's sandbox calls means the two Pods disagree on that key):
 
 ```bash
 kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002/health
@@ -267,7 +270,7 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   `%40`). The chart uses an external `databaseUrl` verbatim and does not
   rewrite the DSN in a user-managed Secret.
 
-- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 90s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s), and bounds uvicorn's `--timeout-graceful-shutdown` (`gateway.uvicornGracefulShutdownSeconds`, default 10s) so an idle SSE connection cannot hold up lifespan shutdown indefinitely. The grace period MUST exceed the Gateway's graceful-shutdown work — the preStop sleep, the uvicorn timeout, and the lifespan's worst case: five hooks bounded at 5s each (startup trash sweep, notification delivery worker, channel service, browser sessions, MCP session pool), the 1s retrieval-warm wait, the in-flight run drain (5s) and the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s), about 61s in total, plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. `backend/tests/_gateway_shutdown_budget.py` reads these bounds from the Gateway and pins the chart and compose budgets against them. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (preStop + uvicorn timeout + ~31s of bounded hooks and drains + memory drain + buffer).
+- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 90s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s), and bounds uvicorn's `--timeout-graceful-shutdown` (`gateway.uvicornGracefulShutdownSeconds`, default 10s) so an idle SSE connection cannot hold up lifespan shutdown indefinitely. The grace period MUST exceed the Gateway's graceful-shutdown work — the preStop sleep, the uvicorn timeout, and the lifespan's worst case: six hooks bounded at 5s each (startup trash sweep, notification delivery worker, channel service, scheduled task service, browser sessions, MCP session pool), the 1s retrieval-warm wait, the in-flight run drain (5s) and the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s), about 66s in total, plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. `backend/tests/_gateway_shutdown_budget.py` reads these bounds from the Gateway and pins the chart and compose budgets against them. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (preStop + uvicorn timeout + ~36s of bounded hooks and drains + memory drain + buffer).
 - **Gateway replicas.** Run control is cross-pod-safe since the work tracked
   by [issue #3948](https://github.com/bytedance/deer-flow/issues/3948) landed
   (#4003, #4064, #4500): admission is a durable one-active-run-per-thread
@@ -301,11 +304,26 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   multi-instance gateway (same rule), and the rollout strategy is
   surge-then-drain (`maxSurge: 1`, `maxUnavailable: 0`).
 - **App secret.** `<release>-app` holds `BETTER_AUTH_SECRET`,
-  `DEER_FLOW_INTERNAL_AUTH_TOKEN` and `AUTH_JWT_SECRET` (the session-cookie
-  signing key), each generated once and preserved across upgrades via
-  `lookup`. `existingAppSecret` points the gateway and frontend at a Secret
-  you manage instead (no `<release>-app` is generated); it must carry all
-  three keys. `AUTH_JWT_SECRET` is required whenever the gateway is
+  `DEER_FLOW_INTERNAL_AUTH_TOKEN`, `AUTH_JWT_SECRET` (the session-cookie
+  signing key) and `PROVISIONER_API_KEY` (the key the gateway presents to the
+  sandbox provisioner), each generated once and preserved across upgrades via
+  `lookup`. `existingAppSecret` points the gateway, frontend and provisioner
+  at a Secret you manage instead (no `<release>-app` is generated); it must
+  carry the first three keys and, while `provisioner.enabled` is true, also
+  `PROVISIONER_API_KEY`: the provisioner's `verify_api_key` middleware
+  answers 401 to every `/api/*` request while its key is empty or differs
+  from the one the gateway sends, so a deployment without it cannot create a
+  single sandbox. The chart injects the same Secret value into both Pods and
+  the default `config` references it as `sandbox.provisioner_api_key:
+  $PROVISIONER_API_KEY` (keep that line when you override `config:`; the
+  harness refuses to start when a referenced variable is unset). With
+  `provisioner.enabled: false` the gateway takes `PROVISIONER_API_KEY` from
+  `secrets` or `existingSecret` when you supply one, so an external
+  provisioner keeps its key (the chart emits no `env` entry, which would win
+  over `envFrom`); otherwise the gateway's start command defaults the
+  variable to an empty string, so the default `config` still loads even when
+  a user-managed provider Secret holds only model keys. `AUTH_JWT_SECRET` is
+  required whenever the gateway is
   multi-instance — without it, concurrently booting Pods race to write their
   own `.jwt_secret` on the home volume and sign sessions with different keys —
   and only a single Pod may omit it and fall back to that file. **Upgrading a
