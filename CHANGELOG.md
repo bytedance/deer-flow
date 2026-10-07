@@ -812,7 +812,7 @@ This release closes that milestone with **439 merged pull requests**.
   through their single root checkpoint, so only one checkpoint per thread is
   loaded.
   A new `sort_by="updated_at"` option lets `--continue` keep resuming the most
-  recently active thread; the default order stays newest created first.
+  recently active thread; the default order stays newest created first. ([#6426])
 - **frontend:** A failed side-chat send no longer clears the composer. The side
   chat's submit handler showed the error toast and then resolved, which the
   composer treats as success, so the typed text and attachments were lost when
@@ -9118,3 +9118,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6400]: https://github.com/bytedance/deer-flow/pull/6400
 [#6401]: https://github.com/bytedance/deer-flow/pull/6401
 [#6407]: https://github.com/bytedance/deer-flow/pull/6407
+[#6426]: https://github.com/bytedance/deer-flow/pull/6426
