@@ -30,10 +30,16 @@ DeerFlow uses a YAML configuration file that should be placed in the **project r
    vim config.yaml  # or your preferred editor
    ```
 
-4. **Verify configuration**:
+4. **Verify configuration in the backend environment**:
+   Install `uv` as described in the [local development prerequisites](../../CONTRIBUTING.md#option-2-local-development).
+   Run the check through `uv` so it uses the backend's workspace packages and
+   dependencies; a system `python` without an activated backend environment
+   cannot import `deerflow` from this directory.
+
    ```bash
    cd backend
-   python -c "from deerflow.config import get_app_config; print('✓ Config loaded:', get_app_config().models[0].name)"
+   uv sync
+   uv run python -c "from deerflow.config import get_app_config; print('✓ Config loaded:', get_app_config().models[0].name)"
    ```
 
 ## Important Notes
@@ -78,7 +84,7 @@ If you skip this step, the image will be automatically pulled on first agent exe
 ```bash
 # Check where the backend is looking
 cd deer-flow/backend
-python -c "from deerflow.config.app_config import AppConfig; print(AppConfig.resolve_config_path())"
+uv run python -c "from deerflow.config.app_config import AppConfig; print(AppConfig.resolve_config_path())"
 ```
 
 If it can't find the config:

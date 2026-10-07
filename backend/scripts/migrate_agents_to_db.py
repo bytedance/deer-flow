@@ -15,9 +15,9 @@ Design (mirrors ``scripts/migrate_user_isolation.py``):
 - Non-destructive: the on-disk files are left untouched, so unsetting
   ``agent_storage.backend`` (back to ``file``) is a clean rollback.
 
-Usage::
+Usage (from the repository root)::
 
-    python scripts/migrate_agents_to_db.py [--dry-run]
+    uv run --directory backend python scripts/migrate_agents_to_db.py [--dry-run]
 
 Requires ``database.backend`` to be ``sqlite`` or ``postgres`` in config.yaml.
 """

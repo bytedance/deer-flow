@@ -581,9 +581,13 @@ agent_storage:
 
 Migrating an existing install from `file` to `db`:
 
+Run from the repository root using the backend's `uv` environment. The importer
+depends on the installed workspace packages; using a system `python` without
+an activated backend environment can fail with `ModuleNotFoundError: deerflow`.
+
 ```bash
-python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
-python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+uv run --directory backend python scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+uv run --directory backend python scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
 ```
 
 The importer is idempotent (already-present agents are skipped) and leaves the source files untouched, so reverting `agent_storage.backend` to `file` is a clean rollback. Agent *memory* (`memory.json`) is unaffected by this switch.
