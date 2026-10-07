@@ -237,6 +237,35 @@ test("recovers a same-tab reconnect that failed before the runs read", async () 
   unmount();
 });
 
+test.each(["success", "error", "timeout", "interrupted"])(
+  "does not rejoin a released same-tab reconnect whose run ended with %s",
+  async (status) => {
+    let resolveRuns!: (runs: Run[]) => void;
+    apiMockState.listRuns.mockImplementation(
+      () =>
+        new Promise<Run[]>((resolve) => {
+          resolveRuns = resolve;
+        }),
+    );
+    window.sessionStorage.setItem("lg:stream:thread-1", "run-active");
+    const { unmount } = renderThread();
+    await flushFrames();
+
+    // This hook never streamed the run, so completedRunIdsRef cannot guard
+    // it; only the server-reported status keeps recovery from rejoining.
+    act(() => failActiveRecoveredStream());
+    act(() => resolveRuns([{ ...ACTIVE_RUN, status } as Run]));
+    await flushFrames();
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(streamMockState.joinStream).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem("lg:stream:thread-1")).toBeNull();
+    unmount();
+  },
+);
+
 test("leaves a failed submitted run to the submit flow", async () => {
   apiMockState.listRuns.mockResolvedValue([]);
   const { queryClient, unmount } = renderThread();
