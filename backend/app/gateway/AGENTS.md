@@ -1,5 +1,12 @@
 ### Gateway API (`app/gateway/`)
 
+Plugin batch-result reads bind the middleware-stamped principal and threads:read
+permission through `BATCH_RESULTS_RESOLVER_KEY`; the native reader additionally
+checks thread access and exact batch owner/thread. Bind lazily on action contexts,
+never use payload owner IDs or grant global access to admin/internal callers.
+Typed public read admission errors retain their status at the plugin boundary.
+Unavailable SQL storage is unsupported; a stopped worker still permits reads.
+
 Reject external run/state writes with `sandbox`, `thread_data`, or `viewed_images`.
 
 Studio retains sanitized creation metadata.

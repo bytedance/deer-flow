@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "entry": "static/index.mjs",
+  "files": ["static/index.mjs", "static/review.mjs", "static/style.css"]
+}

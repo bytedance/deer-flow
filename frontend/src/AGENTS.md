@@ -209,6 +209,15 @@ clarification references from full grouping.
 
 ### Knowledge source citations
 
+Plugin conversation actions can optionally use host-bound `openPluginPage` to
+navigate only to surfaces declared by their installed namespace. The page carries
+an optional thread query into SurfaceContext; this is display context, not a grant.
+`callBackend` accepts an optional selection AbortSignal, combined with the page
+lifetime signal; preserve viewer fencing and CSRF/credential handling. Packaged
+batch-review evidence remains scoped to its selected saved result, not the
+conversation KnowledgeSourcesProvider. Replacing a selection closes its old
+source dialog and cancels obsolete reads.
+
 `KnowledgeSourcesProvider` scopes source records to the current message list.
 Only versioned native `knowledge_search`/`task` tool artifacts supply evidence;
 AI/human text and metadata cannot create a source. `CitationLink` resolves

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -18,6 +19,7 @@ import type {
   ConversationAction,
   ConversationActionContext,
   FrontendContribution,
+  FrontendExtension,
 } from "@/core/extensions/contracts";
 import {
   useFrontendServices,
@@ -43,18 +45,23 @@ export function ConversationExtensionActions({
   const { t, locale } = useI18n();
   const query = useFrontendExtensions();
   const services = useFrontendServices();
+  const router = useRouter();
   const [busy, setBusy] = useState(false);
   const entries = query.isError ? [] : (query.data ?? []);
 
   async function execute(
     action: ConversationAction,
     contribution: FrontendContribution,
+    extension: FrontendExtension,
   ) {
     setBusy(true);
     try {
       await action.execute(
         context,
-        bindFrontendServices(services, contribution),
+        bindFrontendServices(services, contribution, undefined, {
+          pageIds: (extension.surfaces ?? []).filter((surface) => surface.slot === "page").map((surface) => surface.id),
+          navigate: (path) => router.push(path),
+        }),
       );
     } catch {
       toast.error(t.extensions.actionFailed);
@@ -81,7 +88,7 @@ export function ConversationExtensionActions({
           <DropdownMenuItem
             key={action.id}
             disabled={busy}
-            onSelect={() => void execute(action, contribution)}
+            onSelect={() => void execute(action, contribution, extension)}
           >
             <Icon className="text-muted-foreground" />
             <span>{action.label}</span>

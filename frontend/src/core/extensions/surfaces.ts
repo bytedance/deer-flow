@@ -35,9 +35,9 @@ export function mountSurface(
             await context.openConversation!(threadId, abort.signal);
           }
         : undefined,
-      async callBackend(action, payload) {
+      async callBackend(action, payload, options) {
         abort.signal.throwIfAborted();
-        const result = await context.callBackend(action, payload);
+        const result = await context.callBackend(action, payload, options);
         abort.signal.throwIfAborted();
         return result;
       },

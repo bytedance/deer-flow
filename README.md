@@ -1590,6 +1590,11 @@ asynchronous peer requests, with a separate team page and persistent member conv
 Capability Center lists the example with localized installation information even before it is installed.
 Installation and activation remain deployment-controlled; Capability Center shows plugin
 information and status. Browser code runs as trusted same-origin code.
+The optional [batch report review example](examples/deerflow-extension-batch-review/README.md)
+opens saved native reports and captured RAG excerpts from default or Custom Agent
+conversation actions. It distinguishes execution and acceptance, reads only the
+current owner's authorized thread, and works with SQL history while the batch
+worker is stopped. Evidence is the saved snapshot, never a provider refetch.
 The browser API and inline `BrowserModule.code` transport are experimental. The
 plugin guide describes an additive path to manifests and packaged static resources.
 

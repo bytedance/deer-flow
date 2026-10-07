@@ -436,3 +436,12 @@ and revoked before host shutdown; PAT/internal grants remain unsupported.
 Unstamped internal launches receive no handle and must still start normally.
 Action/tool dispatch scopes handles to each registered plugin namespace for
 idempotency isolation; request-resolved handles use `for_plugin` explicitly.
+
+Extension-api 0.2.6 adds request-bound `BatchResultReader`. The native adapter
+checks thread access before batch metadata, then exact owner/thread scope. Fixed
+compact projections exclude full results; detail reads take report/verdict/evidence
+from one row and hash that public projection for revision. Never publish execution
+specs, prompts or arbitrary artifacts. Worker availability is not a read gate.
+`ActionContext.batch_results` is a lazy request callback, so unrelated actions do
+not acquire a new threads:read requirement. It cannot be serialized or treated as
+an app-global capability. Model-facing `read_batch_item` remains independent.

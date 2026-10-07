@@ -46,9 +46,12 @@ export type ConversationActionContext = {
   messages?: Message[];
 };
 export type FrontendServices = {
+  /** Navigate only to a page declared by this installed plugin; host owns its URL. */
+  openPluginPage?: (surfaceId: string, threadId?: string) => void;
   callBackend: (
     action: string,
     payload: Record<string, unknown>,
+    options?: { signal?: AbortSignal },
   ) => Promise<unknown>;
   conversationText: (context: ConversationActionContext) => Promise<string>;
   latestVisibleAnswer?: (

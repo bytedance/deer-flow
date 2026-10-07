@@ -2,6 +2,13 @@
 
 ## Project Overview
 
+Optional batch-report review uses extension-api 0.2.6 request-bound reads and the
+packaged `examples/deerflow-extension-batch-review` consumer. The host owns native
+storage/authorization; the package owns presentation and has no private host
+imports, storage or writes. Keep API_VERSION, package version, the harness's exact
+contract dependency and workspace lock metadata synchronized when adding public
+contract slices. Default-install collection must remain import-light.
+
 The backend runs a LangGraph-based super agent with sandbox execution, persistent memory, subagent delegation, and extensible tools in isolated per-thread environments.
 
 **Architecture**:
