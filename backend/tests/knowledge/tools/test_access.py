@@ -5,9 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-
-from deerflow.knowledge.access import can_access, resolve_kb_scope
-from deerflow.knowledge.store import KnowledgeStore
+from deerflow_knowledge.access import can_access, resolve_kb_scope
+from deerflow_knowledge.store import KnowledgeStore
 
 
 @pytest.mark.asyncio

@@ -367,7 +367,7 @@ def test_changing_only_the_rag_default_reloads_through_the_resolver(env_paths):
     Proven through the *real* resolver rather than by reading the field back, because the
     field alone cannot show whether the next ingest would actually pick the new target.
     """
-    from deerflow.knowledge.model_target import resolve_rag_model_name
+    from deerflow_knowledge.model_target import resolve_rag_model_name
 
     config_yaml, rag_json = env_paths
     _write_config_yaml(config_yaml)
@@ -457,8 +457,8 @@ def test_config_secret_wins_over_env(env_paths, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("DASHSCOPE_EMBEDDING_API_KEY", "sk-env")
     monkeypatch.setenv("DASHSCOPE_RERANK_API_KEY", "sk-env")
 
-    from deerflow.knowledge.embedder import DashScopeEmbedder
-    from deerflow.knowledge.reranker import DashScopeReranker
+    from deerflow_knowledge.embedder import DashScopeEmbedder
+    from deerflow_knowledge.reranker import DashScopeReranker
 
     assert DashScopeEmbedder()._read_api_key() == "sk-file"
     assert DashScopeReranker()._read_api_key() == "sk-rerank-file"
@@ -470,7 +470,7 @@ def test_env_still_used_when_the_file_declares_no_secret(env_paths, monkeypatch:
     _write_rag_json(rag_json, {"embedding_model": "ui-embedding"})
     monkeypatch.setenv("DASHSCOPE_EMBEDDING_API_KEY", "sk-env")
 
-    from deerflow.knowledge.embedder import DashScopeEmbedder
+    from deerflow_knowledge.embedder import DashScopeEmbedder
 
     assert DashScopeEmbedder()._read_api_key() == "sk-env"
 
@@ -480,7 +480,7 @@ def test_explicit_constructor_key_beats_the_file(env_paths):
     _write_config_yaml(config_yaml)
     _write_rag_json(rag_json, {"embedding_api_key": "sk-file"})
 
-    from deerflow.knowledge.embedder import DashScopeEmbedder
+    from deerflow_knowledge.embedder import DashScopeEmbedder
 
     assert DashScopeEmbedder(api_key="sk-arg")._read_api_key() == "sk-arg"
 
@@ -491,7 +491,7 @@ def test_missing_secret_raises_with_the_env_hint(env_paths, monkeypatch: pytest.
     _write_rag_json(rag_json, {})
     monkeypatch.delenv("DASHSCOPE_EMBEDDING_API_KEY", raising=False)
 
-    from deerflow.knowledge.embedder import DashScopeEmbedder, EmbedderAuthError
+    from deerflow_knowledge.embedder import DashScopeEmbedder, EmbedderAuthError
 
     with pytest.raises(EmbedderAuthError, match="DASHSCOPE_EMBEDDING_API_KEY"):
         DashScopeEmbedder()._read_api_key()

@@ -5,7 +5,7 @@
 整端点形态则原样保留。今天能用的地址（主机名 / 自定义前缀）结果逐字不变。
 """
 
-from deerflow.knowledge.endpoint_url import join_endpoint
+from deerflow_knowledge.endpoint_url import join_endpoint
 
 
 def test_ecosystem_base_with_v1_is_not_doubled():

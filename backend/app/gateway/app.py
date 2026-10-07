@@ -12,6 +12,7 @@ from deerflow_extension_api import (
 )
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, AUTH_SOURCE_PAT, warn_if_auth_disabled_enabled
 from app.gateway.auth_middleware import AuthMiddleware
@@ -919,6 +920,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Shutting down API Gateway")
 
 
+def _handle_rag_configuration_error(request: Request, exc: Exception) -> JSONResponse:
+    """Answer a configuration-class refusal with its own message (spec 2026-09-16 §3 D4).
+
+    Starlette's default for an unhandled exception is a bare ``500 Internal Server Error``;
+    the message that tells an admin what to change would stay in the log. 400 is the honest
+    status: the request described a configuration the pipeline cannot use.
+    """
+    logger.warning("RAG configuration refused on %s: %s", request.url.path, exc)
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -1015,6 +1027,19 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             },
         ],
     )
+
+    # A configuration-class refusal from the knowledge extension is the caller's to fix, so
+    # answer it as a client error with the actionable message intact instead of a bare 500
+    # whose detail only reaches the server log (spec 2026-09-16 §3 D4). Registered for that
+    # one type on purpose: a handler for ``ValueError`` would report every unrelated
+    # programming error as a 400. Lazy import: the host must start with the extension not
+    # installed at all.
+    try:
+        from deerflow_knowledge.embedder import RagConfigurationError
+
+        app.add_exception_handler(RagConfigurationError, _handle_rag_configuration_error)
+    except ImportError:
+        logger.debug("knowledge extension not installed; RagConfigurationError handler skipped")
 
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
     app.add_middleware(AuthMiddleware)

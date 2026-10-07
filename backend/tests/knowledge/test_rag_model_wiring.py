@@ -1,9 +1,9 @@
 """What the kept RAG role entry does with the resolver (spec 2026-09-23 default model D3/D6).
 
 Trimmed to the kept chain in the first-phase slice: the extraction role
-(``deerflow.knowledge.graph.extractor``), the eval judge (``deerflow.knowledge.eval.factory``),
-the manual wiki role (``deerflow.knowledge.wiki.generator``) and the synthesis role
-(``deerflow.knowledge.eval.synthesis``) were removed with their subsystems, and so were the
+(``deerflow_knowledge.graph.extractor``), the eval judge (``deerflow_knowledge.eval.factory``),
+the manual wiki role (``deerflow_knowledge.wiki.generator``) and the synthesis role
+(``deerflow_knowledge.eval.synthesis``) were removed with their subsystems, and so were the
 retrieval-time ``graph_search`` consumer and the snapshot-rule tests that rode them. What
 remains of this file's subject is the vlm role — the caption legs' target — and the shared
 chain behind every role: the role declaration, else the RAG default, else the first
@@ -18,12 +18,12 @@ check can never judge a different target than the one that gets constructed.
 from __future__ import annotations
 
 import pytest
+from deerflow_knowledge.embedder import RagConfigurationError
+from deerflow_knowledge.vlm_target import resolve_vlm_target
 
 from deerflow.config.app_config import AppConfig, RagConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
-from deerflow.knowledge.embedder import RagConfigurationError
-from deerflow.knowledge.vlm_target import resolve_vlm_target
 
 SANDBOX = SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider")
 

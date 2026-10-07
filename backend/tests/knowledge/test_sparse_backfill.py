@@ -25,10 +25,9 @@ import json
 
 import httpx
 import pytest
+from deerflow_knowledge.embedder import ComposedEmbedder, EmbedderAuthError, EmbedderError
+from deerflow_knowledge.sparse import BM25SparseEncoder, TEISparseEncoder, _tokenize
 from qdrant_client.models import SparseVector
-
-from deerflow.knowledge.embedder import ComposedEmbedder, EmbedderAuthError, EmbedderError
-from deerflow.knowledge.sparse import BM25SparseEncoder, TEISparseEncoder, _tokenize
 
 SPARSE_BASE = "http://127.0.0.1:8081"
 
@@ -151,7 +150,7 @@ class _DenseOnly:
         self.calls: list[list[str]] = []
 
     async def embed(self, texts, *, text_type: str = "document"):
-        from deerflow.knowledge.embedder import EmbeddingResult
+        from deerflow_knowledge.embedder import EmbeddingResult
 
         self.calls.append(list(texts))
         return [EmbeddingResult(dense=[float(len(text))], sparse=SparseVector(indices=[], values=[])) for text in texts]

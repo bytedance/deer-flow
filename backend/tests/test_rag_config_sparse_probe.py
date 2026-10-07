@@ -21,10 +21,11 @@ import httpx
 import pytest
 import yaml
 from _router_auth_helpers import make_authed_test_app
+from deerflow_knowledge.routers import rag_config as rag_config_router
+from deerflow_knowledge.service import KnowledgeExtensionService
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
-from app.gateway.routers import rag_config as rag_config_router
 from deerflow.config.app_config import reset_app_config
 
 SANDBOX = {"use": "deerflow.sandbox.local:LocalSandboxProvider"}
@@ -67,7 +68,8 @@ def _client(*, system_role: str = "admin") -> TestClient:
             id=uuid4(),
         )
     )
-    app.include_router(rag_config_router.router)
+    extension = KnowledgeExtensionService()
+    app.include_router(rag_config_router.build_router(extension))
     return TestClient(app)
 
 

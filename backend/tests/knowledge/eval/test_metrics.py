@@ -8,9 +8,8 @@ category aggregation, and baseline diff with the regression gate. No IO.
 from __future__ import annotations
 
 import pytest
-
-from deerflow.knowledge.eval.dataset import GoldenQuestion
-from deerflow.knowledge.eval.metrics import (
+from deerflow_knowledge.eval.dataset import GoldenQuestion
+from deerflow_knowledge.eval.metrics import (
     AggregateMetrics,
     DiffResult,
     PathResult,

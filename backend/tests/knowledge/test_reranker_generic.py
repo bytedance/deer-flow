@@ -12,9 +12,8 @@ import json
 
 import httpx
 import pytest
-
-from deerflow.knowledge.reranker import RerankerAuthError, RerankerError
-from deerflow.knowledge.reranker_generic import GenericReranker
+from deerflow_knowledge.reranker import RerankerAuthError, RerankerError
+from deerflow_knowledge.reranker_generic import GenericReranker
 
 BASE_URL = "http://localhost:8000"
 
@@ -152,9 +151,10 @@ def test_the_factory_refuses_a_generic_provider_without_an_address():
     (it used to be a bare `ValueError`: a 500 on the recall-test route, a wrapped tool error in
     chat, and the reason visible only in the server log).
     """
+    from deerflow_knowledge.embedder import RagConfigurationError
+    from deerflow_knowledge.reranker_factory import build_reranker
+
     from deerflow.config.app_config import RagConfig
-    from deerflow.knowledge.embedder import RagConfigurationError
-    from deerflow.knowledge.reranker_factory import build_reranker
 
     rag = RagConfig(rerank_provider="generic-rerank")
     assert rag.rerank_base_url is None
@@ -169,9 +169,10 @@ def test_the_factory_refuses_a_generic_provider_without_an_address():
 def test_the_factory_refuses_dashscope_without_an_address_too():
     """Spec 2026-09-25 rag-endpoint-unlock D1 乙: no built-in endpoint fallback any more —
     the address is required whatever the provider (the old message promised one)."""
+    from deerflow_knowledge.embedder import RagConfigurationError
+    from deerflow_knowledge.reranker_factory import build_reranker
+
     from deerflow.config.app_config import RagConfig
-    from deerflow.knowledge.embedder import RagConfigurationError
-    from deerflow.knowledge.reranker_factory import build_reranker
 
     rag = RagConfig(rerank_provider="dashscope", rerank_base_url=None)
     with pytest.raises(RagConfigurationError, match="rerank_base_url") as caught:
@@ -214,9 +215,10 @@ async def test_rerank_accepts_a_whole_endpoint():
 def test_the_factory_refuses_a_missing_rerank_model():
     """A-1 (spec 2026-09-30 D1): the address is present, the model name is not — an undeclared
     model is refused at the construction point instead of silently using a vendor pick."""
+    from deerflow_knowledge.embedder import RagConfigurationError
+    from deerflow_knowledge.reranker_factory import build_reranker
+
     from deerflow.config.app_config import RagConfig
-    from deerflow.knowledge.embedder import RagConfigurationError
-    from deerflow.knowledge.reranker_factory import build_reranker
 
     rag = RagConfig(rerank_provider="generic-rerank", rerank_base_url="http://127.0.0.1:8126").model_copy(update={"rerank_model": None})
     assert rag.rerank_model is None

@@ -30,15 +30,16 @@ load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 import httpx  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from _router_auth_helpers import make_authed_test_app  # noqa: E402
+from deerflow_knowledge.routers import knowledge_bases  # noqa: E402
+from deerflow_knowledge.service import KnowledgeExtensionService  # noqa: E402
+from deerflow_knowledge.services.knowledge_service import KnowledgeService  # noqa: E402
+from deerflow_knowledge.store import KnowledgeStore  # noqa: E402
+from deerflow_knowledge.vector_store import KnowledgeVectorStore  # noqa: E402
+from deerflow_knowledge.worker import KnowledgeIndexWorker  # noqa: E402
 from qdrant_client import AsyncQdrantClient  # noqa: E402
 from qdrant_client.models import FieldCondition, Filter, MatchValue  # noqa: E402
 
 from app.gateway.auth.models import User  # noqa: E402
-from app.gateway.routers import knowledge_bases  # noqa: E402
-from app.gateway.services.knowledge_service import KnowledgeService  # noqa: E402
-from deerflow.knowledge.store import KnowledgeStore  # noqa: E402
-from deerflow.knowledge.vector_store import KnowledgeVectorStore  # noqa: E402
-from deerflow.knowledge.worker import KnowledgeIndexWorker  # noqa: E402
 
 from .conftest import QDRANT_TEST_URL, requires_qdrant  # noqa: E402
 
@@ -109,8 +110,9 @@ async def smoke(session_factory, tmp_path):
     )
     owner_id = uuid.uuid4()
     app = make_authed_test_app(user_factory=lambda: User(email="smoke@example.com", password_hash="x", system_role="user", id=owner_id))
-    app.state.knowledge_service = service
-    app.include_router(knowledge_bases.router)
+    extension = KnowledgeExtensionService()
+    extension.knowledge = service
+    app.include_router(knowledge_bases.build_router(extension))
 
     await worker.start()
     api = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://smoke", timeout=60.0)

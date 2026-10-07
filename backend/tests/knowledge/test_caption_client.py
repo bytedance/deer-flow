@@ -13,9 +13,8 @@ import json
 
 import httpx
 import pytest
-
-from deerflow.knowledge.caption_client import _anthropic_request, _openai_request, request_caption
-from deerflow.knowledge.vlm_target import VlmTarget
+from deerflow_knowledge.caption_client import _anthropic_request, _openai_request, request_caption
+from deerflow_knowledge.vlm_target import VlmTarget
 
 _PROMPT = "Describe this image."
 _IMAGE = (b"\x89PNG\r\n\x1a\nfake-bytes", "image/png")

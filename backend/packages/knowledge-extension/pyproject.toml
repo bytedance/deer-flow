@@ -1,0 +1,29 @@
+[project]
+name = "deerflow-knowledge-extension"
+version = "0.1.0"
+description = "First-phase RAG knowledge base for DeerFlow: document ingestion and hybrid vector retrieval, shipped as a plugin"
+requires-python = ">=3.12"
+dependencies = [
+    # Exact pin by design (extension-system version contract): the extension is
+    # built against this host contract, so it pins the version it implements.
+    "deerflow-extension-api==0.2.5",
+    "alembic>=1.13",
+    "fastapi>=0.115.0",
+    "httpx>=0.28.0",
+    "pydantic>=2.12.5",
+    # The vector store is this extension's own dependency; the host harness no
+    # longer carries it.
+    "qdrant-client>=1.19.0",
+    "sqlalchemy[asyncio]>=2.0,<3.0",
+    "tiktoken>=0.8.0",
+]
+
+[project.entry-points."deerflow.extensions"]
+knowledge = "deerflow_knowledge.install:install"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["deerflow_knowledge"]

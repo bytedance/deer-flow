@@ -12,10 +12,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from app.gateway.services.knowledge_service import KnowledgeService
-from deerflow.knowledge.store import KnowledgeStore
-from deerflow.knowledge.vector_store import KnowledgeVectorStore, refreshed_store
-from deerflow.knowledge.worker import KnowledgeIndexWorker
+from deerflow_knowledge.services.knowledge_service import KnowledgeService
+from deerflow_knowledge.store import KnowledgeStore
+from deerflow_knowledge.vector_store import KnowledgeVectorStore, refreshed_store
+from deerflow_knowledge.worker import KnowledgeIndexWorker
 
 CFG_URL = "http://cfg:6333"
 

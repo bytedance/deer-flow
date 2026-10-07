@@ -15,9 +15,8 @@ import zipfile
 
 import httpx
 import pytest
-
-from deerflow.knowledge.captioner import apply_captions, caption_images
-from deerflow.knowledge.parser import (
+from deerflow_knowledge.captioner import apply_captions, caption_images
+from deerflow_knowledge.parser import (
     MineruAuthError,
     MineruError,
     MineruParseFailedError,
@@ -94,7 +93,7 @@ async def test_parse_pdf_full_flow(tmp_path, monkeypatch):
     client = httpx.AsyncClient(transport=_mineru_transport(recorded))
     # zip 下载走独立 client（支持 MINERU_ZIP_PROXY，不经传入的 mock transport）
     # —— mock 掉网络层，保留真实 zip 解包路径的验证。
-    from deerflow.knowledge import parser as parser_mod
+    from deerflow_knowledge import parser as parser_mod
 
     async def _fake_download(zip_url: str) -> bytes:
         return _make_result_zip()
@@ -227,7 +226,7 @@ def _vlm_transport(recorded: list[httpx.Request], *, status: int = 200) -> httpx
 
 @pytest.mark.asyncio
 async def test_caption_images_calls_vlm_with_base64(monkeypatch):
-    monkeypatch.setattr("deerflow.knowledge.captioner.get_app_config", _vlm_config)
+    monkeypatch.setattr("deerflow_knowledge.captioner.get_app_config", _vlm_config)
     recorded: list[httpx.Request] = []
     client = httpx.AsyncClient(transport=_vlm_transport(recorded))
 
@@ -286,7 +285,7 @@ def test_apply_captions_rewrites_anchored_cells_and_tail_images():
 
 @pytest.mark.asyncio
 async def test_vlm_failure_degrades_to_filename_placeholder(monkeypatch):
-    monkeypatch.setattr("deerflow.knowledge.captioner.get_app_config", _vlm_config)
+    monkeypatch.setattr("deerflow_knowledge.captioner.get_app_config", _vlm_config)
     recorded: list[httpx.Request] = []
     client = httpx.AsyncClient(transport=_vlm_transport(recorded, status=500))
 
@@ -299,7 +298,7 @@ async def test_vlm_failure_degrades_to_filename_placeholder(monkeypatch):
 async def test_missing_vlm_key_degrades_all_images(monkeypatch):
     """A target with no usable key degrades to placeholders — and now that is only reachable
     for an entry outside the strict grid (the declared-UI case is refused upstream)."""
-    monkeypatch.setattr("deerflow.knowledge.captioner.get_app_config", lambda: _vlm_config(with_key=False))
+    monkeypatch.setattr("deerflow_knowledge.captioner.get_app_config", lambda: _vlm_config(with_key=False))
     recorded: list[httpx.Request] = []
 
     outcome = await caption_images([_SAMPLE_IMAGE], client=httpx.AsyncClient(transport=_vlm_transport(recorded)), model="test-vlm")
@@ -315,7 +314,7 @@ def test_caption_prompt_offers_transcription_mode_for_text_dense_images():
     """Task 15: text-dense images (doc screenshots/tables/code) must be fully
     transcribed; other images keep the one-sentence summary. One prompt, two
     branches, still retrieval-oriented."""
-    from deerflow.knowledge.captioner import _CAPTION_PROMPT
+    from deerflow_knowledge.captioner import _CAPTION_PROMPT
 
     assert "完整转录" in _CAPTION_PROMPT  # text-dense branch
     assert "一句" in _CAPTION_PROMPT  # summary branch kept
@@ -325,7 +324,7 @@ def test_caption_prompt_offers_transcription_mode_for_text_dense_images():
 async def test_caption_request_allows_transcription_length(monkeypatch):
     """Task 15: max_tokens raised from 256 (one sentence) to 1024 so a full
     page of transcribed text fits."""
-    monkeypatch.setattr("deerflow.knowledge.captioner.get_app_config", _vlm_config)
+    monkeypatch.setattr("deerflow_knowledge.captioner.get_app_config", _vlm_config)
     recorded: list[httpx.Request] = []
     client = httpx.AsyncClient(transport=_vlm_transport(recorded))
 
@@ -338,7 +337,7 @@ async def test_caption_request_allows_transcription_length(monkeypatch):
 @pytest.mark.asyncio
 async def test_caption_request_carries_the_configured_generation_params(monkeypatch):
     """A-4: the two knobs reach the wire from ``rag.caption_*`` (spec 2026-09-30 D1/D2)."""
-    monkeypatch.setattr("deerflow.knowledge.captioner.get_app_config", lambda: _vlm_config(rag={"caption_max_tokens": 2048, "caption_temperature": 0.7}))
+    monkeypatch.setattr("deerflow_knowledge.captioner.get_app_config", lambda: _vlm_config(rag={"caption_max_tokens": 2048, "caption_temperature": 0.7}))
     recorded: list[httpx.Request] = []
     client = httpx.AsyncClient(transport=_vlm_transport(recorded))
 
@@ -352,7 +351,7 @@ async def test_caption_request_carries_the_configured_generation_params(monkeypa
 @pytest.mark.asyncio
 async def test_caption_request_defaults_are_the_pre_change_values(monkeypatch):
     """The leg-level negative control: undeclared ⇒ 1024 / 0.15 on the wire (Task 0 capture)."""
-    monkeypatch.setattr("deerflow.knowledge.captioner.get_app_config", _vlm_config)
+    monkeypatch.setattr("deerflow_knowledge.captioner.get_app_config", _vlm_config)
     recorded: list[httpx.Request] = []
     client = httpx.AsyncClient(transport=_vlm_transport(recorded))
 
@@ -369,7 +368,7 @@ async def test_caption_request_defaults_are_the_pre_change_values(monkeypatch):
 def test_caption_prompt_no_longer_requests_structure_preservation():
     """Task 16: remove 'retain original structure' from prompt to cut token
     output by ~15–20% while still transcribing all text verbatim."""
-    from deerflow.knowledge.captioner import _CAPTION_PROMPT
+    from deerflow_knowledge.captioner import _CAPTION_PROMPT
 
     assert "保留原有结构" not in _CAPTION_PROMPT  # removed
     assert "完整转录" in _CAPTION_PROMPT  # kept for full transcription
@@ -382,7 +381,7 @@ async def test_concurrent_captions_maintain_original_order(monkeypatch):
     Simulate: p1 needs 5s, p2 needs 1s → p2 returns first but stays at pos2."""
     import asyncio
 
-    monkeypatch.setattr("deerflow.knowledge.captioner.get_app_config", _vlm_config)
+    monkeypatch.setattr("deerflow_knowledge.captioner.get_app_config", _vlm_config)
     recorded: list[httpx.Request] = []
 
     # Mock transport that delays p1 more than p2 (simulate different generation times)
@@ -419,7 +418,7 @@ async def test_concurrent_captions_maintain_original_order(monkeypatch):
 async def test_timeout_parameter_extended_to_180_seconds(monkeypatch):
     """Task 16: timeout raised from 60s to 180s so long-form transcription fits.
     Connect timeout remains 15s."""
-    monkeypatch.setattr("deerflow.knowledge.captioner.get_app_config", _vlm_config)
+    monkeypatch.setattr("deerflow_knowledge.captioner.get_app_config", _vlm_config)
     recorded: list[httpx.Request] = []
 
     def transport_handler(request: httpx.Request) -> httpx.Response:
@@ -440,7 +439,7 @@ async def test_timeout_parameter_extended_to_180_seconds(monkeypatch):
 
 def test_supported_upload_suffixes_contract():
     """spec §6 frozen set; helpers are case-insensitive, suffixes carry the dot."""
-    from deerflow.knowledge.parser import SUPPORTED_UPLOAD_SUFFIXES, is_local_suffix, is_supported_suffix
+    from deerflow_knowledge.parser import SUPPORTED_UPLOAD_SUFFIXES, is_local_suffix, is_supported_suffix
 
     assert SUPPORTED_UPLOAD_SUFFIXES == frozenset(
         {
@@ -474,7 +473,7 @@ def _stub_gates(monkeypatch, *, table: bool = False) -> None:
     """
     from types import SimpleNamespace
 
-    from deerflow.knowledge import parser as knowledge_parser
+    from deerflow_knowledge import parser as knowledge_parser
 
     monkeypatch.setattr(
         knowledge_parser,
@@ -490,7 +489,7 @@ def _stub_gates(monkeypatch, *, table: bool = False) -> None:
 def test_table_upload_suffixes_contract(monkeypatch):
     """spec 2026-09-09 §4（plan Task 1）：表格集是独立 frozenset（文本冻结集原地
     不动、`.csv` 留在文本集不进表格集），并集助手随 rag.table.enabled 两态。"""
-    from deerflow.knowledge.parser import (
+    from deerflow_knowledge.parser import (
         SUPPORTED_UPLOAD_SUFFIXES,
         TABLE_UPLOAD_SUFFIXES,
         is_supported_suffix,
@@ -524,8 +523,8 @@ def test_table_upload_suffixes_contract(monkeypatch):
 
 def test_table_gate_degrades_to_off_when_config_unreadable(monkeypatch):
     """配置读取抛错时门控降级为 off——门口绝不因异常而放宽（spec §4）。"""
-    from deerflow.knowledge import parser as knowledge_parser
-    from deerflow.knowledge.parser import (
+    from deerflow_knowledge import parser as knowledge_parser
+    from deerflow_knowledge.parser import (
         SUPPORTED_UPLOAD_SUFFIXES,
         is_supported_suffix,
         supported_upload_suffixes,
@@ -597,7 +596,7 @@ def test_download_zip_uses_proxy_env(monkeypatch):
     """MINERU_ZIP_PROXY 设置时，zip 下载走该代理（绕过宿主进程直连被拦）。"""
     import asyncio
 
-    from deerflow.knowledge import parser as parser_mod
+    from deerflow_knowledge import parser as parser_mod
 
     captured: dict = {}
 
@@ -632,7 +631,7 @@ def test_download_zip_direct_without_proxy_env(monkeypatch):
     """未设置 MINERU_ZIP_PROXY 时，zip 下载直连（不传 proxy 参数）。"""
     import asyncio
 
-    from deerflow.knowledge import parser as parser_mod
+    from deerflow_knowledge import parser as parser_mod
 
     captured: dict = {}
 
@@ -667,7 +666,7 @@ def test_download_zip_falls_back_to_direct_when_proxy_unreachable(monkeypatch):
     """代理不可达（ConnectError）时自动降级直连——安全软件关/开两种环境都可用。"""
     import asyncio
 
-    from deerflow.knowledge import parser as parser_mod
+    from deerflow_knowledge import parser as parser_mod
 
     attempts: list[dict] = []
 
@@ -720,7 +719,7 @@ def _fake_zip_download(zip_bytes: bytes):
 
 
 async def _parse_pdf_from_zip(tmp_path, monkeypatch, markdown: str) -> str:
-    from deerflow.knowledge import parser as parser_mod
+    from deerflow_knowledge import parser as parser_mod
 
     monkeypatch.setenv("MINERU_API_TOKEN", "test-token")
     monkeypatch.setattr(parser_mod, "_download_zip", _fake_zip_download(_make_result_zip_with_md(markdown)))
@@ -776,7 +775,7 @@ async def test_mineru_heading_only_document_not_moved(tmp_path, monkeypatch):
 
 
 def test_parse_delimited_csv_comma_to_gfm(tmp_path):
-    from deerflow.knowledge.parser import _parse_delimited
+    from deerflow_knowledge.parser import _parse_delimited
 
     p = tmp_path / "sales.csv"
     p.write_bytes("名称,数量\n苹果,3\n香蕉,5\n".encode())
@@ -785,7 +784,7 @@ def test_parse_delimited_csv_comma_to_gfm(tmp_path):
 
 
 def test_parse_delimited_csv_semicolon_sniffed(tmp_path):
-    from deerflow.knowledge.parser import _parse_delimited
+    from deerflow_knowledge.parser import _parse_delimited
 
     p = tmp_path / "semi.csv"
     p.write_bytes(b"a;b;c\n1;2;3\n")
@@ -794,7 +793,7 @@ def test_parse_delimited_csv_semicolon_sniffed(tmp_path):
 
 
 def test_parse_delimited_tsv_fixed_tab(tmp_path):
-    from deerflow.knowledge.parser import _parse_delimited
+    from deerflow_knowledge.parser import _parse_delimited
 
     p = tmp_path / "data.tsv"
     p.write_bytes("列一\t列二\n值A\t值B\n".encode())
@@ -803,7 +802,7 @@ def test_parse_delimited_tsv_fixed_tab(tmp_path):
 
 
 def test_parse_delimited_gbk_fallback(tmp_path):
-    from deerflow.knowledge.parser import _parse_delimited
+    from deerflow_knowledge.parser import _parse_delimited
 
     p = tmp_path / "国标.csv"
     p.write_bytes("名称,数量\n苹果,3".encode("gbk"))
@@ -812,7 +811,7 @@ def test_parse_delimited_gbk_fallback(tmp_path):
 
 
 def test_parse_delimited_strips_utf8_bom(tmp_path):
-    from deerflow.knowledge.parser import _parse_delimited
+    from deerflow_knowledge.parser import _parse_delimited
 
     p = tmp_path / "bom.csv"
     p.write_bytes("\ufeff名称,数量\n苹果,3\n".encode("utf-8"))
@@ -825,7 +824,7 @@ def test_parse_delimited_strips_utf8_bom(tmp_path):
 
 def test_parse_delimited_ragged_rows_fit_header_width(tmp_path):
     """行宽不齐：短行补空、长行截断到表头列数（与 HTML 归一同口径，spec §5）。"""
-    from deerflow.knowledge.parser import _parse_delimited
+    from deerflow_knowledge.parser import _parse_delimited
 
     p = tmp_path / "ragged.csv"
     p.write_bytes(b"a,b,c\n1,2\n3,4,5,6\n")
@@ -835,7 +834,7 @@ def test_parse_delimited_ragged_rows_fit_header_width(tmp_path):
 
 def test_parse_delimited_cell_pipe_is_escaped(tmp_path):
     """单元格内字面竖线转义后不破坏 GFM 列结构（parser 保证输出恒为合法 GFM）。"""
-    from deerflow.knowledge.parser import _parse_delimited
+    from deerflow_knowledge.parser import _parse_delimited
 
     p = tmp_path / "pipe.csv"
     p.write_bytes(b"cmd,note\na|b,keep\n")
@@ -845,7 +844,7 @@ def test_parse_delimited_cell_pipe_is_escaped(tmp_path):
 
 def test_parse_delimited_collapses_multiline_cell_to_space(tmp_path):
     """带引号的多行单元格 → 空白折叠为单空格（GFM 单元格必须单行，spec §5）。"""
-    from deerflow.knowledge.parser import _parse_delimited
+    from deerflow_knowledge.parser import _parse_delimited
 
     p = tmp_path / "multi.csv"
     p.write_bytes(b'a,b\n"line1\nline2",x\n')
@@ -854,7 +853,7 @@ def test_parse_delimited_collapses_multiline_cell_to_space(tmp_path):
 
 
 def test_parse_delimited_empty_file_returns_empty_string(tmp_path):
-    from deerflow.knowledge.parser import _parse_delimited
+    from deerflow_knowledge.parser import _parse_delimited
 
     p = tmp_path / "empty.csv"
     p.write_bytes(b"")
@@ -863,7 +862,7 @@ def test_parse_delimited_empty_file_returns_empty_string(tmp_path):
 
 
 def test_parse_delimited_blank_only_returns_empty_string(tmp_path):
-    from deerflow.knowledge.parser import _parse_delimited
+    from deerflow_knowledge.parser import _parse_delimited
 
     p = tmp_path / "blank.csv"
     p.write_bytes(b"\n\n  \n")
@@ -873,7 +872,7 @@ def test_parse_delimited_blank_only_returns_empty_string(tmp_path):
 
 def test_parse_delimited_header_only_no_data_rows(tmp_path):
     """单行（仅表头）→ GFM 表头 + 分隔行，无数据行。"""
-    from deerflow.knowledge.parser import _parse_delimited
+    from deerflow_knowledge.parser import _parse_delimited
 
     p = tmp_path / "header_only.csv"
     p.write_bytes(b"a,b,c\n")
@@ -882,7 +881,7 @@ def test_parse_delimited_header_only_no_data_rows(tmp_path):
 
 
 def test_parse_delimited_skips_blank_rows(tmp_path):
-    from deerflow.knowledge.parser import _parse_delimited
+    from deerflow_knowledge.parser import _parse_delimited
 
     p = tmp_path / "gaps.csv"
     p.write_bytes(b"a,b\n1,2\n\n3,4\n")
@@ -921,7 +920,7 @@ async def test_parse_document_routes_tsv_to_delimited_no_mineru(tmp_path, monkey
 
 def test_is_local_suffix_covers_tsv():
     """`.tsv` 归本地读集（永不触 MinerU）；`.csv` 成员身份不变。"""
-    from deerflow.knowledge.parser import is_local_suffix
+    from deerflow_knowledge.parser import is_local_suffix
 
     assert is_local_suffix(".tsv")
     assert is_local_suffix(".TSV")
@@ -964,14 +963,14 @@ _FORM_A_SHADED_TABLE1 = (
 
 def test_normalize_form_a_header_is_first_tr():
     """形态 A（PDF 路）：无 <thead>/<th> → 表头回落首个 <tr>；整表压一行也吃下。"""
-    from deerflow.knowledge.parser import _normalize_tables_to_gfm
+    from deerflow_knowledge.parser import _normalize_tables_to_gfm
 
     assert _normalize_tables_to_gfm(_FORM_A_TABLE1) == ("| Region | Q1 | Q2 | Total |\n| --- | --- | --- | --- |\n| North | 120 | 135 | 255 |\n| South | 98 | 112 | 210 |\n| East | 143 | 150 | 293 |\n| West | 87 | 94 | 181 |")
 
 
 def test_normalize_rowspan_sinks_value_into_spanned_rows():
     """rowspan=2 扁平化：值下沉填充到被跨的行（检索行卡自足，spec §5）。"""
-    from deerflow.knowledge.parser import _normalize_tables_to_gfm
+    from deerflow_knowledge.parser import _normalize_tables_to_gfm
 
     lines = _normalize_tables_to_gfm(_FORM_A_TABLE2).splitlines()
 
@@ -983,7 +982,7 @@ def test_normalize_rowspan_sinks_value_into_spanned_rows():
 
 def test_normalize_colspan_row_padded_to_header_width():
     """colspan=3 行只回 1 个 <td> → 值取首列、余列空、补齐到表头 3 列（spec §5）。"""
-    from deerflow.knowledge.parser import _normalize_tables_to_gfm
+    from deerflow_knowledge.parser import _normalize_tables_to_gfm
 
     lines = _normalize_tables_to_gfm(_FORM_A_TABLE2).splitlines()
 
@@ -992,7 +991,7 @@ def test_normalize_colspan_row_padded_to_header_width():
 
 def test_normalize_shaded_empty_header_not_guessed():
     """底纹表头失读（首 <tr> 全空 <td>）：不猜列名、退化为无列名行组、列数守恒。"""
-    from deerflow.knowledge.parser import _normalize_tables_to_gfm
+    from deerflow_knowledge.parser import _normalize_tables_to_gfm
 
     lines = _normalize_tables_to_gfm(_FORM_A_SHADED_TABLE1).splitlines()
 
@@ -1004,7 +1003,7 @@ def test_normalize_shaded_empty_header_not_guessed():
 def test_normalize_form_b_nested_p_strong_joined_by_space():
     """形态 B（docx 路）：<thead><th> + 嵌套 <p>/<strong>；单格多 <p> 以空格连接、绝不插
     换行；剥内嵌标签。"""
-    from deerflow.knowledge.parser import _normalize_tables_to_gfm
+    from deerflow_knowledge.parser import _normalize_tables_to_gfm
 
     html = "<table><thead><tr><th><p><strong>数据类型</strong></p></th><th><p>Private</p><p>扑瑞沃特</p></th></tr></thead><tbody><tr><td><p>基本类型</p></td><td><p>int</p></td></tr></tbody></table>"
 
@@ -1013,7 +1012,7 @@ def test_normalize_form_b_nested_p_strong_joined_by_space():
 
 def test_normalize_form_b_implicit_empty_td_tolerated():
     """形态 B 合并区的隐式空 <td></td>（无 span 属性）：按字面空值处理、宽度守恒。"""
-    from deerflow.knowledge.parser import _normalize_tables_to_gfm
+    from deerflow_knowledge.parser import _normalize_tables_to_gfm
 
     html = "<table><tbody><tr><th>类别</th><th>类型</th></tr><tr><td></td><td>可中断锁</td></tr><tr><td></td><td>可重入锁</td></tr></tbody></table>"
 
@@ -1021,7 +1020,7 @@ def test_normalize_form_b_implicit_empty_td_tolerated():
 
 
 def test_normalize_unescapes_html_entities():
-    from deerflow.knowledge.parser import _normalize_tables_to_gfm
+    from deerflow_knowledge.parser import _normalize_tables_to_gfm
 
     html = "<table><tr><td>A &amp; B</td><td>&lt;tag&gt;</td></tr><tr><td>x</td><td>y</td></tr></table>"
 
@@ -1030,7 +1029,7 @@ def test_normalize_unescapes_html_entities():
 
 def test_normalize_already_gfm_is_noop():
     """已是 GFM 管道表（用户 authored .md）：幂等 no-op，原样返回。"""
-    from deerflow.knowledge.parser import _normalize_tables_to_gfm
+    from deerflow_knowledge.parser import _normalize_tables_to_gfm
 
     gfm = "| a | b |\n| --- | --- |\n| 1 | 2 |"
 
@@ -1039,7 +1038,7 @@ def test_normalize_already_gfm_is_noop():
 
 def test_normalize_prose_with_pipe_untouched():
     """散文里的 |（shell 管道）不在 <table> 内 → 原样保留，绝不误判为表格（Task 0 #6）。"""
-    from deerflow.knowledge.parser import _normalize_tables_to_gfm
+    from deerflow_knowledge.parser import _normalize_tables_to_gfm
 
     prose = "Pipeline note: the shell command cat sales.csv | grep north | wc -l counts rows."
 
@@ -1048,7 +1047,7 @@ def test_normalize_prose_with_pipe_untouched():
 
 def test_normalize_preserves_surrounding_markdown():
     """归一只替换 <table> 段，标题/散文/空行逐字保留（散文里的 | 不动）。"""
-    from deerflow.knowledge.parser import _normalize_tables_to_gfm
+    from deerflow_knowledge.parser import _normalize_tables_to_gfm
 
     md = "## 报告\n\n表一：\n\n" + _FORM_A_TABLE1 + "\n\n结尾 cat a.csv | grep x | wc -l 说明。"
 
@@ -1060,7 +1059,7 @@ def test_normalize_preserves_surrounding_markdown():
 
 def test_normalize_nested_table_left_as_residual_html():
     """嵌套表（归一器未覆盖形态）→ 整段原样保留为残留 HTML，交 chunker 原子块防御（spec §6）。"""
-    from deerflow.knowledge.parser import _normalize_tables_to_gfm
+    from deerflow_knowledge.parser import _normalize_tables_to_gfm
 
     nested = "<table><tr><td><table><tr><td>inner</td></tr></table></td></tr></table>"
 
@@ -1113,7 +1112,7 @@ async def test_local_markdown_trailing_heading_not_touched(tmp_path, monkeypatch
 
 
 def test_workbook_to_markdown_single_sheet_first_row_header():
-    from deerflow.knowledge.parser import _workbook_rows_to_markdown
+    from deerflow_knowledge.parser import _workbook_rows_to_markdown
 
     md = _workbook_rows_to_markdown([("Sales", [["Region", "Q1"], ["North", 120], ["South", 98]])])
 
@@ -1121,7 +1120,7 @@ def test_workbook_to_markdown_single_sheet_first_row_header():
 
 
 def test_workbook_to_markdown_multi_sheet_in_order_joined_by_blank_line():
-    from deerflow.knowledge.parser import _workbook_rows_to_markdown
+    from deerflow_knowledge.parser import _workbook_rows_to_markdown
 
     md = _workbook_rows_to_markdown(
         [
@@ -1135,7 +1134,7 @@ def test_workbook_to_markdown_multi_sheet_in_order_joined_by_blank_line():
 
 def test_workbook_to_markdown_skips_empty_sheet():
     """空 sheet（无行 / 全空行）跳过，不产出空 ## 段（spec §5）。"""
-    from deerflow.knowledge.parser import _workbook_rows_to_markdown
+    from deerflow_knowledge.parser import _workbook_rows_to_markdown
 
     md = _workbook_rows_to_markdown(
         [
@@ -1152,14 +1151,14 @@ def test_workbook_to_markdown_skips_empty_sheet():
 
 
 def test_workbook_to_markdown_all_sheets_empty_returns_empty_string():
-    from deerflow.knowledge.parser import _workbook_rows_to_markdown
+    from deerflow_knowledge.parser import _workbook_rows_to_markdown
 
     assert _workbook_rows_to_markdown([("A", []), ("B", [["", ""]])]) == ""
 
 
 def test_workbook_to_markdown_stringifies_typed_cells():
     """calamine to_python 返回原生类型（int/float/bool/None）→ 文本；None 落空单元格。"""
-    from deerflow.knowledge.parser import _workbook_rows_to_markdown
+    from deerflow_knowledge.parser import _workbook_rows_to_markdown
 
     md = _workbook_rows_to_markdown([("S", [["n", "f", "b", "e"], [120, 2.5, True, None]])])
 
@@ -1172,7 +1171,7 @@ def test_workbook_to_markdown_integral_float_renders_as_int():
     真实 .xlsx 端到端（openpyxl 写 int、calamine 读回 float）暴露：整数列显示
     120.0 是格式瑕疵；整值 float 归一为 int 文本，非整值 float 保留小数。
     """
-    from deerflow.knowledge.parser import _workbook_rows_to_markdown
+    from deerflow_knowledge.parser import _workbook_rows_to_markdown
 
     md = _workbook_rows_to_markdown([("S", [["n", "f"], [120.0, 2.5]])])
 
@@ -1180,7 +1179,7 @@ def test_workbook_to_markdown_integral_float_renders_as_int():
 
 
 def test_workbook_to_markdown_ragged_rows_fit_header_width():
-    from deerflow.knowledge.parser import _workbook_rows_to_markdown
+    from deerflow_knowledge.parser import _workbook_rows_to_markdown
 
     md = _workbook_rows_to_markdown([("S", [["a", "b", "c"], ["1"], ["2", "3", "4", "5"]])])
 
@@ -1188,7 +1187,7 @@ def test_workbook_to_markdown_ragged_rows_fit_header_width():
 
 
 def test_workbook_to_markdown_header_only_sheet():
-    from deerflow.knowledge.parser import _workbook_rows_to_markdown
+    from deerflow_knowledge.parser import _workbook_rows_to_markdown
 
     assert _workbook_rows_to_markdown([("S", [["a", "b"]])]) == "## S\n\n| a | b |\n| --- | --- |"
 
@@ -1231,7 +1230,7 @@ def _install_fake_calamine(monkeypatch, sheets, starts=None):
 @pytest.mark.asyncio
 async def test_parse_excel_gate_off_raises_clear_error(tmp_path, monkeypatch):
     """门控 off：不进 calamine，直接抛清晰 ValueError（带 rag.table.enabled，spec §4/§8）。"""
-    from deerflow.knowledge.parser import _parse_excel
+    from deerflow_knowledge.parser import _parse_excel
 
     _stub_gates(monkeypatch)  # table off
     p = tmp_path / "book.xlsx"
@@ -1246,7 +1245,7 @@ async def test_parse_excel_missing_calamine_raises_clear_error(tmp_path, monkeyp
     """门控 on 但 python-calamine 缺失：抛清晰 ValueError（带安装指引），不静默产空。"""
     import sys
 
-    from deerflow.knowledge.parser import _parse_excel
+    from deerflow_knowledge.parser import _parse_excel
 
     _stub_gates(monkeypatch, table=True)
     monkeypatch.setitem(sys.modules, "python_calamine", None)  # 强制 ImportError
@@ -1262,7 +1261,7 @@ async def test_parse_excel_happy_path_via_fake_calamine(tmp_path, monkeypatch):
     """fake calamine 走完接线：from_path → sheet_names → get_sheet_by_name → to_python
     → 每 sheet 一段 GFM；证明 run_file_io 包裹的 blocking 读取产出正确 markdown。
     .xlsx 会尽力读一次 zip（本夹具是假字节 ⇒ 落回退腿、images 空，spec 2026-10-03）。"""
-    from deerflow.knowledge.parser import _parse_excel
+    from deerflow_knowledge.parser import _parse_excel
 
     _stub_gates(monkeypatch, table=True)
     _install_fake_calamine(monkeypatch, {"Sales": [["Region", "Q1"], ["North", 120]], "Empty": []})
@@ -1455,7 +1454,7 @@ _RICH_MEMBERS = {
 
 
 def test_xlsx_sheet_images_maps_anchors_media_and_bytes(tmp_path):
-    from deerflow.knowledge.parser import _extract_xlsx_images, _xlsx_sheet_images
+    from deerflow_knowledge.parser import _extract_xlsx_images, _xlsx_sheet_images
 
     book = _build_xlsx(
         tmp_path / "rich.xlsx",
@@ -1480,7 +1479,7 @@ def test_xlsx_sheet_images_maps_anchors_media_and_bytes(tmp_path):
 
 
 def test_xlsx_sheet_images_sheet_with_only_filtered_images_is_absent(tmp_path):
-    from deerflow.knowledge.parser import _xlsx_sheet_images
+    from deerflow_knowledge.parser import _xlsx_sheet_images
 
     book = _build_xlsx(
         tmp_path / "filtered.xlsx",
@@ -1501,7 +1500,7 @@ def test_xlsx_sheet_images_sheet_with_only_filtered_images_is_absent(tmp_path):
 
 
 def test_xlsx_sheet_images_dedupes_same_media_keeping_first_anchor(tmp_path):
-    from deerflow.knowledge.parser import _xlsx_sheet_images
+    from deerflow_knowledge.parser import _xlsx_sheet_images
 
     book = _build_xlsx(
         tmp_path / "dedupe.xlsx",
@@ -1521,7 +1520,7 @@ def test_xlsx_sheet_images_dedupes_same_media_keeping_first_anchor(tmp_path):
 
 
 def test_xlsx_sheet_images_skips_missing_drawing_and_missing_media(tmp_path):
-    from deerflow.knowledge.parser import _xlsx_sheet_images
+    from deerflow_knowledge.parser import _xlsx_sheet_images
 
     # sheet rels 指向包内不存在的 drawing9 → 该件跳过、不炸（其余照出）
     book = _build_xlsx(
@@ -1552,7 +1551,7 @@ def test_xlsx_sheet_images_skips_missing_drawing_and_missing_media(tmp_path):
 
 
 def test_extract_xlsx_images_bad_zip_raises(tmp_path):
-    from deerflow.knowledge.parser import _extract_xlsx_images
+    from deerflow_knowledge.parser import _extract_xlsx_images
 
     p = tmp_path / "broken.xlsx"
     p.write_bytes(b"this is not a zip")
@@ -1569,7 +1568,7 @@ def _img(ref):
 
 
 def test_merge_anchor_links_merges_into_cells_keeping_text_form():
-    from deerflow.knowledge.parser import _merge_anchor_links
+    from deerflow_knowledge.parser import _merge_anchor_links
 
     rows = [["Region", "Q1"], ["North", 120.0], ["South", None]]
 
@@ -1590,7 +1589,7 @@ def test_merge_anchor_links_merges_into_cells_keeping_text_form():
 
 
 def test_merge_anchor_links_normalizes_anchors_against_sheet_start():
-    from deerflow.knowledge.parser import _merge_anchor_links
+    from deerflow_knowledge.parser import _merge_anchor_links
 
     entries = [
         (_img("images/hit.png"), 3, 2),  # abs (3,2) − start (2,1) → 矩阵 (1,1)
@@ -1606,7 +1605,7 @@ def test_merge_anchor_links_normalizes_anchors_against_sheet_start():
 
 
 def test_merge_anchor_links_falls_back_when_unplaceable():
-    from deerflow.knowledge.parser import _merge_anchor_links
+    from deerflow_knowledge.parser import _merge_anchor_links
 
     absolute = (_img("images/abs.png"), None, None)  # absoluteAnchor：无 from
     anchored = (_img("images/cell.png"), 0, 0)
@@ -1623,7 +1622,7 @@ def test_merge_anchor_links_falls_back_when_unplaceable():
 
 
 def test_workbook_to_markdown_trailing_images_and_image_only_sheet():
-    from deerflow.knowledge.parser import _workbook_rows_to_markdown
+    from deerflow_knowledge.parser import _workbook_rows_to_markdown
 
     md = _workbook_rows_to_markdown(
         [("Data", [["a"], ["1"]]), ("Shots", [])],
@@ -1635,7 +1634,7 @@ def test_workbook_to_markdown_trailing_images_and_image_only_sheet():
 
 @pytest.mark.asyncio
 async def test_parse_excel_merges_anchor_links_and_flattens_images(tmp_path, monkeypatch):
-    from deerflow.knowledge.parser import _parse_excel
+    from deerflow_knowledge.parser import _parse_excel
 
     _stub_gates(monkeypatch, table=True)
     _install_fake_calamine(monkeypatch, {"Sheet1": [["Region", "Q1"], ["North", 120.0]]})
@@ -1661,7 +1660,7 @@ async def test_parse_excel_merges_anchor_links_and_flattens_images(tmp_path, mon
 
 @pytest.mark.asyncio
 async def test_parse_excel_startless_sheet_appends_images_section(tmp_path, monkeypatch):
-    from deerflow.knowledge.parser import _parse_excel
+    from deerflow_knowledge.parser import _parse_excel
 
     _stub_gates(monkeypatch, table=True)
     _install_fake_calamine(monkeypatch, {"Sheet1": []}, starts={"Sheet1": None})
@@ -1683,14 +1682,14 @@ async def test_parse_excel_startless_sheet_appends_images_section(tmp_path, monk
 async def test_parse_excel_broken_xlsx_falls_back_to_text_only(tmp_path, monkeypatch, caplog):
     import logging
 
-    from deerflow.knowledge.parser import _parse_excel
+    from deerflow_knowledge.parser import _parse_excel
 
     _stub_gates(monkeypatch, table=True)
     _install_fake_calamine(monkeypatch, {"S": [["a"], ["1"]]})
     p = tmp_path / "broken.xlsx"
     p.write_bytes(b"not a zip at all")
 
-    with caplog.at_level(logging.WARNING, logger="deerflow.knowledge.parser"):
+    with caplog.at_level(logging.WARNING, logger="deerflow_knowledge.parser"):
         doc = await _parse_excel(p)
 
     assert doc.markdown == "## S\n\n| a |\n| --- |\n| 1 |"
@@ -1703,7 +1702,7 @@ async def test_parse_excel_broken_xlsx_falls_back_to_text_only(tmp_path, monkeyp
 async def test_parse_excel_image_extraction_errors_degrade_to_text(tmp_path, monkeypatch, caplog, exc):
     import logging
 
-    from deerflow.knowledge import parser as knowledge_parser
+    from deerflow_knowledge import parser as knowledge_parser
 
     _stub_gates(monkeypatch, table=True)
     _install_fake_calamine(monkeypatch, {"S": [["a"], ["1"]]})
@@ -1715,7 +1714,7 @@ async def test_parse_excel_image_extraction_errors_degrade_to_text(tmp_path, mon
 
     monkeypatch.setattr(knowledge_parser, "_extract_xlsx_images", _boom)
 
-    with caplog.at_level(logging.WARNING, logger="deerflow.knowledge.parser"):
+    with caplog.at_level(logging.WARNING, logger="deerflow_knowledge.parser"):
         doc = await knowledge_parser._parse_excel(p)
 
     assert doc.markdown == "## S\n\n| a |\n| --- |\n| 1 |"
@@ -1725,7 +1724,7 @@ async def test_parse_excel_image_extraction_errors_degrade_to_text(tmp_path, mon
 
 @pytest.mark.asyncio
 async def test_parse_excel_xls_never_reads_the_zip_leg(tmp_path, monkeypatch):
-    from deerflow.knowledge import parser as knowledge_parser
+    from deerflow_knowledge import parser as knowledge_parser
 
     _stub_gates(monkeypatch, table=True)
     _install_fake_calamine(monkeypatch, {"S": [["a"], ["1"]]})
@@ -1813,9 +1812,9 @@ def _marker_transport(recorded: list[httpx.Request]) -> httpx.MockTransport:
 
 
 async def _caption(monkeypatch, flags: str, *, key: str = "test-entry-key"):
-    from deerflow.knowledge.captioner import caption_images
+    from deerflow_knowledge.captioner import caption_images
 
-    monkeypatch.setattr("deerflow.knowledge.captioner.get_app_config", lambda: _vlm_config(with_key=bool(key)))
+    monkeypatch.setattr("deerflow_knowledge.captioner.get_app_config", lambda: _vlm_config(with_key=bool(key)))
     recorded: list[httpx.Request] = []
     client = httpx.AsyncClient(transport=_marker_transport(recorded))
     outcome = await caption_images(_images(flags), client=client, model="test-vlm")
@@ -1892,10 +1891,11 @@ def test_the_captioner_owns_its_threshold_constant():
     """
     from pathlib import Path
 
-    from deerflow.knowledge.captioner import DEGRADED_FAILURE_THRESHOLD
+    from deerflow_knowledge import captioner as captioner_module
+    from deerflow_knowledge.captioner import DEGRADED_FAILURE_THRESHOLD
 
     assert DEGRADED_FAILURE_THRESHOLD == 0.3
-    source = (Path(__file__).resolve().parents[2] / "packages" / "harness" / "deerflow" / "knowledge" / "captioner.py").read_text(encoding="utf-8")
+    source = Path(captioner_module.__file__).read_text(encoding="utf-8")
 
     assert source.count("DEGRADED_FAILURE_THRESHOLD") == 2  # the definition plus its one reader
     assert source.count("0.3") == 1  # the literal appears once — inside the definition

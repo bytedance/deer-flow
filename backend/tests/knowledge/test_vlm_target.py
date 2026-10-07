@@ -61,7 +61,7 @@ def _config(models: list[dict] | None = None, rag: dict | None = None) -> AppCon
 
 
 def test_entry_reference_supplies_model_endpoint_and_key():
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     config = _config([VL_ENTRY])
 
@@ -80,8 +80,8 @@ def test_entry_without_endpoint_does_not_borrow_a_rag_side_field():
     without such a default is refused rather than pointed at a cloud nobody named, which is
     what the `rag.vlm_base_url` field used to supply.
     """
-    from deerflow.knowledge.embedder import RagConfigurationError
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.embedder import RagConfigurationError
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     entry = {key: value for key, value in VL_ENTRY.items() if key != "base_url"}
     config = _config([entry])
@@ -95,7 +95,7 @@ def test_entry_without_endpoint_does_not_borrow_a_rag_side_field():
 def test_entry_without_key_has_no_fallback_left():
     """Reversed (R14/D10.3): the entry must carry the key — the RAG field and the environment
     are both gone, and this is what the strict target rule keys off."""
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     entry = {key: value for key, value in VL_ENTRY.items() if key != "api_key"}
 
@@ -104,8 +104,8 @@ def test_entry_without_key_has_no_fallback_left():
 
 def test_a_value_naming_no_entry_is_a_configuration_error():
     """Reversed (D10.3): the bare-id path is gone, so this reports instead of dialing."""
-    from deerflow.knowledge.embedder import RagConfigurationError
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.embedder import RagConfigurationError
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     config = _config([VL_ENTRY])
 
@@ -121,7 +121,7 @@ def test_defaults_to_the_configured_vlm_model():
     The fixture's entry name, wire id and the RAG default are three different strings, so
     "which level answered" is visible in the result.
     """
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     config = _config([VL_ENTRY], {"vlm_model": "vl-entry"})
 
@@ -145,9 +145,9 @@ def _recording_transport(recorded: list[httpx.Request]) -> httpx.MockTransport:
 
 @pytest.mark.asyncio
 async def test_image_caption_posts_to_the_selected_entry(monkeypatch):
-    from deerflow.knowledge import captioner as captioner_module
-    from deerflow.knowledge.captioner import caption_images
-    from deerflow.knowledge.parser import ParsedImage
+    from deerflow_knowledge import captioner as captioner_module
+    from deerflow_knowledge.captioner import caption_images
+    from deerflow_knowledge.parser import ParsedImage
 
     monkeypatch.setattr(captioner_module, "get_app_config", lambda: _config([VL_ENTRY]))
     recorded: list[httpx.Request] = []
@@ -176,7 +176,7 @@ def _anthropic_transport(recorded: list[httpx.Request], *, content: list[dict] |
 
 
 def test_dialect_is_read_off_the_entrys_use_class():
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     assert resolve_vlm_target(_config([ANTHROPIC_ENTRY]), "claude-entry").dialect == "anthropic"
     assert resolve_vlm_target(_config([VL_ENTRY]), "vl-entry").dialect == "openai"
@@ -186,9 +186,9 @@ def test_dialect_is_read_off_the_entrys_use_class():
 
 @pytest.mark.asyncio
 async def test_anthropic_image_caption_speaks_the_messages_protocol(monkeypatch):
-    from deerflow.knowledge import captioner as captioner_module
-    from deerflow.knowledge.captioner import caption_images
-    from deerflow.knowledge.parser import ParsedImage
+    from deerflow_knowledge import captioner as captioner_module
+    from deerflow_knowledge.captioner import caption_images
+    from deerflow_knowledge.parser import ParsedImage
 
     monkeypatch.setattr(captioner_module, "get_app_config", lambda: _config([ANTHROPIC_ENTRY]))
     recorded: list[httpx.Request] = []
@@ -239,9 +239,9 @@ async def test_anthropic_endpoint_join_mirrors_the_chat_leg(monkeypatch, declare
     `/v1`: stripping would make an entry the graph extractor cannot reach work for
     captioning, which is the asymmetry this line exists to remove.
     """
-    from deerflow.knowledge import captioner as captioner_module
-    from deerflow.knowledge.captioner import caption_images
-    from deerflow.knowledge.parser import ParsedImage
+    from deerflow_knowledge import captioner as captioner_module
+    from deerflow_knowledge.captioner import caption_images
+    from deerflow_knowledge.parser import ParsedImage
 
     entry = {**ANTHROPIC_ENTRY, "base_url": declared}
     monkeypatch.setattr(captioner_module, "get_app_config", lambda: _config([entry]))
@@ -258,9 +258,9 @@ async def test_anthropic_endpoint_join_mirrors_the_chat_leg(monkeypatch, declare
 
 @pytest.mark.asyncio
 async def test_anthropic_reply_keeps_the_text_blocks_and_ignores_the_rest(monkeypatch):
-    from deerflow.knowledge import captioner as captioner_module
-    from deerflow.knowledge.captioner import caption_images
-    from deerflow.knowledge.parser import ParsedImage
+    from deerflow_knowledge import captioner as captioner_module
+    from deerflow_knowledge.captioner import caption_images
+    from deerflow_knowledge.parser import ParsedImage
 
     monkeypatch.setattr(captioner_module, "get_app_config", lambda: _config([ANTHROPIC_ENTRY]))
     recorded: list[httpx.Request] = []
@@ -281,9 +281,9 @@ async def test_anthropic_reply_keeps_the_text_blocks_and_ignores_the_rest(monkey
 
 @pytest.mark.asyncio
 async def test_unrecognized_entry_still_posts_the_openai_shape(monkeypatch):
-    from deerflow.knowledge import captioner as captioner_module
-    from deerflow.knowledge.captioner import caption_images
-    from deerflow.knowledge.parser import ParsedImage
+    from deerflow_knowledge import captioner as captioner_module
+    from deerflow_knowledge.captioner import caption_images
+    from deerflow_knowledge.parser import ParsedImage
 
     monkeypatch.setattr(captioner_module, "get_app_config", lambda: _config([CUSTOM_ENTRY]))
     recorded: list[httpx.Request] = []
@@ -317,7 +317,7 @@ def _chain() -> list[dict]:
 
 
 def test_explicit_argument_still_wins():
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     target = resolve_vlm_target(_config(models=_chain(), rag={"vlm_model": "role-model", "default_model": "default-model"}), "explicit-model")
 
@@ -325,7 +325,7 @@ def test_explicit_argument_still_wins():
 
 
 def test_vlm_model_beats_the_rag_default():
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     target = resolve_vlm_target(_config(models=_chain(), rag={"vlm_model": "role-model", "default_model": "default-model"}))
 
@@ -335,7 +335,7 @@ def test_vlm_model_beats_the_rag_default():
 def test_rag_default_answers_when_the_role_is_empty():
     # `rag.vlm_model` carries a code-level literal default until Task 9 retires it, so the
     # lower levels of the chain are only reachable from an isolated configuration.
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     target = resolve_vlm_target(_config(models=_chain(), rag={"vlm_model": "", "default_model": "default-model"}))
 
@@ -343,7 +343,7 @@ def test_rag_default_answers_when_the_role_is_empty():
 
 
 def test_first_model_answers_when_nothing_declares_a_target():
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     target = resolve_vlm_target(_config(models=_chain(), rag={"vlm_model": ""}))
 
@@ -353,9 +353,9 @@ def test_first_model_answers_when_nothing_declares_a_target():
 def test_a_stale_default_falls_back_to_the_first_model_and_is_named(caplog):
     import logging
 
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
-    with caplog.at_level(logging.WARNING, logger="deerflow.knowledge.model_target"):
+    with caplog.at_level(logging.WARNING, logger="deerflow_knowledge.model_target"):
         target = resolve_vlm_target(_config(models=_chain(), rag={"vlm_model": "", "default_model": "gone-model"}))
 
     assert target.model == "wire-first"
@@ -364,8 +364,8 @@ def test_a_stale_default_falls_back_to_the_first_model_and_is_named(caplog):
 
 def test_no_models_at_all_refuses_instead_of_sending_an_empty_model():
     """A caption call with an empty ``model`` is a request the endpoint would refuse anyway."""
-    from deerflow.knowledge.embedder import RagConfigurationError
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.embedder import RagConfigurationError
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     with pytest.raises(RagConfigurationError):
         resolve_vlm_target(_config(models=[], rag={"vlm_model": ""}))
@@ -385,8 +385,8 @@ def _ui_config(*entries: dict, vlm_model: str | None = None):
 
 
 def test_a_declared_ui_caption_target_without_a_key_is_refused():
-    from deerflow.knowledge.embedder import RagConfigurationError
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.embedder import RagConfigurationError
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     config = _ui_config({**VL_ENTRY, "api_key": None}, vlm_model="vl-entry")
 
@@ -398,7 +398,7 @@ def test_a_declared_ui_caption_target_without_a_key_is_refused():
 
 def test_a_fallback_caption_target_is_not_refused():
     """Blank role, keyless first model: still today's degradation path, not a hard error."""
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     config = _ui_config({**VL_ENTRY, "api_key": None}, vlm_model="")
 
@@ -416,9 +416,8 @@ def test_a_fallback_caption_target_is_not_refused():
 
 
 def test_an_anthropic_entry_without_an_address_borrows_the_sdks_own_default():
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
     from langchain_anthropic import ChatAnthropic
-
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
 
     config = _config([{**ANTHROPIC_ENTRY, "base_url": None}])
     target = resolve_vlm_target(config, "claude-entry")
@@ -429,9 +428,8 @@ def test_an_anthropic_entry_without_an_address_borrows_the_sdks_own_default():
 
 
 def test_a_deepseek_entry_without_an_address_borrows_the_sdks_own_default():
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
     from langchain_deepseek.chat_models import DEFAULT_API_BASE
-
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
 
     entry = {"name": "ds-entry", "use": "deerflow.models.patched_deepseek:PatchedChatDeepSeek", "model": "ds-wire", "api_key": "sk-ds", "supports_vision": True}
     config = _config([entry])
@@ -441,7 +439,7 @@ def test_a_deepseek_entry_without_an_address_borrows_the_sdks_own_default():
 
 
 def test_an_explicit_address_wins_in_every_cell():
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     entries = [
         {**VL_ENTRY, "base_url": "https://explicit.example/v1"},
@@ -455,8 +453,8 @@ def test_an_explicit_address_wins_in_every_cell():
 
 def test_an_openai_compatible_entry_without_an_address_is_refused_at_the_entrance():
     """No SDK default to borrow (its blank would mean OpenAI's public cloud): refuse."""
-    from deerflow.knowledge.embedder import RagConfigurationError
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.embedder import RagConfigurationError
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     config = _config([{**VL_ENTRY, "base_url": None}])
 
@@ -469,8 +467,7 @@ def test_an_openai_compatible_entry_without_an_address_is_refused_at_the_entranc
 def test_resolving_borrows_no_client_and_no_network(monkeypatch):
     """Purity pin: reading an SDK's default address must not build a client or dial out."""
     import httpx
-
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     def _explode(*args, **kwargs):
         raise AssertionError("resolving a target must not construct a client")
@@ -487,7 +484,7 @@ def test_the_rag_side_carries_no_vendor_url_literal():
     """The borrow is read from the SDK, so no default address may be copied into this repo."""
     from pathlib import Path
 
-    from deerflow.knowledge import vlm_target as module
+    from deerflow_knowledge import vlm_target as module
 
     source = Path(module.__file__).read_text(encoding="utf-8")
 
@@ -503,7 +500,7 @@ def test_the_rag_side_carries_no_vendor_url_literal():
 
 
 def test_the_entrys_thinking_declarations_reach_the_target():
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     entry = {
         **VL_ENTRY,
@@ -518,7 +515,7 @@ def test_the_entrys_thinking_declarations_reach_the_target():
 
 
 def test_an_entry_declaring_nothing_carries_no_thinking_declarations():
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     target = resolve_vlm_target(_config([VL_ENTRY]), "vl-entry")
 

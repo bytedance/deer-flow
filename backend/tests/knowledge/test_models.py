@@ -8,14 +8,13 @@ bootstrap, so these tests also prove the table definitions round-trip.
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select
-
-from deerflow.knowledge.models import (
+from deerflow_knowledge.models import (
     ChunkRow,
     DocumentRow,
     KnowledgeBaseRow,
 )
-from deerflow.knowledge.store import KnowledgeStore
+from deerflow_knowledge.store import KnowledgeStore
+from sqlalchemy import select
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,4 @@
-"""Unit tests for ``deerflow.knowledge.dimension_probe`` (spec 2026-09-26 §3 探针实现).
+"""Unit tests for ``deerflow_knowledge.dimension_probe`` (spec 2026-09-26 §3 探针实现).
 
 The probe answers "which dimensions does this embedding model accept" from a handful of real
 calls, and the whole design rests on one criterion: **a candidate passes only when the answer
@@ -17,8 +17,7 @@ from typing import Any
 
 import httpx
 import pytest
-
-from deerflow.knowledge.dimension_probe import (
+from deerflow_knowledge.dimension_probe import (
     CANDIDATE_DIMENSIONS,
     WILD_DIMENSION,
     DimensionProbeError,

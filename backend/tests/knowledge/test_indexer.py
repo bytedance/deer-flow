@@ -13,18 +13,17 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 import pytest_asyncio
-from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import FieldCondition, Filter, MatchValue, SparseVector
-
-from deerflow.knowledge.embedder import (
+from deerflow_knowledge.embedder import (
     DashScopeEmbedder,
     EmbedderAuthError,
     EmbedderError,
     EmbeddingResult,
 )
-from deerflow.knowledge.indexer import IndexStats, index_chunks
-from deerflow.knowledge.store import KnowledgeStore
-from deerflow.knowledge.vector_store import KnowledgeVectorStore
+from deerflow_knowledge.indexer import IndexStats, index_chunks
+from deerflow_knowledge.store import KnowledgeStore
+from deerflow_knowledge.vector_store import KnowledgeVectorStore
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import FieldCondition, Filter, MatchValue, SparseVector
 
 from .conftest import QDRANT_TEST_URL, requires_qdrant
 

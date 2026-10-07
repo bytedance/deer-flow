@@ -14,13 +14,12 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from deerflow_knowledge.captioner import CaptionOutcome
+from deerflow_knowledge.embedder import EmbeddingResult
+from deerflow_knowledge.parser import ParsedDocument, ParsedImage
+from deerflow_knowledge.store import KnowledgeStore
+from deerflow_knowledge.worker import KnowledgeIndexWorker
 from qdrant_client.models import SparseVector
-
-from deerflow.knowledge.captioner import CaptionOutcome
-from deerflow.knowledge.embedder import EmbeddingResult
-from deerflow.knowledge.parser import ParsedDocument, ParsedImage
-from deerflow.knowledge.store import KnowledgeStore
-from deerflow.knowledge.worker import KnowledgeIndexWorker
 
 SAMPLE_MD = """# 第一章 概述
 
@@ -113,7 +112,7 @@ async def test_parsed_images_are_persisted_next_to_document(session_factory, tmp
     storage.write_bytes(b"pdf")
     await store.create_document(doc_id="doc-1", kb_id="kb-1", uploader_id="user-1", name="a.pdf", size_bytes=3, storage_path=str(storage))
     images = [ParsedImage(ref="images/p1.jpg", content=b"jpeg-bytes", media_type="image/jpeg")]
-    monkeypatch.setattr("deerflow.knowledge.worker.caption_images", AsyncMock(return_value=CaptionOutcome(captions={"images/p1.jpg": "图注"})))
+    monkeypatch.setattr("deerflow_knowledge.worker.caption_images", AsyncMock(return_value=CaptionOutcome(captions={"images/p1.jpg": "图注"})))
 
     async def parse_with_images(path: str) -> ParsedDocument:
         return ParsedDocument(markdown=SAMPLE_MD + "\n\n![图注](images/p1.jpg)\n", images=images)
@@ -140,7 +139,7 @@ async def test_reparse_rebuilds_images_dir(session_factory, tmp_path, monkeypatc
     storage.write_bytes(b"pdf")
     await store.create_document(doc_id="doc-1", kb_id="kb-1", uploader_id="user-1", name="a.pdf", size_bytes=3, storage_path=str(storage))
     images = [ParsedImage(ref="images/p1.jpg", content=b"fresh", media_type="image/jpeg")]
-    monkeypatch.setattr("deerflow.knowledge.worker.caption_images", AsyncMock(return_value=CaptionOutcome(captions={"images/p1.jpg": "图注"})))
+    monkeypatch.setattr("deerflow_knowledge.worker.caption_images", AsyncMock(return_value=CaptionOutcome(captions={"images/p1.jpg": "图注"})))
 
     async def parse_with_images(path: str) -> ParsedDocument:
         return ParsedDocument(markdown=SAMPLE_MD, images=images)
@@ -163,12 +162,12 @@ async def test_image_persist_failure_does_not_fail_document(session_factory, tmp
     storage.write_bytes(b"pdf")
     await store.create_document(doc_id="doc-1", kb_id="kb-1", uploader_id="user-1", name="a.pdf", size_bytes=3, storage_path=str(storage))
     images = [ParsedImage(ref="images/p1.jpg", content=b"jpeg-bytes", media_type="image/jpeg")]
-    monkeypatch.setattr("deerflow.knowledge.worker.caption_images", AsyncMock(return_value=CaptionOutcome(captions={"images/p1.jpg": "图注"})))
+    monkeypatch.setattr("deerflow_knowledge.worker.caption_images", AsyncMock(return_value=CaptionOutcome(captions={"images/p1.jpg": "图注"})))
 
     async def boom(fn, *args, **kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr("deerflow.knowledge.worker.run_file_io", boom)
+    monkeypatch.setattr("deerflow_knowledge.worker.run_file_io", boom)
 
     async def parse_with_images(path: str) -> ParsedDocument:
         return ParsedDocument(markdown=SAMPLE_MD, images=images)
@@ -295,7 +294,7 @@ class _FailingEmbedder:
         self.calls = 0
 
     async def embed(self, texts, *, text_type: str = "document"):
-        from deerflow.knowledge.embedder import EmbedderError
+        from deerflow_knowledge.embedder import EmbedderError
 
         self.calls += 1
         if self.calls == 1:
@@ -313,7 +312,7 @@ class _SecondCallFailingEmbedder:
         self.calls = 0
 
     async def embed(self, texts, *, text_type: str = "document"):
-        from deerflow.knowledge.embedder import EmbedderError
+        from deerflow_knowledge.embedder import EmbedderError
 
         self.calls += 1
         if self.calls == 2:
@@ -523,10 +522,10 @@ async def test_a_config_error_on_a_new_document_fails_it_without_a_request(sessi
     entry = ModelConfig(name="vl-entry", display_name="vl-entry", description=None, use="langchain_openai:ChatOpenAI", model="vl-wire", base_url="https://ui.example/v1", supports_thinking=False)
     config = AppConfig(models=[entry], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"), rag=RagConfig(vlm_model="vl-entry"))
     config._ui_model_names = {"vl-entry"}
-    monkeypatch.setattr("deerflow.knowledge.captioner.get_app_config", lambda: config)
-    monkeypatch.setattr("deerflow.knowledge.worker.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow_knowledge.captioner.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow_knowledge.worker.get_app_config", lambda: config)
     sent: list[object] = []
-    monkeypatch.setattr("deerflow.knowledge.caption_client.httpx.AsyncClient", lambda **kw: sent.append(kw) or object())
+    monkeypatch.setattr("deerflow_knowledge.caption_client.httpx.AsyncClient", lambda **kw: sent.append(kw) or object())
 
     async def parse(path: str) -> ParsedDocument:
         return ParsedDocument(markdown=SAMPLE_MD, images=images)
@@ -548,7 +547,7 @@ async def test_pipeline_records_a_degraded_caption_leg(session_factory, tmp_path
     await store.create_kb(kb_id="kb-1", owner_id="user-1", name="k")
     storage, images = _image_workspace(tmp_path)
     await store.create_document(doc_id="doc-1", kb_id="kb-1", uploader_id="user-1", name="a.pdf", size_bytes=3, storage_path=str(storage))
-    monkeypatch.setattr("deerflow.knowledge.worker.caption_images", AsyncMock(side_effect=_degraded_caption))
+    monkeypatch.setattr("deerflow_knowledge.worker.caption_images", AsyncMock(side_effect=_degraded_caption))
 
     async def parse(path: str) -> ParsedDocument:
         return ParsedDocument(markdown=SAMPLE_MD + "\n\n![图注](images/p1.jpg)\n", images=images)
@@ -613,7 +612,7 @@ async def test_reparse_refreshes_a_counted_marker_instead_of_stacking(session_fa
     storage, images = _image_workspace(tmp_path)
     await store.create_document(doc_id="doc-1", kb_id="kb-1", uploader_id="user-1", name="a.pdf", size_bytes=3, storage_path=str(storage))
     await store.update_document_status("doc-1", "parsing", path_status={"caption": "degraded"}, error="image caption degraded: 1/2 images failed")
-    monkeypatch.setattr("deerflow.knowledge.worker.caption_images", AsyncMock(side_effect=_degraded_caption))
+    monkeypatch.setattr("deerflow_knowledge.worker.caption_images", AsyncMock(side_effect=_degraded_caption))
 
     async def parse(path: str) -> ParsedDocument:
         return ParsedDocument(markdown=SAMPLE_MD, images=images)
@@ -653,7 +652,7 @@ async def test_an_indexing_resume_keeps_the_caption_result_and_never_reruns_it(s
     await store.insert_chunks([{"chunk_id": "doc-1#0000", "doc_id": "doc-1", "kb_id": "kb-1", "chunk_index": 0, "text": "DeerFlow 智能体", "heading_path": [], "page": None, "token_count": 5}])
     await store.update_document_status("doc-1", "indexing", path_status={"caption": "degraded", "vector": "done"}, error=CAPTION_MARKER)
     stub = AsyncMock(side_effect=AssertionError("caption_images must not rerun on an indexing resume"))
-    monkeypatch.setattr("deerflow.knowledge.worker.caption_images", stub)
+    monkeypatch.setattr("deerflow_knowledge.worker.caption_images", stub)
     worker = _worker(store, session_factory, parse_fn=_parse_fn())
 
     await worker.process_document("doc-1")
@@ -674,7 +673,7 @@ async def test_a_hard_failure_still_overwrites_the_caption_marker(session_factor
     await store.create_kb(kb_id="kb-1", owner_id="user-1", name="k")
     storage, images = _image_workspace(tmp_path)
     await store.create_document(doc_id="doc-1", kb_id="kb-1", uploader_id="user-1", name="a.pdf", size_bytes=3, storage_path=str(storage))
-    monkeypatch.setattr("deerflow.knowledge.worker.caption_images", AsyncMock(side_effect=_degraded_caption))
+    monkeypatch.setattr("deerflow_knowledge.worker.caption_images", AsyncMock(side_effect=_degraded_caption))
     store.insert_chunks = AsyncMock(side_effect=RuntimeError("chunk table is locked"))
 
     async def parse(path: str) -> ParsedDocument:

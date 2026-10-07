@@ -13,8 +13,7 @@ import logging
 from types import SimpleNamespace
 
 import pytest
-
-from deerflow.knowledge.model_target import resolve_rag_model_name
+from deerflow_knowledge.model_target import resolve_rag_model_name
 
 
 def _config(*names: str, default_model: str | None = None):
@@ -64,7 +63,7 @@ def test_a_stale_default_falls_back_to_the_first_model_and_is_named(caplog: pyte
     """Only the RAG default itself may be silently superseded -- and never silently."""
     config = _config("A", "B", default_model="ghost")
 
-    with caplog.at_level(logging.WARNING, logger="deerflow.knowledge.model_target"):
+    with caplog.at_level(logging.WARNING, logger="deerflow_knowledge.model_target"):
         assert resolve_rag_model_name(config) == "A"
 
     assert "ghost" in caplog.text
@@ -151,7 +150,7 @@ def _real_config(*entries: ModelConfig, ui: tuple[str, ...] = (), default_model:
 
 
 def _missing(config, name, *, role: str = "评测裁判"):
-    from deerflow.knowledge.model_target import rag_target_missing
+    from deerflow_knowledge.model_target import rag_target_missing
 
     return rag_target_missing(config, name, role=role)
 

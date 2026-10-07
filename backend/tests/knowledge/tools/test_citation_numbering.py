@@ -13,8 +13,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from deerflow_knowledge.citation_counter import claim_citation_range
 
-from deerflow.knowledge.citation_counter import claim_citation_range
 from deerflow.tools.builtins.hybrid_search_tool import _hybrid_search_impl
 
 from ..conftest import requires_qdrant

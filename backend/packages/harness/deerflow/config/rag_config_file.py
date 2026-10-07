@@ -127,7 +127,7 @@ class RagConfigFile(BaseModel):
     vlm_thinking: bool | None = Field(default=None, description="Caption legs follow chat's thinking treatment (output budget rises to at least 4096 while on); None uses config.yaml.")
     mineru_api_token: str | None = Field(default=None, description="MinerU parsing token; masked on read, env is the fallback.")
     # Provider dimension (spec 2026-09-14 rag model provider adaptation §4.1). Ids are
-    # validated against `deerflow.knowledge.providers.PROVIDER_ALLOWLIST`; every field is
+    # validated against `deerflow_knowledge.providers.PROVIDER_ALLOWLIST`; every field is
     # optional, so an existing file that only sets the models keeps loading unchanged.
     embedding_provider: Literal["dashscope", "volcengine-ark", "openai-compatible"] | None = Field(default=None, description="Embedding provider id; None uses config.yaml.")
     embedding_base_url: str | None = Field(default=None, description="Embedding endpoint; None uses the provider's own default.")

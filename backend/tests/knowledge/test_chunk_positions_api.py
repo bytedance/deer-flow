@@ -12,12 +12,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
+from deerflow_knowledge.routers import knowledge_bases
+from deerflow_knowledge.service import KnowledgeExtensionService
+from deerflow_knowledge.services.knowledge_service import KnowledgeService
+from deerflow_knowledge.store import KnowledgeStore
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
-from app.gateway.routers import knowledge_bases
-from app.gateway.services.knowledge_service import KnowledgeService
-from deerflow.knowledge.store import KnowledgeStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -43,8 +44,9 @@ def service(session_factory, tmp_path) -> KnowledgeService:
 
 def _client(service: KnowledgeService) -> TestClient:
     app = make_authed_test_app(user_factory=_owner)
-    app.state.knowledge_service = service
-    app.include_router(knowledge_bases.router)
+    extension = KnowledgeExtensionService()
+    extension.knowledge = service
+    app.include_router(knowledge_bases.build_router(extension))
     return TestClient(app)
 
 

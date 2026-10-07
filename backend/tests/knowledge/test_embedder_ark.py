@@ -24,11 +24,10 @@ import json
 
 import httpx
 import pytest
-
-from deerflow.knowledge.embedder import EmbedderAuthError, EmbedderError, RagConfigurationError, SparseHalfMissingError
-from deerflow.knowledge.embedder_ark import ARK_BASE_URL, ArkEmbedder
-from deerflow.knowledge.embedder_factory import build_embedder
-from deerflow.knowledge.providers import PROVIDER_ALLOWLIST, resolve_provider, secret_env_var
+from deerflow_knowledge.embedder import EmbedderAuthError, EmbedderError, RagConfigurationError, SparseHalfMissingError
+from deerflow_knowledge.embedder_ark import ARK_BASE_URL, ArkEmbedder
+from deerflow_knowledge.embedder_factory import build_embedder
+from deerflow_knowledge.providers import PROVIDER_ALLOWLIST, resolve_provider, secret_env_var
 
 ARK_PATH = "/api/v3/embeddings/multimodal"
 CUSTOM_BASE = "http://custom.example:9999"
@@ -37,7 +36,7 @@ CUSTOM_BASE = "http://custom.example:9999"
 @pytest.fixture(autouse=True)
 def _clear_probe_cache():
     """The dimension probe is cached per process; tests must not see each other's entries."""
-    from deerflow.knowledge import embedder_factory as factory_mod
+    from deerflow_knowledge import embedder_factory as factory_mod
 
     factory_mod._PROBED_DIMENSIONS.clear()
     yield
@@ -46,7 +45,7 @@ def _clear_probe_cache():
 
 def _stub_config(monkeypatch, **rag_updates):
     """Point ``build_embedder`` at a stubbed ``rag`` block."""
-    from deerflow.knowledge import embedder_factory as factory_mod
+    from deerflow_knowledge import embedder_factory as factory_mod
 
     real = factory_mod.get_app_config()
     stub = real.model_copy(update={"rag": real.rag.model_copy(update=rag_updates)})
@@ -235,7 +234,7 @@ def test_the_two_new_fields_never_disagree():
 
 def test_the_dashscope_default_endpoint_has_not_drifted():
     """值在两处各有一份（本模块要 import-light，不能 import 实现模块）⇒ 用这条钉住。"""
-    from deerflow.knowledge.embedder import DASHSCOPE_BASE_URL
+    from deerflow_knowledge.embedder import DASHSCOPE_BASE_URL
 
     assert resolve_provider("embedding", "dashscope").default_endpoint == DASHSCOPE_BASE_URL
 

@@ -15,14 +15,13 @@ import asyncio
 import uuid
 
 import pytest
+from deerflow_knowledge import reindex as reindex_mod
+from deerflow_knowledge.embed_identity import write_kb_identity
+from deerflow_knowledge.embedder import EmbedderError, EmbeddingResult
+from deerflow_knowledge.services import rag_reembed as reembed_module
+from deerflow_knowledge.store import KnowledgeStore
+from deerflow_knowledge.vector_store import ChunkUpsert
 from qdrant_client.models import SparseVector
-
-from app.gateway.services import rag_reembed as reembed_module
-from deerflow.knowledge import reindex as reindex_mod
-from deerflow.knowledge.embed_identity import write_kb_identity
-from deerflow.knowledge.embedder import EmbedderError, EmbeddingResult
-from deerflow.knowledge.store import KnowledgeStore
-from deerflow.knowledge.vector_store import ChunkUpsert
 
 OWNER_ID = str(uuid.UUID(int=9876543210))
 

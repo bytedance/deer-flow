@@ -24,11 +24,10 @@ import json
 
 import httpx
 import pytest
-
-from deerflow.knowledge.embedder import DashScopeEmbedder, EmbedderAuthError, EmbedderError, RagConfigurationError, SparseHalfMissingError
-from deerflow.knowledge.embedder_factory import build_embedder, effective_dimension
-from deerflow.knowledge.embedder_openai import OpenAICompatibleEmbedder
-from deerflow.knowledge.sparse import BM25SparseEncoder, TEISparseEncoder
+from deerflow_knowledge.embedder import DashScopeEmbedder, EmbedderAuthError, EmbedderError, RagConfigurationError, SparseHalfMissingError
+from deerflow_knowledge.embedder_factory import build_embedder, effective_dimension
+from deerflow_knowledge.embedder_openai import OpenAICompatibleEmbedder
+from deerflow_knowledge.sparse import BM25SparseEncoder, TEISparseEncoder
 
 OPENAI_BASE = "http://127.0.0.1:8080"
 SPARSE_BASE = "http://127.0.0.1:8081"
@@ -38,8 +37,8 @@ SPARSE_BASE = "http://127.0.0.1:8081"
 def _clear_probe_cache():
     """Per-process memories must not leak between tests: the width probe, the learned batch cap,
     and "this endpoint refuses the dimensions parameter" (spec 2026-09-26 D3/D2 甲a)."""
-    from deerflow.knowledge import embedder_factory as factory_mod
-    from deerflow.knowledge import embedder_openai as openai_mod
+    from deerflow_knowledge import embedder_factory as factory_mod
+    from deerflow_knowledge import embedder_openai as openai_mod
 
     factory_mod._PROBED_DIMENSIONS.clear()
     openai_mod._BATCH_CAPS.clear()
@@ -52,7 +51,7 @@ def _clear_probe_cache():
 
 def _stub_config(monkeypatch, **rag_updates):
     """Point ``build_embedder`` at a stubbed ``rag`` block."""
-    from deerflow.knowledge import embedder_factory as factory_mod
+    from deerflow_knowledge import embedder_factory as factory_mod
 
     real = factory_mod.get_app_config()
     stub = real.model_copy(update={"rag": real.rag.model_copy(update=rag_updates)})
@@ -186,8 +185,8 @@ async def test_the_generic_embedder_starts_at_the_ladder_top():
 @pytest.mark.asyncio
 async def test_build_embedder_defaults_to_dashscope_and_keeps_its_sparse(monkeypatch):
     """百炼 + 同出双路（地址必填后夹具自带端点；spec 2026-09-25 rag-endpoint-unlock）；且它自证维度、无需探测。"""
-    from deerflow.knowledge import embedder_factory as factory_mod
-    from deerflow.knowledge.providers import resolve_provider
+    from deerflow_knowledge import embedder_factory as factory_mod
+    from deerflow_knowledge.providers import resolve_provider
 
     _stub_config(
         monkeypatch,
@@ -286,7 +285,7 @@ def test_an_undeclared_width_is_still_the_historical_default(monkeypatch):
 @pytest.mark.asyncio
 async def test_declared_dimension_overrides_the_measured_length(monkeypatch):
     """显式声明是权威：某些自建服务的探测不稳（spec §4.2 维度 #1），声明了就不再测。"""
-    from deerflow.knowledge import embedder_factory as factory_mod
+    from deerflow_knowledge import embedder_factory as factory_mod
 
     recorded: list[httpx.Request] = []
     _stub_config(monkeypatch, embedding_provider="openai-compatible", embedding_base_url=OPENAI_BASE, embedding_sparse_source="bm25", embedding_dimension=1024)
@@ -314,7 +313,7 @@ async def test_probe_reads_the_real_length_and_refuses_another_width(monkeypatch
 
 @pytest.mark.asyncio
 async def test_probe_certifies_once_per_process(monkeypatch):
-    from deerflow.knowledge import embedder_factory as factory_mod
+    from deerflow_knowledge import embedder_factory as factory_mod
 
     recorded: list[httpx.Request] = []
     _stub_config(monkeypatch, embedding_provider="openai-compatible", embedding_base_url=OPENAI_BASE, embedding_model="bge-m3", embedding_sparse_source="bm25")
@@ -397,7 +396,7 @@ def test_the_row_cap_is_conservative_for_models_nobody_measured():
     2026-09-17 实测：`text-embedding-v3` / `v4` 一次最多 10 行（20 行 ⇒ 400
     `batch size is invalid`），`qwen3.7-text-embedding` 能吃 20。
     """
-    from deerflow.knowledge.embedder import DASHSCOPE_SAFE_BATCH_SIZE, dashscope_batch_size
+    from deerflow_knowledge.embedder import DASHSCOPE_SAFE_BATCH_SIZE, dashscope_batch_size
 
     assert DASHSCOPE_SAFE_BATCH_SIZE == 10
     assert dashscope_batch_size("text-embedding-v3") == 10
@@ -428,7 +427,7 @@ async def test_the_embedder_sends_batches_the_model_can_take(monkeypatch):
 async def test_build_embedder_refuses_an_empty_endpoint_even_for_dashscope(monkeypatch):
     """Spec 2026-09-25 rag-endpoint-unlock D1 乙: the vendor's built-in fallback is gone —
     an empty ``rag.embedding_base_url`` is a construction error whatever the provider."""
-    from deerflow.knowledge.embedder import RagConfigurationError
+    from deerflow_knowledge.embedder import RagConfigurationError
 
     _stub_config(monkeypatch, embedding_provider="dashscope", embedding_base_url=None)
 

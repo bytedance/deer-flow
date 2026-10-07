@@ -11,18 +11,15 @@ vector path never hard-fails on the precision stage (spec §4.4).
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from langchain.tools import tool
 
-from deerflow.knowledge.access import ACCESS_DENIED_MESSAGE, NO_KB_GUIDANCE, can_access, resolve_kb_scope
-from deerflow.knowledge.citation_counter import claim_citation_range
-from deerflow.knowledge.embedder_factory import build_embedder
-from deerflow.knowledge.reranker import RerankerError
-from deerflow.knowledge.reranker_factory import build_reranker
-from deerflow.knowledge.store import KnowledgeStore, get_knowledge_store
-from deerflow.knowledge.vector_store import KnowledgeVectorStore, get_vector_store
 from deerflow.tools.types import Runtime
+
+if TYPE_CHECKING:
+    from deerflow_knowledge.store import KnowledgeStore
+    from deerflow_knowledge.vector_store import KnowledgeVectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +35,20 @@ async def _hybrid_search_impl(
     top_k: int = 5,
     candidate_limit: int = 20,
 ) -> dict:
-    """Core implementation — testable without the @tool wrapper."""
+    """Core implementation — testable without the @tool wrapper.
+
+    Imports stay function-level on purpose: this module lives in the host and
+    its registration surface must import even when the knowledge extension is
+    not installed (the tool only resolves its dependencies when actually called).
+    """
+    from deerflow_knowledge.access import ACCESS_DENIED_MESSAGE, NO_KB_GUIDANCE, can_access, resolve_kb_scope
+    from deerflow_knowledge.citation_counter import claim_citation_range
+    from deerflow_knowledge.embedder_factory import build_embedder
+    from deerflow_knowledge.reranker import RerankerError
+    from deerflow_knowledge.reranker_factory import build_reranker
+    from deerflow_knowledge.store import get_knowledge_store
+    from deerflow_knowledge.vector_store import get_vector_store
+
     kb_id, user_id = resolve_kb_scope(runtime)
     if not kb_id:
         return {"results": [], "message": NO_KB_GUIDANCE}
@@ -110,11 +120,6 @@ async def hybrid_search(
 
     Use this tool when:
     - The user's question needs factual detail, precise wording, or citation-grade evidence from the bound knowledge base
-    - You need the default, fast retrieval path before considering deeper paths
-
-    Skip this tool when:
-    - The question is about relationships/multi-hop structure between concepts — use graph_search
-    - The question asks for a conceptual overview of an important entity — use wiki_search
 
     Each result carries chunk text plus doc_name/page/heading_path for citation. Missing knowledge-base binding returns guidance instead of searching.
 

@@ -9,7 +9,7 @@ pin 住的契约：
 
 from __future__ import annotations
 
-from deerflow.knowledge.sweep import sweep_generations
+from deerflow_knowledge.sweep import sweep_generations
 
 DECLARED = ["kb_chunks"]
 LEFTOVERS = ["kb_chunks_1000"]

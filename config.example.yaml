@@ -3448,6 +3448,15 @@ authorization:
 #                                         # also match a host-owned table name.
 #     config:
 #       label: example                    # extension-private values, if any
+#
+#   - name: knowledge                     # the first-phase RAG knowledge base ships as
+#     package: deerflow-knowledge-extension  # this workspace extension; install it with
+#     use: deerflow_knowledge.install:install  # `make extension-install SOURCE=packages/knowledge-extension`
+#     enabled: true                       # false leaves it fully inert (no tables, no worker)
+#     table_prefix: kb_                   # it owns its schema end to end: kb_knowledge_bases /
+#                                         # kb_documents / kb_chunks / kb_eval_runs under its
+#                                         # own migration chain and kb_alembic_version table
+#     config: {}
 
 # ============================================================================
 # RAG Knowledge Base
@@ -3496,7 +3505,7 @@ rag:
   # caption output budget to at least 4096 (max with caption_max_tokens).
   # vlm_thinking: false
   # --- Provider selection (spec 2026-09-14, §4.1) ---
-  # Curated ids from `deerflow.knowledge.providers.PROVIDER_ALLOWLIST`. Every default
+  # Curated ids from `deerflow_knowledge.providers.PROVIDER_ALLOWLIST`. Every default
   # reproduces the behaviour of a config that sets only the models above; the fields
   # are listed here for discoverability, uncomment to override.
   # embedding_provider: dashscope        # dashscope | volcengine-ark | openai-compatible (dense only)

@@ -16,13 +16,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
+from deerflow_knowledge import parser as knowledge_parser
+from deerflow_knowledge.routers import knowledge_bases
+from deerflow_knowledge.service import KnowledgeExtensionService
+from deerflow_knowledge.services.knowledge_service import KnowledgeService
+from deerflow_knowledge.store import KnowledgeStore
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
-from app.gateway.routers import knowledge_bases
-from app.gateway.services.knowledge_service import KnowledgeService
-from deerflow.knowledge import parser as knowledge_parser
-from deerflow.knowledge.store import KnowledgeStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -54,8 +55,9 @@ def service(session_factory, tmp_path) -> KnowledgeService:
 
 def _client(service: KnowledgeService, user_factory=_owner) -> TestClient:
     app = make_authed_test_app(user_factory=user_factory)
-    app.state.knowledge_service = service
-    app.include_router(knowledge_bases.router)
+    extension = KnowledgeExtensionService()
+    extension.knowledge = service
+    app.include_router(knowledge_bases.build_router(extension))
     return TestClient(app)
 
 
@@ -155,8 +157,9 @@ async def test_upload_compensates_when_row_creation_fails(service, tmp_path, mon
     """文件→行半段（spec 2026-10-05 §2.1）：``create_document`` 抛错 ⇒ 请求报错、
     已写文件不残留、不进入队列。"""
     app = make_authed_test_app(user_factory=_owner)
-    app.state.knowledge_service = service
-    app.include_router(knowledge_bases.router)
+    extension = KnowledgeExtensionService()
+    extension.knowledge = service
+    app.include_router(knowledge_bases.build_router(extension))
     client = TestClient(app, raise_server_exceptions=False)
     kb = _create_kb(client)
     payload = "# 标题\n\n正文内容".encode()
@@ -205,7 +208,7 @@ async def test_upload_rejects_empty_file(service):
 async def test_supported_formats_endpoint_matches_parser_constant(service, monkeypatch):
     """Registered before ``/{kb_id}`` so the literal segment wins; payload is
     exactly the parser allowlist (frontend accept/intercept source)."""
-    from deerflow.knowledge.parser import SUPPORTED_UPLOAD_SUFFIXES
+    from deerflow_knowledge.parser import SUPPORTED_UPLOAD_SUFFIXES
 
     _stub_rag_gates(monkeypatch)  # 表格腿 off：并集 = 文本冻结集
     client = _client(service)
@@ -234,7 +237,7 @@ async def test_upload_rejects_table_suffix_when_table_disabled(service, monkeypa
 
 async def test_supported_formats_unions_table_suffixes_when_enabled(service, monkeypatch):
     """on 态：端点返回 文本∪表格 并集（排序）。"""
-    from deerflow.knowledge.parser import SUPPORTED_UPLOAD_SUFFIXES, TABLE_UPLOAD_SUFFIXES
+    from deerflow_knowledge.parser import SUPPORTED_UPLOAD_SUFFIXES, TABLE_UPLOAD_SUFFIXES
 
     _stub_rag_gates(monkeypatch, table=True)
     client = _client(service)

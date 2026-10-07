@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from deerflow.knowledge.models import EvalRunRow
+from deerflow_knowledge.models import EvalRunRow
 
 
 class TestEvalRunRow:

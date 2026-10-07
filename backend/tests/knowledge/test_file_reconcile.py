@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from deerflow.knowledge.store import KnowledgeStore
-from deerflow.knowledge.sweep import reconcile_files
-from deerflow.knowledge.worker import KnowledgeIndexWorker
+from deerflow_knowledge.store import KnowledgeStore
+from deerflow_knowledge.sweep import reconcile_files
+from deerflow_knowledge.worker import KnowledgeIndexWorker
 
 KB = "kb-files"
 OWNER = "u-1"
@@ -123,9 +123,9 @@ async def test_sweep_once_reconciles_files_for_idle_kbs_only(session_factory, tm
     async def _noop(**kwargs):
         return None
 
-    monkeypatch.setattr("deerflow.knowledge.worker.migration_in_progress", lambda: False)
-    monkeypatch.setattr("deerflow.knowledge.worker.sweep_generations", _noop)
-    monkeypatch.setattr("deerflow.knowledge.worker.effective_dimension", lambda: 1024)
+    monkeypatch.setattr("deerflow_knowledge.worker.migration_in_progress", lambda: False)
+    monkeypatch.setattr("deerflow_knowledge.worker.sweep_generations", _noop)
+    monkeypatch.setattr("deerflow_knowledge.worker.effective_dimension", lambda: 1024)
 
     worker._busy_kbs.add(KB)
     await worker._sweep_once()

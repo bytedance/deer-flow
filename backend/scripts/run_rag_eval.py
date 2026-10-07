@@ -35,8 +35,8 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
-from deerflow.knowledge.eval.metrics import DEFAULT_FAIL_THRESHOLD
-from deerflow.knowledge.eval.persistence import ENV_LOCAL, ENVIRONMENTS, STATUS_COMPLETED, generate_run_id, resolve_environment
+from deerflow_knowledge.eval.metrics import DEFAULT_FAIL_THRESHOLD
+from deerflow_knowledge.eval.persistence import ENV_LOCAL, ENVIRONMENTS, STATUS_COMPLETED, generate_run_id, resolve_environment
 
 EXIT_OK = 0
 EXIT_REGRESSION = 1
@@ -58,9 +58,10 @@ async def _persist_eval_run(args: argparse.Namespace, *, config=None, status: st
     """
 
     try:
+        from deerflow_knowledge.eval import persistence as eval_persistence
+        from deerflow_knowledge.eval.runner import report_to_dict
+
         from deerflow.config.app_config import get_app_config
-        from deerflow.knowledge.eval import persistence as eval_persistence
-        from deerflow.knowledge.eval.runner import report_to_dict
         from deerflow.persistence import engine as persistence_engine
 
         layer1_metrics: dict = {}
@@ -84,6 +85,13 @@ async def _persist_eval_run(args: argparse.Namespace, *, config=None, status: st
         own_engine = persistence_engine.get_session_factory() is None
         if own_engine:
             await persistence_engine.init_engine_from_config((config or get_app_config()).database)
+            # The eval tables live in the extension's own chain (private MetaData): a CLI
+            # that opened its own engine must bring that chain to head before writing.
+            from deerflow_knowledge.migrations.runner import run_knowledge_migrations
+
+            sf = persistence_engine.get_session_factory()
+            if sf is not None:
+                await run_knowledge_migrations(sf)
         try:
             await eval_persistence.save_eval_run(
                 run_id=generate_run_id(),
@@ -161,7 +169,7 @@ async def _load_auto_baseline(kb_id: str) -> dict | None:
     mark) means a plain no-diff run — exit 0 semantics unchanged.
     """
 
-    from deerflow.knowledge.eval import persistence as eval_persistence
+    from deerflow_knowledge.eval import persistence as eval_persistence
 
     row = await eval_persistence.get_baseline_run(kb_id)
     if row is None or not row.layer1_metrics:
@@ -181,7 +189,7 @@ async def _async_main(args: argparse.Namespace, *, environment: str = ENV_LOCAL)
         return EXIT_SKIPPED
 
     # Fail fast on bad inputs BEFORE touching the persistence engine.
-    from deerflow.knowledge.eval.dataset import GoldenDatasetError, load_golden
+    from deerflow_knowledge.eval.dataset import GoldenDatasetError, load_golden
 
     try:
         questions = load_golden(args.golden)
@@ -196,13 +204,18 @@ async def _async_main(args: argparse.Namespace, *, environment: str = ENV_LOCAL)
         await _persist_eval_run(args, config=config, status="error", environment=environment)
         return EXIT_ERROR
 
-    from deerflow.knowledge.eval.runner import build_default_searchers, render_summary, run_evaluation, write_reports
-    from deerflow.knowledge.store import get_knowledge_store
-    from deerflow.knowledge.vector_store import get_vector_store
-    from deerflow.persistence.engine import close_engine, init_engine_from_config
+    from deerflow_knowledge.eval.runner import build_default_searchers, render_summary, run_evaluation, write_reports
+    from deerflow_knowledge.migrations.runner import run_knowledge_migrations
+    from deerflow_knowledge.store import get_knowledge_store
+    from deerflow_knowledge.vector_store import get_vector_store
+
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 
     await init_engine_from_config(config.database)
     try:
+        sf = get_session_factory()
+        if sf is not None:
+            await run_knowledge_migrations(sf)
         store = get_knowledge_store()
         kb = await store.get_kb(args.kb_id)
         if kb is None:

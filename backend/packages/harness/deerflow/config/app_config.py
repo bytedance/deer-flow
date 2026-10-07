@@ -236,7 +236,7 @@ class RagConfig(BaseModel):
     # Provider dimension (spec 2026-09-14 rag model provider adaptation §4.1). Every
     # default reproduces today's behaviour, so a config.yaml that only sets the models
     # above keeps resolving to exactly the providers it used before. The ids are
-    # validated against `deerflow.knowledge.providers.PROVIDER_ALLOWLIST`.
+    # validated against `deerflow_knowledge.providers.PROVIDER_ALLOWLIST`.
     embedding_provider: Literal["dashscope", "volcengine-ark", "openai-compatible"] = Field(default="dashscope", description="Embedding provider id (curated allowlist); `openai-compatible` emits dense only.")
     embedding_base_url: str | None = Field(default=None, description="Embedding endpoint; None uses the provider's own default.")
     embedding_dimension: int | None = Field(default=None, ge=1, description="Override for the dense dimension; None means 1024. A declared width is what the library is written at — changing it rebuilds every collection before the switch.")

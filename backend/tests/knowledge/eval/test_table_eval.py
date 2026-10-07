@@ -20,13 +20,12 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
-
-from deerflow.knowledge.chunker import chunk_markdown
-from deerflow.knowledge.eval.dataset import load_golden, validate_question
-from deerflow.knowledge.eval.persistence import baseline_diff_from_report, generate_run_id, layer1_metrics_from_report, save_eval_run
-from deerflow.knowledge.eval.runner import ScoredHit, report_to_dict, run_evaluation
-from deerflow.knowledge.parser import _workbook_rows_to_markdown, parse_document
-from deerflow.knowledge.store import KnowledgeStore
+from deerflow_knowledge.chunker import chunk_markdown
+from deerflow_knowledge.eval.dataset import load_golden, validate_question
+from deerflow_knowledge.eval.persistence import baseline_diff_from_report, generate_run_id, layer1_metrics_from_report, save_eval_run
+from deerflow_knowledge.eval.runner import ScoredHit, report_to_dict, run_evaluation
+from deerflow_knowledge.parser import _workbook_rows_to_markdown, parse_document
+from deerflow_knowledge.store import KnowledgeStore
 
 pytestmark = pytest.mark.asyncio
 

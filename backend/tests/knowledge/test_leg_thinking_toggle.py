@@ -49,13 +49,13 @@ def _config(models: list[dict] | None = None, rag: dict | None = None) -> AppCon
 
 
 def _vlm_target(cfg, name: str):
-    from deerflow.knowledge.vlm_target import resolve_vlm_target
+    from deerflow_knowledge.vlm_target import resolve_vlm_target
 
     return resolve_vlm_target(cfg, name)
 
 
 def _caption_body(target, **kwargs):
-    from deerflow.knowledge.caption_client import _openai_request
+    from deerflow_knowledge.caption_client import _openai_request
 
     return _openai_request(target, "Describe.", [(b"jpeg", "image/jpeg")], max_tokens=1024, temperature=0.15, **kwargs)[0]
 
@@ -88,7 +88,7 @@ def test_caption_default_still_sends_the_disable_shape():
 
 @pytest.mark.asyncio
 async def test_caption_checked_but_the_entry_declares_no_support_downgrades_with_a_warning(caplog):
-    from deerflow.knowledge.caption_client import request_caption
+    from deerflow_knowledge.caption_client import request_caption
 
     target = _vlm_target(_config([UNSUPPORTED_ENTRY]), "plain-entry")
     recorded: list[httpx.Request] = []
@@ -119,7 +119,7 @@ async def test_caption_checked_but_the_entry_declares_no_support_downgrades_with
 async def _sent_max_tokens(entry_name: str, *, thinking: bool, user_budget: int) -> int:
     import json as _json
 
-    from deerflow.knowledge.caption_client import request_caption
+    from deerflow_knowledge.caption_client import request_caption
 
     target = _vlm_target(_config([THINKING_ENTRY if entry_name == "think-entry" else UNSUPPORTED_ENTRY]), entry_name)
     recorded: list[httpx.Request] = []

@@ -18,13 +18,14 @@ import httpx
 import pytest
 import yaml
 from _router_auth_helpers import make_authed_test_app
+from deerflow_knowledge.providers import provider_ids
+from deerflow_knowledge.routers import rag_config as rag_config_router
+from deerflow_knowledge.service import KnowledgeExtensionService
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
-from app.gateway.routers import rag_config as rag_config_router
 from deerflow.config.app_config import get_app_config, reset_app_config
 from deerflow.config.rag_config_file import MASKED_SECRET
-from deerflow.knowledge.providers import provider_ids
 
 SANDBOX = {"use": "deerflow.sandbox.local:LocalSandboxProvider"}
 
@@ -135,7 +136,7 @@ def _reembed_libraries_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     and the post-flip delta pass (spec 2026-10-05) are stubbed alongside — the placeholder
     service stores in this file are plain objects, not databases.
     """
-    from app.gateway.services import rag_reembed as reembed_module
+    from deerflow_knowledge.services import rag_reembed as reembed_module
 
     async def _noop(store, *, vector_store, embedder):
         return {}
@@ -160,13 +161,15 @@ def _client(*, system_role: str) -> TestClient:
             id=uuid4(),
         )
     )
-    app.include_router(rag_config_router.router)
+    extension = KnowledgeExtensionService()
+    app.include_router(rag_config_router.build_router(extension))
     client = _EndpointSeededClient(app)
+    client.app.state.knowledge_extension = extension
     # The gateway always wires a knowledge service; cases that care about its contents
     # call ``_attach_service`` to replace this placeholder.
     from types import SimpleNamespace
 
-    client.app.state.knowledge_service = SimpleNamespace(store=object(), vector_store=object())
+    client.app.state.knowledge_extension.knowledge = SimpleNamespace(store=object(), vector_store=object())
     return client
 
 
@@ -571,7 +574,7 @@ def test_the_not_found_sentence_is_written_once():
     """R6: the RAG side owns one copy of the factory's sentence; the router carries none."""
     from pathlib import Path as _Path
 
-    from deerflow.knowledge import model_target as model_target_module
+    from deerflow_knowledge import model_target as model_target_module
 
     router_source = _Path(rag_config_router.__file__).read_text(encoding="utf-8")
     target_source = _Path(model_target_module.__file__).read_text(encoding="utf-8")
@@ -583,10 +586,11 @@ def test_the_not_found_sentence_is_written_once():
 
 def test_the_not_found_sentence_equals_the_factorys_own(config_env: Path):
     """The value pin: the real factory's message must equal the RAG helper's output, word for word."""
+    from deerflow_knowledge.model_target import model_not_found_message
+
     from deerflow.config.app_config import AppConfig
     from deerflow.config.app_config import RagConfig as _RagConfig
     from deerflow.config.sandbox_config import SandboxConfig
-    from deerflow.knowledge.model_target import model_not_found_message
     from deerflow.models.factory import create_chat_model
 
     config = AppConfig(models=[], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"), rag=_RagConfig())
@@ -889,8 +893,8 @@ def test_the_rerank_default_endpoint_is_the_clients_own_constant():
     Same rule the embedding rows follow — the literal lives in the import-light allowlist module,
     so a test keeps the two equal instead (spec 2026-09-17 alignment §3 D3).
     """
-    from deerflow.knowledge.providers import resolve_provider
-    from deerflow.knowledge.reranker import DASHSCOPE_RERANK_BASE_URL
+    from deerflow_knowledge.providers import resolve_provider
+    from deerflow_knowledge.reranker import DASHSCOPE_RERANK_BASE_URL
 
     assert resolve_provider("rerank", "dashscope").default_endpoint == DASHSCOPE_RERANK_BASE_URL
 
@@ -1187,7 +1191,7 @@ def _stub_runner(
     ``gate`` holds the rebuild open so a case can look at the state a *running* migration
     leaves behind without racing the flip; release it to let the run finish.
     """
-    from app.gateway.services import rag_migration as migration_module
+    from deerflow_knowledge.services import rag_migration as migration_module
 
     recorder = _Recorder()
 
@@ -1215,7 +1219,7 @@ def _attach_service(client: TestClient) -> None:
     """The gateway always wires this; the test app has no knowledge stack of its own."""
     from types import SimpleNamespace
 
-    client.app.state.knowledge_service = SimpleNamespace(store=object(), vector_store=object())
+    client.app.state.knowledge_extension.knowledge = SimpleNamespace(store=object(), vector_store=object())
 
 
 def _migration_of(client: TestClient) -> dict | None:
@@ -1239,7 +1243,7 @@ def _settled(client: TestClient, *, tries: int = 100) -> dict | None:
 
 @pytest.fixture(autouse=True)
 def _clean_migration_state():
-    from app.gateway.services import rag_migration as migration_module
+    from deerflow_knowledge.services import rag_migration as migration_module
 
     migration_module.reset_state()
     yield
@@ -1338,7 +1342,7 @@ def test_an_unrelated_edit_does_not_start_a_migration(config_env: Path, monkeypa
 
 @pytest.fixture(autouse=True)
 def _clean_reembed_state():
-    from app.gateway.services import rag_reembed as reembed_module
+    from deerflow_knowledge.services import rag_reembed as reembed_module
 
     reembed_module.reset_state()
     yield
@@ -1357,7 +1361,7 @@ def _stub_reembed(
     Mirrors ``_stub_runner``: ``gate`` holds the run open so a case can look at the state a
     *running* rebuild leaves behind without racing the flip.
     """
-    from app.gateway.services import rag_reembed as reembed_module
+    from deerflow_knowledge.services import rag_reembed as reembed_module
 
     async def _reembed_libraries(store, *, vector_store, embedder):
         if calls is not None:

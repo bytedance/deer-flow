@@ -12,8 +12,7 @@ import json
 from pathlib import Path
 
 import pytest
-
-from deerflow.knowledge.eval.dataset import (
+from deerflow_knowledge.eval.dataset import (
     GoldenDatasetError,
     GoldenQuestion,
     load_golden,

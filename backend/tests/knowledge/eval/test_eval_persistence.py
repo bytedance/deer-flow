@@ -18,12 +18,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from deerflow_knowledge.eval import persistence
+from deerflow_knowledge.eval.dataset import GoldenQuestion
+from deerflow_knowledge.models import EvalRunRow
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-
-from deerflow.knowledge.eval import persistence
-from deerflow.knowledge.eval.dataset import GoldenQuestion
-from deerflow.knowledge.models import EvalRunRow
 
 REPO_BACKEND = Path(__file__).resolve().parents[3]
 LAYER1_CLI_PATH = REPO_BACKEND / "scripts" / "run_rag_eval.py"
@@ -330,8 +329,9 @@ class _FakeStore:
 
 
 def _patch_common(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kb: dict[str, Any] | None) -> None:
+    import deerflow_knowledge.store as store_module
+
     import deerflow.config.app_config as app_config_module
-    import deerflow.knowledge.store as store_module
 
     monkeypatch.setattr(app_config_module, "get_app_config", lambda: _fake_config(tmp_path))
     monkeypatch.setattr(store_module, "get_knowledge_store", lambda: _FakeStore(kb))
@@ -347,12 +347,15 @@ def _golden_entry(qid: str, category: str, *, entities: list[str] | None = None)
 
 def _read_runs(tmp_path: Path) -> list[EvalRunRow]:
     async def _read() -> list[EvalRunRow]:
+        from deerflow_knowledge.migrations.runner import run_knowledge_migrations
+
         from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 
         await init_engine_from_config(_fake_config(tmp_path).database)
         try:
             sf = get_session_factory()
             assert sf is not None
+            await run_knowledge_migrations(sf)
             async with sf() as session:
                 result = await session.execute(select(EvalRunRow).order_by(EvalRunRow.created_at))
                 return list(result.scalars().all())
@@ -363,7 +366,7 @@ def _read_runs(tmp_path: Path) -> list[EvalRunRow]:
 
 
 def _layer1_searchers(*, hit: bool) -> dict[str, Any]:
-    from deerflow.knowledge.eval.runner import ScoredHit
+    from deerflow_knowledge.eval.runner import ScoredHit
 
     hits = (ScoredHit(CHUNK, 0.9),) if hit else ()
 
@@ -378,8 +381,8 @@ def _layer1_searchers(*, hit: bool) -> dict[str, Any]:
 
 def _patch_layer1(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kb: dict[str, Any] | None, *, hit: bool) -> None:
     _patch_common(monkeypatch, tmp_path, kb)
-    import deerflow.knowledge.eval.runner as runner_module
-    import deerflow.knowledge.vector_store as vector_store_module
+    import deerflow_knowledge.eval.runner as runner_module
+    import deerflow_knowledge.vector_store as vector_store_module
 
     monkeypatch.setattr(runner_module, "build_default_searchers", lambda **kwargs: _layer1_searchers(hit=hit))
     monkeypatch.setattr(vector_store_module, "get_vector_store", lambda: None)

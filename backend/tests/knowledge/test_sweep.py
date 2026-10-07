@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from deerflow.knowledge.store import KnowledgeStore
-from deerflow.knowledge.sweep import sweep_round
-from deerflow.knowledge.worker import KnowledgeIndexWorker
+from deerflow_knowledge.store import KnowledgeStore
+from deerflow_knowledge.sweep import sweep_round
+from deerflow_knowledge.worker import KnowledgeIndexWorker
 
 KB = "kb-sweep"
 OWNER = "u-1"
@@ -244,10 +244,10 @@ async def test_sweep_once_skips_busy_and_migration_and_runs_when_idle(session_fa
     async def spy_generations(**kwargs):
         return None
 
-    monkeypatch.setattr("deerflow.knowledge.worker.sweep_round", spy_round)
-    monkeypatch.setattr("deerflow.knowledge.worker.sweep_generations", spy_generations)
-    monkeypatch.setattr("deerflow.knowledge.worker.migration_in_progress", lambda: False)
-    monkeypatch.setattr("deerflow.knowledge.worker.effective_dimension", lambda: 1024)
+    monkeypatch.setattr("deerflow_knowledge.worker.sweep_round", spy_round)
+    monkeypatch.setattr("deerflow_knowledge.worker.sweep_generations", spy_generations)
+    monkeypatch.setattr("deerflow_knowledge.worker.migration_in_progress", lambda: False)
+    monkeypatch.setattr("deerflow_knowledge.worker.effective_dimension", lambda: 1024)
 
     # 1) 文档在飞 → skip 集合带该库
     worker._busy_kbs.add(KB)
@@ -255,11 +255,11 @@ async def test_sweep_once_skips_busy_and_migration_and_runs_when_idle(session_fa
     assert calls == [{KB}]
     # 2) 迁移在飞 → 整轮跳过
     worker._busy_kbs.discard(KB)
-    monkeypatch.setattr("deerflow.knowledge.worker.migration_in_progress", lambda: True)
+    monkeypatch.setattr("deerflow_knowledge.worker.migration_in_progress", lambda: True)
     await worker._sweep_once()
     assert len(calls) == 1
     # 3) 全空闲 → 跑（skip 为空集）
-    monkeypatch.setattr("deerflow.knowledge.worker.migration_in_progress", lambda: False)
+    monkeypatch.setattr("deerflow_knowledge.worker.migration_in_progress", lambda: False)
     await worker._sweep_once()
     assert calls == [{KB}, set()]
 
@@ -276,9 +276,9 @@ async def test_sweep_once_skips_round_while_migration_app_gate_is_true(session_f
     async def spy_generations(**kwargs):
         calls.append("generations")
 
-    monkeypatch.setattr("deerflow.knowledge.worker.sweep_round", spy_round)
-    monkeypatch.setattr("deerflow.knowledge.worker.sweep_generations", spy_generations)
-    monkeypatch.setattr("deerflow.knowledge.worker.migration_in_progress", lambda: False)
+    monkeypatch.setattr("deerflow_knowledge.worker.sweep_round", spy_round)
+    monkeypatch.setattr("deerflow_knowledge.worker.sweep_generations", spy_generations)
+    monkeypatch.setattr("deerflow_knowledge.worker.migration_in_progress", lambda: False)
 
     await worker._sweep_once()
     assert calls == []
@@ -295,10 +295,10 @@ async def test_sweep_once_runs_generations_with_declared_width(session_factory, 
     async def spy_generations(**kwargs):
         seen.update(kwargs)
 
-    monkeypatch.setattr("deerflow.knowledge.worker.sweep_round", spy_round)
-    monkeypatch.setattr("deerflow.knowledge.worker.sweep_generations", spy_generations)
-    monkeypatch.setattr("deerflow.knowledge.worker.migration_in_progress", lambda: False)
-    monkeypatch.setattr("deerflow.knowledge.worker.effective_dimension", lambda: 1536)
+    monkeypatch.setattr("deerflow_knowledge.worker.sweep_round", spy_round)
+    monkeypatch.setattr("deerflow_knowledge.worker.sweep_generations", spy_generations)
+    monkeypatch.setattr("deerflow_knowledge.worker.migration_in_progress", lambda: False)
+    monkeypatch.setattr("deerflow_knowledge.worker.effective_dimension", lambda: 1536)
 
     await worker._sweep_once()
 

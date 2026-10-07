@@ -44,9 +44,9 @@ class _RecordingSemaphore(asyncio.Semaphore):
 
 async def _caption_cap_for(monkeypatch, *, worker_concurrency: int) -> int:
     """The cap the caption leg builds, at one worker count."""
-    from deerflow.knowledge import captioner as captioner_module
-    from deerflow.knowledge.captioner import caption_images
-    from deerflow.knowledge.parser import ParsedImage
+    from deerflow_knowledge import captioner as captioner_module
+    from deerflow_knowledge.captioner import caption_images
+    from deerflow_knowledge.parser import ParsedImage
 
     config = _config(worker_concurrency)
     monkeypatch.setattr(captioner_module, "get_app_config", lambda: config)

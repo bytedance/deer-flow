@@ -20,16 +20,16 @@ from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import ValidationError
-
-from deerflow.config.app_config import RagConfig, reset_app_config
-from deerflow.config.rag_config_file import RagConfigFile
-from deerflow.knowledge.providers import (
+from deerflow_knowledge.providers import (
     PROVIDER_ALLOWLIST,
     provider_ids,
     resolve_provider,
     secret_env_var,
 )
+from pydantic import ValidationError
+
+from deerflow.config.app_config import RagConfig, reset_app_config
+from deerflow.config.rag_config_file import RagConfigFile
 
 SANDBOX = {"use": "deerflow.sandbox.local:LocalSandboxProvider"}
 
@@ -164,15 +164,15 @@ def test_sparse_keys_declared_in_yaml_are_carried_by_rag_config():
 @pytest.mark.parametrize(
     ("leg", "provider_id", "expected_impl", "expected_endpoint_key"),
     [
-        ("embedding", "dashscope", "deerflow.knowledge.embedder:DashScopeEmbedder", "base_url"),
-        ("embedding", "volcengine-ark", "deerflow.knowledge.embedder_ark:ArkEmbedder", "base_url"),
-        ("embedding", "openai-compatible", "deerflow.knowledge.embedder_openai:OpenAICompatibleEmbedder", "base_url"),
-        ("rerank", "dashscope", "deerflow.knowledge.reranker:DashScopeReranker", "base_url"),
-        ("rerank", "generic-rerank", "deerflow.knowledge.reranker_generic:GenericReranker", "base_url"),
-        ("rerank", "tei-rerank", "deerflow.knowledge.reranker_tei:TEIReranker", "base_url"),
-        ("parse", "mineru-cloud", "deerflow.knowledge.parser:MineruCloudParseProvider", "base_url"),
-        ("parse", "mineru-local", "deerflow.knowledge.parse_local:MineruLocalParseProvider", "base_url"),
-        ("sparse", "tei-sparse", "deerflow.knowledge.sparse:TEISparseEncoder", "base_url"),
+        ("embedding", "dashscope", "deerflow_knowledge.embedder:DashScopeEmbedder", "base_url"),
+        ("embedding", "volcengine-ark", "deerflow_knowledge.embedder_ark:ArkEmbedder", "base_url"),
+        ("embedding", "openai-compatible", "deerflow_knowledge.embedder_openai:OpenAICompatibleEmbedder", "base_url"),
+        ("rerank", "dashscope", "deerflow_knowledge.reranker:DashScopeReranker", "base_url"),
+        ("rerank", "generic-rerank", "deerflow_knowledge.reranker_generic:GenericReranker", "base_url"),
+        ("rerank", "tei-rerank", "deerflow_knowledge.reranker_tei:TEIReranker", "base_url"),
+        ("parse", "mineru-cloud", "deerflow_knowledge.parser:MineruCloudParseProvider", "base_url"),
+        ("parse", "mineru-local", "deerflow_knowledge.parse_local:MineruLocalParseProvider", "base_url"),
+        ("sparse", "tei-sparse", "deerflow_knowledge.sparse:TEISparseEncoder", "base_url"),
     ],
 )
 def test_allowlist_resolves_each_supported_provider(leg, provider_id, expected_impl, expected_endpoint_key):

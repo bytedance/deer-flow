@@ -24,11 +24,10 @@ import uuid
 from collections.abc import Awaitable, Callable
 
 import pytest
+from deerflow_knowledge.dimension_migration import migrate_collections, migration_in_progress, migration_last_run, migration_progress
+from deerflow_knowledge.embedder import EmbeddingResult
+from deerflow_knowledge.store import KnowledgeStore
 from qdrant_client.models import SparseVector
-
-from deerflow.knowledge.dimension_migration import migrate_collections, migration_in_progress, migration_last_run, migration_progress
-from deerflow.knowledge.embedder import EmbeddingResult
-from deerflow.knowledge.store import KnowledgeStore
 
 OWNER_A = str(uuid.UUID(int=11))
 OWNER_B = str(uuid.UUID(int=22))
@@ -84,7 +83,7 @@ async def _seed_doc(store: KnowledgeStore, *, kb_id: str, doc_id: str, texts: li
 
 @pytest.fixture(autouse=True)
 def _clean_state():
-    from deerflow.knowledge import dimension_migration as migration_mod
+    from deerflow_knowledge import dimension_migration as migration_mod
 
     yield
     migration_mod._IN_FLIGHT = False

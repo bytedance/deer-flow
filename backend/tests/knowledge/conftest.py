@@ -61,7 +61,14 @@ requires_qdrant = pytest.mark.skipif(not _qdrant_available(), reason=f"Qdrant no
 
 @pytest_asyncio.fixture
 async def session_factory(tmp_path) -> AsyncIterator:
-    """Bootstrap a throwaway SQLite database at alembic head per test."""
+    """Bootstrap a throwaway SQLite database at alembic head per test.
+
+    Host bootstrap first, then the extension's own chain — the production
+    sequence (the extension's tables live under its private MetaData and are
+    never created by the host's ``create_all``).
+    """
+    from deerflow_knowledge.migrations.runner import run_knowledge_migrations
+
     from deerflow.config.database_config import DatabaseConfig
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 
@@ -69,6 +76,7 @@ async def session_factory(tmp_path) -> AsyncIterator:
     try:
         sf = get_session_factory()
         assert sf is not None
+        await run_knowledge_migrations(sf)
         yield sf
     finally:
         await close_engine()

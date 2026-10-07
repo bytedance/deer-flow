@@ -10,10 +10,9 @@ deliberately does **not** turn unrelated ``ValueError``\\ s into 400s.
 from __future__ import annotations
 
 import pytest
+from deerflow_knowledge.embedder import RagConfigurationError, SparseHalfMissingError
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
-from deerflow.knowledge.embedder import RagConfigurationError, SparseHalfMissingError
 
 _MESSAGE = "嵌入 provider 'openai-compatible' 只输出稠密向量 ⇒ 请改为「独立稀疏服务」或「本地 BM25」。"
 
@@ -80,7 +79,7 @@ def test_the_empty_sparse_refusal_inherits_that_mapping(gateway_handlers):
 def test_the_bilingual_helper_is_the_one_copy_shape():
     """Every configuration-class refusal carries both languages, joined by ` / ` — the admin
     reads one line whichever locale they work in (the frontend renders `detail` verbatim)."""
-    from deerflow.knowledge.messages import bilingual
+    from deerflow_knowledge.messages import bilingual
 
     assert bilingual("中文", "English") == "中文 / English"
 
@@ -88,6 +87,6 @@ def test_the_bilingual_helper_is_the_one_copy_shape():
 def test_the_previously_english_members_gained_a_chinese_half():
     """The audit-② resolution: `Model … not found in config` used to be English-only, so the
     family stayed mixed even after the Chinese members were made readable."""
-    from deerflow.knowledge.model_target import model_not_found_message
+    from deerflow_knowledge.model_target import model_not_found_message
 
     assert model_not_found_message("ghost-entry") == "配置里没有模型「ghost-entry」 / Model ghost-entry not found in config"

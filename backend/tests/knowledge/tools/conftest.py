@@ -13,12 +13,11 @@ import zlib
 from collections.abc import AsyncIterator, Sequence
 
 import pytest_asyncio
+from deerflow_knowledge.embedder import EmbeddingResult
+from deerflow_knowledge.store import KnowledgeStore
+from deerflow_knowledge.vector_store import ChunkUpsert, KnowledgeVectorStore
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import SparseVector
-
-from deerflow.knowledge.embedder import EmbeddingResult
-from deerflow.knowledge.store import KnowledgeStore
-from deerflow.knowledge.vector_store import ChunkUpsert, KnowledgeVectorStore
 
 from ..conftest import QDRANT_TEST_URL
 

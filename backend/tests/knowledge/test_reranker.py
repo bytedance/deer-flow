@@ -12,8 +12,7 @@ import json
 
 import httpx
 import pytest
-
-from deerflow.knowledge.reranker import DashScopeReranker, RerankerAuthError, RerankerError
+from deerflow_knowledge.reranker import DashScopeReranker, RerankerAuthError, RerankerError
 
 
 def _transport(recorded: list[httpx.Request], handler_fn) -> httpx.MockTransport:

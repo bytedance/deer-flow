@@ -8,8 +8,7 @@ from __future__ import annotations
 import hashlib
 
 import pytest
-
-from deerflow.knowledge.store import KnowledgeStore
+from deerflow_knowledge.store import KnowledgeStore
 
 pytestmark = pytest.mark.asyncio
 

@@ -23,7 +23,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from deerflow.knowledge.providers import PROVIDER_ALLOWLIST
+from deerflow_knowledge.providers import PROVIDER_ALLOWLIST
 
 _BACKEND = Path(__file__).resolve().parents[2]
 _PRODUCTION_ROOTS = (

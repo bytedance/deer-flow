@@ -12,10 +12,9 @@ from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from deerflow_knowledge.vector_store import ChunkUpsert, KnowledgeVectorStore
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, PayloadSchemaType, SparseVector
-
-from deerflow.knowledge.vector_store import ChunkUpsert, KnowledgeVectorStore
 
 from .conftest import QDRANT_TEST_URL, requires_qdrant
 

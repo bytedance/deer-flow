@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from deerflow.knowledge.chunker import MAX_CHUNK_TOKENS, chunk_markdown, count_tokens
+from deerflow_knowledge.chunker import MAX_CHUNK_TOKENS, chunk_markdown, count_tokens
 
 FIXTURE_MD = (Path(__file__).parent / "fixtures" / "sample.md").read_text(encoding="utf-8")
 
@@ -135,7 +135,7 @@ _MINERU_RESIDUAL_TABLE = (
 
 def test_gfm_table_detected_as_atomic_block():
     """GFM 管道表被识别为单一原子块，不被段落/标题逻辑中切（§7.1 修复）。"""
-    from deerflow.knowledge.chunker import _split_by_headings
+    from deerflow_knowledge.chunker import _split_by_headings
 
     md = "# 标题\n\n前言文字。\n\n" + _gfm_table([["a", "b"], ["1", "2"], ["3", "4"]]) + "\n\n后记。"
     blocks = _split_by_headings(md)
@@ -148,7 +148,7 @@ def test_gfm_table_detected_as_atomic_block():
 
 def test_gfm_table_in_fence_not_detected():
     """代码 fence 内的 `|` 不被误判为表格（复用现有 in_fence 跟踪）。"""
-    from deerflow.knowledge.chunker import _split_by_headings
+    from deerflow_knowledge.chunker import _split_by_headings
 
     md = "前言\n\n```\n| a | b |\n| --- | --- |\n| 1 | 2 |\n```\n\n后记"
     blocks = _split_by_headings(md)
@@ -157,7 +157,7 @@ def test_gfm_table_in_fence_not_detected():
 
 def test_lone_pipe_line_without_delimiter_not_a_table():
     """散文里孤立的 `|` 行（次行非分隔行）不被误判为表格（防 shell 管道误伤）。"""
-    from deerflow.knowledge.chunker import _split_by_headings
+    from deerflow_knowledge.chunker import _split_by_headings
 
     md = "运行 cat sales.csv | grep north | wc -l 得到结果。\n\n普通段落。"
     blocks = _split_by_headings(md)
@@ -166,7 +166,7 @@ def test_lone_pipe_line_without_delimiter_not_a_table():
 
 def test_residual_html_table_is_atomic():
     """残留 HTML `<table>`（嵌套/畸形未归一）整段作原子块（§7.3）。"""
-    from deerflow.knowledge.chunker import _split_by_headings
+    from deerflow_knowledge.chunker import _split_by_headings
 
     html = "<table><tr><td><table><tr><td>内层</td></tr></table></td></tr></table>"
     blocks = _split_by_headings(f"前言\n\n{html}\n\n后记")
@@ -187,7 +187,7 @@ def test_residual_html_table_oversized_not_hard_split():
 
 def test_residual_html_table_from_mineru_fixture_is_one_block():
     """Task 0 实测单行 HTML 表作残留时整块保留、完整闭合。"""
-    from deerflow.knowledge.chunker import _split_by_headings
+    from deerflow_knowledge.chunker import _split_by_headings
 
     blocks = _split_by_headings(f"Prose before.\n\n{_MINERU_RESIDUAL_TABLE}\n\nProse after.")
     html_blocks = [b for b in blocks if b.is_table and "<table" in b.text]
@@ -198,7 +198,7 @@ def test_residual_html_table_from_mineru_fixture_is_one_block():
 
 def test_chunk_table_block_small_single():
     """小表（表头+全部行 ≤ cap）→ 单块，表头保留，无溯源行（§6 步3a）。"""
-    from deerflow.knowledge.chunker import _chunk_table_block
+    from deerflow_knowledge.chunker import _chunk_table_block
 
     header = "| Region | Q1 |"
     delim = "| --- | --- |"
@@ -212,7 +212,7 @@ def test_chunk_table_block_small_single():
 
 def test_chunk_table_block_large_repeats_header_per_group():
     """大表贪心行组：每组 ≤ cap，**每块重复表头+分隔**（§6 步3b，检索自解释）。"""
-    from deerflow.knowledge.chunker import _chunk_table_block, count_tokens
+    from deerflow_knowledge.chunker import _chunk_table_block, count_tokens
 
     header = "| id | value |"
     delim = "| --- | --- |"
@@ -226,7 +226,7 @@ def test_chunk_table_block_large_repeats_header_per_group():
 
 def test_chunk_table_block_provenance_line_on_split():
     """大表拆分时每块顶加溯源行 `表格：{名}（第 {起}-{止} 行 / 共 {N} 行）`（§6）。"""
-    from deerflow.knowledge.chunker import _chunk_table_block
+    from deerflow_knowledge.chunker import _chunk_table_block
 
     header = "| id | v |"
     delim = "| --- | --- |"
@@ -241,7 +241,7 @@ def test_chunk_table_block_provenance_line_on_split():
 
 def test_chunk_table_block_single_oversized_row_not_mid_split():
     """退化：单行 + 表头已超 cap → 该行整块保留，**绝不行中切**（§6 步3b 退化）。"""
-    from deerflow.knowledge.chunker import _chunk_table_block
+    from deerflow_knowledge.chunker import _chunk_table_block
 
     header = "| id | payload |"
     delim = "| --- | --- |"
@@ -253,7 +253,7 @@ def test_chunk_table_block_single_oversized_row_not_mid_split():
 
 def test_chunk_table_block_linearized_mode():
     """card_mode="linearized"：每行转 `列名: 值 | 列名: 值`，表头仍随块重复（§4 card_mode）。"""
-    from deerflow.knowledge.chunker import _chunk_table_block
+    from deerflow_knowledge.chunker import _chunk_table_block
 
     header = "| Region | Q1 |"
     delim = "| --- | --- |"
@@ -310,7 +310,7 @@ def test_table_chunks_have_continuous_index_and_ids():
 
 def test_non_table_prose_regression_unchanged():
     """非表格散文回归：无表文档不误判为表、heading 仍在 text（守实际语义）。"""
-    from deerflow.knowledge.chunker import _split_by_headings
+    from deerflow_knowledge.chunker import _split_by_headings
 
     md = "# 章\n\n" + "正文。" * 30 + "\n\n## 小节\n\n" + "更多正文。" * 20
     blocks = _split_by_headings(md)

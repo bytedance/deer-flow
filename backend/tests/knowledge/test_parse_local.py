@@ -33,11 +33,10 @@ from pathlib import Path
 
 import httpx
 import pytest
-
-from deerflow.knowledge import parser as parser_mod
-from deerflow.knowledge.embedder import RagConfigurationError
-from deerflow.knowledge.parse_local import MineruLocalParseProvider
-from deerflow.knowledge.parser import (
+from deerflow_knowledge import parser as parser_mod
+from deerflow_knowledge.embedder import RagConfigurationError
+from deerflow_knowledge.parse_local import MineruLocalParseProvider
+from deerflow_knowledge.parser import (
     MineruError,
     MineruParseFailedError,
     MineruTimeoutError,

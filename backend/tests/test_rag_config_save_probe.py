@@ -31,14 +31,15 @@ import httpx
 import pytest
 import yaml
 from _router_auth_helpers import make_authed_test_app
+from deerflow_knowledge.embedder import RagConfigurationError
+from deerflow_knowledge.embedder_factory import build_embedder
+from deerflow_knowledge.routers import rag_config as rag_config_router
+from deerflow_knowledge.service import KnowledgeExtensionService
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
-from app.gateway.routers import rag_config as rag_config_router
 from deerflow.config.app_config import get_app_config, reset_app_config
 from deerflow.config.rag_config_file import MASKED_SECRET
-from deerflow.knowledge.embedder import RagConfigurationError
-from deerflow.knowledge.embedder_factory import build_embedder
 
 SANDBOX = {"use": "deerflow.sandbox.local:LocalSandboxProvider"}
 
@@ -110,13 +111,15 @@ def _client(*, system_role: str = "admin") -> TestClient:
             id=uuid4(),
         )
     )
-    app.include_router(rag_config_router.router)
+    extension = KnowledgeExtensionService()
+    app.include_router(rag_config_router.build_router(extension))
     client = TestClient(app)
+    client.app.state.knowledge_extension = extension
     # The gateway always wires a knowledge service; a save that changes the embedding
     # identity now starts a rebuild off it (spec 2026-10-04 D3).
     from types import SimpleNamespace
 
-    client.app.state.knowledge_service = SimpleNamespace(store=object(), vector_store=object())
+    client.app.state.knowledge_extension.knowledge = SimpleNamespace(store=object(), vector_store=object())
     return client
 
 
@@ -128,7 +131,7 @@ def _reembed_libraries_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     success so the flip settles quietly, and forget the verdict between cases so one case's
     still-running task cannot 409 the next one's save.
     """
-    from app.gateway.services import rag_reembed as reembed_module
+    from deerflow_knowledge.services import rag_reembed as reembed_module
 
     async def _noop(store, *, vector_store, embedder):
         return {}

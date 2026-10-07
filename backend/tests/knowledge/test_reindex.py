@@ -18,17 +18,16 @@ import uuid
 from unittest.mock import MagicMock
 
 import pytest
+from deerflow_knowledge import parser as parser_mod
+from deerflow_knowledge import reindex as reindex_mod
+from deerflow_knowledge.embedder import EmbedderError, EmbeddingResult
+from deerflow_knowledge.indexer import index_chunks
+from deerflow_knowledge.reindex import reindex_in_progress, reindex_kb, reindex_last_run_status, reindex_progress
+from deerflow_knowledge.services import knowledge_service as ks_module
+from deerflow_knowledge.services.knowledge_service import KnowledgeService
+from deerflow_knowledge.store import KnowledgeStore
+from deerflow_knowledge.vector_store import ChunkUpsert
 from qdrant_client.models import SparseVector
-
-from app.gateway.services import knowledge_service as ks_module
-from app.gateway.services.knowledge_service import KnowledgeService
-from deerflow.knowledge import parser as parser_mod
-from deerflow.knowledge import reindex as reindex_mod
-from deerflow.knowledge.embedder import EmbedderError, EmbeddingResult
-from deerflow.knowledge.indexer import index_chunks
-from deerflow.knowledge.reindex import reindex_in_progress, reindex_kb, reindex_last_run_status, reindex_progress
-from deerflow.knowledge.store import KnowledgeStore
-from deerflow.knowledge.vector_store import ChunkUpsert
 
 OWNER_ID = str(uuid.UUID(int=1234567890))
 KB_ID = "kb-1"
@@ -268,14 +267,16 @@ def service(session_factory, tmp_path) -> KnowledgeService:
 
 def _client(service: KnowledgeService):
     from _router_auth_helpers import make_authed_test_app
+    from deerflow_knowledge.routers import knowledge_bases
+    from deerflow_knowledge.service import KnowledgeExtensionService
     from fastapi.testclient import TestClient
 
     from app.gateway.auth.models import User
-    from app.gateway.routers import knowledge_bases
 
     app = make_authed_test_app(user_factory=lambda: User(email="owner@example.com", password_hash="x", system_role="user", id=uuid.UUID(OWNER_ID)))
-    app.state.knowledge_service = service
-    app.include_router(knowledge_bases.router)
+    extension = KnowledgeExtensionService()
+    extension.knowledge = service
+    app.include_router(knowledge_bases.build_router(extension))
     return TestClient(app)
 
 

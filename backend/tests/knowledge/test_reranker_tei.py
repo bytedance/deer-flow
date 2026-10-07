@@ -3,7 +3,7 @@
 Contract — pinned from the upstream source (``huggingface/text-embeddings-inference``):
 ``POST /rerank`` with ``{"query", "texts", "raw_scores"}`` answers a **bare JSON array**
 ``[{"index", "score"}, ...]``. There is no ``model`` field (TEI serves exactly one model per
-instance — the same rule :class:`~deerflow.knowledge.sparse.TEISparseEncoder` states) and no
+instance — the same rule :class:`~deerflow_knowledge.sparse.TEISparseEncoder` states) and no
 ``top_n`` (the service has none, so the cap is applied locally); the response is not wrapped in
 a ``results`` envelope the way the Cohere/Jina shape is, which is why this is its own allowlist
 row rather than a branch inside the generic client.
@@ -15,9 +15,8 @@ import json
 
 import httpx
 import pytest
-
-from deerflow.knowledge.reranker import RerankerAuthError, RerankerError
-from deerflow.knowledge.reranker_tei import TEIReranker
+from deerflow_knowledge.reranker import RerankerAuthError, RerankerError
+from deerflow_knowledge.reranker_tei import TEIReranker
 
 BASE_URL = "http://localhost:8080"
 
@@ -143,7 +142,7 @@ async def test_no_key_means_no_authorization_header(monkeypatch):
     ``configured_rag_secret`` 被钉住是必须的 —— 本机仓库根的 rag_config.json 真的存着
     一把重排 key（generic-rerank 那格），否则这条断言会随操作员的机器漂移。
     """
-    import deerflow.knowledge.reranker_tei as tei_module
+    import deerflow_knowledge.reranker_tei as tei_module
 
     monkeypatch.setattr(tei_module, "configured_rag_secret", lambda _name: None)
     monkeypatch.delenv("RAG_RERANK_API_KEY", raising=False)
@@ -165,8 +164,9 @@ def test_the_factory_builds_a_tei_reranker_without_handing_it_a_model():
     allowlist row carries ``takes_model=False`` and the factory reads that — never the
     provider id (the same capability-over-name rule the endpoint lock follows).
     """
+    from deerflow_knowledge.reranker_factory import build_reranker
+
     from deerflow.config.app_config import RagConfig
-    from deerflow.knowledge.reranker_factory import build_reranker
 
     rag = RagConfig(rerank_provider="tei-rerank", rerank_base_url=BASE_URL)
 
@@ -179,9 +179,10 @@ def test_the_factory_refuses_a_tei_provider_without_an_address():
     It must arrive as ``RagConfigurationError`` (a ``ValueError``) — the single type the
     gateway maps to a readable 400 — not as a ``TypeError`` from a missing kwarg.
     """
+    from deerflow_knowledge.embedder import RagConfigurationError
+    from deerflow_knowledge.reranker_factory import build_reranker
+
     from deerflow.config.app_config import RagConfig
-    from deerflow.knowledge.embedder import RagConfigurationError
-    from deerflow.knowledge.reranker_factory import build_reranker
 
     rag = RagConfig(rerank_provider="tei-rerank")
     assert rag.rerank_base_url is None

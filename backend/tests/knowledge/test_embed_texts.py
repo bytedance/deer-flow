@@ -1,12 +1,12 @@
 """Tests for the shared embedding-input helpers (spec 2026-09-24 §4.1).
 
 The write paths and the rebuild pass must embed the *same* text, so the
-f-strings move into ``deerflow.knowledge.embed_texts`` and both sides call in.
+f-strings move into ``deerflow_knowledge.embed_texts`` and both sides call in.
 """
 
 from __future__ import annotations
 
-from deerflow.knowledge.embed_texts import (
+from deerflow_knowledge.embed_texts import (
     EMBED_CONTENT_CHARS,
     entity_embed_text,
     manual_card_embed_text,

@@ -24,8 +24,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-
-from deerflow.knowledge.vector_store import DimensionMigrationRequired, KnowledgeVectorStore
+from deerflow_knowledge.vector_store import DimensionMigrationRequired, KnowledgeVectorStore
 
 LEGACY_NAMES = ("kb_chunks",)
 

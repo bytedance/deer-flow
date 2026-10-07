@@ -24,6 +24,9 @@ from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 
 HARNESS = Path(__file__).resolve().parents[1] / "packages" / "harness" / "deerflow"
+#: The knowledge legs live in the extension package (Task 3): their non-role members are
+#: pinned against that root instead of the harness one.
+KNOWLEDGE = Path(__file__).resolve().parents[1] / "packages" / "knowledge-extension" / "deerflow_knowledge"
 
 #: The field name as a *field* — ``_default_model_name`` is a different thing entirely and
 #: must not be mistaken for a leak.
@@ -31,11 +34,10 @@ FIELD = re.compile(r"\bdefault_model\b(?!_)")
 
 #: Non-role legs: they take their own provider/model settings and never the RAG default.
 NOT_ROLE_LEGS = (
-    "knowledge/embedder_factory.py",
-    "knowledge/reranker_factory.py",
-    "knowledge/providers/__init__.py",
-    "knowledge/parse_local.py",
-    "knowledge/video/asr.py",
+    "embedder_factory.py",
+    "reranker_factory.py",
+    "providers/__init__.py",
+    "parse_local.py",
 )
 
 #: Seams that need a live client / a full agent build to drive behaviourally. Pinned at the
@@ -87,7 +89,7 @@ def test_the_two_snapshots_differ_only_in_the_rag_default(pair):
 
 def test_the_rag_roles_do_move(pair):
     """The positive half — without it the negative half could pass on a no-op feature."""
-    from deerflow.knowledge.model_target import resolve_rag_model_name
+    from deerflow_knowledge.model_target import resolve_rag_model_name
 
     without, with_default = pair
 
@@ -181,7 +183,7 @@ def test_unreachable_seams_never_read_the_rag_default(relative: str):
 
 @pytest.mark.parametrize("relative", NOT_ROLE_LEGS)
 def test_other_functional_legs_never_read_the_rag_default(relative: str):
-    """embedding / sparse / rerank / parse / ASR keep their own provider settings (D1)."""
-    source = (HARNESS / relative).read_text(encoding="utf-8")
+    """embedding / sparse / rerank / parse keep their own provider settings (D1)."""
+    source = (KNOWLEDGE / relative).read_text(encoding="utf-8")
 
     assert not FIELD.search(source), f"{relative} must not follow the RAG role default"

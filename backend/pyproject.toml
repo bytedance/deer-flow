@@ -110,7 +110,7 @@ default-groups = ["dev", "extensions"]
 override-dependencies = ["websockets==16.0"]
 
 [tool.uv.workspace]
-members = ["packages/harness", "packages/extension-api"]
+members = ["packages/harness", "packages/extension-api", "packages/knowledge-extension"]
 
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
