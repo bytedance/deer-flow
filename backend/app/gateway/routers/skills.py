@@ -161,8 +161,39 @@ class SkillRollbackRequest(BaseModel):
 # making the overwritten revision unreachable by rollback. Running each
 # mutation's steps inside one worker-thread function does not make them a
 # critical section — two requests can both be inside their own workers — so
-# the cooperating mutation paths share this lock around the whole sequence.
-_custom_skill_mutation_lock = threading.Lock()
+# the cooperating mutation paths share a lock around the whole sequence.
+#
+# The lock is scoped to the owning user's storage, not to the process: the
+# critical section includes write_custom_skill's projection rebuild, which
+# copies that user's whole skill tree (including a large linked package) and
+# waits on the user's projection lock. A process-wide lock would therefore
+# queue every other user's edit, rollback, and delete behind one user's slow
+# filesystem work, even though their skill trees, histories, and projection
+# roots are disjoint. Keying on the resolved root — not the user_id string,
+# and not one lock per storage instance — keeps a single lock per user when a
+# hot-reloaded config or a later request builds a fresh storage object.
+_custom_skill_mutation_locks: dict[str, threading.Lock] = {}
+_custom_skill_mutation_locks_guard = threading.Lock()
+
+
+def _custom_skill_mutation_lock(storage: SkillStorage) -> threading.Lock:
+    """Return the read → write → append mutex for ``storage``'s owning user."""
+    with _custom_skill_mutation_locks_guard:
+        return _custom_skill_mutation_locks.setdefault(_custom_skill_mutation_scope(storage), threading.Lock())
+
+
+def _custom_skill_mutation_scope(storage: SkillStorage) -> str:
+    """The storage scope whose custom-skill mutations must serialize together.
+
+    User-scoped storage reports the canonical root its mutations touch, so two
+    users never share a lock while two storage objects for one user always do.
+    Anything else — the global legacy singleton, or a test double — has exactly
+    one scope, and a single shared lock is correct for it.
+    """
+    get_user_custom_root = getattr(storage, "get_user_custom_root", None)
+    if callable(get_user_custom_root):
+        return str(get_user_custom_root())
+    return "global"
 
 
 def _skill_to_response(skill: Skill) -> SkillResponse:
@@ -677,12 +708,13 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
                 # The write and its history entry must settle together, and the
                 # prompt cache must not stay stale behind them: a cancelled caller
                 # drains the whole mutation tail instead of cutting it mid-sequence.
-                # The read → write → append sequence runs under the shared mutation
-                # lock so a concurrent edit cannot land between the predecessor read
-                # and the write: prev_content must record what this mutation
-                # actually overwrites, or the overwritten revision silently drops
-                # out of the history chain and becomes unreachable by rollback.
-                with _custom_skill_mutation_lock:
+                # The read → write → append sequence runs under the owning
+                # user's mutation lock so a concurrent edit cannot land between
+                # the predecessor read and the write: prev_content must record
+                # what this mutation actually overwrites, or the overwritten
+                # revision silently drops out of the history chain and becomes
+                # unreachable by rollback.
+                with _custom_skill_mutation_lock(storage):
                     prev_content = storage.read_custom_skill(skill_name)
                     storage.write_custom_skill(skill_name, SKILL_MD_FILE, body.content)
                     storage.append_history(
@@ -729,10 +761,10 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
             # Same cancellation contract as the edit and rollback tails: the
             # deletion and its history record settle before a cancelled caller
             # unwinds, and the prompt cache reflects the removal. The deletion
-            # joins the shared mutation lock so it cannot interleave with a
-            # concurrent edit or rollback's read → write → append sequence.
+            # joins the owning user's mutation lock so it cannot interleave with
+            # a concurrent edit or rollback's read → write → append sequence.
             def _delete_and_record() -> None:
-                with _custom_skill_mutation_lock:
+                with _custom_skill_mutation_lock(storage):
                     storage.delete_custom_skill(
                         skill_name,
                         history_meta={
@@ -842,11 +874,11 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
                 # The restore write and its history entry must settle together, and
                 # the prompt cache must reflect the restored content, before a
                 # cancelled caller unwinds. The read → write → append sequence runs
-                # under the shared mutation lock (same contract as the edit path):
-                # the recorded prev_content must be what this rollback actually
-                # overwrites, which requires that no concurrent mutation can land
-                # between the predecessor read and the write.
-                with _custom_skill_mutation_lock:
+                # under the owning user's mutation lock (same contract as the edit
+                # path): the recorded prev_content must be what this rollback
+                # actually overwrites, which requires that no concurrent mutation
+                # can land between the predecessor read and the write.
+                with _custom_skill_mutation_lock(storage):
                     current_content = _read_current_content()
                     storage.write_custom_skill(skill_name, SKILL_MD_FILE, target_content)
                     storage.append_history(

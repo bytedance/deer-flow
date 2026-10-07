@@ -55,7 +55,7 @@ def _make_skill(name: str, *, enabled: bool) -> Skill:
     )
 
 
-def _make_test_app(config) -> FastAPI:
+def _make_test_app(config, *, user_factory=None, bind_current_user: bool = False) -> FastAPI:
     # The listing/detail routes read config.authorization.fail_closed even
     # when authorization is disabled (mirroring list_models). Many tests here
     # build minimal SimpleNamespace configs; backfill the real disabled
@@ -63,7 +63,10 @@ def _make_test_app(config) -> FastAPI:
     # crashing on a missing attribute.
     if not hasattr(config, "authorization"):
         config.authorization = AuthorizationConfig(enabled=False)
-    app = make_authed_test_app(user_factory=_make_admin_user)
+    # bind_current_user=True is what makes the route's real
+    # get_effective_user_id() resolve the stub user, so a test can drive two
+    # requests as two different users.
+    app = make_authed_test_app(user_factory=user_factory or _make_admin_user, bind_current_user=bind_current_user)
     app.state.config = config  # kept for any startup-style reads
     app.dependency_overrides[get_config] = lambda: config
     app.include_router(skills_router.router)
@@ -1954,3 +1957,155 @@ def test_custom_skill_rollback_history_survives_concurrent_put(monkeypatch, tmp_
     assert entries[2]["prev_content"] == original_content
     assert entries[2]["new_content"] == concurrent_content
     assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == concurrent_content
+
+
+def _user_with_id(user_id: str) -> User:
+    """An admin user with a fixed id, so its per-user skill root is predictable."""
+    from uuid import UUID
+
+    return User(email=f"{user_id}@example.com", password_hash="x", system_role="admin", id=UUID(user_id))
+
+
+def _users_in_request_order(*users: User):
+    """Hand one stub user to each request, in arrival order, then repeat the last."""
+    remaining = list(users)
+
+    def _factory() -> User:
+        return remaining.pop(0) if remaining else users[-1]
+
+    return _factory
+
+
+def _gate_write_by_content(monkeypatch, gated_content: str, concurrent_content: str) -> tuple[threading.Event, threading.Event, threading.Event]:
+    """Pause one mutation inside its storage write, after its predecessor read.
+
+    The gated request stays there until the test releases it, so a second
+    mutation either lands inside that window (its own user's lock) or cannot
+    start at all (one lock shared by both users).
+    """
+    gated_write_entered = threading.Event()
+    concurrent_write_entered = threading.Event()
+    release_gated_write = threading.Event()
+    original_write = UserScopedSkillStorage.write_custom_skill
+
+    def _gated_write(self, name, relative_path, content):
+        if content == gated_content:
+            gated_write_entered.set()
+            release_gated_write.wait(timeout=30)
+        elif content == concurrent_content:
+            concurrent_write_entered.set()
+        return original_write(self, name, relative_path, content)
+
+    monkeypatch.setattr(UserScopedSkillStorage, "write_custom_skill", _gated_write)
+    return gated_write_entered, concurrent_write_entered, release_gated_write
+
+
+def test_custom_skill_mutation_lock_is_scoped_to_the_owning_user(tmp_path, monkeypatch):
+    """One mutation lock per owning-user storage root, not one per process.
+
+    Every request (and every hot-reloaded config) builds its own storage object,
+    so identity across instances is what keeps one user's mutations serialized;
+    two users that own disjoint custom-skill trees must not share the lock that
+    also spans write_custom_skill's whole projection rebuild.
+    """
+    from app.gateway.routers.skills import _custom_skill_mutation_lock
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+    alice = UserScopedSkillStorage("alice", host_path=str(tmp_path / "skills"))
+    alice_second_instance = UserScopedSkillStorage("alice", host_path=str(tmp_path / "skills"))
+    bob = UserScopedSkillStorage("bob", host_path=str(tmp_path / "skills"))
+
+    assert _custom_skill_mutation_lock(alice) is _custom_skill_mutation_lock(alice_second_instance)
+    assert _custom_skill_mutation_lock(alice) is not _custom_skill_mutation_lock(bob)
+
+
+def test_custom_skill_update_does_not_serialize_an_unrelated_user(monkeypatch, tmp_path):
+    """One user's in-flight mutation must not block a different user's.
+
+    The locked sequence wraps write_custom_skill, which rebuilds the user's
+    skill projection and can therefore be slow (a large or linked package, a
+    projection lock held elsewhere). With one process-wide lock, Alice's
+    rebuild stalls Bob's edit of an unrelated skill; scoped to the owning
+    user's storage, Bob's write reaches storage while Alice is still inside
+    hers, and each user's own history chain stays intact.
+    """
+    skills_root = tmp_path / "skills"
+    alice = _user_with_id("00000000-0000-4000-8000-0000000000a1")
+    bob = _user_with_id("00000000-0000-4000-8000-0000000000b2")
+    alice_custom = _user_custom_dir(tmp_path, str(alice.id)) / "demo-skill"
+    bob_custom = _user_custom_dir(tmp_path, str(bob.id)) / "demo-skill"
+    alice_custom.mkdir(parents=True, exist_ok=True)
+    bob_custom.mkdir(parents=True, exist_ok=True)
+    alice_initial = _skill_content("demo-skill")
+    bob_initial = _skill_content("demo-skill", "Bob's own skill")
+    alice_edited = _skill_content("demo-skill", "Edited by Alice")
+    bob_edited = _skill_content("demo-skill", "Edited by Bob")
+    (alice_custom / "SKILL.md").write_text(alice_initial, encoding="utf-8")
+    (bob_custom / "SKILL.md").write_text(bob_initial, encoding="utf-8")
+
+    from deerflow.config.paths import Paths
+
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+    async def _refresh(user_id: str):
+        return None
+
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", lambda *args, **kwargs: _async_scan("allow", "ok"))
+
+    gated_write_entered, concurrent_write_entered, release_gated_write = _gate_write_by_content(monkeypatch, alice_edited, bob_edited)
+
+    app = _make_test_app(config, user_factory=_users_in_request_order(alice, bob), bind_current_user=True)
+    server, server_thread, base_url = _run_live_server(app)
+    bob_progressed = False
+    try:
+        with httpx.Client(base_url=base_url, timeout=30) as client_a, httpx.Client(base_url=base_url, timeout=30) as client_b:
+            a_result: dict = {}
+            b_result: dict = {}
+
+            def _request_a():
+                a_result["response"] = client_a.put("/api/skills/custom/demo-skill", json={"content": alice_edited})
+
+            def _request_b():
+                b_result["response"] = client_b.put("/api/skills/custom/demo-skill", json={"content": bob_edited})
+
+            thread_a = threading.Thread(target=_request_a)
+            thread_a.start()
+            assert gated_write_entered.wait(timeout=10), "Alice's edit never reached its write"
+
+            thread_b = threading.Thread(target=_request_b)
+            thread_b.start()
+            # Alice is parked inside her mutation; Bob must not wait for her.
+            bob_progressed = concurrent_write_entered.wait(timeout=5)
+
+            release_gated_write.set()
+            thread_a.join(timeout=30)
+            thread_b.join(timeout=30)
+    finally:
+        release_gated_write.set()
+        server.should_exit = True
+        server_thread.join(timeout=10)
+
+    assert bob_progressed, "Bob's edit waited on Alice's in-flight mutation instead of its own user's lock"
+    assert a_result["response"].status_code == 200
+    assert b_result["response"].status_code == 200
+    assert (alice_custom / "SKILL.md").read_text(encoding="utf-8") == alice_edited
+    assert (bob_custom / "SKILL.md").read_text(encoding="utf-8") == bob_edited
+
+    # Each user kept its own chain: the concurrent peer never entered the
+    # other user's history.
+    alice_history = UserScopedSkillStorage(str(alice.id), host_path=str(skills_root)).read_history("demo-skill")
+    bob_history = UserScopedSkillStorage(str(bob.id), host_path=str(skills_root)).read_history("demo-skill")
+    assert [entry["prev_content"] for entry in alice_history] == [alice_initial]
+    assert [entry["new_content"] for entry in alice_history] == [alice_edited]
+    assert [entry["prev_content"] for entry in bob_history] == [bob_initial]
+    assert [entry["new_content"] for entry in bob_history] == [bob_edited]
