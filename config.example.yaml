@@ -2676,8 +2676,10 @@ run_events:
 #                   'sqlite' or 'postgres' (rejected at startup on 'memory').
 #
 # Switching an existing install to 'db'? Import the on-disk Custom Agents and
-# managed subagents once with:
-#     python backend/scripts/migrate_agents_to_db.py   # --dry-run to preview
+# managed subagents once from the repository root, with the installed backend
+# environment and the same runtime/configuration selectors as the Gateway:
+#     uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py --dry-run
+# Remove --dry-run after reviewing the preview to perform the import.
 # The source files are left in place, so reverting to 'file' is a clean rollback.
 #
 # agent_storage:

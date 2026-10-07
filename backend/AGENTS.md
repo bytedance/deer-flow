@@ -188,6 +188,11 @@ watcher. Do not replace it with a bare `uvicorn --reload`: agent tasks write
 Python and other runtime files below `DEER_FLOW_HOME`, which would otherwise
 restart the Gateway during an active run.
 
+Configuration checks and operator migration scripts reuse the installed backend
+environment with `uv run --no-sync --project backend` from the repository root.
+`--project` preserves the caller's working directory and relative runtime/config
+selectors; `--no-sync` retains installed extras such as PostgreSQL drivers.
+
 More specific `AGENTS.md` files in backend code directories contain the subsystem sections split from this file. Follow the nearest file in the directory tree.
 
 ## Architecture
