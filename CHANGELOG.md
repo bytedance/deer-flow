@@ -812,7 +812,7 @@ This release closes that milestone with **439 merged pull requests**.
   then failed at its atomic commit. Chunk writes refresh the staging file's
   mtime, so an upload in flight stays younger than the guard; a crash leftover
   is collected by the first startup more than 24 hours later, the same guard
-  project-document staging already uses.
+  project-document staging already uses. ([#6445])
 - **frontend:** Retrying a message after its attachment upload fails now keeps
   the context that was attached to it. The composer dropped its quotes,
   conversation references, staged project files and stored draft as soon as a
@@ -9139,3 +9139,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6407]: https://github.com/bytedance/deer-flow/pull/6407
 [#6412]: https://github.com/bytedance/deer-flow/pull/6412
 [#6426]: https://github.com/bytedance/deer-flow/pull/6426
+[#6445]: https://github.com/bytedance/deer-flow/pull/6445
