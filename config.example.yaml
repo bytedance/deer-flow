@@ -2977,7 +2977,7 @@ run_ownership:
 #     ilink_app_id: ""
 #     # Optional: sent as SKRouteTag header when provided
 #     route_tag: ""
-#     allowed_users: []               # empty = allow all
+#     allowed_users: []               # iLink user IDs; empty allows all; a single ID is one entry; unparseable non-empty lists fail closed
 #     # Optional: extra host suffixes inbound media downloads may come from,
 #     # in addition to the platform CDN defaults (*.qq.com and the cdn_base_url host).
 #     # Entries are suffixes: "example.com" and "*.example.com" are equivalent.

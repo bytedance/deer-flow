@@ -334,7 +334,8 @@ class ChannelService:
         The UI runtime-config overlay applied at startup is re-applied here
         so a file-driven reload neither drops credentials entered from the
         browser nor resurrects a channel disconnected from it.
-        Falls back to the cached ``self._config`` when config loading fails.
+        Returns a snapshot without mutating shared state, or ``None`` when
+        unavailable. The restart caller owns publication and cached fallback.
         """
         try:
             from deerflow.config.app_config import get_app_config
@@ -345,12 +346,10 @@ class ChannelService:
             _merge_channel_connection_runtime_config(channels_config, app_config)
             channel_config = channels_config.get(name)
             if isinstance(channel_config, dict):
-                # Update the cached config so get_status() stays consistent.
-                self._config[name] = channel_config
                 return channel_config
         except Exception:
-            logger.exception("Failed to reload config for channel %s, using cached version", name)
-        return self._config.get(name)
+            logger.exception("Failed to load config snapshot for channel %s", name)
+        return None
 
     def _channel_lock(self, name: str) -> asyncio.Lock:
         """Return the per-channel lifecycle lock ensuring serialized mutations."""
@@ -384,7 +383,11 @@ class ChannelService:
         if reload_config:
             # Reading config.yaml and the runtime store is disk IO; keep it
             # off the event loop.
-            config = await asyncio.to_thread(self._load_channel_config, name)
+            loaded_config = await asyncio.to_thread(self._load_channel_config, name)
+            # Publish under the lifecycle lock after await; abandoned workers stay read-only.
+            if loaded_config is not None:
+                self._config[name] = loaded_config
+            config = self._config.get(name)
             self._bump_config_epoch(name)
         else:
             config = self._config.get(name)

@@ -216,9 +216,9 @@ export function ThreadSidebarItem({
   const channelSource = channelSourceOfThread(thread);
   const pinned = isThreadPinned(thread);
   const parentTitle = branchEntry?.parentThread
-    ? titleOfThread(branchEntry.parentThread)
+    ? titleOfThread(branchEntry.parentThread, t.pages.untitled)
     : null;
-  const title = titleOfThread(thread);
+  const title = titleOfThread(thread, t.pages.untitled);
   const branchLabel = parentTitle
     ? t.chats.branchLabel(title, parentTitle)
     : undefined;
@@ -296,7 +296,7 @@ export function ThreadSidebarItem({
             </DropdownMenuItem>
             <DropdownMenuItem
               onSelect={() => {
-                setRenameValue(titleOfThread(thread));
+                setRenameValue(titleOfThread(thread, t.pages.untitled));
                 setRenameDialogOpen(true);
               }}
             >

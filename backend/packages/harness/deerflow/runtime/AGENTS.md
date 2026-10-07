@@ -192,7 +192,11 @@ carriers, and releases it during terminal cleanup. `scheduled_task_runtime` is a
 separate private occurrence snapshot: its owner, task ID, occurrence ID, and goal
 objective must match the admitted record before the worker may install a goal.
 Run metadata and hidden conversation-reference messages are display data and
-never confer either capability.
+never confer either capability. An interactive grant manages the owner's tasks
+created in its thread plus tasks that ran an occurrence there (re-checked per
+call); a scheduled grant only stops its own occurrence's task. The Gateway
+grants neither while its scheduler poller is stopped. The scheduled prompt's
+`deerflow_scheduled_origin` message metadata is server-owned display data.
 
 A scheduled goal is installed before the first turn, only in a fresh thread,
 using the existing goal writer and default continuation budgets. Terminal

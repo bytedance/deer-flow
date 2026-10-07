@@ -535,6 +535,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # startup-failure and cancellation path below.
         try:
             from deerflow.extensions.notify import (
+                drain_extension_notify_dispatches,
                 reset_extension_notify_loop,
                 set_extension_notify_loop,
             )
@@ -544,16 +545,24 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             logger.exception("Failed to register the extension notify loop; sync observations will be dropped")
         else:
 
-            def reset_notify_loop_safely() -> None:
+            async def reset_notify_loop_safely() -> None:
                 try:
-                    reset_extension_notify_loop()
+                    await drain_extension_notify_dispatches()
                 except Exception:
                     logger.debug(
-                        "Failed to reset the extension notify loop (non-fatal)",
+                        "Failed to drain pending extension notifications (non-fatal)",
                         exc_info=True,
                     )
+                finally:
+                    try:
+                        reset_extension_notify_loop()
+                    except Exception:
+                        logger.debug(
+                            "Failed to reset the extension notify loop (non-fatal)",
+                            exc_info=True,
+                        )
 
-            stack.callback(reset_notify_loop_safely)
+            stack.push_async_callback(reset_notify_loop_safely)
 
         config = startup_config
         app.state.checkpoint_channel_mode = freeze_checkpoint_channel_mode(config.database.checkpoint_channel_mode)
@@ -811,25 +820,44 @@ def get_thread_store(request: Request) -> ThreadMetaStore:
     return val
 
 
+def _scheduler_unavailable(message: str) -> HTTPException:
+    """Coded 503 for the scheduled-task routes (contracts/scheduled_task_errors_contract.json)."""
+    from app.gateway.scheduled_task_errors import scheduler_error
+
+    return scheduler_error(503, "scheduler_unavailable", message)
+
+
 def get_scheduled_task_repo(request: Request):
     val = getattr(request.app.state, "scheduled_task_repo", None)
     if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task repo not available")
+        raise _scheduler_unavailable("Scheduled task repo not available")
     return val
 
 
 def get_scheduled_task_run_repo(request: Request):
     val = getattr(request.app.state, "scheduled_task_run_repo", None)
     if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task run repo not available")
+        raise _scheduler_unavailable("Scheduled task run repo not available")
     return val
 
 
 def get_scheduled_task_service(request: Request):
     val = getattr(request.app.state, "scheduled_task_service", None)
     if val is None:
-        raise HTTPException(status_code=503, detail="Scheduled task service not available")
+        raise _scheduler_unavailable("Scheduled task service not available")
     return val
+
+
+def is_scheduler_running(request: Request) -> bool:
+    """Whether this Gateway process's scheduler poller is running.
+
+    False when the service is absent (no scheduler persistence) or was never
+    started (``scheduler.enabled: false``) or its poller stopped. Per process:
+    another worker may report differently.
+    """
+    state = getattr(getattr(request, "app", None), "state", None)
+    service = getattr(state, "scheduled_task_service", None)
+    return bool(getattr(service, "is_running", False))
 
 
 def get_mcp_task_repo(request: Request):
