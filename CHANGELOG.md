@@ -99,6 +99,96 @@ This release closes that milestone with **439 merged pull requests**.
   智能体; no `lead_agent` in labels). Untitled chats and the Scheduled tasks and
   Agents breadcrumbs follow the interface language. ([#6378])
 
+- **scheduler:** Scheduled runs now share execution slots fairly between task
+  owners. A new `scheduler.max_concurrent_runs_per_user` (default `2`, `0` =
+  off, never more than `max_concurrent_runs`) caps how many scheduled runs one
+  owner has launching or running at a time, manual "run now" included; it is
+  checked in the same atomic claim, under the same database lock, as the global
+  cap. The waiting queue is drained owner by owner whatever the cap: owners at
+  their cap drop out before the batch limit, so one owner's backlog no longer
+  pushes another owner's run out of the drain batch. Same-thread FIFO and the
+  order within one owner are unchanged. A run that waits past
+  `scheduler.queue_timeout_seconds` is skipped and shows "Skipped: it waited
+  too long for a free slot" in the run history. ([#6393])
+
+  **Behavior change:** one owner now runs at most 2 scheduled runs at a time by
+  default (before: up to `max_concurrent_runs`, default 3).
+  `scheduler.max_concurrent_runs_per_user: 0` restores the old behavior.
+
+- **scheduler:** When a schedule created in a chat is paused by the agent
+  (its stop condition was met), is paused automatically after three missed
+  goals, or finishes (all `max_runs` done, `end_at` passed, or a one-time task
+  ran), a durable lifecycle event is recorded for that chat in the same
+  database transaction as the state change, and recovery after a crash or a
+  lost lease never records it twice. New `GET
+  /api/threads/{thread_id}/scheduled-task-events` lists them (title snapshot,
+  stop condition, run number and the last run's outcome); the rows stay after
+  the task is deleted and go with the chat. The event names are pinned in
+  `contracts/scheduled_goal_notes_contract.json` (version 3). Migration
+  `0032_activity_and_task_events` adds this table and the run-origin and
+  read-state schema used by later changes; `runs.origin_kind` stays NULL for
+  existing runs. ([#6393])
+
+- **scheduler:** Scheduled-task IM notices are honest, localized and
+  self-contained. Each occurrence sends at most one message, queued by the
+  finalization observer in the same transaction that records the outcome: a
+  pause by the agent (`task_stopped`, new), the automatic pause (now one
+  merged message instead of a goal-missed notice plus a pause notice), the
+  task finishing (`task_finished`, new: all `max_runs` done or `end_at`
+  reached), or the run's own outcome; a pause or finish still says how the
+  last run went. Only apps with proactive push (WeCom today) get notices: the
+  new `app/channels/capabilities.py` declares `proactive_notifications` per
+  provider (and adds the missing `qq` entry), `GET /api/channels/providers`
+  returns it, and other providers get no outbox rows. The text has the task
+  title, what happened, the tasks page's one-line run summary when the agent
+  replied (redacted) and "Open DeerFlow → Scheduled tasks for details.", with
+  no IDs and no links, in the owner's web UI language (new `locale` user
+  preference, `en-US` or `zh-CN`) or else the new
+  `channel_connections.notification_locale` (default `en-US`). No public base
+  URL setting is added: most deployments run on localhost or a LAN, where a
+  link would be dead on the phone that receives it. ([#6393])
+
+  **Behavior change:** runs finalized by crash or lease recovery now notify
+  once (they used to be silent); one message per occurrence replaces separate
+  goal-missed and pause messages; agent stops and finishes now notify; notice
+  text changed and no longer shows the task or run ID. Rows already queued for
+  providers without proactive push end once as `failed` without retries.
+
+- **frontend:** Threads the server creates now show who created them and
+  whether they are new. In the sidebar and on the Chats page, a scheduled run
+  has a clock icon ("Scheduled run"), an IM thread its app's icon ("From
+  Feishu"), a GitHub thread the GitHub mark and an extension thread a puzzle
+  icon. An unread dot follows the title until the thread is opened (never on
+  the open thread; announced as "{title}, unread"). New and changed
+  server-created threads appear within 15 seconds without a reload, opening
+  one clears its dot on every device, and the open chat stays read while a
+  scheduled run in it updates. Nothing polls when the Gateway has no thread
+  activity (memory persistence). ([#6393])
+
+- **frontend:** The chat that created a schedule now shows one line when the
+  schedule pauses or ends ("Release checklist was paused by the agent. Stop
+  condition met: …", "… was paused automatically: 3 runs in a row missed the
+  goal.", "… finished: all 5 runs are done. The last run failed.", "… has
+  run."), at the end of the turn it followed, with the time and "See that run"
+  or "Open task". It appears without a reload when the task's state changes,
+  and stays after the task is deleted. Settings → Channels and the sidebar's
+  channel list say for each app whether scheduled task updates are sent there
+  ("sent here" for WeCom, "not available for this app yet" for the others).
+  ([#6393])
+
+- **scheduler:** The web app keeps the account's `locale` preference equal to
+  its interface language (after sign-in with session auth and on every
+  language switch), so scheduled-task IM notices arrive in the language the
+  user reads DeerFlow in; with auth disabled nothing is written and
+  `notification_locale` applies. A queued run in the run history now reads
+  "Waiting for a free slot". The frontend core for server-created threads
+  lands here too: origin markers from `deerflow_origin` (IM provider names
+  localized, `channel_source` and legacy scheduled threads still recognized),
+  activity polling that refetches the thread lists only when a
+  server-originated thread changed or a thread was read on another device,
+  debounced read marking, and the per-chat lifecycle events with their
+  placement in the conversation. ([#6393])
+
 - **scheduler:** The tasks page shows the per-run goal and end conditions of
   conversation-created tasks. Run history shows whether a goal was met,
   including when it relied on stated assumptions; an unmet run shows a readable
@@ -117,6 +207,23 @@ This release closes that milestone with **439 merged pull requests**.
   entirely on the existing authorized list response — no API change. ([#5355])
 
 #### Agents & runtime
+
+- **gateway:** Threads the server creates for you can be noticed without a
+  reload. Runs started by a schedule, an IM channel, a GitHub agent, an
+  extension or an MCP notification now carry a server-owned
+  `metadata.deerflow_origin` (`{kind, provider?, namespace?}`, pinned by the new
+  `contracts/thread_origin_contract.json`) and a denormalized
+  `runs.origin_kind`; a thread created for such a run keeps the same marker.
+  Clients cannot set it: thread create/patch and run admission strip client
+  copies. The new `GET /api/thread-activity` feed pages the caller's run
+  changes over the existing run-change clock and returns only threads changed
+  by server-originated runs, plus a per-user `read_version`; an idle poll is one
+  index seek. `POST /api/threads/{thread_id}/read` stores a per-user,
+  never-decreasing read position, and thread search items gain `unread`. Only
+  the caller's own server-originated runs make a thread unread; interactive
+  runs, other users' runs in shared threads and runs from before the upgrade
+  never do. `GET /api/features` reports `thread_activity.available` (SQL
+  persistence only). ([#6393])
 
 - **uploads:** Add stable cursor pagination to the `list_uploaded_files`
   discovery tool. With more than 100 historical uploads matching the same
@@ -705,6 +812,14 @@ This release closes that milestone with **439 merged pull requests**.
   The handler now rejects after the toast, and the queued first send settles the
   submit with its own outcome, so the draft stays for a retry and clears only
   once the message is sent. ([#6407])
+- **frontend:** A failed reconnect after a page refresh is now retried in the same
+  tab. The SDK reconnects once from the tab's `lg:stream` pointer and keeps that
+  pointer on error, and active-run recovery skipped any run with a matching
+  pointer, so the live stream stayed detached until another refresh. When that
+  reconnect fails, including a drop mid-stream, recovery now releases the pointer
+  and rejoins the run if the server still reports it active, with its existing
+  bounded retries (immediately, then after 1s and 2s). Failed submitted runs are
+  unchanged. ([#6400])
 - **channels:** Opening an IM-channel conversation on the web while its run is still
   going no longer shows the user's message twice. Channel run input carried no
   message id, so the Gateway stored it id-less in the run record while the
@@ -726,6 +841,14 @@ This release closes that milestone with **439 merged pull requests**.
   128-token budget before later query terms. Tokens without a letter or digit are
   now dropped, as the no-jieba fallback and the FTS5 query filter already did.
   ([#6388])
+- **gateway:** Run streams now arrive incrementally behind compressing proxies.
+  Every SSE response (`POST /api/threads/{id}/runs/stream`, `GET .../join`,
+  `GET`/`POST .../runs/{run_id}/stream` and `POST /api/runs/stream`) sends
+  `Cache-Control: no-cache, no-transform` from one shared helper instead of
+  `no-cache`, so proxies that compress responses, such as the Next.js rewrite
+  proxy used by `pnpm start` without nginx, no longer buffer the stream and
+  deliver it in bursts. `X-Accel-Buffering: no` and `Content-Location` are
+  unchanged, and nginx deployments behave as before. ([#6393])
 - **config:** Every Gateway process that shares one `extensions_config.json`
   now sees the MCP and skill changes made by another one. The parsed file was
   cached once per process and only the process that handled the write
@@ -8982,5 +9105,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6378]: https://github.com/bytedance/deer-flow/pull/6378
 [#6386]: https://github.com/bytedance/deer-flow/pull/6386
 [#6388]: https://github.com/bytedance/deer-flow/pull/6388
+[#6393]: https://github.com/bytedance/deer-flow/pull/6393
+[#6400]: https://github.com/bytedance/deer-flow/pull/6400
 [#6401]: https://github.com/bytedance/deer-flow/pull/6401
 [#6407]: https://github.com/bytedance/deer-flow/pull/6407

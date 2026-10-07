@@ -1075,6 +1075,7 @@ export const enUS: Translations = {
       continuations: "Kept working {n} more times to reach the goal",
       details: "Details",
       listLabel: "Runs of this task",
+      waitingForSlot: "Waiting for a free slot",
     },
     runTrigger: { scheduled: "Scheduled run", manual: "Trial run" },
     runStatus: {
@@ -1168,6 +1169,24 @@ export const enUS: Translations = {
         "Scheduled tasks aren't available on this server right now.",
       triggerFailed: "The run couldn't be started.",
       permissionDenied: "You don't have permission to do this.",
+    },
+    events: {
+      stoppedWithCondition:
+        "{title} was paused by the agent. Stop condition met: {condition}",
+      stopped: "{title} was paused by the agent: its stop condition was met.",
+      autoPaused:
+        "{title} was paused automatically: 3 runs in a row missed the goal.",
+      finishedRuns: "{title} finished: all {max} runs are done.",
+      finishedOneRun: "{title} finished: its one run is done.",
+      finishedEnd: "{title} finished: its end time has passed.",
+      finished: "{title} finished.",
+      onceDone: "{title} has run.",
+      onceFailed: "{title} didn't finish.",
+      label: "Scheduled task update",
+      suffixLastFailed: "The last run failed.",
+      suffixLastUnmet: "The last run didn't meet the goal.",
+      suffixLastInterrupted: "The last run was interrupted.",
+      untitledTask: "Untitled task",
     },
     card: {
       runs: "Runs",
@@ -1384,6 +1403,31 @@ export const enUS: Translations = {
     pinChatFailed: "Failed to update pinned chat",
   },
 
+  // Thread origin and unread markers
+  threads: {
+    unread: "Unread",
+    unreadLabel: "{title}, unread",
+    unreadLabelWithOrigin: "{origin}, {title}, unread",
+    origin: {
+      schedule: "Scheduled run",
+      fromProvider: (provider: string) => `From ${provider}`,
+      github: "From GitHub",
+      extension: "From an extension",
+      providers: {
+        buzz: "Buzz",
+        dingtalk: "DingTalk",
+        discord: "Discord",
+        feishu: "Feishu",
+        github: "GitHub",
+        qq: "QQ",
+        slack: "Slack",
+        telegram: "Telegram",
+        wechat: "WeChat",
+        wecom: "WeCom",
+      },
+    },
+  },
+
   // Sidecar
   sidecar: {
     title: "Side chat",
@@ -1509,6 +1553,12 @@ export const enUS: Translations = {
       wecom: "WeCom messages through your DeerFlow AI bot.",
     },
     connectedAs: (name: string) => `Connected as ${name}.`,
+    scheduledUpdates: {
+      supported: "Scheduled task updates: sent here",
+      supportedAfterConnect:
+        "Scheduled task updates: available after you connect",
+      unsupported: "Scheduled task updates: not available for this app yet",
+    },
   },
 
   // Page titles (document title)

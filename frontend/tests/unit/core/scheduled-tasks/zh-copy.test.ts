@@ -18,8 +18,11 @@ function leaves(node: unknown, path: string): [string, string][] {
 
 describe("zh-CN scheduled-task copy", () => {
   test("an interpolated time, date or number is followed by a space before Chinese", () => {
+    // `{title}` is exempt: the event lines glue a Chinese title to the
+    // predicate ("检查发布清单已结束") and add the space at render time only
+    // after a title ending in a Latin letter or digit (events.ts).
     const glued = leaves(zhCN.scheduledTasks, "scheduledTasks").filter(
-      ([, text]) => /\{[a-z_]+\}[一-鿿]/i.test(text),
+      ([, text]) => /\{(?!title\})[a-z_]+\}[一-鿿]/i.test(text),
     );
     expect(glued).toEqual([]);
   });

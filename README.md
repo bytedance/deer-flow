@@ -167,6 +167,8 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
 
    Jina fetches support opt-in bounded retries via `max_retries` (default `0`) and `retry_budget_seconds` (default `30`) in the tool configuration. Valid `Retry-After` hints set a minimum wait for HTTP 429/503; 429 without a valid hint stays terminal. Hints that cannot fit the remaining budget stop retries. Local backoff remains randomized. Retries may increase upstream requests and cost; see [Jina fetch retries](backend/docs/CONFIGURATION.md#jina-fetch-retries).
 
+   Jina also accepts an opt-in `max_response_bytes` tool setting (positive integer; omitted/null disables it). It stops oversized decoded responses before extraction, with no partial success or retry. This leaves the 4096-character output cap unchanged and does not bound HTTPX decompressor allocations or wire bandwidth; see [response budget](backend/docs/CONFIGURATION.md#jina-response-byte-budget).
+
    Run `make doctor` at any time to verify your setup and get actionable fix hints.
    If you are opening a GitHub issue about a local setup or runtime problem, run
    `make support-bundle`. The command prints reporter next steps, writes a
@@ -2468,11 +2470,12 @@ Current MVP capabilities:
 - Editing or duplicating an interval task preserves its saved cadence until the interval is explicitly changed, including sub-minute intervals allowed by the operator's scheduler configuration
 - Run background scheduled executions as non-interactive DeerFlow runs (`ask_clarification` is not exposed there)
 - Persist a due execution as `queued` when its reused thread or the global execution budget is busy, then launch it when capacity is available; queued occurrences survive Gateway restarts and fail after `scheduler.queue_timeout_seconds`
+- Share execution slots fairly between task owners: one owner may have at most `scheduler.max_concurrent_runs_per_user` scheduled runs starting or running at a time (default 2, never more than `max_concurrent_runs`; `0` turns the per-owner cap off), and the waiting queue is drained owner by owner, so one owner's backlog never holds back another owner's run. A run that waits longer than `scheduler.queue_timeout_seconds` is skipped, and its history reads "Skipped: it waited too long for a free slot"
 - Freeze a task's definition while an occurrence is `queued`, `launching`, or `running`, so a durable occurrence cannot silently pick up a different prompt, thread, or schedule; transitioning a task to paused or deleting it cancels an existing waiting occurrence, while `launching`/`running` work must finish before those mutations are retried and an explicit manual trigger may still wait and run without resuming a paused schedule
 - Pause, resume, trigger, inspect history, and delete tasks
 - Search task titles or prompts, combined with status/type filters and the current thread scope.
 - Execute scheduled work through the normal DeerFlow run lifecycle
-- When `channel_connections.enabled: true`, push a summary to the task owner's connected IM identities when a scheduled run finishes as success or failed (outbox + delivery worker). Goal tasks send a goal-unmet notice for an `unmet` occurrence instead, plus an auto-pause notice when three unmet occurrences pause the task. Manual "run now" and interrupts stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, restart recovery). Channel/transport outages park deliveries without exhausting retries, for up to about a day; platform rejections retry for roughly 15 minutes before settling as `failed`. An identity you disconnect while a delivery is waiting is never pushed to: the row is dropped as `failed`. Proactive push is currently implemented for WeCom; other connected providers enqueue but fail until they grow a `send_notification` path.
+- When `channel_connections.enabled: true`, send scheduled task updates to the task owner's connected IM identities (outbox + delivery worker) on apps that support proactive push, which today is WeCom; Settings shows for each app whether updates are sent there, and other apps get none. Each occurrence sends at most one message: a finished, failed or goal-missed run, the automatic pause after three missed goals, a pause by the agent (its stop condition was met) or the task finishing (all `max_runs` done, `end_at` reached); when several apply, the pause or finish wins and still says how the last run went. A one-time task sends only its run's outcome. The message is queued in the same database transaction that records the outcome, so runs finalized after a crash or a lost lease notify exactly once. It reads on its own, in your web UI language (else `channel_connections.notification_locale`): the task title, what happened, a one-line result when the agent replied, and "Open DeerFlow → Scheduled tasks for details.", with no IDs and no links. Plain manual "run now" trials and interrupted runs stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart). Channel/transport outages park deliveries without exhausting retries, for up to about a day; platform rejections retry for roughly 15 minutes before settling as `failed`. An identity you disconnect while a delivery is waiting is never pushed to: the row is dropped as `failed`.
 - Browse execution history in pages of 50; older pages pause automatic refresh, with an explicit return to the latest runs. Counts appear only after a successful read; loading and failed reads are not reported as zero runs.
 
 **Filter execution history through the API**
@@ -2528,9 +2531,12 @@ schedule, the next run and the stop condition in plain text.
   keep the saved zone; the browser zone never changes an existing task.
 - **Where results appear.** Each run posts its result in a new chat of its own,
   titled “{task} · {local time}”, or in the originating chat when the task runs
-  there. Nothing else is posted back to the originating conversation. A run chat
-  shows the task instructions as one collapsed “Task instructions” block under
-  the run's header instead of a long user message.
+  there. When the schedule is paused by the agent, is paused automatically or
+  finishes, the originating chat shows one line where the conversation stood,
+  with a link to that run or to the task; nothing else is posted back to it.
+  The line stays after the task is deleted. A run chat shows the task
+  instructions as one collapsed “Task instructions” block under the run's
+  header instead of a long user message.
 - **Language.** The agent writes the title, instructions and stop condition in
   your language, and scheduled runs answer in the language of the instructions.
 
@@ -2548,8 +2554,9 @@ Three eligible automatic unmet occurrences pause a recurring task. Accepted
 success resets the streak, including a success relying on disclosed assumptions;
 manual trials, interruption, execution failure, external waiting and
 goal-check failures do not advance it. Resume retains the streak, so another eligible unmet occurrence can
-pause the task again. Existing notification bindings receive goal-unmet and
-auto-pause notices through the same durable outbox; manual trials stay silent.
+pause the task again. Connected IM apps with proactive push receive one notice
+per occurrence through the same durable outbox (goal missed, auto-paused, paused
+by the agent, finished); plain manual trials stay silent.
 
 You can ask the agent in a conversation that manages the task to save an
 explicit note for future runs (at most 10 notes of 500 characters). Fresh

@@ -87,6 +87,7 @@ def test_features_reports_agents_api_enabled() -> None:
             "scope_selection_enabled": False,
         },
         "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60},
+        "thread_activity": {"available": False},
     }
 
 
@@ -109,6 +110,7 @@ def test_features_reports_agents_api_disabled() -> None:
             "scope_selection_enabled": False,
         },
         "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60},
+        "thread_activity": {"available": False},
     }
 
 
@@ -255,3 +257,30 @@ def test_features_reports_scheduled_tasks_process_state(repo: bool, running: boo
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json()["scheduled_tasks"] == {**expected, "min_interval_seconds": 60}
+
+
+class _SqlRunStore:
+    async def latest_change(self, *, user_id):
+        return None
+
+
+@pytest.mark.parametrize(
+    ("run_store", "read_repo", "available"),
+    [
+        (None, None, False),
+        (SimpleNamespace(), object(), False),  # memory run store: no run-change clock seek
+        (_SqlRunStore(), None, False),
+        (_SqlRunStore(), object(), True),
+    ],
+    ids=["memory", "memory-run-store", "no-read-repo", "sql"],
+)
+def test_features_reports_thread_activity_only_with_sql_persistence(run_store, read_repo, available: bool) -> None:
+    """The frontend polls /api/thread-activity only when this says so; a
+    missing block on an older backend means unavailable."""
+    app = _app_with_config(agents_api_enabled=True)
+    app.state.run_store = run_store
+    app.state.thread_read_repo = read_repo
+    with TestClient(app) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["thread_activity"] == {"available": available}

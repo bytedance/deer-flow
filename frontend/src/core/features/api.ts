@@ -24,6 +24,9 @@ export interface FeaturesResponse {
     tool_enabled?: boolean;
     min_interval_seconds?: number;
   };
+  thread_activity?: {
+    available?: boolean;
+  };
 }
 
 export interface ScheduledTasksFeature {
@@ -47,6 +50,19 @@ export const DEFAULT_SCHEDULED_TASKS_FEATURE: ScheduledTasksFeature = {
   running: true,
   toolEnabled: false,
   minIntervalSeconds: 60,
+};
+
+export interface ThreadActivityFeature {
+  /**
+   * The activity feed, read markers and unread state exist (SQL persistence).
+   * When false the sidebar does not poll and chats are never marked read.
+   */
+  available: boolean;
+}
+
+/** Assumed while loading, on error, and when an older backend sends no block. */
+export const DEFAULT_THREAD_ACTIVITY_FEATURE: ThreadActivityFeature = {
+  available: false,
 };
 
 export interface ConversationReferencesCapability {
@@ -137,5 +153,12 @@ export async function fetchScheduledTasksFeature(): Promise<ScheduledTasksFeatur
       minInterval > 0
         ? minInterval
         : defaults.minIntervalSeconds,
+  };
+}
+
+export async function fetchThreadActivityFeature(): Promise<ThreadActivityFeature> {
+  const feature = (await fetchFeatures()).thread_activity;
+  return {
+    available: feature?.available === true,
   };
 }

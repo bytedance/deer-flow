@@ -507,6 +507,7 @@ scheduler:
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
+  max_concurrent_runs_per_user: 2
   queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
   recursion_limit: 1000
@@ -519,13 +520,16 @@ Notes:
 - The tasks page and REST API have parity with conversations for the per-run goal (`goal_objective`), safety cap (`max_runs`, `end_at`) and stop condition (`stop_condition`, stored in its own column and appended to the run message only at launch). Resume computes the next run from now without a catch-up run and refuses a one-time task whose time passed; reactivating a task whose cap is used up returns `409 limits_exhausted` unless the same request (for example the optional Resume body `{"max_runs", "end_at"}`) renews or clears the cap. Goal-check failures neither count toward nor reset the three-miss automatic pause, and changing the goal, instructions or stop condition, or adding a note, starts a new count (Resume keeps it). Creating a task while this Gateway process's poller is not running returns `409 scheduler_not_running`; `/api/features` reports `scheduled_tasks.running`. See `backend/docs/API.md#scheduled-tasks`.
 - `multi_instance: true` opts into lease-aware scheduler recovery across Gateway instances. It requires Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; otherwise startup fails fast. Leave it false for the default single-instance scheduler.
 - `max_concurrent_runs` is a shared global execution cap in multi-instance mode. Waiting `queued` rows do not consume capacity; an atomic `queued` → `launching` claim counts `launching`/`running` rows under a Postgres advisory lock so concurrent Pods cannot exceed the cap.
-- `queue_timeout_seconds` limits how long a persisted occurrence may wait for capacity or a reused thread to become available. Expired occurrences are marked `failed`; queued rows otherwise survive Gateway restarts.
+- `max_concurrent_runs_per_user` (default `2`, `0` = off, at most 32) caps how many scheduled runs one task owner may have `launching`/`running` at a time, whatever started them (manual "run now" included). The effective cap is `min(max_concurrent_runs_per_user, max_concurrent_runs)`, so with the defaults one owner holds at most 2 of the 3 global slots and the third stays free for other owners. The check runs in the same atomic claim, under the same database-wide lock, as the global cap, so it holds across workers and Pods. A row rejected by either cap stays `queued`.
+- The waiting queue is drained fairly whatever the per-owner cap: eligible rows are ranked within their owner and the drain batch takes every owner's oldest row before any owner's second one, so one owner's backlog cannot push another owner's run out of the batch. Owners already at their cap drop out of the batch before its size limit applies. Same-thread FIFO and the order within one owner (fewest launch attempts, then oldest) are unchanged; with a single owner the order is the same as before.
+- `queue_timeout_seconds` limits how long a persisted occurrence may wait for capacity or a reused thread to become available. Expired occurrences are marked `failed`; queued rows otherwise survive Gateway restarts. With the per-owner cap on, an owner whose runs take longer than this can see its waiting runs expire: the run history then reads "Skipped: it waited too long for a free slot", and no chat event or IM notice is sent for it. Keep `queue_timeout_seconds` well above an owner's typical run length.
 - A task definition is immutable while an occurrence is `queued`, `launching`, or `running`. This prevents a durable occurrence from mixing its admitted thread with a later prompt or schedule edit. Transitioning a task to paused or deleting it cancels a waiting row; PATCH and resume return a conflict until the active occurrence finishes or is cancelled.
 - A manual trigger remains explicit even while the recurring schedule is paused: it may wait in the durable queue and run later, while the task itself stays paused. Transitioning an enabled task to paused still cancels its waiting occurrence atomically.
 - Queue admission, PATCH/resume, pause, and delete serialize on the parent task row. Per-thread FIFO spans all active states, so an older `launching` or `running` occurrence blocks a newer queued occurrence on the same reused thread as well as an older `queued` occurrence.
 - Multi-instance reconciliation uses the run ownership lease: a live peer run is preserved, an expired lease is atomically taken over before its scheduled row is interrupted, and a stale Pod cannot overwrite a newer Pod's parent-task bookkeeping.
 - `recursion_limit` is the LangGraph super-step cap for scheduler-launched runs (default 1000, matching the web UI's interactive budget). Values above `max_recursion_limit` (default 1000) are clamped. This field is read at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
-- Poller fields (`enabled`, `multi_instance`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, `queue_timeout_seconds`, `min_once_delay_seconds`) are restart-required; edits need a Gateway restart.
+- Poller fields (`enabled`, `multi_instance`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, `max_concurrent_runs_per_user`, `queue_timeout_seconds`, `min_once_delay_seconds`) are restart-required; edits need a Gateway restart.
+- **Upgrade note (behavior change):** one owner now runs at most 2 scheduled runs at a time by default (before, up to `max_concurrent_runs`). Set `scheduler.max_concurrent_runs_per_user: 0` to restore the old behavior; the drain stays fair to owners either way.
 - **Upgrade note:** before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either run the scheduler on exactly one Gateway worker or enable `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The startup gate now rejects the unsafe combination instead of allowing it to start silently.
 - **Upgrade note:** in multi-instance mode, `max_concurrent_runs` is cluster-wide rather than per Pod and counts `launching`/`running` occurrences. Waiting `queued` rows remain outside the execution cap; capacity does not multiply with the replica count.
 - **Upgrade note:** `scheduler.multi_instance` and its related scheduler, ownership, and run-event settings are startup-only. Restart all Gateway Pods together after changing them; a ConfigMap update without a coordinated restart leaves the running service on its previous mode.
@@ -535,7 +539,14 @@ Notes:
 - Create/update accept `once`, `cron`, and `interval`. Interval uses `schedule_spec.every_seconds` (UTC `now + N`, no missed-beat catch-up). N is at least `min_once_delay_seconds` (default 60) and at most 30 days.
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
-- With `channel_connections.enabled: true`, the scheduler enqueues IM outcome notifications for the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them. Scheduled runs that finish as success or failed notify. For goal tasks, an `unmet` scheduled occurrence sends a goal-unmet notice instead, and an automatic pause after three unmet occurrences sends an auto-pause notice; a stop requested by the agent adds no separate notice. Manual triggers and interrupts stay silent, and so do occurrences that end without a finished run (launch error, queue timeout, restart recovery). Channel/transport outages park rows without consuming the retry budget, for up to about a day; platform rejections exhaust ~15 minutes of counted retries then settle `failed`. The worker re-checks the binding right before sending: a target the owner has disconnected since enqueue is dropped as `failed`, never pushed. Only WeCom currently implements proactive `send_notification`.
+- With `channel_connections.enabled: true`, the scheduler sends IM notices ("scheduled task updates") to the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them.
+  - **Which apps:** only providers whose channel implements proactive push get notices; today that is WeCom (`proactive_notifications` in `app/channels/capabilities.py`, also returned by `GET /api/channels/providers`, where Settings shows "sent here" or "not available for this app yet"). Other providers get no outbox rows at all, and rows queued for them before the upgrade end once as `failed` without retries.
+  - **Events:** `run_completed`, `run_failed`, `run_unmet` (goal missed), `task_paused` (automatic pause after three missed goals), `task_stopped` (paused by the agent because its stop condition was met) and `task_finished` (all `max_runs` done or `end_at` reached).
+  - **One message per occurrence:** when one occurrence produces several events, only the first of `task_stopped` > `task_paused` > `task_finished` > `run_failed` > `run_unmet` > `run_completed` is sent, and that message still says how the last run went ("The last run failed." / "didn't meet the goal"). A one-time task sends only its run's outcome, never a separate `task_finished`.
+  - **Transactional:** notices are queued by the finalization observer in the same database transaction that records the outcome and are deduplicated per occurrence (or per end time for a task that ends between runs), so an occurrence finalized by crash or lease recovery notifies exactly once. Plain manual "run now" trials and interrupted runs stay silent; a trial that pauses or finishes the task still sends that notice. Occurrences that end without a finished run (launch error, queue timeout, interrupted by a restart) stay silent.
+  - **Text:** the task title, what happened, a one-line result (the same run summary the tasks page shows, redacted, only when the agent replied) and "Open DeerFlow → Scheduled tasks for details." Notices carry no task, run or thread IDs, no timestamps and no links: most deployments run on localhost or a LAN, where a link would be dead on the phone that receives it.
+  - **Language:** the owner's web UI language (the `locale` user preference, which the web app keeps in sync), else `channel_connections.notification_locale` (`en-US` or `zh-CN`, default `en-US`; startup-scoped). Auth-disabled installs always use the config value.
+  - **Delivery:** channel/transport outages park rows without consuming the retry budget, for up to about a day; platform rejections exhaust ~15 minutes of counted retries then settle `failed`. The worker re-checks the binding right before sending: a target the owner has disconnected since enqueue is dropped as `failed`, never pushed.
 
 ### Deployment topology (multi-instance)
 
@@ -655,6 +666,27 @@ Cancellation propagates during requests and waits. This stops local work; it
 cannot cancel work already started by Jina. Enabling retries can send up to `1 + max_retries` upstream requests
 and incur additional cost. Successful content and final `Error:` results retain
 the existing contract.
+
+#### Jina response byte budget
+
+On the same Jina `web_fetch` tool entry, optionally set `max_response_bytes: 1048576`
+(for example, 1 MiB). This uses existing tool configuration extras; no model-facing
+argument is added. Omitted or `null` preserves the buffered default. An enabled
+value must be a positive integer; booleans, strings, fractions, zero and negative
+values return `Error:` before HTTP client creation or network activity.
+
+Enabled fetches stream and count actual content-decoded bytes (after decompression,
+before text decoding), ignoring `Content-Length`. Exactly the limit is accepted.
+The first chunk exceeding it stops consumption and closes the response, returning
+an explicit size `Error:` without body content, partial success or readability
+extraction. This applies to all statuses, including 502/503/504, and oversize never
+retries. Each retry response has its own counter within the existing shared time
+budget. Streams close on success, errors, cancellation and read failures. Responses
+within the limit retain charset decoding and existing status/retry handling.
+
+This limits response retention/consumption, not wire-byte bandwidth or allocations
+inside HTTPX's decompressor; it is not a hard process-memory bound. The final
+Markdown truncation at 4096 characters is unchanged and independent of this option.
 
 Serper `web_search` also accepts the optional model argument
 `time_range: "day" | "week" | "month" | "year"`. For example,

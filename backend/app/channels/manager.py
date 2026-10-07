@@ -24,6 +24,7 @@ from langgraph_sdk.errors import ConflictError
 
 from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
+from app.channels.capabilities import CHANNEL_CAPABILITIES
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.connection_identity import lookup_thread_id
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
@@ -50,6 +51,7 @@ from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
 from deerflow.runtime.goal import parse_goal_command
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
@@ -140,17 +142,6 @@ INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
 # Slack is intentionally excluded: its channel ids are not globally unique.
 CHAT_SCOPED_WORKSPACE_CHANNELS = frozenset({"telegram", "feishu", "wechat"})
 
-CHANNEL_CAPABILITIES = {
-    "buzz": {"supports_streaming": True},
-    "dingtalk": {"supports_streaming": False},
-    "discord": {"supports_streaming": False},
-    "feishu": {"supports_streaming": True},
-    "github": {"supports_streaming": False},
-    "slack": {"supports_streaming": False},
-    "telegram": {"supports_streaming": True},
-    "wechat": {"supports_streaming": False},
-    "wecom": {"supports_streaming": True},
-}
 
 InboundFileReader = Callable[[dict[str, Any], httpx.AsyncClient], Awaitable[bytes | None]]
 
@@ -946,6 +937,24 @@ def _apply_effective_owner(msg: InboundMessage) -> InboundMessage:
     return msg
 
 
+def _run_origin(msg: InboundMessage) -> dict[str, str] | None:
+    """Server-owned ``deerflow_origin`` for a run this manager starts.
+
+    The Gateway honours it only from internal callers (this manager's client
+    carries the internal token); a provider name outside the origin shape is
+    dropped rather than failing the message.
+    """
+    try:
+        return make_origin("github" if msg.channel_name == "github" else "im_channel", provider=msg.channel_name)
+    except ValueError:
+        return None
+
+
+def _apply_run_origin(run_kwargs: dict[str, Any], msg: InboundMessage) -> None:
+    if (origin := _run_origin(msg)) is not None:
+        run_kwargs["metadata"] = {DEERFLOW_ORIGIN_KEY: origin}
+
+
 def _owner_headers(msg: InboundMessage) -> dict[str, str] | None:
     owner_user_id = _effective_owner_user_id(msg)
     if not owner_user_id:
@@ -1593,6 +1602,7 @@ class ChannelManager:
                 "context": run_context,
                 "multitask_strategy": "reject",
             }
+            _apply_run_origin(run_kwargs, carrier_msg)
             if owner_headers := _owner_headers(carrier_msg):
                 run_kwargs["headers"] = owner_headers
 
@@ -2492,6 +2502,7 @@ class ChannelManager:
             "context": run_context,
             "multitask_strategy": "reject",
         }
+        _apply_run_origin(run_kwargs, msg)
         if owner_headers := _owner_headers(msg):
             run_kwargs["headers"] = owner_headers
 
@@ -2619,6 +2630,7 @@ class ChannelManager:
             "stream_mode": list(STREAM_MODES),
             "multitask_strategy": "reject",
         }
+        _apply_run_origin(stream_kwargs, msg)
         if owner_headers := _owner_headers(msg):
             stream_kwargs["headers"] = owner_headers
 
