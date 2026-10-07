@@ -59,7 +59,9 @@ export function ConversationExtensionActions({
       await action.execute(
         context,
         bindFrontendServices(services, contribution, undefined, {
-          pageIds: (extension.surfaces ?? []).filter((surface) => surface.slot === "page").map((surface) => surface.id),
+          pageIds: (extension.surfaces ?? [])
+            .filter((surface) => surface.slot === "page")
+            .map((surface) => surface.id),
           navigate: (path) => router.push(path),
         }),
       );

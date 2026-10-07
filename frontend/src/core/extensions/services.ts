@@ -12,7 +12,10 @@ import type {
 } from "./contracts";
 import { pluginPagePath } from "./pages";
 
-export type HostServices = Omit<FrontendServices, "callBackend" | "openPluginPage">;
+export type HostServices = Omit<
+  FrontendServices,
+  "callBackend" | "openPluginPage"
+>;
 
 /** Namespace comes from the installed page snapshot, never from action input. */
 export function bindFrontendServices(
@@ -31,8 +34,12 @@ export function bindFrontendServices(
               throw new Error("Page not declared by this plugin");
             if (threadId !== undefined && (!threadId || threadId.length > 128))
               throw new Error("Invalid conversation context");
-            const query = threadId ? `?${new URLSearchParams({ thread: threadId })}` : "";
-            navigation.navigate(pluginPagePath(entry.namespace, surfaceId) + query);
+            const query = threadId
+              ? `?${new URLSearchParams({ thread: threadId })}`
+              : "";
+            navigation.navigate(
+              pluginPagePath(entry.namespace, surfaceId) + query,
+            );
           },
         }
       : {}),
@@ -50,7 +57,14 @@ export function bindFrontendServices(
               : {}),
           },
           body: JSON.stringify(payload),
-          ...(signal || options?.signal ? { signal: signal && options?.signal ? AbortSignal.any([signal, options.signal]) : signal ?? options?.signal } : {}),
+          ...(signal || options?.signal
+            ? {
+                signal:
+                  signal && options?.signal
+                    ? AbortSignal.any([signal, options.signal])
+                    : (signal ?? options?.signal),
+              }
+            : {}),
         },
       );
       if (!response.ok)

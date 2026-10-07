@@ -23,7 +23,8 @@ from deerflow.persistence.engine import close_engine, get_session_factory, init_
 from deerflow.persistence.subagent_batches import SubagentBatchRepository
 from deerflow.persistence.thread_meta import make_thread_store
 
-THREAD = "550e8400-e29b-41d4-a716-446655440000"
+# Match the frontend mock-api conversation identity used by the real HTTP E2E.
+THREAD = "00000000-0000-0000-0000-000000000001"
 
 
 async def create_app(directory):
@@ -73,6 +74,7 @@ async def create_app(directory):
     host = create_host_app()
     host.state.subagent_batch_repo = repository
     host.state.thread_store = make_thread_store(get_session_factory(), None)
+    await host.state.thread_store.create(THREAD, user_id="alice", display_name="Research")
     host.state.subagent_batches_available = False
 
     @asynccontextmanager
@@ -84,6 +86,7 @@ async def create_app(directory):
 
     app = FastAPI(lifespan=lifespan)
     app.state.extensions = extensions
+    app.state.preview_thread_store = host.state.thread_store
     for key in (EXTENSION_PRINCIPAL_RESOLVER_KEY, BATCH_RESULTS_RESOLVER_KEY):
         setattr(app.state, key, getattr(host.state, key))
 

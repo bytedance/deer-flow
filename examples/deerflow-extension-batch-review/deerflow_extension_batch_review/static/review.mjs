@@ -32,7 +32,11 @@ export function reportNodes(report, sources, showSource, unavailable) {
   // Process backtick runs once and precompute their next matching run. An
   // unclosed span stays literal; repeated unequal runs cannot trigger rescans.
   function appendText(text) {
-    const tokens = [...text.matchAll(/(?<!\\)(`+)|(?<!!)\[([^\]\n]+)\]\(#knowledge-([a-f0-9]{32}-[1-9][0-9]{0,2})\)/g)];
+    const tokens = [...text.matchAll(/(`+)|(?<!!)\[([^\]\n]+)\]\(#knowledge-([a-f0-9]{32}-[1-9][0-9]{0,2})\)/g)].filter((match) => {
+      let escapes = 0;
+      for (let i = match.index - 1; i >= 0 && text[i] === "\\"; i--) escapes++;
+      return escapes % 2 === 0;
+    });
     const nextRun = new Map();
     const closes = new Map();
     for (let i = tokens.length - 1; i >= 0; i--) {
@@ -57,6 +61,13 @@ export function reportNodes(report, sources, showSource, unavailable) {
         fragment.append(document.createTextNode(match[0]));
       } else {
         const source = sources.get(match[3]);
+        const lineStart = text.lastIndexOf("\n", match.index - 1) + 1;
+        const indented = /^(?: {4}|\t)/.test(text.slice(lineStart, match.index));
+        if (indented) {
+          fragment.append(document.createTextNode(match[0]));
+          end = match.index + match[0].length;
+          continue;
+        }
         const citation = source ? button(match[2], () => showSource(source)) : node("span", match[2], "muted");
         citation.classList.add("citation");
         if (!source) citation.title = unavailable;
@@ -69,8 +80,8 @@ export function reportNodes(report, sources, showSource, unavailable) {
   let pending = "";
   let fence = null;
   for (const line of report.match(/[^\n]*\n|[^\n]+$/g) ?? []) {
-    const marker = /^ {0,3}(`{3,}|~{3,})([^\n]*)/.exec(line);
-    if (fence || marker || /^(?: {4}|\t)/.test(line)) {
+    const marker = /^(?: {0,3}> ?)* {0,3}(`{3,}|~{3,})([^\n]*)/.exec(line);
+    if (fence || marker) {
       if (pending) { appendText(pending); pending = ""; }
       fragment.append(document.createTextNode(line));
       if (fence) {

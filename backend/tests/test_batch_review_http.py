@@ -84,3 +84,19 @@ async def test_actual_manifest_and_assets_load_through_host_plugin_router(client
     response = await client.get(relative)
     assert response.status_code == 200 and "textContent" in response.text
     assert response.headers["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.asyncio
+async def test_real_thread_owner_change_blocks_read_even_when_batch_owner_matches(tmp_path):
+    app = await create_app(tmp_path)
+    try:
+        await app.state.preview_thread_store.update_owner(THREAD, "bob", user_id="alice")
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            batches = await client.post(ACTION + "batches", json={"thread_id": THREAD})
+            assert batches.status_code == 200 and batches.json() == []
+            for action, extra in (("items", {}), ("result", {"position": 0})):
+                response = await client.post(ACTION + action, json={"thread_id": THREAD, "batch_id": "research-batch", **extra})
+                assert response.status_code == 404
+                assert "Full saved report" not in response.text and "Captured.pdf" not in response.text
+    finally:
+        await close_engine()

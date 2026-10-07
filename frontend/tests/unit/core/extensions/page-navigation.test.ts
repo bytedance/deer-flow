@@ -20,20 +20,36 @@ const entry = {
 test("installed page navigation binds namespace, registered surface and encoded thread context", () => {
   const navigate = rs.fn();
   const services = bindFrontendServices(base, entry, undefined, {
-    pageIds: ["results"], navigate,
+    pageIds: ["results"],
+    navigate,
   });
   expect(typeof services.openPluginPage).toBe("function");
   services.openPluginPage!("results", "thread/&?x=1");
-  expect(navigate).toHaveBeenCalledWith("/workspace/extensions/community.review/results?thread=thread%2F%26%3Fx%3D1");
+  expect(navigate).toHaveBeenCalledWith(
+    "/workspace/extensions/community.review/results?thread=thread%2F%26%3Fx%3D1",
+  );
   services.openPluginPage!("results");
-  expect(navigate).toHaveBeenLastCalledWith("/workspace/extensions/community.review/results");
+  expect(navigate).toHaveBeenLastCalledWith(
+    "/workspace/extensions/community.review/results",
+  );
 });
 
 test("external and undeclared targets cannot escape the installed page set", () => {
   const navigate = rs.fn();
-  const services = bindFrontendServices(base, entry, undefined, { pageIds: ["results"], navigate });
-  for (const id of ["other", "https://example.com", "../../login", "", "__proto__"]) {
-    expect(() => services.openPluginPage!(id, "thread")).toThrow("not declared");
+  const services = bindFrontendServices(base, entry, undefined, {
+    pageIds: ["results"],
+    navigate,
+  });
+  for (const id of [
+    "other",
+    "https://example.com",
+    "../../login",
+    "",
+    "__proto__",
+  ]) {
+    expect(() => services.openPluginPage!(id, "thread")).toThrow(
+      "not declared",
+    );
   }
   expect(navigate).not.toHaveBeenCalled();
 });
@@ -44,9 +60,14 @@ test("older hosts without page navigation do not gain an arbitrary URL helper", 
 
 test("invalid or empty thread context fails before navigation", () => {
   const navigate = rs.fn();
-  const services = bindFrontendServices(base, entry, undefined, { pageIds: ["results"], navigate });
+  const services = bindFrontendServices(base, entry, undefined, {
+    pageIds: ["results"],
+    navigate,
+  });
   for (const thread of ["", "t".repeat(129)]) {
-    expect(() => services.openPluginPage!("results", thread)).toThrow("Invalid conversation");
+    expect(() => services.openPluginPage!("results", thread)).toThrow(
+      "Invalid conversation",
+    );
   }
   expect(navigate).not.toHaveBeenCalled();
 });
@@ -54,18 +75,26 @@ test("invalid or empty thread context fails before navigation", () => {
 test("disposed conversation actions cannot navigate through a retained helper", () => {
   const abort = new AbortController();
   const navigate = rs.fn();
-  const services = bindFrontendServices(base, entry, abort.signal, { pageIds: ["results"], navigate });
+  const services = bindFrontendServices(base, entry, abort.signal, {
+    pageIds: ["results"],
+    navigate,
+  });
   abort.abort();
   expect(() => services.openPluginPage!("results", "thread")).toThrow();
   expect(navigate).not.toHaveBeenCalled();
 });
 
 test("selection request cancellation and page lifetime cancellation both reach fetch", async () => {
-  request.mockResolvedValue({ ok: true, json: async () => ({ result: "report" }) });
+  request.mockResolvedValue({
+    ok: true,
+    json: async () => ({ result: "report" }),
+  });
   const page = new AbortController();
   const selection = new AbortController();
   const services = bindFrontendServices(base, entry, page.signal);
-  expect(await services.callBackend("read", {}, { signal: selection.signal })).toEqual({ result: "report" });
+  expect(
+    await services.callBackend("read", {}, { signal: selection.signal }),
+  ).toEqual({ result: "report" });
   const combined = request.mock.calls.at(-1)![1]!.signal as AbortSignal;
   expect(combined.aborted).toBe(false);
   selection.abort();
@@ -81,6 +110,10 @@ test("selection request cancellation and page lifetime cancellation both reach f
 test("request-specific cancellation also works without a page signal", async () => {
   request.mockResolvedValue({ ok: true, json: async () => [] });
   const selection = new AbortController();
-  await bindFrontendServices(base, entry).callBackend("read", {}, { signal: selection.signal });
+  await bindFrontendServices(base, entry).callBackend(
+    "read",
+    {},
+    { signal: selection.signal },
+  );
   expect(request.mock.calls.at(-1)![1]!.signal).toBe(selection.signal);
 });
