@@ -73,11 +73,18 @@ export function scheduledTaskEventsQueryKey(
   return ["scheduled-tasks", "thread-events", threadId] as const;
 }
 
+/**
+ * The route's maximum. The chat loads its event lines once, so the default
+ * of 50 would silently drop the oldest lines of a chat with many schedules
+ * (up to three lifecycle events each).
+ */
+const SCHEDULED_TASK_EVENTS_LIMIT = 200;
+
 export async function fetchThreadScheduledTaskEvents(
   threadId: string,
 ): Promise<ScheduledTaskEvent[]> {
   const response = await fetch(
-    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/scheduled-task-events`,
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/scheduled-task-events?limit=${SCHEDULED_TASK_EVENTS_LIMIT}`,
   );
   if (!response.ok) {
     await throwGatewayApiError(

@@ -69,7 +69,7 @@ function task(overrides: Partial<ThreadScheduledTask>): ThreadScheduledTask {
 
 function eventRequests() {
   return mocks.fetch.mock.calls.filter(([url]) =>
-    String(url).endsWith("/scheduled-task-events"),
+    String(url).includes("/scheduled-task-events"),
   );
 }
 
@@ -108,8 +108,9 @@ describe("useThreadScheduledTaskEvents", () => {
     const { hook } = setup("chat-1");
     await waitFor(() => expect(hook.result.current.data).toEqual([EVENT]));
     expect(eventRequests()).toHaveLength(1);
+    // The route's maximum, so a busy chat does not lose its oldest lines.
     expect(String(eventRequests()[0]![0])).toBe(
-      "/api/threads/chat-1/scheduled-task-events",
+      "/api/threads/chat-1/scheduled-task-events?limit=200",
     );
     // The chat's task list is empty (the task was deleted); the events
     // query does not depend on it.
