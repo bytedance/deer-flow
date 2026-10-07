@@ -15,6 +15,7 @@ import pytest_asyncio
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
+from support.postgres import asyncpg_test_url
 
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
@@ -44,7 +45,7 @@ async def env(monkeypatch, tmp_path, request):
         if not uri:
             pytest.skip("requires TEST_POSTGRES_URI (real Postgres result reader)")
         schema = f"batch_reader_{uuid.uuid4().hex}"
-        db = DatabaseConfig(backend="postgres", postgres_url=uri, postgres_schema=schema)
+        db = DatabaseConfig(backend="postgres", postgres_url=asyncpg_test_url(uri), postgres_schema=schema)
     else:
         db = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path / "db"))
     service = None
