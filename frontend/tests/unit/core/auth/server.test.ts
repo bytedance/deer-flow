@@ -177,7 +177,6 @@ describe("getServerSideUser — gateway_unavailable contract (issue #3493)", () 
   });
 });
 
-
 // ── system_role contract (RFC #4063 gap 2) ─────────────────────────
 
 describe("userSchema system_role", () => {
