@@ -334,7 +334,8 @@ class ChannelService:
         The UI runtime-config overlay applied at startup is re-applied here
         so a file-driven reload neither drops credentials entered from the
         browser nor resurrects a channel disconnected from it.
-        Falls back to the cached ``self._config`` when config loading fails.
+        Returns a snapshot without mutating shared state, or ``None`` when
+        unavailable. The restart caller owns publication and cached fallback.
         """
         try:
             from deerflow.config.app_config import get_app_config
@@ -347,7 +348,7 @@ class ChannelService:
             if isinstance(channel_config, dict):
                 return channel_config
         except Exception:
-            logger.exception("Failed to reload config for channel %s, using cached version", name)
+            logger.exception("Failed to load config snapshot for channel %s", name)
         return None
 
     def _channel_lock(self, name: str) -> asyncio.Lock:
@@ -383,6 +384,7 @@ class ChannelService:
             # Reading config.yaml and the runtime store is disk IO; keep it
             # off the event loop.
             loaded_config = await asyncio.to_thread(self._load_channel_config, name)
+            # Publish under the lifecycle lock after await; abandoned workers stay read-only.
             if loaded_config is not None:
                 self._config[name] = loaded_config
             config = self._config.get(name)

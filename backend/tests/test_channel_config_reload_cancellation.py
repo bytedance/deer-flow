@@ -25,6 +25,7 @@ async def test_cancelled_reload_cannot_overwrite_new_runtime_config(
     reload_started = threading.Event()
     allow_reload = threading.Event()
     reload_finished = threading.Event()
+    loaded = []
 
     def blocking_get_app_config():
         reload_started.set()
@@ -47,7 +48,9 @@ async def test_cancelled_reload_cannot_overwrite_new_runtime_config(
 
     def tracked_load(name: str):
         try:
-            return real_load(name)
+            config = real_load(name)
+            loaded.append(config)
+            return config
         finally:
             reload_finished.set()
 
@@ -67,6 +70,7 @@ async def test_cancelled_reload_cannot_overwrite_new_runtime_config(
 
         allow_reload.set()
         assert await asyncio.to_thread(reload_finished.wait, 2)
+        assert loaded == [{"enabled": False, "marker": "stale"}], "worker did not produce the stale config snapshot"
         assert service._config["wechat"]["marker"] == "fresh"
     finally:
         allow_reload.set()

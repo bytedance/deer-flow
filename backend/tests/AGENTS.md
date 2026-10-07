@@ -2,6 +2,10 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Channel reload cancellation regressions must assert the worker returned the
+stale snapshot before checking that newer runtime config survived. Completion
+alone cannot prove the race: loader exceptions are caught and return `None`.
+
 Browser-asset confinement tests use `support.symlinks.symlink_or_skip` for real
 file and directory symlinks. Keep missing-file, duplicate-key, and size-limit
 checks separate so they still run when the host cannot create symlinks.
