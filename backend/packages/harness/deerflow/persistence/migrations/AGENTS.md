@@ -33,7 +33,9 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to
-`mcp_tasks`, so the bootstrap forward-compat floor is unchanged.
+`mcp_tasks`. The batch-result revision adds a nullable JSON evidence snapshot
+to `subagent_batch_items`, without changing existing report text or backfilling
+historical evidence; the bootstrap forward-compat floor is unchanged.
 The incarnation revision deliberately retains the exact id audited by the
 rollback-floor binary; Alembic orders revisions by `down_revision`, not by the
 numeric prefix.
