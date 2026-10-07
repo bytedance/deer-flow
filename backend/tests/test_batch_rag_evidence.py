@@ -3,7 +3,9 @@
 import asyncio
 import importlib.util
 import json
+import os
 import sys
+import uuid
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from enum import Enum
@@ -48,33 +50,63 @@ def retrieval(*, text="Original evidence", name="knowledge_search"):
     return content, captured
 
 
-@pytest_asyncio.fixture
-async def env(monkeypatch, tmp_path):
-    db = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path / "db"))
-    await init_engine_from_config(db)
-    repo = SubagentBatchRepository(get_session_factory())
-    state = SimpleNamespace(repo=repo, db=db, result=SimpleNamespace(status=Status.COMPLETED, result="plain report", ai_messages=[], error=None, stop_reason=None, token_usage_records=[]))
-
-    class Executor:
-        def __init__(self, **kwargs):
-            state.owner = kwargs["user_id"]
-            state.scope = kwargs["knowledge_scope"]
-
-        def execute_async(self, prompt, task_id=None):
-            return task_id
-
-    monkeypatch.setattr(batch_service, "SubagentExecutor", Executor)
-    monkeypatch.setattr(batch_service, "SubagentStatus", Status)
-    monkeypatch.setattr(batch_service, "get_background_task_result", lambda _: state.result)
-    monkeypatch.setattr(batch_service, "cleanup_background_task", lambda _: None)
-    monkeypatch.setattr(batch_service, "resolve_subagent_model_name", lambda *args, **kwargs: "offline-model")
-    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
-    state.service = batch_service.SubagentBatchService(repository=repo, config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig(), app_config=SimpleNamespace())
+@pytest_asyncio.fixture(params=["sqlite", "postgres"])
+async def env(monkeypatch, tmp_path, request):
+    schema = None
+    if request.param == "postgres":
+        uri = os.environ.get("TEST_POSTGRES_URI")
+        if not uri:
+            pytest.skip("requires TEST_POSTGRES_URI (real Postgres batch evidence chain)")
+        schema = f"batch_evidence_{uuid.uuid4().hex}"
+        db = DatabaseConfig(backend="postgres", postgres_url=uri, postgres_schema=schema)
+    else:
+        db = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path / "db"))
+    service = None
     try:
+        await init_engine_from_config(db)
+        if schema:
+            from sqlalchemy import text
+
+            async with get_session_factory()() as session:
+                assert (await session.execute(text("SELECT current_schema()"))).scalar_one() == schema
+        repo = SubagentBatchRepository(get_session_factory())
+        state = SimpleNamespace(repo=repo, db=db, result=SimpleNamespace(status=Status.COMPLETED, result="plain report", ai_messages=[], error=None, stop_reason=None, token_usage_records=[]))
+
+        class Executor:
+            def __init__(self, **kwargs):
+                state.owner = kwargs["user_id"]
+                state.scope = kwargs["knowledge_scope"]
+
+            def execute_async(self, prompt, task_id=None):
+                return task_id
+
+        monkeypatch.setattr(batch_service, "SubagentExecutor", Executor)
+        monkeypatch.setattr(batch_service, "SubagentStatus", Status)
+        monkeypatch.setattr(batch_service, "get_background_task_result", lambda _: state.result)
+        monkeypatch.setattr(batch_service, "cleanup_background_task", lambda _: None)
+        monkeypatch.setattr(batch_service, "resolve_subagent_model_name", lambda *args, **kwargs: "offline-model")
+        monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+        state.service = batch_service.SubagentBatchService(repository=repo, config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig(), app_config=SimpleNamespace())
+        service = state.service
         yield state
     finally:
-        await state.service.stop()
-        await close_engine()
+        try:
+            if service is not None:
+                await service.stop()
+        finally:
+            try:
+                await close_engine()
+            finally:
+                if schema:
+                    import sqlalchemy as sa
+                    from sqlalchemy.ext.asyncio import create_async_engine
+
+                    engine = create_async_engine(db.app_sqlalchemy_url)
+                    try:
+                        async with engine.begin() as conn:
+                            await conn.execute(sa.text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+                    finally:
+                        await engine.dispose()
 
 
 async def execute(env):
@@ -233,6 +265,73 @@ def test_forwarding_limit_counts_duplicate_omissions_once():
     assert result["knowledge_sources"]["omitted_count"] == 2
     # Ordinary task forwarding retains its existing artifact shape.
     assert "omitted_count" not in cited_source_artifact(messages, content)["knowledge_sources"]
+
+
+def forwarded_task(messages, content):
+    from deerflow.tools.builtins.task_tool import _task_result_command
+
+    command = _task_result_command(tool_call_id="child", status="completed", result=content, source_messages=messages)
+    captured = []
+    capture_step_message(command.update["messages"][0], captured, set())
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_nested_task_omissions_survive_worker_reopen_and_export(env, monkeypatch):
+    from app.gateway.routers import subagent_batches as router
+
+    entries = [retrieval(text=f"Evidence {index}") for index in range(102)]
+    report = "\n".join(entry[0] for entry in entries)
+    messages = [message for entry in entries for message in entry[1]]
+    forwarded = forwarded_task(messages, report)
+    # Repeated child messages and a second delegation must not double-count.
+    env.result.result = report
+    env.result.ai_messages = forwarded_task(forwarded + forwarded, report)
+    snapshot = deepcopy(env.result.ai_messages)
+    batch = await execute(env)
+    await env.service.stop()
+    await close_engine()
+    await init_engine_from_config(env.db)
+    repo = SubagentBatchRepository(get_session_factory())
+    monkeypatch.setattr(router, "get_current_user", AsyncMock(return_value="user-1"))
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(subagent_batch_repo=repo)))
+    response = await router.export_batch_results.__wrapped__(thread_id="thread-1", batch_id=batch["id"], request=request)
+    row = json.loads([line async for line in response.body_iterator][0])
+    payload = row["result_artifact"]["knowledge_sources"]
+    assert len(payload["sources"]) == 100
+    assert payload["omitted_count"] == 2
+    assert "omitted_source_ids" not in payload
+    assert env.result.ai_messages == snapshot
+
+
+@pytest.mark.parametrize("selection", ["retained", "omitted", "unknown", "partial"])
+def test_forwarded_omissions_follow_only_current_complete_references(selection):
+    from deerflow.community.ragflow.sources import durable_source_artifact
+
+    entries = [retrieval(text=f"Evidence {index}") for index in range(101)]
+    report = "\n".join(entry[0] for entry in entries)
+    messages = [message for entry in entries for message in entry[1]]
+    forwarded = forwarded_task(messages, report)
+    selected = {"retained": entries[0][0], "omitted": entries[-1][0], "unknown": "[citation:1](#knowledge-" + "f" * 32 + "-1)", "partial": entries[-1][0].split(")")[0]}[selection]
+    result = durable_source_artifact(forwarded, selected, max_chars=1000)
+    if selection in {"unknown", "partial"}:
+        assert result is None
+    else:
+        assert result["knowledge_sources"]["omitted_count"] == (selection == "omitted")
+        assert len(result["knowledge_sources"]["sources"]) == (selection == "retained")
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_recaptured_source_supersedes_forwarded_omission(reverse):
+    from deerflow.community.ragflow.sources import durable_source_artifact
+
+    content, messages = retrieval()
+    source_id = messages[0]["artifact"]["knowledge_sources"]["sources"][0]["id"]
+    omitted = {"type": "tool", "name": "task", "artifact": {"knowledge_sources": {"version": 1, "sources": [], "omitted_source_ids": [source_id, source_id, None, "invalid"], "omitted_count": 999}}}
+    inputs = [omitted, *messages] if not reverse else [*messages, omitted]
+    result = durable_source_artifact(inputs, content, max_chars=1000)
+    assert result["knowledge_sources"]["sources"] == messages[0]["artifact"]["knowledge_sources"]["sources"]
+    assert result["knowledge_sources"]["omitted_count"] == 0
 
 
 @pytest.mark.asyncio

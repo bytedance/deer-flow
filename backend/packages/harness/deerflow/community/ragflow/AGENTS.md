@@ -15,6 +15,11 @@ schema-projected snapshots via `durable_source_artifact`; standalone Markdown
 does not include native source artifacts. Preserve entire excerpts and only
 select citations in the stored report. Bound the serialized JSON by the batch
 result cap, retain forwarding limits, and count omissions without refetching.
+Ordinary task artifacts carry omitted opaque source IDs, limited to complete
+citations in that task's report. Filter them again against each outer report,
+deduplicate, and let recaptured evidence supersede an omission. Never trust an
+incoming count or count unknown prose links. Durable exports expose only the
+final count; legacy artifacts without omission IDs cannot recover lost IDs.
 
 Output budgeting retains complete evidence entries and their source records
 together, including delegated results and model-request history. Never shorten

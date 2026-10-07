@@ -76,6 +76,9 @@ def cited_source_artifact(messages: list[dict[str, Any]], content: str, *, inclu
     """Carry only actual captured sources cited in the child's final result."""
     sources: dict[str, dict[str, Any]] = {}
     omitted_ids: set[str] = set()
+    # Complete destinations bound omission metadata by this report's size;
+    # never forward arbitrary input IDs or infer evidence from unknown links.
+    referenced_ids = set(re.findall(r"\]\(#knowledge-([a-f0-9]{32}-[1-9][0-9]{0,2})\)", content)) if include_omissions else set()
     remaining = 1_000_000
     for message in messages:
         if message.get("type") != "tool" or message.get("name") not in {"knowledge_search", "task"}:
@@ -87,6 +90,9 @@ def cited_source_artifact(messages: list[dict[str, Any]], content: str, *, inclu
         raw_sources = payload.get("sources")
         if not isinstance(raw_sources, list):
             continue
+        inherited_ids = payload.get("omitted_source_ids")
+        if include_omissions and isinstance(inherited_ids, list):
+            omitted_ids.update(source_id for source_id in inherited_ids if isinstance(source_id, str) and source_id in referenced_ids)
         for source in raw_sources[:100]:
             if not isinstance(source, dict):
                 continue
@@ -94,16 +100,18 @@ def cited_source_artifact(messages: list[dict[str, Any]], content: str, *, inclu
             text = source.get("text")
             if not isinstance(source_id, str) or not isinstance(text, str) or f"](#knowledge-{source_id})" not in content:
                 continue
-            if source_id in sources or (include_omissions and source_id in omitted_ids):
+            if source_id in sources:
                 continue
             if len(sources) >= 100 or len(text) > remaining:
-                if include_omissions:
+                if include_omissions and source_id in referenced_ids:
                     omitted_ids.add(source_id)
                 continue
             sources[source_id] = dict(source)
             remaining -= len(text)
+    # Another captured result may carry a source previously omitted by a child.
+    omitted_ids.difference_update(sources)
     if include_omissions and (sources or omitted_ids):
-        return {"knowledge_sources": {"version": 1, "sources": list(sources.values()), "omitted_count": len(omitted_ids)}}
+        return {"knowledge_sources": {"version": 1, "sources": list(sources.values()), "omitted_source_ids": sorted(omitted_ids), "omitted_count": len(omitted_ids)}}
     return {"knowledge_sources": {"version": 1, "sources": list(sources.values())}} if sources else None
 
 

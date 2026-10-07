@@ -13,6 +13,8 @@ bounded, cited RAG snapshots; compact item projections omit them. Cancelled,
 failed and stale attempts cannot publish evidence; retry clears it. Cover the
 formatter/step capture -> worker -> reopened SQLite -> authorized export chain
 in `tests/test_batch_rag_evidence.py`; no provider fetch or preview UI is added.
+Explicitly enabled nested tasks propagate report-bound omission IDs; filter and
+deduplicate at each forwarding boundary before publishing the durable count.
 
 **Remote empty files**: GNU stat's `regular file`/`regular empty file` are regular files. Empty files pass exists/file_written, fail non-empty; reject symlinks, directories, FIFOs.
 
