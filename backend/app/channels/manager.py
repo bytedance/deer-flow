@@ -1188,7 +1188,14 @@ async def _ingest_inbound_files(thread_id: str, msg: InboundMessage, *, user_id:
 
             dest = uploads_dir / safe_name
             try:
-                dest = await asyncio.to_thread(write_upload_file_no_symlink, uploads_dir, safe_name, data)
+                while True:
+                    try:
+                        dest = await asyncio.to_thread(write_upload_file_no_symlink, uploads_dir, safe_name, data, exclusive=True)
+                        break
+                    except FileExistsError:
+                        # Another upload can claim a name after the directory
+                        # snapshot, including while this attachment downloads.
+                        safe_name = claim_unique_filename(safe_name, seen_names)
                 # Root-written 0o600 files are unreadable to the non-root
                 # sandbox; grant group/other read like the HTTP upload path.
                 await asyncio.to_thread(_make_inbound_file_sandbox_readable, dest)

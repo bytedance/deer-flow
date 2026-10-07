@@ -812,6 +812,10 @@ DeerFlow can also expose user-owned IM channel connections in the workspace UI. 
 | DingTalk | Stream Push (WebSocket) | Moderate |
 | Buzz | Nostr relay (WebSocket, NIP-42) | Moderate |
 
+Attachments saved by the shared IM ingestion pipeline keep distinct filenames,
+including when concurrent uploads choose the same name. The stored filename is
+passed to the agent; an existing conversation file is not overwritten.
+
 **Configuration in `config.yaml`:**
 
 Discord's `channels.discord.allowed_guilds` accepts one positive numeric guild

@@ -282,6 +282,105 @@ class TestResolveAttachments:
 
 
 class TestInboundFileIngestion:
+    def test_concurrent_same_name_downloads_preserve_both_payloads(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        payloads = [b"first attachment" * 127, b"second attachment" * 91]
+
+        async def scenario():
+            # Each reader starts after its call's directory snapshot. Hold
+            # both downloads there so neither snapshot can see the other file.
+            downloads_ready = asyncio.Event()
+            arrivals = 0
+
+            async def reader(file_info, client):
+                nonlocal arrivals
+                arrivals += 1
+                if arrivals == 2:
+                    downloads_ready.set()
+                await asyncio.wait_for(downloads_ready.wait(), timeout=5)
+                return payloads[file_info["index"]]
+
+            messages = [InboundMessage(channel_name="test-channel", chat_id="chat-1", user_id="user-1", text="attachment", files=[{"filename": "report.txt", "index": index}]) for index in range(2)]
+            with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir), patch.dict(manager.INBOUND_FILE_READERS, {"test-channel": reader}):
+                tasks = [asyncio.create_task(manager._ingest_inbound_files("thread-1", msg)) for msg in messages]
+                try:
+                    return await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+                finally:
+                    downloads_ready.set()
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+
+        results = asyncio.run(scenario())
+        assert all(len(batch) == 1 for batch in results)
+        names = [batch[0]["filename"] for batch in results]
+        assert len(set(names)) == 2
+        for batch, payload in zip(results, payloads, strict=True):
+            saved = batch[0]
+            assert (uploads_dir / saved["filename"]).read_bytes() == payload
+            assert saved["path"] == f"/mnt/user-data/uploads/{saved['filename']}"
+            assert saved["size"] == len(payload)
+
+    def test_file_created_during_download_is_not_overwritten(self, tmp_path):
+        from app.channels import manager
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        prior_payload = b"another request published this file"
+        new_payload = b"this attachment arrived later"
+
+        async def reader(file_info, client):
+            # A second uploader wins both the original and first suffix
+            # after this ingestion has taken its directory snapshot.
+            for name in ("report.txt", "report_1.txt"):
+                await asyncio.to_thread((uploads_dir / name).write_bytes, prior_payload)
+            return new_payload
+
+        msg = InboundMessage(channel_name="test-channel", chat_id="chat-1", user_id="user-1", text="attachment", files=[{"filename": "report.txt"}])
+        with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir), patch.dict(manager.INBOUND_FILE_READERS, {"test-channel": reader}):
+            result = asyncio.run(manager._ingest_inbound_files("thread-1", msg))
+
+        assert len(result) == 1
+        assert result[0]["filename"] not in {"report.txt", "report_1.txt"}
+        assert (uploads_dir / result[0]["filename"]).read_bytes() == new_payload
+        for name in ("report.txt", "report_1.txt"):
+            assert (uploads_dir / name).read_bytes() == prior_payload
+
+    def test_gateway_conversion_staging_link_is_a_filename_collision(self, tmp_path):
+        from app.channels import manager
+        from app.gateway.routers.uploads import _link_staged_no_overwrite
+
+        uploads_dir = tmp_path / "uploads"
+        uploads_dir.mkdir()
+        gateway_payload = b"gateway upload still being converted"
+        inbound_payload = b"independent IM attachment"
+
+        def publish_gateway_upload():
+            staged = uploads_dir / ".upload-fixture.part"
+            staged.write_bytes(gateway_payload)
+            # Gateway retains the staged link while a conversion descriptor
+            # owns this inode. This is an ordinary upload, not an unsafe path.
+            return _link_staged_no_overwrite(staged, uploads_dir, "report.pdf", unlink_staged=False)
+
+        async def reader(file_info, client):
+            published = await asyncio.to_thread(publish_gateway_upload)
+            assert (await asyncio.to_thread(published.stat)).st_nlink == 2
+            return inbound_payload
+
+        msg = InboundMessage(channel_name="test-channel", chat_id="chat-1", user_id="user-1", text="attachment", files=[{"filename": "report.pdf"}])
+        with patch("deerflow.uploads.manager.ensure_uploads_dir", return_value=uploads_dir), patch.dict(manager.INBOUND_FILE_READERS, {"test-channel": reader}):
+            result = asyncio.run(manager._ingest_inbound_files("thread-1", msg))
+
+        assert len(result) == 1
+        assert result[0]["filename"] != "report.pdf"
+        assert (uploads_dir / result[0]["filename"]).read_bytes() == inbound_payload
+        assert (uploads_dir / "report.pdf").read_bytes() == gateway_payload
+        assert (uploads_dir / ".upload-fixture.part").read_bytes() == gateway_payload
+
     def test_consumes_inline_channel_bytes_without_exposing_them_downstream(self, tmp_path):
         from app.channels import manager
 
