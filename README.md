@@ -393,7 +393,7 @@ Use the table below as a practical starting point when choosing how to run DeerF
 
 Requires Docker Desktop / Docker Engine and **Docker Compose v2.24+**
 (`docker compose version`). Older Compose clients cannot parse the optional
-`env_file` syntax in `docker/docker-compose-dev.yaml`.
+`env_file` syntax in `docker/docker-compose.yaml` and `docker/docker-compose-dev.yaml`.
 
 **Development** (hot-reload, source mounts):
 
@@ -1749,12 +1749,13 @@ call. Skipped or failed compaction leaves the existing messages unchanged.
 
 Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
 remote tool results, compaction input, reinjected summaries, and configured
-LLM title input. It is off by default. Existing summary placeholders reserve
-indices so new values do not reuse them after compaction. No PII mapping is
-persisted, so repeated values cannot be linked to a compacted source; numbering
-may change when history or summary placeholders disappear. Raw thread text and
-local fallback titles remain available for display; memory extraction is outside
-this feature's scope.
+LLM title input. Memory admission, including pre-compaction flushes, also redacts
+detected identifiers in supported text/JSON content, parsed and invalid call arguments/error text,
+provider-raw/legacy function calls and supported user-content provenance.
+It is off by default; enabled deployments supply a secret for stable, keyed
+value-derived placeholders. No token-to-raw mapping is persisted. Raw thread
+text and local fallback titles remain available for display; memory redaction
+copies messages without changing the caller's history or tool execution.
 
 The Web UI preserves persisted message order when merging history with live updates. Streaming steps around a persisted result inside the loaded history stay together, including steps that arrive after the result. Steps captured during compaction also remain visible before their persisted result when history has not refreshed and the UI has not rendered them yet.
 
@@ -1975,6 +1976,8 @@ cannot accept new acquisitions.
 DeerFlow doesn't just *talk* about doing things. It has its own computer.
 
 Each task gets its own execution environment with a full filesystem view — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It can view images and, when configured safely, execute shell commands.
+
+The read-before-write gate ties each read mark to that `read_file` call's result, including custom tools returning multi-message `Command` updates. An unrelated result cannot authorize a write after a failed read or hide a successful read.
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
 

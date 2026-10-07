@@ -29,6 +29,15 @@ synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
 
+Both compose files mark `../.env` and `../frontend/.env` optional
+(`path`/`required: false`, Compose 2.24+), so `make up`, `make down` and
+`make prod-logs` on a fresh checkout neither abort nor create them; an
+unreadable `.env` still fails. Do not seed them from the examples in
+`deploy.sh` as `docker.sh start` does: `.env.example` holds placeholder API
+keys the production Gateway would receive, and `make config` skips files that
+exist. Pinned by `backend/tests/test_compose_default_bind_host.py` and
+`backend/tests/test_gateway_startup.py`.
+
 `deploy.sh` never sources the repo-root `.env`; Compose reads it via
 `--env-file`, and shell exports outrank that file during interpolation (an
 exported-but-empty variable still wins). So `BETTER_AUTH_SECRET` and

@@ -2,6 +2,16 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Browser egress session-close tests retain the real listener and its sockets,
+verify a SOCKS handshake, then check listener shutdown, closed socket descriptors
+and EOF on the established client. A new connection to the old port is not a
+reliable ownership assertion on hosts with loopback forwarding or port reuse.
+Keep ownership assertions inside the teardown-protected block; always drain
+the client writer and close the saved proxy during teardown.
+
+Read-before-write hash fixtures pin `newline=""` when writing LF/CRLF test
+content, so native Windows cannot translate the bytes before the real read.
+
 Browser-asset confinement tests use `support.symlinks.symlink_or_skip` for real
 file and directory symlinks. Keep missing-file, duplicate-key, and size-limit
 checks separate so they still run when the host cannot create symlinks.
@@ -17,6 +27,14 @@ must fail rather than receive a fabricated IPv4 answer.
 The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
 `ast`, checking both `encoding` and `errors`; module-wide literal counts can
 hide unpinned calls behind unrelated settings.
+
+## Real Compose tests
+
+`support/compose.py` probes `docker compose version --short` and requires Compose
+2.24+ for optional `env_file` syntax. Skip missing, old or unreadable clients with
+an actionable reason; cover version detection offline in `test_support_compose.py`.
+Real rendering and production entry-point tests use only read-only Compose calls.
+Never start or stop a stack from these tests.
 
 ## Claude provider tests
 

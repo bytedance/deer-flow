@@ -310,7 +310,7 @@ Use a tabela abaixo como ponto de partida prático para escolher como rodar o De
 
 #### Opção 1: Docker (recomendado)
 
-Requer Docker Desktop / Docker Engine e **Docker Compose v2.24+** (`docker compose version`). Clientes Compose mais antigos não conseguem interpretar a sintaxe opcional de `env_file` em `docker/docker-compose-dev.yaml`.
+Requer Docker Desktop / Docker Engine e **Docker Compose v2.24+** (`docker compose version`). Clientes Compose mais antigos não conseguem interpretar a sintaxe opcional de `env_file` em `docker/docker-compose.yaml` e `docker/docker-compose-dev.yaml`.
 
 **Desenvolvimento** (hot-reload, mounts do código-fonte):
 

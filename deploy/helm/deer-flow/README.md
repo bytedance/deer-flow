@@ -145,6 +145,7 @@ config: |
   sandbox:
     use: deerflow.community.aio_sandbox:AioSandboxProvider
     provisioner_url: http://provisioner:8002
+    provisioner_api_key: $PROVISIONER_API_KEY   # injected from the app Secret
   database:
     backend: postgres
     postgres_url: $DATABASE_URL
@@ -238,7 +239,9 @@ curl http://localhost:2026/health          # gateway health via nginx
 
 Hit the Ingress host (map it in `/etc/hosts` for local clusters) to load the UI.
 
-Provisioner sanity check:
+Provisioner sanity check (`/health` is unauthenticated; `/api/*` requires the
+`PROVISIONER_API_KEY` the chart generates into the app Secret, so a 401 from
+the gateway's sandbox calls means the two Pods disagree on that key):
 
 ```bash
 kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002/health
@@ -301,11 +304,26 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   multi-instance gateway (same rule), and the rollout strategy is
   surge-then-drain (`maxSurge: 1`, `maxUnavailable: 0`).
 - **App secret.** `<release>-app` holds `BETTER_AUTH_SECRET`,
-  `DEER_FLOW_INTERNAL_AUTH_TOKEN` and `AUTH_JWT_SECRET` (the session-cookie
-  signing key), each generated once and preserved across upgrades via
-  `lookup`. `existingAppSecret` points the gateway and frontend at a Secret
-  you manage instead (no `<release>-app` is generated); it must carry all
-  three keys. `AUTH_JWT_SECRET` is required whenever the gateway is
+  `DEER_FLOW_INTERNAL_AUTH_TOKEN`, `AUTH_JWT_SECRET` (the session-cookie
+  signing key) and `PROVISIONER_API_KEY` (the key the gateway presents to the
+  sandbox provisioner), each generated once and preserved across upgrades via
+  `lookup`. `existingAppSecret` points the gateway, frontend and provisioner
+  at a Secret you manage instead (no `<release>-app` is generated); it must
+  carry the first three keys and, while `provisioner.enabled` is true, also
+  `PROVISIONER_API_KEY`: the provisioner's `verify_api_key` middleware
+  answers 401 to every `/api/*` request while its key is empty or differs
+  from the one the gateway sends, so a deployment without it cannot create a
+  single sandbox. The chart injects the same Secret value into both Pods and
+  the default `config` references it as `sandbox.provisioner_api_key:
+  $PROVISIONER_API_KEY` (keep that line when you override `config:`; the
+  harness refuses to start when a referenced variable is unset). With
+  `provisioner.enabled: false` the gateway takes `PROVISIONER_API_KEY` from
+  `secrets` or `existingSecret` when you supply one, so an external
+  provisioner keeps its key (the chart emits no `env` entry, which would win
+  over `envFrom`); otherwise the gateway's start command defaults the
+  variable to an empty string, so the default `config` still loads even when
+  a user-managed provider Secret holds only model keys. `AUTH_JWT_SECRET` is
+  required whenever the gateway is
   multi-instance — without it, concurrently booting Pods race to write their
   own `.jwt_secret` on the home volume and sign sessions with different keys —
   and only a single Pod may omit it and fall back to that file. **Upgrading a

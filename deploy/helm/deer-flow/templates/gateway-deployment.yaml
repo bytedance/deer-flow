@@ -91,7 +91,18 @@ spec:
           workingDir: /app
           command: ["sh", "-c"]
           args:
-            - cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1 --timeout-graceful-shutdown {{ .Values.gateway.uvicornGracefulShutdownSeconds | int }}
+            {{- /* With the bundled provisioner disabled, the default config still
+                  references $PROVISIONER_API_KEY; the harness refuses to start on
+                  an unset variable but resolves an empty one to "". The chart
+                  cannot see whether `secrets`/`existingSecret` carry the key (a
+                  user-managed provider Secret often holds only model keys), and an
+                  explicit env entry would override an envFrom value, so the shell
+                  defaults the variable to "" only when nothing else set it. An
+                  external provisioner's key is never touched and the gateway boots
+                  as it did before the key existed, failing sandbox calls at use
+                  time. With the bundled provisioner the key is injected below and
+                  required, so no default is needed. */}}
+            - {{ if not .Values.provisioner.enabled }}export PROVISIONER_API_KEY="${PROVISIONER_API_KEY:-}" && {{ end }}cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1 --timeout-graceful-shutdown {{ .Values.gateway.uvicornGracefulShutdownSeconds | int }}
           env:
             - name: CI
               value: "true"
@@ -139,6 +150,24 @@ spec:
                   name: {{ include "deer-flow.appSecret" . }}
                   key: AUTH_JWT_SECRET
                   optional: {{ ne (include "deer-flow.gatewayMultiInstance" .) "true" }}
+            {{- if .Values.provisioner.enabled }}
+            # Shared gateway -> bundled-provisioner key. config.yaml references
+            # it as sandbox.provisioner_api_key: $PROVISIONER_API_KEY, and the
+            # harness refuses to start when a referenced variable is unset, so
+            # the key is required here (the provisioner rejects every /api/*
+            # request without it anyway) and a user-managed existingAppSecret
+            # must carry it. Rendered only for the bundled provisioner: an
+            # explicit env entry wins over envFrom, so emitting it with
+            # provisioner.enabled=false would override the PROVISIONER_API_KEY
+            # an operator supplies through `secrets`/`existingSecret` for an
+            # external provisioner. In that mode the start command above
+            # defaults the variable to "" when nothing else set it.
+            - name: PROVISIONER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.appSecret" . }}
+                  key: PROVISIONER_API_KEY
+            {{- end }}
             # Tells the Gateway's startup gate that peers share the database;
             # its GATEWAY_WORKERS count only sees this Pod. Derived from
             # gateway.replicas unless gateway.multiInstance is set explicitly:

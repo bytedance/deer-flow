@@ -45,6 +45,9 @@ so malformed values cannot abort compaction/model calls.
 `tool_calls` update: adapters resend stale `content` tool-call blocks, which
 strict providers reject.
 
+Read marks bind to request `tool_call_id`, including `Command` results.
+No match: skip inspection, log ID. Tests: `test_read_mark_tool_call_correlation.py`.
+
 **Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
 
 1. **InputSanitizationMiddleware** - First, so it is the outermost `wrap_model_call` wrapper; every inner middleware (including LLM retries) sees sanitized messages. `additional_kwargs.original_user_content` is server-owned provenance: Gateway strips caller-supplied values for non-internal run requests, trusted IM calls may carry the string they captured before adding transport/file context, and the middleware replaces any non-string value before wrapping. Uploads and sanitization retain first-writer-wins only for validated strings. Caller markers are marked `untrusted_input`, never stripped; scope is every turn.
@@ -60,7 +63,7 @@ strict providers reject.
    ordered by application — the last entry produced the final visible bytes — so an
    observer classifies raw→visible transforms from facts rather than by sniffing
    output wording.
-4. **PiiRedactionMiddleware** - *(optional, `pii_redaction.enabled`, default off, #3190)* Rewrites PII in genuine user messages (`wrap_model_call`) and remote-content tool results (`wrap_tool_call`, the tool-result allowlist) to irreversible value-derived placeholders. Deterministic regex detectors only. Innermost Layer-1 wrapper; compaction input, summaries, title input and queued memory payloads are redacted via `redact_text`.
+4. **PiiRedactionMiddleware** - *(optional, `pii_redaction.enabled`, default off, #3190)* Rewrites PII in genuine user messages (`wrap_model_call`) and remote-content tool results (`wrap_tool_call`, the tool-result allowlist) to irreversible value-derived placeholders. Deterministic regex detectors only. Innermost Layer-1 wrapper; compaction input, summaries and title input use `redact_text`. Memory admission redacts content, parsed/invalid/legacy call arguments and supported provenance before backend filtering.
 
 5. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves identity via `resolve_runtime_user_id(runtime)`, including Gateway runtime context and standalone LangGraph Server auth, then falls back to the request ContextVar / `"default"`
 6. **UploadsMiddleware** - Injects current uploads (lead only). Check existence in the runtime user's bucket; coerce invalid `files[*].size` to `0`. Copy the user message when adding context to preserve caller metadata, including `response_metadata`.
