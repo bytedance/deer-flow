@@ -41,24 +41,26 @@ for (const mode of ["create", "edit"] as const) {
             ],
     });
     await page.goto("/workspace/scheduled-tasks");
-    const form = page.getByTestId(
-      mode === "create"
-        ? "scheduled-task-create-form"
-        : "scheduled-task-detail",
-    );
+    if (mode === "create") {
+      await page.getByTestId("scheduled-task-new").click();
+    } else {
+      await page
+        .getByTestId("scheduled-task-detail")
+        .getByRole("button", { name: "Edit", exact: true })
+        .click();
+    }
+    const form = page.getByTestId("scheduled-task-form");
     if (mode === "create") {
       await form.getByRole("button", { name: "One-time" }).click();
-      await form.getByPlaceholder("Task title").fill("DST task");
-      await form.getByPlaceholder("Prompt").fill("Summarize");
+      await form.getByLabel("Title", { exact: true }).fill("DST task");
+      await form.getByLabel("Instructions").fill("Summarize");
       await form.getByTestId("schedule-timezone").click();
       await page
         .getByRole("option", { name: "America/New_York", exact: true })
         .click();
-    } else {
-      await form.getByRole("button", { name: "Edit", exact: true }).click();
     }
     const submit = form.getByRole("button", {
-      name: mode === "create" ? "Create" : "Save edit",
+      name: mode === "create" ? "Create" : "Save changes",
       exact: true,
     });
     await form.getByLabel("Run at").fill("2027-03-14T02:30");

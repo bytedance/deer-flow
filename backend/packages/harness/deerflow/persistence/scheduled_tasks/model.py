@@ -17,6 +17,8 @@ class ScheduledTaskRow(Base):
     thread_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     origin_thread_id: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     goal_objective: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The user's normalized "stop when ..." rule; never part of ``prompt``.
+    stop_condition: Mapped[str | None] = mapped_column(Text, nullable=True)
     max_runs: Mapped[int | None] = mapped_column(Integer, nullable=True)
     end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     standing_notes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
@@ -38,6 +40,9 @@ class ScheduledTaskRow(Base):
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     run_count: Mapped[int] = mapped_column(Integer, default=0)
     last_occurrence_seq: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    # Occurrences with occurrence_seq <= this value never count toward the
+    # unmet streak (moved by goal, prompt, stop-condition and note edits).
+    unmet_streak_after_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -78,6 +83,12 @@ ACTIVE_RUN_STATUSES: frozenset[str] = frozenset(
         ScheduledTaskRunStatus.RUNNING,
     }
 )
+
+# Parent task lifecycle: a live task can still run (or be resumed); a terminal
+# one is finished. Defined here, next to the run statuses, so the finalization
+# module can use them without importing ``scheduled_tasks.sql`` (import cycle).
+TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
+LIVE_TASK_STATUSES: frozenset[str] = frozenset({"enabled", "running", "paused"})
 
 # Parent ``once`` task status projected from a terminal occurrence status.
 # Shared by the completion path and both recovery paths so the mapping

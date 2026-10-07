@@ -87,6 +87,16 @@ fact-only import payload supplies empty summary defaults.
 It captures `user_id` when it enqueues work.
 This identity survives the background timer boundary.
 
+DeerMem and mem0 exclude assistant tool-call intent in every representation:
+`tool_calls`, `invalid_tool_calls`, and provider-raw `tool_calls`/`function_call`.
+An empty parsed call list does not make an attempted call a final response.
+Keep both portable backend filters aligned without importing host helpers;
+test the real queue/HTTP write boundary in `tests/test_memory_tool_call_intent.py`.
+
+Memory enqueue redaction also covers `invalid_tool_calls` arguments/error text
+and legacy `function_call` payloads. Keep sync, async and compaction admission
+aligned; preserve original messages and detector policy.
+
 `memory.mode: tool` registers the four memory tools.
 The model chooses when to search or change facts.
 Tool mode still uses `MemoryMiddleware` for passive writes on supported remote backends.
@@ -356,6 +366,8 @@ runs by default.
   retrieval, while adapter indexing and warm-up remain configured.
 - Ranking reads at most 4096 characters and 128 tokens per query/fact. The
   no-jieba fallback emits both Latin words and CJK bigrams, including mixed text.
+  With jieba, tokens without a letter or digit (punctuation) are dropped, as in
+  the fallback, so they neither match nor use the 128-token budget.
   `DeerMem.warm()` initializes optional jieba before serving requests, even
   with character-based token counting. Invalid/missing confidence defaults to 0.
 - Search stops MMR after `top_k` picks. Injection diversifies guaranteed and

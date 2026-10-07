@@ -21,7 +21,9 @@ from fastapi import FastAPI
 from app.gateway.deps import _enforce_postgres_for_multi_worker, _validate_agent_storage, langgraph_runtime
 from app.gateway.routers.browser import _browser_tools_enabled
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.config.deployment_config import MULTI_INSTANCE_ENV_VAR, DeploymentConfig, multi_instance_declaration
 from deerflow.config.run_ownership_config import RunOwnershipConfig
+from deerflow.config.stream_bridge_config import StreamBridgeConfig
 
 
 def _config_with_backend(
@@ -32,16 +34,31 @@ def _config_with_backend(
     run_events_backend: str = "db",
     scheduler_enabled: bool = False,
     scheduler_multi_instance: bool = False,
+    deployment_multi_instance: bool = False,
+    stream_bridge_type: str | None = None,
+    ownership_type: str | None = None,
 ) -> SimpleNamespace:
     run_ownership = RunOwnershipConfig(heartbeat_enabled=heartbeat_enabled) if heartbeat_enabled is not None else None
     tools = [SimpleNamespace(name="browser_navigate")] if browser_enabled else []
+    stream_bridge = StreamBridgeConfig(type=stream_bridge_type) if stream_bridge_type is not None else None
+    ownership = SimpleNamespace(type=ownership_type) if ownership_type is not None else None
     return SimpleNamespace(
         database=DatabaseConfig(backend=backend),
         run_ownership=run_ownership,
         run_events=SimpleNamespace(backend=run_events_backend),
         scheduler=SimpleNamespace(enabled=scheduler_enabled, multi_instance=scheduler_multi_instance),
         tools=tools,
+        deployment=DeploymentConfig(multi_instance=deployment_multi_instance),
+        stream_bridge=stream_bridge,
+        sandbox=SimpleNamespace(ownership=ownership),
     )
+
+
+def _cluster_ready(**overrides):
+    """A Postgres deployment with every multi-instance prerequisite satisfied."""
+    kwargs = dict(heartbeat_enabled=True, stream_bridge_type="redis")
+    kwargs.update(overrides)
+    return _config_with_backend("postgres", **kwargs)
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +73,8 @@ def isolated_worker_env(monkeypatch):
     """
     monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
     monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.delenv(MULTI_INSTANCE_ENV_VAR, raising=False)
+    monkeypatch.delenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +200,7 @@ def test_agent_storage_warning_names_the_variable_that_set_the_count(monkeypatch
 
 def test_gate_allows_multi_worker_with_postgres_and_heartbeat(monkeypatch):
     monkeypatch.setenv("GATEWAY_WORKERS", "2")
-    _enforce_postgres_for_multi_worker(_config_with_backend("postgres", heartbeat_enabled=True))
+    _enforce_postgres_for_multi_worker(_config_with_backend("postgres", heartbeat_enabled=True, stream_bridge_type="redis"))
 
 
 def test_gate_rejects_multi_worker_with_scheduler_enabled(monkeypatch):
@@ -227,6 +246,7 @@ def test_gate_allows_multi_instance_scheduler_with_multiple_workers(monkeypatch)
             heartbeat_enabled=True,
             scheduler_enabled=True,
             scheduler_multi_instance=True,
+            stream_bridge_type="redis",
         )
     )
 
@@ -458,3 +478,232 @@ async def test_langgraph_runtime_invokes_gate_before_persistence_setup(monkeypat
     init_engine_from_config.assert_not_called()
     make_stream_bridge.assert_not_called()
     make_store.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Cross-process stream bridge: multi-worker now needs it too
+# ---------------------------------------------------------------------------
+
+
+def test_multi_worker_requires_a_cross_process_stream_bridge(monkeypatch):
+    """GATEWAY_WORKERS > 1 with the memory bridge used to start and then 409 every SSE join on a peer."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    for bridge in (None, "memory"):
+        with pytest.raises(SystemExit, match="stream_bridge.type='redis'"):
+            _enforce_postgres_for_multi_worker(_config_with_backend("postgres", heartbeat_enabled=True, stream_bridge_type=bridge))
+
+
+def test_multi_worker_accepts_the_env_redis_stream_bridge(monkeypatch):
+    """docker-compose and the Helm chart inject DEER_FLOW_STREAM_BRIDGE_REDIS_URL instead of a config section."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "redis://redis:6379/0")
+    _enforce_postgres_for_multi_worker(_config_with_backend("postgres", heartbeat_enabled=True))
+
+
+def test_multi_worker_rejects_explicit_memory_sandbox_ownership(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    with pytest.raises(SystemExit, match="sandbox.ownership.type='memory'"):
+        _enforce_postgres_for_multi_worker(_cluster_ready(ownership_type="memory"))
+
+
+# ---------------------------------------------------------------------------
+# Explicit multi-instance declaration: Kubernetes replicas run one worker per Pod
+# ---------------------------------------------------------------------------
+
+
+def test_declared_multi_instance_is_gated_with_a_single_worker(monkeypatch):
+    """replicas > 1 with GATEWAY_WORKERS=1 per Pod must not bypass the gate.
+
+    Without the declaration every Pod reports one worker, passes every check,
+    and its startup orphan reconciliation writes the peers' lease-less runs off
+    as crashed on every rolling update.
+    """
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite", deployment_multi_instance=True))
+    msg = str(exc_info.value)
+    assert "deployment.multi_instance=true" in msg
+    assert "requires database.backend='postgres'" in msg
+    assert "deployment.multi_instance=false" in msg, "must name the rollback knob"
+
+
+def test_declared_multi_instance_accepts_a_fully_shared_deployment(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    _enforce_postgres_for_multi_worker(_cluster_ready(deployment_multi_instance=True))
+
+
+def test_declared_multi_instance_requires_heartbeat():
+    with pytest.raises(SystemExit, match="heartbeat_enabled=true"):
+        _enforce_postgres_for_multi_worker(_cluster_ready(deployment_multi_instance=True, heartbeat_enabled=False))
+
+
+@pytest.mark.parametrize("run_events_backend", ["memory", "jsonl"])
+def test_declared_multi_instance_requires_db_run_events(run_events_backend):
+    with pytest.raises(SystemExit, match="run_events.backend='db'"):
+        _enforce_postgres_for_multi_worker(_cluster_ready(deployment_multi_instance=True, run_events_backend=run_events_backend))
+
+
+def test_declared_multi_instance_requires_a_redis_stream_bridge():
+    """The memory bridge is process-local, so a peer never sees the owner's SSE events."""
+    for bridge in (None, "memory"):
+        with pytest.raises(SystemExit, match="stream_bridge.type='redis'"):
+            _enforce_postgres_for_multi_worker(_cluster_ready(deployment_multi_instance=True, stream_bridge_type=bridge))
+
+
+def test_declared_multi_instance_accepts_the_env_redis_stream_bridge(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", "redis://redis:6379/0")
+    _enforce_postgres_for_multi_worker(_cluster_ready(deployment_multi_instance=True, stream_bridge_type=None))
+
+
+def test_declared_multi_instance_rejects_explicit_memory_sandbox_ownership():
+    with pytest.raises(SystemExit, match="sandbox.ownership.type='memory'"):
+        _enforce_postgres_for_multi_worker(_cluster_ready(deployment_multi_instance=True, ownership_type="memory"))
+
+
+def test_declared_multi_instance_accepts_redis_or_inferred_sandbox_ownership():
+    """An omitted ownership section is inferred from the redis stream bridge (ownership/factory.py)."""
+    for ownership in (None, "redis"):
+        _enforce_postgres_for_multi_worker(_cluster_ready(deployment_multi_instance=True, ownership_type=ownership))
+
+
+def test_declared_multi_instance_rejects_single_instance_scheduler():
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_cluster_ready(deployment_multi_instance=True, scheduler_enabled=True))
+    msg = str(exc_info.value)
+    assert "each worker starts its own scheduler" in msg
+    assert "scheduler.multi_instance=true" in msg
+    assert "deployment.multi_instance=false" in msg
+
+
+def test_declared_multi_instance_accepts_multi_instance_scheduler():
+    _enforce_postgres_for_multi_worker(_cluster_ready(deployment_multi_instance=True, scheduler_enabled=True, scheduler_multi_instance=True))
+
+
+def test_declared_multi_instance_rejects_process_local_browser():
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_cluster_ready(deployment_multi_instance=True, browser_enabled=True))
+    msg = str(exc_info.value)
+    assert "process-local" in msg
+    assert "deployment.multi_instance=false" in msg
+
+
+@pytest.mark.parametrize("value", ["1", "true", "True", "yes", "on", "replicas"])
+def test_env_declaration_is_gated(monkeypatch, value):
+    """DEER_FLOW_MULTI_INSTANCE is what deploy tooling sets from the replica count.
+
+    Any spelling that is not an explicit "off" counts: a typo must fail closed
+    (run the gate) rather than silently disable it.
+    """
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, value)
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite"))
+    msg = str(exc_info.value)
+    assert f"{MULTI_INSTANCE_ENV_VAR}={value}" in msg
+    assert f"Unset {MULTI_INSTANCE_ENV_VAR}" in msg, "must name the rollback knob"
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "False", "no", "off", "  "])
+def test_falsy_env_declaration_stays_inert(monkeypatch, value):
+    """A templated DEER_FLOW_MULTI_INSTANCE=false (one replica) must not trip the gate."""
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, value)
+    _enforce_postgres_for_multi_worker(_config_with_backend("sqlite", scheduler_enabled=True))
+
+
+def test_env_declaration_accepts_a_fully_shared_deployment(monkeypatch):
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "1")
+    _enforce_postgres_for_multi_worker(_cluster_ready())
+
+
+def test_worker_count_is_reported_over_the_declaration(monkeypatch):
+    """When both apply, the refusal names the worker count: that is the knob uvicorn acts on."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "1")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite"))
+    assert "GATEWAY_WORKERS=2" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("declared_by", "expected_rollback"),
+    [
+        ("env", f"Set GATEWAY_WORKERS=1 and unset {MULTI_INSTANCE_ENV_VAR}"),
+        ("config", "Set GATEWAY_WORKERS=1 and set deployment.multi_instance=false"),
+    ],
+)
+def test_worker_count_rollback_also_withdraws_the_declaration(monkeypatch, declared_by, expected_rollback):
+    """With both knobs active, a rollback that only resets the worker count is not enough.
+
+    Following ``Set GATEWAY_WORKERS=1`` alone leaves the declaration tripping the
+    gate at the next start, so the operator would bounce through a second
+    refusal before learning about the other knob. The message names both.
+    """
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    if declared_by == "env":
+        monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "1")
+    config = _config_with_backend("sqlite", deployment_multi_instance=declared_by == "config")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(config)
+    assert expected_rollback in str(exc_info.value)
+
+
+def test_offered_env_rollback_clears_the_gate(monkeypatch):
+    """The remediation a refusal offers must make the next start succeed."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "1")
+    sqlite = _config_with_backend("sqlite")
+    with pytest.raises(SystemExit):
+        _enforce_postgres_for_multi_worker(sqlite)
+
+    # Resetting only the worker count is the half-step the message must not suggest.
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(sqlite)
+    assert f"{MULTI_INSTANCE_ENV_VAR}=1" in str(exc_info.value)
+
+    # The full rollback the message offered clears the gate.
+    monkeypatch.delenv(MULTI_INSTANCE_ENV_VAR)
+    _enforce_postgres_for_multi_worker(sqlite)
+
+
+def test_offered_config_rollback_clears_the_gate(monkeypatch):
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_config_with_backend("sqlite", deployment_multi_instance=True))
+    assert "Set GATEWAY_WORKERS=1 and set deployment.multi_instance=false" in str(exc_info.value)
+
+    monkeypatch.setenv("GATEWAY_WORKERS", "1")
+    _enforce_postgres_for_multi_worker(_config_with_backend("sqlite", deployment_multi_instance=False))
+
+
+def test_browser_refusal_names_the_declaration_when_both_knobs_are_active(monkeypatch):
+    """The browser refusal must not send the operator through the same double bounce."""
+    monkeypatch.setenv("GATEWAY_WORKERS", "2")
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "1")
+    with pytest.raises(SystemExit) as exc_info:
+        _enforce_postgres_for_multi_worker(_cluster_ready(browser_enabled=True))
+    msg = str(exc_info.value)
+    assert "browser" in msg
+    assert f"Set GATEWAY_WORKERS=1 and unset {MULTI_INSTANCE_ENV_VAR}" in msg
+
+
+def test_agent_storage_warning_fires_for_a_declared_multi_instance_deployment(caplog):
+    with caplog.at_level("WARNING"):
+        _validate_agent_storage(_cluster_ready(deployment_multi_instance=True))
+    messages = [r.message for r in caplog.records if "not visible across workers" in r.message]
+    assert messages and "deployment.multi_instance=true" in messages[0]
+
+
+def test_deployment_declaration_helpers(monkeypatch):
+    assert DeploymentConfig().multi_instance is False
+    assert multi_instance_declaration(None) is None
+
+    by_config = multi_instance_declaration(SimpleNamespace(deployment=DeploymentConfig(multi_instance=True)))
+    assert by_config is not None
+    assert (by_config.source, by_config.knob, by_config.rollback) == ("config", "deployment.multi_instance=true", "set deployment.multi_instance=false")
+    assert str(by_config) == by_config.knob
+
+    # The environment wins over config.yaml and keeps the operator's spelling.
+    monkeypatch.setenv(MULTI_INSTANCE_ENV_VAR, "replicas")
+    by_env = multi_instance_declaration(SimpleNamespace(deployment=DeploymentConfig(multi_instance=True)))
+    assert by_env is not None
+    assert (by_env.source, by_env.knob, by_env.rollback) == ("env", f"{MULTI_INSTANCE_ENV_VAR}=replicas", f"unset {MULTI_INSTANCE_ENV_VAR}")

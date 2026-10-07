@@ -4830,3 +4830,152 @@ def test_task_notes_state_write_normalizes_and_replaces(monkeypatch, mode, fallb
         read = client.get("/api/threads/note-replacement/state")
         assert read.status_code == 200, read.text
         assert read.json()["values"]["task_notes"] == {"new": {"content": "keep backups", "source_ids": [], "authority": "model_report"}}
+
+
+# ---------------------------------------------------------------------------
+# Server-owned origin marker and per-user unread state (deerflow_origin)
+# ---------------------------------------------------------------------------
+
+
+def test_strip_reserved_metadata_drops_client_origin():
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    assert DEERFLOW_ORIGIN_KEY in threads._SERVER_RESERVED_METADATA_KEYS
+    assert threads._strip_reserved_metadata({DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}, "keep": 1}) == {"keep": 1}
+
+
+def test_create_and_patch_strip_a_client_supplied_origin() -> None:
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, _store, checkpointer = _build_thread_app()
+    forged = {DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}, "title": "mine"}
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "origin-forge", "metadata": forged})
+        assert created.status_code == 200, created.text
+        assert created.json()["metadata"] == {"title": "mine"}
+        patched = client.patch("/api/threads/origin-forge", json={"metadata": {DEERFLOW_ORIGIN_KEY: {"kind": "im_channel"}}})
+        assert patched.status_code == 200, patched.text
+        assert DEERFLOW_ORIGIN_KEY not in patched.json()["metadata"]
+        fetched = client.post("/api/threads/search", json={"limit": 10})
+        assert all(DEERFLOW_ORIGIN_KEY not in item["metadata"] for item in fetched.json())
+
+    checkpoint = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "origin-forge", "checkpoint_ns": ""}}))
+    assert DEERFLOW_ORIGIN_KEY not in checkpoint.metadata
+
+
+def test_create_thread_marks_a_host_origin_from_request_state() -> None:
+    """Only server code can set request.state.run_origin (an extension handle)."""
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, _store, _checkpointer = _build_thread_app()
+
+    @app.middleware("http")
+    async def host_origin(request, call_next):
+        request.state.run_origin = {"kind": "extension", "namespace": "community.teams"}
+        return await call_next(request)
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "ext-thread", "metadata": {"title": "t"}})
+    assert response.status_code == 200, response.text
+    assert response.json()["metadata"] == {"title": "t", DEERFLOW_ORIGIN_KEY: {"kind": "extension", "namespace": "community.teams"}}
+
+
+def _unread_app(tmp_path, *, owner_check_passes: bool = True):
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+    from deerflow.persistence.thread_reads import ThreadReadMarkerRow, ThreadReadRepository, ThreadReadVersionRow
+
+    user = User(id=UUID("31f5a8c2-1d4e-4b6f-8a9c-0d1e2f3a4b5c"), email="unread@example.com", password_hash="x", system_role="user")
+    app = make_authed_test_app(user_factory=lambda: user, owner_check_passes=owner_check_passes, bind_current_user=True)
+    store = InMemoryStore()
+    app.state.store = store
+    app.state.checkpointer = InMemorySaver()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.state.thread_store = _PermissiveThreadMetaStore(store)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'unread.db'}")
+
+    async def _init():
+        async with engine.begin() as conn:
+            await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[m.__table__ for m in (RunRow, RunChangeClockRow, ThreadReadMarkerRow, ThreadReadVersionRow)]))
+
+    asyncio.run(_init())
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+    app.state.thread_read_repo = ThreadReadRepository(sf)
+    app.include_router(threads.router)
+    return app, store, RunRepository(sf), str(user.id), engine
+
+
+def test_search_items_carry_unread_until_the_thread_is_read(tmp_path) -> None:
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, store, runs, user_id, engine = _unread_app(tmp_path)
+
+    async def _seed():
+        for thread_id, metadata in (("sched-thread", {DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}}), ("chat-thread", {})):
+            await store.aput(THREADS_NS, thread_id, {"thread_id": thread_id, "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": metadata})
+        await runs.put("run-sched", thread_id="sched-thread", user_id=user_id, status="success", metadata={DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}})
+        await runs.put("run-chat", thread_id="chat-thread", user_id=user_id, status="success", metadata={})
+
+    asyncio.run(_seed())
+    try:
+        with TestClient(app) as client:
+            items = {item["thread_id"]: item for item in client.post("/api/threads/search", json={"limit": 10}).json()}
+            assert items["sched-thread"]["unread"] is True
+            assert items["chat-thread"]["unread"] is False
+
+            read = client.post("/api/threads/sched-thread/read")
+            assert read.status_code == 200, read.text
+            assert read.json() == {"unread": False, "read_version": 1}
+            items = {item["thread_id"]: item for item in client.post("/api/threads/search", json={"limit": 10}).json()}
+            assert items["sched-thread"]["unread"] is False
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_search_unread_is_null_without_sql_read_state() -> None:
+    app, store, _checkpointer = _build_thread_app()
+    asyncio.run(store.aput(THREADS_NS, "t", {"thread_id": "t", "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": {}}))
+    with TestClient(app) as client:
+        assert [item["unread"] for item in client.post("/api/threads/search", json={"limit": 10}).json()] == [None]
+
+
+def test_mark_read_on_another_users_thread_is_404(tmp_path) -> None:
+    app, _store, _runs, user_id, engine = _unread_app(tmp_path, owner_check_passes=False)
+    try:
+        with TestClient(app) as client:
+            response = client.post("/api/threads/someone-elses/read")
+        assert response.status_code == 404
+        assert asyncio.run(app.state.thread_read_repo.read_version(user_id=user_id)) == 0
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_delete_thread_route_removes_read_markers(tmp_path) -> None:
+    app, store, runs, user_id, engine = _unread_app(tmp_path)
+
+    async def _seed():
+        await store.aput(THREADS_NS, "gone", {"thread_id": "gone", "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": {}})
+        await runs.put("run-gone", thread_id="gone", user_id=user_id, status="success", metadata={"deerflow_origin": {"kind": "schedule"}})
+        await app.state.thread_read_repo.mark_read(user_id=user_id, thread_id="gone")
+
+    asyncio.run(_seed())
+    app.state.run_event_store = MagicMock(delete_by_thread=AsyncMock())
+    app.state.run_store = runs
+    try:
+        with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)), TestClient(app) as client:
+            assert client.delete("/api/threads/gone").status_code == 200
+        from deerflow.persistence.thread_reads import ThreadReadMarkerRow
+
+        async def _count():
+            async with app.state.thread_read_repo._sf() as session:
+                return await session.get(ThreadReadMarkerRow, (user_id, "gone"))
+
+        assert asyncio.run(_count()) is None
+    finally:
+        asyncio.run(engine.dispose())

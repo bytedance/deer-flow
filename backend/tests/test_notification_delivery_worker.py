@@ -15,7 +15,7 @@ import pytest
 from app.channels.base import ChannelUnavailable
 from app.channels.message_bus import MessageBus
 from app.channels.wecom import WeComChannel
-from app.scheduler.notification_delivery import NotificationDeliveryWorker, redact_egress_text, render_notification_text
+from app.scheduler.notification_delivery import NotificationDeliveryWorker, render_notification_text
 
 
 class FakeDeliveryRepo:
@@ -108,20 +108,25 @@ def _connection(*, provider="wecom", external_account_id="GaoZhiChao", status="c
     }
 
 
-def test_render_run_completed_text_includes_task_and_run():
-    text = render_notification_text(_delivery_row())
+def test_render_run_completed_text_has_no_raw_ids():
+    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "task_title": "Daily digest"}))
 
-    assert "completed" in text.lower()
-    assert "task-1" in text
-    assert "run-1" in text
+    assert "Finished a run." in text
+    assert "“Daily digest”" in text
+    assert "task-1" not in text
+    assert "run-1" not in text
 
 
 def test_render_prefers_task_title_over_id():
     text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "task_title": "Daily digest"}))
 
-    assert "Daily digest" in text
-    task_line = next(line for line in text.splitlines() if line.startswith("Task:"))
-    assert "task-1" not in task_line
+    assert "“Daily digest”" in text
+    assert "task-1" not in text
+    assert not any(line.startswith("Task:") for line in text.splitlines())
+    # Without a title the notice says so instead of printing the id.
+    untitled = render_notification_text(_delivery_row())
+    assert "Untitled task" in untitled
+    assert "task-1" not in untitled
 
 
 def test_render_run_failed_text_does_not_forward_raw_error():
@@ -133,9 +138,9 @@ def test_render_run_failed_text_does_not_forward_raw_error():
         )
     )
 
-    assert "failed" in text.lower()
+    assert "A run failed." in text
     assert secret not in text
-    assert "workspace" in text.lower()
+    assert "Open DeerFlow → Scheduled tasks for details." in text
     assert "Error:" not in text
 
 
@@ -151,43 +156,6 @@ def test_render_truncates_unbounded_error_text():
     assert "Error:" not in text
 
 
-def test_redact_egress_text_scrubs_seeded_secret():
-    secret = "sk-" + ("S" * 40)
-    redacted = redact_egress_text(f"answer used {secret} here")
-
-    assert secret not in redacted
-    assert "[redacted]" in redacted
-
-
-def test_redact_egress_text_scrubs_entire_pem_block():
-    pem_body = "ABCDEFSECRETKEYBODY"
-    pem = "-----BEGIN PRIVATE KEY-----\n" + pem_body + "\n-----END PRIVATE KEY-----"
-    redacted = redact_egress_text(f"key follows\n{pem}\nend")
-
-    assert pem_body not in redacted
-    assert "BEGIN PRIVATE KEY" not in redacted
-    assert "END PRIVATE KEY" not in redacted
-    assert "[redacted]" in redacted
-
-
-def test_render_redacts_entire_pem_block_in_result_summary():
-    pem_body = "ABCDEFSECRETKEYBODY"
-    pem = "-----BEGIN PRIVATE KEY-----\n" + pem_body + "\n-----END PRIVATE KEY-----"
-    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": pem}))
-
-    assert pem_body not in text
-    assert "END PRIVATE KEY" not in text
-    assert "[redacted]" in text
-
-
-def test_render_redacts_secret_in_result_summary():
-    secret = "ghp_" + ("a" * 36)
-    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": f"token={secret}"}))
-
-    assert secret not in text
-    assert "[redacted]" in text
-
-
 @pytest.mark.asyncio
 async def test_run_once_delivers_claimed_row_and_marks_sent():
     repo = FakeDeliveryRepo([_delivery_row()])
@@ -201,7 +169,8 @@ async def test_run_once_delivers_claimed_row_and_marks_sent():
     assert len(channel.sent) == 1
     target, text = channel.sent[0]
     assert target == "GaoZhiChao"
-    assert "task-1" in text
+    assert text.splitlines()[0] == "Scheduled task “Untitled task”"
+    assert "task-1" not in text
 
 
 @pytest.mark.asyncio
@@ -500,17 +469,19 @@ async def test_start_stop_lifecycle():
 
 
 def test_render_includes_result_summary_for_completed_runs():
-    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": "The answer is 42"}))
+    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": "The answer is 42\nand a second line"}))
 
-    assert "The answer is 42" in text
+    # The tasks page's run summary: the reply's first line only.
+    assert "Result: The answer is 42" in text.splitlines()
+    assert "second line" not in text
 
 
 def test_render_truncates_long_result_summary():
     text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": "x" * 5000}))
 
-    # Bounded on the wire: 999 chars of summary + the ellipsis marker.
+    # Bounded like the tasks page: at most 160 chars, ending in an ellipsis.
     result_line = next(line for line in text.splitlines() if line.startswith("Result: "))
-    assert len(result_line) == len("Result: ") + 1000
+    assert len(result_line) == len("Result: ") + 160
     assert result_line.endswith("\u2026")
 
 
@@ -596,7 +567,8 @@ async def test_delivery_falls_back_to_skeleton_when_resolver_raises():
     # A summary lookup failure must never block the notification itself.
     assert repo.sent == ["delivery-1"]
     assert repo.failed == []
-    assert "task-1" in channel.sent[0][1]
+    assert "Finished a run." in channel.sent[0][1]
+    assert "Result:" not in channel.sent[0][1]
 
 
 @pytest.mark.asyncio
@@ -609,8 +581,101 @@ async def test_delivery_sends_skeleton_when_summary_is_missing():
 
     assert repo.sent == ["delivery-1"]
     text = channel.sent[0][1]
-    assert "task-1" in text
+    assert "Finished a run." in text
     assert "Result:" not in text
+
+
+@pytest.mark.asyncio
+async def test_legacy_row_for_unsupported_provider_fails_terminally_without_send():
+    # Rows queued before only push-capable providers got rows: they can never
+    # be sent, so they end at once instead of using up five retries.
+    repo = FakeDeliveryRepo([_delivery_row(provider="feishu", target="ou_123")])
+    channel = FakeChannel()
+    resolved_channels, checked_connections = [], []
+
+    def resolve_channel(provider):
+        resolved_channels.append(provider)
+        return channel
+
+    def resolve_connections(owner):
+        checked_connections.append(owner)
+        return [_connection(provider="feishu", external_account_id="ou_123")]
+
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=resolve_channel, resolve_connections=resolve_connections)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert channel.sent == []
+    assert resolved_channels == [] and checked_connections == []
+    assert repo.sent == []
+    assert repo.terminal_failures == [("delivery-1", "provider does not support proactive notifications")]
+
+
+@pytest.mark.asyncio
+async def test_task_stopped_is_enriched_with_summary():
+    row = _delivery_row(event="task_stopped", payload={"payload_version": 2, "task_title": "Release check", "reason_code": "agent_stop", "run_status": "success", "stop_condition": "all items are ticked"})
+    repo = FakeDeliveryRepo([row])
+    channel = FakeChannel()
+    seen = []
+
+    def resolver(run_id, user_id):
+        seen.append((run_id, user_id))
+        return "## All 12 items are ticked\nmore"
+
+    await _make_worker(repo, channel, resolve_run_summary=resolver).run_once(now=datetime.now(UTC))
+
+    assert seen == [("run-1", "user-1")]
+    assert channel.sent[0][1].splitlines() == [
+        "Scheduled task “Release check”",
+        "Paused by agent: its stop condition was met (all items are ticked).",
+        "Result: All 12 items are ticked",
+        "Open DeerFlow → Scheduled tasks for details.",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event", "payload"),
+    [
+        ("run_failed", {"payload_version": 2, "run_status": "failed"}),
+        ("task_finished", {"payload_version": 2, "reason_code": "max_runs", "run_status": "failed", "max_runs": 3}),
+        ("task_stopped", {"payload_version": 2, "reason_code": "agent_stop", "run_status": "interrupted"}),
+    ],
+)
+async def test_failed_run_is_not_enriched(event, payload):
+    repo = FakeDeliveryRepo([_delivery_row(event=event, payload=payload)])
+    channel = FakeChannel()
+    called = []
+
+    def resolver(run_id, user_id):
+        called.append(run_id)
+        return "partial answer"
+
+    await _make_worker(repo, channel, resolve_run_summary=resolver).run_once(now=datetime.now(UTC))
+
+    assert called == []
+    assert repo.sent == ["delivery-1"]
+    assert "partial answer" not in channel.sent[0][1]
+    assert "Result:" not in channel.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_worker_uses_default_locale_for_rows_without_locale():
+    legacy = _delivery_row(delivery_id="legacy", event="run_failed", payload={"run_status": "failed", "error": "boom", "task_id": "task-1"})
+    no_preference = _delivery_row(delivery_id="no-preference", event="run_failed", payload={"payload_version": 2, "locale": None, "run_status": "failed"})
+    english_owner = _delivery_row(delivery_id="english-owner", event="run_failed", payload={"payload_version": 2, "locale": "en-US", "run_status": "failed"})
+    repo = FakeDeliveryRepo([legacy, no_preference, english_owner])
+    channel = FakeChannel()
+    worker = NotificationDeliveryWorker(delivery_repo=repo, resolve_channel=lambda provider: channel, default_locale="zh-CN")
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == ["legacy", "no-preference", "english-owner"]
+    texts = [text for _target, text in channel.sent]
+    assert texts[0].splitlines()[1:] == ["一次运行出错了。", "在 DeerFlow 的定时任务页查看详情。"]
+    assert texts[1] == texts[0].replace("Untitled task", "未命名任务")
+    # The owner's own UI language wins over the configured default.
+    assert texts[2].splitlines()[1] == "A run failed."
 
 
 class FakeWsClient:

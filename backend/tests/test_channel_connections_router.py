@@ -26,6 +26,7 @@ def _stub_app_config(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "0")
     monkeypatch.delenv("GATEWAY_WORKERS", raising=False)
     monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    monkeypatch.delenv("DEER_FLOW_MULTI_INSTANCE", raising=False)
     set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
     yield
     reset_app_config()
@@ -197,6 +198,17 @@ def test_get_providers_uses_existing_channels_config(tmp_path):
     assert by_provider["wecom"]["credential_values"] == {
         "bot_id": "wecom-bot",
         "bot_secret": "********",
+    }
+    # Scheduled-task updates are pushed only where the provider implements
+    # proactive push; Settings shows that per provider card.
+    assert {name: item["proactive_notifications"] for name, item in by_provider.items()} == {
+        "telegram": False,
+        "slack": False,
+        "discord": False,
+        "feishu": False,
+        "dingtalk": False,
+        "wechat": False,
+        "wecom": True,
     }
 
     anyio.run(repo.close)
@@ -1452,6 +1464,8 @@ def test_wechat_qr_confirmation_preserves_bot_id_unless_replaced(monkeypatch, re
         {"GATEWAY_WORKERS": "invalid"},
         # A blank GATEWAY_WORKERS is unset, so WEB_CONCURRENCY still decides.
         {"GATEWAY_WORKERS": "", "WEB_CONCURRENCY": "2"},
+        # Kubernetes replicas run one worker each and declare their peers instead.
+        {"GATEWAY_WORKERS": "1", "DEER_FLOW_MULTI_INSTANCE": "1"},
     ],
 )
 @pytest.mark.parametrize("method,suffix", [("POST", ""), ("POST", "/session/poll"), ("DELETE", "/session")])
@@ -1520,6 +1534,7 @@ def test_qq_provider_exposes_binding_flow_and_masks_secret(tmp_path):
             assert provider["auth_mode"] == "binding_code"
             assert provider["configured"] is True
             assert provider["connectable"] is True
+            assert provider["proactive_notifications"] is False
             assert "fixture-private-secret" not in response.text
             fields = {field["name"]: field for field in provider["credential_fields"]}
             assert fields["app_id"]["type"] == "text"

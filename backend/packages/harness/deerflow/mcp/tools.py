@@ -21,11 +21,16 @@ from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
-from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
-from deerflow.mcp.session_pool import call_pooled_session_tool, get_session_pool
+from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
+from deerflow.mcp.session_pool import (
+    MCPPoolDomain,
+    call_pooled_session_tool,
+    get_session_pool,
+)
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
+    get_mcp_task_oauth_token_manager,
     get_mcp_task_submitter,
     validate_mcp_task_config_snapshot,
 )
@@ -539,11 +544,12 @@ def _make_session_pool_tool(
     tool_call_timeout: float | None = None,
     session_init_timeout: float | None = None,
     tool_name_prefix: bool = True,
+    ownership_domain: MCPPoolDomain = "deployment",
 ) -> BaseTool:
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
     Replaces the per-call session creation with pool-managed sessions scoped
-    by ``(server_name, user/thread/incarnation)``. This ensures stateful MCP servers
+    by ``(server_name, user/thread/incarnation, ownership_domain)``. This ensures stateful MCP servers
     (e.g. Playwright) keep their state across tool calls within the same thread
     while staying isolated per user.
 
@@ -607,6 +613,16 @@ def _make_session_pool_tool(
             session_env.setdefault("TMP", str(tmp_dir))
             session_env.setdefault("TEMP", str(tmp_dir))
             session_connection["env"] = session_env
+        session_request = (
+            pool.get_session(server_name, scope_key, session_connection)
+            if ownership_domain == "deployment"
+            else pool.get_session(
+                server_name,
+                scope_key,
+                session_connection,
+                domain=ownership_domain,
+            )
+        )
         if session_init_timeout is not None:
             # Cancellation here is safe: MCPSessionPool.get_session owns the
             # teardown of a session stuck mid-creation (it signals close and
@@ -614,7 +630,7 @@ def _make_session_pool_tool(
             # so a hung server cannot leak a session or block the turn.
             try:
                 session = await asyncio.wait_for(
-                    pool.get_session(server_name, scope_key, session_connection),
+                    session_request,
                     timeout=session_init_timeout,
                 )
             except TimeoutError:
@@ -629,7 +645,9 @@ def _make_session_pool_tool(
                 )
                 raise
         else:
-            session = await pool.get_session(server_name, scope_key, session_connection)
+            session = await session_request
+
+        domain_kwargs = {"domain": ownership_domain} if ownership_domain != "deployment" else {}
 
         # Build common call_tool kwargs once — only add keys when needed so
         # existing call-sites that assert on exact arguments are not affected.
@@ -657,6 +675,7 @@ def _make_session_pool_tool(
                     tool_name=request.name,
                     arguments=request.args,
                     call_kwargs=kwargs,
+                    **domain_kwargs,
                 )
 
             handler = compose_tool_interceptors(tool_interceptors, base_handler)
@@ -677,6 +696,7 @@ def _make_session_pool_tool(
                 tool_name=original_name,
                 arguments=arguments,
                 call_kwargs=call_kwargs,
+                **domain_kwargs,
             )
 
         # The after-call snapshot diff only feeds bare-filename correlation in
@@ -892,7 +912,8 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
         logger.info(f"Initializing MCP client with {len(servers_config)} server(s)")
 
         # Inject initial OAuth headers for server connections (tool discovery/session init)
-        initial_oauth_headers = await get_initial_oauth_headers(extensions_config)
+        oauth_token_manager = OAuthTokenManager.from_extensions_config(extensions_config) if personal_user_id is not None else get_mcp_task_oauth_token_manager(extensions_config)
+        initial_oauth_headers = await get_initial_oauth_headers(extensions_config, token_manager=oauth_token_manager)
         for server_name, auth_header in initial_oauth_headers.items():
             if server_name not in servers_config:
                 continue
@@ -906,7 +927,7 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
 
         tool_interceptors = build_mcp_tool_interceptors(
             extensions_config,
-            oauth_builder=build_oauth_tool_interceptor,
+            oauth_builder=lambda config: build_oauth_tool_interceptor(config, token_manager=oauth_token_manager),
             resolver=resolve_variable,
             target_logger=logger,
         )
@@ -1021,6 +1042,7 @@ async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, pe
                             tool_call_timeout=_timeout,
                             session_init_timeout=_init_timeout,
                             tool_name_prefix=tool_name_prefix,
+                            ownership_domain=("personal" if personal_user_id is not None else "deployment"),
                         )
                     )
                 else:
