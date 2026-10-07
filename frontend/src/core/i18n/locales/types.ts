@@ -404,6 +404,38 @@ export interface Translations {
     goalFailed: string;
     goalTooLong: string;
     goalLengthCounter: string;
+    goalBar: {
+      regionLabel: string;
+      inProgress: string;
+      stopped: string;
+      waitingForYou: string;
+      waiting: string;
+      paused: string;
+      autoContinuedOnce: string;
+      autoContinuedMany: string;
+      details: string;
+      hideDetails: string;
+      noteLabel: string;
+      codeLabel: string;
+      assumptionTooltip: string;
+      announce: string;
+      editLocked: string;
+      busy: string;
+      next: {
+        limit: string;
+        autoOff: string;
+        noProgress: string;
+        tokenCapped: string;
+        missingEvidence: string;
+        runFailed: string;
+        needsInputCard: string;
+        needsInputReply: string;
+        external: string;
+        unchecked: string;
+        unknown: string;
+        paused: string;
+      };
+    };
     compactSuccess: string;
     compactSkipped: string;
     compactFailed: string;

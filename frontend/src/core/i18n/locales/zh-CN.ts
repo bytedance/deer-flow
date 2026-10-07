@@ -460,6 +460,45 @@ export const zhCN: Translations = {
     goalFailed: "目标命令执行失败。",
     goalTooLong: "目标过长，请控制在 {max} 个字符以内。",
     goalLengthCounter: "目标长度：{length}/{max} 字符",
+    goalBar: {
+      regionLabel: "目标状态",
+      inProgress: "进行中",
+      stopped: "已停止",
+      waitingForYou: "等你回复",
+      waiting: "等待中",
+      paused: "已暂停",
+      autoContinuedOnce: "自动续跑了 1 次",
+      autoContinuedMany: "自动续跑了 {count} 次",
+      details: "详情",
+      hideDetails: "收起详情",
+      noteLabel: "目标检查说明（评估器原文）",
+      codeLabel: "停止代码",
+      assumptionTooltip:
+        "智能体补全了目标里没写明的内容，并在回复里做了说明，请核对上面的回复。",
+      announce: "{status}：{detail}",
+      editLocked: "设置了目标时不能编辑，先运行 /goal clear 清除目标。",
+      busy: "这个对话还有运行未结束，结束后再试。",
+      next: {
+        limit:
+          "已达到自动续跑上限 {count}/{max}，不会再自动续跑。回复即可继续；或用 /goal <完成条件> 重新设置目标，次数从零开始（同时会开始一次新的运行）。",
+        autoOff: "目标检查：尚未达成。这个目标没有开启自动续跑，回复即可继续。",
+        noProgress:
+          "连续几轮没有进展。回复说明还缺什么，或用 /goal 换个说法重新设置目标。",
+        tokenCapped:
+          "已达到 token 预算。发送消息即可继续，新的运行会重新计算预算。",
+        missingEvidence:
+          "目标检查：缺少依据。可以让它把结果展示出来，或回复说明还差什么。",
+        runFailed:
+          "目标检查：这次运行没有完成任务。先看看回复里的错误，再发送消息重试。",
+        needsInputCard: "回答上面的问题即可继续。",
+        needsInputReply: "回复补充缺少的信息即可继续。",
+        external: "目标检查：正在等待外部条件，就绪后发送消息即可继续。",
+        unchecked: "{reason}。下次发消息后会重新检查。",
+        unknown: "发送消息即可继续。",
+        paused:
+          "已自动续跑 {count}/{max} 次，运行在确认达成前结束了。发送消息即可重新检查。",
+      },
+    },
     compactSuccess:
       "已压缩早期上下文。完整聊天记录仍保留，后续模型将基于摘要和最近消息继续。",
     compactSkipped: "当前上下文还不需要压缩。",

@@ -6,7 +6,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isGoalState(value: unknown): value is GoalState {
+/**
+ * An active goal as the backend stores it, so a malformed or inactive `goal`
+ * in history or worker frames never renders. `goal_outcome` is not folded
+ * here: only the worker's clear writes it, never through `updates`.
+ */
+export function isGoalState(value: unknown): value is GoalState {
   return (
     isRecord(value) &&
     typeof value.objective === "string" &&

@@ -27,6 +27,12 @@ describe("raw identifier guard", () => {
     "Agent: lead_agent",
     "max_runs reached",
     "Status: unmet",
+    "Stopped: blocked:needs_user_input",
+    "max_continuations_reached",
+    "Reason token_capped",
+    "thread_changed_after_evaluation",
+    "goal_outcome missing",
+    "last_evaluation.stand_down_reason",
   ])("flags %s", (text) => {
     expect(findRawIdentifiers(text).length).toBeGreaterThan(0);
   });
@@ -36,6 +42,8 @@ describe("raw identifier guard", () => {
     "工作日 09:00 (Asia/Shanghai) · 下次：明天 09:00",
     "Safety cap: 2 of 5 runs used",
     "Every 30 minutes",
+    "Continuation limit reached · 8/8. Reply to keep going.",
+    "Token budget reached",
   ])("accepts readable copy: %s", (text) => {
     expectNoRawIdentifiers(text);
   });
@@ -50,6 +58,19 @@ describe("raw identifier guard", () => {
         // The cron field's placeholder is the one place a cron belongs.
         if (path === "fields.cronPlaceholder") continue;
         // `{max_runs}`-style placeholders are filled before display.
+        const shown = text.replace(/\{[a-z_]+\}/g, "1");
+        expect([path, findRawIdentifiers(shown)]).toEqual([path, []]);
+      }
+    },
+  );
+
+  it.each([
+    ["en-US", enUS],
+    ["zh-CN", zhCN],
+  ] as const)(
+    "no goal bar copy in %s contains a raw identifier",
+    (_locale, t) => {
+      for (const [path, text] of strings(t.inputBox.goalBar)) {
         const shown = text.replace(/\{[a-z_]+\}/g, "1");
         expect([path, findRawIdentifiers(shown)]).toEqual([path, []]);
       }

@@ -494,6 +494,48 @@ export const enUS: Translations = {
     goalFailed: "Goal command failed.",
     goalTooLong: "Goal is too long. Keep it under {max} characters.",
     goalLengthCounter: "Goal length: {length}/{max} characters",
+    goalBar: {
+      regionLabel: "Goal status",
+      inProgress: "In progress",
+      stopped: "Stopped",
+      waitingForYou: "Waiting for you",
+      waiting: "Waiting",
+      paused: "Paused",
+      autoContinuedOnce: "Auto-continued once",
+      autoContinuedMany: "Auto-continued {count} times",
+      details: "Details",
+      hideDetails: "Hide details",
+      noteLabel: "Goal check note (from the checker)",
+      codeLabel: "Stop code",
+      assumptionTooltip:
+        "The agent filled in something the goal didn't specify and said so in its reply. Check the reply above.",
+      announce: "{status}: {detail}",
+      editLocked:
+        "Editing is off while a goal is set. Run /goal clear to edit.",
+      busy: "A run is still going in this chat. Try again when it finishes.",
+      next: {
+        limit:
+          "Continuation limit reached · {count}/{max}. It won't auto-continue again. Reply to keep going, or set the goal again with /goal <condition> to start a fresh count (this also starts a new run).",
+        autoOff:
+          "Goal check: not met yet. Auto-continue is off for this goal. Reply to keep going.",
+        noProgress:
+          "No progress between turns. Reply with what's missing, or rephrase the goal with /goal.",
+        tokenCapped:
+          "Token budget reached. Send a message to continue; a new run starts with a fresh budget.",
+        missingEvidence:
+          "Goal check: evidence missing. Ask it to show the result, or reply with what's left.",
+        runFailed:
+          "Goal check: the run did not finish the work. Check the reply for errors, then send a message to retry.",
+        needsInputCard: "Answer the question above to continue.",
+        needsInputReply: "Reply with the missing details to continue.",
+        external:
+          "Goal check: waiting on something external. Send a message when it's ready.",
+        unchecked: "{reason}. It's checked again after your next message.",
+        unknown: "Send a message to keep going.",
+        paused:
+          "Auto-continued {count}/{max}. The run ended before the goal was confirmed. Send a message to check again.",
+      },
+    },
     compactSuccess:
       "Earlier context compacted. The full chat remains visible; future model calls will use the summary and recent messages.",
     compactSkipped: "The current context does not need compaction yet.",
