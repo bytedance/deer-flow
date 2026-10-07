@@ -91,7 +91,7 @@ def _fit_utf8_bytes(text: str, budget: int) -> str:
 
 
 def claim_unique_filename(name: str, seen: set[str]) -> str:
-    """Generate a unique filename by appending ``_N`` suffix on collision.
+    """Generate a case-insensitively unique filename by appending ``_N`` on collision.
 
     Automatically adds the returned name to *seen* so callers don't need to.
 
@@ -107,9 +107,10 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
         seen: Set of filenames already claimed (mutated in place).
 
     Returns:
-        A filename not present in *seen* (already added to *seen*).
+        A filename not present in *seen* even ignoring case (already added to *seen*).
     """
-    if name not in seen:
+    claimed = {existing.casefold() for existing in seen}
+    if name.casefold() not in claimed:
         seen.add(name)
         return name
     stem, suffix = Path(name).stem, Path(name).suffix
@@ -123,7 +124,7 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
             candidate = _fit_utf8_bytes(stem + suffix, _MAX_FILENAME_BYTES - len(tag.encode("utf-8"))) + tag
         else:
             candidate = f"{_fit_utf8_bytes(stem, budget)}{tag}{suffix}"
-        if candidate not in seen:
+        if candidate.casefold() not in claimed:
             break
         counter += 1
     seen.add(candidate)

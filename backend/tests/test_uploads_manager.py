@@ -133,6 +133,11 @@ class TestDeduplicateFilename:
         assert claim_unique_filename("data.txt", seen) == "data_1.txt"
         assert "data_1.txt" in seen
 
+    def test_case_insensitive_collision_including_suffix(self):
+        seen = {"Report.txt", "report_1.TXT"}
+        assert claim_unique_filename("report.txt", seen) == "report_2.txt"
+        assert "report_2.txt" in seen
+
     def test_triple_collision(self):
         seen = {"data.txt", "data_1.txt", "data_2.txt"}
         assert claim_unique_filename("data.txt", seen) == "data_3.txt"
