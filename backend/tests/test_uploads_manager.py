@@ -4,6 +4,8 @@ import errno
 import os
 import shutil
 import stat
+import time
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
@@ -405,6 +407,12 @@ class TestListFilesInDir:
 # ---------------------------------------------------------------------------
 
 
+def _set_age(path, age: timedelta) -> None:
+    """Backdate *path*'s mtime so the cleanup sees it as *age* old."""
+    timestamp = time.time() - age.total_seconds()
+    os.utime(path, (timestamp, timestamp))
+
+
 class TestCleanupStaleUploadStagingFiles:
     def test_removes_only_stale_staging_files_from_all_upload_layouts(self, tmp_path):
         legacy_uploads = tmp_path / "threads" / "thread-legacy" / "user-data" / "uploads"
@@ -419,6 +427,15 @@ class TestCleanupStaleUploadStagingFiles:
         (legacy_uploads / ".env").write_text("intentional dotfile")
         (legacy_uploads / ".upload-note.txt").write_text("intentional upload")
         (legacy_uploads / "draft.part").write_text("intentional upload")
+        for path in (
+            legacy_uploads / ".upload-old.part",
+            user_uploads / ".upload-new.part",
+            unrelated_uploads / ".upload-ignore.part",
+            legacy_uploads / ".env",
+            legacy_uploads / ".upload-note.txt",
+            legacy_uploads / "draft.part",
+        ):
+            _set_age(path, timedelta(days=2))
 
         removed = cleanup_stale_upload_staging_files(tmp_path)
 
@@ -429,6 +446,73 @@ class TestCleanupStaleUploadStagingFiles:
         assert (legacy_uploads / ".env").exists()
         assert (legacy_uploads / ".upload-note.txt").exists()
         assert (legacy_uploads / "draft.part").exists()
+
+    def test_keeps_staging_files_younger_than_the_default_guard(self, tmp_path):
+        """On a volume shared by several Gateway replicas, a young ``.part`` may be
+        an upload another replica is still writing; only old ones are orphans."""
+        uploads_dir = tmp_path / "users" / "owner-1" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        fresh = uploads_dir / ".upload-fresh.part"
+        recent = uploads_dir / ".upload-recent.part"
+        old = uploads_dir / ".upload-old.part"
+        for path in (fresh, recent, old):
+            path.write_text("partial")
+        _set_age(recent, timedelta(hours=23))
+        _set_age(old, timedelta(hours=25))
+
+        removed = cleanup_stale_upload_staging_files(tmp_path)
+
+        assert removed == 1
+        assert fresh.exists()
+        assert recent.exists()
+        assert not old.exists()
+
+    def test_min_age_is_configurable(self, tmp_path):
+        uploads_dir = tmp_path / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        young = uploads_dir / ".upload-young.part"
+        old = uploads_dir / ".upload-old.part"
+        for path in (young, old):
+            path.write_text("partial")
+        _set_age(young, timedelta(minutes=1))
+        _set_age(old, timedelta(minutes=10))
+
+        removed = cleanup_stale_upload_staging_files(tmp_path, min_age=timedelta(minutes=5))
+
+        assert removed == 1
+        assert young.exists()
+        assert not old.exists()
+
+    def test_keeps_staging_file_when_its_age_cannot_be_read(self, tmp_path, caplog):
+        uploads_dir = tmp_path / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        old = uploads_dir / ".upload-old.part"
+        old.write_text("partial")
+        _set_age(old, timedelta(days=2))
+
+        with (
+            patch("deerflow.uploads.manager._staging_entry_mtime", side_effect=PermissionError(errno.EACCES, "denied")),
+            caplog.at_level("WARNING", logger="deerflow.uploads.manager"),
+        ):
+            removed = cleanup_stale_upload_staging_files(tmp_path)
+
+        assert removed == 0
+        assert old.exists()
+        assert any("keeping it" in record.getMessage() for record in caplog.records)
+
+    def test_skips_staging_file_that_vanished_before_its_age_was_read(self, tmp_path, caplog):
+        uploads_dir = tmp_path / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        (uploads_dir / ".upload-gone.part").write_text("partial")
+
+        with (
+            patch("deerflow.uploads.manager._staging_entry_mtime", side_effect=FileNotFoundError),
+            caplog.at_level("WARNING", logger="deerflow.uploads.manager"),
+        ):
+            removed = cleanup_stale_upload_staging_files(tmp_path)
+
+        assert removed == 0
+        assert caplog.records == []
 
 
 # ---------------------------------------------------------------------------

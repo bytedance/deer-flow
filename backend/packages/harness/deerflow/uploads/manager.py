@@ -9,6 +9,8 @@ import logging
 import os
 import shutil
 import stat
+import time
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -30,6 +32,9 @@ logger = logging.getLogger(__name__)
 
 UPLOAD_STAGING_PREFIX = ".upload-"
 UPLOAD_STAGING_SUFFIX = ".part"
+# Staging files younger than this are treated as in flight by the startup sweep.
+# Mirrors the project-document ``.staging`` orphan guard (``projects/trash.py``).
+UPLOAD_STAGING_MIN_AGE = timedelta(hours=24)
 
 _MAX_FILENAME_BYTES = 255
 
@@ -181,9 +186,22 @@ def _iter_upload_dirs(base_dir: Path):
     yield from base_dir.glob("users/*/threads/*/user-data/uploads")
 
 
-def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> int:
-    """Remove orphaned Gateway upload staging files left by a hard crash."""
+def _staging_entry_mtime(entry: os.DirEntry[str]) -> float:
+    return entry.stat(follow_symlinks=False).st_mtime
+
+
+def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None, *, min_age: timedelta = UPLOAD_STAGING_MIN_AGE) -> int:
+    """Remove orphaned Gateway upload staging files left by a hard crash.
+
+    Only ``.upload-*.part`` files whose mtime is older than *min_age* are
+    removed. The uploads directories may live on a volume shared by several
+    Gateway replicas, so at startup a staging file can belong to an upload
+    another replica is still writing; each chunk write refreshes its mtime,
+    which keeps it younger than the guard until it is committed or abandoned.
+    A file whose age cannot be read is kept, never removed on a guess.
+    """
     root = Path(base_dir) if base_dir is not None else get_paths().base_dir
+    cutoff = time.time() - min_age.total_seconds()
     removed = 0
     for uploads_dir in _iter_upload_dirs(root):
         if not uploads_dir.is_dir():
@@ -192,6 +210,14 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None) -> in
             with os.scandir(uploads_dir) as entries:
                 for entry in entries:
                     if not is_upload_staging_file(entry.name) or not entry.is_file(follow_symlinks=False):
+                        continue
+                    try:
+                        if _staging_entry_mtime(entry) >= cutoff:
+                            continue
+                    except FileNotFoundError:
+                        continue
+                    except OSError:
+                        logger.warning("Could not read the age of upload staging file %s; keeping it", entry.path, exc_info=True)
                         continue
                     try:
                         os.unlink(entry.path)

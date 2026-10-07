@@ -3,6 +3,8 @@ import errno
 import os
 import stat
 import threading
+import time
+from datetime import timedelta
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -18,6 +20,7 @@ from app.gateway.deps import get_config
 from app.gateway.routers import uploads
 from deerflow.sandbox.lease import get_sandbox_lease_manager
 from deerflow.uploads.companions import resolve_companion
+from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
 
 class ChunkedUpload:
@@ -747,13 +750,14 @@ def test_upload_files_in_flight_upload_is_invisible_to_listings(tmp_path):
 
 def test_orphaned_staging_part_is_hidden_from_listings_and_swept(tmp_path):
     """A crashed upload leaves only a hidden ``.upload-*.part`` file: the
-    listing never exposes it and the startup cleanup removes it."""
-    from deerflow.uploads.manager import cleanup_stale_upload_staging_files
-
+    listing never exposes it and, once it is older than the in-flight guard,
+    the startup cleanup removes it."""
     thread_uploads_dir = tmp_path / "threads" / "t1" / "user-data" / "uploads"
     thread_uploads_dir.mkdir(parents=True)
     orphan = thread_uploads_dir / ".upload-crashed.part"
     orphan.write_bytes(b"partial")
+    stale = time.time() - timedelta(days=2).total_seconds()
+    os.utime(orphan, (stale, stale))
     visible = thread_uploads_dir / "kept.txt"
     visible.write_bytes(b"kept")
 
@@ -762,6 +766,58 @@ def test_orphaned_staging_part_is_hidden_from_listings_and_swept(tmp_path):
     assert cleanup_stale_upload_staging_files(tmp_path) == 1
     assert not orphan.exists()
     assert visible.read_bytes() == b"kept"
+
+
+def test_startup_cleanup_keeps_an_in_flight_upload_on_a_shared_volume(tmp_path):
+    """Several Gateway replicas can share one home volume. A replica starting
+    while another one is still writing a ``.upload-*.part`` must not sweep it:
+    that upload would lose its staged bytes at the atomic link and fail."""
+    thread_uploads_dir = tmp_path / "threads" / "thread-local" / "user-data" / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = _mounted_provider()
+    real_write = uploads._write_upload_chunk
+    write_started = threading.Event()
+    release_write = threading.Event()
+
+    def gated_write(upload_temp, chunk) -> None:
+        write_started.set()
+        assert release_write.wait(timeout=10)
+        real_write(upload_temp, chunk)
+
+    results = []
+
+    def run_upload() -> None:
+        file = ChunkedUpload("notes.txt", [b"hello"])
+        try:
+            results.append(asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace())))
+        except BaseException as exc:  # noqa: BLE001 - surfaced through the assertions below
+            results.append(exc)
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        patch.object(uploads, "_write_upload_chunk", side_effect=gated_write),
+    ):
+        upload_thread = threading.Thread(target=run_upload)
+        upload_thread.start()
+        assert write_started.wait(timeout=10)
+        staged = [p.name for p in thread_uploads_dir.iterdir()]
+        assert len(staged) == 1 and staged[0].startswith(".upload-") and staged[0].endswith(".part")
+
+        # Another replica starts up mid-upload and runs its staging sweep.
+        assert cleanup_stale_upload_staging_files(tmp_path) == 0
+        assert [p.name for p in thread_uploads_dir.iterdir()] == staged
+
+        release_write.set()
+        upload_thread.join(timeout=15)
+
+    assert not upload_thread.is_alive()
+    assert not isinstance(results[0], BaseException), results[0]
+    assert results[0].success is True
+    assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello"
+    assert [p.name for p in thread_uploads_dir.iterdir()] == ["notes.txt"]
 
 
 def test_upload_files_rejects_oversized_single_file_and_removes_partial_file(tmp_path):

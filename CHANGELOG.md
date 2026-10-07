@@ -804,6 +804,15 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **uploads:** The Gateway's startup sweep of orphaned `.upload-*.part` staging
+  files now skips files younger than 24 hours. The sweep removed every staging
+  file it found, which was right for one Gateway but not for several replicas
+  sharing a home volume: a replica starting during a rolling update deleted the
+  staging file of an upload another replica was still writing, and that upload
+  then failed at its atomic commit. Chunk writes refresh the staging file's
+  mtime, so an upload in flight stays younger than the guard; a crash leftover
+  is collected by the first startup more than 24 hours later, the same guard
+  project-document staging already uses.
 - **frontend:** Retrying a message after its attachment upload fails now keeps
   the context that was attached to it. The composer dropped its quotes,
   conversation references, staged project files and stored draft as soon as a
