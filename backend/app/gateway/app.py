@@ -394,6 +394,28 @@ async def _shutdown_startup_trash_sweep(app: FastAPI) -> None:
         logger.exception("Startup trash sweep failed during shutdown")
 
 
+async def _shutdown_scheduled_task_service(app: FastAPI) -> None:
+    """Bound scheduler stop so a stuck poll cannot block Gateway exit.
+
+    ``asyncio.wait_for`` cancels the ``stop()`` coroutine at the deadline.
+    If the scheduler is already stuck inside an iteration, its owned poll task
+    may remain pending until event-loop teardown; this helper bounds Gateway
+    shutdown latency rather than promising completion of stuck scheduler work.
+    """
+    service = getattr(app.state, "scheduled_task_service", None)
+    if service is None:
+        return
+    try:
+        await asyncio.wait_for(service.stop(), timeout=_SHUTDOWN_HOOK_TIMEOUT_SECONDS)
+    except TimeoutError:
+        logger.warning(
+            "Scheduled task service shutdown exceeded %.1fs; proceeding with worker exit.",
+            _SHUTDOWN_HOOK_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.exception("Failed to stop scheduled task service")
+
+
 def _scheduled_task_notification_repos(startup_config: AppConfig):
     """Return ``(connection_repo, notification_repo)`` for the scheduled-run outbox (issue #4254).
 
@@ -810,11 +832,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to stop channel service")
 
-        if getattr(app.state, "scheduled_task_service", None) is not None:
-            try:
-                await app.state.scheduled_task_service.stop()
-            except Exception:
-                logger.exception("Failed to stop scheduled task service")
+        await _shutdown_scheduled_task_service(app)
+
 
         if getattr(app.state, "mcp_task_service", None) is not None:
             app.state.mcp_tasks_available = False
