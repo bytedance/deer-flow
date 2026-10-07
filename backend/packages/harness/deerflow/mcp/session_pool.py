@@ -318,6 +318,13 @@ class MCPSessionPool:
                 self._signal_close(loop, close_evt)
                 self._cancel_owner(loop, task, ready)
 
+        # Owners are already out of the registry, so retain their teardown even
+        # if the caller never awaits the returned PreparedRetirement.
+        for _session, loop, task, _close_evt in entries:
+            self._track_detached_owner(loop, task)
+        for loop, _ready, task, _close_evt in inflight:
+            self._track_detached_owner(loop, task)
+
         return PreparedRetirement(entries=tuple(entries), inflight=tuple(inflight))
 
     def retire_all(self) -> None:
@@ -362,6 +369,11 @@ class MCPSessionPool:
                 if self._binding_is_current(expected_binding):
                     ready.set_exception(error)
                 else:
+                    logger.debug(
+                        "Suppressing MCP session error for superseded binding '%s'",
+                        expected_binding.server_name,
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
                     ready.set_exception(StaleMCPBindingError(expected_binding.server_name))
             return
 
@@ -411,6 +423,11 @@ class MCPSessionPool:
                 if self._binding_is_current(expected_binding):
                     ready.set_exception(error)
                 else:
+                    logger.debug(
+                        "Suppressing MCP session error for superseded binding '%s'",
+                        expected_binding.server_name,
+                        exc_info=(type(error), error, error.__traceback__),
+                    )
                     ready.set_exception(StaleMCPBindingError(expected_binding.server_name))
         finally:
             try:
@@ -506,6 +523,10 @@ class MCPSessionPool:
 
         if join is not None:
             session = await asyncio.shield(join)
+            # Check-before-return fence, not a lease across subsequent caller
+            # use: a reconcile racing after this check detaches and closes the
+            # owner, and the caller then fails through the existing transport
+            # disconnect path.
             if not self._binding_is_current(expected_binding):
                 raise StaleMCPBindingError(server_name)
             return session
@@ -528,6 +549,7 @@ class MCPSessionPool:
                         self._inflight.pop(key)
             raise
 
+        # Same check-before-return fence as the joiner path above; not a lease.
         if not self._binding_is_current(expected_binding):
             raise StaleMCPBindingError(server_name)
         return session
@@ -602,6 +624,33 @@ class MCPSessionPool:
         except RuntimeError:
             # Loop was closed between the is_closed() check and now.
             pass
+
+    def _track_detached_owner(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        task: asyncio.Task[Any],
+    ) -> None:
+        """Keep an owner detached by binding reconciliation strongly retained.
+
+        ``reconcile_bindings()`` removes owners from the registry without
+        awaiting their teardown, so the pool itself must keep that teardown
+        observable even when the caller drops the returned
+        ``PreparedRetirement``. The reaper has to run on the owner's loop, which
+        is where ``__aexit__`` executes.
+        """
+        try:
+            current_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if loop is current_loop:
+            self._track_owner_teardown(task)
+        elif not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(self._track_owner_teardown, task)
+            except RuntimeError:
+                # Loop was closed between the is_closed() check and now.
+                pass
 
     def _track_owner_teardown(self, task: asyncio.Task[Any]) -> None:
         """Keep detached eviction or cancelled-caller teardown observable.

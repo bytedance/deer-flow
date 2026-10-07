@@ -569,7 +569,8 @@ def _make_session_pool_tool(
     if tool_name_prefix and original_name.startswith(prefix):
         original_name = original_name[len(prefix) :]
 
-    pool = pool or get_session_pool()
+    if pool is None:
+        pool = get_session_pool()
     if binding is None and isinstance(pool, MCPSessionPool):
         binding = pool.ensure_binding(
             server_name,

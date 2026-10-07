@@ -296,6 +296,64 @@ async def test_durable_stdio_call_binds_base_connection_before_workspace_augment
     )
 
 
+def test_ensure_binding_rejects_changed_fingerprint():
+    pool = MCPSessionPool()
+    pool.ensure_binding("A", "fp-a")
+
+    with pytest.raises(StaleMCPBindingError):
+        pool.ensure_binding("A", "fp-b")
+
+
+def test_ensure_binding_rejects_tombstoned_server():
+    pool = MCPSessionPool()
+    pool.ensure_binding("A", "same-fp")
+    pool.reconcile_bindings({}, ("A",))
+
+    # remove -> identical re-add must not re-authorize from fingerprint equality
+    with pytest.raises(StaleMCPBindingError):
+        pool.ensure_binding("A", "same-fp")
+
+
+def test_ensure_binding_rejects_retired_pool():
+    pool = MCPSessionPool()
+    pool.retire_all()
+
+    with pytest.raises(StaleMCPBindingError):
+        pool.ensure_binding("A", "fp-a")
+
+
+@pytest.mark.asyncio
+async def test_reconcile_retains_detached_owners_when_retirement_is_dropped():
+    """Detached owners keep a tracked teardown even without PreparedRetirement."""
+    pool = MCPSessionPool()
+    binding = pool.ensure_binding("A", "a1")
+    gate = asyncio.Event()
+    cm = _GatedSessionCm(gate)
+
+    with patch("langchain_mcp_adapters.sessions.create_session", return_value=cm):
+        creator = asyncio.create_task(pool.get_session("A", "u:t", _CONNECTION, binding=binding))
+        await asyncio.wait_for(cm.initialize_started.wait(), 1)
+
+        # Return value deliberately dropped: the pool itself must retain the
+        # detached owner's teardown instead of leaving a dangling task.
+        pool.reconcile_bindings({"A": "a2"}, ())
+        reapers = set(pool._teardown_tasks)
+        assert reapers, "detached owner teardown was not retained"
+
+        gate.set()
+        with pytest.raises(StaleMCPBindingError):
+            await asyncio.wait_for(creator, 1)
+
+        await asyncio.wait_for(asyncio.gather(*reapers, return_exceptions=True), 1)
+        deadline = asyncio.get_running_loop().time() + 1
+        while pool._teardown_tasks and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0)
+
+    assert not pool._teardown_tasks
+    assert cm.closed is True
+    assert cm.exit_task is cm.enter_task
+
+
 @pytest.mark.asyncio
 async def test_joiner_rechecks_binding_after_ready_resolves():
     """A joiner cannot return a session superseded after ready resolved.
