@@ -59,9 +59,11 @@ export default function ChatsPage() {
 
   const filteredThreads = useMemo(() => {
     return threads.filter((thread) => {
-      return titleOfThread(thread).toLowerCase().includes(search.toLowerCase());
+      return titleOfThread(thread, t.pages.untitled)
+        .toLowerCase()
+        .includes(search.toLowerCase());
     });
-  }, [threads, search]);
+  }, [threads, search, t.pages.untitled]);
 
   // Sentinel-based auto load-more for the unfiltered list (issue #3482).
   // In search mode we deliberately do NOT auto-paginate, otherwise an empty
@@ -156,7 +158,7 @@ export default function ChatsPage() {
                               <div className="flex min-w-0 items-center gap-2">
                                 <ThreadChannelIcon source={channelSource} />
                                 <div className="min-w-0 flex-1 truncate">
-                                  {titleOfThread(thread)}
+                                  {titleOfThread(thread, t.pages.untitled)}
                                 </div>
                                 <ThreadChannelBadge
                                   source={channelSource}

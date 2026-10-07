@@ -34,8 +34,13 @@ def _app_with_config(
     knowledge_base_enabled: bool = False,
     scope_selection_enabled: bool = False,
     knowledge_search_provider: str | None = None,
+    scheduled_task_repo_available: bool = False,
+    scheduler_running: bool = False,
+    scheduler_tool_enabled: bool = False,
 ) -> FastAPI:
     app = FastAPI()
+    app.state.scheduled_task_repo = object() if scheduled_task_repo_available else None
+    app.state.scheduled_task_service = SimpleNamespace(is_running=scheduler_running) if scheduled_task_repo_available else None
     app.state.mcp_tasks_available = mcp_tasks_available
     app.state.subagent_batches_available = subagent_batches_available
     if subagent_batch_repo_available is None:
@@ -55,6 +60,7 @@ def _app_with_config(
             enabled=knowledge_base_enabled,
             scope_selection_enabled=scope_selection_enabled,
         ),
+        scheduler=SimpleNamespace(enabled=scheduler_running, tool_enabled=scheduler_tool_enabled, min_once_delay_seconds=60),
     )
     search_tool = SimpleNamespace(use=knowledge_search_provider) if knowledge_search_provider is not None else None
     fake_config.get_tool_config = lambda name: search_tool if name == "knowledge_search" else None
@@ -80,6 +86,7 @@ def test_features_reports_agents_api_enabled() -> None:
         "knowledge_base": {
             "scope_selection_enabled": False,
         },
+        "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60},
     }
 
 
@@ -101,6 +108,7 @@ def test_features_reports_agents_api_disabled() -> None:
         "knowledge_base": {
             "scope_selection_enabled": False,
         },
+        "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60},
     }
 
 
@@ -229,3 +237,21 @@ def test_features_reports_browser_control_disabled_for_unguarded_cdp() -> None:
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json()["browser_control"] == {"enabled": False}
+
+
+@pytest.mark.parametrize(
+    ("repo", "running", "tool", "expected"),
+    [
+        (False, False, False, {"available": False, "running": False, "tool_enabled": False}),
+        (True, False, True, {"available": True, "running": False, "tool_enabled": False}),
+        (True, True, False, {"available": True, "running": True, "tool_enabled": False}),
+        (True, True, True, {"available": True, "running": True, "tool_enabled": True}),
+    ],
+    ids=["no-repo", "repo-service-not-running", "running-tool-off", "running-tool-on"],
+)
+def test_features_reports_scheduled_tasks_process_state(repo: bool, running: bool, tool: bool, expected: dict) -> None:
+    app = _app_with_config(agents_api_enabled=True, scheduled_task_repo_available=repo, scheduler_running=running, scheduler_tool_enabled=tool)
+    with TestClient(app) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["scheduled_tasks"] == {**expected, "min_interval_seconds": 60}

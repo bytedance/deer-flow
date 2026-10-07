@@ -780,6 +780,8 @@ cleanup when migrating from legacy metadata credentials.
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
+Cancelling a channel restart discards its pending configuration reload, preserving newer runtime settings applied afterward.
+
 DeerFlow can also expose user-owned IM channel connections in the workspace UI. When `channel_connections` is enabled, logged-in users can bind Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, WeCom, QQ, or Buzz from the sidebar / Settings > Channels. It reuses the existing outbound `channels.*` transports, so no public IP or provider callback URL is required. Incoming IM messages then run under the connected DeerFlow user account. See [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md) for setup and security notes.
 
 | Channel | Transport | Difficulty |
@@ -970,6 +972,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 5. For Docker Compose deployments, keep `state_dir` on a persistent volume so the `get_updates_buf` cursor and saved auth state survive restarts.
 6. Outbound images/files enforce `max_outbound_image_bytes` / `max_outbound_file_bytes` (20 MiB / 50 MiB defaults) while reading, including files that grow after resolution. Oversize reads are rejected before encryption/upload instead of sending a truncated prefix. Non-positive limits disable the corresponding cap.
 7. `allowed_users` takes iLink user IDs. Unset, `null`, `[]`, or a blank string allows everyone. A single ID is one entry, not a sequence of characters, and an unquoted integer-valued number is stored as that integer's text. A scalar string containing commas or interior whitespace logs a warning but remains one literal ID; use a YAML list for multiple IDs. Invalid entries are ignored with a warning; any other configured value that yields no valid ID denies every user and logs an error. `/connect` is still accepted before that check, and a denied sender is dropped before inbound media is downloaded.
+8. Shutdown waits for in-flight cursor writes. On token expiry, DeerFlow persists the cursor reset and removes the saved token before completing poller cancellation.
 
 **WeCom Setup**
 
@@ -2482,20 +2485,56 @@ Current MVP limits:
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 
+### Lifecycle, safety caps and stop conditions
+
+- The tasks page and the REST API (`POST` / `PATCH /api/scheduled-tasks`) accept the same per-run goal (`goal_objective`), safety cap (`max_runs`, `end_at`) and stop condition (`stop_condition`) as a conversation. Sending `null` in a PATCH clears any of these four; an `end_at` without a UTC offset is wall-clock time in the task's timezone.
+- A stop condition is the user's "stop when …" rule. It is stored in its own field (migration `0031`), never inside the task instructions. Only when a run starts does DeerFlow append it to that run's message and ask the run to call `stop_scheduled_task` when the rule holds. While `scheduler.tool_enabled` is on, every scheduled run can stop its own schedule, whether a chat or the tasks page created the task; with it off, the run is asked to report a met rule instead of calling a tool it does not have.
+- Goal tasks created on the tasks page are now evaluated like chat-created ones, and their runs also receive the saved notes and the previous-run reference.
+- Resume computes the next run from now, so a long pause never causes a catch-up run. A one-time task whose time has passed returns `422 once_time_passed` and needs a new time. Resuming an active task changes nothing; pausing a finished task returns `409 task_finished`.
+- `max_runs` is a lifetime total of automatic runs; trial runs never count. Reactivating a task whose cap is used up (Resume, or a PATCH that re-arms a finished task's schedule) returns `409 limits_exhausted` unless the same request renews the limit that ran out: a used-up run limit needs a higher `max_runs` or `null`, a passed end time needs a later `end_at` or `null` (a later `end_at` alone does not renew a used-up `max_runs`). `POST /api/scheduled-tasks/{task_id}/resume` accepts an optional `{"max_runs": …, "end_at": …}` body for that (`null` clears a cap; chat-created sub-hourly tasks must keep one). A PATCH that only changes the cap of a finished task saves it and leaves the task finished.
+- Goal-check failures (the evaluator failed, or the conversation changed during the check) neither count toward the three-miss automatic pause nor reset it. Changing the goal, the instructions or the stop condition, or adding a note, starts a new count; Resume keeps it.
+- While this Gateway process's scheduler is not running, creating a task (including Duplicate) returns `409 scheduler_not_running`, because the task would never run on schedule. `GET /api/features` reports `scheduled_tasks.available`, `running`, `tool_enabled` and `min_interval_seconds`.
+- Errors from `/api/scheduled-tasks*` are `{"detail": {"code", "message", "params"}}`; see [`backend/docs/API.md`](backend/docs/API.md#scheduled-tasks) and `contracts/scheduled_task_errors_contract.json`.
+
 ### Create schedules in a conversation
 
 Set both `scheduler.enabled: true` and `scheduler.tool_enabled: true`, then restart
-Gateway. An authorized interactive turn can use `schedule_task` to create, list,
-pause or delete tasks belonging to that conversation. For example: “Prepare a
-weekly meeting report every Monday at 9 AM in Asia/Shanghai for four weeks.”
-The tool returns the exact prompt, schedule, optional goal and stop method.
-Recurring report/file jobs may offer a manual trial; the trial requires your
-request and does not count toward the scheduled-launch limit.
+Gateway. An authorized interactive turn can use `schedule_task` to create, update,
+list, pause, resume or delete tasks, start a trial run, or save a note. For
+example: “Every weekday at 9:00, check release-checklist.md and tell me what is
+still unchecked; stop when everything is checked.” In the web app the result is a
+live card with the schedule, the stop condition and buttons, and the agent
+replies in one or two sentences; IM and other non-web turns describe the
+schedule, the next run and the stop condition in plain text.
+
+- **Which tasks a conversation manages.** The tasks created in it, and, in a run
+  conversation (the chat a scheduled run posted into), the task that run belongs
+  to: “pause this” or “move it to 10:00” work there too. This applies only to
+  turns you send. A scheduled run itself can only pause its own schedule with
+  `stop_scheduled_task`.
+- **Edits keep the task.** Changing the time, instructions, goal, stop condition
+  or safety cap is an `update` of the same task, so its ID and run history stay.
+  `resume` restarts a paused or finished task without a catch-up run. When the
+  cap is used up, the agent asks how to renew the limit that ran out (a higher
+  `max_runs` or none; a later `end_at` or none) and sends that with the resume.
+- **Timezone.** A zone you name wins. Otherwise a new task uses the browser
+  timezone the web app sends with each message (`context.client_timezone`, read
+  only for this), and the result says which zone was used. Intervals and
+  one-time times with a UTC offset need no zone; for a cron schedule or a local
+  one-time time with no known zone (for example from IM), the agent asks. Edits
+  keep the saved zone; the browser zone never changes an existing task.
+- **Where results appear.** Each run posts its result in a new chat of its own,
+  titled “{task} · {local time}”, or in the originating chat when the task runs
+  there. Nothing else is posted back to the originating conversation. A run chat
+  shows the task instructions as one collapsed “Task instructions” block under
+  the run's header instead of a long user message.
+- **Language.** The agent writes the title, instructions and stop condition in
+  your language, and scheduled runs answer in the language of the instructions.
 
 New tasks default to a fresh conversation for each occurrence. A configured
 `goal_objective` applies only to that occurrence: success does not stop a
 recurring schedule. The running agent can request `stop_scheduled_task` for its
-own schedule when your overall end condition has been met; the request takes
+own schedule when your stop condition has been met; the request takes
 effect during terminal finalization. `max_runs` counts automatic launches only,
 and `end_at` provides a deadline. Either end condition takes precedence over a
 pause request. Tool-created sub-hourly schedules require an end condition; each
@@ -2504,21 +2543,25 @@ owner may keep at most 20 live tool-created tasks, including paused tasks.
 An unmet occurrence is recorded as `unmet`, distinct from an execution failure.
 Three eligible automatic unmet occurrences pause a recurring task. Accepted
 success resets the streak, including a success relying on disclosed assumptions;
-manual trials, interruption, execution failure and external waiting do not
-advance it. Resume retains the streak, so another eligible unmet occurrence can
+manual trials, interruption, execution failure, external waiting and
+goal-check failures do not advance it. Resume retains the streak, so another eligible unmet occurrence can
 pause the task again. Existing notification bindings receive goal-unmet and
 auto-pause notices through the same durable outbox; manual trials stay silent.
 
-You can ask the agent in the originating conversation to save an explicit note
-for future runs (at most 10 notes of 500 characters). Fresh recurring runs may
-read the previous executed occurrence through opt-in `read_conversation`, with
-the same owner and read-permission checks. This provides a source reference,
-not an automatic summary or a post-back into the originating chat.
+You can ask the agent in a conversation that manages the task to save an
+explicit note for future runs (at most 10 notes of 500 characters). Fresh
+recurring runs may read the previous executed occurrence through opt-in
+`read_conversation`, with the same owner and read-permission checks. This
+provides a source reference, not an automatic summary or a post-back into the
+originating chat.
 
-For a trial, send a direct request such as "Run this task now" or "先跑一次".
+For a trial, ask directly, for example “Run it now”, “OK, run it now” or
+“先跑一次吧”; in the web app the card's **Run once now** button does the same.
 The host accepts a bounded set of English/Chinese direct-run requests from the
-current user turn; task mentions, quoted or conditional requests, and a bare
-"yes" do not start a paid run. The agent asks for a direct request when needed.
+current user turn, optionally after a short acknowledgement such as “Sure,” or
+“好的，”. A bare “yes” or “好”, task mentions, and quoted or conditional requests
+do not start a paid run. When a run is already waiting to start, no extra trial
+is added and the agent says so. A trial does not count toward `max_runs`.
 
 A goal occurrence can use up to nine agent turns, with an evaluator request after
 each. Evaluator requests and provider-reported tokens are included in run usage;

@@ -27,7 +27,8 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0024_project_documents` → `0025_repair_run_change_seq` →
 `0026_mcp_task_lease_tokens` → `0027_notification_deliveries` →
 `0028_parked_attempts` → `0029_scheduler_agent_tasks` →
-`0030_notification_claim_tokens` (current head). The preference
+`0030_notification_claim_tokens` → `0031_scheduled_streak_boundary`
+(current head). The preference
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to
@@ -169,6 +170,7 @@ on installs that never enabled it. The convention is:
 - `migrations/versions/0026_mcp_task_lease_tokens.py` — chains after `0025_repair_run_change_seq` and adds nullable `mcp_tasks.lease_token` / `notification_lease_token` columns so every poll, cancel, and notification mutation can be fenced to the exact claim generation
 - `migrations/versions/0027_notification_deliveries.py` — creates the scheduled-task IM notification outbox (`notification_deliveries`) with idempotency on `(task_run_id, event, provider, target)`; chains after `0026_mcp_task_lease_tokens`. Consumed by `ScheduledTaskService` enqueue + `NotificationDeliveryWorker` (issue #4254); no HTTP read surface yet
 - `migrations/versions/0028_parked_attempts.py` — adds `notification_deliveries.parked_attempts` so channel-down parking is capped; backfills with a temporary `server_default="0"` then drops it so the durable schema matches `create_all` (ORM Python-side `default=0` only). Chains after `0027_notification_deliveries`
+- `migrations/versions/0031_scheduled_streak_boundary.py` — adds nullable `scheduled_tasks.unmet_streak_after_seq` (occurrences at or below it never count toward the three-miss automatic pause; moved by goal/prompt/stop-condition/note edits, internal and never serialized) and nullable `scheduled_tasks.stop_condition` (the user's normalized "stop when …" rule, appended to the run message only at launch). Two nullable columns, so the bootstrap forward-compat floor is unchanged; chains after `0030_notification_claim_tokens`. Test: `tests/test_migration_0031_scheduled_streak_boundary.py`
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch provisioning decision, locked revision validation, and the narrow 0019 forward-compatibility exception
 - `extensions/loader.py::load_extensions` — registers each spec's `table_prefix` with `register_extension_table_prefix()`
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter, including extension-owned tables), `tests/test_extension_loader.py::TestTablePrefixRegistration` (spec-to-filter wiring), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps), `tests/test_migration_0025_repair_run_change_seq.py` (issue #5516 skipped-revision heal)

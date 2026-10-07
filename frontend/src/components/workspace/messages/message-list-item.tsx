@@ -530,7 +530,7 @@ function MessageContent_({
                   agent_name: reference.agentName,
                 })}
                 key={reference.threadId}
-                title={reference.title || "Untitled"}
+                title={reference.title || t.pages.untitled}
               />
             ))}
           </div>
