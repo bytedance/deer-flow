@@ -768,6 +768,41 @@ def test_orphaned_staging_part_is_hidden_from_listings_and_swept(tmp_path):
     assert visible.read_bytes() == b"kept"
 
 
+def test_startup_cleanup_reclaims_a_published_staging_alias_immediately(tmp_path):
+    """A Gateway that dies after the commit's ``os.link`` but before the staged
+    name is removed leaves ``notes.txt`` and its ``.upload-*.part`` alias on one
+    inode. The next startup must reclaim the alias at once: left in place, the
+    destination fails the multi-link check on its next replacement upload."""
+    from deerflow.uploads.manager import validate_upload_destination
+
+    thread_uploads_dir = tmp_path / "threads" / "thread-local" / "user-data" / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    provider = _mounted_provider()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        # The crash: the staged name is never removed after the link publishes the bytes.
+        patch.object(uploads, "_remove_staged_file"),
+    ):
+        file = ChunkedUpload("notes.txt", [b"hello"])
+        result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert result.success is True
+    names = sorted(p.name for p in thread_uploads_dir.iterdir())
+    assert names[-1] == "notes.txt" and len(names) == 2 and names[0].startswith(".upload-") and names[0].endswith(".part")
+    assert os.lstat(thread_uploads_dir / "notes.txt").st_nlink == 2
+    with pytest.raises(ValueError, match="multiple links"):
+        validate_upload_destination(thread_uploads_dir, "notes.txt")
+
+    assert cleanup_stale_upload_staging_files(tmp_path) == 1
+
+    assert [p.name for p in thread_uploads_dir.iterdir()] == ["notes.txt"]
+    assert (thread_uploads_dir / "notes.txt").read_bytes() == b"hello"
+    assert validate_upload_destination(thread_uploads_dir, "notes.txt") == thread_uploads_dir / "notes.txt"
+
+
 def test_startup_cleanup_keeps_an_in_flight_upload_on_a_shared_volume(tmp_path):
     """Several Gateway replicas can share one home volume. A replica starting
     while another one is still writing a ``.upload-*.part`` must not sweep it:

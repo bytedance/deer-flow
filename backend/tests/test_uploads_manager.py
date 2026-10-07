@@ -21,6 +21,7 @@ from deerflow.uploads.manager import (
     list_files_in_dir,
     normalize_filename,
     validate_path_traversal,
+    validate_upload_destination,
     write_upload_file_no_symlink,
 )
 
@@ -491,7 +492,7 @@ class TestCleanupStaleUploadStagingFiles:
         _set_age(old, timedelta(days=2))
 
         with (
-            patch("deerflow.uploads.manager._staging_entry_mtime", side_effect=PermissionError(errno.EACCES, "denied")),
+            patch("deerflow.uploads.manager._staging_entry_stat", side_effect=PermissionError(errno.EACCES, "denied")),
             caplog.at_level("WARNING", logger="deerflow.uploads.manager"),
         ):
             removed = cleanup_stale_upload_staging_files(tmp_path)
@@ -500,13 +501,46 @@ class TestCleanupStaleUploadStagingFiles:
         assert old.exists()
         assert any("keeping it" in record.getMessage() for record in caplog.records)
 
+    def test_removes_published_alias_at_any_age_but_keeps_lone_young_part(self, tmp_path):
+        """A crash between the commit's ``os.link`` and the staged-name removal
+        leaves the final file and its ``.part`` alias sharing one inode. The
+        alias is reclaimed on the next startup regardless of age, or the
+        destination would fail the multi-link check on its next replacement;
+        a lone young part next to it is still treated as in flight."""
+        uploads_dir = tmp_path / "users" / "owner-1" / "threads" / "thread-1" / "user-data" / "uploads"
+        uploads_dir.mkdir(parents=True)
+        published = uploads_dir / "notes.txt"
+        published.write_bytes(b"published bytes")
+        alias = uploads_dir / ".upload-abc123.part"
+        try:
+            os.link(published, alias)
+        except OSError as exc:  # pragma: no cover - filesystems without hard links
+            pytest.skip(f"hard links unsupported here: {exc}")
+        in_flight = uploads_dir / ".upload-inflight.part"
+        in_flight.write_bytes(b"partial")
+        with pytest.raises(UnsafeUploadPathError, match="multiple links"):
+            validate_upload_destination(uploads_dir, "notes.txt")
+
+        removed = cleanup_stale_upload_staging_files(tmp_path)
+
+        assert removed == 1
+        assert not alias.exists()
+        assert in_flight.exists()
+        assert published.read_bytes() == b"published bytes"
+        assert os.lstat(published).st_nlink == 1
+        assert validate_upload_destination(uploads_dir, "notes.txt") == published
+        replacement = tmp_path / "replacement.txt"
+        replacement.write_bytes(b"replacement bytes")
+        assert copy_upload_file_no_symlink(uploads_dir, "notes.txt", replacement) == published
+        assert published.read_bytes() == b"replacement bytes"
+
     def test_skips_staging_file_that_vanished_before_its_age_was_read(self, tmp_path, caplog):
         uploads_dir = tmp_path / "threads" / "thread-1" / "user-data" / "uploads"
         uploads_dir.mkdir(parents=True)
         (uploads_dir / ".upload-gone.part").write_text("partial")
 
         with (
-            patch("deerflow.uploads.manager._staging_entry_mtime", side_effect=FileNotFoundError),
+            patch("deerflow.uploads.manager._staging_entry_stat", side_effect=FileNotFoundError),
             caplog.at_level("WARNING", logger="deerflow.uploads.manager"),
         ):
             removed = cleanup_stale_upload_staging_files(tmp_path)

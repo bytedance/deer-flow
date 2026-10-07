@@ -812,7 +812,11 @@ This release closes that milestone with **439 merged pull requests**.
   then failed at its atomic commit. Chunk writes refresh the staging file's
   mtime, so an upload in flight stays younger than the guard; a crash leftover
   is collected by the first startup more than 24 hours later, the same guard
-  project-document staging already uses. ([#6445])
+  project-document staging already uses. A staging file that already shares
+  its inode with the published upload (a crash between the atomic link and the
+  staged-name removal) is still reclaimed on the next startup at any age, so
+  that destination does not fail the multi-link safety check on its next
+  replacement. ([#6445])
 - **frontend:** Retrying a message after its attachment upload fails now keeps
   the context that was attached to it. The composer dropped its quotes,
   conversation references, staged project files and stored draft as soon as a
