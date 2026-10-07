@@ -108,9 +108,10 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 
 **Extensions Config Caching**: `get_extensions_config()` caches the parsed file but revalidates it on every call against the resolved path and the `(mtime, size, sha256)` signature from `file_signature.get_config_signature`, so an edit made by another Gateway worker, or by another instance sharing the file (the Helm home volume, the compose bind mount), is visible to this process on its next read without a restart or an explicit reload. Writers (MCP router, skill toggle, `DeerFlowClient`) still call `reload_extensions_config()` after their write, which records the written revision so the next read does not reload it again. Once a configuration has been loaded, a revision that cannot be loaded — the file vanished, or it is truncated or invalid, for example midway through the non-atomic `EBUSY` overwrite fallback — keeps the last-known-good configuration and is logged once at warning level with the exception type only (validation messages can embed resolved `$VAR` secrets); the first load still raises, so a broken file at startup stays loud. `reload_extensions_config(config_path=...)` makes the cache follow that file (later edits included) until a reset or an argument-less reload. `set_extensions_config()` pins an injected instance until `reload_extensions_config()` or `reset_extensions_config()`; tests that inject one must reset it afterwards, because the `extensions` snapshot of `get_app_config()` follows the pinned instance too. The local-bash absolute path allowlist (`sandbox/tools.py::_get_mcp_allowed_paths`) is derived from this singleton, which is why the revalidation is a security property rather than an optimization. Pinned by `tests/test_extensions_config_freshness.py` and the extensions cases in `tests/test_app_config_reload.py`.
 
-Freshness reloads parse the probed path explicitly. A search-mode file vanishing
-between signature collection and parsing must retain the last-known-good cache,
-including AppConfig's middleware snapshot, until a readable revision returns.
+Extensions loads parse the bytes from `read_config_with_signature`, recording
+that read's digest rather than an earlier probe's. Freshness reloads read the
+probed path explicitly; a missing or invalid revision keeps the last-known-good
+cache, including AppConfig's middleware snapshot, until a readable revision returns.
 
 ### Config Schema
 

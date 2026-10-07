@@ -43,6 +43,11 @@ URI. Reuse the normalized config for reopening and teardown, and drop only the
 fixture's UUID schema. This is test-only handling; production connection and
 TLS policy are unchanged.
 
+The 0033 batch-evidence migration fixture uses the same adapter. Its connection
+contract probes execute the actual migration test setup through SQLAlchemy's
+dialect argument conversion, stopping before database acquisition; the real
+SQLite/PostgreSQL cases still exercise upgrade, downgrade and re-upgrade.
+
 ## Real Compose tests
 
 `support/compose.py` probes `docker compose version --short` and requires Compose

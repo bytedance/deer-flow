@@ -28,11 +28,14 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0026_mcp_task_lease_tokens` → `0027_notification_deliveries` →
 `0028_parked_attempts` → `0029_scheduler_agent_tasks` →
 `0030_notification_claim_tokens` → `0031_scheduled_streak_boundary` →
-`0032_activity_and_task_events` (current head). The preference
+`0032_activity_and_task_events` → `0033_batch_result_artifact`
+(current head). The preference
 revision adds a separate owner/key table with a cascading users foreign key and
 does not alter users; the project-documents revision adds a new owner-scoped
 shelf table, and the MCP lease-token revision adds two nullable token columns to
-`mcp_tasks`, so the bootstrap forward-compat floor is unchanged.
+`mcp_tasks`. The batch-result revision adds a nullable JSON evidence snapshot
+to `subagent_batch_items`, without changing existing report text or backfilling
+historical evidence; the bootstrap forward-compat floor is unchanged.
 The incarnation revision deliberately retains the exact id audited by the
 rollback-floor binary; Alembic orders revisions by `down_revision`, not by the
 numeric prefix.

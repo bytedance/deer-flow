@@ -1,3 +1,11 @@
+### Port Allocation Bounds
+
+`network.py::PortAllocator.allocate` caps its exclusive search endpoint at
+65536. A valid start near 65535 must report exhaustion with `RuntimeError`
+when all remaining ports are reserved or occupied, without probing invalid
+TCP ports. Keep the last valid port allocatable and preserve `max_range`.
+Regression coverage lives in `tests/test_port_allocator_bounds.py`.
+
 ### Goal Objective Validation
 
 `goal_objective.py` owns the dependency-free normalized 4000-character objective
@@ -20,6 +28,9 @@ repeated unclosed `<think>` prefixes in model output do not rescan the same
 suffix. Keep its case-insensitive tag handling, optional whitespace before
 the closing `>`, and the `truncate_unclosed` behavior. Regression coverage
 lives in `tests/test_utils_llm_text.py`.
+
+Display summaries use `strip_leading_think_blocks` before limiting text;
+`test_run_journal_visible_summary.py` preserves literal tags in the answer.
 
 ### Agent / Tool Assembly Off-Load
 
