@@ -687,6 +687,10 @@ When host Bash is enabled for Local Execution, DeerFlow starts OS detection with
 
 For Docker development, service startup follows `config.yaml` sandbox mode. In Local/Docker modes, `provisioner` is not started.
 
+Local AIO sandbox port allocation stops at TCP port 65535. If the remaining
+ports from the configured starting port are occupied, allocation reports
+that no port is available instead of attempting an out-of-range bind.
+
 See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode.
 
 Remote directory listings report traversal failures (for example, unreadable

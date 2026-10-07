@@ -1,3 +1,11 @@
+### Port Allocation Bounds
+
+`network.py::PortAllocator.allocate` caps its exclusive search endpoint at
+65536. A valid start near 65535 must report exhaustion with `RuntimeError`
+when all remaining ports are reserved or occupied, without probing invalid
+TCP ports. Keep the last valid port allocatable and preserve `max_range`.
+Regression coverage lives in `tests/test_port_allocator_bounds.py`.
+
 ### Goal Objective Validation
 
 `goal_objective.py` owns the dependency-free normalized 4000-character objective
