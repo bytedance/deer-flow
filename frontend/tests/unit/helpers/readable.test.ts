@@ -33,6 +33,12 @@ describe("raw identifier guard", () => {
     "thread_changed_after_evaluation",
     "goal_outcome missing",
     "last_evaluation.stand_down_reason",
+    "Blocker: needs_user_input",
+    "goal_not_met_yet",
+    "Waiting: external_wait",
+    "reply_message_id: null",
+    "continuation_count 1 of max_continuations 8",
+    "relied_on_assumption",
   ])("flags %s", (text) => {
     expect(findRawIdentifiers(text).length).toBeGreaterThan(0);
   });
