@@ -2220,7 +2220,7 @@ memory:
   manager_class: deermem
   # Memory operation mode:
   #   middleware (default) - passive background extraction after each turn.
-  #   tool - experimental opt-in; the model calls memory_search/memory_add/
+  #   tool - experimental opt-in; the model calls memory_search/memory_get/memory_add/
   #     memory_update/memory_delete directly. This gives the model agency over
   #     memory writes, but effectiveness depends on model tool-use behavior.
   # Normally only one mode runs at a time. A backend that needs conversation-
