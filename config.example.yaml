@@ -2676,8 +2676,10 @@ run_events:
 #                   'sqlite' or 'postgres' (rejected at startup on 'memory').
 #
 # Switching an existing install to 'db'? Import the on-disk Custom Agents and
-# managed subagents once with:
-#     python backend/scripts/migrate_agents_to_db.py   # --dry-run to preview
+# managed subagents once from the repository root, with the installed backend
+# environment and the same runtime/configuration selectors as the Gateway:
+#     uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py --dry-run
+# Remove --dry-run after reviewing the preview to perform the import.
 # The source files are left in place, so reverting to 'file' is a clean rollback.
 #
 # agent_storage:
@@ -3223,6 +3225,10 @@ run_ownership:
 #       # resource unrestricted for the role**, so list it explicitly to
 #       # constrain it. Declared plugin pages are not gated yet: their
 #       # `plugin_pages` row ships with the page-authorization slice.
+#       #
+#       # Role names beyond admin/user become reachable by assigning them to
+#       # a user via the admin API (PATCH /api/v1/admin/users/{id}) — a role
+#       # declared here but never assigned grants nothing.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}

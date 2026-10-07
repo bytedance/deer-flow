@@ -804,6 +804,33 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **frontend:** Retrying a message after its attachment upload fails now keeps
+  the context that was attached to it. The composer dropped its quotes,
+  conversation references, staged project files and stored draft as soon as a
+  send started, before the attachments uploaded, so after a failed upload the
+  text and files were still there but a retry went out without that context.
+  That one-time state now clears only once the send is dispatched, after the
+  upload. A send that finishes uploading after the user has switched
+  conversations or left the page clears only the stored draft and staged files
+  it carried, keeping a draft saved or a document attached since. ([#6412])
+- **client:** `DeerFlowClient.list_threads(limit)` now limits threads rather
+  than checkpoints. It passed `limit` to a checkpoint scan across every thread,
+  and one turn writes several checkpoints, so a single long conversation filled
+  the limit: the TUI thread picker and `--resume <title>` saw only the latest one
+  or two threads, and an older title failed to resolve. SQLite and Postgres now
+  list threads from their checkpoint index, and only each returned thread's
+  first and latest checkpoints are loaded. Gateway branches are listed, and order
+  follows checkpoint write order, so a goal-only write counts as activity. A new
+  `sort_by="updated_at"` option lets `--continue` keep resuming the most
+  recently active thread; the default order stays newest created first. ([#6426])
+- **frontend:** A failed side-chat send no longer clears the composer. The side
+  chat's submit handler showed the error toast and then resolved, which the
+  composer treats as success, so the typed text and attachments were lost when
+  creating the side chat or uploading an attachment failed. The first message to
+  a new side chat was also cleared as soon as it was queued, before it was sent.
+  The handler now rejects after the toast, and the queued first send settles the
+  submit with its own outcome, so the draft stays for a retry and clears only
+  once the message is sent. ([#6407])
 - **sandbox:** AIO sandboxes no longer trust unverified state for credential
   placement or container reuse. A failed provisioner capability probe no longer
   reads as "broker off" (which bind-mounted plaintext lark credential dirs into
@@ -9110,4 +9137,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6393]: https://github.com/bytedance/deer-flow/pull/6393
 [#6400]: https://github.com/bytedance/deer-flow/pull/6400
 [#6401]: https://github.com/bytedance/deer-flow/pull/6401
+[#6407]: https://github.com/bytedance/deer-flow/pull/6407
+[#6412]: https://github.com/bytedance/deer-flow/pull/6412
+[#6426]: https://github.com/bytedance/deer-flow/pull/6426
 [#6436]: https://github.com/bytedance/deer-flow/pull/6436

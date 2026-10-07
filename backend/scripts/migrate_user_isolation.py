@@ -1,7 +1,10 @@
 """One-time migration: move legacy thread dirs, memory, agents, skills, and the global USER.md profile into per-user layout.
 
-Usage:
-    PYTHONPATH=. python scripts/migrate_user_isolation.py [--dry-run] [--user-id USER_ID]
+Usage (from the repository root):
+    uv run --no-sync --project backend python backend/scripts/migrate_user_isolation.py [--dry-run] [--user-id USER_ID]
+
+Use the installed backend environment and the Gateway's exported runtime
+selectors; relative paths remain anchored to the caller's directory.
 
 The script is idempotent — re-running it after a successful migration is a no-op.
 """

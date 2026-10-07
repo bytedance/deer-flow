@@ -23,6 +23,7 @@ HOOKS_BOUNDED_BY_SHUTDOWN_HOOK_TIMEOUT: tuple[str, ...] = (
     "startup trash sweep",
     "notification delivery worker stop",
     "channel service stop",
+    "scheduled task service stop",
     "browser session close",
     "MCP session pool close",
 )
@@ -61,7 +62,7 @@ def memory_flush_seconds() -> float:
 def lifespan_shutdown_seconds() -> float:
     """Worst-case lifespan shutdown: every bounded hook + retrieval-warm wait + run drain + memory flush.
 
-    Unbounded steps (OIDC close, scheduler / task-service stops, backend close)
+    Unbounded steps (OIDC close, MCP/subagent task-service stops, backend close)
     are expected to be quick and are not modeled; deployments keep slack on top
     of this figure for them.
     """

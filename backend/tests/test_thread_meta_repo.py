@@ -512,6 +512,16 @@ class TestThreadMetaRepository:
         assert hits == {"t1"}
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize("boundary, outside", [(2**63 - 1, 2**63), (-(2**63), -(2**63) - 1)])
+    async def test_search_integer_boundary_does_not_match_out_of_range_metadata(self, repo, boundary, outside):
+        await repo.create("exact", metadata={"id": boundary})
+        await repo.create("outside", metadata={"id": outside})
+        await repo.create("huge", metadata={"id": outside * 10**100})
+
+        hits = {record["thread_id"] for record in await repo.search(metadata={"id": boundary})}
+        assert hits == {"exact"}
+
+    @pytest.mark.anyio
     async def test_membership_exposed_via_reserved_metadata_key(self, repo):
         from deerflow.persistence.thread_meta import THREAD_PROJECT_METADATA_KEY
 
@@ -754,13 +764,13 @@ class TestJsonMatchCompilation:
             sql = expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True})
             assert str(sql) == expected_fragment, f"value={value!r}: {sql}"
 
-        # int: uses INTEGER cast for precision, type-check narrows to 'integer' only
+        # int: require a native SQL integer, not an oversized integer decoded as REAL
         int_expr = json_match(t.c.data, "k", 42)
         sql = str(int_expr.compile(dialect=engine.dialect, compile_kwargs={"literal_binds": True}))
         assert "json_type" in sql
         assert "= 'integer'" in sql
-        assert "INTEGER" in sql
-        assert "CAST" in sql
+        assert "typeof(json_extract" in sql
+        assert "CAST" not in sql
 
         # float: uses REAL cast, type-check spans 'integer' and 'real'
         float_expr = json_match(t.c.data, "k", 3.14)
@@ -795,14 +805,13 @@ class TestJsonMatchCompilation:
             sql = expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True})
             assert str(sql) == expected_fragment, f"value={value!r}: {sql}"
 
-        # int: CASE guard prevents CAST error when 'number' also matches floats
+        # int: compare number spellings without casting unbounded stored values
         int_expr = json_match(t.c.data, "k", 42)
         sql = str(int_expr.compile(dialect=dialect, compile_kwargs={"literal_binds": True}))
         assert "json_typeof" in sql
         assert "'number'" in sql
-        assert "BIGINT" in sql
-        assert "CASE WHEN" in sql
-        assert "'^-?[0-9]+$'" in sql
+        assert "CAST" not in sql
+        assert "(t.data ->> 'k') = '42'" in sql
 
         # float: uses DOUBLE PRECISION cast
         float_expr = json_match(t.c.data, "k", 3.14)

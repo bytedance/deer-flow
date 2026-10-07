@@ -1,11 +1,25 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+Result-reader acceptance runs on SQLite and, with TEST_POSTGRES_URI, an isolated
+PostgreSQL schema; both exercise submission, completion, reopen and ToolNode
+continuation without paid model work. Always clean up the temporary schema.
+
 **JSON**: See README. Authorize before local metadata and reads; inaccessible paths stay UNVERIFIED.
 
 Apply each subagent's prompt overlay after assembling its full SystemMessage.
 Registry overrides must not mutate `BUILTIN_SUBAGENTS`.
 Direct returns use the compiled tool registry, including middleware tools. Match current-turn IDs in call order; error ToolMessages fail the task with outputs preserved.
 Durable batch specs store overlays as JSON and restore them before execution.
+`read_batch_item` projects only report/state/acceptance fields after owner and current-thread checks. Positions are immutable submission order; no status filtering. The bounded tool hashes that projection for continuation, detecting completion/retry/cancel changes. It does not persist snapshots, schedule work or expose execution specs; HTTP bulk export stays independent.
+
+Batch evidence uses nullable `result_artifact` (migration 0033), persisted with
+successful results under the same lease fence. Only full-result exports expose
+bounded, cited RAG snapshots; compact item projections omit them. Cancelled,
+failed and stale attempts cannot publish evidence; retry clears it. Cover the
+formatter/step capture -> worker -> reopened SQLite -> authorized export chain
+in `tests/test_batch_rag_evidence.py`; no provider fetch or preview UI is added.
+Explicitly enabled nested tasks propagate report-bound omission IDs; filter and
+deduplicate at each forwarding boundary before publishing the durable count.
 
 **Remote empty files**: GNU stat's `regular file`/`regular empty file` are regular files. Empty files pass exists/file_written, fail non-empty; reject symlinks, directories, FIFOs.
 

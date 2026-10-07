@@ -101,7 +101,10 @@ import {
   supportsThinking as modelSupportsThinking,
 } from "@/core/models/reasoning";
 import { attachProjectDocument } from "@/core/projects/api";
-import { useStagedProjectAttachments } from "@/core/projects/composer-attach";
+import {
+  retireProjectAttachments,
+  useStagedProjectAttachments,
+} from "@/core/projects/composer-attach";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
@@ -118,6 +121,7 @@ import {
   getSessionComposerDraftStorage,
   readComposerDraft,
   resolveComposerDraft,
+  retireSentComposerDraft,
   type ComposerDraft,
   writeComposerDraft,
 } from "@/core/threads/composer-draft";
@@ -584,6 +588,10 @@ export function InputBox({
   } | null>(null);
   const draftSaveTimerRef = useRef<number | null>(null);
   const draftSaveGenerationRef = useRef(0);
+  // Bumped whenever the composer stops showing a conversation (switch or
+  // unmount). A send's onSent can arrive after an attachment upload, when
+  // the composer that sent it shows another conversation or is gone.
+  const composerLifetimeRef = useRef(0);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const { data: suggestionsConfig } = useSuggestionsConfig();
@@ -909,9 +917,10 @@ export function InputBox({
   }, [cancelDraftSaveTimer]);
   const scheduleDraftSave = useCallback(
     (draft: ComposerDraft, key = draftKey) => {
-      // An accepted attachment send keeps its text visible until upload finishes.
-      // Reference cleanup can rerun this effect meanwhile; do not resurrect the
-      // accepted snapshot. Actual input edits release it, even for identical text.
+      // An accepted attachment send keeps its text visible until its submit
+      // resolves. Reference cleanup can rerun this effect meanwhile; do not
+      // resurrect the accepted snapshot. Actual input edits release it, even
+      // for identical text.
       const accepted = acceptedDraftRef.current;
       if (
         accepted?.key === key &&
@@ -1015,6 +1024,7 @@ export function InputBox({
   }, [thread.messages]);
 
   useLayoutEffect(() => {
+    composerLifetimeRef.current += 1;
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
     setTextInput("");
@@ -1033,6 +1043,7 @@ export function InputBox({
     latestDraftRef.current = null;
     invalidateDraftSaveTimer();
     return () => {
+      composerLifetimeRef.current += 1;
       mentionEpoch.current += 1;
       flushLatestDraft(draftKey);
     };
@@ -1429,12 +1440,13 @@ export function InputBox({
           ),
         );
       }
-      const activeConversations = reconcileConversationReferences(
+      const reconciledDraft = reconcileConversationReferences(
         textInput.value,
         conversationReferences,
         conversationCapability,
         threadId,
-      ).references;
+      );
+      const activeConversations = reconciledDraft.references;
       const referenceIds = activeConversations.map(
         (reference) => reference.threadId,
       );
@@ -1481,6 +1493,12 @@ export function InputBox({
         text: textInput.value,
         skillName: null,
       };
+      // What this send carries, so a late onSent retires only that.
+      const sendingLifetime = composerLifetimeRef.current;
+      const sentDraftTexts = [textInput.value, reconciledDraft.text];
+      const sentAttachmentPaths = new Set(
+        projectAttachments.map((attachment) => attachment.virtual_path),
+      );
       const additionalKwargs = {
         ...extensionMetadata,
         ...(skillReferences.length
@@ -1506,9 +1524,23 @@ export function InputBox({
         ...(referenceIds.length
           ? { conversationReferences: referenceIds }
           : {}),
-        // Clear one-time state only once the send genuinely proceeds. If the
-        // send is dropped by the in-flight guard, `onSent` never fires.
+        // Clear one-time state only once the send is genuinely dispatched.
+        // `onSent` never fires for a dropped send or a failed attachment
+        // upload, so a retry keeps its quotes, references and staged files.
         onSent: () => {
+          if (composerLifetimeRef.current !== sendingLifetime) {
+            // The upload finished after the composer moved to another
+            // conversation or unmounted. Leave live state alone and retire
+            // only what this send persisted, keeping anything a later
+            // composer saved or staged since.
+            retireSentComposerDraft(
+              getSessionComposerDraftStorage(),
+              draftKey,
+              sentDraftTexts,
+            );
+            retireProjectAttachments(threadId, projectAttachments);
+            return;
+          }
           setMentionQuery(null);
           setMentionButtonOpen(false);
           if (pendingDraftSubmissionRef.current?.key === draftKey) {
@@ -1524,7 +1556,11 @@ export function InputBox({
           }
           sidecar?.clearConversationQuotes(quoteIds);
           setConversationReferences([]);
-          setProjectAttachments([]);
+          setProjectAttachments((previous) =>
+            previous.filter(
+              (attachment) => !sentAttachmentPaths.has(attachment.virtual_path),
+            ),
+          );
         },
       };
       const submit = () => onSubmit?.(message, submitOptions);

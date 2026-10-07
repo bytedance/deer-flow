@@ -279,6 +279,26 @@ models:
           type: enabled
 ```
 
+#### MindIE XML tool arguments
+
+The MindIE adapter (`deerflow.models.mindie_provider:MindIEChatModel`) parses XML
+tool calls before decoding escaped newlines in the remaining reply text. JSON
+objects and arrays keep their original escapes during parsing, so `\n` inside a
+JSON string becomes a newline through JSON decoding and `\\n` retains a literal
+backslash. The existing Python-literal fallback also parses the original value.
+
+Non-JSON raw-string parameters retain the gateway's multiline compatibility:
+literal `\n` outside fenced code becomes a real newline, and surrounding
+whitespace is trimmed. Escapes inside fenced code remain unchanged. This keeps
+multi-line file content and commands working. Raw strings cannot distinguish an
+intended literal `\n` from a gateway-escaped newline; structured JSON parameters
+avoid that ambiguity. Numeric conversion failures and unsafe Python-literal
+containers retain the entire original argument rather than rewriting it.
+
+The same behavior applies to synchronous generation, asynchronous generation,
+and tool-enabled simulated streaming. Native tool-call arguments remain unchanged.
+No additional configuration is required.
+
 #### Gemini via Google's OpenAI-compatible endpoint
 
 When routing Gemini through an OpenAI-compatible proxy (Vertex AI OpenAI compat endpoint, AI Studio, or third-party gateways) with thinking enabled, the API attaches a `thought_signature` to each tool-call object returned in the response.  Every subsequent request that replays those assistant messages **must** echo those signatures back on the tool-call entries or the API returns:
@@ -581,9 +601,19 @@ agent_storage:
 
 Migrating an existing install from `file` to `db`:
 
+Run from the repository root using the backend's `uv` environment. The importer
+depends on the installed workspace packages; using a system `python` without
+an activated backend environment can fail with `ModuleNotFoundError: deerflow`.
+Complete the [backend installation](../../CONTRIBUTING.md#option-2-local-development)
+first, including the `postgres` extra when applicable. Use the same exported
+configuration and runtime selectors as the running Gateway, such as
+`DEER_FLOW_CONFIG_PATH` and `DEER_FLOW_HOME`. `--project backend` selects the
+environment without changing the working directory, so relative paths keep
+their meaning; `--no-sync` preserves installed extras.
+
 ```bash
-python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
-python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py --dry-run  # preview without writing
+uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
 ```
 
 The importer is idempotent (already-present agents are skipped) and leaves the source files untouched, so reverting `agent_storage.backend` to `file` is a clean rollback. Agent *memory* (`memory.json`) is unaffected by this switch.
