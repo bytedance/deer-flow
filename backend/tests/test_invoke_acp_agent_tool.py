@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.config.acp_config import ACPAgentConfig
-from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, set_extensions_config
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, reset_extensions_config, set_extensions_config
 from deerflow.tools.builtins.invoke_acp_agent_tool import (
     _build_acp_mcp_servers,
     _build_mcp_servers,
@@ -44,7 +44,7 @@ def test_build_mcp_servers_filters_disabled_and_maps_transports():
         }
     finally:
         monkeypatch.undo()
-        set_extensions_config(ExtensionsConfig(mcp_servers={}, skills={}))
+        reset_extensions_config()
 
 
 def test_build_acp_mcp_servers_formats_list_payload():
@@ -81,7 +81,7 @@ def test_build_acp_mcp_servers_formats_list_payload():
         ]
     finally:
         monkeypatch.undo()
-        set_extensions_config(ExtensionsConfig(mcp_servers={}, skills={}))
+        reset_extensions_config()
 
 
 def test_build_permission_response_prefers_allow_once():

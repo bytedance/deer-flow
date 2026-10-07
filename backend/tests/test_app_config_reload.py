@@ -9,11 +9,19 @@ import yaml
 from pydantic import ValidationError
 
 import deerflow.config.app_config as app_config_module
+import deerflow.config.extensions_config as extensions_config_module
 from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.agents_api_config import get_agents_api_config, load_agents_api_config_from_dict
 from deerflow.config.app_config import AppConfig, get_app_config, peek_loaded_app_config, reset_app_config
 from deerflow.config.checkpointer_config import get_checkpointer_config, load_checkpointer_config_from_dict
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.config.extensions_config import (
+    ExtensionsConfig,
+    atomic_write_extensions_config,
+    reload_extensions_config,
+    reset_extensions_config,
+    set_extensions_config,
+)
 from deerflow.config.guardrails_config import get_guardrails_config, load_guardrails_config_from_dict
 from deerflow.config.memory_config import get_memory_config, load_memory_config_from_dict
 from deerflow.config.stream_bridge_config import get_stream_bridge_config, load_stream_bridge_config_from_dict
@@ -27,6 +35,7 @@ from deerflow.storage import BlobNotConfiguredError, get_blob_store, get_blob_st
 
 
 def _reset_config_singletons() -> None:
+    reset_extensions_config()
     load_title_config_from_dict({})
     load_summarization_config_from_dict({})
     load_memory_config_from_dict({})
@@ -102,8 +111,28 @@ def _write_config_with_sections(path: Path, sections: dict | None = None) -> Non
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
 
 
-def _write_extensions_config(path: Path) -> None:
-    path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
+def _write_extensions_config(path: Path, *, middlewares: list[str] | None = None) -> None:
+    payload: dict = {"mcpServers": {}, "skills": {}}
+    if middlewares is not None:
+        payload["middlewares"] = middlewares
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _stage_singleton_configs(tmp_path: Path, monkeypatch, *, middlewares: list[str]) -> Path:
+    """Stage config.yaml plus an extensions file and point the singletons at them."""
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path, middlewares=middlewares)
+    _write_config(config_path, model_name="model-a", supports_thinking=False)
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    _reset_config_singletons()
+    return extensions_path
+
+
+def _peer_writes_extensions(path: Path, *, middlewares: list[str], skills: dict | None = None) -> None:
+    """Another Gateway process rewrites the shared file without reloading this one."""
+    atomic_write_extensions_config(path, {"mcpServers": {}, "skills": skills or {}, "middlewares": middlewares})
 
 
 def test_checkpoint_channel_mode_defaults_to_full() -> None:
@@ -956,5 +985,125 @@ def test_an_unquoted_off_mode_loads_and_rolls_back(tmp_path, monkeypatch):
 
         assert rolled_back.memory.prescreen.mode == "off"
         assert rolled_back.memory.signal_classification.mode == "off"
+    finally:
+        _reset_config_singletons()
+
+
+def test_get_app_config_refreshes_extensions_snapshot_after_peer_extensions_write(tmp_path, monkeypatch):
+    extensions_path = _stage_singleton_configs(tmp_path, monkeypatch, middlewares=["pkg.first:FirstMiddleware"])
+
+    try:
+        initial = get_app_config()
+        loaded = peek_loaded_app_config()
+        yaml_signature = app_config_module._app_config_signature
+        assert initial.extensions.middlewares == ["pkg.first:FirstMiddleware"]
+
+        get_app_config()
+        assert peek_loaded_app_config() is loaded, "neither file changed: no reload"
+
+        _peer_writes_extensions(extensions_path, middlewares=["pkg.second:SecondMiddleware"], skills={"demo": {"enabled": False}})
+
+        refreshed = get_app_config()
+        assert refreshed.extensions.middlewares == ["pkg.second:SecondMiddleware"]
+        assert refreshed.extensions.skills["demo"].enabled is False
+        assert peek_loaded_app_config() is not loaded
+        assert app_config_module._app_config_signature == yaml_signature, "config.yaml itself was not re-signed"
+    finally:
+        _reset_config_singletons()
+
+
+def test_get_app_config_keeps_extensions_snapshot_while_extensions_file_is_half_written(tmp_path, monkeypatch):
+    extensions_path = _stage_singleton_configs(tmp_path, monkeypatch, middlewares=["pkg.first:FirstMiddleware"])
+
+    try:
+        get_app_config()
+        loaded = peek_loaded_app_config()
+
+        # The non-atomic overwrite fallback can expose a truncated document.
+        extensions_path.write_text('{"mcpServers": {', encoding="utf-8")
+
+        assert get_app_config().extensions.middlewares == ["pkg.first:FirstMiddleware"]
+        assert peek_loaded_app_config() is loaded
+
+        _peer_writes_extensions(extensions_path, middlewares=["pkg.second:SecondMiddleware"])
+        assert get_app_config().extensions.middlewares == ["pkg.second:SecondMiddleware"]
+    finally:
+        _reset_config_singletons()
+
+
+def test_get_app_config_keeps_extensions_snapshot_when_search_file_disappears_during_reload(tmp_path, monkeypatch):
+    extensions_path = _stage_singleton_configs(tmp_path, monkeypatch, middlewares=["pkg.first:FirstMiddleware"])
+    monkeypatch.delenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH")
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+    monkeypatch.setattr(extensions_config_module, "__file__", str(tmp_path / "isolated/backend/packages/harness/deerflow/config/extensions_config.py"))
+
+    try:
+        initial = get_app_config()
+        loaded = peek_loaded_app_config()
+        yaml_signature = app_config_module._app_config_signature
+        assert initial.extensions.middlewares == ["pkg.first:FirstMiddleware"]
+        _peer_writes_extensions(extensions_path, middlewares=["pkg.second:SecondMiddleware"])
+        original_signature = extensions_config_module.get_config_signature
+
+        def signature_with_peer_deletion(path: Path):
+            assert path == extensions_path
+            signature = original_signature(path)
+            path.unlink()
+            return signature
+
+        with monkeypatch.context() as race:
+            race.setattr(extensions_config_module, "get_config_signature", signature_with_peer_deletion)
+            assert get_app_config().extensions.middlewares == ["pkg.first:FirstMiddleware"]
+
+        assert peek_loaded_app_config() is loaded
+        assert app_config_module._app_config_signature == yaml_signature
+        assert get_app_config().extensions.middlewares == ["pkg.first:FirstMiddleware"]
+
+        _peer_writes_extensions(extensions_path, middlewares=["pkg.second:SecondMiddleware"])
+        assert get_app_config().extensions.middlewares == ["pkg.second:SecondMiddleware"]
+        assert peek_loaded_app_config() is not loaded
+        assert app_config_module._app_config_signature == yaml_signature
+    finally:
+        _reset_config_singletons()
+
+
+def test_get_app_config_follows_writer_reload_and_injected_extensions_config(tmp_path, monkeypatch):
+    extensions_path = _stage_singleton_configs(tmp_path, monkeypatch, middlewares=["pkg.first:FirstMiddleware"])
+
+    try:
+        assert get_app_config().extensions.middlewares == ["pkg.first:FirstMiddleware"]
+
+        # A writer in this process reloads after its own write.
+        _peer_writes_extensions(extensions_path, middlewares=["pkg.second:SecondMiddleware"])
+        reload_extensions_config()
+        assert get_app_config().extensions.middlewares == ["pkg.second:SecondMiddleware"]
+
+        # An injected instance is pinned, and the AppConfig snapshot follows it.
+        set_extensions_config(ExtensionsConfig(middlewares=["pkg.injected:InjectedMiddleware"]))
+        assert get_app_config().extensions.middlewares == ["pkg.injected:InjectedMiddleware"]
+    finally:
+        _reset_config_singletons()
+
+
+def test_get_app_config_keeps_config_yaml_extension_override_after_extensions_reload(tmp_path, monkeypatch):
+    extensions_path = _stage_singleton_configs(tmp_path, monkeypatch, middlewares=["pkg.first:FirstMiddleware"])
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "models": [{"name": "model-a", "use": "langchain_openai:ChatOpenAI", "model": "gpt-test"}],
+                "extensions": {"middlewares": ["pkg.from_yaml:YamlMiddleware"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    try:
+        assert get_app_config().extensions.middlewares == ["pkg.from_yaml:YamlMiddleware"]
+
+        _peer_writes_extensions(extensions_path, middlewares=["pkg.second:SecondMiddleware"])
+
+        assert get_app_config().extensions.middlewares == ["pkg.from_yaml:YamlMiddleware"]
     finally:
         _reset_config_singletons()
