@@ -816,6 +816,20 @@ This release closes that milestone with **439 merged pull requests**.
   sandbox as reaped. `list_dir` on e2b handles the same exception, so a missing
   directory raises `FileNotFoundError` and a listing truncated at 500 entries
   (SIGPIPE 141) is returned instead of failing with `OSError`. ([#6441])
+- **gateway:** `GET /health/ready` now reports unready while the Redis stream
+  bridge is unreachable. The bridge's Redis client connects lazily and nothing
+  pinged it, so a gateway whose Redis was down started, answered `200 ready` to
+  the Kubernetes readiness probe and the Compose healthcheck, and kept
+  receiving traffic while every run's first publish failed; with the
+  multi-instance gate making the Redis bridge mandatory, such a replica is not
+  serviceable at all. `StreamBridge` gains `ping()`, the response body gains a
+  `stream_bridge` verdict (`not_configured` for the memory bridge) that flips
+  the endpoint to 503 when unreachable, and a report-only `provisioner` verdict
+  from the sandbox provisioner's own `/health` when `sandbox.provisioner_url`
+  is set, which never changes the status code because every replica shares one
+  provisioner. A probe that overruns the endpoint deadline is now the only one
+  marked unreachable, and the public probe gate is one lock per probe kind.
+  ([#6447])
 - **frontend:** Retrying a message after its attachment upload fails now keeps
   the context that was attached to it. The composer dropped its quotes,
   conversation references, staged project files and stored draft as soon as a
@@ -9143,3 +9157,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6412]: https://github.com/bytedance/deer-flow/pull/6412
 [#6426]: https://github.com/bytedance/deer-flow/pull/6426
 [#6441]: https://github.com/bytedance/deer-flow/pull/6441
+[#6447]: https://github.com/bytedance/deer-flow/pull/6447
