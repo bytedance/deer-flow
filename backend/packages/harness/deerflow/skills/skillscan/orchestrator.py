@@ -146,21 +146,23 @@ _DESTRUCTIVE_RM_RE = (
     r"(?:-\S+\s+|--no-preserve-root\s+)*"
     r"/(?:\*|\s|$|(?:bin|boot|dev|etc|home|lib|lib64|opt|proc|root|run|sbin|srv|sys|usr|var)(?:/\*?)?(?:\s|$))"
 )
-# `env`, `printenv` and `export -p` dump the environment only when they run as a
-# command: at the start of a line, right after a `;`, `&`, `|`, `(`, `)` or
-# backtick separator, after the `{` that opens a brace group (`{ env; }`, which
-# bash requires to be followed by whitespace), or after a reserved word that must
-# introduce a command (`then`, `do`, `exec`, ...). An `NAME=value` assignment
-# prefix may come first. Anywhere else the word names something else -- a path in
-# `#!/usr/bin/env bash`, a host in `https://env.example.com`, a flag in
-# `--env FOO=1`, an argument in `echo env`, a variable in `${env}`, or comment
-# text in `# export -p` -- and dumps nothing. The text this is matched against is
-# first reduced to shell code by `_shell_code_only`, so a `;` inside a comment and
-# a command-looking line inside a heredoc body do not count either.
-_SHELL_ENV_DUMP_RE = re.compile(
+# `env`, `printenv` and `export -p` count only at a real command position. The
+# text is first reduced to shell code by `_shell_code_only`, excluding comments
+# and heredoc bodies. The `env` match is classified separately because `env` may
+# launch a command instead of dumping the environment.
+_SHELL_ENV_COMMAND_RE = re.compile(
     r"(?m)(?:^|(?<=[;&|()`])|\{(?=[ \t])|(?<![\w/.-])(?:if|then|elif|else|while|until|do|exec)\b[ \t]+)"
     r"[ \t]*(?:[A-Za-z_]\w*=[^ \t]*[ \t]+)*(?P<cmd>env\b|printenv\b|export[ \t]+-p\b)"
 )
+_SHELL_DOWNLOAD_PIPE_RE = re.compile(r"\b(?:curl|wget)\b(?:[^\\\r\n|;&]|\\\r?\n|\\[^\r\n])*\|")
+_ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_]\w*=.*")
+_ENV_REDIRECTION_RE = re.compile(r"(?:(?P<fd>[0-9]+)|\{\w+\})?(?P<op><<<|<<-?|>>|<>|>\||>&|<&|>|<)(?P<target>.*)")
+_ENV_LONG_VALUE_OPTIONS = {"--argv0", "--chdir", "--split-string", "--unset"}
+_ENV_SHORT_VALUE_OPTIONS = {"a", "C", "P", "S", "u"}
+_ENV_STANDALONE_OPTIONS = {"0", "i", "v"}
+_ENV_EXIT_OPTIONS = {"--debug", "--help", "--version"}
+_SHELL_NAMES = {"bash", "dash", "fish", "sh", "zsh"}
+_SHELL_SEPARATORS = {";", "&", "&&", "|", "||", "(", ")", "`", "\n"}
 # The head of a heredoc redirection: `<<` or `<<-`, an optional quoted delimiter,
 # then the delimiter word. Requiring a leading letter/underscore keeps arithmetic
 # shifts such as `$((1 << 2))` from being read as a heredoc opener.
@@ -788,6 +790,177 @@ def _shell_code_only(text: str) -> str:
     return "\n".join(lines)
 
 
+def _tokenize_shell(command: str) -> list[str] | None:
+    """Tokenize the shell subset needed for command and redirection boundaries."""
+    tokens: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    command_depth = 0
+    i = 0
+
+    def flush() -> None:
+        if current:
+            tokens.append("".join(current))
+            current.clear()
+
+    while i < len(command):
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            else:
+                current.append(ch)
+            i += 1
+            continue
+        if quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch == "\\" and i + 1 < len(command):
+                current.append(command[i + 1])
+                i += 1
+            else:
+                current.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < len(command):
+            if command[i + 1] == "\r" and command[i + 2 : i + 3] == "\n":
+                i += 3
+            elif command[i + 1] == "\n":
+                i += 2
+            else:
+                current.append(command[i + 1])
+                i += 2
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            i += 1
+            continue
+        if command.startswith("$(", i):
+            current.append("$(")
+            command_depth += 1
+            i += 2
+            continue
+        if ch == ")" and command_depth:
+            current.append(ch)
+            command_depth -= 1
+            i += 1
+            continue
+        if command_depth:
+            current.append(ch)
+            i += 1
+            continue
+        if ch == "#" and not current:
+            break
+        if ch in " \t\r":
+            flush()
+            i += 1
+            continue
+        if ch == "\n":
+            flush()
+            tokens.append("\n")
+            i += 1
+            continue
+        if ch in ";|&()`":
+            if ch == "&" and current and _ENV_REDIRECTION_RE.match("".join(current)):
+                current.append(ch)
+                i += 1
+                continue
+            flush()
+            if i + 1 < len(command) and command[i + 1] == ch and ch in "|&":
+                tokens.append(ch * 2)
+                i += 2
+            else:
+                tokens.append(ch)
+                i += 1
+            continue
+        current.append(ch)
+        i += 1
+    if quote or command_depth:
+        return None
+    flush()
+    return tokens
+
+
+def _is_env_redirection(tokens: list[str], index: int) -> tuple[int, bool, bool]:
+    match = _ENV_REDIRECTION_RE.fullmatch(tokens[index])
+    if not match:
+        return index, False, False
+    target = match.group("target")
+    if not target:
+        if index + 1 >= len(tokens) or tokens[index + 1] in _SHELL_SEPARATORS:
+            return index + 1, True, "<" in match.group("op")
+        return index + 2, True, "<" in match.group("op")
+    return index + 1, True, "<" in match.group("op")
+
+
+def _split_env_string(value: str) -> list[str] | None:
+    return _tokenize_shell(value)
+
+
+def _env_command(tokens: list[str], index: int = 0) -> tuple[list[str], int] | None:
+    """Return the effective command vector launched by `env`."""
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _SHELL_SEPARATORS:
+            return None
+        next_index, redirected, _ = _is_env_redirection(tokens, index)
+        if redirected:
+            index = next_index
+            continue
+        if _ENV_ASSIGNMENT_RE.fullmatch(token):
+            index += 1
+            continue
+        if token in {"--", "-"}:
+            index += 1
+            break
+        if token in _ENV_EXIT_OPTIONS or token == "-0":
+            return None
+        if token in {"-S", "--split-string"}:
+            if index + 1 >= len(tokens):
+                return None
+            split_tokens = (_split_env_string(tokens[index + 1]) or []) + tokens[index + 2 :]
+            return _env_command(split_tokens)
+        if token.startswith("-S") and token != "-S":
+            split_tokens = (_split_env_string(token[2:]) or []) + tokens[index + 1 :]
+            return _env_command(split_tokens)
+        if token.startswith("--split-string="):
+            split_tokens = (_split_env_string(token.removeprefix("--split-string=")) or []) + tokens[index + 1 :]
+            return _env_command(split_tokens)
+        if token in _ENV_LONG_VALUE_OPTIONS:
+            index += 2
+            continue
+        if any(token.startswith(option + "=") for option in _ENV_LONG_VALUE_OPTIONS):
+            index += 1
+            continue
+        if token.startswith("--"):
+            index += 1
+            continue
+        if token.startswith("-"):
+            cluster = token[1:]
+            value_position = next((position for position, option in enumerate(cluster) if option in _ENV_SHORT_VALUE_OPTIONS), -1)
+            if value_position >= 0:
+                index += 1 if len(cluster) > value_position + 1 else 2
+            elif set(cluster) <= _ENV_STANDALONE_OPTIONS:
+                index += 1
+            else:
+                return None
+            continue
+        return tokens, index
+    return (tokens, index) if index < len(tokens) else None
+
+
+def _env_launches_shell(tokens: list[str]) -> bool:
+    if not tokens or tokens[0] != "env":
+        return False
+    command = _env_command(tokens, 1)
+    if command is None:
+        return False
+    command_tokens, command_index = command
+    if any(_is_env_redirection(tokens, offset)[2] and _ENV_REDIRECTION_RE.fullmatch(tokens[offset]).group("fd") in {None, "0"} for offset in range(1, len(tokens))):
+        return False
+    return PurePosixPath(command_tokens[command_index]).name in _SHELL_NAMES
+
+
 def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
     findings: list[SecurityFinding] = []
     # Unmistakable reverse-shell signals hard-block; weaker idioms (bash -i,
@@ -822,12 +995,27 @@ def _scan_shell(rel_path: str, text: str) -> list[SecurityFinding]:
         text,
     ):
         findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, text, match))
+    else:
+        code = _shell_code_only(text)
+        for pipe_match in _SHELL_DOWNLOAD_PIPE_RE.finditer(code):
+            command = code[pipe_match.end() :].lstrip()
+            tokens = _tokenize_shell(command)
+            if tokens and _env_launches_shell(tokens):
+                findings.append(_finding_from_match("shell-curl-pipe-shell", rel_path, code, pipe_match))
+                break
     if match := re.search(_DESTRUCTIVE_RM_RE + r"|:\(\)\{\s*:\|:&\s*\};:|dd\s+[^#\n]*\bof=/dev/", text):
         findings.append(_finding_from_match("shell-destructive-command", rel_path, text, match))
     # Only a command position counts, and only in shell code: see `_shell_code_only`.
     code = _shell_code_only(text)
-    if match := _SHELL_ENV_DUMP_RE.search(code):
-        findings.append(_finding("shell-env-dump", file=rel_path, line=_line_number(code, match.start("cmd")), evidence=match.group("cmd")))
+    for match in _SHELL_ENV_COMMAND_RE.finditer(code):
+        command = match.group("cmd")
+        if command == "env":
+            env_text = code[match.start("cmd") :]
+            tokens = _tokenize_shell(env_text)
+            if tokens and _env_command(tokens, 1) is not None:
+                continue
+        findings.append(_finding("shell-env-dump", file=rel_path, line=_line_number(code, match.start("cmd")), evidence=command))
+        break
     return findings
 
 
