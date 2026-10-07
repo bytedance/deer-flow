@@ -1,17 +1,34 @@
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from uuid import UUID
+from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
-from _router_auth_helpers import call_unwrapped
+import pytest_asyncio
+from _router_auth_helpers import call_unwrapped, make_authed_test_app
+from _scheduled_rows import occurrence
 from fastapi import HTTPException
 
+from app.gateway.auth.models import User
+from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
 from app.gateway.routers import scheduled_tasks
+from app.scheduler.service import ScheduledTaskService
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
+from deerflow.persistence.scheduled_task_runs.finalization import AGENT_STOP_LAST_ERROR_PREFIX
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+
+
+@pytest.fixture(autouse=True)
+def scheduler_running(monkeypatch):
+    """Creation requires this process's poller (409 scheduler_not_running otherwise)."""
+    monkeypatch.setattr(scheduled_tasks, "is_scheduler_running", lambda _request: True)
 
 
 @pytest.mark.parametrize(
@@ -101,6 +118,12 @@ class _Repo:
 
     async def get_active_run_status(self, task_id: str):
         return self.active_status
+
+    async def active_run_status_for(self, task_ids):
+        return {task_id: self.active_status for task_id in task_ids if self.active_status is not None}
+
+    async def automatic_runs_used_for(self, task_ids):
+        return {task_id: 0 for task_id in task_ids}
 
     async def pause_with_queue_cancellation(self, task_id: str, *, user_id: str, **_kwargs):
         item = await self.get(task_id, user_id=user_id)
@@ -288,7 +311,7 @@ async def test_trigger_scheduled_task_dispatches_manual_run():
         scheduled_tasks.get_scheduled_task_service = old_service
         scheduled_tasks.get_optional_user_from_request = old_user
 
-    assert result == {"id": "task-1", "triggered": True}
+    assert result == {"id": "task-1", "triggered": True, "outcome": "launched", "existing": False, "thread_id": None}
     assert len(service.calls) == 1
     assert service.calls[0][2] == "manual"
 
@@ -448,7 +471,7 @@ async def test_update_rechecks_atomic_mutability_after_router_precheck(tmp_path)
         with pytest.raises(HTTPException) as exc_info:
             await patch_call
         assert exc_info.value.status_code == 409
-        assert "active queued occurrence" in exc_info.value.detail
+        assert "active queued occurrence" in exc_info.value.detail["message"]
         current = await repo.get(task["id"], user_id="user-1")
         assert current is not None
         assert current["prompt"] == "original prompt"
@@ -1116,7 +1139,7 @@ async def test_create_interval_task_rejects_below_minimum_delay():
     with pytest.raises(HTTPException) as exc_info:
         await _call_create(_interval_create_request(schedule_spec={"every_seconds": 30}))
     assert exc_info.value.status_code == 422
-    assert "at least 60 seconds" in exc_info.value.detail
+    assert "at least 60 seconds" in exc_info.value.detail["message"]
 
 
 @pytest.mark.asyncio
@@ -1124,7 +1147,7 @@ async def test_create_interval_task_rejects_above_maximum():
     with pytest.raises(HTTPException) as exc_info:
         await _call_create(_interval_create_request(schedule_spec={"every_seconds": 30 * 24 * 3600 + 1}))
     assert exc_info.value.status_code == 422
-    assert "at most" in exc_info.value.detail
+    assert "at most" in exc_info.value.detail["message"]
 
 
 @pytest.mark.asyncio
@@ -1132,7 +1155,7 @@ async def test_create_interval_task_rejects_missing_every_seconds():
     with pytest.raises(HTTPException) as exc_info:
         await _call_create(_interval_create_request(schedule_spec={}))
     assert exc_info.value.status_code == 422
-    assert "every_seconds" in exc_info.value.detail
+    assert "every_seconds" in exc_info.value.detail["message"]
 
 
 @pytest.mark.asyncio
@@ -1185,7 +1208,7 @@ async def test_update_interval_task_rejects_below_minimum_delay():
             scheduled_tasks.ScheduledTaskUpdateRequest(schedule_spec={"every_seconds": 30}),
         )
     assert exc_info.value.status_code == 422
-    assert "at least 60 seconds" in exc_info.value.detail
+    assert "at least 60 seconds" in exc_info.value.detail["message"]
 
 
 @pytest.mark.asyncio
@@ -1222,7 +1245,7 @@ async def test_create_interval_task_rejects_non_integer_every_seconds():
     with pytest.raises(HTTPException) as exc_info:
         await _call_create(_interval_create_request(schedule_spec={"every_seconds": True}))
     assert exc_info.value.status_code == 422
-    assert "every_seconds" in exc_info.value.detail
+    assert "every_seconds" in exc_info.value.detail["message"]
 
 
 @pytest.mark.asyncio
@@ -1233,7 +1256,7 @@ async def test_create_interval_task_uses_configured_minimum_delay():
             config=_Config(min_once_delay_seconds=120),
         )
     assert exc_info.value.status_code == 422
-    assert "at least 120 seconds" in exc_info.value.detail
+    assert "at least 120 seconds" in exc_info.value.detail["message"]
 
 
 @pytest.mark.asyncio
@@ -1270,7 +1293,7 @@ async def test_create_unknown_assistant_id_is_rejected():
         with pytest.raises(HTTPException) as exc_info:
             await _call_create(_create_request(assistant_id="missing-bot"))
     assert exc_info.value.status_code == 422
-    assert "Unknown assistant_id" in exc_info.value.detail
+    assert "Unknown assistant_id" in exc_info.value.detail["message"]
 
 
 @pytest.mark.asyncio
@@ -1278,7 +1301,7 @@ async def test_create_invalid_assistant_id_is_rejected():
     with pytest.raises(HTTPException) as exc_info:
         await _call_create(_create_request(assistant_id="bad agent"))
     assert exc_info.value.status_code == 422
-    assert "Invalid assistant_id" in exc_info.value.detail
+    assert "Invalid assistant_id" in exc_info.value.detail["message"]
 
 
 @pytest.mark.asyncio
@@ -1336,7 +1359,7 @@ async def test_update_unknown_assistant_id_is_rejected():
                 scheduled_tasks.ScheduledTaskUpdateRequest(assistant_id="missing-bot"),
             )
     assert exc_info.value.status_code == 422
-    assert "Unknown assistant_id" in exc_info.value.detail
+    assert "Unknown assistant_id" in exc_info.value.detail["message"]
     assert repo.items[task["id"]]["assistant_id"] == "lead_agent"
 
 
@@ -1351,7 +1374,7 @@ async def test_update_invalid_assistant_id_is_rejected():
             scheduled_tasks.ScheduledTaskUpdateRequest(assistant_id="bad agent"),
         )
     assert exc_info.value.status_code == 422
-    assert "Invalid assistant_id" in exc_info.value.detail
+    assert "Invalid assistant_id" in exc_info.value.detail["message"]
 
 
 @pytest.mark.asyncio
@@ -1418,3 +1441,391 @@ async def test_update_omitting_assistant_id_keeps_existing_even_if_agent_is_gone
     loader.assert_not_called()
     assert updated["title"] == "Renamed"
     assert updated["assistant_id"] == "research-bot"
+
+
+# --- PR1: lifecycle, limits, stop condition and coded errors over HTTP ----------------------
+
+
+_CONTRACT = json.loads((Path(__file__).resolve().parents[2] / "contracts" / "scheduled_task_errors_contract.json").read_text(encoding="utf-8"))
+_CONTRACT_CODES = set(_CONTRACT["ui_codes"]) | set(_CONTRACT["agent_only_codes"])
+_OWNER = User(id=UUID("12345678-1234-1234-1234-123456789abc"), email="lifecycle@example.com", password_hash="unused", system_role="user")
+OWNER = str(_OWNER.id)
+
+
+def coded(response, status: int, code: str) -> dict:
+    """Assert a well-typed request failed with a contract-coded ``{code, message}``."""
+    assert response.status_code == status, response.text
+    detail = response.json()["detail"]
+    assert isinstance(detail, dict) and detail["code"] == code and isinstance(detail["message"], str) and detail["message"]
+    assert detail["code"] in _CONTRACT_CODES
+    return detail
+
+
+@pytest_asyncio.fixture
+async def http(tmp_path, monkeypatch):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    sf = get_session_factory()
+    repo, run_repo = ScheduledTaskRepository(sf), ScheduledTaskRunRepository(sf)
+    launches = []
+
+    async def launch(**kwargs):
+        launches.append(kwargs)
+        return {"run_id": f"run-{len(launches)}", "thread_id": kwargs["thread_id"]}
+
+    app = make_authed_test_app(user_factory=lambda: _OWNER, bind_current_user=True)
+
+    @app.middleware("http")
+    async def mark_session_source(request, call_next):
+        request.state.auth_source = AUTH_SOURCE_SESSION
+        return await call_next(request)
+
+    app.state.scheduled_task_repo = repo
+    app.state.scheduled_task_run_repo = run_repo
+    app.state.scheduled_task_service = ScheduledTaskService(task_repo=repo, task_run_repo=run_repo, launch_run=launch, poll_interval_seconds=60, lease_seconds=120, max_concurrent_runs=3)
+    app.include_router(scheduled_tasks.router)
+    monkeypatch.setattr(scheduled_tasks, "get_config", lambda: _Config())
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://lifecycle.test") as client:
+            yield SimpleNamespace(client=client, app=app, repo=repo, runs=run_repo, sf=sf, launches=launches)
+    finally:
+        await close_engine()
+
+
+async def _seed(repo, task_id="task-l", *, schedule_type="interval", schedule_spec=None, timezone="UTC", next_run_at=None, origin_thread_id=None, **extra):
+    return await repo.create(
+        task_id=task_id,
+        user_id=OWNER,
+        thread_id=None,
+        context_mode="fresh_thread_per_run",
+        assistant_id="lead_agent",
+        title="Checklist",
+        prompt="Check release-checklist.md.",
+        schedule_type=schedule_type,
+        schedule_spec=schedule_spec or {"every_seconds": 3600},
+        timezone=timezone,
+        next_run_at=next_run_at,
+        origin_thread_id=origin_thread_id,
+        **extra,
+    )
+
+
+async def _exhaust(env, task_id="task-l", runs=2):
+    async with env.sf() as session:
+        session.add_all([occurrence(f"{task_id}-{index}", task_id, seq=index) for index in range(1, runs + 1)])
+        await session.commit()
+    await env.repo.update(task_id, user_id=OWNER, updates={"status": "completed", "next_run_at": None})
+
+
+def _when(body):
+    return datetime.fromisoformat(body["next_run_at"].replace("Z", "+00:00"))
+
+
+_CREATE = {"title": "Checklist", "prompt": "Check release-checklist.md.\nList the unchecked items.", "schedule_type": "interval", "schedule_spec": {"every_seconds": 3600}, "timezone": "UTC"}
+
+
+@pytest.mark.asyncio
+async def test_resume_recomputes_a_past_interval_run_from_now(http):
+    await _seed(http.repo, next_run_at=datetime.now(UTC) - timedelta(hours=5))
+    await http.repo.update("task-l", user_id=OWNER, updates={"status": "paused"})
+    before = datetime.now(UTC)
+    response = await http.client.post("/api/scheduled-tasks/task-l/resume")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "enabled"
+    assert before + timedelta(seconds=3590) <= _when(body) <= datetime.now(UTC) + timedelta(seconds=3610)
+    assert http.launches == []  # no catch-up run
+
+
+@pytest.mark.asyncio
+async def test_resume_of_a_daily_cron_paused_yesterday_moves_to_the_next_local_nine(http):
+    yesterday = datetime.now(UTC) - timedelta(days=1)
+    await _seed(http.repo, schedule_type="cron", schedule_spec={"cron": "0 9 * * *"}, timezone="Asia/Shanghai", next_run_at=yesterday)
+    await http.repo.update("task-l", user_id=OWNER, updates={"status": "paused"})
+    response = await http.client.post("/api/scheduled-tasks/task-l/resume")
+    assert response.status_code == 200, response.text
+    local = _when(response.json()).astimezone(ZoneInfo("Asia/Shanghai"))
+    assert (local.hour, local.minute) == (9, 0)
+    assert datetime.now(UTC) < _when(response.json()) <= datetime.now(UTC) + timedelta(days=1)
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_a_future_next_run_and_clears_the_agent_stop_marker(http):
+    future = datetime(2031, 5, 6, 7, 8, tzinfo=UTC)
+    await _seed(http.repo, next_run_at=future)
+    await http.repo.update("task-l", user_id=OWNER, updates={"status": "paused", "last_error": f"{AGENT_STOP_LAST_ERROR_PREFIX}run-7"})
+    response = await http.client.post("/api/scheduled-tasks/task-l/resume")
+    assert response.status_code == 200, response.text
+    assert _when(response.json()) == future
+    assert response.json()["last_error"] is None
+    again = await http.client.post("/api/scheduled-tasks/task-l/resume")
+    assert again.status_code == 200 and again.json()["updated_at"] == response.json()["updated_at"]
+
+
+@pytest.mark.asyncio
+async def test_resume_of_a_one_time_task_whose_time_passed_asks_for_a_new_time(http):
+    await _seed(http.repo, schedule_type="once", schedule_spec={"run_at": "2020-01-01T09:00:00+00:00"})
+    await http.repo.update("task-l", user_id=OWNER, updates={"status": "paused"})
+    coded(await http.client.post("/api/scheduled-tasks/task-l/resume"), 422, "once_time_passed")
+    assert (await http.repo.get("task-l", user_id=OWNER))["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_resume_renewal_raises_the_cap_or_clears_it(http):
+    await _seed(http.repo, max_runs=2)
+    await _exhaust(http)
+    detail = coded(await http.client.post("/api/scheduled-tasks/task-l/resume"), 409, "limits_exhausted")
+    assert detail["params"] == {"limit": "max_runs", "used": 2, "max_runs": 2, "end_at": None}
+    assert detail["message"] == "All 2 automatic runs are used. Raise max_runs above 2 or clear it (max_runs: null) in the same request to reactivate."
+    # A later end time does not renew a used-up run limit.
+    later = (datetime.now(UTC) + timedelta(days=2)).isoformat()
+    coded(await http.client.post("/api/scheduled-tasks/task-l/resume", json={"end_at": later}), 409, "limits_exhausted")
+    coded(await http.client.post("/api/scheduled-tasks/task-l/resume", json={"max_runs": 2}), 422, "max_runs_not_above_used")
+    raised = await http.client.post("/api/scheduled-tasks/task-l/resume", json={"max_runs": 5})
+    assert raised.status_code == 200, raised.text
+    assert (raised.json()["status"], raised.json()["max_runs"], raised.json()["automatic_runs_used"]) == ("enabled", 5, 2)
+    await http.repo.update("task-l", user_id=OWNER, updates={"status": "completed", "max_runs": 2})
+    cleared = await http.client.post("/api/scheduled-tasks/task-l/resume", json={"max_runs": None})
+    assert cleared.status_code == 200, cleared.text
+    assert (cleared.json()["status"], cleared.json()["max_runs"]) == ("enabled", None)
+
+
+@pytest.mark.asyncio
+async def test_clearing_the_only_cap_of_a_sub_hourly_chat_task_is_refused(http):
+    await _seed(http.repo, schedule_spec={"every_seconds": 600}, origin_thread_id="origin", max_runs=2)
+    await _exhaust(http)
+    before = await http.repo.get("task-l", user_id=OWNER)
+    coded(await http.client.post("/api/scheduled-tasks/task-l/resume", json={"max_runs": None}), 422, "frequent_requires_limit")
+    assert await http.repo.get("task-l", user_id=OWNER) == before
+    later = (datetime.now(UTC) + timedelta(days=2)).isoformat()
+    renewed = await http.client.post("/api/scheduled-tasks/task-l/resume", json={"max_runs": None, "end_at": later})
+    assert renewed.status_code == 200, renewed.text
+    assert renewed.json()["status"] == "enabled"
+
+
+@pytest.mark.asyncio
+async def test_resume_reports_an_end_time_that_passed(http):
+    past = datetime.now(UTC) - timedelta(hours=1)
+    await _seed(http.repo, end_at=past)
+    await http.repo.update("task-l", user_id=OWNER, updates={"status": "completed"})
+    detail = coded(await http.client.post("/api/scheduled-tasks/task-l/resume"), 409, "limits_exhausted")
+    assert detail["params"]["limit"] == "end_at"
+    assert detail["message"].startswith("The end time ") and detail["message"].endswith("has passed. Set a later end_at or clear it (end_at: null) in the same request to reactivate.")
+    coded(await http.client.post("/api/scheduled-tasks/task-l/resume", json={"end_at": past.isoformat()}), 422, "end_at_in_past")
+
+
+@pytest.mark.asyncio
+async def test_patch_that_only_raises_the_cap_leaves_a_finished_task_finished(http):
+    await _seed(http.repo, max_runs=2)
+    await _exhaust(http)
+    response = await http.client.patch("/api/scheduled-tasks/task-l", json={"max_runs": 10})
+    assert response.status_code == 200, response.text
+    assert (response.json()["status"], response.json()["max_runs"]) == ("completed", 10)
+
+
+@pytest.mark.asyncio
+async def test_patch_rearm_of_an_exhausted_task_needs_a_higher_cap_in_the_same_body(http):
+    await _seed(http.repo, max_runs=2)
+    await _exhaust(http)
+    detail = coded(await http.client.patch("/api/scheduled-tasks/task-l", json={"schedule_spec": {"every_seconds": 7200}}), 409, "limits_exhausted")
+    assert detail["params"]["used"] == 2
+    assert (await http.repo.get("task-l", user_id=OWNER))["status"] == "completed"
+    rearmed = await http.client.patch("/api/scheduled-tasks/task-l", json={"schedule_spec": {"every_seconds": 7200}, "max_runs": 4})
+    assert rearmed.status_code == 200, rearmed.text
+    assert (rearmed.json()["status"], rearmed.json()["max_runs"]) == ("enabled", 4)
+
+
+@pytest.mark.asyncio
+async def test_schedule_edits_and_resume_keep_room_before_a_future_end_time(http):
+    now = datetime.now(UTC)
+    await _seed(http.repo, next_run_at=now + timedelta(minutes=30), end_at=now + timedelta(minutes=90))
+    url = "/api/scheduled-tasks/task-l"
+    # A new cadence whose next run falls after the end time could never run.
+    coded(await http.client.patch(url, json={"schedule_spec": {"every_seconds": 7200}}), 422, "end_at_before_first_run")
+    assert (await http.client.patch(url, json={"title": "Renamed"})).status_code == 200
+    await http.repo.update("task-l", user_id=OWNER, updates={"status": "paused", "next_run_at": now + timedelta(hours=3)})
+    coded(await http.client.post(f"{url}/resume"), 422, "end_at_before_first_run")
+    assert (await http.repo.get("task-l", user_id=OWNER))["status"] == "paused"
+    renewed = await http.client.post(f"{url}/resume", json={"end_at": (now + timedelta(days=1)).isoformat()})
+    assert renewed.status_code == 200, renewed.text
+    assert renewed.json()["status"] == "enabled"
+    # An end time that already passed is the reactivation check's job (409), not a 422.
+    await http.repo.update("task-l", user_id=OWNER, updates={"status": "completed", "next_run_at": None, "end_at": now - timedelta(hours=1)})
+    assert (await http.client.patch(url, json={"title": "Finished checklist"})).status_code == 200
+    detail = coded(await http.client.patch(url, json={"schedule_spec": {"every_seconds": 3600}}), 409, "limits_exhausted")
+    assert detail["params"]["limit"] == "end_at"
+
+
+@pytest.mark.asyncio
+async def test_task_responses_report_the_active_run_of_a_recurring_task(http):
+    await _seed(http.repo, next_run_at=datetime.now(UTC) + timedelta(hours=1))
+    idle = await http.client.get("/api/scheduled-tasks/task-l")
+    assert (idle.json()["active_run_status"], idle.json()["automatic_runs_used"]) == (None, 0)
+    async with http.sf() as session:
+        session.add(occurrence("live", "task-l", seq=1, status="running", accounted=False))
+        await session.commit()
+    single = (await http.client.get("/api/scheduled-tasks/task-l")).json()
+    listed = (await http.client.get("/api/scheduled-tasks")).json()
+    assert single["status"] == "enabled"
+    assert single["active_run_status"] == "running"
+    assert [task["active_run_status"] for task in listed] == ["running"]
+    coded(await http.client.patch("/api/scheduled-tasks/task-l", json={"title": "Renamed"}), 409, "task_running")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["scheduled_task_repo", "scheduled_task_service"])
+async def test_missing_scheduler_backend_is_a_coded_503(http, missing):
+    kept = getattr(http.app.state, missing)
+    setattr(http.app.state, missing, None)
+    try:
+        response = await (http.client.get("/api/scheduled-tasks") if missing == "scheduled_task_repo" else http.client.post("/api/scheduled-tasks/task-x/trigger"))
+        coded(response, 503, "scheduler_unavailable")
+    finally:
+        setattr(http.app.state, missing, kept)
+
+
+@pytest.mark.asyncio
+async def test_wrong_types_keep_fastapis_list_detail(http):
+    response = await http.client.post("/api/scheduled-tasks", json={**_CREATE, "max_runs": "abc"})
+    assert response.status_code == 422
+    assert isinstance(response.json()["detail"], list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra", "code", "params"),
+    [
+        ({"max_runs": 0}, "invalid_max_runs", None),
+        ({"max_runs": -1}, "invalid_max_runs", None),
+        ({"max_runs": True}, "invalid_max_runs", None),
+        ({"stop_condition": "x" * 501}, "invalid_stop_condition", {"max_chars": 500}),
+        ({"end_at": "2020-01-01T09:00:00"}, "end_at_in_past", None),
+        ({"goal_objective": "   "}, "invalid_goal", {"max_chars": 4000}),
+        ({"context_mode": "reuse_thread", "thread_id": "thread-1", "goal_objective": "report"}, "goal_requires_fresh_thread", None),
+        ({"schedule_spec": {"every_seconds": 30}}, "interval_too_short", {"min_seconds": 60}),
+        ({"timezone": "Mars/Base"}, "invalid_timezone", None),
+        ({"timezone": "Europe"}, "invalid_timezone", None),
+        ({"schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}, "timezone": "Europe"}, "invalid_timezone", None),
+        ({"schedule_type": "weekly"}, "invalid_schedule_type", None),
+    ],
+)
+async def test_value_rules_are_coded_errors(http, extra, code, params):
+    detail = coded(await http.client.post("/api/scheduled-tasks", json={**_CREATE, **extra}), 422, code)
+    assert detail.get("params") == params
+    assert await http.repo.list_by_user(OWNER) == []
+
+
+@pytest.mark.asyncio
+async def test_patch_with_a_timezone_directory_name_is_invalid_timezone(http):
+    created = (await http.client.post("/api/scheduled-tasks", json={**_CREATE, "schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}})).json()
+    detail = coded(await http.client.patch(f"/api/scheduled-tasks/{created['id']}", json={"timezone": "Europe"}), 422, "invalid_timezone")
+    assert "zoneinfo" not in detail["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_naive_end_at_is_wall_clock_time_in_the_task_timezone(http):
+    response = await http.client.post("/api/scheduled-tasks", json={**_CREATE, "timezone": "Asia/Shanghai", "end_at": "2030-01-01T09:00:00"})
+    assert response.status_code == 200, response.text
+    assert datetime.fromisoformat(response.json()["end_at"]) == datetime(2030, 1, 1, 1, 0, tzinfo=UTC)
+    patched = await http.client.patch(f"/api/scheduled-tasks/{response.json()['id']}", json={"end_at": "2030-06-01T18:30:00"})
+    assert datetime.fromisoformat(patched.json()["end_at"]) == datetime(2030, 6, 1, 10, 30, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_create_keeps_the_prompt_and_stores_the_stop_condition_apart(http):
+    response = await http.client.post(
+        "/api/scheduled-tasks",
+        json={**_CREATE, "goal_objective": "List every unchecked item with its owner", "max_runs": 30, "end_at": "2031-01-01T00:00:00+00:00", "stop_condition": "every item\n on the checklist   is checked"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["prompt"] == _CREATE["prompt"]
+    assert body["stop_condition"] == "every item on the checklist is checked"
+    assert (body["goal_objective"], body["max_runs"], body["automatic_runs_used"], body["active_run_status"]) == ("List every unchecked item with its owner", 30, 0, None)
+    stored = await http.repo.get(body["id"], user_id=OWNER)
+    assert stored["prompt"] == _CREATE["prompt"]
+    assert "unmet_streak_after_seq" not in body
+    blank = await http.client.post("/api/scheduled-tasks", json={**_CREATE, "stop_condition": "  \n "})
+    assert blank.json()["stop_condition"] is None
+
+
+@pytest.mark.asyncio
+async def test_patch_sets_and_clears_goal_limits_and_stop_condition(http):
+    created = (await http.client.post("/api/scheduled-tasks", json={**_CREATE, "stop_condition": "all checked"})).json()
+    url = f"/api/scheduled-tasks/{created['id']}"
+    only_stop = await http.client.patch(url, json={"stop_condition": "the release shipped"})
+    assert (only_stop.json()["stop_condition"], only_stop.json()["prompt"]) == ("the release shipped", _CREATE["prompt"])
+    for empty in (None, ""):
+        await http.client.patch(url, json={"stop_condition": "the release shipped"})
+        assert (await http.client.patch(url, json={"stop_condition": empty})).json()["stop_condition"] is None
+    end_at = "2031-02-03T04:05:00+00:00"
+    updated = (await http.client.patch(url, json={"goal_objective": "Report sent", "max_runs": 9, "end_at": end_at})).json()
+    assert (updated["goal_objective"], updated["max_runs"], datetime.fromisoformat(updated["end_at"])) == ("Report sent", 9, datetime.fromisoformat(end_at))
+    cleared = (await http.client.patch(url, json={"goal_objective": None, "max_runs": None, "end_at": None})).json()
+    assert (cleared["goal_objective"], cleared["max_runs"], cleared["end_at"]) == (None, None, None)
+    untouched = (await http.client.patch(url, json={"title": "Renamed", "prompt": None})).json()
+    assert (untouched["title"], untouched["prompt"]) == ("Renamed", _CREATE["prompt"])
+    await http.client.patch(url, json={"goal_objective": "Report sent"})
+    coded(await http.client.patch(url, json={"context_mode": "reuse_thread", "thread_id": "thread-1"}), 422, "goal_requires_fresh_thread")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["completed", "failed", "cancelled"])
+async def test_pause_of_a_finished_task_is_task_finished(http, terminal):
+    await _seed(http.repo)
+    await http.repo.update("task-l", user_id=OWNER, updates={"status": terminal})
+    coded(await http.client.post("/api/scheduled-tasks/task-l/pause"), 409, "task_finished")
+    assert (await http.repo.get("task-l", user_id=OWNER))["status"] == terminal
+
+
+@pytest.mark.asyncio
+async def test_create_and_duplicate_need_a_running_scheduler_but_validate_first(http, monkeypatch):
+    monkeypatch.setattr(scheduled_tasks, "is_scheduler_running", lambda _request: False)
+    coded(await http.client.post("/api/scheduled-tasks", json={**_CREATE, "schedule_spec": {"every_seconds": 1}}), 422, "interval_too_short")
+    detail = coded(await http.client.post("/api/scheduled-tasks", json=_CREATE), 409, "scheduler_not_running")
+    assert "this Gateway process" in detail["message"]
+    # The page's Duplicate is a create with the copied definition.
+    duplicate = {**_CREATE, "title": "Checklist (copy)", "goal_objective": "Report sent", "max_runs": 3, "stop_condition": "all checked"}
+    coded(await http.client.post("/api/scheduled-tasks", json=duplicate), 409, "scheduler_not_running")
+    assert await http.repo.list_by_user(OWNER) == []
+
+
+def test_is_scheduler_running_reads_the_service_of_this_process():
+    from app.gateway.deps import is_scheduler_running
+
+    assert is_scheduler_running(SimpleNamespace()) is False
+    assert is_scheduler_running(SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(scheduled_task_service=None)))) is False
+    assert is_scheduler_running(SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(scheduled_task_service=SimpleNamespace(is_running=True))))) is True
+
+
+@pytest.mark.asyncio
+async def test_trigger_reports_outcome_thread_and_an_already_waiting_run(http):
+    await _seed(http.repo, next_run_at=datetime.now(UTC) + timedelta(hours=1))
+    launched = await http.client.post("/api/scheduled-tasks/task-l/trigger")
+    assert launched.status_code == 200, launched.text
+    body = launched.json()
+    assert (body["id"], body["triggered"], body["outcome"], body["existing"]) == ("task-l", True, "launched", False)
+    assert body["thread_id"] == http.launches[0]["thread_id"]
+    await _seed(http.repo, "task-q", next_run_at=datetime.now(UTC) + timedelta(hours=1))
+    async with http.sf() as session:
+        session.add(occurrence("waiting", "task-q", seq=1, status="queued", accounted=False, thread_id="thread-waiting"))
+        await session.commit()
+    waiting = await http.client.post("/api/scheduled-tasks/task-q/trigger")
+    assert waiting.status_code == 200, waiting.text
+    assert {key: waiting.json()[key] for key in ("outcome", "existing", "thread_id")} == {"outcome": "queued", "existing": True, "thread_id": "thread-waiting"}
+    assert len(await http.runs.list_by_task("task-q")) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_tasks_and_thread_relations_over_http(http):
+    coded(await http.client.get("/api/scheduled-tasks/task-missing"), 404, "task_not_found")
+    coded(await http.client.post("/api/scheduled-tasks/task-missing/resume"), 404, "task_not_found")
+    coded(await http.client.get("/api/scheduled-tasks/task-missing/runs"), 404, "task_not_found")
+    await _seed(http.repo, origin_thread_id="thread-origin")
+    async with http.sf() as session:
+        session.add(occurrence("ran", "task-l", seq=1, thread_id="thread-run"))
+        await session.commit()
+    origin = (await http.client.get("/api/threads/thread-origin/scheduled-tasks")).json()
+    run = (await http.client.get("/api/threads/thread-run/scheduled-tasks")).json()
+    assert [(task["id"], task["thread_relation"]) for task in origin] == [("task-l", "origin")]
+    assert [(task["id"], task["thread_relation"], task["thread_run"]["run_number"]) for task in run] == [("task-l", "run", 1)]
+    assert run[0]["automatic_runs_used"] == 1

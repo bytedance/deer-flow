@@ -1,3 +1,4 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import { afterEach, expect, test, rs } from "@rstest/core";
 
 import {
@@ -7,6 +8,7 @@ import {
   isRunNotCancellableError,
   StreamReplayGapError,
 } from "@/core/api/api-client";
+import { getMessageGroups } from "@/core/messages/utils";
 
 function makeSessionStorage() {
   const values = new Map<string, string>();
@@ -483,6 +485,89 @@ test("hydrates the active run input before replaying an incremental stream", asy
   expect(
     (entries[0]?.data as { messages: Array<{ id: string }> }).messages,
   ).toHaveLength(2);
+});
+
+test("rejoining a scheduled run shows its launch once", async () => {
+  const origin = {
+    task_id: "task-1",
+    task_run_id: "task-run-x",
+    trigger: "scheduled",
+    run_number: 2,
+    scheduled_for: "2026-10-05T12:21:53+00:00",
+    timezone: "Asia/Shanghai",
+    task_title: "Release checklist",
+    instructions: "Check the list.",
+    stop_condition: null,
+    standing_notes: [],
+  };
+  const launched = {
+    id: "scheduled-x",
+    type: "human",
+    content: "Check the list.",
+    additional_kwargs: { deerflow_scheduled_origin: origin },
+  };
+  const fetchFn = rs.fn(async (url: string | URL) => {
+    const path = new URL(url.toString()).pathname;
+    if (path.endsWith("/runs/run-scheduled")) {
+      return new Response(
+        JSON.stringify({
+          status: "running",
+          kwargs: { input: { messages: [launched] } },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/threads/thread-scheduled/state")) {
+      return new Response(
+        JSON.stringify({
+          values: {
+            messages: [
+              {
+                id: "scheduled-x",
+                type: "system",
+                content: "<system-reminder>date</system-reminder>",
+                additional_kwargs: { hide_from_ui: true },
+              },
+              { ...launched, id: "scheduled-x__user" },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.endsWith("/runs/run-scheduled/stream")) {
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage: makeSessionStorage(),
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const entries: Array<{ event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.joinStream(
+    "thread-scheduled",
+    "run-scheduled",
+  )) {
+    entries.push(entry);
+  }
+
+  const messages = (entries[0]?.data as { messages: Message[] }).messages;
+  expect(messages.map((message) => message.id)).toEqual([
+    "scheduled-x",
+    "scheduled-x__user",
+  ]);
+  const humans = getMessageGroups(messages).filter(
+    (group) => group.type === "human",
+  );
+  expect(humans).toHaveLength(1);
+  expect(
+    humans[0]?.type === "human" && humans[0].scheduledOrigin?.task_id,
+  ).toBe("task-1");
 });
 
 test("continues reconnect when durable state hydration fails", async () => {

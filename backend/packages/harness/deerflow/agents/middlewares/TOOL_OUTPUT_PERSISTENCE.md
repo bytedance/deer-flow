@@ -43,6 +43,18 @@ configured fallback. Disabled budgets, raised limits and tool exemptions apply
 before provider normalization. Pure text/media results without JSON retain their
 existing pass-through behavior.
 
+## Bash exit marker
+
+The subagent executor reads a bash result's exit status only from its end
+(`Exit Code: N`, or a whole-output `Command exited with code N`); with no marker
+it falls back to `deerflow_tool_meta`, which reports `success` for a nonzero
+exit. A model-visible rewrite of a `bash`/`bash_tool` result must therefore keep
+the original trailing marker last: the preview re-appends it after the `Access:`
+footer, and the storage-unavailable fallback reserves it from `max_chars` like
+sandbox truncation. The local marker regex mirrors
+`sandbox.tools._BASH_EXIT_MARKER_TAIL_RE` and a test pins them together. The
+persisted output is the original bytes; other tools are not rewritten.
+
 ## Unclean shutdown
 
 SIGKILL, OOM termination, and host failure bypass exception cleanup and can leave

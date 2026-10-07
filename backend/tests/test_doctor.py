@@ -28,6 +28,18 @@ def _load_script(path: Path, name: str):
     return module
 
 
+@pytest.mark.parametrize("host_encoding", ["ascii", "cp936"])
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_run_preserves_tool_diagnostics_with_invalid_utf8(monkeypatch, host_encoding, stream):
+    monkeypatch.setattr(doctor.subprocess, "_text_encoding", lambda: host_encoding)
+    output = "v22.0.0 ✓ 检查通过 ".encode() + b"\xff\n"
+    code = f"import sys; sys.{stream}.buffer.write({output!r})"
+
+    result = doctor._run([sys.executable, "-c", code])
+
+    assert result == "v22.0.0 ✓ 检查通过 \ufffd"
+
+
 # ---------------------------------------------------------------------------
 # check_python
 # ---------------------------------------------------------------------------
@@ -46,6 +58,30 @@ class TestCheckPython:
 
 
 class TestCheckPnpm:
+    @pytest.mark.parametrize("host_encoding", ["ascii", "cp936"])
+    @pytest.mark.parametrize("returncode", [0, 7])
+    def test_preserves_runner_diagnostics_with_invalid_utf8(self, tmp_path, monkeypatch, host_encoding, returncode):
+        monkeypatch.setattr(doctor.subprocess, "_text_encoding", lambda: host_encoding)
+        stdout = b"10.26.2\n" if returncode == 0 else "运行失败 ".encode() + b"\xff\n"
+        stderr = "诊断详情 ".encode() + b"\xff\n"
+        runner = tmp_path / "pnpm runner.py"
+        runner.write_text(
+            f"import os, sys\nassert os.getcwd() == {str(tmp_path)!r}\nassert sys.argv[1:] == ['-v']\nsys.stdout.buffer.write({stdout!r})\nsys.stderr.buffer.write({stderr!r})\nsys.exit({returncode})\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(doctor, "PNPM_SCRIPT_PATH", runner)
+        monkeypatch.setattr(doctor, "FRONTEND_DIR", tmp_path)
+
+        result = doctor.check_pnpm()
+
+        if returncode == 0:
+            assert result.status == "ok"
+            assert result.detail == "10.26.2"
+        else:
+            assert result.status == "fail"
+            assert result.detail == "诊断详情 \ufffd\n运行失败 \ufffd"
+            assert result.fix is not None
+
     def test_resolves_shared_runner_from_relative_script_path(self, monkeypatch):
         # Load the script as `scripts/doctor.py`, as a user would from the
         # repository root. The derived paths must not depend on that relative

@@ -122,6 +122,16 @@ preference hints for requests that should prefer a specific MCP server or tool.
 See [MCP Server Configuration](MCP_SERVER.md#routing-hints) for the schema,
 example, and soft-vs-hard routing boundary.
 
+Runtime edits to `extensions_config.json` (the MCP and skills APIs, the web UI,
+`DeerFlowClient`, or an editor) are picked up by every Gateway process that reads
+the same file: the process cache revalidates the file's path and content
+signature on each read, so uvicorn workers and multi-instance Pods sharing one
+volume converge without a restart or a per-Pod reload call. A change made through
+an API call on one instance is visible to the others on their next request. A
+missing, partially written or invalid file keeps the previously loaded configuration
+until a complete revision lands, including when it disappears during a reload;
+the Gateway logs one warning per such revision.
+
 ### Recursion Limits
 
 Gateway runs use the top-level `recursion_limit` as their LangGraph super-step
@@ -505,7 +515,8 @@ scheduler:
 Notes:
 
 - `enabled: false` keeps background polling off by default.
-- `tool_enabled: false` keeps conversation schedule tools off. Set it together with `enabled: true` and restart Gateway to offer `schedule_task` in authorized interactive conversations and `stop_scheduled_task` in their scheduled runs (see "Create schedules in a conversation" in the README).
+- `tool_enabled: false` keeps conversation schedule tools off. Set it together with `enabled: true` and restart Gateway to offer `schedule_task` in authorized interactive conversations and `stop_scheduled_task` to every scheduled run of a task, whether a chat or the tasks page created it (see "Create schedules in a conversation" in the README). A run can stop only its own task's schedule. Managing tasks from chat (create, update, resume, pause, delete, trial, notes) is interactive-only: a conversation manages the tasks created in it and, when it is a task's run conversation, that task; scheduled runs get only their own stop. The tools are offered only while this Gateway process's scheduler is running. With `tool_enabled` off, a task's stop condition is still sent to its runs, phrased so the run reports a met rule instead of calling a tool it does not have. Each launch reads `tool_enabled` from the live config, the same value that decides whether the run gets the tool, so the phrasing always matches.
+- The tasks page and REST API have parity with conversations for the per-run goal (`goal_objective`), safety cap (`max_runs`, `end_at`) and stop condition (`stop_condition`, stored in its own column and appended to the run message only at launch). Resume computes the next run from now without a catch-up run and refuses a one-time task whose time passed; reactivating a task whose cap is used up returns `409 limits_exhausted` unless the same request (for example the optional Resume body `{"max_runs", "end_at"}`) renews or clears the cap. Goal-check failures neither count toward nor reset the three-miss automatic pause, and changing the goal, instructions or stop condition, or adding a note, starts a new count (Resume keeps it). Creating a task while this Gateway process's poller is not running returns `409 scheduler_not_running`; `/api/features` reports `scheduled_tasks.running`. See `backend/docs/API.md#scheduled-tasks`.
 - `multi_instance: true` opts into lease-aware scheduler recovery across Gateway instances. It requires Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; otherwise startup fails fast. Leave it false for the default single-instance scheduler.
 - `max_concurrent_runs` is a shared global execution cap in multi-instance mode. Waiting `queued` rows do not consume capacity; an atomic `queued` → `launching` claim counts `launching`/`running` rows under a Postgres advisory lock so concurrent Pods cannot exceed the cap.
 - `queue_timeout_seconds` limits how long a persisted occurrence may wait for capacity or a reused thread to become available. Expired occurrences are marked `failed`; queued rows otherwise survive Gateway restarts.
@@ -644,6 +655,27 @@ Cancellation propagates during requests and waits. This stops local work; it
 cannot cancel work already started by Jina. Enabling retries can send up to `1 + max_retries` upstream requests
 and incur additional cost. Successful content and final `Error:` results retain
 the existing contract.
+
+#### Jina response byte budget
+
+On the same Jina `web_fetch` tool entry, optionally set `max_response_bytes: 1048576`
+(for example, 1 MiB). This uses existing tool configuration extras; no model-facing
+argument is added. Omitted or `null` preserves the buffered default. An enabled
+value must be a positive integer; booleans, strings, fractions, zero and negative
+values return `Error:` before HTTP client creation or network activity.
+
+Enabled fetches stream and count actual content-decoded bytes (after decompression,
+before text decoding), ignoring `Content-Length`. Exactly the limit is accepted.
+The first chunk exceeding it stops consumption and closes the response, returning
+an explicit size `Error:` without body content, partial success or readability
+extraction. This applies to all statuses, including 502/503/504, and oversize never
+retries. Each retry response has its own counter within the existing shared time
+budget. Streams close on success, errors, cancellation and read failures. Responses
+within the limit retain charset decoding and existing status/retry handling.
+
+This limits response retention/consumption, not wire-byte bandwidth or allocations
+inside HTTPX's decompressor; it is not a hard process-memory bound. The final
+Markdown truncation at 4096 characters is unchanged and independent of this option.
 
 Serper `web_search` also accepts the optional model argument
 `time_range: "day" | "week" | "month" | "year"`. For example,

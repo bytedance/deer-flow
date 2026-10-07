@@ -80,8 +80,12 @@ export function textOfMessage(message: Message) {
   return null;
 }
 
-export function titleOfThread(thread: AgentThread) {
-  return thread.values?.title ?? "Untitled";
+/**
+ * The thread's title, or `untitledLabel` when it has none. UI callers pass
+ * the localized `t.pages.untitled`; export filenames keep the English default.
+ */
+export function titleOfThread(thread: AgentThread, untitledLabel = "Untitled") {
+  return thread.values?.title ?? untitledLabel;
 }
 
 export function isThreadPinned(thread: Pick<AgentThread, "metadata">) {

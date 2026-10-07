@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import threading
+import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -97,6 +98,7 @@ from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.scheduler.runtime import scheduler_tools_enabled
+from deerflow.scheduler.schedules import validate_timezone
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.assembly_io import run_assembly
@@ -141,9 +143,18 @@ _TERMINAL_RUN_STATUSES = {
 
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
+# Message metadata a scheduled launch puts on its prompt: the task, run and the
+# user-language parts (instructions, stop condition, notes) the run thread shows
+# instead of the launched text. A cross-language contract
+# (contracts/scheduled_goal_notes_contract.json "scheduled_origin_key").
+SCHEDULED_ORIGIN_KEY = "deerflow_scheduled_origin"
+
 _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
     frozenset(
         {
+            # Only the scheduler's internal launch may mark a message as a
+            # scheduled run prompt.
+            SCHEDULED_ORIGIN_KEY,
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
@@ -1689,6 +1700,29 @@ _SCHEDULER_METADATA_KEYS = frozenset(
 )
 
 
+_MAX_CLIENT_TIMEZONE_CHARS = 64
+
+
+async def _client_timezone_from_context(context: Mapping[str, Any] | None) -> str | None:
+    """The browser timezone the web client sent in ``body.context``, if valid.
+
+    Read only for the schedule capability (default zone for new tasks). It is
+    not a ``_CONTEXT_CONFIGURABLE_KEYS`` entry, so it never reaches the run
+    config, the checkpoint or the prompt.
+    """
+    raw = context.get("client_timezone") if isinstance(context, Mapping) else None
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw or len(raw) > _MAX_CLIENT_TIMEZONE_CHARS:
+        logger.debug("Ignoring a malformed client_timezone in the run context")
+        return None
+    try:
+        return await asyncio.to_thread(validate_timezone, raw)
+    except (ValueError, OSError):
+        logger.debug("Ignoring an unknown client_timezone %s", sanitize_log_param(raw))
+        return None
+
+
 def _admit_scheduler_metadata(value: object, *, trusted: bool) -> dict[str, Any]:
     """Keep scheduler snapshots only on the private scheduler launch path."""
     result = dict(value) if isinstance(value, Mapping) else {}
@@ -2105,6 +2139,7 @@ async def start_run(
                     human_text = "\n".join(block["text"] for block in original if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str))
             scheduler_capability = None
             if scheduler_tools_enabled(getattr(run_ctx, "app_config", None)):
+                client_timezone = await _client_timezone_from_context(body.context)
                 try:
                     scheduler_capability = await prepare_scheduler_capability(
                         request,
@@ -2115,6 +2150,7 @@ async def start_run(
                         original_user_text=human_text,
                         interaction_policy=resolve_run_interaction_policy(config),
                         scheduled_task_runtime=scheduled_task_runtime,
+                        client_timezone=client_timezone,
                     )
                 except Exception:
                     logger.warning("Scheduler tool capability is unavailable for this run", exc_info=True)
@@ -2232,7 +2268,16 @@ async def launch_scheduled_thread_run(
     app: Any | None = None,
     owner_user_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    origin: dict[str, Any] | None = None,
+    title: str | None = None,
 ) -> dict[str, Any]:
+    """Start one scheduled occurrence as an internal run.
+
+    The prompt message gets a stable id per occurrence (retried launches and
+    reconnect hydration see one message) and, with ``origin``, the
+    ``SCHEDULED_ORIGIN_KEY`` metadata the run thread renders. ``title``
+    pre-sets a fresh run thread's title, so no title is generated.
+    """
     if request is None:
         if app is None:
             raise ValueError("launch_scheduled_thread_run requires request or app")
@@ -2245,9 +2290,20 @@ async def launch_scheduled_thread_run(
             ),
             cookies={},
         )
+    scheduled_task_run_id = (metadata or {}).get("scheduled_task_run_id")
+    message: dict[str, Any] = {
+        "role": "user",
+        "content": prompt,
+        "id": f"scheduled-{scheduled_task_run_id}" if isinstance(scheduled_task_run_id, str) else f"scheduled-{uuid.uuid4().hex}",
+    }
+    if origin:
+        message["additional_kwargs"] = {SCHEDULED_ORIGIN_KEY: origin}
+    graph_input: dict[str, Any] = {"messages": [message]}
+    if title:
+        graph_input["title"] = title
     body = RunCreateRequest(
         assistant_id=assistant_id,
-        input={"messages": [{"role": "user", "content": prompt}]},
+        input=graph_input,
         command=None,
         metadata=metadata or {},
         config={"recursion_limit": _resolve_scheduler_recursion_limit()},
@@ -2271,7 +2327,6 @@ async def launch_scheduled_thread_run(
         if_not_exists="create",
         feedback_keys=None,
     )
-    scheduled_task_run_id = (metadata or {}).get("scheduled_task_run_id")
     scheduled_task_runtime = None
     task_id = (metadata or {}).get("scheduled_task_id")
     if owner_user_id and isinstance(task_id, str) and isinstance(scheduled_task_run_id, str):

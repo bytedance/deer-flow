@@ -33,8 +33,8 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
     renders the same token across the batch, across enqueues, and across
     seams; message objects are rebuilt rather than mutated. Structured
     tool-call arguments are covered too — backends like OpenViking retain the full
-    message object, including ``tool_calls`` and provider-format arguments in
-    ``additional_kwargs``. Text-bearing provenance metadata is covered as
+    message object, including parsed/invalid calls (and invalid-call errors)
+    and provider-raw/legacy arguments in ``additional_kwargs``. Text-bearing provenance metadata is covered as
     well: UploadsMiddleware preserves the raw user turn in
     ``original_user_content``, and clarification replies keep the raw answer
     in ``human_input_response.value`` — DeerMem reads that mapping — so a
@@ -49,18 +49,20 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
         content, changed = _redact_content(message.content, redactor)
         if changed:
             updates["content"] = content
-        tool_calls = getattr(message, "tool_calls", None)
-        if tool_calls:
-            rewritten = [_redact_tool_call(call, redactor) for call in tool_calls]
-            if rewritten != tool_calls:
-                updates["tool_calls"] = rewritten
+        for field in ("tool_calls", "invalid_tool_calls"):
+            tool_calls = getattr(message, field, None)
+            if tool_calls:
+                rewritten = [_redact_tool_call(call, redactor) for call in tool_calls]
+                if rewritten != tool_calls:
+                    updates[field] = rewritten
         additional_kwargs = getattr(message, "additional_kwargs", None)
         if isinstance(additional_kwargs, dict):
             new_additional_kwargs = additional_kwargs
-            if additional_kwargs.get("tool_calls"):
-                rewritten = _redact_strings(additional_kwargs["tool_calls"], redactor)
-                if rewritten != additional_kwargs["tool_calls"]:
-                    new_additional_kwargs = {**new_additional_kwargs, "tool_calls": rewritten}
+            for field in ("tool_calls", "function_call"):
+                if additional_kwargs.get(field):
+                    rewritten = _redact_strings(additional_kwargs[field], redactor)
+                    if rewritten != additional_kwargs[field]:
+                        new_additional_kwargs = {**new_additional_kwargs, field: rewritten}
             original_content = additional_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
             if isinstance(original_content, str) and original_content:
                 redacted_original = redactor.redact(original_content)
@@ -78,11 +80,12 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
 
 
 def _redact_tool_call(call: dict, redactor: _Redactor) -> dict:
-    """Redact PII inside one parsed tool-call dict (args values recursively)."""
+    """Redact arguments and invalid-call error text without changing call identity."""
     rewritten = dict(call)
-    args = rewritten.get("args")
-    if args is not None:
-        rewritten["args"] = _redact_strings(args, redactor)
+    for field in ("args", "error"):
+        value = rewritten.get(field)
+        if value is not None:
+            rewritten[field] = _redact_strings(value, redactor)
     return rewritten
 
 

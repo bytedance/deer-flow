@@ -3,7 +3,8 @@
 Covers: pass-through, disk externalization, fallback truncation, UTF-8
 boundaries, Command results, model-request history patching, superseded
 write_file payload elision (issue #5328), config variations, exempt tools,
-per-tool overrides, edge cases, and both sync/async code paths.
+per-tool overrides, bash exit-marker preservation after budget rewrites,
+edge cases, and both sync/async code paths.
 """
 
 from __future__ import annotations
@@ -11,11 +12,13 @@ from __future__ import annotations
 import contextlib
 import csv
 import hashlib
+import importlib.util
 import io
 import json
 import os
 import pathlib
 import re
+import sys
 import tempfile
 from types import SimpleNamespace
 
@@ -25,12 +28,14 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_output_budget_middleware import (
+    _BASH_EXIT_MARKER_TAIL_RE,
     TOOL_OUTPUT_BLOB_KEY,
     ToolOutputBudgetMiddleware,
     _build_fallback,
     _build_preview,
     _effective_trigger,
     _externalize,
+    _keep_exit_marker_last,
     _message_text,
     _needs_budget,
     _patch_model_messages,
@@ -97,6 +102,22 @@ def _unwritable_outputs_path():
 
 def _tm(content: str = "ok", name: str = "tool", tool_call_id: str = "tc-1") -> ToolMessage:
     return ToolMessage(content=content, name=name, tool_call_id=tool_call_id)
+
+
+def _pytest_like_output(exit_line: str = "Exit Code: 1") -> str:
+    """Pytest-shaped bash output in the default 12k–20k budget window."""
+    return "============================= test session starts =============================\n" + ("collected 12 items\n" + "." * 12 + "\n") * 500 + f"12 passed in 1.23s\n{exit_line}"
+
+
+def _bash_tm(content: str, name: str = "bash") -> ToolMessage:
+    return ToolMessage(
+        content=content,
+        name=name,
+        tool_call_id="tc-1",
+        id="tool-msg-1",
+        artifact={"k": "v"},
+        additional_kwargs={"deerflow_tool_meta": {"status": "success", "source": "normalized"}},
+    )
 
 
 # ===========================================================================
@@ -795,6 +816,185 @@ class TestBuildFallback:
         content = "x" * 1000
         result = _build_fallback(content, tool_name="t", max_chars=50, head_chars=20, tail_chars=10)
         assert len(result) <= 50
+
+
+# ===========================================================================
+# Bash exit-marker preservation (harvest reads Exit Code: N from the end)
+# ===========================================================================
+
+
+class TestBashExitMarkerPreservation:
+    """Budget rewrites must keep a trailing bash exit marker last.
+
+    The subagent executor harvests status with ``Exit Code: N\\s*$``. Preview
+    construction always ends with an Access footer, so without this the
+    marker is no longer last and a failed command is harvested as success.
+    """
+
+    def test_keep_exit_marker_last_appends_for_bash(self):
+        original = "out\nExit Code: 1"
+        rewritten = "preview\nAccess:\n- Use read_file"
+        assert _keep_exit_marker_last(original, rewritten, tool_name="bash") == "preview\nAccess:\n- Use read_file\nExit Code: 1"
+
+    def test_keep_exit_marker_last_is_noop_for_other_tools(self):
+        original = "out\nExit Code: 1"
+        rewritten = "preview\nAccess:\n- Use read_file"
+        assert _keep_exit_marker_last(original, rewritten, tool_name="web_fetch") == rewritten
+
+    def test_keep_exit_marker_last_is_noop_when_already_last(self):
+        original = "out\nExit Code: 0"
+        rewritten = "preview\nExit Code: 0"
+        assert _keep_exit_marker_last(original, rewritten, tool_name="bash") == rewritten
+
+    def test_wrap_tool_call_keeps_failed_exit_marker_last(self):
+        content = _pytest_like_output("Exit Code: 1")
+        assert 12_000 < len(content) <= 20_000
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            msg = _bash_tm(content)
+            result = mw.wrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), lambda _: msg)
+
+        assert isinstance(result, ToolMessage)
+        assert result is not msg
+        assert str(result.content).rstrip().endswith("Exit Code: 1")
+        assert "Access:" in result.content
+        assert "read_file" in result.content
+        assert result.additional_kwargs["deerflow_tool_meta"] == {"status": "success", "source": "normalized"}
+        assert result.artifact == {"k": "v"}
+        assert result.id == "tool-msg-1"
+
+    @pytest.mark.anyio
+    async def test_awrap_tool_call_keeps_failed_exit_marker_last(self):
+        content = _pytest_like_output("Exit Code: 1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            msg = _bash_tm(content)
+
+            async def handler(_):
+                return msg
+
+            result = await mw.awrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), handler)
+
+        assert str(result.content).rstrip().endswith("Exit Code: 1")
+        assert "Access:" in result.content
+        assert result.artifact == {"k": "v"}
+        assert result.id == "tool-msg-1"
+
+    def test_wrap_tool_call_keeps_successful_exit_marker_last(self):
+        content = _pytest_like_output("Exit Code: 0")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            result = mw.wrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), lambda _: _bash_tm(content))
+        assert str(result.content).rstrip().endswith("Exit Code: 0")
+        assert "Access:" in result.content
+
+    def test_wrap_tool_call_without_marker_ends_at_access_footer(self):
+        content = _pytest_like_output("12 failed in 1.23s")
+        assert not content.rstrip().endswith("Exit Code: 1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            result = mw.wrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), lambda _: _bash_tm(content))
+        assert "Access:" in result.content
+        assert "read_file" in result.content
+        assert not str(result.content).rstrip().endswith("Exit Code: 1")
+        assert "Exit Code:" not in str(result.content).rsplit("Access:", 1)[-1]
+
+    def test_non_bash_tool_does_not_promote_exit_marker(self):
+        content = _pytest_like_output("Exit Code: 1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            result = mw.wrap_tool_call(
+                _make_request(tool_name="web_fetch", outputs_path=tmpdir),
+                lambda _: _bash_tm(content, name="web_fetch"),
+            )
+        assert "Access:" in result.content
+        assert not str(result.content).rstrip().endswith("Exit Code: 1")
+
+    def test_bash_tool_alias_also_preserves_marker(self):
+        content = _pytest_like_output("Exit Code: 1")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+            result = mw.wrap_tool_call(
+                _make_request(tool_name="bash_tool", outputs_path=tmpdir),
+                lambda _: _bash_tm(content, name="bash_tool"),
+            )
+        assert str(result.content).rstrip().endswith("Exit Code: 1")
+
+    def test_fallback_tiny_budget_keeps_marker_and_stays_within_max_chars(self):
+        content = _pytest_like_output("Exit Code: 1")
+        result = _build_fallback(content, tool_name="bash", max_chars=80, head_chars=8000, tail_chars=3000)
+        assert len(result) <= 80
+        assert result.rstrip().endswith("Exit Code: 1")
+
+    def test_fallback_default_budget_leaves_payload_unchanged(self):
+        content = _pytest_like_output("Exit Code: 1")
+        result = _build_fallback(content, tool_name="bash", max_chars=30_000, head_chars=8000, tail_chars=3000)
+        assert result == content
+        assert result.rstrip().endswith("Exit Code: 1")
+
+    def test_fallback_never_exceeds_max_chars_with_exit_marker(self):
+        content = _pytest_like_output("Exit Code: 1")
+        marker_line = "\nExit Code: 1"
+        for max_chars in [10, len(marker_line) - 1, len(marker_line), 20, 80, 200, 500, 1000, 5000, 20000]:
+            result = _build_fallback(content, tool_name="bash", max_chars=max_chars, head_chars=max_chars // 2, tail_chars=max_chars // 4)
+            assert len(result) <= max_chars, f"max_chars={max_chars}: got {len(result)}"
+            if max_chars >= len(marker_line):
+                assert result.rstrip().endswith("Exit Code: 1"), f"max_chars={max_chars}"
+            else:
+                assert not result.rstrip().endswith("Exit Code: 1")
+
+    def test_exit_marker_regex_matches_sandbox_truncation_tail_shapes(self):
+        from deerflow.sandbox.tools import _BASH_EXIT_MARKER_TAIL_RE as sandbox_re
+
+        for content in ("out\nExit Code: 1", "out\nExit Code: -9 \n", "out\nCommand exited with code 3", "Command exited with code 3"):
+            ours = _BASH_EXIT_MARKER_TAIL_RE.search(content)
+            theirs = sandbox_re.search(content)
+            assert ours is not None and theirs is not None
+            assert ours.start() == theirs.start(), content
+
+    def test_budgeted_failed_pytest_is_harvested_as_error_not_pass(self):
+        """End-to-end: wrap_tool_call rewrite → harvest status=error → leaf holds=False.
+
+        ``tests/conftest.py`` mocks ``deerflow.subagents.executor``, so the
+        production harvest helpers are loaded under a unique module name.
+        """
+        path = pathlib.Path(__file__).parents[1] / "packages/harness/deerflow/subagents/executor.py"
+        spec = importlib.util.spec_from_file_location("_budget_exit_marker_executor", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        try:
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            from deerflow.subagents import acceptance_checks
+
+            content = _pytest_like_output("Exit Code: 1")
+            with tempfile.TemporaryDirectory() as tmpdir:
+                mw = ToolOutputBudgetMiddleware(config=ToolOutputConfig())
+                result = mw.wrap_tool_call(_make_request(tool_name="bash", outputs_path=tmpdir), lambda _: _bash_tm(content))
+
+            assert str(result.content).rstrip().endswith("Exit Code: 1")
+            cmd = "pytest -q"
+            ai = AIMessage(
+                content="",
+                tool_calls=[{"name": "bash", "args": {"command": cmd}, "id": "tc-1", "type": "tool_call"}],
+            )
+            state = {"messages": [HumanMessage(content="task"), ai, result]}
+            executions = module._harvest_bash_executions(state)
+            assert executions, "harvest returned no bash executions"
+            for entry in executions:
+                entry["shell_persistent"] = False
+            latest = executions[-1]
+            assert latest["status"] == "error"
+            assert latest["status_marker"] == "Exit Code: 1"
+            leaf = acceptance_checks._check_tests_passed_leaf(cmd, executions)
+            assert leaf["checked"] is True
+            assert leaf["holds"] is False
+        finally:
+            sys.modules.pop(spec.name, None)
+            # Absent when exec_module failed part-way; don't mask that error.
+            shutdown = getattr(module, "_shutdown_isolated_subagent_loop", None)
+            if shutdown is not None:
+                shutdown()
 
 
 # ===========================================================================

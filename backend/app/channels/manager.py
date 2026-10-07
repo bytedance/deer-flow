@@ -9,6 +9,7 @@ import mimetypes
 import re
 import stat
 import time
+import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -911,7 +912,10 @@ def _unknown_command_reply(command: str | None = None) -> str:
 
 
 def _human_input_message(content: str, *, original_content: str | None = None, files: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    message: dict[str, Any] = {"role": "human", "content": content}
+    # The Gateway records run input as sent, but add_messages gives an id-less
+    # message a fresh uuid in the checkpoint. A web client reconnecting to the
+    # run rebuilds its input from both copies and can only match them by id.
+    message: dict[str, Any] = {"id": str(uuid.uuid4()), "role": "human", "content": content}
     if original_content is not None and original_content != content or files:
         additional_kwargs: dict[str, Any] = {}
         if original_content is not None and original_content != content:

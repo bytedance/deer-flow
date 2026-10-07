@@ -108,6 +108,8 @@ import {
   MessageTokenUsageList,
 } from "./message-token-usage";
 import { RunActivity, RunDuration } from "./run-duration";
+import { ScheduledRunPrompt } from "./scheduled-run-prompt";
+import { ScheduledTaskCard } from "./scheduled-task-card";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
 import {
@@ -1196,6 +1198,15 @@ export function MessageList({
                 (display) => display.runId,
               );
 
+              if (group.type === "human" && group.scheduledOrigin) {
+                // A scheduled launch: the run block replaces the launched
+                // prompt; it is the task's, so it has no edit or copy actions.
+                return withRunDuration(
+                  group,
+                  groupIndex,
+                  <ScheduledRunPrompt origin={group.scheduledOrigin} />,
+                );
+              }
               if (group.type === "human" || group.type === "assistant") {
                 return withRunDuration(
                   group,
@@ -1233,6 +1244,7 @@ export function MessageList({
                           )}
                           canEdit={
                             group.type === "human" &&
+                            !group.scheduledOrigin &&
                             Boolean(msg.id) &&
                             msg.id === latestEditableHumanMessageId &&
                             canEdit &&
@@ -1242,6 +1254,7 @@ export function MessageList({
                           isEditPending={editingMessageId === msg.id}
                           onEditAndRegenerate={
                             group.type === "human" &&
+                            !group.scheduledOrigin &&
                             msg.id &&
                             onEditAndRegenerateMessage
                               ? async (replacementText) => {
@@ -1374,6 +1387,18 @@ export function MessageList({
                   );
                 }
                 return withRunDuration(group, groupIndex, null);
+              } else if (group.type === "assistant:scheduled-task") {
+                return withRunDuration(
+                  group,
+                  groupIndex,
+                  <div className="w-full">
+                    <ScheduledTaskCard result={group.scheduleResult} />
+                    {renderTokenUsage({
+                      messages: group.messages,
+                      turnUsageMessages,
+                    })}
+                  </div>,
+                );
               } else if (group.type === "assistant:present-files") {
                 const files = new Set<string>();
                 for (const message of group.messages) {

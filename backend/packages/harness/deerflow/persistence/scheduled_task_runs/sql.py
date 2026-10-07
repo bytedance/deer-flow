@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import operator
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, exists, func, or_, select, text, update
+from sqlalchemy import and_, case, exists, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
 
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
-from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, end_condition_reached, finalize_occurrence
+from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, end_condition_reached, finalize_occurrence, is_host_pause_marker
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
 from deerflow.persistence.scheduled_tasks.model import (
@@ -19,6 +21,7 @@ from deerflow.persistence.scheduled_tasks.model import (
     ScheduledTaskRow,
     ScheduledTaskRunStatus,
 )
+from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.utils.time import coerce_iso
 
@@ -32,6 +35,92 @@ def _lease_is_alive(lease_expires_at: datetime | None, *, now: datetime, grace_s
     if lease_expires_at.tzinfo is None:
         lease_expires_at = lease_expires_at.replace(tzinfo=UTC)
     return lease_expires_at >= now - timedelta(seconds=grace_seconds)
+
+
+_SUMMARY_MAX_CHARS = 160
+_MARKDOWN_PREFIX = re.compile(r"^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)+")
+_MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MARKDOWN_MARKERS = re.compile(r"(\*\*|__|~~|`+)")
+_LIST_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+_TASK_CHECKBOX = re.compile(r"^\[[ xX]\]\s*")
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uff00-\uffef]")
+
+
+def _summary_line(line: str) -> str:
+    """One reply line as plain text: no list/heading/quote prefix, checkbox, links or emphasis markers."""
+    text = _MARKDOWN_PREFIX.sub("", line.strip())
+    text = _TASK_CHECKBOX.sub("", text)
+    text = _MARKDOWN_MARKERS.sub("", _MARKDOWN_LINK.sub(r"\1", text)).strip()
+    if text.startswith(("*", "_")) and text.endswith(("*", "_")) and len(text) > 2:
+        text = text[1:-1].strip()
+    return text
+
+
+def _lead_in_items(lines: list[str]) -> list[str]:
+    """The list that follows a lead-in line ("Two items are still open:"), as plain text.
+
+    Blank lines before and between items are skipped; the first other line ends the list.
+    """
+    items: list[str] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        if not _LIST_ITEM.match(line.strip()):
+            break
+        item = _summary_line(line)
+        if item:
+            items.append(item)
+    return items
+
+
+def run_summary(last_ai_message: str | None) -> str | None:
+    """One readable line from the agent's final reply, without markdown markers.
+
+    It is the reply's first non-empty line. When that line only introduces a
+    list (it ends with ":" or "："), the list items follow it, joined with
+    "；" for CJK text and "; " otherwise, so the line still says something.
+    The result is capped at ``_SUMMARY_MAX_CHARS`` with an ellipsis.
+    """
+    if not isinstance(last_ai_message, str):
+        return None
+    lines = last_ai_message.splitlines()
+    for index, line in enumerate(lines):
+        text = _summary_line(line)
+        if not (text and set(text) - set("-*_=|: ")):
+            continue
+        if text.endswith((":", "：")):
+            items = _lead_in_items(lines[index + 1 :])
+            if items:
+                if _CJK.search(text):
+                    # "：" needs no space after it; an ASCII ":" does.
+                    text = f"{text}{' ' if text.endswith(':') else ''}{'；'.join(items)}"
+                else:
+                    text = f"{text} {'; '.join(items)}"
+        return text if len(text) <= _SUMMARY_MAX_CHARS else text[: _SUMMARY_MAX_CHARS - 1].rstrip() + "…"
+    return None
+
+
+def run_number_expression(outer: Any):
+    """SQL expression numbering automatic runs exactly like the safety cap counts them.
+
+    A launch-accounted scheduled row is number N when N accounted scheduled
+    rows of its task have ``occurrence_seq <=`` its own. A launching/running
+    row not yet accounted gets the number it will have (accounted-before + 1),
+    so the launch-time number and the history number agree. Manual,
+    unsequenced and never-launched rows have no number.
+    """
+    inner = aliased(ScheduledTaskRunRow)
+
+    def accounted(compare):
+        condition = and_(inner.task_id == outer.task_id, inner.trigger == "scheduled", inner.launch_accounted.is_(True), compare(inner.occurrence_seq, outer.occurrence_seq))
+        return select(func.count()).select_from(inner).where(condition).correlate(outer).scalar_subquery()
+
+    sequenced = and_(outer.trigger == "scheduled", outer.occurrence_seq.is_not(None))
+    return case(
+        (and_(sequenced, outer.launch_accounted.is_(True)), accounted(operator.le)),
+        (and_(sequenced, outer.status.in_(("launching", "running"))), accounted(operator.lt) + 1),
+        else_=None,
+    )
 
 
 class ActiveScheduledRunConflict(Exception):
@@ -246,7 +335,7 @@ class ScheduledTaskRunRepository:
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             row = await session.get(ScheduledTaskRunRow, task_run_id, with_for_update=True)
-            if task is None or task.origin_thread_id is None or task.user_id != user_id or row is None or row.task_id != task_id or row.status not in {"launching", "running"} or row.run_id not in (None, run_id):
+            if task is None or task.user_id != user_id or row is None or row.task_id != task_id or row.status not in {"launching", "running"} or row.run_id not in (None, run_id):
                 return False
             durable = await session.get(RunRow, run_id)
             metadata = durable.metadata_json if durable is not None else {}
@@ -309,13 +398,42 @@ class ScheduledTaskRunRepository:
         offset: int = 0,
         status: ScheduledTaskRunStatus | None = None,
     ) -> list[dict[str, Any]]:
-        stmt = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id)
+        """Page of a task's occurrences, newest first.
+
+        Each row adds ``run_number`` (see ``run_number_expression``),
+        ``total_tokens`` of the launched run (None when nothing launched) and
+        ``summary``: the first line of the agent's final reply. The goal
+        evaluator's reason is deliberately not the summary; it stays in
+        ``goal_verdict``.
+        """
+        number = run_number_expression(ScheduledTaskRunRow).label("run_number")
+        stmt = select(ScheduledTaskRunRow, number, RunRow.total_tokens, RunRow.last_ai_message).outerjoin(RunRow, RunRow.run_id == ScheduledTaskRunRow.run_id).where(ScheduledTaskRunRow.task_id == task_id)
         if status is not None:
             stmt = stmt.where(ScheduledTaskRunRow.status == status)
         stmt = stmt.order_by(ScheduledTaskRunRow.created_at.desc(), ScheduledTaskRunRow.id.desc()).limit(limit).offset(offset)
         async with self._sf() as session:
             result = await session.execute(stmt)
-            return [self._row_to_dict(row) for row in result.scalars()]
+            rows = []
+            for row, run_number, total_tokens, last_ai_message in result.all():
+                data = self._row_to_dict(row)
+                data["run_number"] = int(run_number) if run_number is not None else None
+                data["total_tokens"] = int(total_tokens) if total_tokens is not None else None
+                data["summary"] = run_summary(last_ai_message)
+                rows.append(data)
+            return rows
+
+    async def run_number(self, task_run_id: str) -> int | None:
+        """The automatic-run number of one occurrence (None for trials and never-launched rows)."""
+        stmt = select(run_number_expression(ScheduledTaskRunRow)).where(ScheduledTaskRunRow.id == task_run_id)
+        async with self._sf() as session:
+            value = (await session.execute(stmt)).scalar()
+        return int(value) if value is not None else None
+
+    async def task_ids_for_thread(self, thread_id: str, *, user_id: str) -> list[str]:
+        """Ids of the owner's tasks that ran an occurrence in this conversation."""
+        stmt = select(ScheduledTaskRunRow.task_id).join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id).where(ScheduledTaskRunRow.thread_id == thread_id, ScheduledTaskRow.user_id == user_id).distinct()
+        async with self._sf() as session:
+            return sorted((await session.execute(stmt)).scalars())
 
     async def count_active_runs(self) -> int:
         """Count launch claims and live runs; waiting rows do not consume slots."""
@@ -409,7 +527,7 @@ class ScheduledTaskRunRepository:
             if row is None or row.status != "queued":
                 return None
             if task is not None and row.trigger == "scheduled" and await end_condition_reached(session, task, now=now):
-                await finalize_occurrence(session, task, row, status="skipped", error="schedule end condition reached", finished_at=now, run_id=None, observer=self._finalization_observer)
+                await finalize_occurrence(session, task, row, status="skipped", error=RUN_ERROR_END_REACHED, finished_at=now, run_id=None, observer=self._finalization_observer)
                 task.status = "completed"
                 task.next_run_at = None
                 task.lease_owner = None
@@ -599,7 +717,9 @@ class ScheduledTaskRunRepository:
                 task.last_run_at = now
                 task.last_run_id = None
                 task.last_thread_id = row.thread_id
-                task.last_error = error
+                # A failed trial on a task the host paused keeps its pause reason.
+                if not (row.trigger == "manual" and task.status == "paused" and is_host_pause_marker(task.last_error)):
+                    task.last_error = error
                 task.lease_owner = None
                 task.lease_expires_at = None
                 task.updated_at = datetime.now(UTC)
