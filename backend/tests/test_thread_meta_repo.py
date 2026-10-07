@@ -826,8 +826,10 @@ class TestJsonMatchCompilation:
         assert "DOUBLE PRECISION" in sql
         assert "CASE WHEN" in sql
         assert "AS NUMERIC" in sql
-        assert "1.7976931348623158e+308" in sql
-        assert "2.4703282292062327e-324" in sql
+        # exact float8 rounding midpoints, not the shortened round-trip spellings
+        assert f">= CAST('{2**1024 - 2**970}' AS NUMERIC)" in sql
+        assert f"<= CAST('{5**1075}e-1075' AS NUMERIC)" in sql
+        assert "1.7976931348623158e+308" not in sql
         # exponent magnitude bound, so CAST AS NUMERIC cannot overflow on 1e-16384
         assert "AS INTEGER) > 6000" in sql
         assert "pg_input_is_valid" not in sql

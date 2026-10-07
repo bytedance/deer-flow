@@ -19,10 +19,12 @@ compare integer text (including `-0` for zero) without casting arbitrary stored
 numbers to BIGINT or NUMERIC. Preserve integer/float/boolean/string distinctions.
 
 PostgreSQL float filters must not let `CAST(... AS DOUBLE PRECISION)` see stored
-numbers outside float8 range (SQLSTATE 22003, e.g. a 309-digit integer):
+numbers outside float8 range (SQLSTATE 22003, e.g. the integer `10**309`):
 `_pg_float_guard` keeps the cast inside a CASE (not `AND`, which has no
 evaluation-order guarantee) behind non-raising checks, using PostgreSQL 14 SQL
-only. Such values never match on PostgreSQL; SQLite saturates them instead.
+only. Its range bounds are the exact float8 rounding midpoints, not shortened
+spellings like `1.7976931348623158e+308`, which drop values that round to
+DBL_MAX. Such values never match on PostgreSQL; SQLite saturates them instead.
 `tests/test_json_integer_matching.py` exercises both dialects; PostgreSQL opts in
 with `DEERFLOW_TEST_POSTGRES_URL` and uses connection-local temporary tables.
 ## Scheduled-task lifecycle

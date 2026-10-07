@@ -806,8 +806,8 @@ This release closes that milestone with **439 merged pull requests**.
 
 - **persistence:** On PostgreSQL, a float JSON metadata filter no longer fails
   the whole search when some stored value on that key is a number outside
-  DOUBLE PRECISION range, such as an integer with 309 or more digits (which the
-  API accepts) or `1e400`. The cast raised SQLSTATE 22003; such values now never
+  DOUBLE PRECISION range, such as an integer above about 1.8e308 like `10**309`
+  (which the API accepts) or `1e400`. The cast raised SQLSTATE 22003; such values now never
   match, while in-range values, including the float8 bounds, match as before.
   The guard uses only PostgreSQL 14 SQL, and SQLite is unchanged. Follow-up to
   [#6000], which fixed the same failure for integer filters. ([#6429])

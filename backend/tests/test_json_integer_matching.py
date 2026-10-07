@@ -97,10 +97,22 @@ async def test_float_filter_ignores_out_of_range_stored_numbers(json_table, expe
         # inside the NUMERIC bounds check despite a five-digit exponent.
         {"id": "deep-underflow", "data": '{"x": 1e-16384}'},
         {"id": "deeper-underflow", "data": '{"x": -1e-20000}'},
+        # Above the shortened half-denorm spelling (2.4703282292062327e-324)
+        # but below the exact underflow midpoint 2**-1075: rounds to 0 and
+        # raised past the old bound. The midpoint itself ties to 0.
+        {"id": "near-underflow", "data": '{"x": 2.47032822920623272e-324}'},
+        {"id": "underflow-midpoint", "data": '{"x": ' + f"{5**1075}e-1075" + "}"},
         {"id": "overflow-ulp", "data": '{"x": 1.7976931348623159e+308}'},
+        # Exact float8 overflow midpoint (DBL_MAX + half an ulp) ties to inf.
+        {"id": "overflow-midpoint", "data": json.dumps({"x": 2**1024 - 2**970})},
         {"id": "zero-huge-exp", "data": '{"x": 0e400}'},
         # JSON allows leading zeros in the exponent; this is 1.5 and must match.
         {"id": "padded-exponent", "data": '{"x": 15e-000001}'},
+        # API-storable exact integers above the shortened DBL_MAX spelling
+        # (1.7976931348623158e+308) that still round to DBL_MAX, the last one
+        # just below the overflow midpoint; they must match a DBL_MAX filter.
+        {"id": "near-max", "data": json.dumps({"x": 1797693134862315805 * 10**290})},
+        {"id": "below-overflow-midpoint", "data": json.dumps({"x": 2**1024 - 2**970 - 1})},
         {"id": "integer", "data": '{"x": 42}'},
         {"id": "string", "data": json.dumps({"x": str(expected)})},
         {"id": "nan-string", "data": '{"x": "NaN"}'},
@@ -113,4 +125,10 @@ async def test_float_filter_ignores_out_of_range_stored_numbers(json_table, expe
     result = await connection.execute(select(table.c.id).where(json_match(table.c.data, "x", expected)))
     expected_ids = {str(expected)} | ({"integer"} if expected == 42 else set())
     expected_ids |= {"padded-exponent"} if expected == 1.5 else set()
+    if expected == 1.7976931348623157e308:
+        expected_ids |= {"near-max", "below-overflow-midpoint"}
+        # SQLite's own text-to-REAL conversion rounds the exact tie down to
+        # DBL_MAX; PostgreSQL rounds it to inf (22003), so the guard skips it.
+        if connection.dialect.name == "sqlite":
+            expected_ids |= {"overflow-midpoint"}
     assert set(result.scalars()) == expected_ids

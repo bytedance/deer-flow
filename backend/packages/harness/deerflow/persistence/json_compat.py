@@ -180,10 +180,13 @@ def _type_check(typeof: str, types: tuple[str, ...]) -> str:
     return f"{typeof} IN ({quoted})"
 
 
-# Last finite float8 spelling PostgreSQL accepts; the next ulp (…159e+308) raises 22003.
-_FLOAT8_MAX = "1.7976931348623158e+308"
-# Half the min positive denormal: that exact spelling raises; anything larger rounds to 5e-324.
-_FLOAT8_HALF_MIN_DENORM = "2.4703282292062327e-324"
+# Exact float8 rounding midpoints. Shortened spellings such as 1.7976931348623158e+308
+# only round-trip; they do not mark where rounding flips. Both midpoints tie away
+# from a finite nonzero float8 under ties-to-even (to inf and to 0), so they raise.
+# DBL_MAX + half an ulp, a 309-digit integer.
+_FLOAT8_OVERFLOW_MIDPOINT = str(2**1024 - 2**970)
+# Half the min positive denormal, 2**-1075 == 5**1075 * 10**-1075, exactly.
+_FLOAT8_UNDERFLOW_MIDPOINT = f"{5**1075}e-1075"
 # CAST AS NUMERIC raises past 131072 integer digits (1e131072, 131073 nines) and
 # past 16383 fractional digits (1e-16384). 10,000 characters plus an exponent of
 # at most 6,000 stays under both, and float8 needs far less than either.
@@ -206,7 +209,9 @@ def _pg_float_guard(typeof: str, extract: str, comparison: str, bp: str) -> str:
     Exact-zero spellings (including ``0e400``) are matched without a numeric cast
     so a huge exponent cannot overflow NUMERIC on a stored zero; they still match
     a ``0.0`` filter. Underflow such as ``1e-400`` is not an exact zero and never
-    matches, whereas SQLite saturates it to 0.0.
+    matches, whereas SQLite saturates it to 0.0. The float8 range check uses the
+    exact rounding midpoints, so a value that rounds to DBL_MAX or 5e-324 still
+    matches and one that rounds to inf or 0 is skipped instead of raising.
     """
     n = f"CAST({extract} AS NUMERIC)"
     # NULL without an exponent, so both exponent WHENs fall through.
@@ -218,8 +223,8 @@ def _pg_float_guard(typeof: str, extract: str, comparison: str, bp: str) -> str:
         f"WHEN char_length({extract}) > {_NUMERIC_SAFE_CHARS} THEN false "
         f"WHEN char_length({exponent}) > {len(str(_NUMERIC_SAFE_EXPONENT))} THEN false "
         f"WHEN CAST('0' || {exponent} AS INTEGER) > {_NUMERIC_SAFE_EXPONENT} THEN false "
-        f"WHEN abs({n}) > CAST('{_FLOAT8_MAX}' AS NUMERIC) THEN false "
-        f"WHEN abs({n}) <= CAST('{_FLOAT8_HALF_MIN_DENORM}' AS NUMERIC) THEN false "
+        f"WHEN abs({n}) >= CAST('{_FLOAT8_OVERFLOW_MIDPOINT}' AS NUMERIC) THEN false "
+        f"WHEN abs({n}) <= CAST('{_FLOAT8_UNDERFLOW_MIDPOINT}' AS NUMERIC) THEN false "
         f"ELSE {comparison} END"
     )
 
