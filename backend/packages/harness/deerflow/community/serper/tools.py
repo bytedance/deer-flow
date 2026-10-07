@@ -7,8 +7,12 @@ API. An API key is required. Sign up at https://serper.dev to get one.
 
 import json
 import logging
+import math
 import os
+import random
 import re
+import time
+from email.utils import parsedate_to_datetime
 from ipaddress import IPv4Address, ip_address
 from urllib.parse import urlparse
 
@@ -246,8 +250,31 @@ def _safe_public_url(value: object) -> str:
     return url if ip.is_global else ""
 
 
-def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, time_range: SearchTimeRange | None = None) -> tuple[dict | None, str | None]:
+def _retry_options(config) -> dict:
+    extra = config.model_extra if config is not None else {}
+    return {name: extra[name] for name in ("max_retries", "retry_budget_seconds") if name in extra}
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Parse provider seconds/HTTP-date hints; huge numeric hints must not retry."""
+    value = response.headers.get("Retry-After", "").strip()
+    if re.fullmatch(r"[0-9]+", value):
+        # float avoids integer digit limits and maps enormous hints to infinity.
+        return float(value)
+    try:
+        date = parsedate_to_datetime(value)
+        if date.tzinfo is not None:
+            return max(0.0, date.timestamp() - time.time())
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return None
+
+
+def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, time_range: SearchTimeRange | None = None, max_retries: int = 0, retry_budget_seconds: float = 30) -> tuple[dict | None, str | None]:
     """Send a POST request to a Serper endpoint.
+
+    Retries share a scheduling deadline, not a hard synchronous I/O deadline.
+    HTTPX timeouts remain per phase; an active request cannot be cancelled here.
 
     ``query`` is expected to already be normalized via :func:`_clean_query`.
 
@@ -264,9 +291,35 @@ def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, t
         payload["tbs"] = _SERPER_TBS_BY_TIME_RANGE[time_range]
 
     try:
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or not 0 <= max_retries <= 3:
+            raise ValueError("max_retries must be an integer between 0 and 3")
+        if isinstance(retry_budget_seconds, bool) or not isinstance(retry_budget_seconds, (int, float)) or not 0 < retry_budget_seconds <= 300 or not math.isfinite(retry_budget_seconds):
+            raise ValueError("retry_budget_seconds must be a finite number greater than 0 and at most 300")
+        deadline = time.monotonic() + retry_budget_seconds
         with httpx.Client(timeout=30) as client:
-            response = client.post(endpoint, headers=headers, json=payload)
-        response.raise_for_status()
+            for attempt in range(max_retries + 1):
+                try:
+                    response = client.post(endpoint, headers=headers, json=payload)
+                    response.raise_for_status()
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.HTTPStatusError) as exc:
+                    if attempt >= max_retries:
+                        raise
+                    hint = None
+                    if isinstance(exc, httpx.HTTPStatusError):
+                        status = exc.response.status_code
+                        if status in (429, 503):
+                            hint = _retry_after(exc.response)
+                        if status not in (502, 503, 504) and not (status == 429 and hint is not None):
+                            raise
+                    # Equal jitter retains exponential pacing even for Retry-After: 0.
+                    backoff = min(0.5 * 2**attempt, 2.0)
+                    delay = max(random.uniform(backoff / 2, backoff), hint or 0.0)
+                    if delay >= deadline - time.monotonic():
+                        raise
+                    time.sleep(delay)
+                    if time.monotonic() >= deadline:
+                        raise
         data = response.json()
         if not isinstance(data, dict):
             logger.error("Serper returned an unexpected payload type: %s", type(data).__name__)
@@ -312,7 +365,7 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     if not api_key:
         return _missing_key_error(query, "web_search")
 
-    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range)
+    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range, **_retry_options(config))
     if error_json is not None:
         error = json.loads(error_json)
         error["query"] = query
@@ -367,7 +420,7 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
     if not api_key:
         return _missing_key_error(query, "image_search")
 
-    data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results)
+    data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results, **_retry_options(config))
     if error_json is not None:
         return error_json
 

@@ -15,3 +15,10 @@ This is source selection, not a fetch policy or factuality check.
 Tests: `backend/tests/test_serper_domain_filters.py` and `test_serper_tools.py`.
 Mock HTTP; live Serper semantics remain unverified. See
 `backend/docs/CONFIGURATION.md#serper-source-filters` for the operator contract.
+
+`_serper_post` owns default-off physical retries (0–3) and one monotonic
+scheduling budget (>0–300s), not cancellation of synchronous I/O. Keep config
+validation before transport and retry only connect failures, 502/503/504 and
+hinted 429. Provider-local hint parsing avoids coupling to Jina. Whole-tool
+extension hooks cannot isolate this boundary. Test with real MockTransport
+through both tools in `backend/tests/test_serper_retries.py`.

@@ -683,6 +683,41 @@ Serper `web_search` also accepts the optional model argument
 to Serper. Omitting `time_range` or passing `null` omits the recency constraint from the
 search request. This option does not change Serper `image_search`.
 
+#### Serper retries
+
+Both Serper `web_search` and `image_search` accept these operator-only settings
+in their respective `tools` entries (the model-facing arguments are unchanged):
+
+```yaml
+max_retries: 0             # Default off; integer 0–3 extra requests
+retry_budget_seconds: 30   # Default 30; finite number >0 and <=300
+```
+
+Set `max_retries: 1` to enable recovery. Booleans, strings, nulls, out-of-range
+values, and non-finite budgets return a structured configuration error before
+HTTP. The three-retry cap limits additional quota/cost; the 300-second budget
+cap limits scheduling waits. No billing or idempotency guarantee is claimed.
+
+Only connection establishment failures (`ConnectError`/`ConnectTimeout`) and
+HTTP 502/503/504 are retried. HTTP 429 requires a valid `Retry-After` hint.
+Authentication errors, other statuses, read/write timeouts, malformed successful
+JSON and tool/result-processing failures are never retried.
+
+Backoff uses equal jitter: 0.25–0.5, 0.5–1, then 1–2 seconds. Valid nonnegative
+integer seconds or timezone-aware HTTP-date `Retry-After` hints on 429/503 set a
+minimum wait (past dates mean zero). Invalid hints leave 503 on local backoff;
+429 stays terminal. A hint or backoff that reaches/exceeds the remaining budget
+returns the last error without another request or a shortened wait.
+
+One monotonic scheduling deadline starts before client creation, counting elapsed
+requests and waits; it is checked before waiting and again before a retry.
+It does **not** interrupt active synchronous HTTP requests, response streaming,
+or worker threads. HTTPX's unchanged 30-second timeout applies per network phase,
+so this is **not** a hard end-to-end wall-clock deadline. The initial request is
+always allowed. Payload, API key, domain restrictions and time range stay identical
+across attempts; errors still report the cleaned original query. No refill,
+cache, global limiter or model-level retry is added.
+
 #### Serper source filters
 
 ```yaml
@@ -724,7 +759,7 @@ including on provider errors.
 
 `time_range` still maps to `tbs`, and `max_results` caps the filtered results.
 `total_results` reports the actual remaining count (zero with `results: []`
-when none survive). One request is made: no refill or relaxed-filter retries.
+when none survive). No refill or relaxed-filter requests are made.
 These settings do not affect `image_search` or the model-facing tool schema.
 Source selection is neither a factuality guarantee nor a global URL-access
 policy for fetch tools, browsers, or redirects.
