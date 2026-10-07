@@ -585,8 +585,9 @@ class SubagentBatchRepository:
             item.completed_at = None
             item.cancel_requested_at = None
             item.updated_at = now
-            batch.status = "queued"
-            batch.completed_at = None
-            batch.updated_at = now
+            if batch.status != "paused":
+                batch.status = "queued"
+                batch.completed_at = None
+                batch.updated_at = now
             await session.commit()
             return self._item_dict(item)
