@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from langchain_core.messages import ToolMessage
+from support.postgres import asyncpg_test_url
 
 from deerflow.community.ragflow.formatting import format_retrieval_sources
 from deerflow.config.database_config import DatabaseConfig
@@ -58,7 +59,7 @@ async def env(monkeypatch, tmp_path, request):
         if not uri:
             pytest.skip("requires TEST_POSTGRES_URI (real Postgres batch evidence chain)")
         schema = f"batch_evidence_{uuid.uuid4().hex}"
-        db = DatabaseConfig(backend="postgres", postgres_url=uri, postgres_schema=schema)
+        db = DatabaseConfig(backend="postgres", postgres_url=asyncpg_test_url(uri), postgres_schema=schema)
     else:
         db = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path / "db"))
     service = None

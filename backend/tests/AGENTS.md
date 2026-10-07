@@ -32,6 +32,17 @@ The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
 `ast`, checking both `encoding` and `errors`; module-wide literal counts can
 hide unpinned calls behind unrelated settings.
 
+## PostgreSQL batch fixtures
+
+Batch fixtures use `support.postgres.asyncpg_test_url` to map libpq `sslmode`
+to asyncpg `ssl` and remove unsupported `channel_binding` before constructing
+database config. Preserve TLS modes, credentials and other query options;
+reject conflicting `ssl`/`sslmode` values. CI uses `?sslmode=disable`; validate
+that URI shape against a real test database, not only a parameter-free local
+URI. Reuse the normalized config for reopening and teardown, and drop only the
+fixture's UUID schema. This is test-only handling; production connection and
+TLS policy are unchanged.
+
 ## Real Compose tests
 
 `support/compose.py` probes `docker compose version --short` and requires Compose
