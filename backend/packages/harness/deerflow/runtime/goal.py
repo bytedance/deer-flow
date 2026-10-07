@@ -632,6 +632,9 @@ async def _call_checkpointer_method(checkpointer: Any, async_name: str, sync_nam
             # NotImplementedError from them. Those must use the sync method.
             if sync_method is None:
                 raise
+            # Debug, not warning: the TUI/embedded path takes this on every
+            # call. It keeps a sync saver wired into the Gateway diagnosable.
+            logger.debug("%s.%s is not implemented; falling back to %s off the event loop", type(checkpointer).__name__, async_name, sync_name)
     if sync_method is None:
         raise AttributeError(f"Missing checkpointer method: {async_name}/{sync_name}")
     # Offload the synchronous checkpointer call so its blocking IO never runs on

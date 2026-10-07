@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from types import SimpleNamespace
 
@@ -78,6 +79,16 @@ async def test_sync_goal_checkpoint_write_drains_across_repeated_cancellation(ch
         checkpointer.allow_put.set()
         await asyncio.gather(task, return_exceptions=True)
         await asyncio.to_thread(checkpointer.put_finished.wait, 1.0)
+
+
+@pytest.mark.asyncio
+async def test_goal_sync_fallback_is_logged(caplog) -> None:
+    checkpointer = _AsyncUnsupportedBlockingCheckpointer()
+
+    with caplog.at_level(logging.DEBUG, logger="deerflow.runtime.goal"):
+        await read_thread_goal(checkpointer, "thread-1")
+
+    assert "_AsyncUnsupportedBlockingCheckpointer.aget_tuple is not implemented; falling back to get_tuple" in caplog.text
 
 
 @pytest.mark.asyncio
