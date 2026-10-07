@@ -130,8 +130,10 @@ _SECRET_TOKEN_PATTERNS = tuple(
     for pattern in (
         r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
         r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b",
+        r"\bgithub_pat_[A-Za-z0-9_]{20,}\b",
         r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b",
         r"\bsk-[A-Za-z0-9_-]{20,}\b",
+        r"\bAIza[0-9A-Za-z_-]{35}\b",
     )
 )
 _SENSITIVE_PATH_RE = re.compile(r"(~/.ssh|/etc/passwd|/etc/shadow|/var/run/docker\.sock|docker\.sock|169\.254\.169\.254)")
@@ -1033,7 +1035,7 @@ def _is_python_path(rel_path: str, text: str) -> bool:
 
 def _is_shell_path(rel_path: str, text: str) -> bool:
     suffix = PurePosixPath(rel_path).suffix.lower()
-    return suffix in {".sh", ".bash"} or text.startswith("#!") and any(shell in text.splitlines()[0].lower() for shell in ("sh", "bash", "zsh"))
+    return suffix in {".sh", ".bash", ".zsh"} or text.startswith("#!") and any(shell in text.splitlines()[0].lower() for shell in ("sh", "bash", "zsh"))
 
 
 def _looks_like_placeholder(value: str) -> bool:
