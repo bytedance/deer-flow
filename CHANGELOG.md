@@ -804,6 +804,16 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **sandbox:** AIO sandboxes no longer trust unverified state for credential
+  placement or container reuse. A failed provisioner capability probe no longer
+  reads as "broker off" (which bind-mounted plaintext lark credential dirs into
+  brokerless Pods for the negative-cache TTL); broker mode is attested per Pod
+  from the provisioner's atomic observation, lark provisioning-config conflicts
+  carry a capability-refresh marker so a deployment change self-heals on the
+  next acquire, and containers whose implicit shell ended ambiguously are fenced
+  by a persistent quarantine (`{DEER_FLOW_HOME}/sandbox-quarantine`) across warm
+  reuse, rediscovery and restarts, recycled under the existing ownership and
+  teardown fences, with records retired only after confirmed absence. ([#6436])
 - **frontend:** A failed reconnect after a page refresh is now retried in the same
   tab. The SDK reconnects once from the tab's `lg:stream` pointer and keeps that
   pointer on error, and active-run recovery skipped any run with a matching
@@ -9100,3 +9110,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6393]: https://github.com/bytedance/deer-flow/pull/6393
 [#6400]: https://github.com/bytedance/deer-flow/pull/6400
 [#6401]: https://github.com/bytedance/deer-flow/pull/6401
+[#6436]: https://github.com/bytedance/deer-flow/pull/6436
