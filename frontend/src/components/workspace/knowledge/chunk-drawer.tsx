@@ -17,7 +17,11 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import { listDocumentChunks } from "@/core/knowledge/api";
 import { knowledgeChunksKey } from "@/core/knowledge/hooks";
-import type { KnowledgeChunk, KnowledgeDocument } from "@/core/knowledge/types";
+import type {
+  KnowledgeChunk,
+  KnowledgeChunkPage,
+  KnowledgeDocument,
+} from "@/core/knowledge/types";
 import { cn } from "@/lib/utils";
 
 import { ChunkCard } from "./chunk-card";
@@ -27,6 +31,32 @@ const PAGE_SIZE = 20;
 /** 单文档切片在该阈值内一次性全量加载（2026-09-05 切片导航）：跳转纯前端；
     超过才退回「加载更多」。 */
 const FULL_LOAD_CAP = 300;
+/** chunks 端点单次至多 200 条（服务端 `le=200`）：窗口越过上限时按页合并，
+    否则整窗请求 422，抽屉会误显「还没有切片」（2026-10-08 验收修复）。 */
+const SERVER_PAGE_LIMIT = 200;
+
+/** Read a `[0, limit)` chunk window, merging sequential pages above the
+    server's per-request cap so growing-limit consumers stay correct. */
+export async function fetchChunkWindow(
+  kbId: string,
+  docId: string,
+  limit: number,
+): Promise<KnowledgeChunkPage> {
+  const first = await listDocumentChunks(kbId, docId, {
+    offset: 0,
+    limit: Math.min(limit, SERVER_PAGE_LIMIT),
+  });
+  const items = [...first.items];
+  while (items.length < limit && items.length < first.total) {
+    const next = await listDocumentChunks(kbId, docId, {
+      offset: items.length,
+      limit: Math.min(limit - items.length, SERVER_PAGE_LIMIT),
+    });
+    if (next.items.length === 0) break;
+    items.push(...next.items);
+  }
+  return { ...first, items };
+}
 
 /**
  * Chunk preview drawer (spec §3.6): opens from a document row click and
@@ -57,11 +87,12 @@ export function ChunkDrawer({
   // Use raw query for configurable polling when pending extraction detected
   const query = useQuery({
     queryKey: knowledgeChunksKey(kbId, doc.id, 0, limit),
-    queryFn: () => listDocumentChunks(kbId, doc.id, { offset: 0, limit }),
+    queryFn: () => fetchChunkWindow(kbId, doc.id, limit),
     enabled: open,
   });
   const page = query.data;
   const isLoading = query.isLoading;
+  const isError = query.isError;
   // useMemo 稳定引用：items 是多个 effect/memo 的依赖，裸 ?? [] 每渲染新数组
   // 会让它们每帧重跑（react-hooks/exhaustive-deps）。
   const items = useMemo(() => page?.items ?? [], [page]);
@@ -219,7 +250,11 @@ export function ChunkDrawer({
               </SheetDescription>
             </SheetHeader>
             <div className="flex flex-col gap-2 px-4 pt-4 pb-6">
-              {items.length === 0 && !isLoading ? (
+              {isError ? (
+                <p className="text-muted-foreground py-8 text-center text-sm">
+                  {tc.loadFailed}
+                </p>
+              ) : items.length === 0 && !isLoading ? (
                 <p className="text-muted-foreground py-8 text-center text-sm">
                   {tc.empty}
                 </p>

@@ -15,10 +15,15 @@ rs.mock("@/core/knowledge/hooks", () => ({
   knowledgeChunksKey: rs.fn(),
 }));
 
+rs.mock("@/core/knowledge/api", () => ({
+  listDocumentChunks: rs.fn(),
+}));
+
 import { ChunkCard } from "@/components/workspace/knowledge/chunk-card";
-import { ChunkDrawer } from "@/components/workspace/knowledge/chunk-drawer";
+import { ChunkDrawer, fetchChunkWindow } from "@/components/workspace/knowledge/chunk-drawer";
 import { I18nContext } from "@/core/i18n/context";
 import { zhCN } from "@/core/i18n/locales/zh-CN";
+import { listDocumentChunks } from "@/core/knowledge/api";
 import { knowledgeChunksKey } from "@/core/knowledge/hooks";
 import type { KnowledgeChunk, KnowledgeDocument } from "@/core/knowledge/types";
 
@@ -106,6 +111,46 @@ describe("ChunkCard", () => {
   });
 });
 
+describe("fetchChunkWindow", () => {
+  const chunkAt = (index: number): KnowledgeChunk => ({
+    ...CHUNK,
+    chunk_id: `doc-1#${String(index).padStart(4, "0")}`,
+    chunk_index: index,
+  });
+
+  it("merges sequential pages when the window exceeds the server page cap", async () => {
+    // 241 条（>le=200）：整窗单请求会 422，抽屉误显「还没有切片」——须按页合并。
+    const first = Array.from({ length: 200 }, (_, i) => chunkAt(i));
+    const rest = Array.from({ length: 41 }, (_, i) => chunkAt(200 + i));
+    rs.mocked(listDocumentChunks)
+      .mockResolvedValueOnce({ items: first, total: 241, offset: 0, limit: 200 })
+      .mockResolvedValueOnce({ items: rest, total: 241, offset: 200, limit: 41 });
+
+    const page = await fetchChunkWindow("kb-1", "doc-1", 241);
+
+    expect(rs.mocked(listDocumentChunks).mock.calls).toEqual([
+      ["kb-1", "doc-1", { offset: 0, limit: 200 }],
+      ["kb-1", "doc-1", { offset: 200, limit: 41 }],
+    ]);
+    expect(page.items).toHaveLength(241);
+    expect(page.items.at(-1)!.chunk_id).toBe("doc-1#0240");
+  });
+
+  it("keeps a within-cap window to a single request", async () => {
+    rs.mocked(listDocumentChunks).mockResolvedValueOnce({
+      items: [CHUNK],
+      total: 1,
+      offset: 0,
+      limit: 50,
+    });
+
+    const page = await fetchChunkWindow("kb-1", "doc-1", 50);
+
+    expect(rs.mocked(listDocumentChunks).mock.calls).toHaveLength(1);
+    expect(page.items).toHaveLength(1);
+  });
+});
+
 describe("ChunkDrawer", () => {
   it("numbers cards by list position so chunk_index gaps never leak into #N (2026-09-05)", async () => {
     // 复现实习.jpg：单切片但 chunk_index=1（历史删除留下的空洞）——卡片序号
@@ -155,6 +200,16 @@ describe("ChunkDrawer", () => {
     renderWithI18n(<ChunkDrawer kbId="kb-1" doc={DOC} open onOpenChange={() => undefined} />);
 
     expect(await screen.findByText("该文档还没有切片")).toBeTruthy();
+  });
+
+  it("shows the failure copy instead of the empty copy when the query errors", async () => {
+    rs.mocked(knowledgeChunksKey).mockReturnValue(["knowledge-bases", "kb-1", "documents", "doc-1", "chunks", { offset: 0, limit: 50 }]);
+    rs.mocked(useQuery).mockReturnValue({ data: undefined, isLoading: false, isError: true } as never);
+
+    renderWithI18n(<ChunkDrawer kbId="kb-1" doc={DOC} open onOpenChange={() => undefined} />);
+
+    expect(await screen.findByText("加载失败")).toBeTruthy();
+    expect(screen.queryByText("该文档还没有切片")).toBeNull();
   });
 
   it("keeps the header position badges and the prev/next jump buttons", async () => {

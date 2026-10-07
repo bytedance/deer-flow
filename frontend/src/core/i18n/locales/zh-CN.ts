@@ -587,6 +587,7 @@ export const zhCN: Translations = {
         empty: "该文档还没有切片",
         entities: "实体",
         imageUnavailable: "图片不可用",
+        loadFailed: "加载失败",
         loadMore: "加载更多",
         loading: "加载中…",
         nextChunk: "下一切片",

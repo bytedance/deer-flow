@@ -623,6 +623,7 @@ export const enUS: Translations = {
         empty: "No chunks for this document yet",
         entities: "Entities",
         imageUnavailable: "Image unavailable",
+        loadFailed: "Failed to load chunks",
         loadMore: "Load more",
         loading: "Loading…",
         nextChunk: "Next chunk",

@@ -690,6 +690,7 @@ export interface Translations {
     tokens: string;
     entities: string;
     empty: string;
+    loadFailed: string;
     loadMore: string;
     loading: string;
     viewRendered: string;
