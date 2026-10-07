@@ -834,7 +834,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         await _shutdown_scheduled_task_service(app)
 
-
         if getattr(app.state, "mcp_task_service", None) is not None:
             app.state.mcp_tasks_available = False
             try:
