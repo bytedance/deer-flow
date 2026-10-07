@@ -694,6 +694,10 @@
 
 ### 修复
 
+- **前端：** 附件上传失败后重试发送时，现在会保留原先附带的上下文。输入框此前在发送开始时（附件上传之前）就清除了
+  引用、对话引用、已暂存的项目文件和已保存的草稿，因此上传失败后文字和文件虽仍在，重试发送却缺少这些上下文。
+  现在这些一次性状态只在发送真正派发（上传完成）后才清除；若上传完成时用户已切换对话或离开页面，只清除该次发送
+  携带的已保存草稿和暂存文件，保留此后保存的草稿或附加的文档。([#6412])
 - **客户端：** `DeerFlowClient.list_threads(limit)` 现在限制的是线程数而不是检查点数。此前 `limit` 被传给跨所有线程的
   检查点扫描，而一轮对话会写入多个检查点，因此一个较长的对话就会占满上限：TUI 线程选择器和 `--resume <标题>` 只能看到
   最近一两个线程，较早线程的标题无法解析。现在 SQLite 和 Postgres 通过检查点索引列出线程，每个返回的线程只加载首个和最新
@@ -7496,4 +7500,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6400]: https://github.com/bytedance/deer-flow/pull/6400
 [#6401]: https://github.com/bytedance/deer-flow/pull/6401
 [#6407]: https://github.com/bytedance/deer-flow/pull/6407
+[#6412]: https://github.com/bytedance/deer-flow/pull/6412
 [#6426]: https://github.com/bytedance/deer-flow/pull/6426

@@ -481,7 +481,10 @@ count and never emulate it by repeatedly calling `task`.
   implies that all items become live or run at once.
 - Use `batch_status` for compact progress and `cancel_batch` for cancellation.
 - Do not wait for or paste all item results into this run. The Web UI and results
-  export API own progress and result inspection.
+  export API own bulk inspection. When the owner explicitly asks to inspect or
+  synthesize stored results, use `read_batch_result` for selected items in this
+  thread. Follow its bounded continuation/revision contract; never poll for
+  completion or equate execution success with acceptance.
 """
     return f"""<subagent_system>
 ## Subagent Routing: Delegate Only for Clear Net Benefit
