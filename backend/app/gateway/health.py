@@ -302,9 +302,21 @@ def resolve_provisioner_url(startup_config: AppConfig) -> str | None:
     return normalized or None
 
 
-def _make_provisioner_client() -> httpx.AsyncClient:
-    """Build the short-lived client for one provisioner probe (replaced in tests)."""
-    return httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SECONDS)
+def _make_provisioner_client(provisioner_url: str) -> httpx.AsyncClient:
+    """Build the short-lived client for one provisioner probe (replaced in tests).
+
+    Proxy handling mirrors the provisioner-bound sandbox clients: a loopback,
+    private, link-local or cluster-local address (``provisioner``,
+    ``*.docker.internal``) is control-plane traffic and bypasses ``HTTP_PROXY``,
+    while an external host keeps the environment's proxy settings. Unlike the
+    requests-based sandbox calls, httpx does not honour CIDR entries in
+    ``NO_PROXY``, so without this a private provisioner behind a proxy-only
+    egress would be reported unreachable on every probe.
+    """
+    # Lazy: importing the aio_sandbox package pulls in the whole provider stack.
+    from deerflow.community.aio_sandbox.backend import sandbox_http_trust_env
+
+    return httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SECONDS, trust_env=sandbox_http_trust_env(provisioner_url))
 
 
 async def _probe_provisioner(provisioner_url: str | None) -> str:
@@ -321,7 +333,7 @@ async def _probe_provisioner(provisioner_url: str | None) -> str:
     async with _probe_gate("provisioner"):
         try:
             async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):
-                async with _make_provisioner_client() as client:
+                async with _make_provisioner_client(provisioner_url) as client:
                     response = await client.get(f"{provisioner_url}/health")
         except Exception:
             logger.warning("Readiness provisioner probe failed", exc_info=True)

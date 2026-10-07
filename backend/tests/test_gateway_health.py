@@ -80,7 +80,7 @@ class _FakeCrossProcessBridge(MemoryStreamBridge):
 def _provisioner_client_factory(handler):
     """Return a ``_make_provisioner_client`` replacement backed by ``httpx.MockTransport``."""
 
-    def _factory() -> httpx.AsyncClient:
+    def _factory(provisioner_url: str) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
     return _factory
@@ -557,6 +557,30 @@ async def test_probe_provisioner_not_configured_without_url():
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("provisioner_url", "trust_env"),
+    [
+        ("http://provisioner:8002", False),
+        ("http://10.1.2.3:8002", False),
+        ("http://127.0.0.1:8002", False),
+        ("http://provisioner.docker.internal:8002", False),
+        ("https://provisioner.example.com", True),
+        ("http://8.8.8.8:8002", True),
+    ],
+    ids=["service-name", "private-ip", "loopback", "docker-internal", "external-fqdn", "public-ip"],
+)
+async def test_make_provisioner_client_bypasses_proxy_for_control_plane_addresses(provisioner_url, trust_env):
+    """Control-plane targets must not be routed through HTTP_PROXY.
+
+    httpx does not treat CIDR entries in NO_PROXY as subnet bypasses the way the
+    requests-based sandbox calls do, so the probe applies the same
+    target-aware policy those clients use instead of trusting the environment.
+    """
+    async with health_module._make_provisioner_client(provisioner_url) as client:
+        assert client.trust_env is trust_env
+
+
+@pytest.mark.anyio
 async def test_probe_provisioner_calls_unauthenticated_health_route(monkeypatch):
     """The probe targets the provisioner's own GET /health, which needs no API key."""
     seen: list[httpx.Request] = []
@@ -795,3 +819,19 @@ def test_health_ready_route_keeps_200_when_only_provisioner_is_down(monkeypatch)
 
     assert response.status_code == 200
     assert response.json()["provisioner"] == PROBE_UNREACHABLE
+
+
+def test_health_liveness_route_stays_200_while_readiness_is_degraded(monkeypatch):
+    """``GET /health`` is liveness only: an unreachable bridge or database must never restart the pod.
+
+    Readiness pulling the pod out of the Service is the intended reaction to a
+    Redis or database outage; the liveness probe moving with it would turn the
+    same outage into a restart loop.
+    """
+    client = _ready_client(monkeypatch, stream_bridge=_FakeCrossProcessBridge(result=False), provisioner_url=None)
+    monkeypatch.setattr("app.gateway.health.get_engine", lambda: _FakeEngine(unreachable=True))
+
+    assert client.get("/health/ready").status_code == 503
+    live = client.get("/health")
+    assert live.status_code == 200
+    assert live.json() == {"status": "healthy", "service": "deer-flow-gateway"}
