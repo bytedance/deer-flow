@@ -700,7 +700,7 @@
   标记从未追加，`_bash_evidence_status` 退回到报告 `success` 的 `deerflow_tool_meta`，
   失败的 `pytest` 可能满足 `tests_passed` 验收条件。该异常本身带有命令的 stdout、stderr
   与退出码，现在会按返回结果的方式格式化。stderr 中恰好包含 "sandbox not found" 的失败命令
-  也不再把沙箱标记为已回收。
+  也不再把沙箱标记为已回收。([#6441])
 - **前端：** 附件上传失败后重试发送时，现在会保留原先附带的上下文。输入框此前在发送开始时（附件上传之前）就清除了
   引用、对话引用、已暂存的项目文件和已保存的草稿，因此上传失败后文字和文件虽仍在，重试发送却缺少这些上下文。
   现在这些一次性状态只在发送真正派发（上传完成）后才清除；若上传完成时用户已切换对话或离开页面，只清除该次发送
@@ -7509,3 +7509,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#6407]: https://github.com/bytedance/deer-flow/pull/6407
 [#6412]: https://github.com/bytedance/deer-flow/pull/6412
 [#6426]: https://github.com/bytedance/deer-flow/pull/6426
+[#6441]: https://github.com/bytedance/deer-flow/pull/6441
