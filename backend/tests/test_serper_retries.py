@@ -214,3 +214,17 @@ def test_last_status_on_budget_exhaustion(search):
     assert result == {"error": "Serper API error: HTTP 429", "query": "news"}
     assert len(search.requests) == 2
     assert search.clock.waits == [0.5]
+
+
+@pytest.mark.parametrize("hint", ["Sun Nov  6 08:49:37 1994", "Sunday, 06-Nov-94 08:49:37 GMT"])
+def test_legacy_http_date_is_valid(search, hint):
+    result = search([(429, hint), 200], {"max_retries": 1})
+    assert "error" not in result
+    assert len(search.requests) == 2
+
+
+@pytest.mark.parametrize("hint", ["Wed, 21 Oct 2015 07:28:00 +0100", "Wed, 21 Oct 2015 07:28:00 UTC", "Wed, 21 Oct 2015 07:28 GMT"])
+def test_email_dates_do_not_enable_429_retry(search, hint):
+    result = search([(429, hint), 200], {"max_retries": 1})
+    assert "error" in result
+    assert len(search.requests) == 1

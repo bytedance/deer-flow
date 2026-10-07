@@ -12,6 +12,7 @@ import os
 import random
 import re
 import time
+from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from ipaddress import IPv4Address, ip_address
 from urllib.parse import urlparse
@@ -255,19 +256,50 @@ def _retry_options(config) -> dict:
     return {name: extra[name] for name in ("max_retries", "retry_budget_seconds") if name in extra}
 
 
+_DAY = r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)"
+_MONTH = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+_CLOCK = r"[0-9]{2}:[0-9]{2}:[0-9]{2}"
+_HTTP_DATE = re.compile(
+    rf"(?:{_DAY}, [0-9]{{2}} {_MONTH} [0-9]{{4}} {_CLOCK} GMT"
+    rf"|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), [0-9]{{2}}-{_MONTH}-[0-9]{{2}} {_CLOCK} GMT"
+    rf"|{_DAY} {_MONTH} (?:[0-9]{{2}}| [0-9]) {_CLOCK} [0-9]{{4}})"
+)
+
+
 def _retry_after(response: httpx.Response) -> float | None:
-    """Parse provider seconds/HTTP-date hints; huge numeric hints must not retry."""
-    value = response.headers.get("Retry-After", "").strip()
-    if re.fullmatch(r"[0-9]+", value):
-        # float avoids integer digit limits and maps enormous hints to infinity.
-        return float(value)
+    """Return a server floor, or None for an invalid HTTP Retry-After value."""
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return None
+    value = value.strip(" \t")
+    if value and value.isascii() and value.isdecimal():
+        digits = value.lstrip("0") or "0"
+        # Bound integer conversion work. Infinity is a valid, unfit floor, not
+        # a parsing failure that could cause an early fallback retry.
+        if len(digits) > 309:
+            return math.inf
+        seconds = int(digits)
+        try:
+            floor = float(seconds)
+        except OverflowError:
+            return math.inf
+        return math.nextafter(floor, math.inf) if floor < seconds else floor
+    if not _HTTP_DATE.fullmatch(value):
+        return None
     try:
-        date = parsedate_to_datetime(value)
-        if date.tzinfo is not None:
-            return max(0.0, date.timestamp() - time.time())
-    except (ValueError, TypeError, OverflowError):
-        pass
-    return None
+        date = parsedate_to_datetime(value).replace(tzinfo=UTC)
+        now = time.time()
+        if "-" in value:
+            # RFC 850 two-digit years: choose the most recent matching year
+            # no more than 50 years in the future (RFC 9110 section 5.6.7).
+            current = datetime.fromtimestamp(now, UTC)
+            year = (current.year + 50) // 100 * 100 + date.year % 100
+            if (year, date.month, date.day, date.hour, date.minute, date.second) > (current.year + 50, current.month, current.day, current.hour, current.minute, current.second):
+                year -= 100
+            date = date.replace(year=year)
+        return max(0.0, date.timestamp() - now)
+    except (ValueError, OverflowError):
+        return None
 
 
 def _serper_post(endpoint: str, api_key: str, query: str, max_results: int, *, time_range: SearchTimeRange | None = None, max_retries: int = 0, retry_budget_seconds: float = 30) -> tuple[dict | None, str | None]:
