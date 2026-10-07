@@ -21,6 +21,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from app.gateway.auth.repositories.base import LastAdminRemainsError, UserNotFoundError
 from app.gateway.authz import assignable_role_names
 from app.gateway.deps import get_user_repository, require_admin_user
 
@@ -80,20 +81,15 @@ async def update_user_role(
             detail=f"unknown role '{update.system_role}'; assignable roles: {sorted(assignable)}",
         )
 
-    user = await repository.get_user_by_id(str(user_id))
-    if user is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
-
-    previous_role = user.system_role
-    if previous_role != update.system_role:
-        if previous_role == "admin" and update.system_role != "admin":
-            admin_count = await repository.count_admin_users()
-            if admin_count <= 1:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="cannot demote the last remaining admin",
-                )
-        user.system_role = update.system_role
-        user = await repository.update_user(user)
+    try:
+        # Single serialized column write: the last-admin count and the write
+        # share one transaction (two concurrent demotions cannot both pass),
+        # and credential writers can never race this — see
+        # SQLiteUserRepository.update_system_role / update_user.
+        user = await repository.update_system_role(str(user_id), update.system_role)
+    except UserNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found") from None
+    except LastAdminRemainsError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="cannot demote the last remaining admin") from None
 
     return _to_response(user)

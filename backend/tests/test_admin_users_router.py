@@ -50,6 +50,19 @@ class _FakeRepo:
         self.users[str(user.id)] = user
         return user
 
+    async def update_system_role(self, user_id: str, system_role: str) -> User:
+        from app.gateway.auth.repositories.base import LastAdminRemainsError, UserNotFoundError
+
+        user = self.users.get(user_id)
+        if user is None:
+            raise UserNotFoundError(f"User {user_id} no longer exists")
+        if user.system_role == "admin" and system_role != "admin":
+            if await self.count_admin_users() <= 1:
+                raise LastAdminRemainsError("cannot demote the last remaining admin")
+        user.system_role = system_role
+        self.updates.append((user_id, system_role))
+        return user
+
 
 def _make_client(monkeypatch, *, caller: User, repo: _FakeRepo, roles: set[str] | None = None) -> TestClient:
     app: FastAPI = make_authed_test_app(user_factory=lambda: caller)
@@ -115,6 +128,8 @@ def test_missing_user_404(monkeypatch):
     admin = _make_user(system_role="admin")
     client = _make_client(monkeypatch, caller=admin, repo=_FakeRepo([admin]), roles={"admin", "user", "guest"})
 
+    # The vanished-row race now surfaces as UserNotFoundError from the
+    # single serialized write, mapped to the same 404 the route always meant.
     assert _patch(client, _make_user(), "guest").status_code == 404
 
 
@@ -142,7 +157,9 @@ def test_admin_demotable_when_another_admin_remains(monkeypatch):
     assert repo.updates == [(str(first.id), "user")]
 
 
-def test_same_role_assignment_is_a_no_op(monkeypatch):
+def test_same_role_assignment_is_idempotent(monkeypatch):
+    """Re-assigning the role a user already holds succeeds and changes
+    nothing (the serialized single-column write is idempotent)."""
     admin = _make_user(system_role="admin")
     target = _make_user(system_role="guest")
     repo = _FakeRepo([admin, target])
@@ -152,7 +169,7 @@ def test_same_role_assignment_is_a_no_op(monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["system_role"] == "guest"
-    assert repo.updates == []
+    assert repo.users[str(target.id)].system_role == "guest"
 
 
 def test_assignable_role_names_union_of_builtins_and_configured():
@@ -197,6 +214,83 @@ def test_repo_list_users_orders_and_maps(monkeypatch):
     second = _make_user(email="second@example.com")
     repo = _FakeRepo([first, second])
     assert asyncio.run(repo.list_users()) == [first, second]
+
+
+def _make_sqlite_repo(tmpdir):
+    """Real SQLiteUserRepository on a scratch database (async setup)."""
+    import asyncio
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.persistence.engine import get_session_factory, init_engine
+
+    async def _setup():
+        await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmpdir}/users.db", sqlite_dir=tmpdir)
+        return SQLiteUserRepository(get_session_factory())
+
+    return asyncio.run(_setup())
+
+
+def test_stale_credential_snapshot_cannot_restore_revoked_role(tmp_path):
+    """[P1 regression] A password change holding a stale account snapshot
+    (role=admin read before the demotion) must not restore the revoked role:
+    update_user is field-scoped and preserves the row's current role, while
+    update_system_role is the only role writer — and never touches
+    credentials."""
+    import asyncio
+    import tempfile
+
+    from app.gateway.auth.repositories.base import LastAdminRemainsError
+    from deerflow.persistence.engine import close_engine
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        repo = _make_sqlite_repo(tmpdir)
+
+        async def _run():
+            admin = User(email="admin@example.com", system_role="admin")
+            other = User(email="other@example.com", system_role="admin")
+            admin = await repo.create_user(admin)
+            other = await repo.create_user(other)
+            stale_snapshot = User(
+                id=admin.id,
+                email=admin.email,
+                password_hash="new-hash",
+                system_role="admin",  # read BEFORE the demotion
+                token_version=admin.token_version + 1,
+            )
+
+            # The demotion lands first (single-column write).
+            demoted = await repo.update_system_role(str(admin.id), "user")
+            assert demoted.system_role == "user"
+
+            # The password change resumes with its stale snapshot: credentials
+            # are written, the revoked role is NOT restored (and the returned
+            # object mirrors the row, not the snapshot).
+            after = await repo.update_user(stale_snapshot)
+            assert after.password_hash == "new-hash"
+            assert after.system_role == "user"
+            assert (await repo.get_user_by_id(str(admin.id))).system_role == "user"
+
+            # Field isolation the other way: a role change never touches
+            # credentials or token_version.
+            await repo.update_system_role(str(admin.id), "guest")
+            row = await repo.get_user_by_id(str(admin.id))
+            assert row.password_hash == "new-hash"
+            assert row.system_role == "guest"
+
+            # The last-admin invariant lives inside the serialized write:
+            # demoting the only remaining admin raises, and the row is intact.
+            try:
+                await repo.update_system_role(str(other.id), "user")
+            except LastAdminRemainsError:
+                pass
+            else:
+                raise AssertionError("demoting the last admin must raise")
+            assert (await repo.get_user_by_id(str(other.id))).system_role == "admin"
+
+        try:
+            asyncio.run(_run())
+        finally:
+            asyncio.run(close_engine())
 
 
 def test_assignment_reaches_principal_permissions():
