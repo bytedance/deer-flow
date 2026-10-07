@@ -16,10 +16,7 @@ from deerflow.scheduler.runtime import SchedulerRunCapability, is_scheduler_capa
 from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
 from deerflow.tools.builtins import (
     ask_clarification_tool,
-    batch_status,
-    batch_task,
     cancel_background_task,
-    cancel_batch,
     list_background_tasks,
     list_uploaded_files,
     present_file_tool,
@@ -199,7 +196,10 @@ def get_available_tools(
     if subagent_enabled:
         builtin_tools.extend(SUBAGENT_TOOLS)
         if is_subagent_batch_runtime_available():
-            builtin_tools.extend((batch_task, batch_status, cancel_batch))
+            from deerflow.subagents.batch_runtime import get_subagent_batch_submitter
+            from deerflow.tools.builtins.batch_task_tool import bind_batch_tools
+
+            builtin_tools.extend(bind_batch_tools(submitter_provider=get_subagent_batch_submitter, app_config=config))
         logger.info("Including native subagent tools")
 
     # If no model_name specified, use the first model (default)

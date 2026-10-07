@@ -172,6 +172,17 @@ class SubagentBatchService:
     ) -> dict[str, Any] | None:
         return await self._repository.get_batch(batch_id, user_id=user_id)
 
+    async def read_batch_item(self, *, batch_id: str, user_id: str, thread_id: str, position: int) -> dict[str, Any] | None:
+        """Read one current-thread result; never expose worker execution context."""
+        batch = await self._repository.get_batch(batch_id, user_id=user_id)
+        if batch is None or batch["thread_id"] != thread_id:
+            return None
+        items = await self._repository.list_items(batch_id, user_id=user_id, offset=position, limit=1, include_result=True)
+        if not items:
+            return None
+        fields = ("id", "item_key", "position", "status", "attempt", "result", "result_truncated", "error", "stop_reason", "acceptance_criteria", "acceptance_verdict")
+        return {key: items[0].get(key) for key in fields}
+
     async def cancel_batch(
         self,
         *,
