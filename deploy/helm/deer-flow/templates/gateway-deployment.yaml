@@ -216,9 +216,12 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
-            # /health/ready bounds both probes to a 3s endpoint deadline;
+            # /health/ready bounds all its probes (database, checkpointer,
+            # Redis stream bridge, provisioner) to a 3s endpoint deadline;
             # timeoutSeconds must stay above that bound or Kubernetes aborts
-            # slow-but-healthy responses at its 1s default.
+            # slow-but-healthy responses at its 1s default. An unreachable
+            # Redis makes the pod unready; the provisioner verdict is
+            # report-only.
             timeoutSeconds: 5
           livenessProbe:
             httpGet:
