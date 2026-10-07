@@ -1071,6 +1071,7 @@ export interface Translations {
     saveRequested: string;
     saveHint: string;
     saveCommandMessage: string;
+    agentSaveFailed: string;
     agentCreatedPendingRefresh: string;
     more: string;
     agentCreated: string;

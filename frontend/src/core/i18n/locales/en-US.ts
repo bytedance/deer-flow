@@ -1300,8 +1300,10 @@ export const enUS: Translations = {
       "You can save this agent at any time from the top-right menu, even if this is only a first draft.",
     saveCommandMessage:
       "Please save this custom agent now based on everything we have discussed so far. Treat this as my explicit confirmation to save. If some details are still missing, make reasonable assumptions, generate a concise first SOUL.md in English, and call setup_agent immediately without asking me for more confirmation.",
+    agentSaveFailed:
+      "DeerFlow could not save this agent. Review the tool error and try again.",
     agentCreatedPendingRefresh:
-      "The agent was created, but DeerFlow could not load it yet. Please refresh this page in a moment.",
+      "DeerFlow could not confirm the saved agent. Please try saving it again.",
     more: "More actions",
     agentCreated: "Agent created!",
     startChatting: "Start chatting",
