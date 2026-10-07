@@ -159,6 +159,27 @@ def test_redact_egress_text_scrubs_seeded_secret():
     assert "[redacted]" in redacted
 
 
+@pytest.mark.parametrize("prefix", ["sk-", "sk-proj-", "sk-svcacct-", "sk-admin-", "sk-ant-api03-"])
+@pytest.mark.asyncio
+async def test_delivery_scrubs_sk_bearer_tokens(prefix):
+    # Synthetic credentials, with no secret assignment to provide a fallback.
+    secret = prefix + "A1b2_C3d4-E5f6_G7h8-I9j0" * 3
+    summary = f"Authorization: Bearer {secret}\nRepeated: {secret}"
+    safe_summary = "Authorization: Bearer [redacted]\nRepeated: [redacted]"
+    assert redact_egress_text(summary) == safe_summary
+
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+    worker = _make_worker(repo, channel, resolve_run_summary=lambda *_: summary)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == ["delivery-1"]
+    assert len(channel.sent) == 1
+    assert safe_summary in channel.sent[0][1]
+    assert secret not in channel.sent[0][1]
+
+
 def test_redact_egress_text_scrubs_entire_pem_block():
     pem_body = "ABCDEFSECRETKEYBODY"
     pem = "-----BEGIN PRIVATE KEY-----\n" + pem_body + "\n-----END PRIVATE KEY-----"

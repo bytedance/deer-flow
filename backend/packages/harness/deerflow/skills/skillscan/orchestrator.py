@@ -361,10 +361,14 @@ def _scan_secrets(rel_path: str, text: str) -> list[SecurityFinding]:
         findings.append(_finding_from_match("secret-private-key", rel_path, text, private_key))
 
     for pattern in _SECRET_TOKEN_PATTERNS:
-        match = pattern.search(text)
-        if match and not _looks_like_placeholder(match.group(0)):
+        for match in pattern.finditer(text):
+            if _looks_like_placeholder(match.group(0)):
+                continue
             findings.append(_finding_from_match("secret-cloud-token", rel_path, text, match))
             break
+        else:
+            continue
+        break
 
     if _is_python_path(rel_path, text):
         findings.extend(_scan_python_secret_assignments(rel_path, text))

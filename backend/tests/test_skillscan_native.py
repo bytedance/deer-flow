@@ -152,6 +152,26 @@ def test_sk_token_non_credentials_stay_unblocked(tmp_path: Path, text: str) -> N
     assert result["blocked"] is False
 
 
+@pytest.mark.parametrize("prefix", ["sk-", "sk-proj-", "sk-svcacct-", "sk-admin-", "sk-ant-api03-"])
+def test_sk_placeholder_does_not_hide_later_credential(tmp_path: Path, prefix: str) -> None:
+    token = prefix + "A1b2C3d4E5f6G7h8I9j0" * 3
+    skill_dir = tmp_path / "demo-skill"
+    _write_skill(
+        skill_dir,
+        f"Authorization: Bearer sk-proj-your_api_key_goes_here\nAuthorization: Bearer sk-ant-api03-example_api_key_value\nAuthorization: Bearer {token}\nAuthorization: Bearer {token}\n",
+    )
+
+    result = scan_skill_dir(skill_dir)
+
+    findings = [finding for finding in result["findings"] if finding["rule_id"] == "secret-cloud-token"]
+    assert len(findings) == 1  # Preserve the first-real-token finding policy.
+    assert findings[0]["severity"] == "CRITICAL"
+    assert findings[0]["line"] == 8
+    assert findings[0]["evidence"] == "[redacted]"
+    assert result["blocked"] is True
+    assert token not in repr(result)
+
+
 def test_dedup_keeps_distinct_lines_for_repeated_pattern(tmp_path: Path) -> None:
     skill_dir = tmp_path / "demo-skill"
     _write_skill(skill_dir)
