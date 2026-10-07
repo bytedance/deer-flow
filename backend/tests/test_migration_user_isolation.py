@@ -1,6 +1,7 @@
 """Tests for per-user data migration."""
 
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -441,6 +442,39 @@ class TestThreadOwnersFromDatabase:
         assert _run_migration(monkeypatch, base_dir, database) == 1
 
         assert (base_dir / "threads" / "t-alice").is_dir()
+
+    def test_unusable_database_url_stops_before_moving_anything(self, base_dir: Path, monkeypatch, caplog):
+        # An unset $DATABASE_URL leaves postgres_url empty; create_engine raises
+        # ArgumentError, which must get the same handling as the other failures.
+        database = DatabaseConfig(backend="postgres", postgres_url="")
+        _make_legacy_threads(base_dir, "t-alice")
+
+        with caplog.at_level(logging.ERROR, logger="scripts.migrate_user_isolation"):
+            assert _run_migration(monkeypatch, base_dir, database) == 1
+
+        assert (base_dir / "threads" / "t-alice").is_dir()
+        assert "Nothing was migrated." in caplog.text
+
+    def test_rerun_recovers_threads_moved_back_from_default(self, base_dir: Path, monkeypatch):
+        # Documented recovery for installs the pre-fix script sent to default:
+        # move the owned threads back to threads/ and run the script again.
+        database = DatabaseConfig(backend="sqlite", sqlite_dir=str(base_dir / "data"))
+        _write_thread_owners(database, {"t-alice": "alice", "t-bob": "bob"})
+        _make_legacy_threads(base_dir, "t-alice", "t-bob")
+        for thread_id in ("t-alice", "t-bob"):
+            (base_dir / "threads" / thread_id / "user-data" / "legacy.txt").write_text(thread_id, encoding="utf-8")
+        # bob kept using the thread after the bad migration.
+        newer = base_dir / "users" / "bob" / "threads" / "t-bob" / "user-data"
+        newer.mkdir(parents=True)
+        (newer / "newer.txt").write_text("newer", encoding="utf-8")
+
+        assert _run_migration(monkeypatch, base_dir, database) == 0
+
+        assert (base_dir / "users" / "alice" / "threads" / "t-alice" / "user-data" / "legacy.txt").read_text(encoding="utf-8") == "t-alice"
+        # An existing destination is never overwritten; the old copy is set aside.
+        assert (newer / "newer.txt").read_text(encoding="utf-8") == "newer"
+        assert not (newer / "legacy.txt").exists()
+        assert (base_dir / "migration-conflicts" / "t-bob" / "user-data" / "legacy.txt").read_text(encoding="utf-8") == "t-bob"
 
     def test_allow_missing_thread_owners_assigns_default(self, base_dir: Path, monkeypatch):
         database = DatabaseConfig(backend="sqlite", sqlite_dir=str(base_dir / "data"))

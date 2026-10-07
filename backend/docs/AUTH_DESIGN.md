@@ -422,6 +422,8 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 
 thread 归属读取 Gateway 所配置数据库（`config.yaml` 的 `database`）中 `threads_meta.user_id`，未记录归属的 thread 归入 `default`。若存在 legacy thread 但无法读取该表（数据库文件不存在、`memory` 后端或查询失败），脚本在移动任何数据前退出；只有从未记录过 thread 归属的安装才应传 `--allow-missing-thread-owners`，此时所有 legacy thread 归入 `default`。
 
+修复前的脚本找不到数据库，会把所有 legacy thread 移到 `users/default/threads/`，且因 `threads/` 已不存在，重跑不会生效。恢复方法：停止 Gateway，用 `SELECT thread_id, user_id FROM threads_meta WHERE user_id IS NOT NULL AND user_id <> 'default'` 列出有真实归属的 thread，把存在的 `users/default/threads/{thread_id}` 移回 `threads/{thread_id}`，再重跑脚本（先 `--dry-run`）。若归属用户之后又使用过该 thread，目标目录已存在，脚本不会覆盖，而是把旧副本放到 `migration-conflicts/{thread_id}`，需手动合并。
+
 ## 安全不变量
 
 必须长期保持的不变量：

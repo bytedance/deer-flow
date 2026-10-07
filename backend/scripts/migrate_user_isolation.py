@@ -325,6 +325,9 @@ def _build_owner_map_from_db(database: DatabaseConfig) -> dict[str, str]:
         engine = create_engine(database.app_sync_sqlalchemy_url)
     except ImportError as e:
         raise OwnerMapUnavailable(f"database driver is not installed ({e})") from e
+    except SQLAlchemyError as e:
+        # e.g. an empty postgres_url when $DATABASE_URL is unset.
+        raise OwnerMapUnavailable(f"cannot open the configured database ({e.__class__.__name__}: {e})") from e
     try:
         with engine.connect() as conn:
             rows = conn.execute(text("SELECT thread_id, user_id FROM threads_meta WHERE user_id IS NOT NULL")).all()

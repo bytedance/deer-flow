@@ -812,7 +812,9 @@ This release closes that milestone with **439 merged pull requests**.
   `threads_meta` table of the database configured in `config.yaml`. If legacy
   threads exist but that table cannot be read, the script stops before moving
   anything; `--allow-missing-thread-owners` assigns every legacy thread to
-  `default` instead, for installs that never recorded thread owners. ([#6450])
+  `default` instead, for installs that never recorded thread owners. Installs
+  that already ran the old script can recover their threads with the steps in
+  `docker/provisioner/README.md`. ([#6450])
 - **frontend:** Retrying a message after its attachment upload fails now keeps
   the context that was attached to it. The composer dropped its quotes,
   conversation references, staged project files and stored draft as soon as a

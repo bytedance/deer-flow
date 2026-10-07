@@ -698,7 +698,8 @@
   `{base_dir}/deer-flow.db` 中查找线程归属，而 DeerFlow 从不创建这个文件（数据库是 `{sqlite_dir}/deerflow.db`
   或 PostgreSQL），因此归属映射始终为空，所有 legacy 线程都被移到 `users/default/`。现在归属从 `config.yaml`
   所配置数据库的 `threads_meta` 表读取；若存在 legacy 线程但无法读取该表，脚本会在移动任何数据前退出。对于
-  从未记录过线程归属的安装，可传 `--allow-missing-thread-owners`，此时所有 legacy 线程归入 `default`。([#6450])
+  从未记录过线程归属的安装，可传 `--allow-missing-thread-owners`，此时所有 legacy 线程归入 `default`。
+  已运行过旧脚本的安装可按 `docker/provisioner/README.md` 中的步骤恢复线程。([#6450])
 - **前端：** 附件上传失败后重试发送时，现在会保留原先附带的上下文。输入框此前在发送开始时（附件上传之前）就清除了
   引用、对话引用、已暂存的项目文件和已保存的草稿，因此上传失败后文字和文件虽仍在，重试发送却缺少这些上下文。
   现在这些一次性状态只在发送真正派发（上传完成）后才清除；若上传完成时用户已切换对话或离开页面，只清除该次发送
