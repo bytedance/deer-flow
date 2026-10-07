@@ -23,11 +23,14 @@ import httpx
 
 from deerflow.config.app_config import get_app_config
 from deerflow.knowledge.caption_client import _CAPTION_CONCURRENCY, request_caption
-from deerflow.knowledge.graph.indexer import DEGRADED_FAILURE_THRESHOLD
 from deerflow.knowledge.parser import ParsedImage
 from deerflow.knowledge.vlm_target import VlmTarget, resolve_vlm_target
 
 logger = logging.getLogger(__name__)
+
+#: Doc-level caption degradation threshold: over 30% of images failed (relocated from the
+#: cut graph leg's indexer, spec lineage §3.4).
+DEGRADED_FAILURE_THRESHOLD = 0.3
 
 
 @dataclass(slots=True)

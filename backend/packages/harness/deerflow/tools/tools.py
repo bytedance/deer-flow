@@ -144,7 +144,9 @@ def get_available_tools(
         List of available tools.
     """
     config = app_config or get_app_config()
-    tool_configs = [tool for tool in config.tools if groups is None or tool.group in groups]
+    # groups=None resolves the default (lead-agent) toolset: opt-in tools are
+    # excluded unless their group is explicitly listed.
+    tool_configs = [tool for tool in config.tools if (tool.group in groups if groups is not None else not tool.opt_in)]
     # These operations are assembled from the host grant below. Registering a
     # tool path in YAML cannot widen that grant or its interaction mode.
     tool_configs = [tool for tool in tool_configs if tool.use not in {"deerflow.tools.scheduled_tasks:schedule_task", "deerflow.tools.scheduled_tasks:stop_scheduled_task"}]

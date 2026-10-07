@@ -34,7 +34,6 @@ YAML_RAG = {
     "rerank_model": "yaml-rerank",
     "vlm_model": "yaml-vlm",
     "worker_concurrency": 4,
-    "video": {"enabled": False, "asr_model": "yaml-asr"},
 }
 
 _PROBE = "/api/rag/config/probe-sparse"
@@ -48,7 +47,7 @@ def config_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     (tmp_path / "config.yaml").write_text(yaml.safe_dump({"sandbox": SANDBOX, "models": [], "rag": YAML_RAG}), encoding="utf-8")
     (tmp_path / "models_config.json").write_text(json.dumps({"models": []}), encoding="utf-8")
     (tmp_path / "extensions_config.json").write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
-    (tmp_path / "rag_config.json").write_text(json.dumps({"extract_model": "kept"}), encoding="utf-8")
+    (tmp_path / "rag_config.json").write_text(json.dumps({"default_model": "kept"}), encoding="utf-8")
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "config.yaml"))
     monkeypatch.setenv("DEER_FLOW_MODELS_CONFIG_PATH", str(tmp_path / "models_config.json"))
     monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(tmp_path / "extensions_config.json"))

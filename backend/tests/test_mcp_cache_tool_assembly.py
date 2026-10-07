@@ -10,8 +10,8 @@ from deerflow.tools.tools import get_available_tools
 def _make_config():
     return SimpleNamespace(
         tools=[
-            SimpleNamespace(name="bash", group="bash", use="deerflow.sandbox.tools:bash_tool"),
-            SimpleNamespace(name="ls", group="file:read", use="tests:ls_tool"),
+            SimpleNamespace(name="bash", group="bash", use="deerflow.sandbox.tools:bash_tool", opt_in=False),
+            SimpleNamespace(name="ls", group="file:read", use="tests:ls_tool", opt_in=False),
         ],
         models=[],
         sandbox=SimpleNamespace(use="deerflow.sandbox.local:LocalSandboxProvider", allow_host_bash=False),

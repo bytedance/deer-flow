@@ -24,27 +24,14 @@ ROOT = Path(__file__).resolve().parents[2]
 RAG_EXAMPLE = ROOT / "rag_config.example.json"
 CONFIG_EXAMPLE = ROOT / "config.example.yaml"
 
-#: The two roles that had no field at all before spec 2026-09-26.
-NEW_ROLE_FIELDS = ("wiki_model", "synthesis_model")
-
 #: The two MinerU cloud knobs that had no field at all before spec 2026-09-29.
 NEW_PARSE_KNOBS = ("parse_language", "parse_model_version")
 
 #: The two caption generation knobs that had no field at all before spec 2026-09-30.
 NEW_CAPTION_KNOBS = ("caption_max_tokens", "caption_temperature")
 
-#: The five follow-chat thinking flags that had no field at all before spec 2026-10-03.
-NEW_THINKING_FLAGS = (
-    "extract_thinking",
-    "wiki_thinking",
-    "judge_thinking",
-    "synthesis_thinking",
-    "vlm_thinking",
-)
-
-
-def _json_keys() -> list[str]:
-    return list(json.loads(RAG_EXAMPLE.read_text(encoding="utf-8")))
+#: The follow-chat thinking flag that had no field at all before spec 2026-10-03.
+NEW_THINKING_FLAGS = ("vlm_thinking",)
 
 
 def _rag_block() -> str:
@@ -60,30 +47,13 @@ def test_the_json_template_loads_through_the_real_model():
     RagConfigFile.model_validate(payload)
 
 
-def test_the_json_template_ships_both_roles_as_empty_overrides():
+def test_the_json_template_carries_every_model_reference_field():
+    """Every role the settings form can write ships in the template as an empty override."""
     payload = json.loads(RAG_EXAMPLE.read_text(encoding="utf-8"))
 
-    for field in NEW_ROLE_FIELDS:
+    for field in MODEL_REFERENCE_FIELDS:
         assert field in payload, f"{field} is missing from rag_config.example.json"
         assert payload[field] == "", f"{field} must ship as an empty override, not {payload[field]!r}"
-        assert field in MODEL_REFERENCE_FIELDS, f"{field} is not a model-reference field"
-
-
-def test_the_json_template_keeps_the_roles_next_to_default_model():
-    keys = _json_keys()
-
-    anchor = keys.index("default_model")
-
-    assert keys[anchor + 1 : anchor + 3] == list(NEW_ROLE_FIELDS)
-
-
-def test_the_yaml_template_advertises_both_roles_as_commented_examples():
-    block = _rag_block()
-
-    for field in NEW_ROLE_FIELDS:
-        assert re.search(rf"^\s*#\s*{field}:\s*\S", block, re.MULTILINE), f"{field} has no commented example in the rag block"
-        # A `models:` entry reference is deployment-specific: the template must not activate one.
-        assert not re.search(rf"^\s*{field}:", block, re.MULTILINE), f"{field} must stay commented out"
 
 
 def test_the_yaml_template_advertises_both_parse_knobs_as_commented_examples():
@@ -162,14 +132,6 @@ def test_the_yaml_example_ships_the_required_model_rows_commented_out():
         assert not re.search(rf"^\s*{field}:", block, re.MULTILINE), f"{field} must stay commented out"
 
 
-def test_the_yaml_example_ships_the_asr_model_row_commented_out():
-    """The video block's row follows the same rule (③ 甲)."""
-    text = CONFIG_EXAMPLE.read_text(encoding="utf-8")
-
-    assert re.search(r"^\s*#\s*asr_model:\s*\S", text, re.MULTILINE), "asr_model has no commented example"
-    assert not re.search(r"^\s*asr_model:", text, re.MULTILINE), "asr_model must stay commented out"
-
-
 def test_the_json_example_ships_placeholder_model_names():
     """The JSON template is a pure template: every model-shaped value is a placeholder the
     reader replaces, and its shape still loads through the real model."""
@@ -177,5 +139,3 @@ def test_the_json_example_ships_placeholder_model_names():
 
     assert payload["embedding_model"] == "your-embedding-model"
     assert payload["rerank_model"] == "your-rerank-model"
-    assert payload["extract_model"] == "your-extract-model"
-    assert payload["video"]["asr_model"] == "your-asr-model"

@@ -91,8 +91,5 @@ def test_knowledge_uploads_route_disables_request_buffering(path):
     block = _extract_location_block(content, LOCATION_SELECTOR)
 
     assert "proxy_request_buffering off;" in block, (
-        f"{path}: /api/knowledge-bases/.../documents does not disable request "
-        "buffering, so nginx spools document upload bodies to a temp file "
-        "before proxying them to Gateway, which can 500 with a permission "
-        "error on non-root local runs"
+        f"{path}: /api/knowledge-bases/.../documents does not disable request buffering, so nginx spools document upload bodies to a temp file before proxying them to Gateway, which can 500 with a permission error on non-root local runs"
     )

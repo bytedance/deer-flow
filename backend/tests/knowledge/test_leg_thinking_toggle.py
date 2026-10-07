@@ -1,16 +1,14 @@
 """Per-leg thinking toggles: checked legs follow chat's treatment (spec 2026-10-03).
 
-Each RAG leg reads its own ``rag.<role>_thinking`` flag and hands it to the shared
-``create_rag_chat_model`` wrapper, which mirrors the lead-agent entry gate (an entry that
-declares no thinking support is pressed back to non-thinking with a warning). The caption
-legs are raw HTTP, so they mirror the same gate at the outbound door instead. Defaults are
-all False: an unchecked leg builds exactly the request it builds today.
+The caption legs read ``rag.vlm_thinking``; they are raw HTTP, so they mirror the
+lead-agent entry gate (an entry that declares no thinking support is pressed back to
+non-thinking with a warning) at the outbound door. The default is False: an unchecked
+leg builds exactly the request it builds today.
 """
 
 from __future__ import annotations
 
 import logging
-from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -47,117 +45,7 @@ def _config(models: list[dict] | None = None, rag: dict | None = None) -> AppCon
     return AppConfig.model_validate({"sandbox": SANDBOX, "models": models or [THINKING_ENTRY], "rag": rag or {}})
 
 
-@pytest.fixture()
-def factory_capture(monkeypatch):
-    """Record what every leg hands the model factory, keyword by keyword."""
-    import deerflow.models.factory as models_factory
-
-    calls: list[tuple[str | None, dict]] = []
-
-    def _fake(name=None, **kwargs):
-        calls.append((name, kwargs))
-        return object()
-
-    monkeypatch.setattr(models_factory, "create_chat_model", _fake)
-    return calls
-
-
-def _build_extract(cfg):
-    from deerflow.knowledge.graph.extractor import get_extract_llm
-
-    return get_extract_llm(cfg)
-
-
-def _build_wiki(cfg):
-    from deerflow.knowledge.wiki.generator import _default_llm
-
-    return _default_llm()
-
-
-def _build_judge(cfg):
-    from deerflow.knowledge.eval.factory import build_judge_llm
-
-    return build_judge_llm(None, config=cfg)
-
-
-def _build_synthesis(cfg):
-    from deerflow.knowledge.eval.synthesis import _default_llm_factory
-
-    return _default_llm_factory()
-
-
-LEG_BUILDERS = [_build_extract, _build_wiki, _build_judge, _build_synthesis]
-LEG_IDS = ["extract", "wiki", "judge", "synthesis"]
-
-
-def _patch_app_config(monkeypatch, cfg):
-    monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: cfg)
-
-
-# ── the five legs' call points ─────────────────────────────────────────────
-
-
-@pytest.mark.parametrize("build", LEG_BUILDERS, ids=LEG_IDS)
-def test_checked_leg_asks_the_factory_for_thinking(build, factory_capture, monkeypatch):
-    cfg = _config(rag={f"{role}_thinking": True for role in ("extract", "wiki", "judge", "synthesis", "vlm")})
-    _patch_app_config(monkeypatch, cfg)
-
-    build(cfg)
-
-    assert factory_capture[-1][1]["thinking_enabled"] is True
-
-
-@pytest.mark.parametrize("build", LEG_BUILDERS, ids=LEG_IDS)
-def test_unchecked_leg_stays_non_thinking(build, factory_capture, monkeypatch):
-    cfg = _config()
-    _patch_app_config(monkeypatch, cfg)
-
-    build(cfg)
-
-    assert factory_capture[-1][1]["thinking_enabled"] is False
-
-
-@pytest.mark.asyncio
-async def test_checked_wiki_worker_asks_the_factory_for_thinking(factory_capture, monkeypatch):
-    """The worker's inline construction site (``worker.py``) is the wiki leg's second door."""
-    from deerflow.knowledge import worker as worker_module
-
-    cfg = _config(rag={"wiki_thinking": True})
-    _patch_app_config(monkeypatch, cfg)
-
-    async def _ready(*args, **kwargs):
-        return True
-
-    async def _no_generate(*args, **kwargs):
-        return None
-
-    async def _no_entries(*args, **kwargs):
-        return []
-
-    monkeypatch.setattr(worker_module, "wiki_trigger_ready", _ready)
-    monkeypatch.setattr(worker_module, "generate_wiki", _no_generate)
-    stub = SimpleNamespace(_main_llm=None, _wiki_store=SimpleNamespace(list_entries=_no_entries), _store=None, _graph_store=None, _vector_store=None)
-
-    await worker_module.KnowledgeIndexWorker._maybe_generate_wiki(stub, "kb-1", None)
-
-    assert factory_capture[-1][1]["thinking_enabled"] is True
-
-
-# ── the entry gate, mirrored from the lead agent ───────────────────────────
-
-
-def test_checked_leg_on_an_unsupported_entry_downgrades_with_a_warning(factory_capture, monkeypatch, caplog):
-    cfg = _config(models=[UNSUPPORTED_ENTRY], rag={"extract_thinking": True})
-    _patch_app_config(monkeypatch, cfg)
-
-    with caplog.at_level(logging.WARNING):
-        _build_extract(cfg)
-
-    assert factory_capture[-1][1]["thinking_enabled"] is False
-    assert "plain-entry" in caplog.text and "does not support" in caplog.text
-
-
-# ── the caption legs mirror the same gate at the outbound door ─────────────
+# ── the caption legs mirror the entry gate at the outbound door ─────────────
 
 
 def _vlm_target(cfg, name: str):

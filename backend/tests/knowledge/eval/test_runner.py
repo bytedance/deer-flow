@@ -9,14 +9,12 @@ markdown/terminal renderings. No Qdrant, no LLM, no database.
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 import pytest
 
 from deerflow.knowledge.eval.dataset import GoldenQuestion
 from deerflow.knowledge.eval.runner import (
     ScoredHit,
-    build_default_searchers,
     render_markdown,
     render_summary,
     report_from_dict,
@@ -250,86 +248,3 @@ class TestBaselineReportCompat:
 
         assert report.diff is not None
         assert report.diff.failed is False
-
-
-class TestBuildDefaultSearchers:
-    async def test_graph_searcher_mirrors_recall_test_config_wiring(self, monkeypatch):
-        """The graph path must receive the same config-driven parameters the
-        online wrapper passes (spec §6: 评估逻辑与线上永远同源)."""
-        captured = {}
-
-        async def fake_graph_impl(query, runtime, **kwargs):
-            captured.update(kwargs)
-            return {"entities": [], "relations": [], "evidence": [{"chunk_id": "c1", "score": 0.7}], "message": ""}
-
-        async def fake_vector_impl(query, runtime, **kwargs):
-            return {"results": [{"chunk_id": "c1", "score": 0.9}], "message": ""}
-
-        async def fake_wiki_impl(query, runtime, **kwargs):
-            return {"entries": [{"entry_id": "e1", "title": "t", "score": 0.3, "source_type": "wiki"}], "message": ""}
-
-        rag = SimpleNamespace(
-            graph_rerank=False,
-            graph_per_entity_cap=3,
-            graph_per_edge_cap=2,
-            graph_hop0_guarantee=2,
-            graph_evidence_limit=8,
-            graph_rerank_threshold=12,
-            graph_hop_penalty=0.0,
-            graph_neighbor_min_score=0.4,
-            graph_max_expanded_nodes=25,
-            graph_hub_degree_threshold=50,
-        )
-        wiki_store = SimpleNamespace()
-
-        async def fake_get_entry(entry_id):
-            return {"id": entry_id, "source_chunk_ids": ["c2"]}
-
-        wiki_store.get_entry = fake_get_entry
-        searchers = build_default_searchers(
-            kb_id="kb1",
-            user_id="u1",
-            store=object(),
-            vector_store=object(),
-            graph_store=object(),
-            wiki_store=wiki_store,
-            rag=rag,
-            hybrid_impl=fake_vector_impl,
-            graph_impl=fake_graph_impl,
-            wiki_impl=fake_wiki_impl,
-        )
-
-        graph_hits = await searchers["graph"]("q", 5)
-        assert [h.chunk_id for h in graph_hits] == ["c1"]
-        # recall_test 同源：evidence_limit 取 top_k，config 参数全量镜像
-        assert captured["evidence_limit"] == 5
-        assert captured["per_entity_cap"] == 3
-        assert captured["neighbor_min_score"] == 0.4
-        assert captured["hub_degree_threshold"] == 50
-        assert captured["reranker"] is None  # graph_rerank=False → 不构造 reranker
-
-        vector_hits = await searchers["vector"]("q", 5)
-        assert [h.chunk_id for h in vector_hits] == ["c1"]
-
-        wiki_hits = await searchers["wiki"]("q", 5)
-        assert [h.chunk_id for h in wiki_hits] == ["c2"]  # entry → source_chunk_ids 归一化
-
-    async def test_wiki_manual_cards_have_no_source_chunks(self):
-        async def fake_wiki_impl(query, runtime, **kwargs):
-            return {"entries": [{"entry_id": "m1", "title": "card", "score": 0.8, "source_type": "manual"}], "message": ""}
-
-        searchers = build_default_searchers(
-            kb_id="kb1",
-            user_id="u1",
-            store=object(),
-            vector_store=object(),
-            graph_store=object(),
-            wiki_store=SimpleNamespace(),
-            rag=SimpleNamespace(graph_rerank=False),
-            hybrid_impl=_ok(()),
-            graph_impl=_ok(()),
-            wiki_impl=fake_wiki_impl,
-        )
-
-        hits = await searchers["wiki"]("q", 5)
-        assert hits == ()  # 人工卡片无 chunk 映射，跳过而非报错

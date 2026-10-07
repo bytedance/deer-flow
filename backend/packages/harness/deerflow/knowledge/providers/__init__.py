@@ -166,48 +166,6 @@ PROVIDER_ALLOWLIST: dict[str, dict[str, ProviderSpec]] = {
             takes_model=False,
         ),
     },
-    # The video ASR leg (spec 2026-09-28 D2「三组四值」). Two of its four rows run in-process
-    # and take neither an address nor a credential; the other two are services, one per
-    # protocol family. Order is the settings dropdown's: the engines first, then the
-    # protocol tiers.
-    "asr": {
-        "funasr": ProviderSpec(
-            leg="asr",
-            provider_id="funasr",
-            implementation="deerflow.knowledge.video.asr:FunAsrProvider",
-            # In-process: funasr is imported into this process, so there is no endpoint to
-            # point at and nothing to authenticate.
-            secret_env_var=None,
-        ),
-        "whisper": ProviderSpec(
-            leg="asr",
-            provider_id="whisper",
-            implementation="deerflow.knowledge.video.asr:WhisperProvider",
-            secret_env_var=None,
-        ),
-        "openai-audio": ProviderSpec(
-            leg="asr",
-            provider_id="openai-audio",
-            implementation="deerflow.knowledge.video.asr:OpenAiAudioProvider",
-            # One row for the whole protocol family: OpenAI's own `/v1/audio/transcriptions`,
-            # any compatible endpoint, and a local `funasr-server` are the same shape, so the
-            # address is what tells them apart. No vendor default to show — the row falls back
-            # to the shared example placeholder.
-            secret_env_var="RAG_ASR_API_KEY",
-        ),
-        "dashscope": ProviderSpec(
-            leg="asr",
-            provider_id="dashscope",
-            implementation="deerflow.knowledge.video.asr:DashScopeAsrProvider",
-            secret_env_var="DASHSCOPE_ASR_API_KEY",
-            # The vendor does fix its own endpoint, so the flag is true — it is one rule with
-            # `default_endpoint` being set. What the ASR *row* does with it differs: the address
-            # stays the admin's to set (2026-09-25 rag-endpoint-unlock retired the lock), so this
-            # is only what the field shows greyed out, never a value and never a fallback.
-            has_fixed_endpoint=True,
-            default_endpoint="https://dashscope.aliyuncs.com",
-        ),
-    },
 }
 
 

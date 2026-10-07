@@ -106,9 +106,6 @@ async def test_busy_kb_dirs_are_skipped(session_factory, tmp_path):
 
 class FakeVectorStore:
     chunks_collection = "kb_chunks"
-    entities_collection = "kb_entities"
-    wiki_entries_collection = "kb_wiki_entries"
-    manual_cards_collection = "kb_manual_cards"
 
     async def init_collections(self) -> None:
         return None

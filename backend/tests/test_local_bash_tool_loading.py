@@ -7,8 +7,8 @@ from deerflow.tools.tools import get_available_tools
 def _make_config(*, allow_host_bash: bool, sandbox_use: str = "deerflow.sandbox.local:LocalSandboxProvider", extra_tools: list[SimpleNamespace] | None = None):
     return SimpleNamespace(
         tools=[
-            SimpleNamespace(name="bash", group="bash", use="deerflow.sandbox.tools:bash_tool"),
-            SimpleNamespace(name="ls", group="file:read", use="tests:ls_tool"),
+            SimpleNamespace(name="bash", group="bash", use="deerflow.sandbox.tools:bash_tool", opt_in=False),
+            SimpleNamespace(name="ls", group="file:read", use="tests:ls_tool", opt_in=False),
             *(extra_tools or []),
         ],
         models=[],
@@ -50,7 +50,7 @@ def test_get_available_tools_keeps_bash_when_explicitly_enabled(monkeypatch):
 def test_get_available_tools_hides_renamed_host_bash_alias(monkeypatch):
     config = _make_config(
         allow_host_bash=False,
-        extra_tools=[SimpleNamespace(name="shell", group="bash", use="deerflow.sandbox.tools:bash_tool")],
+        extra_tools=[SimpleNamespace(name="shell", group="bash", use="deerflow.sandbox.tools:bash_tool", opt_in=False)],
     )
     monkeypatch.setattr("deerflow.tools.tools.get_app_config", lambda: config)
     monkeypatch.setattr(

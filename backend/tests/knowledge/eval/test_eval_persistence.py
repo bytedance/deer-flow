@@ -1,4 +1,4 @@
-"""Tests for eval_runs persistence from the two eval CLIs (spec 2026-08-24 §3.1, plan Task 0b).
+"""Tests for eval_runs persistence from the eval CLI (spec 2026-08-24 §3.1, plan Task 0b).
 
 Covers the §3.1.2 report→JSON field mappings (pure functions), the
 status/environment resolution rules, ``save_eval_run`` round-trips against a
@@ -27,7 +27,6 @@ from deerflow.knowledge.models import EvalRunRow
 
 REPO_BACKEND = Path(__file__).resolve().parents[3]
 LAYER1_CLI_PATH = REPO_BACKEND / "scripts" / "run_rag_eval.py"
-LAYER2_CLI_PATH = REPO_BACKEND / "scripts" / "run_ragas_eval.py"
 
 KEYS = {"DASHSCOPE_EMBEDDING_API_KEY": "k1", "DASHSCOPE_RERANK_API_KEY": "k2"}
 CHUNK = "a" * 32 + "#0001"
@@ -41,10 +40,9 @@ def _load_cli(path: Path, name: str):
 
 
 layer1_cli = _load_cli(LAYER1_CLI_PATH, "run_rag_eval_persist")
-layer2_cli = _load_cli(LAYER2_CLI_PATH, "run_ragas_eval_persist")
 
 
-# ── report payloads (mirror runner.report_to_dict / ragas_eval.report_to_dict) ──
+# ── report payloads (mirror runner.report_to_dict / the Layer-2 report shape) ──
 
 
 def _layer1_report_payload() -> dict[str, Any]:
@@ -277,6 +275,7 @@ def _as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
+@pytest.mark.asyncio
 class TestSaveEvalRun:
     async def test_round_trip(self, session_factory):
         created = datetime(2026, 8, 24, 10, 0, 0, tzinfo=UTC)
@@ -474,80 +473,6 @@ class TestLayer1CliPersistence:
         assert rows[0].layer2_metrics == {}
 
 
-def _patch_layer2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kb: dict[str, Any] | None) -> None:
-    _patch_common(monkeypatch, tmp_path, kb)
-    import deerflow.knowledge.eval.ragas_eval as ragas_module
-
-    async def fake_agent_runner(question):
-        return ragas_module.TraceOutcome(
-            question_id=question.id,
-            answer="答案（无引用标注，judge 不会被调用）",
-            retrieval_tools=("hybrid_search",),
-            citation_map={},
-            seed_entities=(),
-        )
-
-    monkeypatch.setattr(ragas_module, "build_lead_agent_runner", lambda **kwargs: fake_agent_runner)
-    monkeypatch.setattr(layer2_cli, "_build_judge_llm", lambda *a, **k: object())
-    monkeypatch.setattr(layer2_cli, "_build_ragas_evaluator", lambda judge_llm: None)
-
-
-class TestLayer2CliPersistence:
-    def test_completed_run_writes_layer2_only_row(self, monkeypatch, tmp_path):
-        golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact", entities=["实体X"]), _golden_entry("q2", "relation"))
-        _patch_layer2(monkeypatch, tmp_path, kb={"owner_id": "u1"})
-        out = tmp_path / "out"
-
-        code = layer2_cli.main(["--golden", str(golden), "--out", str(out), "--kb-id", "kb-1"], environ=dict(KEYS))
-
-        assert code == 0  # report-only: quality never gates
-        rows = _read_runs(tmp_path)
-        assert len(rows) == 1
-        row = rows[0]
-        assert row.kb_id == "kb-1"
-        assert row.status == "completed"
-        assert row.layer1_metrics == {}
-        layer2 = row.layer2_metrics
-        assert layer2["ragas_available"] is False  # evaluator patched to None
-        assert isinstance(layer2["ragas_skip_reason"], str) and layer2["ragas_skip_reason"]
-        assert set(layer2["ragas"]) == {"faithfulness", "answer_relevancy", "context_precision", "context_recall"}
-        assert layer2["arch_specific"]["citation_precision"] is None  # answer carries no [n] marks
-        assert layer2["arch_specific"]["citation_recall"] is None
-        assert layer2["arch_specific"]["seed_hit_rate"] == pytest.approx(0.0)  # annotated entities, no seeds
-        assert layer2["has_graph_questions"] is True
-        report = json.loads((out / "ragas-report.json").read_text(encoding="utf-8"))
-        assert row.id == report["run_id"]
-        assert _as_utc(row.created_at) == datetime.fromisoformat(report["generated_at"])
-
-    def test_golden_load_error_writes_error_row(self, monkeypatch, tmp_path):
-        _patch_common(monkeypatch, tmp_path, kb={"owner_id": "u1"})
-
-        code = layer2_cli.main(
-            ["--golden", str(tmp_path / "absent.jsonl"), "--out", str(tmp_path / "out"), "--kb-id", "kb-1"],
-            environ=dict(KEYS),
-        )
-
-        assert code == 2
-        rows = _read_runs(tmp_path)
-        assert len(rows) == 1
-        assert rows[0].status == "error"
-        assert rows[0].layer2_metrics == {}
-
-    def test_missing_keys_writes_skipped_row(self, monkeypatch, tmp_path, capsys):
-        golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"))
-        _patch_common(monkeypatch, tmp_path, kb={"owner_id": "u1"})
-
-        code = layer2_cli.main(["--golden", str(golden), "--out", str(tmp_path / "out"), "--kb-id", "kb-1"], environ={})
-
-        assert code == 3
-        assert "skipped" in capsys.readouterr().out
-        rows = _read_runs(tmp_path)
-        assert len(rows) == 1
-        assert rows[0].status == "skipped"
-
-
 # ── Task 0c: baseline 标记 + environment 列（spec §3.1.3 / §3.1.1 v3）─────────
 
 
@@ -579,6 +504,7 @@ class TestBaselineReportMapping:
         assert baseline["questions"] == []
 
 
+@pytest.mark.asyncio
 class TestMarkBaseline:
     async def test_mark_baseline_sets_flag(self, session_factory):
         await persistence.save_eval_run(
@@ -650,6 +576,7 @@ class TestMarkBaseline:
         assert bad_row.is_baseline is False
 
 
+@pytest.mark.asyncio
 class TestEnvironmentPersistence:
     async def test_default_environment_is_local(self, session_factory):
         await persistence.save_eval_run(run_id="run-1", kb_id="kb-1", status="completed", created_at=datetime.now(UTC))
@@ -790,40 +717,3 @@ class TestLayer1CliBaselineAndEnvironment:
         rows = _read_runs(tmp_path)
         assert len(rows) == 1
         assert rows[0].baseline_diff is None
-
-
-class TestLayer2CliBaselineAndEnvironment:
-    def test_mark_baseline_marks_row_with_environment(self, monkeypatch, tmp_path):
-        golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"))
-        _patch_layer2(monkeypatch, tmp_path, kb={"owner_id": "u1"})
-
-        code = layer2_cli.main(
-            ["--golden", str(golden), "--out", str(tmp_path / "out"), "--kb-id", "kb-1", "--mark-baseline", "--environment", "ci"],
-            environ=dict(KEYS),
-        )
-
-        assert code == 0
-        rows = _read_runs(tmp_path)
-        assert len(rows) == 1
-        assert rows[0].is_baseline is True
-        assert rows[0].environment == "ci"
-
-    def test_mark_baseline_on_skipped_run_keeps_previous_baseline_and_notes_stderr(self, monkeypatch, tmp_path, capsys):
-        golden = tmp_path / "golden.jsonl"
-        _write_golden(golden, _golden_entry("q1", "fact"))
-        _patch_layer2(monkeypatch, tmp_path, kb={"owner_id": "u1"})
-
-        code = layer2_cli.main(["--golden", str(golden), "--out", str(tmp_path / "out"), "--kb-id", "kb-1", "--mark-baseline"], environ=dict(KEYS))
-        assert code == 0
-
-        _patch_common(monkeypatch, tmp_path, kb={"owner_id": "u1"})
-        code = layer2_cli.main(["--golden", str(golden), "--out", str(tmp_path / "out"), "--kb-id", "kb-1", "--mark-baseline"], environ={})
-
-        assert code == 3
-        err = capsys.readouterr().err
-        assert "--mark-baseline" in err and "ignored" in err
-        rows = _read_runs(tmp_path)
-        baselines = [row for row in rows if row.is_baseline]
-        assert len(baselines) == 1
-        assert baselines[0].status == "completed"

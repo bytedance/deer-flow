@@ -21,10 +21,8 @@ from app.gateway.services import rag_reembed as reembed_module
 from deerflow.knowledge import reindex as reindex_mod
 from deerflow.knowledge.embed_identity import write_kb_identity
 from deerflow.knowledge.embedder import EmbedderError, EmbeddingResult
-from deerflow.knowledge.graph.store import GraphStore
 from deerflow.knowledge.store import KnowledgeStore
-from deerflow.knowledge.vector_store import ChunkUpsert, EntityUpsert, ManualCardUpsert, WikiEntryUpsert
-from deerflow.knowledge.wiki.store import WikiStore
+from deerflow.knowledge.vector_store import ChunkUpsert
 
 OWNER_ID = str(uuid.UUID(int=9876543210))
 
@@ -34,21 +32,9 @@ class _FakeVectorStore:
 
     def __init__(self) -> None:
         self.upserts: list[ChunkUpsert] = []
-        self.entities: list[EntityUpsert] = []
-        self.wiki_entries: list[WikiEntryUpsert] = []
-        self.manual_cards: list[ManualCardUpsert] = []
 
     async def upsert_chunks(self, items) -> None:
         self.upserts.extend(items)
-
-    async def upsert_entities(self, items) -> None:
-        self.entities.extend(items)
-
-    async def upsert_wiki_entries(self, items) -> None:
-        self.wiki_entries.extend(items)
-
-    async def upsert_manual_cards(self, items) -> None:
-        self.manual_cards.extend(items)
 
 
 class _DeterministicEmbedder:
@@ -109,8 +95,8 @@ async def _run_channel(store: KnowledgeStore, monkeypatch, embedder, *, after_wa
     events: list[str] = []
     real_walk = reembed_module.reembed_libraries
 
-    async def _walk(store_, *, vector_store, embedder, graph_store, wiki_store):
-        result = await real_walk(store_, vector_store=vector_store, embedder=embedder, graph_store=graph_store, wiki_store=wiki_store)
+    async def _walk(store_, *, vector_store, embedder):
+        result = await real_walk(store_, vector_store=vector_store, embedder=embedder)
         if after_walk is not None:
             await after_walk()
         return result
@@ -129,8 +115,6 @@ async def _run_channel(store: KnowledgeStore, monkeypatch, embedder, *, after_wa
     reembed_module.reset_state()
     reembed_module.start_reembed(
         store=store,
-        graph_store=GraphStore(store._sf),
-        wiki_store=WikiStore(store._sf),
         vector_store=vector_store,
         embedder=embedder,
         target_payload={"embedding_provider": "p", "embedding_model": "m-target", "embedding_base_url": "https://target.example/v1"},

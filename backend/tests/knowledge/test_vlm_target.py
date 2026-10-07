@@ -164,79 +164,6 @@ async def test_image_caption_posts_to_the_selected_entry(monkeypatch):
     assert request.headers["Authorization"] == "Bearer sk-entry"
 
 
-@pytest.mark.asyncio
-async def test_shot_caption_posts_to_the_selected_entry(monkeypatch):
-    from deerflow.knowledge.video import captioner as video_captioner_module
-    from deerflow.knowledge.video.captioner import caption_shots
-
-    monkeypatch.setattr(video_captioner_module, "get_app_config", lambda: _config([VL_ENTRY]))
-    recorded: list[httpx.Request] = []
-
-    outcome = await caption_shots({0: [b"frame"]}, client=httpx.AsyncClient(transport=_recording_transport(recorded)), model="vl-entry")
-
-    assert outcome.captions == {0: "一张架构图"}
-    request = recorded[0]
-    assert str(request.url) == "https://dashscope.example/compatible-mode/v1/chat/completions"
-    assert request.headers["Authorization"] == "Bearer sk-entry"
-
-
-# ── both caption legs read one target (spec 2026-09-23 D3/D7, R18) ─────────
-#
-# `video.caption_model` is retired: the video leg keeps no layer of its own, so both legs
-# resolve the same way. The fixture deliberately points the retired field at a *different*
-# entry — naming the same model in both fields would make the two layers indistinguishable,
-# and the assertion would hold even with the old precedence restored.
-
-VIDEO_ENTRY = {
-    "name": "video-entry",
-    "use": "langchain_openai:ChatOpenAI",
-    "model": "wire-video",
-    "base_url": "https://video.example/v1",
-    "api_key": "sk-video",
-    "supports_vision": True,
-}
-ROLE_ENTRY = {
-    "name": "role-entry",
-    "use": "langchain_openai:ChatOpenAI",
-    "model": "wire-role",
-    "base_url": "https://role.example/v1",
-    "api_key": "sk-role",
-    "supports_vision": True,
-}
-
-
-def _two_leg_config() -> AppConfig:
-    return _config(
-        models=[VIDEO_ENTRY, ROLE_ENTRY],
-        rag={"vlm_model": "role-entry"},
-    )
-
-
-@pytest.mark.asyncio
-async def test_both_caption_legs_read_the_same_target(monkeypatch):
-    from deerflow.knowledge import captioner as captioner_module
-    from deerflow.knowledge.captioner import caption_images
-    from deerflow.knowledge.parser import ParsedImage
-    from deerflow.knowledge.video import captioner as video_captioner_module
-    from deerflow.knowledge.video.captioner import caption_shots
-
-    image_requests: list[httpx.Request] = []
-    video_requests: list[httpx.Request] = []
-    monkeypatch.setattr(captioner_module, "get_app_config", _two_leg_config)
-    monkeypatch.setattr(video_captioner_module, "get_app_config", _two_leg_config)
-
-    await caption_images(
-        [ParsedImage(ref="images/p1.jpg", content=b"jpeg", media_type="image/jpeg")],
-        client=httpx.AsyncClient(transport=_recording_transport(image_requests)),
-    )
-    await caption_shots({0: [b"frame"]}, client=httpx.AsyncClient(transport=_recording_transport(video_requests)))
-
-    # Same entry ⇒ same endpoint and same key: the video field above is not consulted.
-    assert str(image_requests[0].url) == "https://role.example/v1/chat/completions"
-    assert str(video_requests[0].url) == str(image_requests[0].url)
-    assert video_requests[0].headers["Authorization"] == image_requests[0].headers["Authorization"] == "Bearer sk-role"
-
-
 # ── dialect dispatch (spec 2026-09-18) ────────────────────────────────────
 
 
@@ -291,28 +218,6 @@ async def test_anthropic_image_caption_speaks_the_messages_protocol(monkeypatch)
         },
     }
     assert content[-1]["type"] == "text"
-
-
-@pytest.mark.asyncio
-async def test_anthropic_shot_caption_puts_every_frame_before_the_text(monkeypatch):
-    from deerflow.knowledge.video import captioner as video_captioner_module
-    from deerflow.knowledge.video.captioner import caption_shots
-
-    monkeypatch.setattr(video_captioner_module, "get_app_config", lambda: _config([ANTHROPIC_ENTRY]))
-    recorded: list[httpx.Request] = []
-
-    outcome = await caption_shots(
-        {0: [b"f1", b"f2", b"f3"]},
-        client=httpx.AsyncClient(transport=_anthropic_transport(recorded)),
-        model="claude-entry",
-    )
-
-    assert outcome.captions == {0: "一张架构图"}
-    assert len(recorded) == 1  # one shot, one call — framing never multiplies requests
-    body = json.loads(recorded[0].content)
-    content = body["messages"][0]["content"]
-    assert [block["type"] for block in content] == ["image", "image", "image", "text"]
-    assert [block["source"]["media_type"] for block in content[:3]] == ["image/jpeg"] * 3
 
 
 @pytest.mark.asyncio

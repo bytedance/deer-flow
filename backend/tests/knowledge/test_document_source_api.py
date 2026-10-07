@@ -44,12 +44,9 @@ def service(session_factory, tmp_path) -> KnowledgeService:
     vector_store = MagicMock()
     vector_store.delete_by_doc = AsyncMock()
     vector_store.delete_by_kb = AsyncMock()
-    vector_store.delete_entities = AsyncMock()
     return KnowledgeService(
         store=KnowledgeStore(session_factory),
         vector_store=vector_store,
-        graph_store=None,
-        wiki_store=None,
         worker=None,
         data_dir=tmp_path,
     )

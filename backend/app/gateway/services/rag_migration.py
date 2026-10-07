@@ -60,8 +60,6 @@ def migration_status() -> dict[str, Any] | None:
 def start_migration(
     *,
     store: Any,
-    graph_store: Any,
-    wiki_store: Any,
     url: str,
     old_width: int,
     target_width: int,
@@ -78,7 +76,7 @@ def start_migration(
     if migration_running():
         raise RuntimeError("a dimension migration is already running")
     _STATE = _Run(target_dimension=target_width)
-    spec = (store, graph_store, wiki_store, url, old_width, target_width, target_payload, embedder)
+    spec = (store, url, old_width, target_width, target_payload, embedder)
     task = asyncio.create_task(_run(*spec), name=f"dimension-migration-{target_width}")
     _TASKS.add(task)
     task.add_done_callback(_TASKS.discard)
@@ -92,8 +90,6 @@ def reset_state() -> None:
 
 async def _run(
     store: Any,
-    graph_store: Any,
-    wiki_store: Any,
     url: str,
     old_width: int,
     target_width: int,
@@ -104,7 +100,7 @@ async def _run(
     state = _STATE
     vector_store = KnowledgeVectorStore(url, dense_size=target_width)
     try:
-        await dimension_migration.migrate_collections(store, vector_store=vector_store, embedder=embedder, graph_store=graph_store, wiki_store=wiki_store)
+        await dimension_migration.migrate_collections(store, vector_store=vector_store, embedder=embedder)
     except Exception as exc:
         state.state = "failed"
         state.detail = f"{type(exc).__name__}: {exc}"

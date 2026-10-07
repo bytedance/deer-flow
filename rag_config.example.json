@@ -1,0 +1,10 @@
+{
+  "qdrant_url": "http://localhost:6333",
+  "embedding_model": "your-embedding-model",
+  "embedding_api_key": "",
+  "rerank_model": "your-rerank-model",
+  "rerank_api_key": "",
+  "vlm_model": "",
+  "default_model": "",
+  "mineru_api_token": ""
+}

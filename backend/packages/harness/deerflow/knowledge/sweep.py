@@ -1,10 +1,9 @@
 """孤儿向量对账清扫（spec 2026-10-04；2026-10-05 D4/D5/D6）。
 
-以业务库为准绳：四集合各扫一遍（无 kb 过滤）→ 按 payload ``kb_id`` 分组 →
+以业务库为准绳：chunks 集合扫一遍（无 kb 过滤）→ 按 payload ``kb_id`` 分组 →
 kb 行缺的整组清（D4：旧枚举"活库表"看不见的那批）、行在的逐点查行；收集
-候选 → 复核一遍 → 只删复核后仍缺失的。两段式兜住卡片创建路径"向量先于行"
-的窗口（knowledge_service.py:941-950）与开关翻转窗口（D5）。
-不建持久记录、不碰业务行与文件；单集合失败记录后继续；幂等可重复。
+候选 → 复核一遍 → 只删复核后仍缺失的。两段式兜住写入在途窗口。
+不建持久记录、不碰业务行与文件；失败记录后继续；幂等可重复。
 
 同模块还有两件同轮步骤：
 - **文件侧对账** ``reconcile_files``（spec 2026-10-05 §2.2）：walk ``knowledge/``
@@ -17,20 +16,15 @@ from __future__ import annotations
 import logging
 import re
 import shutil
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from deerflow.knowledge.wiki.generator import wiki_generation_in_progress
 from deerflow.utils.file_io import run_file_io
 
 logger = logging.getLogger(__name__)
 
-_COLLECTION_KEYS: tuple[str, ...] = ("chunks", "entities", "wiki_entries", "manual_cards")
+_COLLECTION_KEYS: tuple[str, ...] = ("chunks",)
 _CHUNK_CHECK_BATCH = 512
-#: 点龄门（spec 2026-10-05 D2=甲）：toggle-on 的 [upsert→行写] 窗口里新点龄≈0，
-#: 低于宽限永不进候选——窗口单调关闭；无 updated_at 键=老、照删。
-_CARD_ORPHAN_GRACE_SECONDS = 60.0
 
 
 @dataclass(slots=True)
@@ -56,19 +50,14 @@ def _group_by_kb(records) -> dict[str, list]:
     return groups
 
 
-async def sweep_round(*, store, vector_store, graph_store, wiki_store, skip_kb_ids: set[str] | None = None) -> SweepReport:
+async def sweep_round(*, store, vector_store, skip_kb_ids: set[str] | None = None) -> SweepReport:
     """一轮集合级清扫（D4）：组内闸跳过 → kb 行缺整组清、行在逐点判（均两段式）。
 
-    ``skip_kb_ids`` 与 wiki 腿在飞并集构成组内闸（对活库与已删库组一视同仁）。
+    ``skip_kb_ids`` 构成组内闸（对活库与已删库组一视同仁）。
     """
     report = SweepReport()
     skip = skip_kb_ids or set()
-    steps = (
-        ("chunks", vector_store.chunks_collection, _sweep_chunks, _deleted_kb_chunks),
-        ("entities", vector_store.entities_collection, _sweep_entities, _deleted_kb_entities),
-        ("wiki_entries", vector_store.wiki_entries_collection, _sweep_wiki_entries, _deleted_kb_wiki_entries),
-        ("manual_cards", vector_store.manual_cards_collection, _sweep_manual_cards, _deleted_kb_manual_cards),
-    )
+    steps = (("chunks", vector_store.chunks_collection, _sweep_chunks, _deleted_kb_chunks),)
     for key, collection, live_step, group_step in steps:
         try:
             records = await vector_store.scroll_collection(collection)
@@ -77,7 +66,7 @@ async def sweep_round(*, store, vector_store, graph_store, wiki_store, skip_kb_i
             live_groups: dict[str, list] = {}
             group_candidates: list[str] = []
             for kb_id, group_records in groups.items():
-                if kb_id in skip or wiki_generation_in_progress(kb_id):
+                if kb_id in skip:
                     continue
                 if await store.get_kb(kb_id) is None:
                     group_candidates.append(kb_id)
@@ -85,7 +74,7 @@ async def sweep_round(*, store, vector_store, graph_store, wiki_store, skip_kb_i
                     live_groups[kb_id] = group_records
             for kb_id, group_records in live_groups.items():
                 try:
-                    await live_step(report, records=group_records, store=store, vector_store=vector_store, graph_store=graph_store, wiki_store=wiki_store, kb_id=kb_id)
+                    await live_step(report, records=group_records, store=store, vector_store=vector_store, kb_id=kb_id)
                 except Exception:
                     logger.exception("orphan sweep failed for kb %s collection %s; continuing", kb_id, key)
                     _note_failed(report, key)
@@ -121,7 +110,7 @@ async def _existing_chunk_ids(store, chunk_ids: list[str], kb_id: str) -> set[st
     return found
 
 
-async def _sweep_chunks(report: SweepReport, *, records, store, vector_store, graph_store, wiki_store, kb_id: str) -> None:
+async def _sweep_chunks(report: SweepReport, *, records, store, vector_store, kb_id: str) -> None:
     ids = sorted({(record.payload or {}).get("chunk_id") for record in records if (record.payload or {}).get("chunk_id")})
     if not ids:
         return
@@ -137,69 +126,6 @@ async def _sweep_chunks(report: SweepReport, *, records, store, vector_store, gr
         report.deleted["chunks"] += len(still_orphans)
 
 
-async def _sweep_entities(report: SweepReport, *, records, store, vector_store, graph_store, wiki_store, kb_id: str) -> None:
-    names = sorted({(record.payload or {}).get("name") for record in records if (record.payload or {}).get("name")})
-    if not names:
-        return
-    live = {row["name"] for row in await graph_store.list_entities(kb_id)}
-    candidates = [name for name in names if name not in live]
-    if not candidates:
-        return
-    live_again = {row["name"] for row in await graph_store.list_entities(kb_id)}
-    still_orphans = [name for name in candidates if name not in live_again]
-    report.skipped["entities"] += len(candidates) - len(still_orphans)
-    if still_orphans:
-        await vector_store.delete_entities(kb_id, still_orphans)
-        report.deleted["entities"] += len(still_orphans)
-
-
-async def _sweep_wiki_entries(report: SweepReport, *, records, store, vector_store, graph_store, wiki_store, kb_id: str) -> None:
-    title_by_id: dict[str, str] = {}
-    for record in records:
-        payload = record.payload or {}
-        if payload.get("entry_id"):
-            title_by_id[payload["entry_id"]] = payload.get("title") or ""
-    if not title_by_id:
-        return
-    live = {row["id"] for row in await wiki_store.list_entries(kb_id)}
-    candidates = [entry_id for entry_id in title_by_id if entry_id not in live]
-    if not candidates:
-        return
-    live_again = {row["id"] for row in await wiki_store.list_entries(kb_id)}
-    still_orphans = [entry_id for entry_id in candidates if entry_id not in live_again]
-    report.skipped["wiki_entries"] += len(candidates) - len(still_orphans)
-    titles = [title_by_id[entry_id] for entry_id in still_orphans if title_by_id[entry_id]]
-    if titles:
-        await vector_store.delete_wiki_entries(kb_id, titles)
-        report.deleted["wiki_entries"] += len(titles)
-
-
-async def _card_is_live(store, card_id: str) -> bool:
-    """D5：行存在**且**开关开才保留（关开关失败留下的残留点才是孤儿）。"""
-    card = await store.get_manual_card(card_id)
-    return card is not None and bool(card.get("include_in_wiki_search"))
-
-
-async def _sweep_manual_cards(report: SweepReport, *, records, store, vector_store, graph_store, wiki_store, kb_id: str) -> None:
-    card_ids = sorted({(record.payload or {}).get("card_id") for record in records if (record.payload or {}).get("card_id")})
-    if not card_ids:
-        return
-    updated_by_id: dict[str, float] = {}
-    for record in records:
-        payload = record.payload or {}
-        if payload.get("card_id"):
-            updated_by_id[payload["card_id"]] = float(payload.get("updated_at") or 0.0)
-    now = time.time()
-    candidates = [card_id for card_id in card_ids if not await _card_is_live(store, card_id) and now - updated_by_id.get(card_id, 0.0) > _CARD_ORPHAN_GRACE_SECONDS]
-    if not candidates:
-        return
-    still_orphans = [card_id for card_id in candidates if not await _card_is_live(store, card_id)]
-    report.skipped["manual_cards"] += len(candidates) - len(still_orphans)
-    if still_orphans:
-        await vector_store.delete_manual_cards(still_orphans)
-        report.deleted["manual_cards"] += len(still_orphans)
-
-
 # ── 已删库组（D4） ─────────────────────────────────────────────────────
 
 
@@ -209,30 +135,6 @@ async def _deleted_kb_chunks(records, *, store, vector_store, kb_id: str) -> int
         return 0
     await vector_store.delete_chunks(ids)
     return len(ids)
-
-
-async def _deleted_kb_entities(records, *, store, vector_store, kb_id: str) -> int:
-    names = sorted({(record.payload or {}).get("name") for record in records if (record.payload or {}).get("name")})
-    if not names:
-        return 0
-    await vector_store.delete_entities(kb_id, names)
-    return len(names)
-
-
-async def _deleted_kb_wiki_entries(records, *, store, vector_store, kb_id: str) -> int:
-    titles = sorted({(record.payload or {}).get("title") for record in records if (record.payload or {}).get("title")})
-    if not titles:
-        return 0
-    await vector_store.delete_wiki_entries(kb_id, titles)
-    return len(titles)
-
-
-async def _deleted_kb_manual_cards(records, *, store, vector_store, kb_id: str) -> int:
-    card_ids = sorted({(record.payload or {}).get("card_id") for record in records if (record.payload or {}).get("card_id")})
-    if not card_ids:
-        return 0
-    await vector_store.delete_manual_cards(card_ids)
-    return len(card_ids)
 
 
 # ── 代次回收（D6，spec §2.6） ─────────────────────────────────────────
@@ -248,8 +150,8 @@ class GenerationReport:
 async def sweep_generations(*, vector_store, declared_width: int) -> GenerationReport:
     """回收非声明宽度的代次集合。
 
-    前置=声明代的四个集合**全部在位**——否则旧代可能是唯一副本（手改宽度
-    没走迁移态），必须停手。命中家族名（前缀 + 四种 kind + 可选 ``_数字``
+    前置=声明代的集合**全部在位**——否则旧代可能是唯一副本（手改宽度
+    没走迁移态），必须停手。命中家族名（前缀 + kind + 可选 ``_数字``
     后缀）且 ≠ 声明代的集合整删，逐个吞错（并发删"已不存在"属正常）。
     锚点=声明宽度（调用方传 ``effective_dimension()``），不用任何持有的实例。
     """
@@ -291,7 +193,7 @@ async def reconcile_files(*, data_dir: str | Path, store, skip_kb_ids: set[str] 
     """Walk ``knowledge/`` and remove trees whose business rows are gone.
 
     判据（Task 0 实测的布局）：只有 ``<kb_id>/<doc_id>`` 形状的子目录才算文档
-    目录；kb 级直挂文件（golden.jsonl / eval_candidates.json）不属对账面。
+    目录；kb 级直挂文件（golden.jsonl）不属对账面。
     kb 行缺 → 整棵清；doc 行缺（或 kb_id 不匹配）→ 整目录清。两段式：收集
     候选 → 复核行仍缺 → 再删（覆盖上传 write→insert 在途窗口）；忙库整库跳过；
     失败仅记录、下轮重试；幂等。

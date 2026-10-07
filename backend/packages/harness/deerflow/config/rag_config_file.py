@@ -1,9 +1,8 @@
 """API-writable RAG functional-model configuration (``rag_config.json``).
 
-The RAG subsystem's roles (embedding / rerank / caption VLM / graph extraction / eval
-judge / ASR / MinerU parsing) used to be editable only in the operator's ``config.yaml``
-plus environment variables for the secrets (spec 2026-09-10 rag functional-model config
-§2).
+The RAG subsystem's roles (embedding / rerank / caption VLM / MinerU parsing) used to
+be editable only in the operator's ``config.yaml`` plus environment variables for the
+secrets (spec 2026-09-10 rag functional-model config §2).
 This module is that block's API-writable counterpart, in the same shape as
 :mod:`deerflow.config.models_config`: a *separate* runtime-writable file whose declared
 fields override ``config.yaml``'s ``rag:`` block at load time, so the settings UI can
@@ -59,20 +58,28 @@ _RETIRED_KEYS: dict[str, str] = {
     "parse_backend": "the local MinerU leg speaks the 4.x contract now (use parse_tier)",
     "vlm_base_url": "the caption endpoint now comes from the configured model entry",
     "vlm_api_key": "the caption key now comes from the configured model entry",
-}
-
-#: The same handling one level down: the nested ``video`` block forbids extras too, and its
-#: own caption override retired with the rest (video now follows ``rag.vlm_model``).
-_RETIRED_VIDEO_KEYS: dict[str, str] = {
-    "caption_model": "the video caption leg follows rag.vlm_model now",
+    # Cut with the first-phase build's legs (video / graph extraction / wiki / eval judge /
+    # eval-question synthesis). A file an earlier build wrote keeps loading; the values have
+    # no reader left, so they are dropped rather than carried.
+    "extract_model": "graph extraction is not part of the first-phase build",
+    "judge_model": "the ragas eval judge is not part of the first-phase build",
+    "wiki_model": "wiki writing is not part of the first-phase build",
+    "synthesis_model": "eval-question synthesis is not part of the first-phase build",
+    "extract_thinking": "graph extraction is not part of the first-phase build",
+    "wiki_thinking": "wiki writing is not part of the first-phase build",
+    "judge_thinking": "the ragas eval judge is not part of the first-phase build",
+    "synthesis_thinking": "eval-question synthesis is not part of the first-phase build",
+    "asr_base_url": "video ingestion is not part of the first-phase build",
+    "asr_api_key": "video ingestion is not part of the first-phase build",
+    "video": "video ingestion is not part of the first-phase build",
 }
 
 #: The fields that name a ``config.yaml`` ``models:`` entry rather than carrying a value.
-#: A *blank* declaration in any of them is not a name — it is the absence of one, which is
-#: why they share one validator (spec 2026-09-23 default model D2). ``_prune_empty()`` only
-#: drops ``None`` / ``""``, so without this the whitespace spelling would be written to the
-#: file, reported as ``ui`` by ``sources`` and echoed back by GET.
-MODEL_REFERENCE_FIELDS = ("default_model", "extract_model", "judge_model", "vlm_model", "wiki_model", "synthesis_model")
+#: A *blank* declaration in either of them is not a name — it is the absence of one, which
+#: is why they share one validator (spec 2026-09-23 default model D2). ``_prune_empty()``
+#: only drops ``None`` / ``""``, so without this the whitespace spelling would be written
+#: to the file, reported as ``ui`` by ``sources`` and echoed back by GET.
+MODEL_REFERENCE_FIELDS = ("default_model", "vlm_model")
 
 
 def _blank_to_none(value: Any) -> Any:
@@ -98,20 +105,6 @@ def _drop_retired_keys(raw: dict[str, Any], keys: dict[str, str], *, path: Path,
         logger.warning("Dropped retired key %r from %s: %s.", f"{prefix}{key}", path, reason)
 
 
-class RagVideoFileConfig(BaseModel):
-    """The video-ingestion fields the settings UI may override.
-
-    Deliberately narrower than :class:`~deerflow.config.app_config.RagVideoConfig`:
-    the master gate / size ceiling / card mode stay operator-only switches in
-    ``config.yaml`` (spec §Out of Scope), while the model choices are UI-editable.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    asr_provider: Literal["funasr", "whisper", "openai-audio", "dashscope"] | None = Field(default=None, description="ASR backend: an in-process engine (funasr / whisper) or a transcription service (openai-audio / dashscope).")
-    asr_model: str | None = Field(default=None, description="ASR model name for the chosen provider.")
-
-
 class RagConfigFile(BaseModel):
     """The UI-managed RAG functional-model set persisted in ``rag_config.json``.
 
@@ -128,17 +121,9 @@ class RagConfigFile(BaseModel):
     rerank_model: str | None = Field(default=None, description="DashScope rerank model.")
     rerank_api_key: str | None = Field(default=None, description="Rerank API key; masked on read, env is the fallback.")
     vlm_model: str | None = Field(default=None, description="Name of a config `models:` entry used for captioning; None follows the RAG default, then the first configured model.")
-    extract_model: str | None = Field(default=None, description="Name of a config `models:` entry used for graph extraction.")
-    judge_model: str | None = Field(default=None, description="Name of a config `models:` entry used as the ragas eval judge; None uses the config primary model.")
     default_model: str | None = Field(default=None, description="Name of a config `models:` entry used by every RAG role that declares none of its own; None uses the first configured model.")
-    wiki_model: str | None = Field(default=None, description="Name of a config `models:` entry used to write wiki entries; None uses the first configured model.")
-    synthesis_model: str | None = Field(default=None, description="Name of a config `models:` entry used to synthesize eval questions; None uses the first configured model.")
-    # Follow-chat thinking toggles (spec 2026-10-03 leg-thinking-follow-chat D1=甲). The
+    # Follow-chat thinking toggle (spec 2026-10-03 leg-thinking-follow-chat D1=甲). The
     # three-state rule applies: None means "not declared here" and config.yaml's value stands.
-    extract_thinking: bool | None = Field(default=None, description="Graph-extraction leg follows chat's thinking treatment; None uses config.yaml.")
-    wiki_thinking: bool | None = Field(default=None, description="Wiki-writing leg follows chat's thinking treatment; None uses config.yaml.")
-    judge_thinking: bool | None = Field(default=None, description="Ragas judge leg follows chat's thinking treatment; None uses config.yaml.")
-    synthesis_thinking: bool | None = Field(default=None, description="Eval-question synthesis leg follows chat's thinking treatment; None uses config.yaml.")
     vlm_thinking: bool | None = Field(default=None, description="Caption legs follow chat's thinking treatment (output budget rises to at least 4096 while on); None uses config.yaml.")
     mineru_api_token: str | None = Field(default=None, description="MinerU parsing token; masked on read, env is the fallback.")
     # Provider dimension (spec 2026-09-14 rag model provider adaptation §4.1). Ids are
@@ -161,10 +146,6 @@ class RagConfigFile(BaseModel):
         default=None, description="MinerU cloud document language pack; None uses config.yaml."
     )
     parse_model_version: Literal["pipeline", "vlm"] | None = Field(default=None, description="MinerU model version for the cloud leg; None uses config.yaml.")
-
-    asr_base_url: str | None = Field(default=None, description="Transcription service endpoint; the service rows need one, the in-process engines take none.")
-    asr_api_key: str | None = Field(default=None, description="Transcription service API key; masked on read, env is the fallback.")
-    video: RagVideoFileConfig | None = Field(default=None, description="Video-ingestion model choices.")
 
     @field_validator(*MODEL_REFERENCE_FIELDS, mode="before")
     @classmethod
@@ -233,9 +214,6 @@ class RagConfigFile(BaseModel):
         if not isinstance(raw, dict):
             raise ValueError(f"Rag config file at {resolved_path} must be a JSON object")
         _drop_retired_keys(raw, _RETIRED_KEYS, path=resolved_path)
-        video = raw.get("video")
-        if isinstance(video, dict):
-            _drop_retired_keys(video, _RETIRED_VIDEO_KEYS, path=resolved_path, prefix="video.")
         try:
             return cls.model_validate(raw)
         except Exception as e:
@@ -246,15 +224,11 @@ def merge_rag_config(yaml_rag: dict | None, ui: RagConfigFile) -> dict:
     """Overlay the UI-managed fields onto ``config.yaml``'s ``rag:`` block.
 
     Field-level: only what the file declares wins, so an operator's untouched knobs
-    survive. The nested ``video`` block merges key by key too — replacing it wholesale
-    would silently drop the operator's gates the moment the UI sets one ASR model.
+    survive.
     """
     merged: dict[str, Any] = dict(yaml_rag or {})
     for key, value in ui.model_dump(exclude_none=True).items():
-        if key == "video" and isinstance(value, dict):
-            merged["video"] = {**(merged.get("video") or {}), **value}
-        else:
-            merged[key] = value
+        merged[key] = value
     return merged
 
 
@@ -315,9 +289,9 @@ def write_rag_config(data: dict[str, Any]) -> Path:
 def atomic_write_rag_config(path: Path, data: dict[str, Any]) -> None:
     """Write the rag config without exposing a truncated or partial file.
 
-    Mirrors ``atomic_write_models_config`` (temp file in the target directory, fsync,
-    ``os.replace``, best-effort directory fsync, temp cleanup on failure) — plus the
-    bounded replace retry (spec 2026-10-05 ③), which the models twin does not have yet.
+    The repository's shared write policy: temp file in the target directory, fsync,
+    ``os.replace``, best-effort directory fsync, temp cleanup on failure — plus the
+    bounded replace retry (spec 2026-10-05 ③).
     """
     path = Path(path)
     target_path = path.resolve(strict=False) if path.is_symlink() else path
@@ -378,7 +352,6 @@ def _replace_with_retry(temporary_path: Path, target_path: Path) -> None:
 
 
 #: Serializes read-modify-write cycles on ``rag_config.json`` across writers (the rag
-#: config management API). Same rationale as ``models_config_write_lock``: a
-#: ``threading.Lock`` owned inside the worker performing the RMW, so it stays held
-#: across the write and reload and has no event-loop affinity.
+#: config management API). A ``threading.Lock`` owned inside the writer performing the
+#: RMW, so it stays held across the write and reload and has no event-loop affinity.
 rag_config_write_lock = threading.Lock()

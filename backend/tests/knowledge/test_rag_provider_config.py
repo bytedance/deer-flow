@@ -173,10 +173,6 @@ def test_sparse_keys_declared_in_yaml_are_carried_by_rag_config():
         ("parse", "mineru-cloud", "deerflow.knowledge.parser:MineruCloudParseProvider", "base_url"),
         ("parse", "mineru-local", "deerflow.knowledge.parse_local:MineruLocalParseProvider", "base_url"),
         ("sparse", "tei-sparse", "deerflow.knowledge.sparse:TEISparseEncoder", "base_url"),
-        ("asr", "funasr", "deerflow.knowledge.video.asr:FunAsrProvider", "base_url"),
-        ("asr", "whisper", "deerflow.knowledge.video.asr:WhisperProvider", "base_url"),
-        ("asr", "openai-audio", "deerflow.knowledge.video.asr:OpenAiAudioProvider", "base_url"),
-        ("asr", "dashscope", "deerflow.knowledge.video.asr:DashScopeAsrProvider", "base_url"),
     ],
 )
 def test_allowlist_resolves_each_supported_provider(leg, provider_id, expected_impl, expected_endpoint_key):
@@ -195,9 +191,6 @@ def test_provider_ids_lists_the_curated_set_per_leg():
     assert provider_ids("rerank") == ("dashscope", "generic-rerank", "tei-rerank")
     assert provider_ids("parse") == ("mineru-cloud", "mineru-local")
     assert provider_ids("sparse") == ("tei-sparse",)
-    # The ASR leg's order is the dropdown's: the two in-process engines, then the protocol
-    # tiers (spec 2026-09-28 D2「三组四值」).
-    assert provider_ids("asr") == ("funasr", "whisper", "openai-audio", "dashscope")
 
 
 def test_sparse_leg_path_is_pinned_to_the_verified_shape():
@@ -239,7 +232,7 @@ def test_allowlist_rejects_an_unknown_leg():
 
 
 def test_allowlist_leg_keys_match_the_declared_legs():
-    assert set(PROVIDER_ALLOWLIST) == {"embedding", "rerank", "parse", "sparse", "asr"}
+    assert set(PROVIDER_ALLOWLIST) == {"embedding", "rerank", "parse", "sparse"}
 
 
 # ── per-provider secret env fallback ──────────────────────────────────────
@@ -260,24 +253,6 @@ def test_secret_env_var_uses_a_generic_name_for_new_providers():
 def test_local_parse_needs_no_secret():
     """The local MinerU service ships without auth, so there is no fallback name."""
     assert secret_env_var("parse", "mineru-local") is None
-
-
-def test_asr_secret_env_vars_follow_the_provider():
-    """The in-process engines take no credential at all; each protocol tier has its own name
-    (spec 2026-09-28 D4). The reported fallback is what the UI badges as 「由环境提供」."""
-    assert secret_env_var("asr", "funasr") is None
-    assert secret_env_var("asr", "whisper") is None
-    assert secret_env_var("asr", "dashscope") == "DASHSCOPE_ASR_API_KEY"
-    assert secret_env_var("asr", "openai-audio") == "RAG_ASR_API_KEY"
-
-
-def test_the_asr_dashscope_row_publishes_the_vendor_endpoint():
-    """Only the placeholder source: the address stays the admin's to set (2026-09-25
-    rag-endpoint-unlock D1/D2), and the generic tier has no vendor default to show."""
-    assert resolve_provider("asr", "dashscope").default_endpoint == "https://dashscope.aliyuncs.com"
-    assert resolve_provider("asr", "openai-audio").default_endpoint is None
-    assert resolve_provider("asr", "funasr").default_endpoint is None
-    assert resolve_provider("asr", "whisper").default_endpoint is None
 
 
 def test_dashscope_secret_env_names_agree_with_the_legacy_table():
@@ -323,24 +298,3 @@ def test_sparse_source_rejects_an_unknown_value():
 def test_embedding_provider_rejects_an_unknown_value():
     with pytest.raises(ValidationError):
         RagConfig.model_validate({"embedding_provider": "some-vendor"})
-
-
-def test_asr_provider_accepts_the_four_curated_values():
-    """The literal widens to the service tier (spec 2026-09-28 D2/D4): the two in-process
-    engines plus the two protocol tiers, and nothing else."""
-    for value in ("funasr", "whisper", "openai-audio", "dashscope"):
-        assert RagConfig.model_validate({"video": {"asr_provider": value}}).video.asr_provider == value
-    with pytest.raises(ValidationError):
-        RagConfig.model_validate({"video": {"asr_provider": "qwen-audio"}})
-
-
-def test_the_asr_connection_fields_live_at_the_top_level():
-    """① 乙 (2026-09-29): the ASR leg's address and key sit beside the other four legs',
-    because that is where every other leg keeps them; ``video`` keeps only the model choices."""
-    rag = RagConfig.model_validate({"asr_base_url": "https://dashscope.aliyuncs.com", "asr_api_key": "sk-x"})
-    assert rag.asr_base_url == "https://dashscope.aliyuncs.com"
-    assert rag.asr_api_key == "sk-x"
-
-    stored = RagConfigFile.model_validate({"asr_base_url": "https://dashscope.aliyuncs.com", "asr_api_key": "sk-x"})
-    assert stored.asr_base_url == "https://dashscope.aliyuncs.com"
-    assert stored.asr_api_key == "sk-x"

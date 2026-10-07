@@ -8,21 +8,23 @@
 
 故本用例建一个 fake 表格 KB（真实 store）：一个 ``.csv`` 文档走生产 ``parse_document``
 归一、一个 ``.xlsx`` 文档走生产 ``_workbook_rows_to_markdown`` 组装，二者均用生产
-``chunk_markdown`` 切成行卡入库；再跑生产同款 ``run_layer1_for_kb`` 编排，断言
-recall@k 有数。向量检索用 stub searcher（真实 embedding 非本用例关注点；L1 编排 /
-指标计算 / 持久化全走真实链路）。镜像 ``test_video_eval.py``（视频镜头卡同构证明）。
+``chunk_markdown`` 切成行卡入库；再跑生产同款 L1 编排（``run_evaluation`` +
+``save_eval_run``），断言 recall@k 有数。向量检索用 stub searcher（真实 embedding
+非本用例关注点；L1 编排 / 指标计算 / 持久化全走真实链路）。
 """
 
 from __future__ import annotations
 
+import json
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 
 from deerflow.knowledge.chunker import chunk_markdown
-from deerflow.knowledge.eval import ondemand
-from deerflow.knowledge.eval.question_bank import add_question
-from deerflow.knowledge.eval.runner import ScoredHit
+from deerflow.knowledge.eval.dataset import load_golden, validate_question
+from deerflow.knowledge.eval.persistence import baseline_diff_from_report, generate_run_id, layer1_metrics_from_report, save_eval_run
+from deerflow.knowledge.eval.runner import ScoredHit, report_to_dict, run_evaluation
 from deerflow.knowledge.parser import _workbook_rows_to_markdown, parse_document
 from deerflow.knowledge.store import KnowledgeStore
 
@@ -61,13 +63,6 @@ def _xlsx_rows(row_count: int = 120) -> list[list[object]]:
 @pytest.fixture
 def store(session_factory):
     return KnowledgeStore(session_factory)
-
-
-@pytest.fixture(autouse=True)
-def _clean_in_flight():
-    yield
-    ondemand._IN_FLIGHT.pop(KB, None)
-    ondemand._PROGRESS.pop(KB, None)
 
 
 async def _insert_row_cards(store: KnowledgeStore, doc_id: str, name: str, markdown: str) -> list[str]:
@@ -140,7 +135,7 @@ def _searchers_hitting(hit_chunk_ids: list[str]) -> dict:
 async def test_table_row_card_chunk_ids_are_valid_golden_anchors(store, tmp_path) -> None:
     """行卡 chunk_id 可直接作 golden ``relevant_chunk_ids``（零 schema 改造）。
 
-    ``add_question`` 内部 ``validate_question`` 强制每条 relevant_chunk_id 匹配
+    ``dataset.validate_question`` 强制每条 relevant_chunk_id 匹配
     ``<32-hex doc_id>#NNNN``（``dataset._CHUNK_ID_RE``）；表格行卡 chunk_id 通过校验 =
     天然兼容现有评测锚定，无需为表格引入任何新 schema 或降级语义。
     """
@@ -150,13 +145,15 @@ async def test_table_row_card_chunk_ids_are_valid_golden_anchors(store, tmp_path
     # 大表被生产 chunk_markdown 切成多张行卡（行组 + 每块重复表头，Task 4）。
     assert len(csv_chunk_ids) >= 2
 
-    golden = tmp_path / "golden.jsonl"
-    question = await add_question(
-        golden,
-        query="表格行卡锚定兼容性",
-        category="fact",
-        expected_paths=["vector"],
-        relevant_chunk_ids=all_chunk_ids,
+    question = validate_question(
+        {
+            "id": "q-table-anchor",
+            "query": "表格行卡锚定兼容性",
+            "expected_paths": ["vector"],
+            "relevant_chunk_ids": all_chunk_ids,
+            "relevant_entities": [],
+            "category": "fact",
+        }
     )
 
     assert question.relevant_chunk_ids == tuple(all_chunk_ids)
@@ -169,19 +166,33 @@ async def test_table_row_cards_enter_layer1_recall(store, tmp_path) -> None:
     target_card = csv_chunk_ids[0]  # 首张行卡含 华北 / Widget-A 行（按列值提问的锚点）
 
     golden = tmp_path / "golden.jsonl"
-    await add_question(
-        golden,
-        query="华北区 Widget-A 的 Q1 销售额是多少",
-        category="fact",
-        expected_paths=["vector"],
-        relevant_chunk_ids=[target_card],
+    golden.write_text(
+        json.dumps(
+            {
+                "id": "q-table-row-card",
+                "query": "华北区 Widget-A 的 Q1 销售额是多少",
+                "expected_paths": ["vector"],
+                "relevant_chunk_ids": [target_card],
+                "relevant_entities": [],
+                "category": "fact",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
     )
+    questions = load_golden(golden)
 
-    await ondemand.run_layer1_for_kb(
-        KB,
-        golden_path=golden,
-        searchers=_searchers_hitting(all_chunk_ids),
-        generated_at=GENERATED_AT,
+    report = await run_evaluation(questions, _searchers_hitting(all_chunk_ids), top_k=5, generated_at=GENERATED_AT)
+    payload = report_to_dict(report)
+    await save_eval_run(
+        run_id=generate_run_id(),
+        kb_id=KB,
+        status="completed",
+        created_at=datetime.fromisoformat(GENERATED_AT),
+        completed_at=datetime.now(UTC),
+        layer1_metrics=layer1_metrics_from_report(payload),
+        baseline_diff=baseline_diff_from_report(payload),
     )
 
     rows = await store.list_eval_runs(KB)

@@ -55,7 +55,6 @@ YAML_RAG = {
     "rerank_base_url": "http://127.0.0.1:8124",
     "vlm_model": "yaml-vlm",
     "worker_concurrency": 4,
-    "video": {"enabled": False, "asr_model": "yaml-asr"},
 }
 
 _PUT = "/api/rag/config"
@@ -117,7 +116,7 @@ def _client(*, system_role: str = "admin") -> TestClient:
     # identity now starts a rebuild off it (spec 2026-10-04 D3).
     from types import SimpleNamespace
 
-    client.app.state.knowledge_service = SimpleNamespace(store=object(), graph_store=object(), wiki_store=object(), vector_store=object())
+    client.app.state.knowledge_service = SimpleNamespace(store=object(), vector_store=object())
     return client
 
 
@@ -131,13 +130,13 @@ def _reembed_libraries_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     from app.gateway.services import rag_reembed as reembed_module
 
-    async def _noop(store, *, vector_store, embedder, graph_store, wiki_store):
+    async def _noop(store, *, vector_store, embedder):
         return {}
 
     async def _noop_marks(store):
         return {}
 
-    async def _noop_delta(store, *, vector_store, embedder, graph_store, wiki_store, marks, main_complete):
+    async def _noop_delta(store, *, vector_store, embedder, marks, main_complete):
         return 0
 
     monkeypatch.setattr(reembed_module, "reembed_libraries", _noop)
@@ -389,22 +388,22 @@ def test_changing_only_the_rag_default_probes_nothing(config_env: Path, monkeypa
 
 
 def test_changing_only_a_new_role_field_probes_nothing(config_env: Path, monkeypatch: pytest.MonkeyPatch):
-    """``wiki_model`` / ``synthesis_model`` are model references, not embedding settings (D2).
+    """``vlm_model`` is a model reference, not an embedding setting (D2).
 
     Same shape as the default-model case above, positive control included.
     """
     recorded = _stub(monkeypatch, _healthy())
 
     with _client() as client:
-        picked = client.put(_PUT, json={"wiki_model": "rag-default", "synthesis_model": "rag-default"})
+        picked = client.put(_PUT, json={"vlm_model": "rag-default"})
 
     assert picked.status_code == 200
     assert picked.json()["warning"] is None
-    assert _read_rag_json(config_env)["wiki_model"] == "rag-default"
+    assert _read_rag_json(config_env)["vlm_model"] == "rag-default"
     assert recorded == []
 
     with _client() as client:
-        assert client.put(_PUT, json={**_INVALID_WIDTH_PAYLOAD, "wiki_model": "rag-default"}).status_code == 200
+        assert client.put(_PUT, json={**_INVALID_WIDTH_PAYLOAD, "vlm_model": "rag-default"}).status_code == 200
 
     assert recorded != [], "the positive control must reach the network"
 
@@ -450,7 +449,7 @@ def test_warning_is_always_present_and_never_strips_null_fields(config_env: Path
         body = client.put(_PUT, json=_UNRELATED).json()
 
     assert "warning" in body and body["warning"] is None
-    assert "judge_model" in body["config"] and body["config"]["judge_model"] is None
+    assert "default_model" in body["config"] and body["config"]["default_model"] is None
     assert body["config"]["embedding_base_url"] == "http://127.0.0.1:8123/v1"
 
 

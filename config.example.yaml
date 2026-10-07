@@ -828,6 +828,9 @@ tool_groups:
   - name: bash
   - name: browser
   - name: knowledge
+  # RAG knowledge-base retrieval (see the `rag:` section). Only agents whose
+  # AgentConfig lists the `rag` group (e.g. the built-in rag agent) see it.
+  - name: rag
 
 # ============================================================================
 # Tools Configuration
@@ -889,6 +892,17 @@ tools:
   #   chunk_top_k: 8  # Optional; omit to use the server default
   #   max_chars_per_chunk: 800
   #   max_total_chars: 8000
+
+  # RAG knowledge-base retrieval tool (requires the `rag:` section + Qdrant):
+  # hybrid vector search (dense+sparse → RRF → rerank). It reads the bound kb_id
+  # from the run context and enforces the Phase-1 owner-only access gate.
+  # `opt_in: true` keeps it out of the default lead agent's toolset — it loads
+  # only for agents whose AgentConfig lists the `rag` group (the built-in `rag`
+  # custom agent ships in deerflow/agents/assets/rag/).
+  - name: hybrid_search
+    group: rag
+    use: deerflow.tools.builtins.hybrid_search_tool:hybrid_search
+    opt_in: true
 
   # Web search tool (uses DuckDuckGo, no API key required)
   - name: web_search
@@ -3434,3 +3448,95 @@ authorization:
 #                                         # also match a host-owned table name.
 #     config:
 #       label: example                    # extension-private values, if any
+
+# ============================================================================
+# RAG Knowledge Base
+# ============================================================================
+# First-phase RAG knowledge base: document ingestion (PDF/Word/MD via the MinerU
+# API) indexed offline into a hybrid vector retrieval path (dense + sparse, RRF)
+# and exposed to a `rag` custom agent as a builtin tool.
+#
+# Secrets come from .env, never from this file:
+#   DASHSCOPE_EMBEDDING_API_KEY  — Aliyun Bailian embedding (dense+sparse)
+#   DASHSCOPE_RERANK_API_KEY     — Aliyun Bailian rerank
+#   MINERU_API_TOKEN             — MinerU document parsing API
+#   RAG_EMBEDDING_API_KEY        — fallback key when embedding_provider is not dashscope
+#   RAG_RERANK_API_KEY           — fallback key when rerank_provider is not dashscope
+#   RAG_SPARSE_API_KEY           — fallback key for the external sparse service
+rag:
+  # Qdrant server hosting the kb_chunks collection. Default matches the qdrant
+  # service in docker-compose*.yaml.
+  qdrant_url: http://localhost:6333
+  # Embedding model name — required, there is no default (spec 2026-09-30 A-1).
+  # The row ships commented so `make config-upgrade` never injects a placeholder
+  # into an existing config; a config that declares none is refused at build time.
+  # embedding_model: your-embedding-model
+  # Rerank model name — required for providers that take one (TEI serves its own).
+  # rerank_model: your-rerank-model
+  # Vision-language model used to caption images extracted from documents. Name a
+  # `models:` entry — the caption call reuses that entry's endpoint and API key,
+  # which is what the settings form picks from. Omit to follow the RAG default,
+  # then the first configured model.
+  # vlm_model: <your-model-name>
+  # Output cap for both caption dialects; room for a full-page transcription.
+  # caption_max_tokens: 1024
+  # Sampling temperature for caption requests; a low value keeps OCR-style
+  # transcriptions stable.
+  # caption_temperature: 0.15
+  # Name of the `models:` entry every RAG role falls back to when it declares none of
+  # its own (image captions). Omit to use the first configured model. Also editable
+  # in Settings → Models → Functional models.
+  # default_model: <your-model-name>
+  # --- Follow-chat thinking toggle (spec 2026-10-03 D1) ---
+  # `true` makes the caption legs ask their model with thinking enabled — through the
+  # same entry gate chat uses, so a model that declares no thinking support downgrades
+  # to non-thinking with a warning. `false` (the default) keeps the non-thinking
+  # dispatch. Also editable as the follow-chat thinking multi-select in
+  # Settings → Models → Functional models. Caption thinking additionally raises the
+  # caption output budget to at least 4096 (max with caption_max_tokens).
+  # vlm_thinking: false
+  # --- Provider selection (spec 2026-09-14, §4.1) ---
+  # Curated ids from `deerflow.knowledge.providers.PROVIDER_ALLOWLIST`. Every default
+  # reproduces the behaviour of a config that sets only the models above; the fields
+  # are listed here for discoverability, uncomment to override.
+  # embedding_provider: dashscope        # dashscope | volcengine-ark | openai-compatible (dense only)
+  # embedding_base_url:                  # endpoint; required (no provider fallback)
+  # embedding_dimension:                 # library width; empty = 1024. Changing it rebuilds every collection
+  #                                        # into a new generation before the switch (settings: 功能模型 → 高级设置 → 维度)
+  # embedding_sparse_source: provider    # provider | external | bm25
+  # sparse_provider: tei-sparse         # only when embedding_sparse_source=external
+  #                                     # tei-sparse = Text Embeddings Inference /embed_sparse
+  # sparse_base_url:
+  # sparse_model:
+  # rerank_provider: dashscope           # dashscope | generic-rerank | tei-rerank
+  # rerank_base_url:
+  # parse_provider: mineru-cloud         # mineru-cloud | mineru-local
+  # parse_base_url:                      # parsing service address; empty = the official MinerU cloud
+  #                                        # (https://mineru.net); required for a self-hosted mineru-local
+  # parse_tier:                          # flash | basic | standard | advanced; empty lets the local service decide
+  # parse_language: ch                   # MinerU cloud document language pack; `ch` covers Chinese and English
+  # parse_model_version: vlm             # MinerU cloud model version: pipeline | vlm
+  # Max documents the offline indexing worker processes concurrently.
+  worker_concurrency: 2
+  # Run the orphan-vector reconciliation sweep (spec 2026-10-04): deletes Qdrant
+  # points whose business rows are gone; skips a library while a live run holds it.
+  sweep_enabled: true
+  # Hours between sweep rounds (the first round runs after a short startup jitter).
+  sweep_interval_hours: 24
+  # --- Table ingestion (spec 2026-09-09 §4) ---
+  # Master gate for spreadsheet uploads: the first-phase build ships it on. When
+  # false, .xlsx/.xls/.tsv are rejected at upload and /supported-formats omits
+  # them. .csv is NOT gated — it already lives in the text allowlist, and routing
+  # it through table-aware chunking is a correctness fix for the hard-split
+  # damage, not a new exposure.
+  table:
+    enabled: true
+    # Max table-file upload size (MB); the upload gate rejects larger files at
+    # the door (row-explosion guard for giant spreadsheets). Applies to the
+    # gated suffixes only — .csv keeps its pre-existing unlimited behaviour.
+    max_size_mb: 50
+    # Row-card body serialization: markdown (GFM table rows — the frontend
+    # renders them as a real table) | linearized ("col: value | col: value"
+    # sentences). linearized is a recall-quality ablation (spec §7), not a
+    # production default.
+    card_mode: markdown

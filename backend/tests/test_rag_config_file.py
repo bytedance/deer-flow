@@ -1,10 +1,9 @@
 """Seam B tests for the API-writable ``rag_config.json`` (spec 2026-09-10 rag functional-model config).
 
-Covers: field-level override of config.yaml's ``rag:`` block (file wins), deep merge of
-the nested ``video`` block, fallback when the file is absent/empty, loud failure on a
-malformed file, crash-safe atomic write, hot reload through ``get_app_config()`` when
-only the rag file changes, the key sentinel, and the ``file > env`` secret resolution
-the ingestion clients rely on.
+Covers: field-level override of config.yaml's ``rag:`` block (file wins), fallback when
+the file is absent/empty, loud failure on a malformed file, crash-safe atomic write, hot
+reload through ``get_app_config()`` when only the rag file changes, the key sentinel,
+and the ``file > env`` secret resolution the ingestion clients rely on.
 """
 
 from __future__ import annotations
@@ -33,9 +32,7 @@ YAML_RAG = {
     "embedding_model": "yaml-embedding",
     "rerank_model": "yaml-rerank",
     "vlm_model": "yaml-vlm",
-    "extract_model": "yaml-extract",
     "worker_concurrency": 4,
-    "video": {"enabled": True, "max_size_mb": 512, "asr_model": "yaml-asr"},
 }
 
 
@@ -81,31 +78,17 @@ def test_file_overrides_only_the_fields_it_declares(env_paths):
     _write_config_yaml(config_yaml)
     _write_rag_json(
         rag_json,
-        {"embedding_model": "ui-embedding", "embedding_api_key": "sk-embed", "extract_model": "ui-extract"},
+        {"embedding_model": "ui-embedding", "embedding_api_key": "sk-embed", "default_model": "ui-default"},
     )
 
     rag = get_app_config().rag
 
     assert rag.embedding_model == "ui-embedding"
     assert rag.embedding_api_key == "sk-embed"
-    assert rag.extract_model == "ui-extract"
+    assert rag.default_model == "ui-default"
     # Untouched fields keep the config.yaml values.
     assert rag.rerank_model == "yaml-rerank"
     assert rag.worker_concurrency == 4
-
-
-def test_video_block_deep_merges(env_paths):
-    config_yaml, rag_json = env_paths
-    _write_config_yaml(config_yaml)
-    _write_rag_json(rag_json, {"video": {"asr_model": "ui-asr", "asr_provider": "whisper"}})
-
-    video = get_app_config().rag.video
-
-    assert video.asr_model == "ui-asr"
-    assert video.asr_provider == "whisper"
-    # The operator's graph/ingestion switches survive.
-    assert video.enabled is True
-    assert video.max_size_mb == 512
 
 
 def test_env_asserted_path_must_exist(env_paths):
@@ -161,16 +144,15 @@ def test_unknown_field_is_rejected(env_paths):
 
 
 # ── retired keys: stripped before validation, names only in the warning ────
-# Spec 2026-09-23 D10.4/R18: three keys retire together and they do not share a level --
-# `vlm_base_url` / `vlm_api_key` sit at the top, `video.caption_model` one level down inside
-# a block that forbids extras too. A stored file has to keep loading, so both levels are
-# stripped before validation; nothing is written back, and the warning names fields only --
-# the addresses and keys are exactly what must not leak into a log line (R22: this assertion
-# is new, the `parse_backend` precedent never pinned it).
+# Spec 2026-09-23 D10.4/R18: keys retire and a stored file has to keep loading, so they
+# are stripped before validation; nothing is written back, and the warning names fields
+# only -- the addresses and keys are exactly what must not leak into a log line (R22:
+# this assertion is new, the `parse_backend` precedent never pinned it). The first-phase
+# build retires the cut legs' keys the same way, the whole `video` block included.
 
 RETIRED_VLM_BASE_URL = "http://retired-vlm-sentinel.example:9/v1"
 RETIRED_VLM_API_KEY = "sk-retired-vlm-sentinel"
-RETIRED_CAPTION_MODEL = "retired-caption-sentinel"
+RETIRED_VIDEO_SENTINEL = "retired-video-sentinel"
 
 
 def test_retired_keys_are_stripped_from_a_legacy_file(env_paths, caplog):
@@ -183,7 +165,7 @@ def test_retired_keys_are_stripped_from_a_legacy_file(env_paths, caplog):
             "vlm_api_key": RETIRED_VLM_API_KEY,
             "vlm_model": "ui-vlm",
             "default_model": "ui-default",
-            "video": {"caption_model": RETIRED_CAPTION_MODEL, "asr_provider": "whisper", "asr_model": "ui-asr"},
+            "video": {"asr_provider": "whisper", "asr_model": RETIRED_VIDEO_SENTINEL},
         },
     )
 
@@ -194,11 +176,11 @@ def test_retired_keys_are_stripped_from_a_legacy_file(env_paths, caplog):
     assert "vlm_api_key" not in declared
     assert declared["vlm_model"] == "ui-vlm"  # the successor field still arrives
     assert declared["default_model"] == "ui-default"
-    # The nested strip takes one key, not the block: the video fields the UI still owns are here.
-    assert declared["video"] == {"asr_provider": "whisper", "asr_model": "ui-asr"}
-    for name in ("vlm_base_url", "vlm_api_key", "video.caption_model"):
+    # The whole `video` block retired with the leg: it goes as one, not key by key.
+    assert "video" not in declared
+    for name in ("vlm_base_url", "vlm_api_key", "video"):
         assert name in caplog.text
-    for sentinel in (RETIRED_VLM_BASE_URL, RETIRED_VLM_API_KEY, RETIRED_CAPTION_MODEL):
+    for sentinel in (RETIRED_VLM_BASE_URL, RETIRED_VLM_API_KEY, RETIRED_VIDEO_SENTINEL):
         assert sentinel not in caplog.text
 
 
@@ -208,7 +190,7 @@ def test_retired_keys_coexist_with_the_mineru_normalization(env_paths, caplog):
     _write_config_yaml(config_yaml)
     _write_rag_json(
         rag_json,
-        {"parse_backend": "hybrid", "parse_provider": "mineru-local", "vlm_api_key": RETIRED_VLM_API_KEY, "video": {"caption_model": RETIRED_CAPTION_MODEL}},
+        {"parse_backend": "hybrid", "parse_provider": "mineru-local", "vlm_api_key": RETIRED_VLM_API_KEY, "video": {"asr_provider": "whisper"}},
     )
 
     with caplog.at_level(logging.WARNING, logger="deerflow.config.rag_config_file"):
@@ -236,7 +218,7 @@ def test_a_legacy_file_reloads_through_the_real_loader_and_is_stripped_again(env
     original = app_config_module._load_and_cache_app_config
     monkeypatch.setattr(app_config_module, "_load_and_cache_app_config", lambda path=None: loads.append(str(path)) or original(path))
 
-    _write_rag_json(rag_json, {"rerank_model": "second", "vlm_api_key": RETIRED_VLM_API_KEY, "video": {"caption_model": RETIRED_CAPTION_MODEL}})
+    _write_rag_json(rag_json, {"rerank_model": "second", "vlm_api_key": RETIRED_VLM_API_KEY, "video": {"asr_provider": "whisper"}})
     with caplog.at_level(logging.INFO, logger="deerflow.config.app_config"):
         after = get_app_config()
 
@@ -245,7 +227,7 @@ def test_a_legacy_file_reloads_through_the_real_loader_and_is_stripped_again(env
     assert after.rag.rerank_model == "second"
     declared = RagConfigFile.from_file().model_dump(exclude_none=True)
     assert "vlm_api_key" not in declared
-    assert "caption_model" not in (declared.get("video") or {})
+    assert "video" not in declared
 
     assert get_app_config() is after, "an unchanged file still hits the cache"
     assert len(loads) == 1
@@ -254,7 +236,7 @@ def test_a_legacy_file_reloads_through_the_real_loader_and_is_stripped_again(env
 def test_reading_a_legacy_file_does_not_write_it_back(env_paths):
     config_yaml, rag_json = env_paths
     _write_config_yaml(config_yaml)
-    _write_rag_json(rag_json, {"rerank_model": "ui", "vlm_api_key": RETIRED_VLM_API_KEY, "video": {"caption_model": RETIRED_CAPTION_MODEL}})
+    _write_rag_json(rag_json, {"rerank_model": "ui", "vlm_api_key": RETIRED_VLM_API_KEY, "video": {"asr_provider": "whisper"}})
     before = rag_json.read_bytes()
 
     RagConfigFile.from_file()
@@ -272,8 +254,8 @@ def test_non_object_json_is_rejected(env_paths):
         RagConfigFile.from_file()
 
 
-def test_near_miss_and_nested_unknown_keys_are_still_rejected(env_paths):
-    """Stripping is not ignoring: only the retired names go, both `extra="forbid"` stay."""
+def test_near_miss_keys_are_still_rejected(env_paths):
+    """Stripping is not ignoring: only the retired names go, `extra="forbid"` stays."""
     config_yaml, rag_json = env_paths
     _write_config_yaml(config_yaml)
 
@@ -281,20 +263,22 @@ def test_near_miss_and_nested_unknown_keys_are_still_rejected(env_paths):
     with pytest.raises(ValueError):
         RagConfigFile.from_file()
 
-    _write_rag_json(rag_json, {"video": {"caption_modle": "typo"}})
+    # A retired name is the one exception -- and a near miss of it still fails.
+    _write_rag_json(rag_json, {"video_": {"asr_provider": "whisper"}})
     with pytest.raises(ValueError):
         RagConfigFile.from_file()
 
 
 def test_merge_is_pure_and_yaml_input_untouched():
-    yaml_rag = {"embedding_model": "yaml", "video": {"enabled": True}}
-    ui = RagConfigFile.model_validate({"embedding_model": "ui", "video": {"asr_model": "ui-asr"}})
+    yaml_rag = {"embedding_model": "yaml", "rerank_model": "yaml-rerank"}
+    ui = RagConfigFile.model_validate({"embedding_model": "ui", "default_model": "ui-default"})
 
     merged = merge_rag_config(yaml_rag, ui)
 
     assert merged["embedding_model"] == "ui"
-    assert merged["video"] == {"enabled": True, "asr_model": "ui-asr"}
-    assert yaml_rag == {"embedding_model": "yaml", "video": {"enabled": True}}
+    assert merged["default_model"] == "ui-default"
+    assert merged["rerank_model"] == "yaml-rerank"
+    assert yaml_rag == {"embedding_model": "yaml", "rerank_model": "yaml-rerank"}
 
 
 # ── hot reload ────────────────────────────────────────────────────────────
@@ -316,7 +300,7 @@ def test_changing_only_the_rag_file_reloads_app_config(env_paths):
 # target the RAG resolver reads; the blank rule is what makes "clear it in the
 # UI" mean "withdraw the override" rather than "declare an empty name".
 
-MODEL_REFERENCE_FIELDS = ("default_model", "extract_model", "judge_model", "vlm_model", "wiki_model", "synthesis_model")
+MODEL_REFERENCE_FIELDS = ("default_model", "vlm_model")
 
 
 def test_the_local_blank_rule_list_matches_the_production_one():
@@ -375,35 +359,6 @@ def test_blank_default_model_with_no_yaml_counterpart_is_none(env_paths):
     _write_rag_json(rag_json, {"default_model": "   "})
 
     assert get_app_config().rag.default_model is None
-
-
-# ── wiki / synthesis: the two roles that had no field at all (spec 2026-09-26) ──
-
-
-@pytest.mark.parametrize("field", ["wiki_model", "synthesis_model"])
-def test_a_role_field_overrides_config_yaml_then_undoes(env_paths, field: str):
-    """Same two-step as ``default_model``: the UI file wins, withdrawing it falls back.
-
-    Withdrawing must fall back to config.yaml's own value rather than forcing ``None`` --
-    an operator who declared the role in their own file keeps that declaration.
-    """
-    config_yaml, rag_json = env_paths
-    _write_config_yaml(config_yaml, {**dict(YAML_RAG), field: f"yaml-{field}"})
-    _write_rag_json(rag_json, {field: f"ui-{field}"})
-    assert getattr(get_app_config().rag, field) == f"ui-{field}"
-
-    _write_rag_json(rag_json, {})
-    assert getattr(get_app_config().rag, field) == f"yaml-{field}"
-
-
-@pytest.mark.parametrize("field", ["wiki_model", "synthesis_model"])
-def test_a_role_field_with_neither_source_is_none(env_paths, field: str):
-    config_yaml, rag_json = env_paths
-    _write_config_yaml(config_yaml)
-    _write_rag_json(rag_json, {})
-
-    assert getattr(get_app_config().rag, field) is None
-    assert field not in RagConfigFile.from_file().model_dump(exclude_none=True)
 
 
 def test_changing_only_the_rag_default_reloads_through_the_resolver(env_paths):
@@ -551,31 +506,6 @@ def test_app_config_can_be_built_without_a_rag_file(env_paths, monkeypatch: pyte
     config = AppConfig.from_file(str(config_yaml))
 
     assert config.rag.embedding_model == "yaml-embedding"
-
-
-# ── eval judge role ───────────────────────────────────────────────────────
-
-
-def test_judge_model_file_overrides_config_yaml(env_paths):
-    """The eval judge is a UI-manageable role like the rest: the file wins, config.yaml is the fallback."""
-    config_yaml, rag_json = env_paths
-    _write_config_yaml(config_yaml, rag={**YAML_RAG, "judge_model": "yaml-judge"})
-    _write_rag_json(rag_json, {"judge_model": "ui-judge"})
-
-    assert get_app_config().rag.judge_model == "ui-judge"
-
-    _write_rag_json(rag_json, {})
-
-    assert get_app_config().rag.judge_model == "yaml-judge"
-
-
-def test_judge_model_defaults_to_none(env_paths):
-    """Unset everywhere reads as None, which the eval path resolves to the config primary model."""
-    config_yaml, rag_json = env_paths
-    _write_config_yaml(config_yaml)
-    _write_rag_json(rag_json, {})
-
-    assert get_app_config().rag.judge_model is None
 
 
 # ── parse knobs: language / model version (spec 2026-09-29) ──

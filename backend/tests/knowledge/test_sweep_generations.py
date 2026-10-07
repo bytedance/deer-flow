@@ -2,17 +2,17 @@
 
 pin 住的契约：
 - ``sweep_generations(*, vector_store, declared_width) -> GenerationReport``
-- 严格匹配本部署四集合的家族名（前缀 + 四种 kind + 可选 ``_数字`` 后缀）；
+- 严格匹配本部署集合的家族名（前缀 + kind + 可选 ``_数字`` 后缀）；
   名字 ≠ 声明宽度代 的即残留代，整集合删、逐个吞错。
-- 两道前置：声明代四个集合**全部在位**才动手（防"手改宽度没走迁移"误删唯一副本）。
+- 两道前置：声明代集合**全部在位**才动手（防"手改宽度没走迁移"误删唯一副本）。
 """
 
 from __future__ import annotations
 
 from deerflow.knowledge.sweep import sweep_generations
 
-DECLARED = ["kb_chunks", "kb_entities", "kb_wiki_entries", "kb_manual_cards"]
-LEFTOVERS = ["kb_chunks_1000", "kb_entities_1000", "kb_wiki_entries_1000", "kb_manual_cards_1000"]
+DECLARED = ["kb_chunks"]
+LEFTOVERS = ["kb_chunks_1000"]
 UNRELATED = ["other_collection", "kb_extra", "kb_chunks_1000x", "kb_chunks_backup"]
 
 
@@ -27,7 +27,7 @@ class FakeGenerationStore:
 
     def names_at_width(self, width: int) -> tuple[str, ...]:
         suffix = "" if width == 1024 else f"_{width}"
-        return tuple(f"kb_{kind}{suffix}" for kind in ("chunks", "entities", "wiki_entries", "manual_cards"))
+        return tuple(f"kb_{kind}{suffix}" for kind in ("chunks",))
 
     async def list_all_collections(self) -> list[str]:
         return sorted(self.names)
@@ -54,8 +54,8 @@ async def test_leftover_generations_dropped_declared_and_unrelated_kept():
 
 
 async def test_gc_skipped_when_declared_generation_incomplete():
-    """手改宽度没走迁移：声明代缺一个 ⇒ 旧代是唯一副本，GC 必须停手。"""
-    store = FakeGenerationStore([n for n in DECLARED if n != "kb_manual_cards"] + LEFTOVERS)
+    """手改宽度没走迁移：声明代缺 ⇒ 旧代是唯一副本，GC 必须停手。"""
+    store = FakeGenerationStore(LEFTOVERS)
 
     report = await sweep_generations(vector_store=store, declared_width=1024)
 
@@ -65,30 +65,30 @@ async def test_gc_skipped_when_declared_generation_incomplete():
 
 
 async def test_drop_failure_recorded_and_others_continue():
-    store = FakeGenerationStore(DECLARED + LEFTOVERS)
+    store = FakeGenerationStore(DECLARED + ["kb_chunks_768", "kb_chunks_1000"])
     store.raised.add("kb_chunks_1000")
 
     report = await sweep_generations(vector_store=store, declared_width=1024)
 
     assert report.failed == ["kb_chunks_1000"]
     assert "kb_chunks_1000" in store.names
-    assert "kb_entities_1000" not in store.names
+    assert "kb_chunks_768" not in store.names
 
 
 async def test_already_absent_collection_is_a_noop():
     """并发删竞态：存在检查与删除之间被别人删了 ⇒ 不算 dropped、不算 failed。"""
     store = FakeGenerationStore(DECLARED + LEFTOVERS)
-    store.absent.add("kb_wiki_entries_1000")
+    store.absent.add("kb_chunks_1000")
 
     report = await sweep_generations(vector_store=store, declared_width=1024)
 
-    assert "kb_wiki_entries_1000" not in report.dropped
-    assert "kb_wiki_entries_1000" not in report.failed
-    assert sorted(report.dropped) == ["kb_chunks_1000", "kb_entities_1000", "kb_manual_cards_1000"]
+    assert "kb_chunks_1000" not in report.dropped
+    assert "kb_chunks_1000" not in report.failed
+    assert report.dropped == []
 
 
 async def test_default_width_leftover_dropped_when_declared_is_non_default():
-    store = FakeGenerationStore(["kb_chunks_1536", "kb_entities_1536", "kb_wiki_entries_1536", "kb_manual_cards_1536", *DECLARED])
+    store = FakeGenerationStore(["kb_chunks_1536", *DECLARED])
 
     report = await sweep_generations(vector_store=store, declared_width=1536)
 

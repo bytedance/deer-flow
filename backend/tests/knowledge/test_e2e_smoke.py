@@ -2,12 +2,11 @@
 
 Drives the REAL chain over HTTP (ASGI): upload one small PDF (real MinerU
 parse) and one markdown file (local short-circuit) → background worker
-(status machine + DashScope embeddings + DeepSeek graph extraction + wiki
-generation against the production-prefixed Qdrant collections) → graph/wiki
-assertions → cascade delete verified across all three stores.
+(status machine + DashScope embeddings against the production-prefixed Qdrant
+collections) → chunk/vector assertions → cascade delete verified.
 
-Gated behind ``RAG_E2E_LIVE=1`` plus the five live keys, because it calls
-paid third-party APIs (MinerU / DashScope / SiliconFlow / DeepSeek). Run with:
+Gated behind ``RAG_E2E_LIVE=1`` plus the three live keys, because it calls
+paid third-party APIs (MinerU / DashScope). Run with:
 
     cd backend && RAG_E2E_LIVE=1 uv run pytest tests/knowledge/test_e2e_smoke.py -q
 
@@ -37,12 +36,9 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue  # noqa: E40
 from app.gateway.auth.models import User  # noqa: E402
 from app.gateway.routers import knowledge_bases  # noqa: E402
 from app.gateway.services.knowledge_service import KnowledgeService  # noqa: E402
-from deerflow.knowledge.graph.store import GraphStore  # noqa: E402
 from deerflow.knowledge.store import KnowledgeStore  # noqa: E402
 from deerflow.knowledge.vector_store import KnowledgeVectorStore  # noqa: E402
-from deerflow.knowledge.wiki.store import WikiStore  # noqa: E402
 from deerflow.knowledge.worker import KnowledgeIndexWorker  # noqa: E402
-from deerflow.models.factory import create_chat_model  # noqa: E402
 
 from .conftest import QDRANT_TEST_URL, requires_qdrant  # noqa: E402
 
@@ -50,7 +46,6 @@ REQUIRED_KEYS = (
     "MINERU_API_TOKEN",
     "DASHSCOPE_EMBEDDING_API_KEY",
     "DASHSCOPE_RERANK_API_KEY",
-    "DEEPSEEK_API_KEY",
 )
 requires_live_keys = pytest.mark.skipif(
     os.environ.get("RAG_E2E_LIVE") != "1" or any(not os.environ.get(key) for key in REQUIRED_KEYS),
@@ -60,7 +55,6 @@ requires_live_keys = pytest.mark.skipif(
 pytestmark = [pytest.mark.integration, requires_qdrant, requires_live_keys, pytest.mark.asyncio]
 
 DOC_READY_TIMEOUT = 900.0
-WIKI_TIMEOUT = 420.0
 POLL_INTERVAL = 5.0
 
 SAMPLE_MD = Path(__file__).parent / "fixtures" / "sample.md"
@@ -97,7 +91,7 @@ def _make_pdf() -> bytes:
 
 @pytest_asyncio.fixture
 async def smoke(session_factory, tmp_path):
-    """Real chain: API (ASGI) → service → worker → MinerU/DashScope/DeepSeek/Qdrant.
+    """Real chain: API (ASGI) → service → worker → MinerU/DashScope/Qdrant.
 
     The business DB is a throwaway sqlite; Qdrant uses the production-prefixed
     ``kb_*`` collections (the point of the smoke) and is cleaned by the
@@ -106,19 +100,10 @@ async def smoke(session_factory, tmp_path):
     qdrant = AsyncQdrantClient(QDRANT_TEST_URL, timeout=60.0)
     vector_store = KnowledgeVectorStore(client=qdrant)
     store = KnowledgeStore(session_factory)
-    graph_store = GraphStore(session_factory)
-    wiki_store = WikiStore(session_factory)
-    worker = KnowledgeIndexWorker(
-        store=store,
-        vector_store=vector_store,
-        concurrency=2,
-        main_llm=create_chat_model(),
-    )
+    worker = KnowledgeIndexWorker(store=store, vector_store=vector_store, concurrency=2)
     service = KnowledgeService(
         store=store,
         vector_store=vector_store,
-        graph_store=graph_store,
-        wiki_store=wiki_store,
         worker=worker,
         data_dir=tmp_path,
     )
@@ -133,8 +118,6 @@ async def smoke(session_factory, tmp_path):
         yield SimpleNamespace(
             api=api,
             store=store,
-            graph_store=graph_store,
-            wiki_store=wiki_store,
             vector_store=vector_store,
             qdrant=qdrant,
             owner_id=str(owner_id),
@@ -203,42 +186,17 @@ async def test_e2e_smoke_full_lifecycle(smoke):
         assert doc["chunk_count"] and doc["chunk_count"] > 0, f"{doc['name']} has no chunks"
         assert doc["progress_percent"] == 100
 
-    # 4. graph path: entities extracted and chunks backfilled with them
-    entities = await smoke.graph_store.list_entities(kb_id)
-    assert entities, "graph extraction produced no entities"
-    relations = await smoke.graph_store.list_relations(kb_id)
-    assert relations, "graph extraction produced no relations"
-
+    # 4. chunk preview: the markdown document's slices are readable
     chunks = await smoke.api.get(f"/api/knowledge-bases/{kb_id}/documents/{md_doc_id}/chunks")
     assert chunks.status_code == 200, chunks.text
     items = chunks.json()["items"]
     assert items and chunks.json()["total"] > 0
-    assert any(item["entities"] for item in items), "no chunk carries backfilled entities"
 
     # 5. vector path: chunk points exist in Qdrant
     assert await _kb_point_count(smoke.qdrant, "kb_chunks", kb_id) > 0
-    assert await _kb_point_count(smoke.qdrant, "kb_entities", kb_id) > 0
 
-    # 6. wiki path: manual trigger (the worker's auto-trigger may also fire) → entries appear
-    response = await smoke.api.post(f"/api/knowledge-bases/{kb_id}/wiki/generate")
-    assert response.status_code == 202, response.text
-    deadline = time.monotonic() + WIKI_TIMEOUT
-    while True:
-        entries = await smoke.wiki_store.list_entries(kb_id)
-        if entries:
-            break
-        if time.monotonic() > deadline:
-            pytest.fail("timeout waiting for wiki entries")
-        await asyncio.sleep(POLL_INTERVAL)
-    assert all(entry["status"] == "ready" for entry in entries)
-    assert all(entry["content"].strip() for entry in entries)
-    assert await _kb_point_count(smoke.qdrant, "kb_wiki_entries", kb_id) > 0
-
-    # 7. cascade delete: business rows + graph/wiki + Qdrant points all gone
+    # 6. cascade delete: business rows + Qdrant points all gone
     response = await smoke.api.delete(f"/api/knowledge-bases/{kb_id}")
     assert response.status_code == 204, response.text
     assert await smoke.store.get_kb(kb_id) is None
-    assert await smoke.graph_store.list_entities(kb_id) == []
-    assert await smoke.wiki_store.list_entries(kb_id) == []
-    for collection in ("kb_chunks", "kb_entities", "kb_wiki_entries"):
-        assert await _kb_point_count(smoke.qdrant, collection, kb_id) == 0, f"{collection} still has points for {kb_id}"
+    assert await _kb_point_count(smoke.qdrant, "kb_chunks", kb_id) == 0, f"kb_chunks still has points for {kb_id}"

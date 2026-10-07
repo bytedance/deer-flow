@@ -101,12 +101,6 @@ _DELIMITED_SUFFIXES: frozenset[str] = frozenset({".csv", ".tsv"})
 #: workbook (see ``_DELIMITED_SUFFIXES``).
 _EXCEL_SUFFIXES: frozenset[str] = frozenset({".xlsx", ".xls"})
 
-#: Video upload allowlist (spec 2026-09-08 §2, frozen): an independent
-#: frozenset so the text set above stays byte-identical. Surfaced in the
-#: upload gate and /supported-formats ONLY when ``rag.video.enabled`` is on
-#: (see ``supported_upload_suffixes``).
-VIDEO_UPLOAD_SUFFIXES: frozenset[str] = frozenset({".mp4", ".mov", ".mkv", ".webm"})
-
 #: Spreadsheet upload allowlist (spec 2026-09-09 §4, frozen): an independent
 #: frozenset so the text set above stays byte-identical. Surfaced in the upload
 #: gate and /supported-formats ONLY when ``rag.table.enabled`` is on (see
@@ -136,15 +130,6 @@ _XLSX_XDR_NS = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDraw
 _XLSX_A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
 
-def video_ingest_enabled() -> bool:
-    """``rag.video.enabled`` master gate (spec 2026-09-08 §7). Config load
-    failures degrade to off — the gate never widens the allowlist on error."""
-    try:
-        return bool(get_app_config().rag.video.enabled)
-    except Exception:
-        return False
-
-
 def table_ingest_enabled() -> bool:
     """``rag.table.enabled`` master gate (spec 2026-09-09 §4). Config load
     failures degrade to off — the gate never widens the allowlist on error."""
@@ -155,28 +140,14 @@ def table_ingest_enabled() -> bool:
 
 
 def supported_upload_suffixes() -> frozenset[str]:
-    """Config-gated upload allowlist: the frozen text set, unioned with the video
-    set when ``rag.video.enabled`` is on and the spreadsheet set when
-    ``rag.table.enabled`` is on. The two gates are independent legs. Single source
-    for both the /supported-formats endpoint and the upload gate so they cannot
-    drift (spec 2026-09-08 §2, spec 2026-09-09 §4)."""
+    """Config-gated upload allowlist: the frozen text set, unioned with the
+    spreadsheet set when ``rag.table.enabled`` is on. Single source for both the
+    /supported-formats endpoint and the upload gate so they cannot drift
+    (spec 2026-09-09 §4)."""
     suffixes = SUPPORTED_UPLOAD_SUFFIXES
-    if video_ingest_enabled():
-        suffixes = suffixes | VIDEO_UPLOAD_SUFFIXES
     if table_ingest_enabled():
         suffixes = suffixes | TABLE_UPLOAD_SUFFIXES
     return suffixes
-
-
-def video_upload_limit_bytes() -> int | None:
-    """``rag.video.max_size_mb`` in bytes; None when the video gate is off
-    (video suffixes are rejected at the door anyway)."""
-    if not video_ingest_enabled():
-        return None
-    try:
-        return int(get_app_config().rag.video.max_size_mb) * 1024 * 1024
-    except Exception:
-        return None
 
 
 def table_upload_limit_bytes() -> int | None:

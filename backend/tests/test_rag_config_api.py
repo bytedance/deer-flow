@@ -38,7 +38,6 @@ YAML_RAG = {
     "rerank_model": "yaml-rerank",
     "vlm_model": "yaml-vlm",
     "worker_concurrency": 4,
-    "video": {"enabled": False, "asr_model": "yaml-asr"},
 }
 
 #: The model names this file's payloads declare, as ``config.yaml`` entries. They have to
@@ -96,11 +95,9 @@ def config_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "DASHSCOPE_EMBEDDING_API_KEY",
         "DASHSCOPE_RERANK_API_KEY",
         "DASHSCOPE_API_KEY",
-        "DASHSCOPE_ASR_API_KEY",
         "MINERU_API_TOKEN",
         "RAG_EMBEDDING_API_KEY",
         "RAG_RERANK_API_KEY",
-        "RAG_ASR_API_KEY",
         "RAG_SPARSE_API_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -140,13 +137,13 @@ def _reembed_libraries_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     from app.gateway.services import rag_reembed as reembed_module
 
-    async def _noop(store, *, vector_store, embedder, graph_store, wiki_store):
+    async def _noop(store, *, vector_store, embedder):
         return {}
 
     async def _noop_marks(store):
         return {}
 
-    async def _noop_delta(store, *, vector_store, embedder, graph_store, wiki_store, marks, main_complete):
+    async def _noop_delta(store, *, vector_store, embedder, marks, main_complete):
         return 0
 
     monkeypatch.setattr(reembed_module, "reembed_libraries", _noop)
@@ -169,7 +166,7 @@ def _client(*, system_role: str) -> TestClient:
     # call ``_attach_service`` to replace this placeholder.
     from types import SimpleNamespace
 
-    client.app.state.knowledge_service = SimpleNamespace(store=object(), graph_store=object(), wiki_store=object(), vector_store=object())
+    client.app.state.knowledge_service = SimpleNamespace(store=object(), vector_store=object())
     return client
 
 
@@ -221,7 +218,6 @@ def test_get_reports_effective_values_and_origins(config_env: Path, monkeypatch:
     config = body["config"]
     assert config["embedding_model"] == "ui-embedding"  # file wins over config.yaml
     assert config["rerank_model"] == "yaml-rerank"  # untouched -> config.yaml
-    assert config["video"]["asr_model"] == "yaml-asr"
     assert config["embedding_api_key"] == MASKED_SECRET
     assert config["rerank_api_key"] == ""  # env-backed, never echoed
     assert config["mineru_api_token"] == ""
@@ -229,7 +225,6 @@ def test_get_reports_effective_values_and_origins(config_env: Path, monkeypatch:
     sources = body["sources"]
     assert sources["embedding_model"] == "ui"
     assert sources["rerank_model"] == "config_file"
-    assert sources["video.asr_model"] == "config_file"
     assert sources["embedding_api_key"] == "ui"
     assert sources["rerank_api_key"] == "env"
     assert sources["mineru_api_token"] == "unset"
@@ -258,14 +253,6 @@ def test_put_rejects_unknown_field(config_env: Path):
     assert _read_rag_json(config_env) == {"embedding_model": "kept"}
 
 
-def test_put_rejects_invalid_video_provider(config_env: Path):
-    with _client(system_role="admin") as client:
-        response = client.put("/api/rag/config", json={"video": {"asr_provider": "bogus"}})
-
-    assert response.status_code == 422
-    assert _read_rag_json(config_env) == {}
-
-
 def test_put_writes_only_the_rag_file(config_env: Path):
     yaml_before = (config_env / "config.yaml").read_bytes()
 
@@ -275,7 +262,6 @@ def test_put_writes_only_the_rag_file(config_env: Path):
             json={
                 "embedding_model": "ui-embedding",
                 "rerank_model": "ui-rerank",
-                "video": {"asr_model": "ui-asr"},
             },
         )
         _settled_reembed(client)
@@ -284,7 +270,6 @@ def test_put_writes_only_the_rag_file(config_env: Path):
     stored = _read_rag_json(config_env)
     assert stored["embedding_model"] == "ui-embedding"
     assert stored["rerank_model"] == "ui-rerank"
-    assert stored["video"] == {"asr_model": "ui-asr"}
     assert (config_env / "config.yaml").read_bytes() == yaml_before
 
 
@@ -354,15 +339,9 @@ def test_put_round_trip_does_not_materialize_no_op_defaults(config_env: Path):
         "qdrant_url",
         "vlm_model",
         "rerank_model",
-        "extract_thinking",
-        "wiki_thinking",
-        "judge_thinking",
-        "synthesis_thinking",
         "vlm_thinking",
         "parse_provider",
         "parse_model_version",
-        "video",
-        "asr_base_url",
     ):
         assert noise not in stored, f"{noise} 是解析兜底，不许物化成声明"
 
@@ -375,46 +354,45 @@ def test_put_keeps_identity_fields_even_when_they_equal_the_fallback(config_env:
     with _client(system_role="admin") as client:
         response = client.put(
             "/api/rag/config",
-            json={"embedding_dimension": 1024, "extract_thinking": False, "qdrant_url": "http://qdrant:6333"},
+            json={"embedding_dimension": 1024, "qdrant_url": "http://qdrant:6333"},
         )
         _settled_reembed(client)
 
     assert response.status_code == 200
     stored = _read_rag_json(config_env)
     assert stored["embedding_dimension"] == 1024
-    assert "extract_thinking" not in stored
     assert "qdrant_url" not in stored
 
 
-# ── eval judge (a model reference, never a secret) ────────────────────────
+# ── the caption VLM reference (a model reference, never a secret) ─────────
 
 
-def test_judge_model_round_trips_as_a_regular_field(config_env: Path):
+def test_vlm_model_round_trips_as_a_regular_field(config_env: Path):
     with _client(system_role="admin") as client:
-        response = client.put("/api/rag/config", json={"judge_model": "judge-entry"})
+        response = client.put("/api/rag/config", json={"vlm_model": "judge-entry"})
 
     assert response.status_code == 200
     assert _read_rag_json(config_env) == {
         **_ENDPOINT_FIXTURE,
-        "judge_model": "judge-entry",
+        "vlm_model": "judge-entry",
     }
     body = response.json()
-    assert body["config"]["judge_model"] == "judge-entry"
-    assert body["sources"]["judge_model"] == "ui"
+    assert body["config"]["vlm_model"] == "judge-entry"
+    assert body["sources"]["vlm_model"] == "ui"
 
     with _client(system_role="admin") as client:
         read = client.get("/api/rag/config").json()
 
-    assert read["config"]["judge_model"] == "judge-entry"
-    assert read["sources"]["judge_model"] == "ui"
+    assert read["config"]["vlm_model"] == "judge-entry"
+    assert read["sources"]["vlm_model"] == "ui"
 
 
-def test_judge_model_falls_back_to_config_yaml(config_env: Path):
+def test_vlm_model_falls_back_to_config_yaml(config_env: Path):
     with _client(system_role="admin") as client:
         body = client.get("/api/rag/config").json()
 
-    assert body["config"]["judge_model"] is None
-    assert body["sources"]["judge_model"] == "config_file"
+    assert body["config"]["vlm_model"] == "yaml-vlm"
+    assert body["sources"]["vlm_model"] == "config_file"
 
 
 # ── the RAG default model (spec 2026-09-23 default model D2) ──────────────
@@ -477,76 +455,6 @@ def test_blank_rag_default_withdraws_the_ui_override(config_env: Path, blank: st
     assert response.json()["sources"]["default_model"] == "config_file"
 
 
-def _seed_two_models(root: Path) -> None:
-    (root / "models_config.json").write_text(
-        json.dumps(
-            {
-                "models": [
-                    {"name": "A", "use": "langchain_openai:ChatOpenAI", "model": "gpt-test", "api_key": "test-key", "base_url": "https://ui.example/v1"},
-                    {"name": "B", "use": "langchain_openai:ChatOpenAI", "model": "gpt-test", "api_key": "test-key", "base_url": "https://ui.example/v1"},
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
-def test_the_saved_default_reaches_the_extraction_role(config_env: Path, monkeypatch: pytest.MonkeyPatch):
-    """The join of the two earlier tasks: what the admin saves is what the role builds with.
-
-    Task 1 pinned the resolver and Task 2 the wiring; neither went through the API. This one
-    does the whole path — PUT, file, config reload, the extraction entry — and the factory is
-    spied so no client is constructed.
-    """
-    from deerflow.knowledge.graph.extractor import get_extract_llm
-
-    _seed_two_models(config_env)
-    seen: dict[str, object] = {}
-    monkeypatch.setattr(
-        "deerflow.models.factory.create_chat_model",
-        lambda name=None, **kwargs: seen.setdefault("name", name) or object(),
-    )
-
-    with _client(system_role="admin") as client:
-        assert client.put("/api/rag/config", json={"default_model": "B"}).status_code == 200
-
-    get_extract_llm()
-
-    assert seen["name"] == "B"
-
-
-@pytest.mark.parametrize("field", ["wiki_model", "synthesis_model"])
-def test_a_new_role_field_round_trips_and_reports_where_it_came_from(config_env: Path, field: str):
-    """Write and read shape for the two roles that had no field at all (spec 2026-09-26 D2/D6).
-
-    The withdrawal is read back with a fresh GET on purpose: a PUT response composes ``config``
-    from the *pre-write* snapshot for keys the payload omits (pre-existing — the settings UI
-    refetches), so only ``sources`` is truthful there.
-    """
-    with _client(system_role="admin") as client:
-        saved = client.put("/api/rag/config", json={field: "judge-entry"})
-
-    assert saved.status_code == 200
-    assert saved.json()["config"][field] == "judge-entry"
-    assert saved.json()["sources"][field] == "ui"
-    assert _read_rag_json(config_env)[field] == "judge-entry"
-
-    with _client(system_role="admin") as client:
-        assert client.get("/api/rag/config").json()["config"][field] == "judge-entry"
-        # Withdrawing the override hands the role back to config.yaml (which declares none).
-        withdrawn = client.put("/api/rag/config", json={field: ""})
-
-    assert withdrawn.status_code == 200
-    assert withdrawn.json()["sources"][field] == "config_file"
-    assert field not in _read_rag_json(config_env)
-
-    with _client(system_role="admin") as client:
-        after = client.get("/api/rag/config").json()
-
-    assert after["config"][field] is None
-    assert after["sources"][field] == "config_file"
-
-
 def test_saving_the_rag_default_touches_no_other_configuration_file(config_env: Path):
     """The save writes `rag_config.json` and nothing else, byte for byte."""
     names = ("config.yaml", "models_config.json", "extensions_config.json")
@@ -570,7 +478,7 @@ def test_save_refuses_a_ui_target_without_a_key(config_env: Path):
     _seed_ui_model(config_env, name="ui-bare", api_key=None)
 
     with _client(system_role="admin") as client:
-        response = client.put("/api/rag/config", json={"judge_model": "ui-bare"})
+        response = client.put("/api/rag/config", json={"vlm_model": "ui-bare"})
 
     assert response.status_code == 400
     detail = response.json()["detail"]
@@ -594,10 +502,10 @@ def test_save_accepts_a_complete_ui_target(config_env: Path, monkeypatch: pytest
     _seed_ui_model(config_env, name="ui-complete")
 
     with _client(system_role="admin") as client:
-        response = client.put("/api/rag/config", json={"extract_model": "ui-complete"})
+        response = client.put("/api/rag/config", json={"vlm_model": "ui-complete"})
 
     assert response.status_code == 200
-    assert _read_rag_json(config_env)["extract_model"] == "ui-complete"
+    assert _read_rag_json(config_env)["vlm_model"] == "ui-complete"
 
 
 def test_save_does_not_judge_the_fallback_target(config_env: Path):
@@ -614,7 +522,7 @@ def test_save_does_not_judge_the_fallback_target(config_env: Path):
     assert response.status_code == 200
 
 
-@pytest.mark.parametrize("field", ["default_model", "extract_model", "judge_model", "vlm_model", "wiki_model", "synthesis_model"])
+@pytest.mark.parametrize("field", ["default_model", "vlm_model"])
 def test_save_maps_a_wrong_role_name_to_400(config_env: Path, field: str):
     """Every declared role, the default included: a name with no entry is a usage error."""
     with _client(system_role="admin") as client:
@@ -625,33 +533,13 @@ def test_save_maps_a_wrong_role_name_to_400(config_env: Path, field: str):
     assert _read_rag_json(config_env) == {}
 
 
-@pytest.mark.parametrize("field", ["wiki_model", "synthesis_model"])
-def test_save_judges_a_declared_new_role_target(config_env: Path, field: str):
-    """⑤＝甲: the two new roles join the same declared-target rule as the other four."""
-    _seed_ui_model(config_env, name="ui-bare-new-role", api_key=None)
-
-    with _client(system_role="admin") as client:
-        refused = client.put("/api/rag/config", json={field: "ui-bare-new-role"})
-
-    assert refused.status_code == 400
-    assert "api_key" in refused.json()["detail"]
-
-    _seed_ui_model(config_env, name="ui-complete-new-role")
-
-    with _client(system_role="admin") as client:
-        accepted = client.put("/api/rag/config", json={field: "ui-complete-new-role"})
-
-    assert accepted.status_code == 200
-    assert _read_rag_json(config_env)[field] == "ui-complete-new-role"
-
-
 def test_save_refuses_a_declared_target_when_there_are_no_models_at_all(config_env: Path):
     """A model list with nothing in it cannot contain the declared name either."""
     (config_env / "models_config.json").write_text(json.dumps({"models": []}), encoding="utf-8")
     (config_env / "config.yaml").write_text(yaml.safe_dump({"sandbox": SANDBOX, "models": [], "rag": YAML_RAG}), encoding="utf-8")
 
     with _client(system_role="admin") as client:
-        response = client.put("/api/rag/config", json={"judge_model": "any-entry"})
+        response = client.put("/api/rag/config", json={"vlm_model": "any-entry"})
 
     assert response.status_code == 400
     assert response.json()["detail"] == "提交后的配置仍不可用： / The configuration is still unusable after the save: 配置里没有模型「any-entry」 / Model any-entry not found in config"
@@ -660,7 +548,7 @@ def test_save_refuses_a_declared_target_when_there_are_no_models_at_all(config_e
 def test_save_maps_the_retired_prefix_to_the_same_400(config_env: Path):
     """A `dashscope:` name is an ordinary name now (spec D9): no entry, no save."""
     with _client(system_role="admin") as client:
-        response = client.put("/api/rag/config", json={"judge_model": "dashscope:qwen3.8-max"})
+        response = client.put("/api/rag/config", json={"vlm_model": "dashscope:qwen3.8-max"})
 
     assert response.status_code == 400
     assert response.json()["detail"] == "提交后的配置仍不可用： / The configuration is still unusable after the save: 配置里没有模型「dashscope:qwen3.8-max」 / Model dashscope:qwen3.8-max not found in config"
@@ -710,34 +598,45 @@ def test_the_not_found_sentence_equals_the_factorys_own(config_env: Path):
     assert model_not_found_message("ghost").split(" / ")[-1] == str(excinfo.value)
 
 
-def test_put_rejects_the_retired_top_level_vlm_fields(config_env: Path):
-    """The two top-level VLM keys are gone from the file contract (spec 2026-09-23 D10.3):
-    a payload that still carries them is refused by the same ``extra="forbid"`` that guards
-    every typo — not silently stripped."""
-    for field in ("vlm_base_url", "vlm_api_key"):
+def test_retired_keys_are_rejected_by_a_write_and_dropped_at_load(config_env: Path):
+    """The retired-key contract, both faces (``_RETIRED_KEYS`` / ``_drop_retired_keys``).
+
+    A payload that still carries one is refused by the same ``extra="forbid"`` that guards
+    every typo — never silently stripped. A *stored* file that still carries one keeps
+    loading (an existing ``rag_config.json`` must not break) with the key dropped and a
+    warning, so a value with no reader left cannot come back as another field's meaning.
+    """
+    retired = (
+        "parse_backend",
+        "vlm_base_url",
+        "vlm_api_key",
+        "extract_model",
+        "judge_model",
+        "wiki_model",
+        "synthesis_model",
+        "extract_thinking",
+        "wiki_thinking",
+        "judge_thinking",
+        "synthesis_thinking",
+        "asr_base_url",
+        "asr_api_key",
+        "video",
+    )
+    for field in retired:
         with _client(system_role="admin") as client:
             response = client.put("/api/rag/config", json={field: "leftover"})
 
         assert response.status_code == 422, field
     assert _read_rag_json(config_env) == {}
 
+    _write_rag_json(config_env, {**{field: "leftover" for field in retired}, "embedding_model": "kept"})
 
-def test_put_rejects_the_retired_nested_caption_field(config_env: Path):
-    """The nested key is a different rejection path: ``RagVideoFileConfig`` forbids extras."""
     with _client(system_role="admin") as client:
-        response = client.put("/api/rag/config", json={"video": {"caption_model": "leftover"}})
+        body = client.get("/api/rag/config").json()
 
-    assert response.status_code == 422
-    assert _read_rag_json(config_env) == {}
-
-
-def test_put_accepts_the_remaining_video_fields_after_the_retirement(config_env: Path):
-    """The positive control: the video block still takes what it owns."""
-    with _client(system_role="admin") as client:
-        response = client.put("/api/rag/config", json={"video": {"asr_provider": "whisper", "asr_model": "small"}})
-
-    assert response.status_code == 200
-    assert _read_rag_json(config_env)["video"] == {"asr_provider": "whisper", "asr_model": "small"}
+    for field in retired:
+        assert field not in body["config"], field
+    assert body["config"]["embedding_model"] == "kept", "退役键被丢掉，文件其余部分照常加载"
 
 
 # ── hot reload through the shared config singleton ────────────────────────
@@ -929,9 +828,6 @@ _CAPABILITY_FIELD = "embedding_providers"
 #: The rerank leg's own capability block (spec 2026-09-17 alignment §3 D3): the address row is
 #: locked by *row capability* there too, so the frontend must stop naming the provider.
 _RERANK_CAPABILITY_FIELD = "rerank_providers"
-#: The ASR leg's own capability block (spec 2026-09-28 §3): the endpoint row's *placeholder*
-#: comes from `default_endpoint`, exactly as the two retrieval rows take theirs.
-_ASR_CAPABILITY_FIELD = "asr_providers"
 #: The save-time probe's verdict rides every response, GET included — always present, ``null``
 #: when there is nothing to say (spec 2026-09-17 save-time probe §3 D3). Registered here rather
 #: than subtracted ad hoc so the "pure addition" guards keep their teeth.
@@ -941,7 +837,7 @@ _WARNING_FIELD = "warning"
 _MIGRATION_FIELD = "migration"
 _MIGRATION_FIELD = "migration"
 _REEMBED_FIELD = "reembed"
-_ADDED_FIELDS = {_CAPABILITY_FIELD, _RERANK_CAPABILITY_FIELD, _ASR_CAPABILITY_FIELD, _WARNING_FIELD, _MIGRATION_FIELD, _REEMBED_FIELD}
+_ADDED_FIELDS = {_CAPABILITY_FIELD, _RERANK_CAPABILITY_FIELD, _WARNING_FIELD, _MIGRATION_FIELD, _REEMBED_FIELD}
 
 
 def _assert_pure_addition(body: dict, golden: dict) -> None:
@@ -1020,115 +916,6 @@ def test_put_response_only_gained_the_capability_field(config_env: Path):
 
     assert response.status_code == 200
     _assert_pure_addition(response.json(), _GOLDEN["put"]["response"])
-
-
-# ── the ASR leg's service tier (spec 2026-09-28 D2/D4) ────────────────────
-#
-# The ASR row grows into a real leg: a provider from the curated allowlist, plus an address
-# and a key stored beside the other four legs' (① 乙, 2026-09-29). What is tested here is the
-# *config face* only — the provider itself, and the save-time address requirement, arrive
-# with the leg's implementation.
-
-
-def test_get_returns_the_asr_provider_capabilities(config_env: Path):
-    with _client(system_role="admin") as client:
-        body = client.get("/api/rag/config").json()
-
-    assert [entry["provider_id"] for entry in body[_ASR_CAPABILITY_FIELD]] == list(provider_ids("asr"))
-    # Only the vendor row has a default to show; the in-process engines and the generic
-    # protocol tier have none, so their row falls back to the shared example placeholder.
-    assert {entry["provider_id"]: entry["default_endpoint"] for entry in body[_ASR_CAPABILITY_FIELD]} == {
-        "funasr": None,
-        "whisper": None,
-        "openai-audio": None,
-        "dashscope": "https://dashscope.aliyuncs.com",
-    }
-
-
-def test_put_round_trips_the_asr_connection_fields(config_env: Path):
-    """Both service-tier values survive a save → reload round trip, and the two new fields
-    land at the top level — ``video`` keeps only the model choices."""
-    with _client(system_role="admin") as client:
-        response = client.put(
-            "/api/rag/config",
-            json={
-                "video": {"asr_provider": "dashscope", "asr_model": "qwen-audio-3.1-asr-flash"},
-                "asr_base_url": "https://dashscope.aliyuncs.com",
-                "asr_api_key": "sk-asr",
-            },
-        )
-        assert response.status_code == 200
-        body = response.json()
-        reloaded = client.get("/api/rag/config").json()
-
-    stored = _read_rag_json(config_env)
-    assert stored["video"] == {"asr_provider": "dashscope", "asr_model": "qwen-audio-3.1-asr-flash"}
-    assert stored["asr_base_url"] == "https://dashscope.aliyuncs.com"
-    assert stored["asr_api_key"] == "sk-asr"
-    assert body["config"]["video"]["asr_provider"] == "dashscope"
-    assert body["config"]["asr_api_key"] == MASKED_SECRET
-    assert body["sources"]["asr_api_key"] == "ui"
-    assert body["sources"]["asr_base_url"] == "ui"
-    assert reloaded["config"]["video"]["asr_provider"] == "dashscope"
-    assert reloaded["config"]["asr_base_url"] == "https://dashscope.aliyuncs.com"
-    assert "sk-asr" not in json.dumps(reloaded)
-
-
-def test_put_sentinel_preserves_the_stored_asr_key(config_env: Path):
-    _write_rag_json(config_env, {"asr_api_key": "sk-kept"})
-
-    with _client(system_role="admin") as client:
-        response = client.put("/api/rag/config", json={"asr_api_key": MASKED_SECRET})
-
-    assert response.status_code == 200
-    assert _read_rag_json(config_env)["asr_api_key"] == "sk-kept"
-
-
-def test_the_asr_key_env_source_follows_the_selected_provider(config_env: Path, monkeypatch: pytest.MonkeyPatch):
-    """The reported fallback must be the variable the *selected* provider reads — and the ASR
-    provider is the one selection that lives **inside** the ``video`` block, so this is where a
-    top-level-only lookup would silently answer for the wrong row."""
-    monkeypatch.setenv("DASHSCOPE_ASR_API_KEY", "env-dashscope")
-
-    with _client(system_role="admin") as client:
-        # funasr runs in-process and takes no credential, so an ambient variable is not its
-        # fallback: the row stays 「未设置」.
-        assert client.get("/api/rag/config").json()["sources"]["asr_api_key"] == "unset"
-
-        switched = client.put(
-            "/api/rag/config",
-            json={"video": {"asr_provider": "dashscope"}, "asr_base_url": "https://dashscope.aliyuncs.com"},
-        ).json()
-        # The switch re-points the fallback in the same response, not only after a reload.
-        assert switched["sources"]["asr_api_key"] == "env"
-        assert client.get("/api/rag/config").json()["sources"]["asr_api_key"] == "env"
-
-        client.put(
-            "/api/rag/config",
-            json={"video": {"asr_provider": "openai-audio"}, "asr_base_url": "http://127.0.0.1:8000/v1"},
-        )
-        assert client.get("/api/rag/config").json()["sources"]["asr_api_key"] == "unset"
-        monkeypatch.setenv("RAG_ASR_API_KEY", "env-generic")
-        assert client.get("/api/rag/config").json()["sources"]["asr_api_key"] == "env"
-
-
-def test_put_refuses_a_service_tier_without_its_address(config_env: Path):
-    """09-25 D1 乙「连回落删」的既有规则，套到新腿上：地址留空不是"用厂商默认"。"""
-    with _client(system_role="admin") as client:
-        response = client.put("/api/rag/config", json={"video": {"asr_provider": "dashscope"}})
-
-    assert response.status_code == 400
-    assert "asr_base_url" in response.json()["detail"]
-    assert _read_rag_json(config_env) == {}
-
-
-def test_put_accepts_an_in_process_engine_without_an_address(config_env: Path):
-    """第一组（进程内）不吃地址与钥匙——留空是常态，不是缺项。"""
-    with _client(system_role="admin") as client:
-        response = client.put("/api/rag/config", json={"video": {"asr_provider": "funasr", "asr_model": "paraformer-zh"}})
-
-    assert response.status_code == 200
-    assert _read_rag_json(config_env)["video"] == {"asr_provider": "funasr", "asr_model": "paraformer-zh"}
 
 
 # ── save-time validation of the configuration about to be persisted ──────────
@@ -1404,7 +1191,7 @@ def _stub_runner(
 
     recorder = _Recorder()
 
-    async def _migrate(store, *, vector_store, embedder, graph_store, wiki_store, page_size=None):
+    async def _migrate(store, *, vector_store, embedder, page_size=None):
         if calls is not None:
             calls.append((store, vector_store))
         if gate is not None:
@@ -1428,7 +1215,7 @@ def _attach_service(client: TestClient) -> None:
     """The gateway always wires this; the test app has no knowledge stack of its own."""
     from types import SimpleNamespace
 
-    client.app.state.knowledge_service = SimpleNamespace(store=object(), graph_store=object(), wiki_store=object(), vector_store=object())
+    client.app.state.knowledge_service = SimpleNamespace(store=object(), vector_store=object())
 
 
 def _migration_of(client: TestClient) -> dict | None:
@@ -1515,17 +1302,19 @@ def test_a_migration_that_fails_never_flips_the_width(config_env: Path, monkeypa
 
 
 def test_a_second_width_change_mid_migration_is_refused(config_env: Path, monkeypatch: pytest.MonkeyPatch):
+    import threading
+
     _answer_with(monkeypatch, dims=1536, recorded=[])
-    _stub_runner(monkeypatch)
+    gate = threading.Event()
+    _stub_runner(monkeypatch, gate=gate)
 
     with _client(system_role="admin") as client:
         _attach_service(client)
         assert client.put("/api/rag/config", json={"embedding_dimension": 1536}).status_code == 200
-        # 第一次的迁移还在跑（桩里没让它结束）—— 第二次改宽度必须被挡在门外。
-        from app.gateway.services import rag_migration as migration_module
-
-        migration_module._STATE.state = "running"
+        # 第一次的迁移还卡在闸里（桩里没让它结束）—— 第二次改宽度必须被挡在门外。
         again = client.put("/api/rag/config", json={"embedding_dimension": 768})
+        gate.set()
+        assert _settled(client)["state"] == "succeeded"
 
     assert again.status_code == 409
     assert "迁移" in again.json()["detail"]
@@ -1570,7 +1359,7 @@ def _stub_reembed(
     """
     from app.gateway.services import rag_reembed as reembed_module
 
-    async def _reembed_libraries(store, *, vector_store, embedder, graph_store, wiki_store):
+    async def _reembed_libraries(store, *, vector_store, embedder):
         if calls is not None:
             calls.append((store, vector_store, embedder))
         if gate is not None:

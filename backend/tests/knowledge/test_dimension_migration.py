@@ -28,10 +28,7 @@ from qdrant_client.models import SparseVector
 
 from deerflow.knowledge.dimension_migration import migrate_collections, migration_in_progress, migration_last_run, migration_progress
 from deerflow.knowledge.embedder import EmbeddingResult
-from deerflow.knowledge.graph.store import GraphStore
 from deerflow.knowledge.store import KnowledgeStore
-from deerflow.knowledge.vector_store import EntityUpsert, ManualCardUpsert, WikiEntryUpsert
-from deerflow.knowledge.wiki.store import WikiStore
 
 OWNER_A = str(uuid.UUID(int=11))
 OWNER_B = str(uuid.UUID(int=22))
@@ -50,7 +47,7 @@ class _Generations:
 
     async def drop_collections(self) -> list[str]:
         self.events.append("drop")
-        return ["kb_chunks_1536", "kb_entities_1536", "kb_wiki_entries_1536", "kb_manual_cards_1536"]
+        return ["kb_chunks_1536"]
 
     async def create_collections(self) -> None:
         self.events.append("create")
@@ -61,15 +58,6 @@ class _Generations:
             await hook()
         self.events.append("chunks")
         self.chunk_ids.extend(item.chunk_id for item in items)
-
-    async def upsert_entities(self, items: list[EntityUpsert]) -> None:
-        self.events.append("entities")
-
-    async def upsert_wiki_entries(self, items: list[WikiEntryUpsert]) -> None:
-        self.events.append("wiki")
-
-    async def upsert_manual_cards(self, items: list[ManualCardUpsert]) -> None:
-        self.events.append("cards")
 
     async def delete_by_doc(self, doc_id: str) -> None:
         self.events.append(f"delete:{doc_id}")
@@ -94,10 +82,6 @@ async def _seed_doc(store: KnowledgeStore, *, kb_id: str, doc_id: str, texts: li
     await store.insert_chunks([{"chunk_id": f"{doc_id}#{index:04d}", "doc_id": doc_id, "kb_id": kb_id, "chunk_index": index, "text": text, "heading_path": ["H"], "page": index} for index, text in enumerate(texts)])
 
 
-def _stores(store: KnowledgeStore) -> dict:
-    return {"graph_store": GraphStore(store._sf), "wiki_store": WikiStore(store._sf)}
-
-
 @pytest.fixture(autouse=True)
 def _clean_state():
     from deerflow.knowledge import dimension_migration as migration_mod
@@ -119,7 +103,7 @@ async def test_the_migration_rebuilds_every_library_into_a_fresh_generation(sess
     await _seed_doc(store, kb_id=KB_B, doc_id="doc-b", texts=["乙一"])
 
     generations = _Generations()
-    report = await migrate_collections(store, vector_store=generations, embedder=_DeterministicEmbedder(), **_stores(store))
+    report = await migrate_collections(store, vector_store=generations, embedder=_DeterministicEmbedder())
 
     assert generations.events[0] == "drop", "上次中断留下的半成品要先删（先删后建）"
     assert generations.events[1] == "create"
@@ -141,7 +125,7 @@ async def test_a_document_that_arrives_during_the_migration_is_embedded_before_t
         await _seed_doc(store, kb_id=KB_A, doc_id="doc-new", texts=["新来的一篇"])
 
     generations = _Generations(on_first_upsert=_arrive)
-    report = await migrate_collections(store, vector_store=generations, embedder=_DeterministicEmbedder(), **_stores(store))
+    report = await migrate_collections(store, vector_store=generations, embedder=_DeterministicEmbedder())
 
     assert "doc-new#0000" in generations.chunk_ids
     # 差量以"库"为单位：动过的库整遍重来（含它已有的文档），没动过的库一次都不跑。
@@ -160,7 +144,7 @@ async def test_a_document_still_moving_through_the_worker_is_not_left_behind(ses
         await _seed_doc(store, kb_id=KB_A, doc_id="doc-moving", texts=["还在抽取"], status="indexing")
 
     generations = _Generations(on_first_upsert=_arrive)
-    report = await migrate_collections(store, vector_store=generations, embedder=_DeterministicEmbedder(), **_stores(store))
+    report = await migrate_collections(store, vector_store=generations, embedder=_DeterministicEmbedder())
 
     assert "doc-moving#0000" in generations.chunk_ids, "非终态文档的切片也要补进新代"
     assert report.delta_documents == 2
@@ -178,7 +162,7 @@ async def test_a_document_deleted_during_the_window_drops_its_points_from_the_ne
         await store.delete_document("doc-gone")
 
     generations = _Generations(on_first_upsert=_delete)
-    await migrate_collections(store, vector_store=generations, embedder=_DeterministicEmbedder(), **_stores(store))
+    await migrate_collections(store, vector_store=generations, embedder=_DeterministicEmbedder())
 
     assert "doc-gone" in generations.deleted_docs
     assert "doc-gone#0000" not in generations.chunk_ids or generations.events.index("delete:doc-gone") > generations.events.index("chunks")
@@ -206,7 +190,7 @@ async def test_a_pass_that_breaks_aborts_and_records_the_failure(session_factory
     generations = _Generations()
 
     with pytest.raises(RuntimeError, match="库读坏了"):
-        await migrate_collections(store, vector_store=generations, embedder=_DeterministicEmbedder(), **_stores(store))
+        await migrate_collections(store, vector_store=generations, embedder=_DeterministicEmbedder())
 
     verdict, detail = migration_last_run()
     assert verdict == "failed"
@@ -229,7 +213,7 @@ async def test_the_state_is_readable_while_it_runs_and_cleared_when_it_is_done(s
         seen.append(migration_progress())
 
     generations._on_first_upsert = _snapshot_state
-    await migrate_collections(store, vector_store=generations, embedder=_DeterministicEmbedder(), **_stores(store))
+    await migrate_collections(store, vector_store=generations, embedder=_DeterministicEmbedder())
 
     assert seen and seen[0] is not None and seen[0]["kbs_total"] == 1
     assert migration_in_progress() is False

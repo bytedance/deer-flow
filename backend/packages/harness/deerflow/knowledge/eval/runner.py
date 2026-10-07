@@ -331,7 +331,7 @@ def render_markdown(report: EvalReport) -> str:
     return "\n".join(lines) + "\n"
 
 
-# ── default searchers (recall_test 同源接线) ─────────────────────────────
+# ── default searchers ───────────────────────────────────────────────────
 
 
 def build_default_searchers(
@@ -340,29 +340,14 @@ def build_default_searchers(
     user_id: str,
     store: Any,
     vector_store: Any,
-    graph_store: Any,
-    wiki_store: Any,
-    rag: Any = None,
     hybrid_impl: Any = None,
-    graph_impl: Any = None,
-    wiki_impl: Any = None,
 ) -> dict[str, SearchFn]:
-    """Wire the three online ``_*_impl`` functions as searchers.
+    """Wire the online hybrid-search impl as the vector searcher.
 
-    Mirrors ``knowledge_service.recall_test``: the graph path receives the same
-    config-driven parameters, and the eval ``top_k`` maps to ``evidence_limit``
-    exactly like the recall test. Impl parameters are injectable for tests.
+    Mirrors the online retrieval wiring; impl parameters are injectable for tests.
     """
-    if rag is None:
-        from deerflow.config.app_config import get_app_config
-
-        rag = get_app_config().rag
     if hybrid_impl is None:
         from deerflow.tools.builtins.hybrid_search_tool import _hybrid_search_impl as hybrid_impl
-    if graph_impl is None:
-        from deerflow.tools.builtins.graph_search_tool import _graph_search_impl as graph_impl
-    if wiki_impl is None:
-        from deerflow.tools.builtins.wiki_search_tool import _wiki_search_impl as wiki_impl
 
     runtime = SimpleNamespace(context={"kb_id": kb_id, "user_id": user_id})
 
@@ -370,44 +355,4 @@ def build_default_searchers(
         raw = await hybrid_impl(query, runtime, store=store, vector_store=vector_store, top_k=top_k)
         return tuple(ScoredHit(item["chunk_id"], item.get("score")) for item in raw.get("results", []))
 
-    async def graph_fn(query: str, top_k: int) -> tuple[ScoredHit, ...]:
-        reranker = None
-        if rag.graph_rerank:
-            from deerflow.knowledge.reranker_factory import build_reranker
-
-            reranker = build_reranker()
-        raw = await graph_impl(
-            query,
-            runtime,
-            store=store,
-            graph_store=graph_store,
-            vector_store=vector_store,
-            reranker=reranker,
-            per_entity_cap=rag.graph_per_entity_cap,
-            per_edge_cap=rag.graph_per_edge_cap,
-            hop0_guarantee=rag.graph_hop0_guarantee,
-            evidence_limit=top_k,  # recall_test 同源：top_k 映射为 evidence_limit
-            graph_rerank=rag.graph_rerank,
-            rerank_threshold=rag.graph_rerank_threshold,
-            hop_penalty=rag.graph_hop_penalty,
-            neighbor_min_score=rag.graph_neighbor_min_score,
-            max_expanded_nodes=rag.graph_max_expanded_nodes,
-            hub_degree_threshold=rag.graph_hub_degree_threshold,
-        )
-        return tuple(ScoredHit(item["chunk_id"], item.get("score")) for item in raw.get("evidence", []))
-
-    async def wiki_fn(query: str, top_k: int) -> tuple[ScoredHit, ...]:
-        raw = await wiki_impl(query, runtime, store=store, wiki_store=wiki_store, vector_store=vector_store, top_k=top_k)
-        hits: list[ScoredHit] = []
-        seen: set[str] = set()
-        for entry in raw.get("entries", []):
-            if entry.get("source_type") != "wiki":
-                continue  # 人工卡片无 chunk 映射，跳过
-            stored = await wiki_store.get_entry(entry["entry_id"])
-            for chunk_id in (stored or {}).get("source_chunk_ids") or []:
-                if chunk_id not in seen:
-                    seen.add(chunk_id)
-                    hits.append(ScoredHit(chunk_id, entry.get("score")))
-        return tuple(hits)
-
-    return {"vector": vector_fn, "graph": graph_fn, "wiki": wiki_fn}
+    return {"vector": vector_fn}

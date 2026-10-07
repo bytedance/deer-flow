@@ -1,15 +1,13 @@
 """CRUD store over the RAG knowledge-base business tables.
 
-Holds the source of truth for chunk text and the per-chunk extract state
-machine; Qdrant only mirrors vectors + a ``chunk_id`` pointer (spec §3.2).
-Graph/wiki-specific writers land with their own indexers (Tasks 5/6); this
-store owns the shared lifecycle: KBs, documents, chunks, and cascading
-deletes across all six tables.
+Holds the source of truth for chunk text; Qdrant only mirrors vectors + a
+``chunk_id`` pointer (spec §3.2). This store owns the shared lifecycle:
+KBs, documents, chunks, and cascading deletes.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -20,12 +18,7 @@ from deerflow.knowledge.models import (
     ChunkRow,
     DocumentRow,
     EvalRunRow,
-    GraphEntityRow,
-    GraphRelationRow,
     KnowledgeBaseRow,
-    ManualKnowledgeRow,
-    VideoShotRow,
-    WikiEntryRow,
 )
 from deerflow.utils.time import coerce_iso
 
@@ -112,9 +105,9 @@ class KnowledgeStore:
             return self._row_to_dict(row)
 
     async def delete_kb(self, kb_id: str) -> bool:
-        """Delete a KB and cascade across all seven business tables.
+        """Delete a KB and cascade across the business tables.
 
-        Vector-side cleanup (three Qdrant collections) is layered on top by
+        Vector-side cleanup (its Qdrant collections) is layered on top by
         the API/worker so a vector failure cannot strand business rows
         half-deleted (spec §3.7).
         """
@@ -122,7 +115,7 @@ class KnowledgeStore:
             row = await session.get(KnowledgeBaseRow, kb_id)
             if row is None:
                 return False
-            for model in (ChunkRow, DocumentRow, GraphEntityRow, GraphRelationRow, WikiEntryRow, ManualKnowledgeRow, VideoShotRow):
+            for model in (ChunkRow, DocumentRow):
                 await session.execute(delete(model).where(model.kb_id == kb_id))
             await session.delete(row)
             await session.commit()
@@ -237,19 +230,17 @@ class KnowledgeStore:
             return self._row_to_dict(row)
 
     async def delete_document(self, doc_id: str) -> bool:
-        """Delete one document + its chunk and video_shots rows (business DB).
+        """Delete one document + its chunk rows (business DB).
 
-        Keyframe files live outside the DB — the service-layer cascade removes
-        the per-doc dir (``_remove_dir``) which carries the ``frames/`` subdir
-        (spec 2026-09-08 §9 存储膨胀缓解). Vector/graph/wiki cleanup is layered
-        on top by the caller (``delete_document_cascade``).
+        Files live outside the DB — the service-layer cascade removes the
+        per-doc dir (``_remove_dir``). Vector cleanup is layered on top by the
+        caller (``delete_document_cascade``).
         """
         async with self._sf() as session:
             row = await session.get(DocumentRow, doc_id)
             if row is None:
                 return False
             await session.execute(delete(ChunkRow).where(ChunkRow.doc_id == doc_id))
-            await session.execute(delete(VideoShotRow).where(VideoShotRow.doc_id == doc_id))
             await session.delete(row)
             await session.commit()
             return True
@@ -305,29 +296,20 @@ class KnowledgeStore:
         return {index: order[index] for index in chunk_indexes if index in order}
 
     async def get_kb_content_stats(self, kb_id: str) -> dict[str, Any]:
-        """Cheap invalidation signals for the projection-cache fingerprint (spec §6).
+        """Cheap invalidation signal for the switch-window fingerprint.
 
-        One session, four aggregate queries: chunks ``count + max(last_edited_at)``
-        (the table has no created_at — count covers insert/delete), wiki/cards
-        ``count + max(updated_at)``, entities ``count`` only.
+        One aggregate query: chunks ``count + max(last_edited_at)`` (the table
+        has no created_at — count covers insert/delete).
         """
         async with self._sf() as session:
             chunks_count, chunks_max = (await session.execute(select(func.count(), func.max(ChunkRow.last_edited_at)).where(ChunkRow.kb_id == kb_id))).one()
-            wiki_count, wiki_max = (await session.execute(select(func.count(), func.max(WikiEntryRow.updated_at)).where(WikiEntryRow.kb_id == kb_id))).one()
-            cards_count, cards_max = (await session.execute(select(func.count(), func.max(ManualKnowledgeRow.updated_at)).where(ManualKnowledgeRow.kb_id == kb_id))).one()
-            entities_count = (await session.execute(select(func.count()).select_from(GraphEntityRow).where(GraphEntityRow.kb_id == kb_id))).scalar_one()
-        return {
-            "chunks": (int(chunks_count), chunks_max),
-            "wiki": (int(wiki_count), wiki_max),
-            "cards": (int(cards_count), cards_max),
-            "entities": int(entities_count),
-        }
+        return {"chunks": (int(chunks_count), chunks_max)}
 
     async def get_chunks_by_ids(self, chunk_ids: list[str], *, kb_id: str | None = None) -> list[dict[str, Any]]:
-        """Fetch chunk rows by id (graph/wiki aggregation of source_chunk_ids).
+        """Fetch chunk rows by id (batch reads by chunk id).
 
-        ``kb_id`` narrows the fetch to one knowledge base; management batch
-        reads pass it so ids from another KB can never leak through.
+        ``kb_id`` narrows the fetch to one knowledge base; callers pass it so
+        ids from another KB can never leak through.
         """
         if not chunk_ids:
             return []
@@ -344,30 +326,6 @@ class KnowledgeStore:
         async with self._sf() as session:
             row = await session.get(ChunkRow, chunk_id)
             return None if row is None else self._row_to_dict(row, datetime_keys=())
-
-    async def rewrite_chunk_entities(self, chunk_ids: Sequence[str], name_map: Mapping[str, str]) -> int:
-        """Rewrite the ``entities`` column on chunk rows through ``name_map``
-        (spec 2026-08-10 D3 dual-write, business-DB half — the Qdrant payload
-        half goes through ``set_chunk_entities``; both mirrors must move
-        together). Returns the number of rows actually changed. Idempotent.
-        """
-        if not chunk_ids or not name_map:
-            return 0
-        changed = 0
-        async with self._sf() as session:
-            result = await session.execute(select(ChunkRow).where(ChunkRow.chunk_id.in_(list(chunk_ids))))
-            for row in result.scalars().all():
-                current = list(row.entities or [])
-                rewritten: list[str] = []
-                for name in current:
-                    mapped = name_map.get(name, name)
-                    if mapped not in rewritten:
-                        rewritten.append(mapped)
-                if rewritten != current:
-                    row.entities = rewritten
-                    changed += 1
-            await session.commit()
-        return changed
 
     async def update_chunk_extract(
         self,
@@ -401,12 +359,6 @@ class KnowledgeStore:
             await session.commit()
             return int(result.rowcount or 0)
 
-    async def delete_chunks_by_kb(self, kb_id: str) -> int:
-        async with self._sf() as session:
-            result = await session.execute(delete(ChunkRow).where(ChunkRow.kb_id == kb_id))
-            await session.commit()
-            return int(result.rowcount or 0)
-
     async def delete_chunk(self, chunk_id: str) -> bool:
         """Drop a single chunk row (Task 5 收尾 single-chunk delete cascade).
 
@@ -414,126 +366,6 @@ class KnowledgeStore:
         """
         async with self._sf() as session:
             result = await session.execute(delete(ChunkRow).where(ChunkRow.chunk_id == chunk_id))
-            await session.commit()
-            return int(result.rowcount or 0) > 0
-
-    async def update_chunk_text(self, chunk_id: str, text: str, token_count: int) -> dict[str, Any] | None:
-        """Update chunk text with recalculated token_count (Phase-3 Batch-1 P2).
-
-        Writes last_edited_at timestamp. Entities JSON column remains unchanged
-        (ID 引用 preserved for graph path).
-        """
-        async with self._sf() as session:
-            row = await session.get(ChunkRow, chunk_id)
-            if row is None:
-                return None
-            row.text = text
-            row.token_count = token_count
-            row.last_edited_at = datetime.now(UTC)  # P2: audit timestamp
-            await session.commit()
-            await session.refresh(row)
-            return self._row_to_dict(row, datetime_keys=("last_edited_at",))
-
-    # ── manual_knowledge (Phase-3 Batch-1 P6) ────────────────────────────
-
-    async def create_manual_card(
-        self,
-        *,
-        card_id: str,
-        kb_id: str,
-        owner_id: str,
-        title: str,
-        content: str,
-        tags: list[str] | None = None,
-        include_in_wiki_search: bool = False,
-    ) -> dict[str, Any]:
-        now = datetime.now(UTC)
-        row = ManualKnowledgeRow(
-            id=card_id,
-            kb_id=kb_id,
-            owner_id=owner_id,
-            title=title,
-            content=content,
-            tags=list(tags or []),
-            include_in_wiki_search=include_in_wiki_search,
-            created_at=now,
-            updated_at=now,
-        )
-        async with self._sf() as session:
-            session.add(row)
-            await session.commit()
-            await session.refresh(row)
-            return self._row_to_dict(row)
-
-    async def get_manual_card(self, card_id: str) -> dict[str, Any] | None:
-        async with self._sf() as session:
-            row = await session.get(ManualKnowledgeRow, card_id)
-            return None if row is None else self._row_to_dict(row)
-
-    async def list_manual_cards(
-        self,
-        kb_id: str,
-        *,
-        offset: int = 0,
-        limit: int = 50,
-        include_in_wiki_search: bool | None = None,
-    ) -> list[dict[str, Any]]:
-        """Cards of one KB, newest first; ``include_in_wiki_search`` filters
-        by the retrieval-mix toggle when given (spec §8 开关口径).
-
-        Ordered by ``created_at`` (not ``updated_at``): a toggle flip or edit
-        must not reshuffle the list — with updated_at ordering the card just
-        touched jumps to the top, which reads as "the row above lit up".
-        """
-        stmt = select(ManualKnowledgeRow).where(ManualKnowledgeRow.kb_id == kb_id)
-        if include_in_wiki_search is not None:
-            stmt = stmt.where(ManualKnowledgeRow.include_in_wiki_search == include_in_wiki_search)
-        stmt = stmt.order_by(ManualKnowledgeRow.created_at.desc(), ManualKnowledgeRow.id.desc()).offset(offset).limit(limit)
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            return [self._row_to_dict(row) for row in result.scalars().all()]
-
-    async def count_manual_cards(self, kb_id: str, *, include_in_wiki_search: bool | None = None) -> int:
-        from sqlalchemy import func
-
-        stmt = select(func.count()).select_from(ManualKnowledgeRow).where(ManualKnowledgeRow.kb_id == kb_id)
-        if include_in_wiki_search is not None:
-            stmt = stmt.where(ManualKnowledgeRow.include_in_wiki_search == include_in_wiki_search)
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            return int(result.scalar_one())
-
-    async def update_manual_card(
-        self,
-        card_id: str,
-        *,
-        title: str | None = None,
-        content: str | None = None,
-        tags: list[str] | None = None,
-        include_in_wiki_search: bool | None = None,
-    ) -> dict[str, Any] | None:
-        """PATCH semantics: ``None`` leaves a field unchanged."""
-        async with self._sf() as session:
-            row = await session.get(ManualKnowledgeRow, card_id)
-            if row is None:
-                return None
-            if title is not None:
-                row.title = title
-            if content is not None:
-                row.content = content
-            if tags is not None:
-                row.tags = list(tags)
-            if include_in_wiki_search is not None:
-                row.include_in_wiki_search = include_in_wiki_search
-            row.updated_at = datetime.now(UTC)
-            await session.commit()
-            await session.refresh(row)
-            return self._row_to_dict(row)
-
-    async def delete_manual_card(self, card_id: str) -> bool:
-        """Idempotent: deleting an absent row returns False."""
-        async with self._sf() as session:
-            result = await session.execute(delete(ManualKnowledgeRow).where(ManualKnowledgeRow.id == card_id))
             await session.commit()
             return int(result.rowcount or 0) > 0
 

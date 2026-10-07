@@ -238,6 +238,16 @@ def collect_extensions_summary(extensions_config_path: Path) -> Any:
     return redact_data(_read_json(extensions_config_path))
 
 
+def collect_models_summary(models_config_path: Path) -> Any:
+    """Redacted ``models_config.json`` (the API-writable UI model set, spec 2026-09-10 §5.4)."""
+    return redact_data(_read_json(models_config_path))
+
+
+def collect_rag_summary(rag_config_path: Path) -> Any:
+    """Redacted ``rag_config.json`` (the API-writable RAG functional-model set, spec 2026-09-10)."""
+    return redact_data(_read_json(rag_config_path))
+
+
 def collect_git_summary(project_root: Path) -> dict[str, Any]:
     """Collect best-effort git metadata without requiring a git checkout."""
     commands = {
@@ -483,6 +493,8 @@ def _evidence_files(*, include_doctor: bool, include_thread_summary: bool) -> li
         ("environment.json", "OS, Python, and toolchain version probes."),
         ("config-summary.json", "Redacted config.yaml structure."),
         ("extensions-summary.json", "Redacted extensions_config.json structure."),
+        ("models-summary.json", "Redacted models_config.json structure."),
+        ("rag-summary.json", "Redacted rag_config.json structure."),
         ("git.json", "Branch, commit, upstream, status, and diff-stat metadata."),
     ]
     if include_thread_summary:
@@ -812,6 +824,8 @@ def create_support_bundle(
     out_path: Path | None = None,
     config_path: Path | None = None,
     extensions_config_path: Path | None = None,
+    models_config_path: Path | None = None,
+    rag_config_path: Path | None = None,
     thread_id: str | None = None,
     include_doctor: bool = False,
 ) -> Path:
@@ -819,6 +833,8 @@ def create_support_bundle(
     project_root = project_root.resolve()
     config_path = (config_path or project_root / "config.yaml").resolve()
     extensions_config_path = (extensions_config_path or project_root / "extensions_config.json").resolve()
+    models_config_path = (models_config_path or project_root / "models_config.json").resolve()
+    rag_config_path = (rag_config_path or project_root / "rag_config.json").resolve()
     out_path = (out_path or _default_out_path(project_root)).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if thread_id:
@@ -843,6 +859,8 @@ def create_support_bundle(
     environment = collect_environment(project_root)
     config_summary = collect_config_summary(config_path)
     extensions_summary = collect_extensions_summary(extensions_config_path)
+    models_summary = collect_models_summary(models_config_path)
+    rag_summary = collect_rag_summary(rag_config_path)
     git_summary = collect_git_summary(project_root)
     thread_summary = collect_thread_summary(project_root, thread_id) if thread_id else None
     doctor = collect_doctor_output(project_root) if include_doctor else None
@@ -867,6 +885,8 @@ def create_support_bundle(
         _write_json(zf, "environment", environment)
         _write_json(zf, "config-summary", config_summary)
         _write_json(zf, "extensions-summary", extensions_summary)
+        _write_json(zf, "models-summary", models_summary)
+        _write_json(zf, "rag-summary", rag_summary)
         _write_json(zf, "git", git_summary)
         if thread_summary is not None:
             _write_json(zf, "thread-summary", thread_summary)
@@ -884,6 +904,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--project-root", type=Path, default=repo_root, help="DeerFlow project root")
     parser.add_argument("--config", type=Path, default=None, help="Path to config.yaml")
     parser.add_argument("--extensions-config", type=Path, default=None, help="Path to extensions_config.json")
+    parser.add_argument("--models-config", type=Path, default=None, help="Path to models_config.json")
+    parser.add_argument("--rag-config", type=Path, default=None, help="Path to rag_config.json")
     parser.add_argument("--thread-id", default=None, help="Optional thread id to include file manifests for")
     parser.add_argument("--out", type=Path, default=None, help="Output zip path")
     parser.add_argument("--include-doctor", action="store_true", help="Include redacted make doctor output")
@@ -898,6 +920,8 @@ def main(argv: list[str] | None = None) -> int:
             out_path=args.out,
             config_path=args.config,
             extensions_config_path=args.extensions_config,
+            models_config_path=args.models_config,
+            rag_config_path=args.rag_config,
             thread_id=args.thread_id,
             include_doctor=args.include_doctor,
         )

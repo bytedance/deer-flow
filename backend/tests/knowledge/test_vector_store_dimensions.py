@@ -7,10 +7,10 @@ would have nothing to build *into*.
 
 Two rules are load-bearing here:
 
-1. **The default width keeps the names every deployment already has.** ``kb_chunks`` and
-   friends were created by every install before this spec and their vectors are the whole
-   library; a suffix on 1024 would make them invisible (an untouched deployment must be
-   byte-for-byte unchanged, spec §4 验收 6).
+1. **The default width keeps the name every deployment already has.** ``kb_chunks`` was
+   created by every install before this spec and its vectors are the whole library; a
+   suffix on 1024 would make it invisible (an untouched deployment must be byte-for-byte
+   unchanged, spec §4 验收 6).
 2. **A new generation is never created silently while the old one still holds vectors.**
    The empty new collection would answer every query with nothing, which reads as "the
    library was wiped" — so the store refuses and hands the situation to the migration.
@@ -27,7 +27,7 @@ import pytest
 
 from deerflow.knowledge.vector_store import DimensionMigrationRequired, KnowledgeVectorStore
 
-LEGACY_NAMES = ("kb_chunks", "kb_entities", "kb_wiki_entries", "kb_manual_cards")
+LEGACY_NAMES = ("kb_chunks",)
 
 
 class _FakeQdrant:
@@ -67,7 +67,7 @@ def test_a_declared_width_carries_the_suffix():
     client = _FakeQdrant()
     store = _store(client, dense_size=1536)
 
-    assert store.collection_names == ("kb_chunks_1536", "kb_entities_1536", "kb_wiki_entries_1536", "kb_manual_cards_1536")
+    assert store.collection_names == ("kb_chunks_1536",)
 
 
 @pytest.mark.asyncio
@@ -77,14 +77,14 @@ async def test_init_creates_the_new_generation_at_the_declared_width():
 
     await store.init_collections()
 
-    assert client.created == [("kb_chunks_1536", 1536), ("kb_entities_1536", 1536), ("kb_wiki_entries_1536", 1536), ("kb_manual_cards_1536", 1536)]
-    assert {name for name, _ in client.indexes} == {f"kb_{kind}_1536" for kind in ("chunks", "entities", "wiki_entries", "manual_cards")}
+    assert client.created == [("kb_chunks_1536", 1536)]
+    assert {name for name, _ in client.indexes} == {"kb_chunks_1536"}
 
 
 @pytest.mark.asyncio
 async def test_init_refuses_to_create_an_empty_generation_while_the_old_one_still_holds_vectors():
-    """The whole library lives in the 1024 collections; a silent new one would read as "wiped"."""
-    client = _FakeQdrant({"kb_chunks": 1024, "kb_entities": 1024, "kb_wiki_entries": 1024, "kb_manual_cards": 1024})
+    """The whole library lives in the 1024 collection; a silent new one would read as "wiped"."""
+    client = _FakeQdrant({"kb_chunks": 1024})
     store = _store(client, dense_size=1536)
 
     with pytest.raises(DimensionMigrationRequired) as excinfo:
@@ -104,16 +104,16 @@ async def test_init_creates_a_fresh_generation_when_no_other_one_exists():
 
     await store.init_collections()
 
-    assert client.created == [(f"kb_{kind}_768", 768) for kind in ("chunks", "entities", "wiki_entries", "manual_cards")]
+    assert client.created == [("kb_chunks_768", 768)]
 
 
 @pytest.mark.asyncio
 async def test_create_collections_is_the_migration_entry_and_skips_the_hand_off():
     """The migration *is* the answer to the refusal above, so it must be able to build into it."""
-    client = _FakeQdrant({"kb_chunks": 1024, "kb_entities": 1024, "kb_wiki_entries": 1024, "kb_manual_cards": 1024})
+    client = _FakeQdrant({"kb_chunks": 1024})
     store = _store(client, dense_size=1536)
 
     await store.create_collections()
 
-    assert client.created == [(f"kb_{kind}_1536", 1536) for kind in ("chunks", "entities", "wiki_entries", "manual_cards")]
+    assert client.created == [("kb_chunks_1536", 1536)]
     assert client.sizes["kb_chunks"] == 1024, "旧的一代原样留着，删除是迁移最后一步的事"

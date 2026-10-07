@@ -77,8 +77,6 @@ def reset_state() -> None:
 def start_reembed(
     *,
     store: Any,
-    graph_store: Any,
-    wiki_store: Any,
     vector_store: Any,
     embedder: Any,
     target_payload: dict[str, Any],
@@ -98,7 +96,7 @@ def start_reembed(
         target_model=target_payload.get("embedding_model"),
         target_base_url=target_payload.get("embedding_base_url"),
     )
-    spec = (store, graph_store, wiki_store, vector_store, embedder, target_payload)
+    spec = (store, vector_store, embedder, target_payload)
     task = asyncio.create_task(_run(*spec), name="embedding-reembed")
     _TASKS.add(task)
     task.add_done_callback(_TASKS.discard)
@@ -109,8 +107,6 @@ async def reembed_libraries(
     *,
     vector_store: Any,
     embedder: Any,
-    graph_store: Any,
-    wiki_store: Any,
 ) -> dict[str, bool]:
     """Re-embed every library in place; returns each library's completeness verdict.
 
@@ -123,7 +119,7 @@ async def reembed_libraries(
     """
     complete: dict[str, bool] = {}
     for kb in await store.list_all_kbs():
-        report = await reindex_kb(store, vector_store, embedder, kb_id=kb["id"], graph_store=graph_store, wiki_store=wiki_store, stamp=False)
+        report = await reindex_kb(store, vector_store, embedder, kb_id=kb["id"], stamp=False)
         complete[kb["id"]] = report.complete
     return complete
 
@@ -133,9 +129,8 @@ async def collect_window_marks(store: Any) -> dict[str, Any]:
 
     Same shape as the width channel's content mark (``dimension_migration._content_mark``,
     D5-6): the store's invalidation signature per collection plus the document id set, so
-    an arriving document, an edited chunk, a regenerated wiki entry or a delete all move
-    the mark. The rebuild's own writes touch only the documents table, so they cannot
-    dirty their own baseline.
+    an arriving document, an edited chunk or a delete all move the mark. The rebuild's own
+    writes touch only the documents table, so they cannot dirty their own baseline.
     """
     marks: dict[str, Any] = {}
     for kb in await store.list_all_kbs():
@@ -153,8 +148,6 @@ async def reembed_window_delta(
     *,
     vector_store: Any,
     embedder: Any,
-    graph_store: Any,
-    wiki_store: Any,
     marks: dict[str, Any],
     main_complete: dict[str, bool],
 ) -> int:
@@ -178,15 +171,13 @@ async def reembed_window_delta(
                 await write_kb_identity(store._sf, kb_id, embedder.identity)
             continue
         logger.info("re-embedding library %s: it changed during the rebuild window", kb_id)
-        await reindex_kb(store, vector_store, embedder, kb_id=kb_id, graph_store=graph_store, wiki_store=wiki_store, include_non_terminal=True)
+        await reindex_kb(store, vector_store, embedder, kb_id=kb_id, include_non_terminal=True)
         walked += 1
     return walked
 
 
 async def _run(
     store: Any,
-    graph_store: Any,
-    wiki_store: Any,
     vector_store: Any,
     embedder: Any,
     target_payload: dict[str, Any],
@@ -195,7 +186,7 @@ async def _run(
     state = _STATE
     try:
         marks = await collect_window_marks(store)
-        main_complete = await reembed_libraries(store, vector_store=vector_store, embedder=embedder, graph_store=graph_store, wiki_store=wiki_store)
+        main_complete = await reembed_libraries(store, vector_store=vector_store, embedder=embedder)
     except Exception as exc:
         state.state = "failed"
         state.detail = f"{type(exc).__name__}: {exc}"
@@ -216,7 +207,7 @@ async def _run(
     # The delta pass stamps the identity (D2=乙): the flip just closed the target set,
     # so what this walk catches up is exactly what the main walk's snapshot missed.
     try:
-        await reembed_window_delta(store, vector_store=vector_store, embedder=embedder, graph_store=graph_store, wiki_store=wiki_store, marks=marks, main_complete=main_complete)
+        await reembed_window_delta(store, vector_store=vector_store, embedder=embedder, marks=marks, main_complete=main_complete)
     except Exception as exc:
         state.state = "failed"
         state.detail = f"{type(exc).__name__}: {exc}"

@@ -27,10 +27,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from deerflow.knowledge.graph.store import GraphStore
 from deerflow.knowledge.reindex import DEFAULT_PAGE_SIZE, reindex_kb
 from deerflow.knowledge.store import KnowledgeStore
-from deerflow.knowledge.wiki.store import WikiStore
 
 logger = logging.getLogger(__name__)
 
@@ -107,8 +105,6 @@ async def migrate_collections(
     *,
     vector_store: Any,
     embedder: _Embedder,
-    graph_store: GraphStore,
-    wiki_store: WikiStore,
     page_size: int = DEFAULT_PAGE_SIZE,
 ) -> MigrationReport:
     """Rebuild every library into ``vector_store``'s (new) generation.
@@ -146,7 +142,7 @@ async def migrate_collections(
 
         for kb in kbs:
             kb_id = kb["id"]
-            kb_report = await reindex_kb(store, vector_store, embedder, kb_id=kb_id, graph_store=graph_store, wiki_store=wiki_store, page_size=page_size)
+            kb_report = await reindex_kb(store, vector_store, embedder, kb_id=kb_id, page_size=page_size)
             report.documents_reindexed += kb_report.documents_reindexed
             report.documents_failed += kb_report.documents_failed
             report.chunks_indexed += kb_report.chunks_indexed
@@ -162,7 +158,7 @@ async def migrate_collections(
             if after == baseline[kb_id]:
                 continue
             logger.info("dimension migration re-embedding library %s: it changed during the switch window", kb_id)
-            delta = await reindex_kb(store, vector_store, embedder, kb_id=kb_id, graph_store=graph_store, wiki_store=wiki_store, page_size=page_size, include_non_terminal=True)
+            delta = await reindex_kb(store, vector_store, embedder, kb_id=kb_id, page_size=page_size, include_non_terminal=True)
             report.delta_documents += delta.documents_reindexed
             report.delta_chunks_indexed += delta.chunks_indexed
             report.documents_failed += delta.documents_failed
@@ -185,8 +181,8 @@ async def _content_mark(store: KnowledgeStore, kb_id: str) -> tuple[Any, frozens
     Two cheap reads: the store's own invalidation signature (counts plus the newest edit
     timestamp per collection — the projection cache's fingerprint, reused rather than
     re-derived) and the document id set. Together they catch an arriving document, an
-    edited chunk, a regenerated wiki entry and a deleted document; a document still in
-    flight shows up as its chunks land.
+    edited chunk and a deleted document; a document still in flight shows up as its
+    chunks land.
     """
     documents = await store.list_documents(kb_id)
     return await store.get_kb_content_stats(kb_id), frozenset(document["id"] for document in documents)

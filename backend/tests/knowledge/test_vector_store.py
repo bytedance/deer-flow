@@ -15,7 +15,7 @@ import pytest_asyncio
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, PayloadSchemaType, SparseVector
 
-from deerflow.knowledge.vector_store import ChunkUpsert, EntityUpsert, KnowledgeVectorStore, ManualCardUpsert
+from deerflow.knowledge.vector_store import ChunkUpsert, KnowledgeVectorStore
 
 from .conftest import QDRANT_TEST_URL, requires_qdrant
 
@@ -70,11 +70,6 @@ async def test_named_vectors_config(vector_store):
     # no distance field); presence of the "sparse" named vector pins the DOT path.
     assert "sparse" in info.config.params.sparse_vectors
 
-    for name in (store.entities_collection, store.wiki_entries_collection):
-        info = await client.get_collection(name)
-        assert info.config.params.vectors["dense"].size == 1024
-        assert "sparse" in info.config.params.sparse_vectors
-
 
 async def test_kb_chunks_payload_indexes(vector_store):
     store, client = vector_store
@@ -83,11 +78,6 @@ async def test_kb_chunks_payload_indexes(vector_store):
     assert set(info.payload_schema) >= {"kb_id", "doc_id", "entities"}
     for field in ("kb_id", "doc_id", "entities"):
         assert info.payload_schema[field].data_type == PayloadSchemaType.KEYWORD
-
-    # The other two collections only need kb_id (per-kb wipe on kb deletion).
-    for name in (store.entities_collection, store.wiki_entries_collection):
-        info = await client.get_collection(name)
-        assert "kb_id" in info.payload_schema
 
 
 async def test_upsert_chunks_payload_carries_pointer_not_text(vector_store):
@@ -181,65 +171,13 @@ async def test_delete_by_doc_removes_only_that_doc(vector_store):
 
 async def test_delete_by_kb_wipes_points_across_collections(vector_store):
     store, client = vector_store
-    await store.upsert_chunks([_chunk("doc-1#0000", "kb-1", "doc-1")])
-    # Seed an entity point for the same kb via the raw client (entity/wiki
-    # upsert helpers land with their own tasks).
-    await client.upsert(
-        collection_name=store.entities_collection,
-        points=[
-            {
-                "id": uuid.uuid5(uuid.NAMESPACE_URL, "kb-1:广义相对论").hex,
-                "vector": {"dense": [0.01] * 1024, "sparse": SparseVector(indices=[1], values=[0.5])},
-                "payload": {"kb_id": "kb-1", "name": "广义相对论"},
-            }
-        ],
-    )
+    await store.upsert_chunks([_chunk("doc-1#0000", "kb-1", "doc-1"), _chunk("doc-2#0000", "kb-1", "doc-2")])
 
     await store.delete_by_kb("kb-1")
 
     for name in store.collection_names:
         count = await client.count(name, exact=True)
         assert count.count == 0, name
-
-
-async def test_delete_entities(vector_store):
-    store, client = vector_store
-    await store.upsert_entities([EntityUpsert(name="实体甲", kb_id="kb-1", dense=[0.1] * 1024), EntityUpsert(name="实体乙", kb_id="kb-1", dense=[0.2] * 1024)])
-
-    await store.delete_entities("kb-1", ["实体甲"])
-
-    assert (await client.count(store.entities_collection, exact=True)).count == 1
-    remaining = await client.scroll(store.entities_collection, limit=10, with_payload=True)
-    assert remaining[0][0].payload["name"] == "实体乙"
-    # unknown name / empty list are no-ops
-    await store.delete_entities("kb-1", ["不存在"])
-    await store.delete_entities("kb-1", [])
-    assert (await client.count(store.entities_collection, exact=True)).count == 1
-
-
-async def test_query_manual_cards_filters_by_kb_and_ranks_by_score(vector_store):
-    """``query_manual_cards`` (Phase-3 P6): dense top-k over kb_manual_cards,
-    scoped to one kb, carrying the card pointer payload."""
-    # 余弦对单维常量向量不敏感（[0.9,0,…] 与 [0.1,0,…] 得分同为 1.0）——
-    # near/far 用方向差异构造，确保分数严格可分。
-    store, client = vector_store
-    await store.upsert_manual_cards(
-        [
-            ManualCardUpsert(card_id="card-near", kb_id="kb-1", title="近", dense=[1.0] + [0.0] * 1023),
-            ManualCardUpsert(card_id="card-far", kb_id="kb-1", title="远", dense=[0.5, 0.5] + [0.0] * 1022),
-            ManualCardUpsert(card_id="card-other-kb", kb_id="kb-2", title="别库", dense=[1.0] + [0.0] * 1023),
-        ]
-    )
-
-    points = await store.query_manual_cards(dense=[1.0] + [0.0] * 1023, kb_id="kb-1", top_k=5)
-
-    assert [point.payload["card_id"] for point in points] == ["card-near", "card-far"]
-    assert all(point.payload["kb_id"] == "kb-1" for point in points)
-    assert points[0].score > points[1].score
-
-    # top_k caps the candidate count fed into the shared pool.
-    capped = await store.query_manual_cards(dense=[1.0] + [0.0] * 1023, kb_id="kb-1", top_k=1)
-    assert [point.payload["card_id"] for point in capped] == ["card-near"]
 
 
 async def test_scroll_collection_pages_and_filters_by_kb(vector_store):
@@ -262,18 +200,3 @@ async def test_scroll_collection_pages_and_filters_by_kb(vector_store):
     assert all(r.payload["kb_id"] == "kb-1" for r in records)
     # with_vectors=False: ids + payload only, no vector data on the wire.
     assert all(not r.vector for r in records)
-
-
-async def test_retrieve_vectors_returns_dense_by_point_ids(vector_store):
-    """``retrieve_vectors`` (vector-space projection P2): batched dense fetch
-    keyed by raw point id, matching the scroll output one-to-one."""
-    store, client = vector_store
-    await store.upsert_chunks([_chunk("doc-1#0000", "kb-1", "doc-1"), _chunk("doc-1#0001", "kb-1", "doc-1")])
-    records = await store.scroll_collection(store.chunks_collection, "kb-1")
-
-    vectors = await store.retrieve_vectors(store.chunks_collection, [r.id for r in records])
-
-    assert set(vectors) == {str(r.id) for r in records}
-    assert all(len(v) == 1024 for v in vectors.values())
-    # empty id list short-circuits without a client call.
-    assert await store.retrieve_vectors(store.chunks_collection, []) == {}

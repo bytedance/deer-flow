@@ -197,10 +197,8 @@ async def _async_main(args: argparse.Namespace, *, environment: str = ENV_LOCAL)
         return EXIT_ERROR
 
     from deerflow.knowledge.eval.runner import build_default_searchers, render_summary, run_evaluation, write_reports
-    from deerflow.knowledge.graph.store import GraphStore
     from deerflow.knowledge.store import get_knowledge_store
     from deerflow.knowledge.vector_store import get_vector_store
-    from deerflow.knowledge.wiki.store import WikiStore
     from deerflow.persistence.engine import close_engine, init_engine_from_config
 
     await init_engine_from_config(config.database)
@@ -222,8 +220,6 @@ async def _async_main(args: argparse.Namespace, *, environment: str = ENV_LOCAL)
             user_id=kb["owner_id"],
             store=store,
             vector_store=get_vector_store(),
-            graph_store=GraphStore(store._sf),  # same construction the impls use
-            wiki_store=WikiStore(store._sf),
         )
         report = await run_evaluation(
             questions,

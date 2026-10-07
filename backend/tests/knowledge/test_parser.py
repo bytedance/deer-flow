@@ -466,13 +466,11 @@ def test_supported_upload_suffixes_contract():
     assert not is_local_suffix(".pdf")
 
 
-def _stub_gates(monkeypatch, *, video: bool = False, table: bool = False) -> None:
-    """把 parser 的配置读取器指向**双腿** stub：门控两态不读本机 config.yaml。
+def _stub_gates(monkeypatch, *, table: bool = False) -> None:
+    """把 parser 的配置读取器指向表格腿 stub：门控两态不读本机 config.yaml。
 
     预存缺陷修复（2026-09-09）：off 态断言原先依赖「测试环境默认 off」，但开发机
-    的真实 config.yaml 里 `rag.video.enabled: true`，使它们恒红。stub 必须同时带上
-    两条腿，否则另一腿的 ``*_ingest_enabled()`` 会走 AttributeError 降级路，把真实
-    行为掩盖成「恰好也是 off」。
+    的真实 config.yaml 里该门是开的，使它们恒红。stub 让两态都可控。
     """
     from types import SimpleNamespace
 
@@ -483,46 +481,18 @@ def _stub_gates(monkeypatch, *, video: bool = False, table: bool = False) -> Non
         "get_app_config",
         lambda: SimpleNamespace(
             rag=SimpleNamespace(
-                video=SimpleNamespace(enabled=video, max_size_mb=2048),
                 table=SimpleNamespace(enabled=table, max_size_mb=50, card_mode="markdown"),
             )
         ),
     )
 
 
-def test_video_upload_suffixes_contract(monkeypatch):
-    """spec 2026-09-08 §2（plan Task 1）：视频集是独立 frozenset（文本冻结集
-    原地不动），并集助手两态随 rag.video.enabled；off 态默认拒 .mp4。"""
-    from deerflow.knowledge.parser import (
-        SUPPORTED_UPLOAD_SUFFIXES,
-        VIDEO_UPLOAD_SUFFIXES,
-        is_supported_suffix,
-        supported_upload_suffixes,
-    )
-
-    assert VIDEO_UPLOAD_SUFFIXES == frozenset({".mp4", ".mov", ".mkv", ".webm"})
-    assert SUPPORTED_UPLOAD_SUFFIXES & VIDEO_UPLOAD_SUFFIXES == frozenset()  # 两集不相交
-
-    # off 态：并集 = 文本集，视频后缀被拒（大小写不敏感）
-    _stub_gates(monkeypatch)
-    assert supported_upload_suffixes() == SUPPORTED_UPLOAD_SUFFIXES
-    assert not is_supported_suffix(".MP4")
-
-    # on 态：并集含视频集，文本集不受影响
-    _stub_gates(monkeypatch, video=True)
-    assert supported_upload_suffixes() == SUPPORTED_UPLOAD_SUFFIXES | VIDEO_UPLOAD_SUFFIXES
-    assert is_supported_suffix(".MP4")
-    assert is_supported_suffix(".md")
-
-
 def test_table_upload_suffixes_contract(monkeypatch):
     """spec 2026-09-09 §4（plan Task 1）：表格集是独立 frozenset（文本冻结集原地
-    不动、`.csv` 留在文本集不进表格集），并集助手随 rag.table.enabled 两态；
-    与视频腿互不干扰。"""
+    不动、`.csv` 留在文本集不进表格集），并集助手随 rag.table.enabled 两态。"""
     from deerflow.knowledge.parser import (
         SUPPORTED_UPLOAD_SUFFIXES,
         TABLE_UPLOAD_SUFFIXES,
-        VIDEO_UPLOAD_SUFFIXES,
         is_supported_suffix,
         supported_upload_suffixes,
         table_ingest_enabled,
@@ -550,13 +520,6 @@ def test_table_upload_suffixes_contract(monkeypatch):
     assert is_supported_suffix(".tsv")
     assert is_supported_suffix(".md")
     assert table_upload_limit_bytes() == 50 * 1024 * 1024
-
-    # 两腿同开：三集并；只开视频时表格后缀仍被拒（腿间独立）
-    _stub_gates(monkeypatch, video=True, table=True)
-    assert supported_upload_suffixes() == SUPPORTED_UPLOAD_SUFFIXES | VIDEO_UPLOAD_SUFFIXES | TABLE_UPLOAD_SUFFIXES
-    _stub_gates(monkeypatch, video=True)
-    assert not is_supported_suffix(".xlsx")
-    assert is_supported_suffix(".mp4")
 
 
 def test_table_gate_degrades_to_off_when_config_unreadable(monkeypatch):
@@ -1920,16 +1883,19 @@ async def test_no_images_is_an_empty_outcome(monkeypatch):
     assert recorded == []
 
 
-def test_the_captioner_reuses_the_graph_legs_threshold_constant():
-    """One constant, and not a third copy: the ratio lives in ``graph/indexer.py``.
+def test_the_captioner_owns_its_threshold_constant():
+    """One constant, one home: with the graph leg gone the ratio lives in ``captioner.py``.
 
-    The pin covers the new leg's own module only — a *fourth* copy written elsewhere would
-    have to be caught by the boundary cases above (0.3 within the captioner would pass no
+    The pin keeps a single definition — a second copy written elsewhere would have to be
+    caught by the boundary cases above (0.3 within the captioner would pass no
     count-sensitive verdict test by accident).
     """
     from pathlib import Path
 
+    from deerflow.knowledge.captioner import DEGRADED_FAILURE_THRESHOLD
+
+    assert DEGRADED_FAILURE_THRESHOLD == 0.3
     source = (Path(__file__).resolve().parents[2] / "packages" / "harness" / "deerflow" / "knowledge" / "captioner.py").read_text(encoding="utf-8")
 
-    assert "DEGRADED_FAILURE_THRESHOLD" in source
-    assert "0.3" not in source
+    assert source.count("DEGRADED_FAILURE_THRESHOLD") == 2  # the definition plus its one reader
+    assert source.count("0.3") == 1  # the literal appears once — inside the definition

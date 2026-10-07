@@ -1,10 +1,9 @@
-"""Fixtures for the three retrieval tools (spec §4).
+"""Fixtures for the retrieval tool tests (spec §4).
 
 One shared environment: KB ``kb-t`` (owner ``user-1``) with one document and
-three chunks, a small graph (DeerFlow → Gateway → MinerU), one wiki entry,
-and a uniquely-prefixed Qdrant store whose points are seeded with the same
-keyword one-hot embedder the tools are tested with — so a query containing a
-keyword deterministically lands on the chunk/entity/entry carrying it.
+three chunks, and a uniquely-prefixed Qdrant store whose points are seeded with
+the same keyword one-hot embedder the tools are tested with — so a query
+containing a keyword deterministically lands on the chunk carrying it.
 """
 
 from __future__ import annotations
@@ -18,11 +17,8 @@ from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import SparseVector
 
 from deerflow.knowledge.embedder import EmbeddingResult
-from deerflow.knowledge.graph.extractor import ExtractedEntity, ExtractedRelation
-from deerflow.knowledge.graph.store import GraphStore
 from deerflow.knowledge.store import KnowledgeStore
-from deerflow.knowledge.vector_store import ChunkUpsert, EntityUpsert, KnowledgeVectorStore, WikiEntryUpsert
-from deerflow.knowledge.wiki.store import WikiStore
+from deerflow.knowledge.vector_store import ChunkUpsert, KnowledgeVectorStore
 
 from ..conftest import QDRANT_TEST_URL
 
@@ -63,8 +59,6 @@ class KeywordEmbedder:
 @pytest_asyncio.fixture
 async def tools_env(session_factory) -> AsyncIterator[dict]:
     store = KnowledgeStore(session_factory)
-    graph_store = GraphStore(session_factory)
-    wiki_store = WikiStore(session_factory)
     await store.create_kb(kb_id=KB_ID, owner_id=OWNER_ID, name="工具测试库")
     await store.create_document(doc_id=DOC_ID, kb_id=KB_ID, uploader_id=OWNER_ID, name="架构.md", size_bytes=10, storage_path="/a.md")
     await store.insert_chunks(
@@ -85,14 +79,6 @@ async def tools_env(session_factory) -> AsyncIterator[dict]:
         ]
     )
     embedder = KeywordEmbedder()
-    # Graph rows.
-    await graph_store.upsert_entities(KB_ID, [ExtractedEntity(name="DeerFlow", type="系统", description="超级智能体")], chunk_id=f"{DOC_ID}-c0")
-    await graph_store.upsert_entities(KB_ID, [ExtractedEntity(name="Gateway", type="组件", description="会话管理入口")], chunk_id=f"{DOC_ID}-c0")
-    await graph_store.upsert_entities(KB_ID, [ExtractedEntity(name="MinerU", type="服务", description="文档解析服务")], chunk_id=f"{DOC_ID}-c1")
-    await graph_store.upsert_relations(KB_ID, [ExtractedRelation(source="DeerFlow", target="Gateway", relation="包含", description="系统包含入口组件")], chunk_id=f"{DOC_ID}-c0")
-    await graph_store.upsert_relations(KB_ID, [ExtractedRelation(source="Gateway", target="MinerU", relation="调用", description="解析调用")], chunk_id=f"{DOC_ID}-c1")
-    # Wiki row.
-    entry = await wiki_store.upsert_entry(KB_ID, title="DeerFlow", content="# DeerFlow\n\nDeerFlow 是基于 LangGraph 的超级智能体系统。", source_chunk_ids=[f"{DOC_ID}-c0"])
 
     prefix = f"testt{uuid.uuid4().hex[:10]}"
     client = AsyncQdrantClient(QDRANT_TEST_URL, timeout=10.0)
@@ -115,18 +101,12 @@ async def tools_env(session_factory) -> AsyncIterator[dict]:
             for c in chunks
         ]
     )
-    for name, chunk_id in (("DeerFlow", f"{DOC_ID}-c0"), ("Gateway", f"{DOC_ID}-c0"), ("MinerU", f"{DOC_ID}-c1")):
-        await vector_store.upsert_entities([EntityUpsert(name=name, kb_id=KB_ID, type="x", description=f"{name} 描述", dense=(await embedder.embed([name]))[0].dense)])
-    await vector_store.upsert_wiki_entries([WikiEntryUpsert(entry_id=entry["id"], kb_id=KB_ID, title="DeerFlow", dense=(await embedder.embed(["DeerFlow"]))[0].dense)])
     try:
         yield {
             "store": store,
-            "graph_store": graph_store,
-            "wiki_store": wiki_store,
             "vector_store": vector_store,
             "client": client,
             "embedder": embedder,
-            "entry_id": entry["id"],
         }
     finally:
         for name in vector_store.collection_names:

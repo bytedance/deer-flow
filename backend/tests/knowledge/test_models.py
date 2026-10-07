@@ -1,10 +1,8 @@
 """Tests for the knowledge-base ORM models and KnowledgeStore CRUD.
 
-Covers the six RAG tables created by the ``0011_knowledge`` migration:
-``knowledge_bases``, ``documents``, ``chunks``, ``graph_entities``,
-``graph_relations``, ``wiki_entries``. The sqlite database is bootstrapped
-through the real alembic chain, so these tests also prove the migration
-itself round-trips.
+Covers the RAG business tables ``knowledge_bases``, ``documents`` and
+``chunks``. The sqlite database is bootstrapped through the real persistence
+bootstrap, so these tests also prove the table definitions round-trip.
 """
 
 from __future__ import annotations
@@ -15,10 +13,7 @@ from sqlalchemy import select
 from deerflow.knowledge.models import (
     ChunkRow,
     DocumentRow,
-    GraphEntityRow,
-    GraphRelationRow,
     KnowledgeBaseRow,
-    WikiEntryRow,
 )
 from deerflow.knowledge.store import KnowledgeStore
 
@@ -139,17 +134,17 @@ async def test_document_path_status_partial_merge(session_factory):
         storage_path="p",
     )
 
-    entered = await store.update_document_status("doc-1", "indexing", path_status={"vector": "pending", "graph": "pending"})
-    assert entered["path_status"] == {"vector": "pending", "graph": "pending"}
+    entered = await store.update_document_status("doc-1", "indexing", path_status={"vector": "pending", "caption": "pending"})
+    assert entered["path_status"] == {"vector": "pending", "caption": "pending"}
 
-    # 只写 vector=done，graph 必须保持 pending（整体覆盖即违反契约）
+    # 只写 vector=done，caption 必须保持 pending（整体覆盖即违反契约）
     merged = await store.update_document_status("doc-1", "indexing", path_status={"vector": "done"})
-    assert merged["path_status"] == {"vector": "done", "graph": "pending"}
+    assert merged["path_status"] == {"vector": "done", "caption": "pending"}
 
     # 独立读取与列表序列化同样携带合并结果（持久化而非内存态）
-    assert (await store.get_document("doc-1"))["path_status"] == {"vector": "done", "graph": "pending"}
+    assert (await store.get_document("doc-1"))["path_status"] == {"vector": "done", "caption": "pending"}
     listed = await store.list_documents("kb-1")
-    assert listed[0]["path_status"] == {"vector": "done", "graph": "pending"}
+    assert listed[0]["path_status"] == {"vector": "done", "caption": "pending"}
 
 
 @pytest.mark.asyncio
@@ -165,7 +160,7 @@ async def test_reset_document_for_retry_clears_path_status(session_factory):
         size_bytes=10,
         storage_path="p",
     )
-    await store.update_document_status("doc-1", "failed", error="boom", path_status={"vector": "done", "graph": "failed"})
+    await store.update_document_status("doc-1", "failed", error="boom", path_status={"vector": "done", "caption": "failed"})
 
     reset = await store.reset_document_for_retry("doc-1")
     assert reset is not None
@@ -265,69 +260,6 @@ async def test_chunk_pagination(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_graph_tables_round_trip(session_factory):
-    """graph_entities / graph_relations persist entity+relation rows with
-    source_chunk_ids linkage (spec §3.4). Full graph CRUD lands with the
-    graph indexer; this pins the table contract."""
-    async with session_factory() as session:
-        session.add(
-            GraphEntityRow(
-                id="ent-1",
-                kb_id="kb-1",
-                name="广义相对论",
-                type="concept",
-                description="爱因斯坦提出的引力理论",
-                source_chunk_ids=["doc-1#0000", "doc-1#0007"],
-                status="ready",
-            )
-        )
-        session.add(
-            GraphRelationRow(
-                id="rel-1",
-                kb_id="kb-1",
-                source="广义相对论",
-                target="GPS",
-                relation="应用于",
-                description="GPS 卫星钟差修正依赖相对论",
-                source_chunk_ids=["doc-1#0007"],
-            )
-        )
-        await session.commit()
-
-        entity = (await session.execute(select(GraphEntityRow).where(GraphEntityRow.kb_id == "kb-1"))).scalar_one()
-        assert entity.name == "广义相对论"
-        assert entity.source_chunk_ids == ["doc-1#0000", "doc-1#0007"]
-        assert entity.status == "ready"
-
-        relation = (await session.execute(select(GraphRelationRow).where(GraphRelationRow.kb_id == "kb-1"))).scalar_one()
-        assert relation.source == "广义相对论"
-        assert relation.target == "GPS"
-        assert relation.source_chunk_ids == ["doc-1#0007"]
-
-
-@pytest.mark.asyncio
-async def test_wiki_entries_round_trip(session_factory):
-    """wiki_entries carries full entry text + dirty/ready status (spec §3.5)."""
-    async with session_factory() as session:
-        session.add(
-            WikiEntryRow(
-                id="entry-1",
-                kb_id="kb-1",
-                title="广义相对论",
-                content="广义相对论是……",
-                status="dirty",
-                source_chunk_ids=["doc-1#0000"],
-            )
-        )
-        await session.commit()
-
-        entry = (await session.execute(select(WikiEntryRow).where(WikiEntryRow.kb_id == "kb-1"))).scalar_one()
-        assert entry.title == "广义相对论"
-        assert entry.status == "dirty"
-        assert entry.updated_at is not None
-
-
-@pytest.mark.asyncio
 async def test_delete_document_cascades_chunks(session_factory):
     store = KnowledgeStore(session_factory)
     await store.create_kb(kb_id="kb-1", owner_id="user-1", name="kb")
@@ -341,26 +273,22 @@ async def test_delete_document_cascades_chunks(session_factory):
 
 
 @pytest.mark.asyncio
-async def test_delete_kb_cascades_all_six_tables(session_factory):
-    """Deleting a KB must clear business rows across all six tables; the
+async def test_delete_kb_cascades_all_tables(session_factory):
+    """Deleting a KB must clear business rows across its tables; the
     Qdrant-side cleanup is layered on top by the API/worker (spec §3.7)."""
     store = KnowledgeStore(session_factory)
     await store.create_kb(kb_id="kb-1", owner_id="user-1", name="kb")
     await store.create_document(doc_id="doc-1", kb_id="kb-1", uploader_id="user-1", name="a.pdf", size_bytes=10, storage_path="p")
     await store.insert_chunks([{"chunk_id": "doc-1#0000", "doc_id": "doc-1", "kb_id": "kb-1", "chunk_index": 0, "text": "t", "heading_path": [], "page": None, "token_count": 1}])
-    async with session_factory() as session:
-        session.add(GraphEntityRow(id="ent-1", kb_id="kb-1", name="e", type="concept", description="d", source_chunk_ids=["doc-1#0000"], status="ready"))
-        session.add(GraphRelationRow(id="rel-1", kb_id="kb-1", source="e", target="f", relation="r", description=None, source_chunk_ids=[]))
-        session.add(WikiEntryRow(id="entry-1", kb_id="kb-1", title="t", content="c", status="ready", source_chunk_ids=[]))
-        await session.commit()
 
     assert await store.delete_kb("kb-1") is True
     assert await store.get_kb("kb-1") is None
     assert await store.list_documents("kb-1") == []
     async with session_factory() as session:
-        for row_cls in (ChunkRow, DocumentRow, GraphEntityRow, GraphRelationRow, WikiEntryRow, KnowledgeBaseRow):
-            remaining = (await session.execute(select(row_cls).where(row_cls.kb_id == "kb-1") if row_cls is not KnowledgeBaseRow else select(row_cls).where(row_cls.id == "kb-1"))).scalars().all()
+        for row_cls in (ChunkRow, DocumentRow):
+            remaining = (await session.execute(select(row_cls).where(row_cls.kb_id == "kb-1"))).scalars().all()
             assert remaining == [], f"{row_cls.__tablename__} rows left after delete_kb"
+        assert (await session.execute(select(KnowledgeBaseRow).where(KnowledgeBaseRow.id == "kb-1"))).scalars().all() == []
 
 
 @pytest.mark.asyncio

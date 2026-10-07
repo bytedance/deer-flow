@@ -25,6 +25,21 @@ SOUL_FILENAME = "SOUL.md"
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 MAX_AGENT_OUTPUT_TOKENS = 200_000
 
+# Built-in agents shipped with the harness (e.g. the ``rag`` knowledge-base
+# agent). Assets are read-only: a user edit via setup_agent/update_agent writes
+# the per-user directory, which the store reads first — so a per-user copy
+# always shadows the built-in, and the fallback below only fires when no user
+# copy exists.
+_BUILTIN_AGENTS_DIR = Path(__file__).resolve().parent.parent / "agents" / "assets"
+
+
+def _load_builtin_agent_asset(name: str, filename: str) -> str | None:
+    """Read a built-in agent asset file, or None when the agent has no built-in."""
+    asset_path = _BUILTIN_AGENTS_DIR / name / filename
+    if not asset_path.is_file():
+        return None
+    return asset_path.read_text(encoding="utf-8")
+
 
 def _validate_display_name(value: object) -> object:
     # Check before trimming so leading/trailing controls cannot disappear.
@@ -345,7 +360,17 @@ def load_agent_config(name: str | None, *, user_id: str | None = None) -> AgentC
     # Lazy import: the store package imports back from this module.
     from deerflow.persistence.agents import get_agent_store
 
-    return get_agent_store().get(name, user_id=user_id)
+    try:
+        return get_agent_store().get(name, user_id=user_id)
+    except FileNotFoundError:
+        builtin_raw = _load_builtin_agent_asset(name, "config.yaml")
+        if builtin_raw is None:
+            raise
+        import yaml
+
+        from deerflow.persistence.agents.base import parse_agent_config
+
+        return parse_agent_config(yaml.safe_load(builtin_raw) or {}, name)
 
 
 def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str | None:
@@ -373,7 +398,13 @@ def load_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> st
         return content or None
     from deerflow.persistence.agents import get_agent_store
 
-    return get_agent_store().get_soul(agent_name, user_id=user_id)
+    soul = get_agent_store().get_soul(agent_name, user_id=user_id)
+    if soul is None:
+        builtin = _load_builtin_agent_asset(agent_name, SOUL_FILENAME)
+        if builtin is not None:
+            builtin = builtin.strip()
+            return builtin or None
+    return soul
 
 
 def list_custom_agents(*, user_id: str | None = None) -> list[AgentConfig]:

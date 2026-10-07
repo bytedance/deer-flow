@@ -288,6 +288,10 @@ _EXEMPT_BLOCK_TAGS = {
     # Documentation artifact: appears only in this middleware's own explanatory
     # comment describing the tag pattern, not emitted into any prompt.
     "tag",
+    # Document-format literal: the knowledge chunker's residual-HTML handling
+    # mentions ``<table>…</table>`` in its docstrings/comments (a parse artifact
+    # of the ingested documents, never injected into or stripped from a prompt).
+    "table",
 }
 
 

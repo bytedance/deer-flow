@@ -8,17 +8,10 @@ the library's chunks, page them per document, and hand each page to ``index_chun
 part the worker itself uses, so batching, failure marking, and the deterministic point ids
 stay identical.
 
-Since 2026-09-24 (spec §4.1) the same rebuild also re-embeds the other three collections —
-entity, wiki-entry and flagged manual-card vectors — which a provider switch invalidates
-just as surely, and which had no repair path at all before. Their text already lives in the
-business DB, so those passes never touch the source documents either. Passes are
-"batched", not paged, where the store returns everything at once: only manual cards have
-a cursor.
-
-Run shape mirrors the wiki rebuild (``wiki/generator.py``): a module-level in-flight
-counter plus a last-run verdict and a progress snapshot, all per KB, all process-local.
-Per-document failures are counted and logged, never fatal: one unreadable document must
-not strand the rest of the library behind an old vector space.
+Run shape: a module-level in-flight counter plus a last-run verdict and a progress
+snapshot, all per KB, all process-local. Per-document failures are counted and logged,
+never fatal: one unreadable document must not strand the rest of the library behind an
+old vector space.
 """
 
 from __future__ import annotations
@@ -29,13 +22,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from deerflow.knowledge.embed_identity import write_kb_identity
-from deerflow.knowledge.embed_texts import entity_embed_text, manual_card_embed_text, wiki_entry_embed_text
 from deerflow.knowledge.embedder import EmbeddingResult
-from deerflow.knowledge.graph.store import GraphStore
 from deerflow.knowledge.indexer import index_chunks
 from deerflow.knowledge.store import KnowledgeStore
-from deerflow.knowledge.vector_store import EntityUpsert, KnowledgeVectorStore, ManualCardUpsert, WikiEntryUpsert
-from deerflow.knowledge.wiki.store import WikiStore
+from deerflow.knowledge.vector_store import KnowledgeVectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +63,6 @@ class ReindexReport:
     documents_skipped: int
     documents_failed: int
     chunks_indexed: int
-    entities_indexed: int
-    wiki_entries_indexed: int
-    cards_indexed: int
     #: Whether the walk left nothing behind — the D2 stamp's precondition. A caller
     #: that withholds the stamp (``stamp=False``) still gets the verdict for later.
     complete: bool = False
@@ -114,18 +101,11 @@ async def reindex_kb(
     embedder: _Embedder,
     *,
     kb_id: str,
-    graph_store: GraphStore,
-    wiki_store: WikiStore,
     page_size: int = DEFAULT_PAGE_SIZE,
     include_non_terminal: bool = False,
     stamp: bool = True,
 ) -> ReindexReport:
     """Re-embed every live chunk of every terminal document in ``kb_id``.
-
-    After the documents, the entity / wiki-entry / manual-card passes rebuild the
-    three other collections a provider switch also invalidates (spec §4.1). Both
-    stores are required on purpose: making them optional would silently skip three
-    collections — the exact defect this rebuild exists to fix.
 
     ``include_non_terminal`` serves the delta passes — the width migration's (spec
     2026-09-26 D5-6) and, since spec 2026-10-05, the same-width rebuild window's.
@@ -147,12 +127,9 @@ async def reindex_kb(
         documents_skipped=0,
         documents_failed=0,
         chunks_indexed=0,
-        entities_indexed=0,
-        wiki_entries_indexed=0,
-        cards_indexed=0,
     )
     _IN_FLIGHT[kb_id] = _IN_FLIGHT.get(kb_id, 0) + 1
-    _PROGRESS[kb_id] = {"documents_total": len(documents), "documents_done": 0, "chunks_indexed": 0, "entities_indexed": 0, "wiki_entries_indexed": 0, "cards_indexed": 0}
+    _PROGRESS[kb_id] = {"documents_total": len(documents), "documents_done": 0, "chunks_indexed": 0}
     complete = True
     try:
         for document in documents:
@@ -179,32 +156,10 @@ async def reindex_kb(
                 complete = False
             finally:
                 _bump(kb_id, documents_done=1)
-        if vector_store is not None:
-            # One failed pass — or one failed batch inside it — is logged and
-            # skipped, like a per-document failure: a partial rebuild still covers
-            # most of the library, and the library-wide verdict stays "succeeded".
-            try:
-                report.entities_indexed, entities_total = await _reindex_entity_vectors(graph_store, vector_store, embedder, kb_id=kb_id, page_size=page_size)
-                complete = complete and report.entities_indexed == entities_total
-            except Exception:
-                logger.exception("reindex entity pass failed (kb %s); continuing with the rest", kb_id)
-                complete = False
-            try:
-                report.wiki_entries_indexed, wiki_total = await _reindex_wiki_entry_vectors(wiki_store, vector_store, embedder, kb_id=kb_id, page_size=page_size)
-                complete = complete and report.wiki_entries_indexed == wiki_total
-            except Exception:
-                logger.exception("reindex wiki-entry pass failed (kb %s); continuing with the rest", kb_id)
-                complete = False
-            try:
-                report.cards_indexed, cards_total = await _reindex_manual_card_vectors(store, vector_store, embedder, kb_id=kb_id, page_size=page_size)
-                complete = complete and report.cards_indexed == cards_total
-            except Exception:
-                logger.exception("reindex manual-card pass failed (kb %s); continuing with the rest", kb_id)
-                complete = False
-            if complete and stamp:
-                # Every live vector now sits in this embedder's space — record which
-                # one (D2). Never a partial claim: nothing to write means nothing written.
-                await write_kb_identity(store._sf, kb_id, embedder.identity)
+        if vector_store is not None and complete and stamp:
+            # Every live vector now sits in this embedder's space — record which
+            # one (D2). Never a partial claim: nothing to write means nothing written.
+            await write_kb_identity(store._sf, kb_id, embedder.identity)
         report.complete = complete
         _LAST_RUN[kb_id] = "succeeded"
     except Exception:
@@ -218,92 +173,6 @@ async def reindex_kb(
             _IN_FLIGHT.pop(kb_id, None)
             _PROGRESS.pop(kb_id, None)
     return report
-
-
-async def _reindex_entity_vectors(
-    graph_store: GraphStore,
-    vector_store: KnowledgeVectorStore,
-    embedder: _Embedder,
-    *,
-    kb_id: str,
-    page_size: int,
-) -> tuple[int, int]:
-    """Re-embed every entity row's (normalized) name+description into ``kb_entities``.
-
-    Returns ``(indexed, total)`` — the two differ when a batch soft-failed.
-    """
-    rows = await graph_store.list_entities(kb_id)
-    indexed = 0
-    for start in range(0, len(rows), page_size):
-        batch = rows[start : start + page_size]
-        try:
-            embeddings = await embedder.embed([entity_embed_text(row["name"], row.get("description")) for row in batch])
-            await vector_store.upsert_entities(
-                [EntityUpsert(name=row["name"], kb_id=kb_id, type=row.get("type") or "", description=row.get("description") or "", dense=embedding.dense) for row, embedding in zip(batch, embeddings, strict=True)]
-            )
-            indexed += len(batch)
-            _bump(kb_id, entities_indexed=len(batch))
-        except Exception:
-            logger.exception("reindex entity batch failed (kb %s); continuing with the rest", kb_id)
-    return indexed, len(rows)
-
-
-async def _reindex_wiki_entry_vectors(
-    wiki_store: WikiStore,
-    vector_store: KnowledgeVectorStore,
-    embedder: _Embedder,
-    *,
-    kb_id: str,
-    page_size: int,
-) -> tuple[int, int]:
-    """Re-embed every wiki entry into ``kb_wiki_entries`` — any status.
-
-    The point holds a vector, not the dirty marker, so keeping ``dirty`` entries
-    out would leave exactly those entries in the old vector space. Returns
-    ``(indexed, total)``.
-    """
-    rows = await wiki_store.list_entries(kb_id)
-    indexed = 0
-    for start in range(0, len(rows), page_size):
-        batch = rows[start : start + page_size]
-        try:
-            embeddings = await embedder.embed([wiki_entry_embed_text(row["title"], row["content"]) for row in batch])
-            await vector_store.upsert_wiki_entries([WikiEntryUpsert(entry_id=row["id"], kb_id=kb_id, title=row["title"], dense=embedding.dense) for row, embedding in zip(batch, embeddings, strict=True)])
-            indexed += len(batch)
-            _bump(kb_id, wiki_entries_indexed=len(batch))
-        except Exception:
-            logger.exception("reindex wiki-entry batch failed (kb %s); continuing with the rest", kb_id)
-    return indexed, len(rows)
-
-
-async def _reindex_manual_card_vectors(
-    store: KnowledgeStore,
-    vector_store: KnowledgeVectorStore,
-    embedder: _Embedder,
-    *,
-    kb_id: str,
-    page_size: int,
-) -> tuple[int, int]:
-    """Re-embed the flagged manual cards into ``kb_manual_cards`` (cursor-paged).
-
-    Returns ``(indexed, total)``.
-    """
-    total = await store.count_manual_cards(kb_id, include_in_wiki_search=True)
-    indexed = 0
-    offset = 0
-    while offset < total:
-        page = await store.list_manual_cards(kb_id, offset=offset, limit=page_size, include_in_wiki_search=True)
-        if not page:
-            break
-        try:
-            embeddings = await embedder.embed([manual_card_embed_text(row["title"], row["content"]) for row in page])
-            await vector_store.upsert_manual_cards([ManualCardUpsert(card_id=row["id"], kb_id=kb_id, title=row["title"], dense=embedding.dense) for row, embedding in zip(page, embeddings, strict=True)])
-            indexed += len(page)
-            _bump(kb_id, cards_indexed=len(page))
-        except Exception:
-            logger.exception("reindex manual-card batch failed (kb %s); continuing with the rest", kb_id)
-        offset += len(page)
-    return indexed, total
 
 
 async def _reindex_document(

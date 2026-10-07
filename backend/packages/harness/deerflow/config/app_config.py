@@ -32,9 +32,11 @@ from deerflow.config.loop_detection_config import LoopDetectionConfig
 from deerflow.config.mcp_tasks_config import McpTasksConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.models_config import ModelsConfig, merge_ui_models
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.config.projects_config import ProjectsConfig
 from deerflow.config.prompt_overlay import PromptOverlay
+from deerflow.config.rag_config_file import RagConfigFile, merge_rag_config
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.config.reload_boundary import format_field_description
 from deerflow.config.run_events_config import RunEventsConfig
@@ -189,6 +191,87 @@ class LoggingConfig(BaseModel):
     enhance: LoggingEnhanceConfig = Field(default_factory=LoggingEnhanceConfig, description="Request trace correlation logging settings.")
 
 
+class RagTableConfig(BaseModel):
+    """Table-ingestion knobs (spec 2026-09-09 §4).
+
+    ``enabled`` gates the spreadsheet suffixes (``.xlsx``/``.xls``/``.tsv``) at the
+    upload door and in /supported-formats. ``.csv`` is deliberately **not** gated:
+    it already lives in the frozen text allowlist, and routing it through
+    table-aware chunking is a correctness fix for the hard-split damage (spec §1),
+    not a new exposure surface. The first-phase build ships the gate on.
+    """
+
+    enabled: bool = Field(default=True, description="Master gate for spreadsheet uploads (.xlsx/.xls/.tsv); when false those suffixes are rejected at upload. .csv is never gated.")
+    max_size_mb: int = Field(default=50, ge=1, description="Max table-file upload size in MB; the upload gate rejects larger files at the door (row-explosion guard).")
+    card_mode: Literal["markdown", "linearized"] = Field(default="markdown", description="Row-card body serialization: markdown (GFM rows) or linearized (col: value sentences); the latter is a recall-quality ablation (spec §7).")
+
+
+class RagConfig(BaseModel):
+    """Configuration for the RAG knowledge-base subsystem.
+
+    The ``*_api_key`` / ``mineru_api_token`` fields are **secrets** and are normally
+    left unset here: they come from the API-writable ``rag_config.json`` (spec
+    2026-09-10 rag functional-model config §3) or, as the fallback, from the
+    environment (``DASHSCOPE_EMBEDDING_API_KEY``, ``DASHSCOPE_RERANK_API_KEY``,
+    ``MINERU_API_TOKEN``). Their resolution order is ``explicit argument > file > environment``.
+    """
+
+    qdrant_url: str = Field(default="http://localhost:6333", description="Qdrant server URL hosting the knowledge vector collections.")
+    embedding_model: str | None = Field(default=None, description="Embedding model name; required — no default, a config that declares none is refused at build time (spec 2026-09-30 A-1).")
+    embedding_api_key: str | None = Field(default=None, description="Embedding API key from rag_config.json; None falls back to DASHSCOPE_EMBEDDING_API_KEY.")
+    rerank_model: str | None = Field(default=None, description="Rerank model name; required for providers that take one (TEI serves its own model), no default (spec 2026-09-30 A-1).")
+    rerank_api_key: str | None = Field(default=None, description="Rerank API key from rag_config.json; None falls back to DASHSCOPE_RERANK_API_KEY.")
+    vlm_model: str | None = Field(default=None, description="Name of a config `models:` entry used for captioning images; None follows the RAG default, then the first configured model.")
+    vlm_timeout: float | None = Field(default=None, description="Read timeout for VLM requests; None uses default 180s from code. Connect timeout is always 15s.")
+    vlm_connect_timeout: float = Field(default=15.0, description="Connection timeout for VLM requests (seconds).")
+    caption_max_tokens: int = Field(default=1024, ge=1, description="Output cap for both caption dialects; room for a full-page transcription.")
+    caption_temperature: float = Field(default=0.15, ge=0.0, le=2.0, description="Sampling temperature for caption requests; a low value keeps OCR-style transcriptions stable.")
+    default_model: str | None = Field(default=None, description="Name of the config `models:` entry every RAG role falls back to when it declares none of its own; None uses the first configured model.")
+    # Follow-chat thinking toggle (spec 2026-10-03 leg-thinking-follow-chat D1=甲): a
+    # checked leg sends "thinking on" exactly like chat does — entry gate and the entry's
+    # default effort included. Default False keeps today's non-thinking legs unchanged.
+    vlm_thinking: bool = Field(default=False, description="Follow chat's thinking treatment on the caption legs; while on, the effective output budget rises to at least 4096 (spec D2=甲).")
+    mineru_api_token: str | None = Field(default=None, description="MinerU parsing token from rag_config.json; None falls back to MINERU_API_TOKEN.")
+
+    # Provider dimension (spec 2026-09-14 rag model provider adaptation §4.1). Every
+    # default reproduces today's behaviour, so a config.yaml that only sets the models
+    # above keeps resolving to exactly the providers it used before. The ids are
+    # validated against `deerflow.knowledge.providers.PROVIDER_ALLOWLIST`.
+    embedding_provider: Literal["dashscope", "volcengine-ark", "openai-compatible"] = Field(default="dashscope", description="Embedding provider id (curated allowlist); `openai-compatible` emits dense only.")
+    embedding_base_url: str | None = Field(default=None, description="Embedding endpoint; None uses the provider's own default.")
+    embedding_dimension: int | None = Field(default=None, ge=1, description="Override for the dense dimension; None means 1024. A declared width is what the library is written at — changing it rebuilds every collection before the switch.")
+    embedding_sparse_source: Literal["provider", "external", "bm25"] = Field(default="provider", description="Who supplies the sparse vectors: the embedding provider itself, the separate `sparse_*` service, or a local BM25 encoder.")
+    sparse_provider: Literal["tei-sparse"] | None = Field(default=None, description="Sparse service provider id; used when embedding_sparse_source=external.")
+    sparse_base_url: str | None = Field(default=None, description="Sparse service endpoint; used when embedding_sparse_source=external.")
+    sparse_model: str | None = Field(default=None, description="Sparse model name; used when embedding_sparse_source=external.")
+    sparse_api_key: str | None = Field(default=None, description="Sparse service API key; None falls back to RAG_SPARSE_API_KEY.")
+    rerank_provider: Literal["dashscope", "generic-rerank", "tei-rerank"] = Field(default="dashscope", description="Rerank provider id (curated allowlist).")
+    rerank_base_url: str | None = Field(default=None, description="Rerank endpoint; None uses the provider's own default.")
+    parse_provider: Literal["mineru-cloud", "mineru-local"] = Field(default="mineru-cloud", description="Document-parsing provider: the MinerU cloud API, or a local MinerU service.")
+    parse_base_url: str | None = Field(
+        default=None,
+        description="Parsing-service address: empty means the official MinerU cloud endpoint (https://mineru.net); a self-hosted `mineru-local` needs it (that service ships without auth, so keep it internal).",
+    )
+    parse_tier: Literal["flash", "basic", "standard", "advanced"] | None = Field(
+        default=None,
+        description="Optional tier for the local MinerU 4.x service; None lets the service decide (its own default is standard). A flash-only service needs an explicit tier: with none it answers 503 for PDFs.",
+    )
+    parse_language: Literal["ch", "ch_server", "en", "japan", "korean", "chinese_cht", "ta", "te", "ka", "el", "th", "latin", "arabic", "cyrillic", "east_slavic", "devanagari"] = Field(
+        default="ch",
+        description="Document language pack for the MinerU cloud leg; `ch` covers Chinese and English (the platform's own default too). The local leg has no language knob.",
+    )
+    parse_model_version: Literal["pipeline", "vlm"] = Field(
+        default="vlm",
+        description="MinerU model version for the cloud leg. `vlm` is what this deployment has always sent; `MinerU-HTML` is unreachable because `.html` is not an accepted upload suffix.",
+    )
+
+    worker_concurrency: int = Field(default=2, ge=1, description="Max documents the offline indexing worker processes concurrently.")
+    sweep_enabled: bool = Field(default=True, description="Run the background orphan-vector sweep (spec 2026-10-04): deletes Qdrant points whose business rows no longer exist; a library with a live run is skipped.")
+    sweep_interval_hours: float = Field(default=24.0, gt=0, description="Hours between orphan-vector sweep rounds; the first round runs after a short startup jitter.")
+    # Table ingestion (spec 2026-09-09 §4): master-gated; the first-phase build ships it on.
+    table: RagTableConfig = Field(default_factory=RagTableConfig, description="Table ingestion knobs (spreadsheet upload gate, size ceiling, row-card serialization mode).")
+
+
 def _legacy_config_candidates() -> tuple[Path, ...]:
     """Return source-tree config.yaml locations for monorepo compatibility."""
     backend_dir = Path(__file__).resolve().parents[4]
@@ -295,6 +378,7 @@ class AppConfig(BaseModel):
         default_factory=KnowledgeBaseConfig,
         description="Provider-agnostic knowledge capability and custom-agent scope-selection configuration",
     )
+    rag: RagConfig = Field(default_factory=RagConfig, description="RAG knowledge-base configuration (Qdrant endpoint, embedding/rerank/VLM model names, indexing worker knobs)")
     agents_api: AgentsApiConfig = Field(default_factory=AgentsApiConfig, description="Custom-agent management API configuration")
     acp_agents: dict[str, ACPAgentConfig] = Field(default_factory=dict, description="ACP-compatible agent configuration")
     subagents: SubagentsAppConfig = Field(default_factory=SubagentsAppConfig, description="Subagent runtime configuration")
@@ -414,6 +498,8 @@ class AppConfig(BaseModel):
     # / ``get_tool_group_config`` O(1) instead of an O(n) ``next(...)`` scan per
     # call. Private attrs are excluded from serialization.
     _managed_model_names: set[str] = PrivateAttr(default_factory=set)
+    _ui_model_names: set[str] = PrivateAttr(default_factory=set)
+    _yaml_rag: dict[str, Any] = PrivateAttr(default_factory=dict)
     _models_by_name: dict[str, ModelConfig] = PrivateAttr(default_factory=dict)
     _tools_by_name: dict[str, ToolConfig] = PrivateAttr(default_factory=dict)
     _tool_groups_by_name: dict[str, ToolGroupConfig] = PrivateAttr(default_factory=dict)
@@ -521,7 +607,24 @@ class AppConfig(BaseModel):
             extensions_data.update(yaml_extensions_config.model_dump(by_alias=True, exclude_unset=True))
         config_data["extensions"] = extensions_data
 
+        # Merge the API-writable models file (models_config.json) over the
+        # config.yaml `models:` list: union by name, UI-managed entry winning
+        # collisions (spec 2026-09-10 §5.2). config.yaml is never written back.
+        ui_models_config = ModelsConfig.from_file()
+        ui_model_names = {model.name for model in ui_models_config.models}
+        config_data["models"] = merge_ui_models(config_data.get("models") or [], ui_models_config)
+
+        # Merge the API-writable rag file (rag_config.json) over config.yaml's `rag:`
+        # block, field by field, so the settings UI can configure the RAG roles without
+        # writing the operator-trusted config.yaml (spec 2026-09-10 rag functional-model
+        # config §3). Untouched knobs keep their config.yaml values.
+        rag_file = RagConfigFile.from_file()
+        yaml_rag = config_data.get("rag")
+        config_data["rag"] = merge_rag_config(yaml_rag, rag_file)
+
         result = cls.model_validate(config_data)
+        result._ui_model_names = ui_model_names
+        result._yaml_rag = dict(yaml_rag) if isinstance(yaml_rag, Mapping) else {}
         if not result.models:
             logger.warning(
                 "No models are configured in %s. Add at least one entry under `models:` (see the commented examples in config.example.yaml) or run `make setup`.",
@@ -697,6 +800,25 @@ class AppConfig(BaseModel):
         """
         return self._models_by_name.get(name)
 
+    def is_ui_managed_model(self, name: str) -> bool:
+        """Return True when *name* came from the API-writable models_config.json.
+
+        Drives the settings UI's read-only vs editable distinction (spec §5.2):
+        config.yaml-sourced models are display-only, UI-managed ones editable.
+        """
+        return name in self._ui_model_names
+
+    @property
+    def yaml_rag(self) -> dict[str, Any]:
+        """The `rag:` block as ``config.yaml`` declares it, before ``rag_config.json`` merges in.
+
+        Read-only and captured at load. The settings PUT's save-time validation needs this base
+        to judge the configuration it is about to persist (spec 2026-09-16 §3 D3); the live
+        ``rag`` already carries the *current* file and would therefore answer for a field the
+        admin just cleared.
+        """
+        return dict(self._yaml_rag)
+
     def get_tool_config(self, name: str) -> ToolConfig | None:
         """Get the tool config by name.
 
@@ -727,6 +849,8 @@ _app_config: AppConfig | None = None
 _app_config_path: Path | None = None
 _app_config_mtime: float | None = None
 _app_config_signature: _ConfigSignature | None = None
+_app_config_models_signature: _ConfigSignature | None = None
+_app_config_rag_signature: _ConfigSignature | None = None
 _app_config_is_custom = False
 _current_app_config: ContextVar[AppConfig | None] = ContextVar("deerflow_current_app_config", default=None)
 _current_app_config_stack: ContextVar[tuple[AppConfig | None, ...]] = ContextVar("deerflow_current_app_config_stack", default=())
@@ -740,6 +864,38 @@ def _get_config_mtime(config_path: Path) -> float | None:
         return None
 
 
+def _get_rag_config_signature() -> _ConfigSignature | None:
+    """Get the content signature of the API-writable rag file, if present.
+
+    Tracked separately from config.yaml so an edit to ``rag_config.json`` alone
+    triggers an AppConfig reload (spec 2026-09-10 rag functional-model config §3). A
+    missing file or an unresolvable path yields ``None`` (the file is optional).
+    """
+    try:
+        rag_path = RagConfigFile.resolve_config_path()
+    except FileNotFoundError:
+        return None
+    if rag_path is None:
+        return None
+    return _get_config_signature(rag_path)
+
+
+def _get_models_config_signature() -> _ConfigSignature | None:
+    """Get the content signature of the API-writable models file, if present.
+
+    Tracked separately from config.yaml so an edit to ``models_config.json``
+    alone triggers an AppConfig reload (spec 2026-09-10 §5.6). A missing file or
+    an unresolvable path yields ``None`` (the file is optional).
+    """
+    try:
+        models_path = ModelsConfig.resolve_config_path()
+    except FileNotFoundError:
+        return None
+    if models_path is None:
+        return None
+    return _get_config_signature(models_path)
+
+
 def _load_and_cache_app_config(config_path: str | None = None) -> AppConfig:
     """Load config from disk and refresh cache metadata.
 
@@ -751,7 +907,7 @@ def _load_and_cache_app_config(config_path: str | None = None) -> AppConfig:
     picked up by the *next* edit. Signing the parsed bytes makes any write that
     races the load show up as a signature mismatch on the next call instead.
     """
-    global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_is_custom
+    global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_models_signature, _app_config_rag_signature, _app_config_is_custom
 
     resolved_path = AppConfig.resolve_config_path(config_path)
     raw, signature = _read_config_with_signature(resolved_path)
@@ -760,6 +916,8 @@ def _load_and_cache_app_config(config_path: str | None = None) -> AppConfig:
     _app_config_path = resolved_path
     _app_config_mtime = signature[0]
     _app_config_signature = signature
+    _app_config_models_signature = _get_models_config_signature()
+    _app_config_rag_signature = _get_rag_config_signature()
     _app_config_is_custom = False
     return _app_config
 
@@ -784,8 +942,10 @@ def get_app_config() -> AppConfig:
     resolved_path = AppConfig.resolve_config_path()
     current_mtime = _get_config_mtime(resolved_path)
     current_signature = _get_config_signature(resolved_path)
+    current_models_signature = _get_models_config_signature()
+    current_rag_signature = _get_rag_config_signature()
 
-    should_reload = _app_config is None or _app_config_path != resolved_path or _app_config_signature != current_signature
+    should_reload = _app_config is None or _app_config_path != resolved_path or _app_config_signature != current_signature or _app_config_models_signature != current_models_signature or _app_config_rag_signature != current_rag_signature
     if should_reload:
         if _app_config_path == resolved_path and _app_config_mtime is not None and current_mtime is not None and _app_config_mtime != current_mtime:
             logger.info(
@@ -795,6 +955,10 @@ def get_app_config() -> AppConfig:
             )
         elif _app_config_path == resolved_path and _app_config_signature != current_signature:
             logger.info("Config file content signature changed, reloading AppConfig")
+        elif _app_config_path == resolved_path and _app_config_models_signature != current_models_signature:
+            logger.info("Models config file changed, reloading AppConfig")
+        elif _app_config_path == resolved_path and _app_config_rag_signature != current_rag_signature:
+            logger.info("Rag config file changed, reloading AppConfig")
         _load_and_cache_app_config(str(resolved_path))
     from deerflow.config.managed_models import merge_managed_models
 
@@ -826,11 +990,13 @@ def reset_app_config() -> None:
     `get_app_config()` to reload from file. Useful for testing
     or when switching between different configurations.
     """
-    global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_is_custom
+    global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_models_signature, _app_config_rag_signature, _app_config_is_custom
     _app_config = None
     _app_config_path = None
     _app_config_mtime = None
     _app_config_signature = None
+    _app_config_models_signature = None
+    _app_config_rag_signature = None
     _app_config_is_custom = False
 
 
