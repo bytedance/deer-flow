@@ -20,6 +20,7 @@ from langgraph.errors import GraphBubbleUp
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
     EmptyModelResponseError,
     LLMErrorHandlingMiddleware,
+    _extract_retry_after_ms,
 )
 from deerflow.config.app_config import AppConfig, LlmCallConfig
 from deerflow.config.sandbox_config import SandboxConfig
@@ -1869,6 +1870,34 @@ def test_retry_delay_honors_retry_after_without_jitter() -> None:
     exc = FakeError("rate limited", status_code=429, headers={"retry-after-ms": "5000"})
     delay = middleware._build_retry_delay_ms(100, exc)
     assert delay == 5000
+
+
+def test_retry_after_non_finite_value_falls_back_to_jitter() -> None:
+    """A non-finite ``Retry-After`` (e.g. ``1e999``, which json/float parse to
+    ``inf``) must be treated as an unusable hint, not crash the retry loop:
+    ``int(float('inf'))`` raises ``OverflowError``, which the numeric branch of
+    ``_extract_retry_after_ms`` did not guard — and that branch runs inside the
+    retry loop's ``except Exception`` handler, so the new exception escapes and
+    kills the whole run instead of falling back to jittered backoff. The
+    date-parsing fallback in the same helper already guards ``OverflowError``;
+    the numeric branch must too.
+    """
+    middleware = _build_middleware(retry_base_delay_ms=100, retry_cap_delay_ms=10000)
+    for header_value in ("1e999", "inf", "-inf", "nan"):
+        exc = FakeError("rate limited", status_code=429, headers={"Retry-After": header_value})
+        delay = middleware._build_retry_delay_ms(100, exc)  # must not raise
+        assert 100 <= delay <= 10000
+
+    # The ms-suffixed header takes the same numeric branch.
+    exc = FakeError("rate limited", status_code=429, headers={"Retry-After-Ms": "1e999"})
+    assert 100 <= middleware._build_retry_delay_ms(100, exc) <= 10000
+
+
+def test_extract_retry_after_ms_non_finite_returns_none() -> None:
+    """Unit level: non-finite hints return None (unusable) instead of raising."""
+    for header_value in ("1e999", "inf", "-inf"):
+        exc = FakeError("rate limited", status_code=429, headers={"Retry-After": header_value})
+        assert _extract_retry_after_ms(exc) is None
 
 
 @pytest.mark.anyio
