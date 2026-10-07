@@ -507,6 +507,9 @@ def test_config_change_during_initialization_retires_pool_for_same_server_connec
                 self.sessions[key] = FakeSession(connection["command"])
             return self.sessions[key]
 
+        def retire_all(self) -> None:
+            pass
+
         def close_all_sync(self) -> None:
             self.closed = True
 
