@@ -3,6 +3,8 @@
 import asyncio
 import importlib
 import json
+import os
+import uuid
 from datetime import UTC, datetime
 from enum import Enum
 from types import SimpleNamespace
@@ -35,33 +37,63 @@ class Status(Enum):
 
 
 @pytest_asyncio.fixture
-async def env(monkeypatch, tmp_path):
-    db = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path / "db"))
-    await init_engine_from_config(db)
-    repo = SubagentBatchRepository(get_session_factory())
-    state = SimpleNamespace(db=db, repo=repo, launches=0)
-    state.result = SimpleNamespace(status=Status.COMPLETED, result='Report "引用"\n' * 1500, error=None, stop_reason=None, token_usage_records=[], bash_executions=[])
-
-    class Executor:
-        def __init__(self, **kwargs):
-            pass
-
-        def execute_async(self, prompt, task_id=None):
-            state.launches += 1
-            return task_id
-
-    monkeypatch.setattr(batch_service, "SubagentExecutor", Executor)
-    monkeypatch.setattr(batch_service, "SubagentStatus", Status)
-    monkeypatch.setattr(batch_service, "get_background_task_result", lambda _: state.result)
-    monkeypatch.setattr(batch_service, "cleanup_background_task", lambda _: None)
-    monkeypatch.setattr(batch_service, "resolve_subagent_model_name", lambda *args, **kwargs: "offline-model")
-    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
-    state.service = batch_service.SubagentBatchService(repository=repo, config=SubagentBatchesConfig(max_attempts=1), runtime_config=SubagentRuntimeConfig(), app_config=SimpleNamespace())
+async def env(monkeypatch, tmp_path, request):
+    schema = None
+    if getattr(request, "param", "sqlite") == "postgres":
+        uri = os.environ.get("TEST_POSTGRES_URI")
+        if not uri:
+            pytest.skip("requires TEST_POSTGRES_URI (real Postgres result reader)")
+        schema = f"batch_reader_{uuid.uuid4().hex}"
+        db = DatabaseConfig(backend="postgres", postgres_url=uri, postgres_schema=schema)
+    else:
+        db = DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path / "db"))
+    service = None
     try:
+        await init_engine_from_config(db)
+        if schema:
+            from sqlalchemy import text
+
+            async with get_session_factory()() as session:
+                assert (await session.execute(text("SELECT current_schema()"))).scalar_one() == schema
+        repo = SubagentBatchRepository(get_session_factory())
+        state = SimpleNamespace(db=db, repo=repo, launches=0)
+        state.result = SimpleNamespace(status=Status.COMPLETED, result='Report "引用"\n' * 1500, error=None, stop_reason=None, token_usage_records=[], bash_executions=[])
+
+        class Executor:
+            def __init__(self, **kwargs):
+                pass
+
+            def execute_async(self, prompt, task_id=None):
+                state.launches += 1
+                return task_id
+
+        monkeypatch.setattr(batch_service, "SubagentExecutor", Executor)
+        monkeypatch.setattr(batch_service, "SubagentStatus", Status)
+        monkeypatch.setattr(batch_service, "get_background_task_result", lambda _: state.result)
+        monkeypatch.setattr(batch_service, "cleanup_background_task", lambda _: None)
+        monkeypatch.setattr(batch_service, "resolve_subagent_model_name", lambda *args, **kwargs: "offline-model")
+        monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+        state.service = batch_service.SubagentBatchService(repository=repo, config=SubagentBatchesConfig(max_attempts=1), runtime_config=SubagentRuntimeConfig(), app_config=SimpleNamespace())
+        service = state.service
         yield state
     finally:
-        await state.service.stop()
-        await close_engine()
+        try:
+            if service is not None:
+                await service.stop()
+        finally:
+            try:
+                await close_engine()
+            finally:
+                if schema:
+                    import sqlalchemy as sa
+                    from sqlalchemy.ext.asyncio import create_async_engine
+
+                    engine = create_async_engine(db.app_sqlalchemy_url)
+                    try:
+                        async with engine.begin() as conn:
+                            await conn.execute(sa.text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+                    finally:
+                        await engine.dispose()
 
 
 def runtime(user="user-1", thread="thread-1"):
@@ -104,6 +136,7 @@ async def complete(env, batch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("env", ["sqlite", "postgres"], indirect=True)
 async def test_real_submission_worker_reopen_and_toolnode_continuation(env):
     batch = await submit(env)
     await complete(env, batch)
@@ -120,6 +153,12 @@ async def test_real_submission_worker_reopen_and_toolnode_continuation(env):
     graph.add_edge("tools", END)
     compiled = graph.compile()
     assert "runtime" not in tool.tool_call_schema.model_json_schema()["properties"]
+    for user, thread, position in [("other", "thread-1", 0), ("user-1", "other", 0), ("user-1", "thread-1", 2)]:
+        denied = await compiled.ainvoke(
+            {"messages": [AIMessage(content="", tool_calls=[{"name": "read_batch_result", "args": {"batch_id": batch, "position": position}, "id": "denied", "type": "tool_call"}])]},
+            context={"user_id": user, "thread_id": thread},
+        )
+        assert json.loads(denied["messages"][-1].content) == {"status": "not_found"}
     chunks = []
     offset, revision = 0, None
     while True:

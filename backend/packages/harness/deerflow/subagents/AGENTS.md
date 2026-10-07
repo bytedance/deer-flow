@@ -1,5 +1,9 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+Result-reader acceptance runs on SQLite and, with TEST_POSTGRES_URI, an isolated
+PostgreSQL schema; both exercise submission, completion, reopen and ToolNode
+continuation without paid model work. Always clean up the temporary schema.
+
 **JSON**: See README. Authorize before local metadata and reads; inaccessible paths stay UNVERIFIED.
 
 Apply each subagent's prompt overlay after assembling its full SystemMessage.
