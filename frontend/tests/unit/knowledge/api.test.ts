@@ -19,17 +19,14 @@ import {
   createKnowledgeBase,
   deleteDocument,
   deleteKnowledgeBase,
-  generateWiki,
   getKnowledgeBase,
   getReindexStatus,
   getSupportedFormats,
   listDocuments,
   listDocumentChunks,
   listKnowledgeBases,
-  projectVectorQuery,
   reindexKnowledgeBase,
   retryDocument,
-  updateEvalQuestion,
   updateKnowledgeBase,
   uploadDocument,
 } from "@/core/knowledge/api";
@@ -119,43 +116,6 @@ describe("knowledge-base endpoints", () => {
     await expect(listKnowledgeBases()).rejects.toThrow("你没有访问该知识库的权限");
   });
 
-  // ── 改锚（2026-10-06 改锚对，spec §2③）：PATCH 契约 + B′ 结构化 422 ──
-
-  test("updateEvalQuestion PATCHes the anchor-only body and parses the updated question", async () => {
-    const question = {
-      id: "q_ab12cd34",
-      query: "装箱与拆箱的区别？",
-      category: "fact",
-      expected_paths: ["vector"],
-      relevant_chunk_ids: ["doc-1#0001"],
-      relevant_entities: ["装箱"],
-      reference_answer: "答案",
-    };
-    mockedFetch.mockResolvedValueOnce(jsonResponse(200, question));
-    const result = await updateEvalQuestion("kb-1", "q_ab12cd34", { relevant_chunk_ids: ["doc-1#0001"] });
-    const [url, init] = mockedFetch.mock.calls[0]!;
-    expect(url).toBe("http://gw/api/knowledge-bases/kb-1/eval/questions/q_ab12cd34");
-    expect(init?.method).toBe("PATCH");
-    expect(JSON.parse(init?.body as string)).toEqual({ relevant_chunk_ids: ["doc-1#0001"] });
-    expect(result).toEqual(question);
-  });
-
-  test("updateEvalQuestion surfaces the structured anchor block on 422 (AnchorBlockError)", async () => {
-    mockedFetch.mockResolvedValueOnce(
-      jsonResponse(422, {
-        detail: { reason: "zero_hit", miss_terms: ["装箱"], hits: 0, best_hits: 3, suggested_chunk: "doc-1#0002" },
-      }),
-    );
-    await expect(
-      updateEvalQuestion("kb-1", "q_ab12cd34", { relevant_chunk_ids: ["doc-1#0003"], anchor_ack: true }),
-    ).rejects.toThrow("anchor check failed: zero_hit");
-    // 确认重提才携带 anchor_ack=true（B′ 复检键语义钉在请求体上）。
-    const [, init] = mockedFetch.mock.calls[0]!;
-    expect(JSON.parse(init?.body as string)).toEqual({
-      relevant_chunk_ids: ["doc-1#0003"],
-      anchor_ack: true,
-    });
-  });
 });
 
 describe("document endpoints", () => {
@@ -238,54 +198,6 @@ describe("supported formats endpoint", () => {
     const result = await getSupportedFormats();
     expect(mockedFetch).toHaveBeenCalledWith("http://gw/api/knowledge-bases/supported-formats");
     expect(result.suffixes).toEqual([".md", ".txt"]);
-  });
-});
-
-describe("wiki endpoint", () => {
-  test("generateWiki defaults to incremental mode", async () => {
-    mockedFetch.mockResolvedValueOnce(jsonResponse(202, { status: "enqueued" }));
-    const result = await generateWiki("kb-1");
-    expect(mockedFetch).toHaveBeenCalledWith(
-      "http://gw/api/knowledge-bases/kb-1/wiki/generate?mode=incremental",
-      expect.objectContaining({ method: "POST" }),
-    );
-    expect(result.status).toBe("enqueued");
-  });
-
-  test("generateWiki full mode maps to the full rebuild query", async () => {
-    mockedFetch.mockResolvedValueOnce(jsonResponse(202, { status: "enqueued" }));
-    await generateWiki("kb-1", "full");
-    expect(mockedFetch).toHaveBeenCalledWith(
-      "http://gw/api/knowledge-bases/kb-1/wiki/generate?mode=full",
-      expect.objectContaining({ method: "POST" }),
-    );
-  });
-});
-
-describe("projectVectorQuery（P6 检索联动 query 投影）", () => {
-  // 缓存键 = (kb, algo, dims, sample_size, collections)——视图参数必须随请求
-  // 携带，否则 peek 落空 409（修复前：从不带参 → 非默认视图下联动静默失败）。
-  test("posts the text and carries the current view params (cache-key alignment)", async () => {
-    mockedFetch.mockResolvedValueOnce(
-      jsonResponse(200, { x: 0.1, y: 0.2, z: 0.3, model_version: "pca-v1", fingerprint: "sha1:x" }),
-    );
-    await projectVectorQuery("kb-1", "Gateway 职责", { collections: ["chunks", "wiki"], algo: "pca", dims: 3 });
-    const [url, init] = mockedFetch.mock.calls.at(-1)! as [string, RequestInit];
-    expect(url).toBe(
-      "http://gw/api/knowledge-bases/kb-1/vector-projection/query?collections=chunks%2Cwiki&algo=pca&dims=3",
-    );
-    expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body as string)).toEqual({ text: "Gateway 职责" });
-  });
-
-  test("omits the query string when no view overrides are given", async () => {
-    mockedFetch.mockResolvedValueOnce(
-      jsonResponse(200, { x: 0.1, y: 0.2, model_version: "pca-v1", fingerprint: "sha1:x" }),
-    );
-    await projectVectorQuery("kb-1", "x");
-    expect(mockedFetch.mock.calls.at(-1)?.[0]).toBe(
-      "http://gw/api/knowledge-bases/kb-1/vector-projection/query",
-    );
   });
 });
 

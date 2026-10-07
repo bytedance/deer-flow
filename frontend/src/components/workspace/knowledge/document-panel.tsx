@@ -12,7 +12,6 @@ import {
   MoreHorizontal,
   RotateCcw,
   Search,
-  Sparkles,
   Trash2,
   Upload,
   X,
@@ -71,7 +70,6 @@ import {
 import {
   formatKnowledgeRelativeTime,
   formatKnowledgeTimestamp,
-  formatVideoDuration,
 } from "@/core/knowledge/format";
 import { pathStatusLines } from "@/core/knowledge/path-status";
 import { partitionFilesBySuffix } from "@/core/knowledge/supported-formats";
@@ -125,10 +123,9 @@ const STATUS_DOT_CLASS: Record<KnowledgeDocumentStatus, string> = {
 };
 
 /**
- * Hover breakdown for the status column (P3, spec 2026-08-11 §5): three
- * per-path lines — vector / graph (percent combined mid-indexing) / wiki.
- * The wiki line carries the library-level hint because it is a library-wide
- * mirror, not a per-document state. Exported for dom tests.
+ * Hover breakdown for the status column (P3, spec 2026-08-11 §5): per-path
+ * lines — the vector leg plus the caption leg on documents with images.
+ * Exported for dom tests.
  */
 export function PathStatusBreakdown({
   doc,
@@ -149,13 +146,9 @@ export function PathStatusBreakdown({
           className="flex items-center justify-between gap-4 text-xs"
           data-path={line.path}
         >
-          <span className="text-muted-foreground">
-            {ps[line.path]}
-            {line.path === "wiki" ? ps.libraryHint : ""}
-          </span>
+          <span className="text-muted-foreground">{ps[line.path]}</span>
           {/* degraded 着琥珀（spec 2026-09-08 §5）：对齐项目既有 caution 视觉词汇
-              （text-amber-600 dark:text-amber-500，同 vector-tab / eval-synthesis-review）；
-              按状态而非腿着色，图谱腿 degraded 与视频腿 degraded 同一处理。 */}
+              （text-amber-600 dark:text-amber-500）；按状态而非腿着色。 */}
           <span
             className={cn(
               line.state === "degraded" && "text-amber-600 dark:text-amber-500",
@@ -163,7 +156,6 @@ export function PathStatusBreakdown({
             data-state={line.state}
           >
             {ps.state[line.state as keyof typeof ps.state] ?? line.state}
-            {line.percent !== undefined ? ` ${line.percent}%` : ""}
           </span>
         </div>
       ))}
@@ -396,9 +388,10 @@ function hasDegradedLeg(
  * `MiddleTabs` header row — this pane owns document actions only (upload,
  * search/sort, row operations).
  */
-/** One filename per badge kind — the empty state's nine-grid doubles as a
- * quiet "all these formats are welcome" hint. `readme` (no suffix) lands on
- * the muted unknown sheet so the grid ends soft instead of loud. */
+/** Nine-grid badge sampler for the empty state's quiet "all these formats are
+ * welcome" hint. Video is absent (this slice does not accept .mp4 uploads), so
+ * notes.md fills the ninth slot — one `readme` (no suffix) lands on the muted
+ * unknown sheet so the grid ends soft instead of loud. */
 const EMPTY_STATE_SAMPLES = [
   "report.pdf",
   "notes.docx",
@@ -406,7 +399,7 @@ const EMPTY_STATE_SAMPLES = [
   "deck.pptx",
   "app.py",
   "photo.png",
-  "video.mp4",
+  "notes.md",
   "bundle.zip",
   "readme",
 ];
@@ -460,7 +453,6 @@ export function DocumentPanel({
   onRetryDocument,
   onOpenChunks,
   onDownload,
-  onGenerateQuestion = () => undefined,
   supportedSuffixes,
   failures = [],
   onDismissFailure = () => undefined,
@@ -476,9 +468,6 @@ export function DocumentPanel({
       本层只挂菜单项（行尾三个点主入口 + 右键兜底，项目惯例双入口）；
       未提供时不渲染菜单项（复用方不关心下载）。 */
   onDownload?: (doc: KnowledgeDocument) => void;
-  /** 右键快捷出题（2026-09-02）：页面层持有触发与通知（合成 hook + toast），
-      本层只负责菜单项显隐（仅就绪文档可选）与回调传参（单篇/选中集）。 */
-  onGenerateQuestion?: (docIds: string[]) => void;
   /** Upload allowlist (Task 6, spec §6): drag-drop pre-upload intercept. */
   supportedSuffixes: readonly string[];
   /** 失败通知面板（2026-08-31）：状态在页面层（useDocFailureNotifier），
@@ -557,13 +546,6 @@ export function DocumentPanel({
       setSelectedIds(new Set([docId]));
     }
   };
-  // 批量快捷出题（2026-09-02）：全部选中文档就绪才启用——任一篇未就绪
-  // 后端会整批 409，不如不亮菜单项；多篇联合出一条跨文档题。
-  const allSelectedReady =
-    selectedIds.size > 0 &&
-    [...selectedIds].every(
-      (id) => documents.find((item) => item.id === id)?.status === "ready",
-    );
   const confirmDeleteTargets = async () => {
     if (!deleteTargets) {
       return;
@@ -963,20 +945,6 @@ export function DocumentPanel({
                                 fileName={doc.name}
                               />
                               <span className="truncate">{doc.name}</span>
-                              {/* 视频行时长徽章（spec 2026-09-08 §5）：胶片图标已由
-                                  FileTypeBadge 按 .mp4/.mov/.mkv 后缀自动渲染，此处只补时长——
-                                  仅列表接口注入了 duration_ms 的已物化视频文档才有（文本文档/
-                                  解析中的视频行不渲染）。镜头数与「切片数」列重复，2026-09-09 移除。 */}
-                              {doc.duration_ms != null && (
-                                <span
-                                  className="text-muted-foreground flex shrink-0 items-center gap-1 text-xs tabular-nums"
-                                  data-testid="doc-video-meta"
-                                >
-                                  <span title={tk.videoDuration}>
-                                    {formatVideoDuration(doc.duration_ms)}
-                                  </span>
-                                </span>
-                              )}
                             </div>
                           </td>
                           {/* 状态列（2026-09-03 接入列显隐）：单元格内容已提为
@@ -1108,21 +1076,6 @@ export function DocumentPanel({
                             <ContextMenuLabel>
                               {tk.selectedCount(selectedIds.size)}
                             </ContextMenuLabel>
-                            {/* 快捷出题（2026-09-02）：选中集联合出一条，合并进待审候选；
-                              图标与评测页「生成考题」入口统一用 Sparkles；文案不带篇数，
-                              避免窄面板下菜单项换行 */}
-                            {allSelectedReady && (
-                              <ContextMenuItem
-                                onSelect={() =>
-                                  runAfterMenuClose(() =>
-                                    onGenerateQuestion([...selectedIds]),
-                                  )
-                                }
-                              >
-                                <Sparkles className="size-4" />
-                                {tk.generateQuestionBatch}
-                              </ContextMenuItem>
-                            )}
                             {/* 取消选择是选择态的退出动作，属非破坏组：紧跟普通动作；
                               危险操作沉底并用分隔线单独隔离（2026-09-02 用户拍板）；
                               X 图标与批量操作栏的取消选择对称 */}
@@ -1161,20 +1114,6 @@ export function DocumentPanel({
                               <ContextMenuItem onSelect={() => onDownload(doc)}>
                                 <Download className="size-4" />
                                 {tk.downloadDocument}
-                              </ContextMenuItem>
-                            )}
-                            {/* 快捷出题（2026-09-02）：仅就绪文档可选（无切片必 409），
-                              为该篇出一条题，合并进评测页待审候选；图标与评测页入口统一 */}
-                            {doc.status === "ready" && (
-                              <ContextMenuItem
-                                onSelect={() =>
-                                  runAfterMenuClose(() =>
-                                    onGenerateQuestion([doc.id]),
-                                  )
-                                }
-                              >
-                                <Sparkles className="size-4" />
-                                {tk.generateQuestion}
                               </ContextMenuItem>
                             )}
                             {(doc.status === "failed" ||

@@ -17,8 +17,6 @@ rs.mock("@/core/api/fetcher", () => ({ fetch: fetchMock.fetch }));
 const { MASKED_RAG_SECRET, loadRagConfig, RagConfigRequestError, saveRagConfig } =
   await import("@/core/rag/api");
 import {
-  ASR_MODEL_MENU,
-  asrModelForProviderSwitch,
   buildRagConfigInput,
   changesEmbeddingDimension,
   connectivityProbeKey,
@@ -67,8 +65,6 @@ function view(
       rerank_model: "qwen3-rerank",
       rerank_api_key: "",
       vlm_model: "Qwen/Qwen3-VL-30B-A3B-Instruct",
-      extract_model: "deepseek-chat",
-      judge_model: "deepseek-chat",
       mineru_api_token: "",
       embedding_provider: "dashscope",
       embedding_base_url: "",
@@ -82,7 +78,6 @@ function view(
       parse_provider: "mineru-cloud",
       parse_base_url: "",
       parse_tier: null,
-      video: { asr_provider: "funasr", asr_model: "paraformer-zh" },
       ...over,
     },
     sources: {
@@ -133,10 +128,6 @@ describe("formValuesFromConfig", () => {
     expect(values.embedding_model).toBe("qwen3.7-text-embedding");
     expect(values.embedding_api_key).toBe(MASKED_RAG_SECRET);
     expect(values.rerank_api_key).toBe("");
-    expect(values.video).toEqual({
-      asr_provider: "funasr",
-      asr_model: "paraformer-zh",
-    });
   });
 
   it("falls back to empty strings for an unset view", () => {
@@ -148,7 +139,6 @@ describe("formValuesFromConfig", () => {
 
     expect(values.qdrant_url).toBe("");
     expect(values.embedding_api_key).toBe("");
-    expect(values.video.asr_provider).toBe("funasr");
   });
 });
 
@@ -162,7 +152,7 @@ describe("buildRagConfigInput", () => {
   it("carries the file's own override forward so a partial edit cannot drop it", () => {
     const current = view({}, { rerank_model: "ui" });
     const values = formValuesFromConfig(current);
-    values.extract_model = ""; // operator-owned: clearing it changes nothing
+    values.default_model = ""; // operator-owned: clearing it changes nothing
 
     expect(buildRagConfigInput(values, current)).toEqual({ rerank_model: "qwen3-rerank" });
   });
@@ -219,49 +209,6 @@ describe("buildRagConfigInput", () => {
 
     values.rerank_api_key = "sk-env-override";
     expect(buildRagConfigInput(values, current)).toEqual({ rerank_api_key: "sk-env-override" });
-  });
-
-  it("carries and updates the nested video block", () => {
-    const current = view({}, { "video.asr_model": "ui" });
-    const values = formValuesFromConfig(current);
-    values.video.asr_provider = "whisper";
-
-    expect(buildRagConfigInput(values, current)).toEqual({
-      video: { asr_model: "paraformer-zh", asr_provider: "whisper" },
-    });
-  });
-
-  it("keeps a service-tier ASR provider instead of normalising it back to a local engine", () => {
-    // The provider select is an enum, not a two-value switch (spec 2026-09-28 D2): a value
-    // outside the old pair used to be silently rewritten to `funasr` on load *and* on submit,
-    // so the new tier could never be saved.
-    const current = view({ video: { asr_provider: "dashscope", asr_model: "qwen-audio-3.1-asr-flash" } });
-    const values = formValuesFromConfig(current);
-
-    expect(values.video.asr_provider).toBe("dashscope");
-    expect(buildRagConfigInput(values, current)).toEqual({});
-  });
-
-  it("round-trips the ASR address and key beside the other legs' fields", () => {
-    // ① 乙 (2026-09-29): the leg's connection info lives at the top level, not inside `video`.
-    const current = view(
-      { asr_base_url: "https://dashscope.aliyuncs.com", asr_api_key: "" },
-      { asr_base_url: "ui", asr_api_key: "unset" },
-    );
-    const values = formValuesFromConfig(current);
-
-    expect(values.asr_base_url).toBe("https://dashscope.aliyuncs.com");
-    expect(buildRagConfigInput(values, current)).toEqual({ asr_base_url: "https://dashscope.aliyuncs.com" });
-
-    values.video.asr_provider = "openai-audio";
-    values.asr_base_url = "http://127.0.0.1:8000/v1";
-    values.asr_api_key = "sk-asr";
-    expect(buildRagConfigInput(values, current)).toEqual({
-      // The model is operator-owned here, so only the rows that actually changed are submitted.
-      video: { asr_provider: "openai-audio" },
-      asr_base_url: "http://127.0.0.1:8000/v1",
-      asr_api_key: "sk-asr",
-    });
   });
 
   it("trims what it submits", () => {
@@ -355,41 +302,6 @@ describe("modelReferenceOptions", () => {
   });
 });
 
-describe("judge model", () => {
-  it("seeds the effective value and reports no change for it", () => {
-    const current = view();
-
-    expect(formValuesFromConfig(current).judge_model).toBe("deepseek-chat");
-    expect(buildRagConfigInput(formValuesFromConfig(current), current)).toEqual({});
-  });
-
-  it("submits an override picked for an operator-owned judge", () => {
-    const current = view();
-    const values = formValuesFromConfig(current);
-    values.judge_model = "qwen-max";
-
-    expect(buildRagConfigInput(values, current)).toEqual({ judge_model: "qwen-max" });
-  });
-
-  it("carries a file-owned judge forward and clears it when emptied", () => {
-    const current = view({}, { judge_model: "ui" });
-    const values = formValuesFromConfig(current);
-
-    expect(buildRagConfigInput(values, current)).toEqual({ judge_model: "deepseek-chat" });
-
-    values.judge_model = "";
-    expect(buildRagConfigInput(values, current)).toEqual({ judge_model: "" });
-  });
-
-  it("reports an edit as a change", () => {
-    const current = view();
-    const values = formValuesFromConfig(current);
-    values.judge_model = "qwen-max";
-
-    expect(hasFormChanges(values, current)).toBe(true);
-  });
-});
-
 describe("RAG default model", () => {
   it("seeds the effective value and reports no change for it", () => {
     const current = view({ default_model: "yaml-default" });
@@ -434,8 +346,8 @@ describe("RAG default model", () => {
 
   it("withdraws one override while carrying the others", () => {
     const current = view(
-      { default_model: "file-default", judge_model: "file-judge" },
-      { default_model: "ui", judge_model: "ui" },
+      { default_model: "file-default", vlm_model: "file-vlm" },
+      { default_model: "ui", vlm_model: "ui" },
     );
     const values = {
       ...formValuesFromConfig(current),
@@ -443,7 +355,7 @@ describe("RAG default model", () => {
     };
 
     expect(buildRagConfigInput(values, current)).toEqual({
-      judge_model: "file-judge",
+      vlm_model: "file-vlm",
       default_model: "",
     });
   });
@@ -490,103 +402,11 @@ describe("RAG default model", () => {
   });
 });
 
-describe("wiki and synthesis roles", () => {
-  // The two roles that had no field at all before spec 2026-09-26. Same contract as every
-  // other model-reference row — including the B-1-shaped guard: a file-owned override has to
-  // survive an unrelated edit, or the whole-object PUT would silently drop it.
-  const ROLES = ["wiki_model", "synthesis_model"] as const;
-  const over = (field: (typeof ROLES)[number], value: string) =>
-    ({ [field]: value }) as Partial<RagConfigValues>;
-  const edited = (field: (typeof ROLES)[number], value: string) => ({
-    ...formValuesFromConfig(view(over(field, "yaml-role"))),
-    [field]: value,
-  });
-
-  it.each(ROLES)(
-    "%s seeds the effective value and reports no change for it",
-    (field) => {
-      const current = view(over(field, "yaml-role"));
-      const values = formValuesFromConfig(current);
-
-      expect(values[field]).toBe("yaml-role");
-      expect(hasFormChanges(values, current)).toBe(false);
-      expect(buildRagConfigInput(values, current)).toEqual({});
-    },
-  );
-
-  it.each(ROLES)(
-    "%s seeds an empty string when nothing declares it",
-    (field) => {
-      expect(formValuesFromConfig(view())[field]).toBe("");
-    },
-  );
-
-  it.each(ROLES)("%s is submitted when an operator picks one", (field) => {
-    const current = view();
-    const values = edited(field, "qwen3.7-max");
-
-    expect(buildRagConfigInput(values, current)).toEqual({
-      [field]: "qwen3.7-max",
-    });
-  });
-
-  it.each(ROLES)(
-    "%s survives an unrelated edit when the file owns it",
-    (field) => {
-      const current = view(
-        { ...over(field, "file-role"), rerank_model: "qwen3-rerank" },
-        { [field]: "ui" },
-      );
-      const values = {
-        ...formValuesFromConfig(current),
-        rerank_model: "qwen3-rerank-v2",
-      };
-
-      expect(buildRagConfigInput(values, current)).toEqual({
-        [field]: "file-role",
-        rerank_model: "qwen3-rerank-v2",
-      });
-    },
-  );
-
-  it.each(ROLES)("%s is withdrawn with an explicit empty string", (field) => {
-    // `""` rather than an omitted key: the server reads an omission as carry-forward.
-    const current = view(over(field, "file-role"), { [field]: "ui" });
-    const values = {
-      ...formValuesFromConfig(current),
-      [field]: "",
-    };
-
-    expect(buildRagConfigInput(values, current)).toEqual({ [field]: "" });
-  });
-
-  it.each(ROLES)(
-    "%s counts as a change when picked, and not once reverted",
-    (field) => {
-      const current = view(over(field, "yaml-role"));
-      const seeded = formValuesFromConfig(current);
-
-      expect(hasFormChanges({ ...seeded, [field]: "other" }, current)).toBe(
-        true,
-      );
-      expect(
-        hasFormChanges({ ...seeded, [field]: "  yaml-role  " }, current),
-      ).toBe(false);
-    },
-  );
-});
-
 describe("thinking follow-chat toggles (spec 2026-10-03 D1=甲)", () => {
-  // Five role slots, one boolean each: checked = this leg follows chat's thinking default.
+  // 首期只剩配文一条腿一个布尔：checked = 该腿跟随对话的思考默认。
   // A checkbox is two-state, so `false` is how the form *says* "not this leg" — an omitted
   // key would be read as a carry-forward by the whole-object PUT, just like the text rows.
-  const FIELDS = [
-    "extract_thinking",
-    "wiki_thinking",
-    "judge_thinking",
-    "synthesis_thinking",
-    "vlm_thinking",
-  ] as const;
+  const FIELDS = ["vlm_thinking"] as const;
   const over = (field: (typeof FIELDS)[number], value: boolean | null) =>
     ({ [field]: value }) as Partial<RagConfigValues>;
 
@@ -669,8 +489,8 @@ describe("thinking follow-chat toggles (spec 2026-10-03 D1=甲)", () => {
 
   it("carries a stored false forward too — false is a value, not an absence", () => {
     const current = view(
-      { extract_thinking: false, rerank_model: "qwen3-rerank" },
-      { extract_thinking: "ui" },
+      { vlm_thinking: false, rerank_model: "qwen3-rerank" },
+      { vlm_thinking: "ui" },
     );
     const values = {
       ...formValuesFromConfig(current),
@@ -678,7 +498,7 @@ describe("thinking follow-chat toggles (spec 2026-10-03 D1=甲)", () => {
     };
 
     expect(buildRagConfigInput(values, current)).toEqual({
-      extract_thinking: false,
+      vlm_thinking: false,
       rerank_model: "qwen3-rerank-v2",
     });
   });
@@ -1465,47 +1285,3 @@ describe("改宽度 = 迁移的那一次保存 (spec 2026-09-26 D5-7)", () => {
   });
 });
 
-describe("ASR model menu and the provider switch (spec 2026-09-27 §2 D2)", () => {
-  it("rewrites a value the target engine cannot load to that engine's first menu row", () => {
-    expect(asrModelForProviderSwitch("whisper", "paraformer-zh")).toBe("small");
-  });
-
-  it("rewrites a whisper name when switching to funasr", () => {
-    expect(asrModelForProviderSwitch("funasr", "tiny")).toBe("paraformer-zh");
-  });
-
-  it("keeps everything that is not a whisper name when switching to funasr", () => {
-    // funasr is an open set (any ModelScope id, or a local directory) — its menu is not a filter.
-    for (const value of [
-      "paraformer-en-spk",
-      "iic/SenseVoiceSmall",
-      "./models/paraformer",
-    ]) {
-      expect(asrModelForProviderSwitch("funasr", value)).toBe(value);
-    }
-  });
-
-  it("takes each engine's default from its own menu's first row", () => {
-    expect(ASR_MODEL_MENU.whisper[0]).toBe("small");
-    expect(ASR_MODEL_MENU.funasr[0]).toBe("paraformer-zh");
-    expect(asrModelForProviderSwitch("whisper", "")).toBe(
-      ASR_MODEL_MENU.whisper[0],
-    );
-    expect(asrModelForProviderSwitch("funasr", "tiny")).toBe(
-      ASR_MODEL_MENU.funasr[0],
-    );
-  });
-
-  it("leaves a legal whisper name alone even when the menu does not offer it", () => {
-    for (const value of ["turbo", "large"]) {
-      expect(asrModelForProviderSwitch("whisper", value)).toBe(value);
-    }
-  });
-
-  it("judges against every whisper name, not against the six menu rows", () => {
-    // A menu-sized judgement would let these through to funasr, which fails only at ingest.
-    for (const value of ["turbo", "large", "tiny.en"]) {
-      expect(asrModelForProviderSwitch("funasr", value)).toBe("paraformer-zh");
-    }
-  });
-});

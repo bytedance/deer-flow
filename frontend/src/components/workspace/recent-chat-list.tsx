@@ -51,6 +51,7 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
+import { excludeKnowledgeThreads } from "@/core/knowledge/kb-threads";
 import { useProjects } from "@/core/projects";
 import { useLocalSettings } from "@/core/settings";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
@@ -447,8 +448,11 @@ export function RecentChatList() {
     archivedProjectsQuery.data,
     archivedProjectsQuery.isError,
   ]);
+  // KB-bound threads (metadata.kb_id, spec §5.2) live inside the knowledge page —
+  // the global recent-chat list excludes them so one conversation has exactly one home
+  // (its own per-kb history popover lists it instead).
   const threadListModel = useMemo(
-    () => buildThreadListModel(infiniteThreads?.pages ?? []),
+    () => buildThreadListModel((infiniteThreads?.pages ?? []).map((page) => excludeKnowledgeThreads(page))),
     [infiniteThreads?.pages],
   );
   const { threads } = threadListModel;

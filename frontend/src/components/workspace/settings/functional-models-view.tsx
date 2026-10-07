@@ -1,7 +1,8 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, Lock } from "lucide-react";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -24,14 +25,12 @@ import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
-  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { Tooltip } from "@/components/workspace/tooltip";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   useKnowledgeBases,
@@ -39,15 +38,10 @@ import {
   useReindexStatus,
 } from "@/core/knowledge/hooks";
 import { isReindexRunning } from "@/core/knowledge/reindex-status";
-import { useModels, useModelsConfig } from "@/core/models/hooks";
+import { useModels } from "@/core/models/hooks";
+import { loadManagedModels } from "@/core/models/management";
 import { RagConfigRequestError } from "@/core/rag/api";
 import {
-  ASR_LOCAL_ENGINES,
-  ASR_MODEL_MENU,
-  ASR_PROVIDER_OPTIONS,
-  asrModelForProviderSwitch,
-  asrProbeBlocksSave,
-  asrProbeVerdictFor,
   buildRagConfigInput,
   changesEmbeddingDimension,
   connectivityProbeKey,
@@ -71,7 +65,6 @@ import {
   RERANK_PROVIDER_OPTIONS,
   resolveSparseCapability,
   SPARSE_PROVIDER_OPTIONS,
-  shouldProbeAsr,
   shouldProbeSparseService,
   sparseProbeKey,
   sparseServiceProbeKey,
@@ -80,7 +73,6 @@ import {
   type RagConfigFormValues,
 } from "@/core/rag/config-form";
 import {
-  useProbeAsrService,
   useProbeConnectivity,
   useProbeDimensions,
   useProbeSparseCapability,
@@ -116,17 +108,6 @@ const EMBEDDING_KEY_SOURCE = "embedding_api_key";
 const PROBE_DEBOUNCE_MS = 400;
 
 /**
- * The ASR dropdown's three groups (spec 2026-09-28 D2「三组四值」): the two engines that run
- * inside this process, then one row per protocol family. The ids mirror the backend allowlist
- * like every other option list here; the grouping is the row's own reading of them.
- */
-const ASR_PROVIDER_GROUPS = [
-  { labelKey: "asrGroupLocal" as const, ids: ASR_LOCAL_ENGINES },
-  { labelKey: "asrGroupProtocol" as const, ids: ["openai-audio"] },
-  { labelKey: "asrGroupNative" as const, ids: ["dashscope"] },
-] as const;
-
-/**
  * A provider dropdown. Its ids come from the backend's curated allowlist; the empty id means
  * "let the downstream service decide", which is what the wire carries as null.
  *
@@ -141,17 +122,12 @@ const ASR_PROVIDER_GROUPS = [
  * child: Radix mirrors the selected item's text into the trigger, so a child would also be
  * copied into the option labels.
  *
- * `groups` turns the flat list into labelled sections separated by hairlines (spec 2026-09-28
- * D2): the ASR row's four values are two *kinds* of thing — engines and protocols — and a flat
- * list of four makes the admin read all four to find the split. The ids still come from
- * `options`; a group only says where they sit.
  */
 function OptionSelect({
   label,
   value,
   options,
   labels,
-  groups,
   disabledReasons,
   trailing,
   onChange,
@@ -160,7 +136,6 @@ function OptionSelect({
   value: string;
   options: readonly string[];
   labels: Record<string, string>;
-  groups?: readonly { labelKey: string; label: string; ids: readonly string[] }[];
   disabledReasons?: Partial<Record<string, string>>;
   trailing?: React.ReactNode;
   onChange: (next: string) => void;
@@ -194,19 +169,7 @@ function OptionSelect({
           </span>
         ) : null}
       </SelectTrigger>
-      <SelectContent>
-        {groups
-          ? groups.map((group, index) => (
-              <Fragment key={group.labelKey}>
-                {index > 0 && <SelectSeparator />}
-                <SelectGroup>
-                  <SelectLabel>{group.label}</SelectLabel>
-                  {group.ids.map(renderOption)}
-                </SelectGroup>
-              </Fragment>
-            ))
-          : options.map(renderOption)}
-      </SelectContent>
+      <SelectContent>{options.map(renderOption)}</SelectContent>
     </Select>
   );
 }
@@ -487,11 +450,15 @@ export function FunctionalModelsView() {
   // 永远只有一条亮（点另一条就把前一条打回灰）。
   const embeddingConnectivity = useProbeConnectivity();
   const rerankConnectivity = useProbeConnectivity();
-  // 一行一个实例：ASR 那格的结论与两条腿无关，共用只会互相顶掉。
-  const asrProbe = useProbeAsrService();
   const requestedDimension = useRef<string | null>(null);
   const { models } = useModels();
-  const { config: modelsConfig } = useModelsConfig();
+  // 同一目录页共用的管理模型缓存（键与 ModelSettingsPage 相同）：VLM 行要从条目能力
+  // （supports_vision）筛选项，公开列表不带该字段。
+  const { user } = useAuth();
+  const managedCatalog = useQuery({
+    queryKey: ["managed-models", user?.id],
+    queryFn: ({ signal }) => loadManagedModels(signal),
+  });
 
   const [values, setValues] = useState<RagConfigFormValues | null>(null);
   // The last candidate a probe was actually sent for, so re-rendering (or unrelated typing) does
@@ -538,19 +505,6 @@ export function FunctionalModelsView() {
     values?.rerank_provider ?? "",
   );
 
-  // The ASR row's own probe (spec 2026-09-28 D7): only the service tiers reach out, the
-  // verdict counts only for the values it was taken for, and only `no_timestamps` blocks a save.
-  // 手动探针 2026-09-30 起零入口休眠（用户裁定）——判定与拦保存留着，只是没有可点的控件。
-  const asrKeyPresent = view?.sources?.asr_api_key !== "unset";
-  const asrServiceApplies = values ? shouldProbeAsr(values) : false;
-  const asrVerdict = values
-    ? asrProbeVerdictFor(values, asrKeyPresent, asrProbe.data ?? null)
-    : null;
-  const asrBlockReason =
-    asrServiceApplies && asrProbeBlocksSave(asrVerdict)
-      ? F.asrProbeBlocksSave
-      : null;
-
   // The sparse half's capability is a three-state answer (spec 2026-09-16 §3 D2): the allowlist
   // settles the dialect question, a probe settles the model question, and everything unproven
   // stays `unknown` — which blocks nothing.
@@ -576,8 +530,7 @@ export function FunctionalModelsView() {
     (!values.embedding_base_url.trim() || !values.rerank_base_url.trim())
       ? F.endpointRequired
       : null;
-  const saveBlockReason =
-    sparseBlockReason ?? endpointRequiredReason ?? asrBlockReason;
+  const saveBlockReason = sparseBlockReason ?? endpointRequiredReason;
   const sparseUnverified =
     values?.embedding_sparse_source === "provider" &&
     probeVerdict?.key === (values ? sparseProbeKey(values) : "") &&
@@ -802,7 +755,7 @@ export function FunctionalModelsView() {
   }
 
   const sources = view.sources ?? {};
-  const managedModels = modelsConfig?.models ?? [];
+  const managedModels = managedCatalog.data?.models ?? [];
   const visionOptions = visionReferenceOptions(
     managedModels,
     values.vlm_model,
@@ -848,12 +801,6 @@ export function FunctionalModelsView() {
     value: RagConfigFormValues[K],
   ) {
     setValues((prev) => (prev ? { ...prev, [key]: value } : prev));
-  }
-
-  function updateVideo(key: keyof RagConfigFormValues["video"], value: string) {
-    setValues((prev) =>
-      prev ? { ...prev, video: { ...prev.video, [key]: value } } : prev,
-    );
   }
 
   /** Provenance is state, not documentation: a chip when the environment supplies it. */
@@ -928,10 +875,6 @@ export function FunctionalModelsView() {
   // currently points at, so the menu reads as "which role, on what".
   const thinkingRows = (
     [
-      ["extract_thinking", F.extractModel, "extract_model", F.extractModelNone],
-      ["wiki_thinking", F.wikiModel, "wiki_model", F.wikiModelNone],
-      ["judge_thinking", F.judgeModel, "judge_model", F.judgeModelNone],
-      ["synthesis_thinking", F.synthesisModel, "synthesis_model", F.synthesisModelNone],
       ["vlm_thinking", F.captionModel, "vlm_model", F.vlmModelDefault],
     ] as const
   ).map(([key, label, modelField, noneLabel]) => {
@@ -1406,120 +1349,6 @@ export function FunctionalModelsView() {
         )}
       </Group>
 
-      <Group title={F.groupExtraction} info={F.extractModelHint}>
-        <div className={ROW}>
-          <RowLabel>{F.extractModel}</RowLabel>
-          <Select
-            value={values.extract_model || MODEL_REFERENCE_NONE}
-            onValueChange={(next) =>
-              update("extract_model", next === MODEL_REFERENCE_NONE ? "" : next)
-            }
-          >
-            <SelectTrigger
-              className="w-full min-w-0"
-              aria-label={F.extractModel}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {modelReferenceOptions(
-                models,
-                values.extract_model,
-                F.extractModelNone,
-              ).map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className={ROW}>
-          <RowLabel info={F.wikiModelHint}>{F.wikiModel}</RowLabel>
-          <Select
-            value={values.wiki_model || MODEL_REFERENCE_NONE}
-            onValueChange={(next) =>
-              update("wiki_model", next === MODEL_REFERENCE_NONE ? "" : next)
-            }
-          >
-            <SelectTrigger
-              className="w-full min-w-0"
-              aria-label={F.wikiModel}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {modelReferenceOptions(
-                models,
-                values.wiki_model,
-                F.wikiModelNone,
-              ).map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </Group>
-
-      <Group title={F.groupEvaluation} info={F.groupEvaluationHint}>
-        <div className={ROW}>
-          <RowLabel>{F.judgeModel}</RowLabel>
-          <Select
-            value={values.judge_model || MODEL_REFERENCE_NONE}
-            onValueChange={(next) =>
-              update("judge_model", next === MODEL_REFERENCE_NONE ? "" : next)
-            }
-          >
-            <SelectTrigger className="w-full min-w-0" aria-label={F.judgeModel}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {modelReferenceOptions(
-                models,
-                values.judge_model,
-                F.judgeModelNone,
-              ).map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className={ROW}>
-          <RowLabel info={F.synthesisModelHint}>{F.synthesisModel}</RowLabel>
-          <Select
-            value={values.synthesis_model || MODEL_REFERENCE_NONE}
-            onValueChange={(next) =>
-              update(
-                "synthesis_model",
-                next === MODEL_REFERENCE_NONE ? "" : next,
-              )
-            }
-          >
-            <SelectTrigger
-              className="w-full min-w-0"
-              aria-label={F.synthesisModel}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {modelReferenceOptions(
-                models,
-                values.synthesis_model,
-                F.synthesisModelNone,
-              ).map((option) => (
-                <SelectItem key={option.value} value={option.value}>
-                  {option.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </Group>
-
       <Group title={F.groupMultimodal} info={F.groupMultimodalHint}>
         <Rows>
           <div className={ROW}>
@@ -1554,152 +1383,6 @@ export function FunctionalModelsView() {
             </div>
           </div>
 
-          {/* 主角行（spec 2026-09-30 观感二轮）：与「图片描述模型 (VLM)」同级；它的细节
-              （Model ID / API Key / 接口地址）缩进一级，照稀疏服务那套嵌套。
-              手动探针零入口休眠（同日第三轮裁定）：兜底＝保存期构造拒绝（缺地址/钥匙 ⇒ 400）
-              ＋ 入库期 asr=failed；探针链路与保存区那道门留着，只是没有可点的控件。 */}
-          <div className={ROW}>
-            <RowLabel>{F.asrModelRow}</RowLabel>
-            <OptionSelect
-              label={F.asrProvider}
-              value={values.video.asr_provider}
-              options={ASR_PROVIDER_OPTIONS}
-              labels={{
-                funasr: F.asrProviderFunasr,
-                whisper: F.asrProviderWhisper,
-                "openai-audio": F.asrProviderOpenaiAudio,
-                dashscope: F.asrProviderDashscope,
-              }}
-              groups={ASR_PROVIDER_GROUPS.map((group) => ({
-                labelKey: group.labelKey,
-                label: F[group.labelKey],
-                ids: group.ids,
-              }))}
-              onChange={(next) => {
-                const provider =
-                  next as RagConfigFormValues["video"]["asr_provider"];
-                updateVideo("asr_provider", provider);
-                // 切换即改值：另一个引擎跑不了的值换成目标引擎的首行（spec 2026-09-27 §2 D2）。
-                // 服务档的模型名是服务侧的、没有候选行，所以那一侧不动值。
-                const kept = asrModelForProviderSwitch(
-                  provider,
-                  values.video.asr_model,
-                );
-                if (kept !== values.video.asr_model)
-                  updateVideo("asr_model", kept);
-              }}
-            />
-          </div>
-
-          <div className={ROW}>
-            <RowLabel
-              nested
-              info={
-                values.video.asr_provider === "whisper"
-                  ? F.asrModelWhisperHint
-                  : values.video.asr_provider === "funasr"
-                    ? F.asrModelFunasrHint
-                    : F.asrModelServiceHint
-              }
-            >
-              {F.modelLabel}
-            </RowLabel>
-            {/* 与「维度」行同款：输入框自由填 + 框内下拉（候选组按引擎整组换）。
-                服务档的模型名是服务侧的、没有候选清单，所以那一侧不给下拉。 */}
-            <div className="relative w-full" data-slot="asr-model-control">
-              <Input
-                aria-label={F.asrModel}
-                data-slot="asr-model-input"
-                className={cn(
-                  "w-full",
-                  values.video.asr_provider !== "openai-audio" &&
-                    values.video.asr_provider !== "dashscope" &&
-                    "pr-10",
-                )}
-                value={values.video.asr_model}
-                placeholder={
-                  asrServiceApplies
-                    ? ""
-                    : ASR_MODEL_MENU[values.video.asr_provider][0]
-                }
-                onChange={(event) =>
-                  updateVideo("asr_model", event.target.value)
-                }
-                {...AUTOFILL_OFF_INPUT_PROPS}
-              />
-              {asrServiceApplies ? null : (
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <span className="pointer-events-none absolute inset-0 flex items-center justify-end pr-3">
-                      <button
-                        type="button"
-                        aria-label={F.asrModelCandidates}
-                        data-slot="asr-model-candidates-trigger"
-                        className="text-muted-foreground hover:text-foreground pointer-events-auto inline-flex"
-                      >
-                        <ChevronDown className="size-4 opacity-50" />
-                      </button>
-                    </span>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    align="start"
-                    className="w-(--radix-dropdown-menu-trigger-width) min-w-0"
-                  >
-                    <DropdownMenuLabel className="text-muted-foreground font-normal">
-                      {F.asrModelCandidates}
-                    </DropdownMenuLabel>
-                    {ASR_MODEL_MENU[values.video.asr_provider].map((name) => (
-                      <DropdownMenuItem
-                        key={name}
-                        data-slot="asr-model-candidate"
-                        onSelect={() => updateVideo("asr_model", name)}
-                      >
-                        {name}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              )}
-            </div>
-          </div>
-
-          {/* 钥匙与地址：本地引擎（进程内）两格都锁——它们对进程内引擎没有概念；
-              服务档两格都填，地址格用厂商端点做灰字占位（D3）。恒显、锁而不藏。 */}
-          <div className={ROW}>
-            <RowLabel nested>{F.apiKeyLabel}</RowLabel>
-            {asrServiceApplies ? (
-              <SecretInput
-                badge={asrKeyPresent ? F.secretFromEnvBadge : undefined}
-                value={values.asr_api_key}
-                aria-label={F.asrApiKey}
-                onChange={(event) => update("asr_api_key", event.target.value)}
-              />
-            ) : (
-              <div data-slot="asr-locked">
-                <LockedBox reason={F.lockedServiceOnly} />
-              </div>
-            )}
-          </div>
-
-          <div className={ROW}>
-            <RowLabel nested>{F.endpointLabel}</RowLabel>
-            {asrServiceApplies ? (
-              <Input
-                value={values.asr_base_url}
-                aria-label={F.asrBaseUrl}
-                placeholder={endpointPlaceholderFor(
-                  view?.asr_providers,
-                  values.video.asr_provider,
-                )}
-                onChange={(event) => update("asr_base_url", event.target.value)}
-                {...AUTOFILL_OFF_INPUT_PROPS}
-              />
-            ) : (
-              <div data-slot="asr-locked">
-                <LockedBox reason={F.lockedServiceOnly} />
-              </div>
-            )}
-          </div>
         </Rows>
       </Group>
 
@@ -1871,7 +1554,7 @@ export function FunctionalModelsView() {
           {reindexRunning && (
             <span className="text-muted-foreground text-xs" role="status">
               {reindexProgress
-                ? `${F.reindexRunning} ${reindexProgress.documents_done}/${reindexProgress.documents_total} · ${F.reindexChunksWritten} ${reindexProgress.chunks_indexed + reindexProgress.entities_indexed + reindexProgress.wiki_entries_indexed + reindexProgress.cards_indexed}`
+                ? `${F.reindexRunning} ${reindexProgress.documents_done}/${reindexProgress.documents_total} · ${F.reindexChunksWritten} ${reindexProgress.chunks_indexed}`
                 : F.reindexRunning}
             </span>
           )}

@@ -13,14 +13,13 @@ import { KB_CITATION_JUMP_EVENT, type CitationJumpDetail } from "./citation-mark
 
 /**
  * Citation cards under an assistant answer (spec §4.6/§3.6, phase-2 batch-1
- * P2). Collapsed by default into a one-line entry「参考来源 · N + 类型统计」;
+ * P2). Collapsed by default into a one-line entry「参考来源 · N」;
  * expanding shows merged cards (same-document citations combine, numbers
  * shown together), capped at 5 with 查看全部. Chunk cards expand the shared
- * ChunkCard in place; wiki cards open the entry drawer via onOpenWikiEntry
- * (overlay — never switches the middle tab). A citation-mark click in the
- * answer body dispatches KB_CITATION_JUMP_EVENT: the strip expands, the
- * matching card highlights, and chunk cards auto-open the chunk text (so a
- * touch-device tap reaches the slice directly).
+ * ChunkCard in place. A citation-mark click in the answer body dispatches
+ * KB_CITATION_JUMP_EVENT: the strip expands, the matching card highlights,
+ * and chunk cards auto-open the chunk text (so a touch-device tap reaches
+ * the slice directly).
  */
 
 const COLLAPSED_LIMIT = 5;
@@ -29,7 +28,6 @@ const HIGHLIGHT_MS = 2000;
 type CitationGroup = {
   key: string;
   docName: string;
-  sourceType: "chunk" | "wiki" | "manual";
   items: { number: number; citation: KnowledgeCitation }[];
 };
 
@@ -37,11 +35,10 @@ function groupSources(sources: KnowledgeCitation[]): CitationGroup[] {
   const groups: CitationGroup[] = [];
   const byKey = new Map<string, CitationGroup>();
   sources.forEach((source, index) => {
-    const sourceType = source.source_type ?? "chunk";
-    const key = `${sourceType}:${source.doc_name}`;
+    const key = `chunk:${source.doc_name}`;
     let group = byKey.get(key);
     if (!group) {
-      group = { key, docName: source.doc_name, sourceType, items: [] };
+      group = { key, docName: source.doc_name, items: [] };
       byKey.set(key, group);
       groups.push(group);
     }
@@ -53,12 +50,10 @@ function groupSources(sources: KnowledgeCitation[]): CitationGroup[] {
 export function KbCitationSources({
   sources,
   messageId,
-  onOpenWikiEntry,
   kbId,
 }: {
   sources: KnowledgeCitation[];
   messageId: string;
-  onOpenWikiEntry?: (entryId: string) => void;
   /** Enables in-place chunk images (`images/…` → document files route). */
   kbId?: string;
 }) {
@@ -71,15 +66,11 @@ export function KbCitationSources({
   const rootRef = useRef<HTMLDivElement>(null);
 
   const groups = useMemo(() => groupSources(sources), [sources]);
-  const chunkCount = useMemo(() => sources.filter((s) => (s.source_type ?? "chunk") === "chunk").length, [sources]);
-  const wikiCount = useMemo(() => sources.filter((s) => s.source_type === "wiki").length, [sources]);
-  // Phase-3 P6 (spec §8): manual cards cited through wiki_search.
-  const manualCount = sources.length - chunkCount - wikiCount;
 
   // Citation-mark clicks in the answer body land here: expand + highlight
   // every matching card (a merged mark carries several display numbers),
-  // auto-opening the first chunk/manual card's text so a touch tap reaches
-  // the slice directly.
+  // auto-opening the first card's text so a touch tap reaches the slice
+  // directly.
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<CitationJumpDetail>).detail;
@@ -91,13 +82,8 @@ export function KbCitationSources({
       const matched = groups.filter((candidate) =>
         candidate.items.some((item) => detail.indices.includes(item.number)),
       );
-      // Cards expand in place like chunks (no entry drawer for manual cards).
-      const target = matched.find(
-        (candidate) =>
-          candidate.sourceType === "chunk" || candidate.sourceType === "manual",
-      );
-      if (target) {
-        setExpandedChunkId(target.items[0]!.citation.chunk_id);
+      if (matched[0]) {
+        setExpandedChunkId(matched[0].items[0]!.citation.chunk_id);
       }
       window.setTimeout(() => {
         // Scoped to this strip — a document-wide selector could scroll to a
@@ -128,9 +114,7 @@ export function KbCitationSources({
       >
         <BookOpenIcon className="size-3.5" />
         <span>{tc.sourcesTitle(sources.length)}</span>
-        {chunkCount > 0 && <span className="text-muted-foreground/80">· {tc.chunkSources(chunkCount)}</span>}
-        {wikiCount > 0 && <span className="text-muted-foreground/80">· {tc.wikiSources(wikiCount)}</span>}
-        {manualCount > 0 && <span className="text-muted-foreground/80">· {tc.manualSources(manualCount)}</span>}
+        <span className="text-muted-foreground/80">· {tc.chunkSources(sources.length)}</span>
         {expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
       </button>
 
@@ -138,9 +122,6 @@ export function KbCitationSources({
         <ol className="flex flex-col gap-1.5">
           {visibleGroups.map((group) => {
             const first = group.items[0]!;
-            const isWiki = group.sourceType === "wiki";
-            const typeLabel =
-              group.sourceType === "wiki" ? tc.sourceTypeWiki : group.sourceType === "manual" ? tc.sourceTypeManual : tc.sourceTypeChunk;
             const isHighlighted = group.items.some((item) =>
               highlightNumbers.includes(item.number),
             );
@@ -157,20 +138,16 @@ export function KbCitationSources({
                     isHighlighted && "bg-muted/60 ring-1 ring-primary/40",
                   )}
                   data-citation-highlight={isHighlighted ? "true" : undefined}
-                  data-testid={`citation-card-${group.sourceType}-${first.citation.chunk_id}`}
+                  data-testid={`citation-card-chunk-${first.citation.chunk_id}`}
                   type="button"
                   onClick={() => {
-                    if (isWiki) {
-                      onOpenWikiEntry?.(first.citation.chunk_id);
-                    } else {
-                      setExpandedChunkId((current) => (current === first.citation.chunk_id ? null : first.citation.chunk_id));
-                    }
+                    setExpandedChunkId((current) => (current === first.citation.chunk_id ? null : first.citation.chunk_id));
                   }}
                 >
                   <span className="flex w-full items-center gap-2 text-xs">
                     <span className="text-muted-foreground shrink-0 font-mono">{numbers}</span>
                     <Badge className="shrink-0 text-[10px]" variant="secondary">
-                      {typeLabel}
+                      {tc.sourceTypeChunk}
                     </Badge>
                     <span className="min-w-0 flex-1 truncate font-medium">{group.docName}</span>
                     {first.citation.page != null && (
@@ -182,9 +159,9 @@ export function KbCitationSources({
                   )}
                   <span className="text-muted-foreground line-clamp-2 w-full text-xs">{first.citation.text.slice(0, 120)}</span>
                 </button>
-                {!isWiki && expandedChunkId === first.citation.chunk_id && expandedSource && (
+                {expandedChunkId === first.citation.chunk_id && expandedSource && (
                   <div className="mt-1 mb-1.5 ml-6">
-                    {/* chunk_id 形如 `{doc_id}#0001`，前段即 doc_id（manual 卡片无图片引用，重写不生效也无碍） */}
+                    {/* chunk_id 形如 `{doc_id}#0001`，前段即 doc_id */}
                     <ChunkCard
                       docId={expandedSource.chunk_id.split("#")[0]}
                       docName={expandedSource.doc_name}

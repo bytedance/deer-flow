@@ -56,8 +56,12 @@ class ConversationReferencesFeature(BaseModel):
 
 
 class KnowledgeBaseFeature(BaseModel):
-    """Availability of RAGFlow retrieval scope selection in chat."""
+    """Availability of the knowledge capability and its retrieval scope selection."""
 
+    enabled: bool = Field(
+        ...,
+        description="Whether the knowledge capability is enabled (gates the frontend entry points)",
+    )
     scope_selection_enabled: bool = Field(
         ...,
         description="Whether chat may select a per-message RAGFlow retrieval scope",
@@ -109,6 +113,7 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             max_references=MAX_CONVERSATION_REFERENCES,
         ),
         knowledge_base=KnowledgeBaseFeature(
+            enabled=getattr(config.knowledge_base, "enabled", False),
             scope_selection_enabled=_knowledge_scope_selection_enabled(config),
         ),
     )

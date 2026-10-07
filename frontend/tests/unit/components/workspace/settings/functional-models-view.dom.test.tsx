@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { FunctionalModelsView } from "@/components/workspace/settings/functional-models-view";
@@ -99,6 +100,17 @@ rs.mock("@/core/models/hooks", () => ({
   useModelsConfig: () => ({ config: { models: catalogues.managed } }),
 }));
 
+// The view now reads the managed catalogue through its own useQuery (the same
+// ["managed-models", user] key the settings page uses) — serve it from the
+// same hoisted catalogue so the discriminators below keep working.
+const managementMock = rs.hoisted(() => ({
+  loadManagedModels: rs.fn(async () => ({ models: catalogues.managed })),
+}));
+rs.mock("@/core/models/management", () => managementMock);
+rs.mock("@/core/auth/AuthProvider", () => ({
+  useAuth: () => ({ user: { id: "u-1", system_role: "admin" } }),
+}));
+
 // The rebuild entry is library-scoped and its hooks poll; these display-rule cases only
 // need the row to render, so the entry stays inert (no library, idle, nothing pending).
 rs.mock("@/core/knowledge/hooks", () => ({
@@ -155,12 +167,21 @@ const RERANK_PROVIDERS = [
 /** The file owns nothing, so every value below is the effective config.yaml / env one. */
 function renderWith(config: Partial<RagConfigValues>) {
   hooks.view = {
-    config: { video: null, ...config },
+    config: { ...config },
     sources: {},
     embedding_providers: EMBEDDING_PROVIDERS,
     rerank_providers: RERANK_PROVIDERS,
   } as RagConfigView;
-  return render(<FunctionalModelsView />);
+  // The managed-catalogue query needs a client; retry off so a case that
+  // leaves the catalogue empty does not spin.
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={client}>
+      <FunctionalModelsView />
+    </QueryClientProvider>,
+  );
 }
 
 const labelCount = (label: string) => screen.queryAllByLabelText(label).length;
@@ -255,10 +276,10 @@ describe("RAG default row", () => {
     // D4's sketch puts it first, before the existing settings — so it must precede every
     // role row in document order, and carry its own label rather than borrowing one.
     const row = screen.getByLabelText("defaultModel");
-    const extraction = screen.getByLabelText("extractModel");
+    const caption = screen.getByLabelText("captionModel");
     expect(labelCount("defaultModel")).toBe(1);
     expect(
-      row.compareDocumentPosition(extraction) & Node.DOCUMENT_POSITION_FOLLOWING,
+      row.compareDocumentPosition(caption) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
@@ -514,65 +535,5 @@ describe("narrow stacking", () => {
     // 乙 (spec §3.2 revision): the pills are gone everywhere, wide included.
     expect(screen.queryByText("roleTagEmbedding")).toBeNull();
     expect(screen.queryByText("roleTagRerank")).toBeNull();
-  });
-});
-
-describe("wiki and synthesis rows", () => {
-  it("adds one row to each existing card instead of opening a new one", () => {
-    catalogues.models = [
-      { name: "deepseek-chat", display_name: "DeepSeek Chat" },
-    ];
-
-    renderWith({
-      extract_model: "deepseek-chat",
-      judge_model: "deepseek-chat",
-      wiki_model: "deepseek-chat",
-      synthesis_model: "deepseek-chat",
-    });
-
-    // One row each, and each explains itself in place rather than borrowing the card's ⓘ.
-    expect(labelCount("wikiModel")).toBe(1);
-    expect(labelCount("synthesisModel")).toBe(1);
-    expect(labelCount("wikiModelHint")).toBe(1);
-    expect(labelCount("synthesisModelHint")).toBe(1);
-
-    // ②'s decision: no new cards exist for them.
-    expect(screen.queryByText("groupWiki")).toBeNull();
-    expect(screen.queryByText("groupSynthesis")).toBeNull();
-
-    // The teeth of that decision: each new row lives in the *same* card as the row it joins.
-    const cardOf = (label: string) =>
-      screen.getByLabelText(label).closest('[data-slot="card"]');
-    expect(cardOf("wikiModel")).toBe(cardOf("extractModel"));
-    expect(cardOf("synthesisModel")).toBe(cardOf("judgeModel"));
-
-    // …and each row follows its card's existing row, in document order.
-    const order = [
-      "extractModel",
-      "wikiModel",
-      "judgeModel",
-      "synthesisModel",
-    ].map((label) => screen.getByLabelText(label));
-    for (let i = 1; i < order.length; i += 1) {
-      expect(
-        order[i - 1]!.compareDocumentPosition(order[i]!) &
-          Node.DOCUMENT_POSITION_FOLLOWING,
-      ).toBeTruthy();
-    }
-  });
-
-  it("offers a non-vision entry on both rows (no vision filter here)", () => {
-    // `visionReferenceOptions` would drop this entry; the discriminator is the *display name*,
-    // because a filtered-out stored value still renders as its raw name (門 A's Task 4 lesson).
-    catalogues.models = [{ name: "text-only", display_name: "Text Only" }];
-
-    renderWith({ wiki_model: "text-only", synthesis_model: "text-only" });
-
-    expect(screen.getByLabelText("wikiModel").textContent).toContain(
-      "Text Only",
-    );
-    expect(screen.getByLabelText("synthesisModel").textContent).toContain(
-      "Text Only",
-    );
   });
 });

@@ -78,6 +78,7 @@ def test_features_reports_agents_api_enabled() -> None:
         },
         "conversation_references": {"enabled": False, "max_references": 3},
         "knowledge_base": {
+            "enabled": False,
             "scope_selection_enabled": False,
         },
     }
@@ -99,6 +100,7 @@ def test_features_reports_agents_api_disabled() -> None:
         },
         "conversation_references": {"enabled": False, "max_references": 3},
         "knowledge_base": {
+            "enabled": False,
             "scope_selection_enabled": False,
         },
     }

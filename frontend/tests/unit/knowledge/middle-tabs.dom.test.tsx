@@ -1,14 +1,10 @@
 /**
- * 评测 tab 挂载（2026-08-24 spec §5，plan Task 4）：
- * - 第六个 trigger「评测」+ Radix 切换 + 六 pane forceMount keep-alive。
- * EvalTab 面板本体（数据联通/降档/drawer 占位，plan Task 5）见
- * eval-tab.dom.test.tsx。
+ * 中间栏容器（首期收窄）：单「文档」tab + 库头行（h-12 对齐会话栏）+ 库菜单（上传/重命名/删除）。
  */
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { useState, type ReactNode } from "react";
 
-import { MiddleTabs, type KnowledgeMiddleTab } from "@/components/workspace/knowledge/middle-tabs";
+import { MiddleTabs } from "@/components/workspace/knowledge/middle-tabs";
 import { I18nContext } from "@/core/i18n/context";
 import { zhCN } from "@/core/i18n/locales/zh-CN";
 import type { KnowledgeBase } from "@/core/knowledge/types";
@@ -22,59 +18,51 @@ const KB: KnowledgeBase = {
   created_at: "2026-08-09T10:00:00Z",
 };
 
-function renderTabs(evalPane?: ReactNode) {
-  function Harness() {
-    const [tab, setTab] = useState<KnowledgeMiddleTab>("documents");
-    return (
-      <I18nContext.Provider value={{ locale: "zh-CN", setLocale: () => undefined, t: zhCN }}>
-        <MiddleTabs
-          kb={KB}
-          activeTab={tab}
-          onTabChange={setTab}
-          supportedSuffixes={[".md", ".pdf", ".txt"]}
-          onUpload={rs.fn()}
-          onGenerateWiki={rs.fn()}
-          onRenameKb={rs.fn()}
-          onDeleteKb={rs.fn()}
-          documents={<div data-testid="documents-pane" />}
-          wiki={<div data-testid="wiki-pane" />}
-          recall={<div data-testid="recall-pane" />}
-          vectors={<div data-testid="vectors-pane" />}
-          graph={<div data-testid="graph-pane" />}
-          eval={evalPane ?? <div data-testid="eval-pane" />}
-        />
-      </I18nContext.Provider>
-    );
-  }
-  return render(<Harness />);
+function renderTabs() {
+  return render(
+    <I18nContext.Provider value={{ locale: "zh-CN", setLocale: () => undefined, t: zhCN }}>
+      <MiddleTabs
+        kb={KB}
+        supportedSuffixes={[".md", ".pdf", ".txt"]}
+        onUpload={rs.fn()}
+        onRenameKb={rs.fn()}
+        onDeleteKb={rs.fn()}
+        documents={<div data-testid="documents-pane" />}
+      />
+    </I18nContext.Provider>,
+  );
 }
 
 const stateOf = (testid: string) =>
   screen.getByTestId(testid).closest("[data-slot='tabs-content']")?.getAttribute("data-state");
 
-describe("MiddleTabs 评测 tab 挂载", () => {
+describe("MiddleTabs 首期收窄", () => {
   afterEach(() => {
     cleanup();
   });
 
-  it("renders the sixth trigger labeled 评测", () => {
+  it("sizes the library header row to h-12, matching the chat panel header", () => {
+    // 两栏标题容器底线必须同一 y（2026-10-07 用户报错位 8px）：高度只能钉
+    // 结构类名，真实像素由真浏览器量。
     renderTabs();
-    expect(screen.getByRole("tab", { name: "评测" })).toBeTruthy();
+    const row = screen.getByTestId("knowledge-middle-header");
+    expect(row.className).toContain("h-12");
+    expect(row.className).toContain("border-b");
   });
 
-  it("activates the eval pane on trigger selection (Radix automatic mode)", () => {
+  it("renders the single documents tab and its pane", () => {
     renderTabs();
-    // Radix Tabs automatic 激活模式在 mousedown 触发（对齐 graph-tab 先例）。
-    fireEvent.mouseDown(screen.getByRole("tab", { name: "评测" }));
-    expect(stateOf("eval-pane")).toBe("active");
-    expect(stateOf("documents-pane")).toBe("inactive");
+    expect(screen.getByRole("tab", { name: "文档" })).toBeTruthy();
+    expect(stateOf("documents-pane")).toBe("active");
   });
 
-  it("keeps all six panes mounted when switching tabs (forceMount)", () => {
+  it("keeps the library-level menu entries (upload / rename / delete)", () => {
     renderTabs();
-    fireEvent.mouseDown(screen.getByRole("tab", { name: "评测" }));
-    for (const testid of ["documents-pane", "wiki-pane", "recall-pane", "vectors-pane", "graph-pane", "eval-pane"]) {
-      expect(screen.getByTestId(testid)).toBeTruthy();
-    }
+    fireEvent.keyDown(screen.getByRole("button", { name: "设置" }), {
+      key: "ArrowDown",
+    });
+    expect(screen.getByRole("menuitem", { name: "上传文档" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "重命名知识库" })).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: "删除知识库" })).toBeTruthy();
   });
 });

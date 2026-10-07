@@ -61,7 +61,12 @@ function mount() {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  client.setQueryData(["models"], { models: [] });
+  // The seeded chat catalogue must carry the full response shape — the
+  // functional view mounted below reads `token_usage` through useModels().
+  client.setQueryData(["models"], {
+    models: [],
+    token_usage: { enabled: false },
+  });
   render(
     <QueryClientProvider client={client}>
       <ModelSettingsPage />

@@ -6,15 +6,9 @@
 import type { KnowledgeDocument } from "./types";
 
 export interface PathStatusLine {
-  path: "asr" | "segment" | "caption" | "vector" | "graph" | "wiki";
-  /** Raw state string (vector/graph/wiki/video-leg enums differ — see types.ts). */
+  path: "vector" | "caption";
+  /** Raw state string (the vector and caption leg enums differ — see types.ts). */
   state: string;
-  /**
-   * Set only for the graph leg mid-indexing: `progress_percent` is
-   * graph-sourced (settled/total chunks), so the hover combines them as
-   * 「图谱 索引中 87%」instead of duplicating the number elsewhere.
-   */
-  percent?: number;
 }
 
 /**
@@ -28,23 +22,12 @@ export function pathStatusLines(
   if (!status) {
     return null;
   }
-  const indexingGraph =
-    doc.status === "indexing" && status.graph === "indexing";
-  // Prep legs (spec 2026-09-08 §5; the text caption leg joined 2026-09-23 D8): asr/segment/
-  // caption sit upstream of the retrieval legs, so they lead the breakdown. Presence is the
-  // whole rule — a leg shows when the payload carries its key (video documents write the
-  // three video legs, a text document with images writes its own caption verdict).
-  const videoLegs: PathStatusLine[] = (["asr", "segment", "caption"] as const)
-    .filter((leg) => status[leg] !== undefined)
-    .map((leg) => ({ path: leg, state: status[leg]! }));
-  return [
-    ...videoLegs,
-    { path: "vector", state: status.vector },
-    {
-      path: "graph",
-      state: status.graph,
-      ...(indexingGraph ? { percent: doc.progress_percent } : {}),
-    },
-    { path: "wiki", state: status.wiki },
-  ];
+  // The caption leg (image descriptions feeding the vector leg) is written
+  // only by documents with images; a settled string state is the whole rule.
+  const lines: PathStatusLine[] = [];
+  if (typeof status.caption === "string") {
+    lines.push({ path: "caption", state: status.caption });
+  }
+  lines.push({ path: "vector", state: status.vector });
+  return lines;
 }

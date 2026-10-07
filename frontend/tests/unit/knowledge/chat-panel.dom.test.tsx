@@ -5,7 +5,7 @@
  * deep-retrieval toggle, citation footers, and an expand-to-full-page entry.
  */
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 const mockUseThreadStream = rs.fn();
 const mockUseInfiniteThreads = rs.fn();
@@ -195,16 +195,7 @@ describe("KnowledgeChatPanel", () => {
     const options = latestStreamOptions();
     expect(options.context.agent_name).toBe("rag");
     expect(options.context.kb_id).toBe("kb-1");
-    expect(options.context.deep_research).toBe(false);
     expect(options.threadId).toBeUndefined();
-  });
-
-  it("propagates the deep-retrieval toggle as context.deep_research (spec §4.7)", () => {
-    renderPanel();
-    fireEvent.click(screen.getByRole("switch"));
-    expect(latestStreamOptions().context.deep_research).toBe(true);
-    fireEvent.click(screen.getByRole("switch"));
-    expect(latestStreamOptions().context.deep_research).toBe(false);
   });
 
   it("sends the draft through sendMessage with the current thread id", () => {
@@ -281,11 +272,11 @@ describe("KnowledgeChatPanel", () => {
     expect(mockDeleteThread).toHaveBeenCalledTimes(1);
     const args = mockDeleteThread.mock.calls[0]![0] as {
       threadId: string;
-      onRemoteDeleted?: () => void;
+      onDeleted?: () => void;
     };
     expect(args.threadId).toBe("thread-kb1-a");
     // Not the open conversation → no reset callback.
-    expect(args.onRemoteDeleted).toBeUndefined();
+    expect(args.onDeleted).toBeUndefined();
     // The row must not become the selected conversation.
     expect(latestStreamOptions().threadId).toBeUndefined();
   });
@@ -299,11 +290,11 @@ describe("KnowledgeChatPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "删除会话" }));
     const args = mockDeleteThread.mock.calls[0]![0] as {
       threadId: string;
-      onRemoteDeleted?: () => void;
+      onDeleted?: () => void;
     };
     expect(args.threadId).toBe("thread-kb1-a");
-    expect(typeof args.onRemoteDeleted).toBe("function");
-    act(() => args.onRemoteDeleted!());
+    expect(typeof args.onDeleted).toBe("function");
+    act(() => args.onDeleted!());
     expect(latestStreamOptions().threadId).toBeUndefined();
   });
 
@@ -330,53 +321,6 @@ describe("KnowledgeChatPanel", () => {
   it("keeps the deep-linked thread selected under the switch reset (effect ordering)", () => {
     renderPanel(KB, { requestedThreadId: "thread-kb1-a" });
     expect(latestStreamOptions().threadId).toBe("thread-kb1-a");
-  });
-
-  it("renders the question tick rail over the message list (chunk-rail scheme, ticks = user questions)", () => {
-    mockUseThreadStream.mockImplementation(() => ({
-      thread: makeThreadState([
-        { id: "h1", type: "human", content: "第一个问题" },
-        { id: "a1", type: "ai", content: "答一" },
-        { id: "h2", type: "human", content: "第二个问题" },
-        { id: "a2", type: "ai", content: "答二" },
-      ]),
-      sendMessage: mockSendMessage,
-    }));
-    renderPanel(KB);
-    // 两个问题轮 → 两刻度（aria 同切片刻度轨方案「问题 #N」）；弹窗行悬浮
-    // 才挂载，静止态只有刻度脊按钮。
-    expect(screen.getAllByRole("button", { name: /^问题 #/ }).length).toBe(2);
-
-    // 单问题轮不显轨（同切片刻度轨 total<=1 退役纪律）。
-    cleanup();
-    mockUseThreadStream.mockImplementation(() => ({
-      thread: makeThreadState([
-        { id: "h1", type: "human", content: "唯一的问题" },
-        { id: "a1", type: "ai", content: "答一" },
-      ]),
-      sendMessage: mockSendMessage,
-    }));
-    renderPanel(KB);
-    expect(screen.queryByRole("button", { name: /^问题 #/ })).toBeNull();
-  });
-
-  it("jumps the message viewport to the picked question via the tick rail", () => {
-    mockUseThreadStream.mockImplementation(() => ({
-      thread: makeThreadState([
-        { id: "h1", type: "human", content: "第一个问题" },
-        { id: "a1", type: "ai", content: "答一" },
-        { id: "h2", type: "human", content: "第二个问题" },
-        { id: "a2", type: "ai", content: "答二" },
-      ]),
-      sendMessage: mockSendMessage,
-    }));
-    renderPanel(KB);
-    const vp = document.querySelector("[data-slot='scroll-area-viewport']")!;
-    const scrollTo = rs.fn();
-    vp.scrollTo = scrollTo as unknown as typeof vp.scrollTo;
-    fireEvent.click(screen.getByRole("button", { name: "问题 #2" }));
-    // 目标在渲染窗口内 → 直接精滚（jsdom rect 全零，top 钳到 0）。
-    expect(scrollTo).toHaveBeenCalledTimes(1);
   });
 
   it("adopts the backend-created thread id via onStart (metadata.kb_id thread)", () => {
@@ -500,256 +444,6 @@ describe("KnowledgeChatPanel", () => {
 });
 
 // ── P6 检索联动（2026-08-15 spec §9 通道二）：最新一轮提问+引用上报 page 层 ──
-
-describe("KnowledgeChatPanel 检索联动上报", () => {
-  const TURN_MESSAGES = [
-    { id: "human-1", type: "human", content: "支持哪些格式？" },
-    {
-      id: "tool-1",
-      type: "tool",
-      name: "knowledge_search",
-      content: JSON.stringify({
-        results: [
-          {
-            chunk_id: "doc-1#0000",
-            doc_name: "产品手册.pdf",
-            page: 3,
-            heading_path: [],
-            text: "知识库系统将非结构化文档转化为可检索的知识资产。",
-            score: 0.9,
-          },
-          {
-            chunk_id: "doc-2#0001",
-            doc_name: "白皮书.md",
-            page: null,
-            heading_path: [],
-            text: "切片二",
-            score: 0.8,
-          },
-        ],
-      }),
-    },
-    { id: "ai-1", type: "ai", content: "支持 PDF 与 Markdown [1][2]" },
-  ];
-
-  function renderWithMessages(messages: unknown[], isLoading: boolean) {
-    mockUseThreadStream.mockImplementation(() => ({
-      thread: { ...makeThreadState(messages), isLoading },
-      sendMessage: mockSendMessage,
-    }));
-    const onRetrievalOverlay = rs.fn();
-    const utils = renderPanel(KB, { onRetrievalOverlay });
-    return { onRetrievalOverlay, ...utils };
-  }
-
-  it("reports the latest completed turn (question text + cited chunk hits) once it settles", async () => {
-    const { onRetrievalOverlay } = renderWithMessages(TURN_MESSAGES, false);
-    await waitFor(() => expect(onRetrievalOverlay).toHaveBeenCalledTimes(1));
-    expect(onRetrievalOverlay).toHaveBeenCalledWith({
-      source: "chat",
-      text: "支持哪些格式？",
-      hits: [
-        { pointId: "doc-1#0000", score: 0.9 },
-        { pointId: "doc-2#0001", score: 0.8 },
-      ],
-    });
-  });
-
-  it("stays silent while the answer is still streaming", () => {
-    const { onRetrievalOverlay } = renderWithMessages(TURN_MESSAGES, true);
-    expect(onRetrievalOverlay).not.toHaveBeenCalled();
-  });
-
-  it("stays silent for an answer without retrieval citations", () => {
-    const { onRetrievalOverlay } = renderWithMessages(
-      [
-        { id: "human-1", type: "human", content: "闲聊" },
-        { id: "ai-1", type: "ai", content: "你好" },
-      ],
-      false,
-    );
-    expect(onRetrievalOverlay).not.toHaveBeenCalled();
-  });
-
-  it("reports again only when a NEW turn completes (dedupe by answer id)", async () => {
-    const { onRetrievalOverlay, rerender } = renderWithMessages(TURN_MESSAGES, false);
-    await waitFor(() => expect(onRetrievalOverlay).toHaveBeenCalledTimes(1));
-
-    // 同一份 messages 重渲染（流式 token 追加之外的 re-render）→ 不重复上报。
-    rerender(
-      <I18nContext.Provider value={{ locale: "zh-CN", setLocale: () => undefined, t: zhCN }}>
-        <KnowledgeChatPanel kb={KB} onRetrievalOverlay={onRetrievalOverlay} />
-      </I18nContext.Provider>,
-    );
-    expect(onRetrievalOverlay).toHaveBeenCalledTimes(1);
-
-    // 新一轮完成 → 再报一次，内容换成最新一轮。
-    const nextMessages = [
-      ...TURN_MESSAGES,
-      { id: "human-2", type: "human", content: "第二个问题" },
-      {
-        id: "tool-2",
-        type: "tool",
-        name: "graph_search",
-        content: JSON.stringify({
-          entities: [],
-          relations: [],
-          evidence: [
-            { chunk_id: "doc-9#0000", doc_name: "架构.md", heading_path: [], page: 1, text: "证据", score: 0.7 },
-          ],
-        }),
-      },
-      { id: "ai-2", type: "ai", content: "第二轮回答 [1]" },
-    ];
-    mockUseThreadStream.mockImplementation(() => ({
-      thread: { ...makeThreadState(nextMessages), isLoading: false },
-      sendMessage: mockSendMessage,
-    }));
-    rerender(
-      <I18nContext.Provider value={{ locale: "zh-CN", setLocale: () => undefined, t: zhCN }}>
-        <KnowledgeChatPanel kb={KB} onRetrievalOverlay={onRetrievalOverlay} />
-      </I18nContext.Provider>,
-    );
-    await waitFor(() => expect(onRetrievalOverlay).toHaveBeenCalledTimes(2));
-    expect(onRetrievalOverlay).toHaveBeenLastCalledWith({
-      source: "chat",
-      text: "第二个问题",
-      hits: [{ pointId: "doc-9#0000", score: 0.7 }],
-    });
-  });
-});
-
-// ── Task 5（P4，spec §7）：graph_search 检索轨迹上报（图谱路径高亮数据源）──
-
-describe("KnowledgeChatPanel 图谱检索轨迹上报", () => {
-  const GRAPH_TURN_MESSAGES = [
-    { id: "human-1", type: "human", content: "Gateway 和哪些组件交互？" },
-    {
-      id: "tool-1",
-      type: "tool",
-      name: "graph_search",
-      content: JSON.stringify({
-        entities: [],
-        relations: [],
-        evidence: [
-          { chunk_id: "doc-1#0000", doc_name: "架构.md", heading_path: [], page: 1, text: "证据", score: 0.9 },
-        ],
-        trace: {
-          seed_entities: ["Gateway"],
-          expanded_nodes: [{ name: "DeerFlow", hop: 1 }],
-          evidence_entities: ["Gateway", "DeerFlow"],
-        },
-      }),
-    },
-    { id: "ai-1", type: "ai", content: "Gateway 与 DeerFlow、MinerU 交互 [1]" },
-  ];
-
-  function renderWithGraphTurn(messages: unknown[], isLoading: boolean) {
-    mockUseThreadStream.mockImplementation(() => ({
-      thread: { ...makeThreadState(messages), isLoading },
-      sendMessage: mockSendMessage,
-    }));
-    const onGraphOverlay = rs.fn();
-    const utils = renderPanel(KB, { onGraphOverlay });
-    return { onGraphOverlay, ...utils };
-  }
-
-  it("reports the latest turn's graph retrieval trace once it settles", async () => {
-    const { onGraphOverlay } = renderWithGraphTurn(GRAPH_TURN_MESSAGES, false);
-    await waitFor(() => expect(onGraphOverlay).toHaveBeenCalledTimes(1));
-    expect(onGraphOverlay).toHaveBeenCalledWith({
-      source: "chat",
-      text: "Gateway 和哪些组件交互？",
-      trace: {
-        seed_entities: ["Gateway"],
-        expanded_nodes: [{ name: "DeerFlow", hop: 1 }],
-        evidence_entities: ["Gateway", "DeerFlow"],
-      },
-    });
-  });
-
-  it("stays silent while streaming or when the turn ran no graph_search", async () => {
-    const streaming = renderWithGraphTurn(GRAPH_TURN_MESSAGES, true);
-    expect(streaming.onGraphOverlay).not.toHaveBeenCalled();
-    cleanup();
-    const noGraph = renderWithGraphTurn(
-      [
-        { id: "human-1", type: "human", content: "闲聊" },
-        { id: "ai-1", type: "ai", content: "你好" },
-      ],
-      false,
-    );
-    // 等一拍 effect 刷新后仍不上报。
-    await waitFor(() => expect(screen.getByTestId("knowledge-chat-panel")).toBeTruthy());
-    expect(noGraph.onGraphOverlay).not.toHaveBeenCalled();
-  });
-
-  it("does not double-report the same turn on re-render（按 answer id 去重）", async () => {
-    const { onGraphOverlay, rerender } = renderWithGraphTurn(GRAPH_TURN_MESSAGES, false);
-    await waitFor(() => expect(onGraphOverlay).toHaveBeenCalledTimes(1));
-    rerender(
-      <I18nContext.Provider value={{ locale: "zh-CN", setLocale: () => undefined, t: zhCN }}>
-        <KnowledgeChatPanel kb={KB} onGraphOverlay={onGraphOverlay} />
-      </I18nContext.Provider>,
-    );
-    expect(onGraphOverlay).toHaveBeenCalledTimes(1);
-  });
-
-  it("reports the trace from the graph_retrieval_trace custom event when the message body was externalized", async () => {
-    // 外置场景：graph_search 消息被替换成摘要预览，消息解析不出 trace；实时
-    // 旁路（onStreamCustomEvent → tool_call_id 缓存）补齐后应照常上报。
-    const synopsisTurn = [
-      { id: "human-1", type: "human", content: "Gateway 和哪些组件交互？" },
-      {
-        id: "tool-1",
-        type: "tool",
-        name: "graph_search",
-        tool_call_id: "call-1",
-        content:
-          "[Full graph_search output saved to /mnt/x/.tool-results/graph_search-abc.txt (20592 chars, ~5148 tokens).]",
-      },
-      { id: "ai-1", type: "ai", content: "Gateway 与 DeerFlow 交互 [1]" },
-    ];
-    mockUseThreadStream.mockImplementation(() => ({
-      // messages 必须每次渲染都是新数组引用（对齐真实流的身份语义），否则
-      // 上报效应的依赖比较会判定未变化而跳过。
-      thread: { ...makeThreadState([...synopsisTurn]), isLoading: false },
-      sendMessage: mockSendMessage,
-    }));
-    const onGraphOverlay = rs.fn();
-    const utils = renderPanel(KB, { onGraphOverlay });
-
-    // 摘要消息解析不出轨迹 → 静默。
-    expect(onGraphOverlay).not.toHaveBeenCalled();
-
-    // 实时事件到达（tool_call_id 对上）→ 下一次渲染周期上报事件副本。
-    const options = latestStreamOptions() as { onStreamCustomEvent?: (event: unknown) => void };
-    options.onStreamCustomEvent?.({
-      type: "graph_retrieval_trace",
-      tool_call_id: "call-1",
-      trace: {
-        seed_entities: ["Gateway"],
-        expanded_nodes: [{ name: "DeerFlow", hop: 1 }],
-        evidence_entities: ["Gateway"],
-      },
-    });
-    utils.rerender(
-      <I18nContext.Provider value={{ locale: "zh-CN", setLocale: () => undefined, t: zhCN }}>
-        <KnowledgeChatPanel kb={KB} onGraphOverlay={onGraphOverlay} />
-      </I18nContext.Provider>,
-    );
-    await waitFor(() => expect(onGraphOverlay).toHaveBeenCalledTimes(1));
-    expect(onGraphOverlay).toHaveBeenCalledWith({
-      source: "chat",
-      text: "Gateway 和哪些组件交互？",
-      trace: {
-        seed_entities: ["Gateway"],
-        expanded_nodes: [{ name: "DeerFlow", hop: 1 }],
-        evidence_entities: ["Gateway"],
-      },
-    });
-  });
-});
 
 describe("KnowledgeChatPanel model selector", () => {
   it("shows the first configured model as the effective default and keeps context.model_name undefined", () => {

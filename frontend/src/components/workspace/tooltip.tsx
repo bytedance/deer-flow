@@ -9,15 +9,17 @@ import {
 export function Tooltip({
   children,
   content,
+  contentClassName,
   ...props
 }: {
   children: React.ReactNode;
   content?: React.ReactNode;
+  contentClassName?: string;
 }) {
   return (
     <TooltipPrimitive delayDuration={500} {...props}>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent>{content}</TooltipContent>
+      <TooltipContent className={contentClassName}>{content}</TooltipContent>
     </TooltipPrimitive>
   );
 }

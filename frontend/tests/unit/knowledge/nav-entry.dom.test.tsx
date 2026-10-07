@@ -14,6 +14,10 @@ rs.mock("@/core/agents", () => ({
   useAgentsApiEnabled: () => ({ enabled: true }),
 }));
 
+rs.mock("@/core/features", () => ({
+  useKnowledgeBaseEnabled: () => ({ enabled: true, scopeSelectionEnabled: false, isLoading: false }),
+}));
+
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { WorkspaceNavChatList } from "@/components/workspace/workspace-nav-chat-list";
 import { I18nContext } from "@/core/i18n/context";

@@ -122,28 +122,6 @@ describe("documentsRefetchInterval", () => {
     expect(documentsRefetchInterval([])).toBe(false);
     expect(documentsRefetchInterval(undefined)).toBe(false);
   });
-
-  test("keeps polling while the library-level wiki mirror reports generating", () => {
-    // The wiki leg outlives document indexing — terminal docs must not freeze
-    // a "generating" mirror (2026-08-13 live bug: hover stuck on 生成中
-    // after 23 entries completed).
-    const generating = { vector: "done", graph: "done", wiki: "generating" };
-    expect(
-      documentsRefetchInterval([
-        doc({ status: "ready", path_status: generating }),
-      ]),
-    ).toBe(DOCUMENTS_POLL_INTERVAL_MS);
-  });
-
-  test("stops once the wiki mirror settles; legacy null path_status tolerated", () => {
-    const settled = { vector: "done", graph: "done", wiki: "ready" };
-    expect(
-      documentsRefetchInterval([
-        doc({ status: "ready", path_status: settled }),
-        doc({ status: "ready" }),
-      ]),
-    ).toBe(false);
-  });
 });
 
 describe("formatKb（固定 KB，现有）", () => {

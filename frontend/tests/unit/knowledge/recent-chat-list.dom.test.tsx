@@ -12,11 +12,40 @@ rs.mock("next/navigation", () => ({
   useRouter: () => ({ push: () => undefined, replace: () => undefined }),
 }));
 
+rs.mock("@/core/features", () => ({
+  useKnowledgeBaseEnabled: () => ({ enabled: true, scopeSelectionEnabled: false, isLoading: false }),
+}));
+
+// 基座版组件带项目分组查询；本对只钉 kb 隔离，项目面给空桩（与分组模式无关）。
+rs.mock("@/core/projects", () => ({
+  useProjects: () => ({ data: [], isError: false, isLoading: false }),
+  useCreateProject: () => ({ mutate: rs.fn(), isPending: false }),
+  useMoveThreadToProject: () => ({ mutate: rs.fn() }),
+}));
+
+rs.mock("@/core/settings", () => ({
+  useLocalSettings: () => [{ projectsDisplayMode: "flat" }, rs.fn()],
+}));
+
+rs.mock("@/core/auth/AuthProvider", () => ({
+  useAuth: () => ({ user: { id: "u1", system_role: "user" } }),
+}));
+
+// 基座版行组件挂两个本地 provider 钩子；本对只钉 kb 隔离，给最小桩。
+rs.mock("@/components/workspace/thread-delete-dialog", () => ({
+  useThreadDeleteDialog: () => rs.fn(),
+}));
+
+rs.mock("@/components/workspace/use-thread-archive-action", () => ({
+  useThreadArchiveAction: () => ({ isPending: false, setArchived: rs.fn() }),
+}));
+
 rs.mock("@/core/threads/hooks", () => ({
   useInfiniteThreads: rs.fn(),
   useDeleteThread: () => ({ mutate: rs.fn() }),
   useRenameThread: () => ({ mutate: rs.fn() }),
   usePinThread: () => ({ mutate: rs.fn() }),
+  useMoveThreadToProject: () => ({ mutate: rs.fn() }),
 }));
 
 rs.mock("@/components/workspace/thread-list-virtualizer", () => ({

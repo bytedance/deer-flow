@@ -6,7 +6,6 @@ import type {
   RagConnectivityProbeResponse,
   RagDimensionProbeResponse,
   RagEmbeddingProviderCapability,
-  RagVideoValues,
 } from "./types";
 
 /**
@@ -34,17 +33,9 @@ export interface RagConfigFormValues {
   rerank_model: string;
   rerank_api_key: string;
   vlm_model: string;
-  extract_model: string;
-  judge_model: string;
   default_model: string;
-  wiki_model: string;
-  synthesis_model: string;
-  /** Follow-chat thinking toggles (spec 2026-10-03 D1=甲); a checkbox is two-state, so an
+  /** Follow-chat thinking toggle (spec 2026-10-03 D1=甲); a checkbox is two-state, so an
    * explicit `false` is how the form says "not this leg" (the file's `null` = undeclared). */
-  extract_thinking: boolean;
-  wiki_thinking: boolean;
-  judge_thinking: boolean;
-  synthesis_thinking: boolean;
   vlm_thinking: boolean;
   mineru_api_token: string;
   embedding_provider: "dashscope" | "volcengine-ark" | "openai-compatible";
@@ -84,13 +75,6 @@ export interface RagConfigFormValues {
     | "devanagari"
     | "";
   parse_model_version: "pipeline" | "vlm" | "";
-  /** The ASR leg's connection info — top level, beside the other legs' (① 乙, 2026-09-29). */
-  asr_base_url: string;
-  asr_api_key: string;
-  video: {
-    asr_provider: "funasr" | "whisper" | "openai-audio" | "dashscope";
-    asr_model: string;
-  };
 }
 
 /**
@@ -153,29 +137,11 @@ export const PARSE_LANGUAGE_OPTIONS = [
  * always sent, and the empty option falls back to the configured default.
  */
 export const PARSE_MODEL_VERSION_OPTIONS = ["", "pipeline", "vlm"] as const;
-/**
- * The ASR leg's providers (spec 2026-09-28 D2「三组四值」): the two engines that run inside
- * this process, then one row per protocol family — the generic OpenAI-audio shape and the
- * vendor's own. The list mirrors the backend allowlist like the others above; the dropdown
- * groups it, and `ASR_LOCAL_ENGINES` is the subset whose rows take neither an address nor a
- * key.
- */
-export const ASR_PROVIDER_OPTIONS = [
-  "funasr",
-  "whisper",
-  "openai-audio",
-  "dashscope",
-] as const;
-export const ASR_LOCAL_ENGINES = ["funasr", "whisper"] as const;
-/** One ASR provider id, as the row and the switch helper spell it. */
-export type AsrProvider = (typeof ASR_PROVIDER_OPTIONS)[number];
-
 const SECRET_FIELDS = [
   "embedding_api_key",
   "rerank_api_key",
   "mineru_api_token",
   "sparse_api_key",
-  "asr_api_key",
 ] as const;
 
 const TEXT_FIELDS = [
@@ -183,17 +149,12 @@ const TEXT_FIELDS = [
   "embedding_model",
   "rerank_model",
   "vlm_model",
-  "extract_model",
-  "judge_model",
   "default_model",
-  "wiki_model",
-  "synthesis_model",
   "embedding_base_url",
   "sparse_base_url",
   "sparse_model",
   "rerank_base_url",
   "parse_base_url",
-  "asr_base_url",
 ] as const;
 
 /**
@@ -215,19 +176,8 @@ const SELECT_FIELDS = [
   "parse_model_version",
 ] as const;
 
-/** The follow-chat thinking toggles: plain booleans, unlike the text/select fields. */
-const THINKING_FIELDS = [
-  "extract_thinking",
-  "wiki_thinking",
-  "judge_thinking",
-  "synthesis_thinking",
-  "vlm_thinking",
-] as const;
-
-const VIDEO_SOURCES: Record<string, string> = {
-  asr_provider: "video.asr_provider",
-  asr_model: "video.asr_model",
-};
+/** The follow-chat thinking toggle: a plain boolean, unlike the text/select fields. */
+const THINKING_FIELDS = ["vlm_thinking"] as const;
 
 function asText(value: unknown): string {
   return typeof value === "string" ? value : "";
@@ -241,7 +191,6 @@ function asEnum<T extends string>(value: unknown, options: readonly T[], fallbac
 /** Effective view → form values; a stored secret stays masked so the input shows it as set. */
 export function formValuesFromConfig(view: RagConfigView): RagConfigFormValues {
   const config = view.config ?? {};
-  const video: RagVideoValues = config.video ?? {};
   return {
     qdrant_url: asText(config.qdrant_url),
     embedding_model: asText(config.embedding_model),
@@ -249,15 +198,7 @@ export function formValuesFromConfig(view: RagConfigView): RagConfigFormValues {
     rerank_model: asText(config.rerank_model),
     rerank_api_key: asText(config.rerank_api_key),
     vlm_model: asText(config.vlm_model),
-    extract_model: asText(config.extract_model),
-    judge_model: asText(config.judge_model),
     default_model: asText(config.default_model),
-    wiki_model: asText(config.wiki_model),
-    synthesis_model: asText(config.synthesis_model),
-    extract_thinking: Boolean(config.extract_thinking),
-    wiki_thinking: Boolean(config.wiki_thinking),
-    judge_thinking: Boolean(config.judge_thinking),
-    synthesis_thinking: Boolean(config.synthesis_thinking),
     vlm_thinking: Boolean(config.vlm_thinking),
     mineru_api_token: asText(config.mineru_api_token),
     embedding_provider: asEnum(config.embedding_provider, EMBEDDING_PROVIDER_OPTIONS, "dashscope"),
@@ -275,12 +216,6 @@ export function formValuesFromConfig(view: RagConfigView): RagConfigFormValues {
     parse_tier: asEnum(config.parse_tier, PARSE_TIER_OPTIONS, ""),
     parse_language: asEnum(config.parse_language, PARSE_LANGUAGE_OPTIONS, ""),
     parse_model_version: asEnum(config.parse_model_version, PARSE_MODEL_VERSION_OPTIONS, ""),
-    asr_base_url: asText(config.asr_base_url),
-    asr_api_key: asText(config.asr_api_key),
-    video: {
-      asr_provider: asEnum(video.asr_provider, ASR_PROVIDER_OPTIONS, "funasr"),
-      asr_model: asText(video.asr_model),
-    },
   };
 }
 
@@ -389,37 +324,6 @@ export function buildRagConfigInput(
     writeField(input, key, next);
   }
 
-  const video: RagVideoValues = {};
-  const loadedVideo: RagVideoValues = view.config?.video ?? {};
-
-  // The two free-text fields share one rule...
-  for (const key of ["asr_model"] as const) {
-    const source = VIDEO_SOURCES[key]!;
-    const previous = asText(loadedVideo[key]);
-    const next = values.video[key].trim();
-    if (next === previous) {
-      if (next !== "" && owned(view, source)) {
-        video[key] = next;
-      }
-      continue;
-    }
-    if (next !== "" || owned(view, source)) {
-      video[key] = next;
-    }
-  }
-
-  // ...while the provider is an enum select, so it keeps its own union type. Judged against
-  // the same option list the row renders: the old two-value narrowing silently rewrote a
-  // service tier back to `funasr`, so the new tiers could never be saved (spec 2026-09-28 D2).
-  const provider = asEnum(values.video.asr_provider, ASR_PROVIDER_OPTIONS, "funasr");
-  const loadedProvider = asEnum(loadedVideo.asr_provider, ASR_PROVIDER_OPTIONS, "funasr");
-  if (provider !== loadedProvider || owned(view, VIDEO_SOURCES.asr_provider!)) {
-    video.asr_provider = provider;
-  }
-  if (Object.keys(video).length > 0) {
-    input.video = video;
-  }
-
   return input;
 }
 
@@ -441,60 +345,6 @@ export function isEmbeddingChange(
     values.embedding_dimension.trim() !== seeded.embedding_dimension.trim() ||
     values.embedding_sparse_source !== seeded.embedding_sparse_source
   );
-}
-
-/**
- * The two ASR engines' candidate menus, in recommendation order (spec 2026-09-27 §7.1/§7.3).
- * The first row of each is also that engine's default: a provider switch has nothing else to
- * fall back to, so one table serves both the dropdown and the fallback.
- */
-export const ASR_MODEL_MENU = {
-  funasr: ["paraformer-zh", "paraformer-en"],
-  // `small` leads because it is the tier most people should use — the fallback is this row.
-  whisper: ["small", "tiny", "base", "medium", "large-v3", "large-v3-turbo"],
-} as const;
-
-/**
- * Every name `openai-whisper` accepts, aliases and `.en` variants included. The judgement set
- * is deliberately wider than the menu (spec 2026-09-27 §2 D2): `turbo` and `large` are legal
- * whisper names the menu does not offer, and a menu-sized judgement would leave them in place
- * when the admin switches to funasr — where they fail only at the next ingest.
- */
-const WHISPER_MODEL_NAMES: ReadonlySet<string> = new Set([
-  "tiny.en",
-  "tiny",
-  "base.en",
-  "base",
-  "small.en",
-  "small",
-  "medium.en",
-  "medium",
-  "large-v1",
-  "large-v2",
-  "large-v3",
-  "large",
-  "turbo",
-  "large-v3-turbo",
-]);
-
-/**
- * The model value a provider switch leaves behind (spec 2026-09-27 §2 D2). Only the whisper
- * side can judge "illegal": funasr is an open set — any ModelScope repo id, or a local
- * directory — so its menu must never double as a filter, and everything that is not a whisper
- * name is carried over untouched.
- */
-export function asrModelForProviderSwitch(next: AsrProvider, value: string): string {
-  const name = value.trim();
-  // The service tiers have no candidate row to fall back to — the name is the service's own,
-  // and only the probe can say whether it is one it knows. So the value is carried over, and
-  // the admin is the one who changes it.
-  if (next === "openai-audio" || next === "dashscope") {
-    return value;
-  }
-  if (next === "funasr") {
-    return WHISPER_MODEL_NAMES.has(name) ? ASR_MODEL_MENU.funasr[0] : value;
-  }
-  return WHISPER_MODEL_NAMES.has(name) ? value : ASR_MODEL_MENU.whisper[0];
 }
 
 /** The width every deployment starts at; a blank declaration keeps it (spec 2026-09-26 D1 乙). */
@@ -691,63 +541,6 @@ export function sparseServiceProbeKey(
   ].join("|");
 }
 
-/** The ASR probe's verdict (spec 2026-09-28 D7), tagged with the values it describes. */
-export interface AsrProbeVerdict {
-  key: string;
-  status: "ok" | "no_timestamps" | "refused" | "unreachable";
-  detail: string;
-}
-
-/**
- * Whether this row has a service to call at all (D7): only the two protocol tiers reach out —
- * the in-process engines have no endpoint, and they already degrade to `asr_failed` when their
- * models are missing, so a probe would only be a second way to learn the same thing.
- */
-export function shouldProbeAsr(values: RagConfigFormValues): boolean {
-  return (ASR_PROVIDER_OPTIONS as readonly string[]).includes(
-    values.video.asr_provider,
-  )
-    ? !(ASR_LOCAL_ENGINES as readonly string[]).includes(
-        values.video.asr_provider,
-      )
-    : false;
-}
-
-/** The ASR probe's identity: the four values that decide what the call would ask. */
-export function asrProbeKey(
-  values: RagConfigFormValues,
-  hasKey: boolean,
-): string {
-  return [
-    values.video.asr_provider,
-    values.video.asr_model.trim(),
-    values.asr_base_url.trim(),
-    hasKey ? "key" : "nokey",
-  ].join("|");
-}
-
-/**
- * Whether a probe verdict may still speak for the form: it only counts for the values it was
- * taken for — editing the provider, the model or the address is asking a different question.
- */
-export function asrProbeVerdictFor(
-  values: RagConfigFormValues,
-  hasKey: boolean,
-  verdict: AsrProbeVerdict | null,
-): AsrProbeVerdict | null {
-  return verdict?.key === asrProbeKey(values, hasKey) ? verdict : null;
-}
-
-/**
- * The one probe state that blocks a save (D7): a service that cannot give segment-level
- * timestamps makes its own row pointless — the cards would be assembled from rows that cannot
- * be projected onto them. Everything else the probe can report is information: an endpoint that
- * is down now may be up in a minute, and refusing the write would close the admin's exit.
- */
-export function asrProbeBlocksSave(verdict: AsrProbeVerdict | null): boolean {
-  return verdict?.status === "no_timestamps";
-}
-
 /**
  * The dimension probe's verdict, tagged with the values it describes (spec 2026-09-26 §3): the
  * view must never apply a conclusion to a form it was not taken for.
@@ -842,10 +635,7 @@ export function hasFormChanges(
     NUMERIC_FIELDS.some((key) => edited(values[key], seeded[key])) ||
     SECRET_FIELDS.some((key) => edited(values[key], seeded[key])) ||
     SELECT_FIELDS.some((key) => values[key] !== seeded[key]) ||
-    THINKING_FIELDS.some((key) => values[key] !== seeded[key]) ||
-    (["asr_provider", "asr_model"] as const).some((key) =>
-      edited(values.video[key], seeded.video[key]),
-    )
+    THINKING_FIELDS.some((key) => values[key] !== seeded[key])
   );
 }
 

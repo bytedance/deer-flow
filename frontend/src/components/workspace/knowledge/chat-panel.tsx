@@ -31,7 +31,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { MessageList } from "@/components/workspace/messages";
 import { Tooltip } from "@/components/workspace/tooltip";
@@ -42,23 +41,19 @@ import {
   KNOWLEDGE_SCOPE_KEY,
   localDatasetId,
 } from "@/core/knowledge";
-import { latestGraphTraceTurn, latestRetrievalTurn, parseGraphSearchTrace, sourcesForAssistantMessage } from "@/core/knowledge/citations";
+import { sourcesForAssistantMessage } from "@/core/knowledge/citations";
 import { threadsForKb } from "@/core/knowledge/kb-threads";
-import type { GraphRetrievalTrace, GraphRetrievalOverlay, KnowledgeBase } from "@/core/knowledge/types";
+import type { KnowledgeBase } from "@/core/knowledge/types";
 import {
   buildHumanInputResponseText,
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
-import { getMessageCopyData } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
-import { useRegisterActivity } from "@/core/threads/activity-context";
 import { useDeleteThread, useInfiniteThreads, useThreadStream } from "@/core/threads/hooks";
-import { pathOfKnowledgeThread, pathOfThread } from "@/core/threads/utils";
 import { uuid } from "@/core/utils/uuid";
 import { cn } from "@/lib/utils";
 
-import { ChunkTickRail } from "./chunk-tick-rail";
 import { KbAssistantContent } from "./kb-assistant-content";
 import { KbCitationSources } from "./kb-citation-sources";
 
@@ -74,26 +69,9 @@ const MODEL_STORAGE_PREFIX = "rag-chat-model:";
  */
 export function KnowledgeChatPanel({
   kb,
-  onOpenWikiEntry,
-  onRetrievalOverlay,
-  onGraphOverlay,
   requestedThreadId,
 }: {
   kb: KnowledgeBase | null;
-  /** Wiki citation cards open the entry drawer (overlay) via this page-held callback. */
-  onOpenWikiEntry?: (entryId: string) => void;
-  /**
-   * P6 检索联动（spec §9 通道二）：每完成一轮含引用的对话，把「提问文本 +
-   * 引用 chunk_id 列表」上报 page 层供向量空间叠加。零后端取数——复用
-   * sourcesForAssistantMessage 的既有解析。
-   */
-  onRetrievalOverlay?: (VectorRetrievalOverlay) => void;
-  /**
-   * P4 图谱路径高亮（2026-08-19 spec §7）：每完成一轮含 graph_search 轨迹的
-   * 对话，把「提问文本 + 三层检索轨迹」上报 page 层供知识图谱叠加。与向量
-   * 通道同节奏（同按 answer id 去重、流式进行中不上报）。
-   */
-  onGraphOverlay?: (overlay: GraphRetrievalOverlay) => void;
   /**
    * External deep-link target: when supplied, apply it as a history-select
    * action once (like clicking a thread in the popover), without overriding
@@ -112,7 +90,6 @@ export function KnowledgeChatPanel({
   const [threadId, setThreadId] = useState(() => uuid());
   const [isNewThread, setIsNewThread] = useState(true);
     const expandDisabled = isNewThread || !agentsApiEnabled;
-  const [deepResearch, setDeepResearch] = useState(false);
   const [draft, setDraft] = useState("");
 
   // 切库即新对话（还原 `2711a35a2` 的重置，`52b0dd76d` 重构时误删）：
@@ -177,9 +154,8 @@ export function KnowledgeChatPanel({
       reasoning_effort: undefined,
       agent_name: "rag",
       ...(kbId ? { kb_id: kbId } : {}),
-      deep_research: deepResearch,
     }),
-    [kbId, deepResearch, selectedModelName],
+    [kbId, selectedModelName],
   );
 
   // Per-message knowledge scope (#5238): one provider-qualified dataset id
@@ -203,19 +179,8 @@ export function KnowledgeChatPanel({
     [kb],
   );
 
-  /** 本线程内收到的实时检索轨迹缓存（tool_call_id → trace）；切线程即清空。
-      spec §7 实时旁路：工具输出预算可能把超大 graph_search ToolMessage 替换成
-      摘要预览（消息解析不出 trace），这里按 tool_call_id 缓存 custom 事件
-      （graph_retrieval_trace）送达的轨迹副本，供图谱上报兜底；重载路径走
-      journal 全文解析，不经过本通道。 */
-  const graphTraceEventsRef = useRef(new Map<string, GraphRetrievalTrace>());
-  useEffect(() => {
-    graphTraceEventsRef.current.clear();
-  }, [threadId]);
-
   const {
     thread,
-    liveRunId,
     sendMessage,
     isHistoryLoading,
     hasMoreHistory,
@@ -227,70 +192,10 @@ export function KnowledgeChatPanel({
       setThreadId(createdThreadId);
       setIsNewThread(false);
     },
-    onStreamCustomEvent: (event) => {
-      if (!event || typeof event !== "object") return;
-      const record = event as { type?: unknown; tool_call_id?: unknown; trace?: unknown };
-      if (record.type !== "graph_retrieval_trace" || typeof record.tool_call_id !== "string") return;
-      const trace = parseGraphSearchTrace({ trace: record.trace });
-      if (trace) {
-        graphTraceEventsRef.current.set(record.tool_call_id, trace);
-      }
-    },
   });
-
-  // 知识库面板也注册(2026-09-12 用户裁决「跟」):它有自己的 kb 绑定线程,不跟的话,
-  // 在这聊天时 app 的灯会显示主线程那条可能一直 idle 的线程,看起来像坏了。
-  // href 必须是 knowledge 路由:从 threadId 反推进会落到 chats 路由,而那里的 rag
-  // agent 没有 kb 绑定,检索永不触发(§5.2)。
-  useRegisterActivity(
-    isNewThread
-      ? null
-      : {
-          threadId,
-          runId: liveRunId,
-          href: kbId
-            ? pathOfKnowledgeThread(kbId, threadId)
-            : pathOfThread(threadId),
-        },
-  );
 
   const threadsQuery = useInfiniteThreads();
 
-  // P6 检索联动上报（spec §9 通道二）：对话每完成一轮（含引用时）上报一次，
-  // 按 ai message id 去重——流式 token 追加引发的重复渲染不会重复上报；
-  // 流式进行中（isLoading）不上报，等该轮落定。
-  const lastReportedTurnRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!onRetrievalOverlay || thread.isLoading) {
-      return;
-    }
-    const turn = latestRetrievalTurn(thread.messages);
-    if (!turn || turn.messageId === lastReportedTurnRef.current) {
-      return;
-    }
-    lastReportedTurnRef.current = turn.messageId;
-    onRetrievalOverlay({
-      source: "chat",
-      text: turn.text,
-      hits: turn.citations.map((citation) => ({ pointId: citation.chunk_id, score: citation.score })),
-    });
-  }, [thread.messages, thread.isLoading, onRetrievalOverlay]);
-
-  // P4 图谱检索轨迹上报（spec §7）：与向量通道同节奏——每完成一轮含
-  // graph_search 轨迹的对话上报一次，按 ai message id 去重（流式 token 追加
-  // 不重复上报；流式进行中不上报，等该轮落定）。
-  const lastReportedGraphTurnRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!onGraphOverlay || thread.isLoading) {
-      return;
-    }
-    const turn = latestGraphTraceTurn(thread.messages, graphTraceEventsRef.current);
-    if (!turn || turn.messageId === lastReportedGraphTurnRef.current) {
-      return;
-    }
-    lastReportedGraphTurnRef.current = turn.messageId;
-    onGraphOverlay({ source: "chat", text: turn.text, trace: turn.trace });
-  }, [thread.messages, thread.isLoading, onGraphOverlay]);
   const kbThreads = useMemo(() => {
     if (!kbId) {
       return [];
@@ -336,7 +241,7 @@ const handleSelectThread = useCallback((nextThreadId: string) => {
       const isCurrent = !isNewThread && deletedThreadId === threadId;
       deleteThread({
         threadId: deletedThreadId,
-        onRemoteDeleted: isCurrent ? handleNewChat : undefined,
+        onDeleted: isCurrent ? handleNewChat : undefined,
       });
     },
     [deleteThread, handleNewChat, isNewThread, threadId],
@@ -368,12 +273,11 @@ const handleSelectThread = useCallback((nextThreadId: string) => {
         <KbCitationSources
           kbId={kbId ?? undefined}
           messageId={message.id ?? ""}
-          onOpenWikiEntry={onOpenWikiEntry}
           sources={sourcesForAssistantMessage(thread.messages, message.id)}
         />
       );
     },
-    [thread.messages, onOpenWikiEntry, kbId],
+    [thread.messages, kbId],
   );
 
   // P2 citation UX (phase-2 batch-1): the answer's [n] markers become
@@ -425,133 +329,6 @@ const handleSelectThread = useCallback((nextThreadId: string) => {
       return sent;
     },
     [knowledgeScopeSnapshot, sendMessage, threadId],
-  );
-
-  // ── 会话刻度轨（2026-09-08，文档详情切片刻度轨同款方案）──────────
-  // 刻度内容 = 用户问的问题：连续 human 消息同属一个 turn（与 MessageList
-  // human 组分组同口径），一轮一刻度；preview 取问题文本首行
-  // （getMessageCopyData 已剥 uploaded-files 标签）。
-  const questions = useMemo(() => {
-    const runs: string[] = [];
-    thread.messages.forEach((message, index) => {
-      if (message.type !== "human") return;
-      const firstLine = (getMessageCopyData(message) ?? "").split("\n")[0] ?? "";
-      if (thread.messages[index - 1]?.type === "human" && runs.length > 0) {
-        runs[runs.length - 1] = `${runs[runs.length - 1]} ${firstLine}`.trim();
-      } else {
-        runs.push(firstLine);
-      }
-    });
-    return runs;
-  }, [thread.messages]);
-
-  const tickEntries = useMemo(
-    () =>
-      questions.map((preview, index) => ({
-        index,
-        preview: preview === "" ? null : preview,
-      })),
-    [questions],
-  );
-
-  const [activeQuestion, setActiveQuestion] = useState(0);
-  const messageZoneRef = useRef<HTMLDivElement | null>(null);
-
-  // active 追踪：顶边越过视口 40% 线的最后一个刻度为当前刻度；全局序号来自
-  // data-human-turn（虚拟化窗口化后仍可读）。
-  useEffect(() => {
-    const vp = messageZoneRef.current?.querySelector(
-      "[data-slot='scroll-area-viewport']",
-    );
-    if (!vp || questions.length === 0) return;
-    let frame = 0;
-    const compute = () => {
-      const middle = vp.getBoundingClientRect().top + vp.clientHeight * 0.4;
-      const nodes = vp.querySelectorAll("[data-human-turn]");
-      let next = 0;
-      let found = false;
-      nodes.forEach((node) => {
-        if (node.getBoundingClientRect().top <= middle) {
-          next = Number(node.getAttribute("data-human-turn"));
-          found = true;
-        }
-      });
-      if (!found && nodes.length > 0) {
-        next = Number(nodes[0]?.getAttribute("data-human-turn"));
-      }
-      const clamped = Math.min(Math.max(next, 0), questions.length - 1);
-      setActiveQuestion((prev) => (prev === clamped ? prev : clamped));
-    };
-    const onScroll = () => {
-      if (frame) return;
-      frame = requestAnimationFrame(() => {
-        frame = 0;
-        compute();
-      });
-    };
-    compute();
-    vp.addEventListener("scroll", onScroll, { passive: true });
-    return () => {
-      if (frame) cancelAnimationFrame(frame);
-      vp.removeEventListener("scroll", onScroll);
-    };
-  }, [threadId, questions.length]);
-
-  // 刻度点击跳转：目标在渲染窗口内直接精滚；虚拟化（≥60 组）窗口外先按比例
-  // 落点附近，再按已渲染节点全局序号估步长逐步收敛（封顶 6 步），目标进窗后
-  // 精滚落定。
-  const jumpToQuestion = useCallback(
-    (index: number) => {
-      const vp = messageZoneRef.current?.querySelector(
-        "[data-slot='scroll-area-viewport']",
-      );
-      if (!vp) return;
-      const scrollToNode = (node: Element) => {
-        const top =
-          vp.scrollTop +
-          (node.getBoundingClientRect().top - vp.getBoundingClientRect().top) -
-          16;
-        vp.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
-      };
-      const direct = vp.querySelector(`[data-human-turn="${index}"]`);
-      if (direct) {
-        scrollToNode(direct);
-        return;
-      }
-      let steps = 0;
-      const converge = () => {
-        const node = vp.querySelector(`[data-human-turn="${index}"]`);
-        if (node) {
-          scrollToNode(node);
-          return;
-        }
-        if (++steps > 6) return;
-        const nodes = [...vp.querySelectorAll("[data-human-turn]")];
-        if (nodes.length === 0) return;
-        const first = nodes[0]!;
-        const last = nodes[nodes.length - 1]!;
-        const oFirst = Number(first.getAttribute("data-human-turn"));
-        const oLast = Number(last.getAttribute("data-human-turn"));
-        const per =
-          oLast > oFirst
-            ? Math.max(
-                80,
-                (last.getBoundingClientRect().top -
-                  first.getBoundingClientRect().top) /
-                  (oLast - oFirst),
-              )
-            : 176;
-        const before = index < oFirst;
-        const anchorOrd = before ? oFirst : oLast;
-        vp.scrollTop += (index - anchorOrd) * per;
-        requestAnimationFrame(converge);
-      };
-      vp.scrollTop =
-        ((index + 0.5) / Math.max(1, questions.length)) *
-        Math.max(0, vp.scrollHeight - vp.clientHeight);
-      requestAnimationFrame(converge);
-    },
-    [questions.length],
   );
 
   return (
@@ -649,32 +426,19 @@ const handleSelectThread = useCallback((nextThreadId: string) => {
         </Tooltip>
       </header>
 
-      <div className="relative min-h-0 flex-1" ref={messageZoneRef}>
+      <div className="relative min-h-0 flex-1">
         {kb ? (
-          <>
-            <MessageList
-              className="size-full"
-              threadId={threadId}
-              thread={thread}
-              hasMoreHistory={hasMoreHistory}
-              loadMoreHistory={loadMoreHistory}
-              isHistoryLoading={isHistoryLoading}
-              renderMessageContent={renderMessageContent}
-              renderMessageFooter={renderMessageFooter}
-              onSubmitHumanInput={handleSubmitHumanInput}
-            />
-            {/* 会话刻度轨（2026-09-08）：文档详情切片刻度轨同款方案——右缘刻度
-                脊 + 悬浮弹窗左侧标签层，刻度内容换为用户问题；overlay 层不进
-                消息滚动流。 */}
-            <ChunkTickRail
-              active={activeQuestion}
-              entries={tickEntries}
-              onJump={jumpToQuestion}
-              tickLabel={tc.questionTickAria}
-              total={questions.length}
-              unloadedLabel={tc.questionTickEmpty}
-            />
-          </>
+          <MessageList
+            className="size-full"
+            threadId={threadId}
+            thread={thread}
+            hasMoreHistory={hasMoreHistory}
+            loadMoreHistory={loadMoreHistory}
+            isHistoryLoading={isHistoryLoading}
+            renderMessageContent={renderMessageContent}
+            renderMessageFooter={renderMessageFooter}
+            onSubmitHumanInput={handleSubmitHumanInput}
+          />
         ) : (
           <div className="text-muted-foreground flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
             <div className="text-sm font-medium">{t.knowledge.selectKbTitle}</div>
@@ -702,17 +466,6 @@ const handleSelectThread = useCallback((nextThreadId: string) => {
           />
           <div className="flex items-center justify-between gap-2 px-2 pb-2">
             <div className="flex min-w-0 items-center gap-2">
-              <Tooltip content={tc.deepResearchHint}>
-                <label className="text-muted-foreground flex shrink-0 cursor-pointer items-center gap-1.5 text-xs">
-                  <Switch
-                    checked={deepResearch}
-                    className="shrink-0"
-                    disabled={!kb}
-                    onCheckedChange={setDeepResearch}
-                  />
-                  <span className="whitespace-nowrap">{tc.deepResearch}</span>
-                </label>
-              </Tooltip>
               <ModelSelector open={modelDialogOpen} onOpenChange={setModelDialogOpen}>
                 <ModelSelectorTrigger asChild>
                   <button

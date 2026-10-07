@@ -1,6 +1,6 @@
 /**
- * 设置 → 模型 的「功能模型」视图（spec 2026-09-10 rag functional-model config §5，plan Task 4 seam C dom）：
- * - 「模型」分区内视图切换（对话模型 / 功能模型），功能模型表单渲染出各角色的字段；
+ * 设置 → 模型 的「功能模型」区块（spec 2026-09-10 rag functional-model config §5，plan Task 4 seam C dom）：
+ * - 共享模型页内嵌功能模型表单，渲染出各角色的字段；
  * - 已存密钥以掩码回显；未改动 → 保存禁用（空 payload 会把整个 rag_config.json 清空）；
  * - 改动 embedding 模型出现「需重建索引」告警；
  * - 保存 payload 只带「文件已拥有字段带出 + 本次改动」（哨兵保留已存密钥）；
@@ -21,7 +21,6 @@ import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { zhCN } from "@/core/i18n/locales/zh-CN";
 import {
-  asrProbeKey,
   connectivityProbeKey,
   dimensionProbeKey,
   formValuesFromConfig,
@@ -52,16 +51,25 @@ const knowledgeHooksMock = rs.hoisted(() => ({
   useReindexStatus: rs.fn(),
   useReindexKnowledgeBase: rs.fn(),
 }));
+const managementMock = rs.hoisted(() => ({
+  loadManagedModels: rs.fn(),
+  modelDraft: rs.fn(() => ({})),
+  saveManagedModel: rs.fn(),
+  testManagedModel: rs.fn(),
+}));
+const authMock = rs.hoisted(() => ({ useAuth: rs.fn() }));
 rs.mock("@/core/rag/hooks", () => ragHooksMock);
-rs.mock("@/core/models/hooks", () => modelHooksMock);
+rs.mock("@/core/models/hooks", () => ({ ...modelHooksMock, MODELS_QUERY_KEY: ["models"] }));
+rs.mock("@/core/models/management", () => managementMock);
+rs.mock("@/core/auth/AuthProvider", () => authMock);
 rs.mock("@/core/knowledge/hooks", () => knowledgeHooksMock);
 rs.mock("sonner", () => ({
   toast: { success: rs.fn(), error: rs.fn(), info: rs.fn(), warning: rs.fn() },
 }));
 
 const { RagConfigRequestError } = await import("@/core/rag/api");
-const { ModelsSettingsPage } = await import(
-  "@/components/workspace/settings/models-settings-page"
+const { ModelSettingsPage } = await import(
+  "@/components/workspace/settings/model-settings-page"
 );
 
 const M = zhCN.settings.models;
@@ -78,13 +86,13 @@ const SAVE_WARNING =
  * （切片 / 实体 / 百科条目 / 人工卡片），源文件与图谱抽取都不重跑，句子必须说全。
  */
 const REINDEX_HINT_ZH =
-  "更换嵌入提供方或维度后，已有向量全部失效——由此入口重新嵌入：切片、实体、百科条目与人工卡片一并重新生成。仅读取库中现有文本：不重新解析源文件，也不重新执行图谱抽取。";
+  "更换嵌入提供方或维度后，已有向量全部失效——由此入口重新嵌入：仅重嵌入切片向量。仅读取库中现有文本：不重新解析源文件。";
 const REINDEX_CONFIRM_ZH =
-  "将重新嵌入该知识库的全部向量（切片、实体、百科条目、人工卡片；不重解析源文件），期间检索结果可能不稳。目标知识库：";
+  "将重新嵌入该知识库的全部切片向量（不重解析源文件），期间检索结果可能不稳。目标知识库：";
 const REINDEX_HINT_EN =
-  "Changing the embedding provider or the dimension invalidates every stored vector — re-embed them from this entry: chunks, entities, wiki entries and manual cards are regenerated together. Only the library's existing text is read: source files are not re-parsed, and graph extraction is not re-run.";
+  "Changing the embedding provider or the dimension invalidates every stored vector — re-embed them from this entry: chunk vectors only. Only the library's existing text is read: source files are not re-parsed.";
 const REINDEX_CONFIRM_EN =
-  "Every vector in this library will be re-embedded — chunks, entities, wiki entries and manual cards (source files are not re-parsed) — and retrieval may be unstable while it runs. Target library:";
+  "Every chunk vector in this library will be re-embedded (source files are not re-parsed) and retrieval may be unstable while it runs. Target library:";
 
 const saveMock = rs.fn();
 const reindexMock = rs.fn();
@@ -179,10 +187,7 @@ function view(
       rerank_base_url: "http://127.0.0.1:8000",
       rerank_api_key: "",
       vlm_model: "vl-model",
-      extract_model: "deepseek-chat",
-      judge_model: "deepseek-chat",
       mineru_api_token: MASKED,
-      video: { asr_provider: "funasr", asr_model: "paraformer-zh" },
       ...over,
     },
     sources: {
@@ -412,27 +417,33 @@ function renderPage(
     isLoading: false,
     error: null,
   });
-  modelHooksMock.useModelsConfig.mockReturnValue({
-    config: { models },
-    isLoading: false,
-    error: null,
-  });
-  modelHooksMock.useSaveModelsConfig.mockReturnValue({ mutate: saveModelsMock, isPending: false });
+  // 共享模型页 + 功能模型区块的目录都来自管理模型查询；条目能力（supports_vision）随行携带。
+  const managed = models.map((m, index) => ({
+    name: String((m.name as string | undefined) ?? `m-${index}`),
+    display_name: (m.display_name as string | undefined) ?? null,
+    model: String((m.model as string | undefined) ?? (m.name as string | undefined) ?? `m-${index}`),
+    supports_vision: Boolean(m.supports_vision),
+    source: "config",
+    enabled: true,
+    revision: "r1",
+    conflict: null,
+  }));
+  managementMock.loadManagedModels.mockResolvedValue({ models: managed });
+  authMock.useAuth.mockReturnValue({ user: { id: "test-user", system_role: "admin" } });
 
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // Seed the shared catalogue query synchronously (same key as the page and the
+  // view): the pickers must resolve on first paint, not one microtask later.
+  client.setQueryData(["managed-models", "test-user"], { models: managed });
   return render(
     <QueryClientProvider client={client}>
       <I18nContext.Provider value={{ locale: "zh-CN", setLocale: () => undefined, t: zhCN }}>
-        <ModelsSettingsPage />
+        <ModelSettingsPage />
       </I18nContext.Provider>
     </QueryClientProvider>,
   );
 }
 
-/** Switch the Models section to its functional-model view. */
-function openFunctionalView() {
-  fireEvent.click(screen.getByRole("radio", { name: M.viewFunctionalModels }));
-}
 
 beforeEach(() => {
   saveMock.mockReset();
@@ -448,31 +459,9 @@ afterEach(() => {
   cleanup();
 });
 
-describe("Models section view switch", () => {
-  it("offers both views and shows the chat list by default", () => {
-    renderPage();
-
-    expect(screen.getByRole("radio", { name: M.viewChatModels })).toBeTruthy();
-    expect(screen.getByRole("radio", { name: M.viewFunctionalModels })).toBeTruthy();
-    expect(screen.queryByText(F.extractModel)).toBeNull();
-
-    openFunctionalView();
-
-    expect(screen.getByText(F.extractModel)).toBeTruthy();
-    // The role heading is the wide-layout one; below `md` each role block also carries the
-    // role name as its block head (spec 2026-09-24 §3.2 revision), so pin the wide-visible
-    // instance.
-    const wideHeadings = screen
-      .getAllByText(F.embeddingModel, { selector: ".text-sm.font-semibold" })
-      .filter((el) => !el.closest(".md\\:hidden"));
-    expect(wideHeadings.length).toBe(1);
-  });
-});
-
 describe("functional-model form", () => {
   it("shows an effective value and masks a stored key", () => {
     renderPage();
-    openFunctionalView();
 
     expect(screen.getByLabelText(F.embeddingModel)).toHaveProperty(
       "value",
@@ -483,19 +472,19 @@ describe("functional-model form", () => {
     expect(screen.getByText(F.secretFromEnvBadge)).toBeTruthy();
   });
 
-  it("uses the configured chat models for the extraction picker", () => {
-    renderPage();
-    openFunctionalView();
+  it("offers the vision-capable entries for the caption picker", () => {
+    setRag({ vlm_model: "claude-model" });
+    renderPage([VL_MODEL, TEXT_MODEL, ANTHROPIC_MODEL]);
 
     // The picker is a Radix Select (its open/close is unreliable under happy-dom), so the
     // trigger carries the resolved model name; the option list itself is pinned by
-    // extractionModelOptions in the node suite.
-    expect(screen.getByLabelText(F.extractModel).textContent).toContain("DeepSeek Chat");
+    // visionReferenceOptions in the node suite. The Anthropic entry resolves by its display
+    // name like any other caption-capable row.
+    expect(screen.getByLabelText(F.captionModel).textContent).toContain("Claude X");
   });
 
   it("keeps Save disabled until something changes", () => {
     renderPage();
-    openFunctionalView();
 
     const save = screen.getByRole("button", { name: zhCN.common.save });
     expect(save).toHaveProperty("disabled", true);
@@ -508,7 +497,6 @@ describe("functional-model form", () => {
 
   it("warns about re-indexing only after the embedding model changes", () => {
     renderPage();
-    openFunctionalView();
 
     expect(screen.queryByText(F.embeddingChangeWarning)).toBeNull();
 
@@ -520,7 +508,6 @@ describe("functional-model form", () => {
 
   it("submits the carried-forward file fields plus this edit", async () => {
     renderPage();
-    openFunctionalView();
 
     fireEvent.change(screen.getByLabelText(F.rerankModel), {
       target: { value: "qwen3-rerank-v2" },
@@ -546,7 +533,6 @@ describe("functional-model form", () => {
   it("shows the denial state for a non-admin", () => {
     setRag({}, { error: new RagConfigRequestError(403, "forbidden") });
     renderPage();
-    openFunctionalView();
 
     expect(screen.getByText(M.adminRequired)).toBeTruthy();
     expect(screen.queryByLabelText(F.embeddingModel)).toBeNull();
@@ -563,14 +549,11 @@ describe("functional-model form", () => {
  * does not roll the draft back.
  */
 describe("RAG default row", () => {
-  it("appears in the functional view only, as the sole control of its kind", () => {
+  it("appears in the functional view as the sole control of its kind", () => {
     renderPage();
 
-    expect(screen.queryByLabelText(F.defaultModel)).toBeNull();
-
-    openFunctionalView();
-
-    // Exactly one: the section title carries no second control (D4).
+    // Exactly one: the section title carries no second control (D4). The view is
+    // mounted inline on this page (Task 6 挂载), so the row is present from the start.
     expect(screen.getAllByLabelText(F.defaultModel).length).toBe(1);
     expect(screen.getByText(F.defaultModel)).toBeTruthy();
     // The explanation rides the row's ⓘ, like every other explanatory sentence here.
@@ -581,7 +564,7 @@ describe("RAG default row", () => {
     // D5's alignment rule: a role's hint says what an empty value means now — the UI
     // override goes away first, the RAG default only takes over when the merged role is
     // still empty. The old "or the configured primary model" claim predates that.
-    for (const hint of [F.extractModelHint, F.groupEvaluationHint, F.captionModelHint]) {
+    for (const hint of [F.captionModelHint]) {
       expect(hint).toContain(F.defaultModel);
       expect(hint).not.toContain("主模型");
       expect(hint).not.toContain("primary model");
@@ -594,14 +577,14 @@ describe("RAG default row", () => {
     expect(F.defaultModel).toBe("RAG 默认模型");
     expect(F.defaultModelNone).toBe("（使用配置默认）");
     expect(F.defaultModelHint).toBe(
-      "用于图谱抽取、评测裁判、图片与视频配文未单独指定模型时的选择，不影响聊天主模型及其他功能；此项留空时使用配置中的 RAG 默认，配置也未指定则使用模型列表第一项。",
+      "用于图片配文未单独指定模型时的选择，不影响聊天主模型及其他功能；此项留空时使用配置中的 RAG 默认，配置也未指定则使用模型列表第一项。",
     );
 
     const FE = enUS.settings.functionalModels;
     expect(FE.defaultModel).toBe("RAG default model");
     expect(FE.defaultModelNone).toBe("(config default)");
     expect(FE.defaultModelHint).toBe(
-      "Used when graph extraction, evaluation judging, image captioning or video captioning has no separate model selection. It does not affect chat models or other features. Leave this unset to inherit the configured RAG default, or the first model in the list if none is configured.",
+      "Used when image captioning has no separate model selection. It does not affect chat models or other features. Leave this unset to inherit the configured RAG default, or the first model in the list if none is configured.",
     );
   });
 
@@ -611,7 +594,6 @@ describe("RAG default row", () => {
       { sources: { default_model: "ui" } },
     );
     renderPage();
-    openFunctionalView();
 
     // The row itself is untouched; editing another field is what makes the save reachable.
     fireEvent.change(screen.getByLabelText(F.rerankModel), {
@@ -630,7 +612,6 @@ describe("RAG default row", () => {
   it("keeps the draft when the save never succeeds", () => {
     setRag({ default_model: "qwen-max" }, { sources: { default_model: "ui" } });
     renderPage();
-    openFunctionalView();
 
     fireEvent.change(screen.getByLabelText(F.rerankModel), {
       target: { value: "qwen3-rerank-v2" },
@@ -655,49 +636,6 @@ describe("RAG default row", () => {
  * save the server could not verify — it must not read as a clean save, and it must not read as a
  * refusal either.
  */
-describe("wiki and synthesis rows", () => {
-  it("offers both inside their existing cards, each with its own hint", () => {
-    renderPage();
-    openFunctionalView();
-
-    // ②'s decision: one more row in each existing card, no new card.
-    expect(screen.getByText(F.wikiModel)).toBeTruthy();
-    expect(screen.getByText(F.synthesisModel)).toBeTruthy();
-    expect(screen.queryByText("groupWiki")).toBeNull();
-    expect(screen.queryByText("groupSynthesis")).toBeNull();
-
-    // The cards keep their own ⓘ; these rows carry theirs.
-    expect(screen.getByLabelText(F.wikiModelHint)).toBeTruthy();
-    expect(screen.getByLabelText(F.synthesisModelHint)).toBeTruthy();
-    expect(screen.getByLabelText(F.extractModelHint)).toBeTruthy();
-  });
-
-  it("states the same inheritance rule as the other role rows", () => {
-    // D5's alignment rule applied to the two new roles: empty withdraws this row's override,
-    // the configured value still applies, and only when both are empty does the default take over.
-    for (const hint of [F.wikiModelHint, F.synthesisModelHint]) {
-      expect(hint).toContain(F.defaultModel);
-      expect(hint).toContain("留空");
-      expect(hint).not.toContain("主模型");
-      expect(hint).not.toContain("要重启");
-      expect(hint).not.toContain("primary model");
-    }
-  });
-
-  it("ships the two roles' copy in both locales", () => {
-    expect(F.wikiModel).toBe("百科生成模型");
-    expect(F.wikiModelNone).toBe("（使用配置默认）");
-    expect(F.synthesisModel).toBe("考题合成模型");
-    expect(F.synthesisModelNone).toBe("（使用配置默认）");
-
-    const FE = enUS.settings.functionalModels;
-    expect(FE.wikiModel).toBe("Wiki generation model");
-    expect(FE.synthesisModel).toBe("Question synthesis model");
-    expect(FE.wikiModelNone).toBe("(use the configured default)");
-    expect(FE.synthesisModelNone).toBe("(use the configured default)");
-  });
-});
-
 describe("thinking follow-chat menu (spec 2026-10-03 D1=甲)", () => {
   // One dropdown under the RAG default row. Its five rows are the five *role slots* — a
   // model in two slots is two rows — each showing the model its slot points at. The trigger
@@ -715,7 +653,6 @@ describe("thinking follow-chat menu (spec 2026-10-03 D1=甲)", () => {
 
   it("names itself in the trigger with the state at the tail, and no label in front", () => {
     renderPage();
-    openFunctionalView();
 
     // The label exists only as the trigger's aria-label; the visible text is the state.
     expect(screen.queryAllByText(F.thinkingMenuLabel)).toHaveLength(0);
@@ -737,17 +674,14 @@ describe("thinking follow-chat menu (spec 2026-10-03 D1=甲)", () => {
     );
   });
 
-  it("lists the five role slots with the model each slot points at", async () => {
-    setRag({ wiki_model: "qwen-max", synthesis_model: "qwen-max" });
+  it("lists the role slot with the model it points at", async () => {
     renderPage();
-    openFunctionalView();
 
     openMenu();
     const items = await screen.findAllByRole("menuitemcheckbox");
 
-    // Rows are role slots, not models: extraction and judging point at the same entry and
-    // still get one row each. Each row carries two cells that share the menu's subgrid, so
-    // the model names line up as one column (2026-10-06); the old composite "role · model"
+    // The row is a role slot, and it carries two cells that share the menu's subgrid, so
+    // the model name lines up as one column (2026-10-06); the composite "role · model"
     // read survives as the row's aria-label, which the by-name queries below rely on.
     const cells = (item: HTMLElement) =>
       [
@@ -755,30 +689,23 @@ describe("thinking follow-chat menu (spec 2026-10-03 D1=甲)", () => {
           '[data-slot="thinking-role"], [data-slot="thinking-model"]',
         ),
       ].map((cell) => cell.textContent);
-    expect(items.map(cells)).toEqual([
-      [F.extractModel, "DeepSeek Chat"],
-      [F.wikiModel, "Qwen Max"],
-      [F.judgeModel, "DeepSeek Chat"],
-      [F.synthesisModel, "Qwen Max"],
-      [F.captionModel, "vl-model"],
-    ]);
+    expect(items.map(cells)).toEqual([[F.captionModel, "vl-model"]]);
   });
 
   it("keeps the menu open across picks and counts them in the trigger", async () => {
     renderPage();
-    openFunctionalView();
 
     openMenu();
     fireEvent.click(
       await screen.findByRole("menuitemcheckbox", {
-        name: `${F.extractModel} · DeepSeek Chat`,
+        name: `${F.captionModel} · vl-model`,
       }),
     );
 
-    // One decision, five rows: a pick must not close the menu on the admin.
+    // A pick must not close the menu on the admin.
     expect(
       screen.getByRole("menuitemcheckbox", {
-        name: `${F.wikiModel} · （使用配置默认）`,
+        name: `${F.captionModel} · vl-model`,
       }),
     ).toBeTruthy();
     expect(trigger().textContent).toContain("已选 1 项");
@@ -787,36 +714,24 @@ describe("thinking follow-chat menu (spec 2026-10-03 D1=甲)", () => {
 
   it("submits the toggles through the RAG save, and nothing for the untouched legs", async () => {
     renderPage();
-    openFunctionalView();
 
     openMenu();
     fireEvent.click(
       await screen.findByRole("menuitemcheckbox", {
-        name: `${F.extractModel} · DeepSeek Chat`,
+        name: `${F.captionModel} · vl-model`,
       }),
     );
     fireEvent.click(saveButton());
 
     await waitFor(() => expect(saveMock).toHaveBeenCalled());
-    // The fixture's other file-owned fields ride along; what this edit owns is the one toggle,
-    // and the four legs left alone must stay out of the payload (an omitted key is the PUT's
-    // "no change").
+    // The fixture's other file-owned fields ride along; what this edit owns is the one toggle.
     const payload = saveMock.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(payload.extract_thinking).toBe(true);
-    for (const key of [
-      "wiki_thinking",
-      "judge_thinking",
-      "synthesis_thinking",
-      "vlm_thinking",
-    ]) {
-      expect(payload).not.toHaveProperty(key);
-    }
+    expect(payload.vlm_thinking).toBe(true);
   });
 
   it("seeds a stored true as checked, and an uncheck is submitted as false", async () => {
     setRag({ vlm_thinking: true });
     renderPage();
-    openFunctionalView();
 
     expect(trigger().textContent).toContain("已选 1 项");
 
@@ -832,7 +747,6 @@ describe("thinking follow-chat menu (spec 2026-10-03 D1=甲)", () => {
     // `false`, not an omitted key: the whole-object PUT would read an omission as "keep it".
     const payload = saveMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload.vlm_thinking).toBe(false);
-    expect(payload).not.toHaveProperty("extract_thinking");
     expect(trigger().textContent).toContain("未选择");
   });
 });
@@ -840,7 +754,6 @@ describe("thinking follow-chat menu (spec 2026-10-03 D1=甲)", () => {
 describe("save-time verification notice", () => {
   it("shows what the server could not verify about the configuration it saved", async () => {
     renderPage();
-    openFunctionalView();
     saveWillReturn(SAVE_WARNING);
 
     fireEvent.change(screen.getByLabelText(F.rerankModel), {
@@ -856,7 +769,6 @@ describe("save-time verification notice", () => {
 
   it("says nothing once the server verified a save", async () => {
     renderPage();
-    openFunctionalView();
     saveWillReturn(SAVE_WARNING);
 
     fireEvent.change(screen.getByLabelText(F.rerankModel), {
@@ -879,20 +791,16 @@ describe("save-time verification notice", () => {
 describe("functional-model layout", () => {
   it("groups the fields under described sections", () => {
     renderPage();
-    openFunctionalView();
 
     for (const title of [
       F.groupRetrieval,
-      F.groupExtraction,
       F.groupMultimodal,
-      F.groupEvaluation,
       F.groupServices,
     ]) {
       expect(screen.getByText(title)).toBeTruthy();
     }
     expect(screen.getByLabelText(F.groupRetrievalHint)).toBeTruthy();
     expect(screen.getByLabelText(F.groupMultimodalHint)).toBeTruthy();
-    expect(screen.getByLabelText(F.groupEvaluationHint)).toBeTruthy();
     expect(screen.getByLabelText(F.groupServicesHint)).toBeTruthy();
   });
 
@@ -900,25 +808,14 @@ describe("functional-model layout", () => {
     // Spec 2026-09-25 rag-endpoint-unlock §4.7/§5: the unlock is endpoint-only — other locked
     // rows keep their own reason copies (their lock is about the *mode*, not a vendor address).
     renderPage();
-    openFunctionalView();
 
     expect(screen.getByLabelText(F.embeddingBaseUrl)).toBeTruthy();
     expect(screen.getByLabelText(F.rerankBaseUrl)).toBeTruthy();
     expect(screen.queryByText("由提供方固定")).toBeNull();
   });
 
-  it("picks a configured chat model as the eval judge", () => {
-    renderPage();
-    openFunctionalView();
-
-    // Radix Select cannot be opened reliably under happy-dom; the trigger carries the
-    // resolved label and the option list itself is pinned by modelReferenceOptions.
-    expect(screen.getByLabelText(F.judgeModel).textContent).toContain("DeepSeek Chat");
-  });
-
   it("writes the retrieval pair's row labels once, not once per column", () => {
     renderPage();
-    openFunctionalView();
 
     // The two roles share one label gutter (2026-09-15): each of the pair's four rows is
     // labelled a single time **in the wide layout** — below `lg` every value cell carries its
@@ -950,7 +847,6 @@ describe("functional-model layout", () => {
 
   it("puts the provenance chip inside the credential field, not beside it", () => {
     renderPage();
-    openFunctionalView();
 
     // The fixture backs the rerank key from the environment, so that row carries the chip.
     const input = screen.getByLabelText(F.rerankApiKey);
@@ -966,7 +862,6 @@ describe("functional-model layout", () => {
 
   it("treats the chip as a placeholder: it clears the moment the field is yours", () => {
     renderPage();
-    openFunctionalView();
 
     const input = screen.getByLabelText(F.rerankApiKey);
     expect(screen.getByText(F.secretFromEnvBadge)).toBeTruthy();
@@ -991,7 +886,6 @@ describe("functional-model layout", () => {
 
   it("paints a credential chip and a locked row's reason identically", () => {
     renderPage();
-    openFunctionalView();
 
     // Two cells that both say "you do not type this here", so they read the same: same size,
     // same tint, and both lead their field. They used to differ in all three (2026-09-16).
@@ -1010,19 +904,15 @@ describe("functional-model layout", () => {
 
   it("labels every input, including the ones that used to be bare boxes", () => {
     renderPage();
-    openFunctionalView();
 
-    // ASR 那几行的可见标签也换成了共享词（spec 2026-09-28 D1），角色的区分在 aria-label 上。
     for (const label of [F.apiKeyLabel, F.modelLabel, F.qdrantUrl, F.mineruToken]) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     }
     expect(screen.getByLabelText(F.embeddingApiKey)).toBeTruthy();
-    expect(screen.getByLabelText(F.asrModel)).toBeTruthy();
   });
 
   it("picks the caption model from the configured entries, asking for no endpoint or key", () => {
     renderPage();
-    openFunctionalView();
 
     const captionRow = screen.getByLabelText(F.captionModel).closest("div");
 
@@ -1052,7 +942,6 @@ describe("functional-model layout", () => {
 
   it("stops warning about a missing vision model when an Anthropic entry can serve the leg", () => {
     renderPage([ANTHROPIC_MODEL, TEXT_MODEL]);
-    openFunctionalView();
 
     // The old filter left this picker with no vision-capable entry at all, and the row said so.
     expect(screen.queryByText(F.vlmNoVisionModel)).toBeNull();
@@ -1060,7 +949,6 @@ describe("functional-model layout", () => {
 
   it("still warns when no entry declares vision support", () => {
     renderPage([TEXT_MODEL]);
-    openFunctionalView();
 
     expect(screen.getByText(F.vlmNoVisionModel)).toBeTruthy();
   });
@@ -1068,7 +956,6 @@ describe("functional-model layout", () => {
   it("keeps a stored caption model that names no configured entry", () => {
     setRag({ vlm_model: "qwen3.7-flash-legacy" });
     renderPage();
-    openFunctionalView();
 
     expect(screen.getByLabelText(F.captionModel).textContent).toContain(
       "qwen3.7-flash-legacy",
@@ -1095,7 +982,6 @@ describe("embedding address row", () => {
       rerank_base_url: "https://dashscope.aliyuncs.com",
     });
     renderPage();
-    openFunctionalView();
 
     // It emits both halves, so the "dense only" refusal must not fire for it.
     expect(screen.queryByRole("alert")).toBeNull();
@@ -1113,7 +999,6 @@ describe("embedding address row", () => {
       rerank_base_url: "",
     });
     renderPage();
-    openFunctionalView();
 
     const input = screen.getByLabelText<HTMLInputElement>(F.embeddingBaseUrl);
     // The vendor default is only the grey hint — never the value.
@@ -1130,7 +1015,6 @@ describe("embedding address row", () => {
       embedding_base_url: "https://ws-example.cn-beijing.maas.aliyuncs.com",
     });
     renderPage();
-    openFunctionalView();
 
     const input = screen.getByLabelText<HTMLInputElement>(F.embeddingBaseUrl);
     expect(input.value).toBe(
@@ -1145,7 +1029,6 @@ describe("embedding address row", () => {
       embedding_base_url: "http://127.0.0.1:8080/v1",
     });
     renderPage();
-    openFunctionalView();
 
     expect(screen.getByLabelText(F.embeddingBaseUrl)).toBeTruthy();
     expect(screen.getByPlaceholderText("https://api.example.com/v1")).toBeTruthy();
@@ -1159,7 +1042,6 @@ describe("embedding address row", () => {
       rerank_base_url: "https://dashscope.aliyuncs.com",
     });
     renderPage();
-    openFunctionalView();
 
     expect(saveButton().disabled).toBe(true);
     expect(screen.getByText("请填写接口地址")).toBeTruthy();
@@ -1183,7 +1065,6 @@ describe("rerank address row", () => {
   it("keeps the row editable and hints the vendor default", () => {
     setRag({ rerank_provider: "dashscope", rerank_base_url: "" });
     renderPage();
-    openFunctionalView();
 
     const input = screen.getByLabelText<HTMLInputElement>(F.rerankBaseUrl);
     expect(input).toBeTruthy();
@@ -1203,7 +1084,6 @@ describe("rerank address row", () => {
       rerank_base_url: "http://127.0.0.1:9999",
     });
     renderPage();
-    openFunctionalView();
 
     const input = screen.getByLabelText<HTMLInputElement>(F.rerankBaseUrl);
     expect(input.value).toBe("http://127.0.0.1:9999");
@@ -1214,7 +1094,6 @@ describe("rerank address row", () => {
     // `unknown ≠ cannot`：旧的网关答不了这个问题，就不要替它把框锁上（占位退 example.com）。
     setRag({ rerank_provider: "dashscope" }, { providers: null });
     renderPage();
-    openFunctionalView();
 
     expect(screen.getByLabelText(F.rerankBaseUrl)).toBeTruthy();
     expect(
@@ -1230,7 +1109,6 @@ describe("rerank address row", () => {
 describe("TEI rerank provider", () => {
   it("offers the TEI shape as a third rerank provider", async () => {
     renderPage();
-    openFunctionalView();
 
     fireEvent.click(screen.getByRole("combobox", { name: F.rerankProvider }));
 
@@ -1252,7 +1130,6 @@ describe("TEI rerank provider", () => {
     // 漏加一格就会被静默读成 dashscope，端点行随即锁死、存量地址再也改不动。
     setRag({ rerank_provider: "tei-rerank" });
     renderPage();
-    openFunctionalView();
 
     expect(screen.getByLabelText(F.rerankBaseUrl)).toBeTruthy();
     expect(screen.getByLabelText(F.rerankModel)).toBeTruthy();
@@ -1276,7 +1153,6 @@ describe("sparse source vs provider capability", () => {
   it("refuses a dense-only provider that is asked for the sparse half", () => {
     unsupported();
     renderPage();
-    openFunctionalView();
 
     expect(screen.getByRole("alert").textContent).toBe(
       F.sparseProviderUnsupported,
@@ -1299,7 +1175,6 @@ describe("sparse source vs provider capability", () => {
       embedding_sparse_source: "bm25",
     });
     renderPage();
-    openFunctionalView();
 
     expect(screen.queryByRole("alert")).toBeNull();
     expect(saveButton().disabled).toBe(true); // nothing edited yet — the usual rule
@@ -1318,7 +1193,6 @@ describe("sparse source vs provider capability", () => {
       { providers: null },
     );
     renderPage();
-    openFunctionalView();
 
     // An older server cannot answer the question, so it must not be answered for it.
     expect(screen.queryByRole("alert")).toBeNull();
@@ -1354,7 +1228,6 @@ describe("sparse capability probe", () => {
   it("blocks a model the probe proved cannot supply the sparse half", () => {
     setProbe({ status: "unsupported" });
     renderPage();
-    openFunctionalView();
 
     expect(screen.getByRole("alert").textContent).toBe(
       F.sparseProviderUnsupported,
@@ -1371,7 +1244,6 @@ describe("sparse capability probe", () => {
   it("drops that verdict the moment the model it was taken for changes", () => {
     setProbe({ status: "unsupported" });
     renderPage();
-    openFunctionalView();
 
     expect(screen.getByRole("alert").textContent).toBe(
       F.sparseProviderUnsupported,
@@ -1386,7 +1258,6 @@ describe("sparse capability probe", () => {
   it("keeps the admin's own choice of sparse source untouched", () => {
     setProbe({ status: "unsupported" });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     // Not silently rewritten to an easier value: showing one thing and sending another is
@@ -1399,7 +1270,6 @@ describe("sparse capability probe", () => {
   it("lets an unverifiable model through, marked as unverified", () => {
     setProbe({ status: "unverifiable" });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     expect(screen.getByText(F.sparseUnverified)).toBeTruthy();
@@ -1417,7 +1287,6 @@ describe("sparse capability probe", () => {
   it("says nothing extra when the probe confirmed the model", () => {
     setProbe({ status: "supported" });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     expect(screen.queryByText(F.sparseUnverified)).toBeNull();
@@ -1429,7 +1298,6 @@ describe("sparse capability probe", () => {
   it("shows the probe as in flight while it is running", () => {
     setProbe({ pending: true });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     expect(screen.getByText(F.sparseProbing)).toBeTruthy();
@@ -1440,7 +1308,6 @@ describe("sparse capability probe", () => {
   it("keeps the probe mark inside the field, so the row never grows", () => {
     setProbe({ pending: true });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     const mark = screen.getByText(F.sparseProbing);
@@ -1459,7 +1326,6 @@ describe("sparse capability probe", () => {
       embedding_model: "",
     });
     renderPage();
-    openFunctionalView();
 
     await new Promise((resolve) => setTimeout(resolve, 600));
     expect(probeMock).not.toHaveBeenCalled();
@@ -1471,7 +1337,6 @@ describe("sparse capability probe", () => {
       embedding_sparse_source: "bm25",
     });
     renderPage();
-    openFunctionalView();
 
     await new Promise((resolve) => setTimeout(resolve, 600));
     expect(probeMock).not.toHaveBeenCalled();
@@ -1490,7 +1355,6 @@ describe("sparse capability probe", () => {
       { sources: { embedding_api_key: "env" } },
     );
     renderPage();
-    openFunctionalView();
 
     expect(
       screen.getByLabelText<HTMLInputElement>(F.embeddingApiKey).value,
@@ -1513,7 +1377,6 @@ describe("sparse model disclosure", () => {
   it("says the sparse model is stored but never sent", () => {
     setRag({ embedding_sparse_source: "external" });
     renderPage();
-    openFunctionalView();
     fireEvent.click(screen.getByRole("button", { name: /^高级设置/ }));
 
     expect(screen.getByLabelText(F.sparseModelHint)).toBeTruthy();
@@ -1546,7 +1409,6 @@ describe("sparse service connectivity", () => {
   it("asks the service once the address is there", async () => {
     withExternal();
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     await waitFor(() => expect(sparseServiceProbeMock).toHaveBeenCalled(), {
@@ -1561,7 +1423,6 @@ describe("sparse service connectivity", () => {
   it("does not ask at all without an address to reach", async () => {
     withExternal({ sparse_base_url: "" });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     await new Promise((resolve) => setTimeout(resolve, 600));
@@ -1571,7 +1432,6 @@ describe("sparse service connectivity", () => {
   it("does not ask while the sparse half comes from somewhere else", async () => {
     setRag({ embedding_sparse_source: "bm25" });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     await new Promise((resolve) => setTimeout(resolve, 600));
@@ -1583,7 +1443,6 @@ describe("sparse service connectivity", () => {
     withExternal();
     setSparseServiceProbe({ status: "unreachable" });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     // The address row says so in place…
@@ -1599,7 +1458,6 @@ describe("sparse service connectivity", () => {
     withExternal();
     setSparseServiceProbe({ status: "empty" });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     // Reachable but useless is a different problem from unreachable: the admin should look at the
@@ -1612,7 +1470,6 @@ describe("sparse service connectivity", () => {
     withExternal();
     setSparseServiceProbe({ status: "ok" });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     expect(screen.queryByText(F.sparseServiceUnreachable)).toBeNull();
@@ -1626,7 +1483,6 @@ describe("sparse service connectivity", () => {
       keyForCurrentValues: false,
     });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     // Editing the address asks a new question; answering it with the old verdict would report a
@@ -1638,7 +1494,6 @@ describe("sparse service connectivity", () => {
     withExternal();
     setSparseServiceProbe({ status: "unreachable" });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     const mark = screen.getByText(F.sparseServiceUnreachable);
@@ -1661,7 +1516,6 @@ describe("sparse service with no provider chosen", () => {
     // The wire says "not declared" with null; the form widens it to "" for Radix.
     setRag({ embedding_sparse_source: "external", sparse_provider: null });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     expect(screen.getByRole("alert").textContent).toBe(
@@ -1684,7 +1538,6 @@ describe("sparse service with no provider chosen", () => {
       sparse_base_url: SPARSE_URL,
     });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     expect(screen.queryByRole("alert")).toBeNull();
@@ -1698,7 +1551,6 @@ describe("sparse service with no provider chosen", () => {
     // The wire says "not declared" with null; the form widens it to "" for Radix.
     setRag({ embedding_sparse_source: "external", sparse_provider: null });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     // The label is only reachable inside the listbox (Radix does not open in happy-dom), so pin it
@@ -1716,7 +1568,6 @@ describe("sparse service with no provider chosen", () => {
 describe("rebuild entry", () => {
   it("keeps the action disabled until a library is chosen", () => {
     renderPage();
-    openFunctionalView();
 
     const action = screen.getByRole<HTMLButtonElement>("button", {
       name: F.reindexAction,
@@ -1730,7 +1581,6 @@ describe("rebuild entry", () => {
     setRag();
     setKnowledge({ libraries: [] });
     renderPage();
-    openFunctionalView();
 
     expect(screen.getByText(F.reindexNoKb)).toBeTruthy();
     expect(screen.getByRole<HTMLButtonElement>("button", { name: F.reindexAction }).disabled).toBe(true);
@@ -1746,15 +1596,10 @@ describe("rebuild entry", () => {
           documents_total: 7,
           documents_done: 3,
           chunks_indexed: 42,
-          // 三键自 run 起手就存在于线上（后端恒发），0 = 还没走到那三遍。
-          entities_indexed: 0,
-          wiki_entries_indexed: 0,
-          cards_indexed: 0,
         },
       },
     });
     renderPage();
-    openFunctionalView();
 
     const status = screen.getByRole("status");
     expect(status.textContent).toContain("3/7");
@@ -1762,7 +1607,7 @@ describe("rebuild entry", () => {
     expect(screen.getByRole<HTMLButtonElement>("button", { name: F.reindexAction }).disabled).toBe(true);
   });
 
-  it("counts every vector collection in the running line", () => {
+  it("counts the chunk vectors in the running line", () => {
     setRag();
     setKnowledge({
       status: {
@@ -1772,25 +1617,19 @@ describe("rebuild entry", () => {
           documents_total: 3,
           documents_done: 3,
           chunks_indexed: 100,
-          entities_indexed: 20,
-          wiki_entries_indexed: 7,
-          cards_indexed: 1,
         },
       },
     });
     renderPage();
-    openFunctionalView();
 
-    // 四类向量之和（spec 2026-09-24 §5.4 / §4.3）：重建换的是切片 + 实体 + 百科条目 +
-    // 人工卡片；只报 chunks_indexed 会把另外三遍的成果藏起来——而它们正是跨空间坏掉的那批。
+    // 切片重建只重嵌入切片向量（重嵌入三件 = 切片一类）：行里的计数就是 chunks_indexed。
     const status = screen.getByRole("status");
     expect(status.textContent).toContain("3/3");
-    expect(status.textContent).toContain("已写入向量 128");
+    expect(status.textContent).toContain("已写入向量 100");
   });
 
   it("spells out that a rebuild moves every vector collection", () => {
     renderPage();
-    openFunctionalView();
 
     // ⓘ 的可及名就是那句话本身，所以钉住它等于同时钉住"文案对"与"它真的挂在页面上"。
     expect(screen.getByLabelText(REINDEX_HINT_ZH)).toBeTruthy();
@@ -1806,7 +1645,6 @@ describe("rebuild entry", () => {
     setRag();
     setKnowledge({ status: { in_progress: false, last_run: "failed", progress: null } });
     renderPage();
-    openFunctionalView();
 
     expect(screen.getByRole("alert").textContent).toContain(F.reindexLastFailed);
   });
@@ -1925,28 +1763,24 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
   /** 高级设置默认收起；探测行就在里面。 */
   const openAdvanced = () => fireEvent.click(screen.getByRole("button", { name: /^高级设置/ }));
 
-  it("keeps both in-field chevrons to the page's own select style", () => {
-    // 标准 SelectTrigger 的箭头是 `size-4 opacity-50`，距右 12px（触发器的 px-3）。框内那两处
-    // （维度行 / ASR 模型行）曾经是 `size-3.5` + `pr-1.5` ⇒ 视觉上小一号、也贴得更靠边
-    // （2026-09-29 他报的缺陷）。几何只能在真浏览器量，这里钉住规格本身。
+  it("keeps the in-field chevron to the page's own select style", () => {
+    // 标准 SelectTrigger 的箭头是 `size-4 opacity-50`，距右 12px（触发器的 px-3）。框内那处
+    // （维度行）曾经是 `size-3.5` + `pr-1.5` ⇒ 视觉上小一号、也贴得更靠边（2026-09-29 他报的
+    // 缺陷）。ASR 模型行已随视频腿裁掉，只剩维度行一处。几何只能在真浏览器量，这里钉住规格本身。
     setDimensionProbe({ status: "ok", type: "tiered", native: 1024, values: [256, 1024] });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
-    for (const slot of ["dimension-tiers-trigger", "asr-model-candidates-trigger"]) {
-      const button = document.querySelector<HTMLElement>(`[data-slot="${slot}"]`);
-      expect(button, slot).toBeTruthy();
-      expect(button!.querySelector("svg")!.getAttribute("class")).toContain("size-4");
-      expect(button!.querySelector("svg")!.getAttribute("class")).toContain("opacity-50");
-      // 12px 的右内边距 = 标准触发器的 px-3。
-      expect(button!.parentElement!.className).toContain("pr-3");
-    }
+    const button = document.querySelector<HTMLElement>('[data-slot="dimension-tiers-trigger"]');
+    expect(button, "dimension-tiers-trigger").toBeTruthy();
+    expect(button!.querySelector("svg")!.getAttribute("class")).toContain("size-4");
+    expect(button!.querySelector("svg")!.getAttribute("class")).toContain("opacity-50");
+    // 12px 的右内边距 = 标准触发器的 px-3。
+    expect(button!.parentElement!.className).toContain("pr-3");
   });
 
   it("puts the dimension row at the head of the advanced panel — editable, button-free", () => {
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     const row = document.querySelector<HTMLElement>('[data-slot="dimension-row"]')!;
@@ -1971,7 +1805,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
     // 档位不再平铺在行里（那会让这一项变成两行）：收进输入框右侧的小箭头，点开是下拉菜单。
     setDimensionProbe({ status: "ok", type: "tiered", native: 1024, values: [256, 1024] });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     const control = document.querySelector<HTMLElement>('[data-slot="dimension-control"]')!;
@@ -1991,7 +1824,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
     // 否则留空=1024，一个原生 768 的模型永远保存不过，而用户没有输入口。
     setDimensionProbe({ status: "ok", type: "fixed", native: 768, values: [768] });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     const input = screen.getByLabelText<HTMLInputElement>(F.dimensionLabel);
@@ -2008,7 +1840,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
   it("reports the no-tier case through the in-field status dot, never an empty list", () => {
     setDimensionProbe({ status: "ok", type: "tiered", native: 768, values: [] });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     const dot = document.querySelector<HTMLElement>('[data-slot="dimension-status"]')!;
@@ -2028,7 +1859,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
       candidates: [256, 512, 768, 1024, 1536],
     });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     fireEvent.pointerDown(
@@ -2042,7 +1872,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
   it("reports 未探明 in-field and offers no tier list when the probe could not answer", () => {
     setDimensionProbe({ status: "unreachable" });
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     const dot = document.querySelector<HTMLElement>('[data-slot="dimension-status"]')!;
@@ -2054,7 +1883,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
   it("turns both role headings into connectivity buttons, and a ready leg asks the server", () => {
     setRag({}, { sources: { embedding_api_key: "env" } });
     renderPage();
-    openFunctionalView();
 
     // 锚定「<角色> · 」：LegHeading 的可及名是这个形状；组 ⓘ 的 aria 是整句提示
     // （2026-09-30 起含「向量模型/重排模型」），不锚定会先命中 ⓘ。
@@ -2083,7 +1911,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
   it("keeps the dots disabled until the leg's own coordinates are complete", () => {
     setRag({}, { sources: { embedding_api_key: "unset" } });
     renderPage();
-    openFunctionalView();
 
     const heading = screen.getByRole("button", {
       name: new RegExp(`^${F.embeddingModel} ·`),
@@ -2100,7 +1927,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
 
   it("raises the embedding-change warning when the width moves, and drops it when put back", () => {
     renderPage();
-    openFunctionalView();
     openAdvanced();
 
     const input = screen.getByLabelText<HTMLInputElement>(F.dimensionLabel);
@@ -2117,7 +1943,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
   it("probes the dimension automatically once the coordinates are complete", async () => {
     setRag({}, { sources: { embedding_api_key: "env" } });
     renderPage();
-    openFunctionalView();
 
     // 不用点任何按钮：坐标齐了、防抖过后自己发一发（spec §3 探测的触发）。
     await waitFor(() => expect(dimensionProbeMock).toHaveBeenCalledTimes(1));
@@ -2130,7 +1955,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
     setRag({}, { sources: { embedding_api_key: "env" } });
     setConnectivityProbe({ status: "unreachable" });
     renderPage();
-    openFunctionalView();
 
     const bad = screen.getByRole<HTMLButtonElement>("button", {
       name: new RegExp(`^${F.embeddingModel} ·`),
@@ -2163,7 +1987,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
     );
 
     renderPage();
-    openFunctionalView();
 
     // 锚定「<角色> ·」的理由同上：组 ⓘ 的提示语里含角色名。
     const dotOf = (label: string) =>
@@ -2180,7 +2003,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
     // 原生 `title` 会弹出浏览器自己画的白框，与仓库的深色 Tooltip 不合（2026-09-28 他报回）。
     setRag({}, { sources: { embedding_api_key: "env" } });
     renderPage();
-    openFunctionalView();
 
     const heading = screen.getByRole<HTMLButtonElement>("button", {
       name: new RegExp(`^${F.embeddingModel} ·`),
@@ -2205,7 +2027,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
         "连得上，但这个模型没给稀疏那一半：嵌入 provider 返回了空的稀疏向量 ⇒ 请改为「独立稀疏服务」或「本地 BM25」",
     });
     renderPage();
-    openFunctionalView();
 
     const head = screen.getByRole<HTMLButtonElement>("button", {
       name: new RegExp(`^${F.embeddingModel} ·`),
@@ -2219,7 +2040,6 @@ describe("维度行 + 两标题连通点 (spec 2026-09-26 §3 / D5-5)", () => {
     setRag({}, { sources: { embedding_api_key: "env" } });
     setConnectivityProbe({ status: "ok" });
     renderPage();
-    openFunctionalView();
 
     const ok = screen.getByRole<HTMLButtonElement>("button", {
       name: new RegExp(`^${F.embeddingModel} ·`),
@@ -2244,7 +2064,6 @@ describe("宽度迁移：保存前的确认 + 在飞状态面 (spec 2026-09-26 D
 
   it("asks before a width change instead of saving straight away", async () => {
     renderPage();
-    openFunctionalView();
     changeDimension("1536");
 
     fireEvent.click(screen.getByRole("button", { name: zhCN.common.save }));
@@ -2264,7 +2083,6 @@ describe("宽度迁移：保存前的确认 + 在飞状态面 (spec 2026-09-26 D
 
   it("still saves without asking when the width is not what changed", async () => {
     renderPage();
-    openFunctionalView();
 
     fireEvent.change(screen.getByLabelText(F.rerankModel), {
       target: { value: "qwen3-rerank-v2" },
@@ -2277,7 +2095,6 @@ describe("宽度迁移：保存前的确认 + 在飞状态面 (spec 2026-09-26 D
 
   it("treats typing the width already in force as no change", async () => {
     renderPage();
-    openFunctionalView();
     changeDimension("1024");
 
     fireEvent.click(screen.getByRole("button", { name: zhCN.common.save }));
@@ -2293,7 +2110,6 @@ describe("宽度迁移：保存前的确认 + 在飞状态面 (spec 2026-09-26 D
       progress: { kbs_done: 1, kbs_total: 2 },
     });
     renderPage();
-    openFunctionalView();
     changeDimension("1536");
 
     const line = document.querySelector('[data-slot="migration-status"]')!;
@@ -2308,7 +2124,6 @@ describe("宽度迁移：保存前的确认 + 在飞状态面 (spec 2026-09-26 D
   it("reports how a settled migration ended", () => {
     setMigration({ state: "succeeded", target_dimension: 1536 });
     renderPage();
-    openFunctionalView();
 
     expect(
       document.querySelector('[data-slot="migration-status"]')!.textContent,
@@ -2322,7 +2137,6 @@ describe("宽度迁移：保存前的确认 + 在飞状态面 (spec 2026-09-26 D
       detail: "RuntimeError: 向量库连不上",
     });
     renderPage();
-    openFunctionalView();
 
     const line = document.querySelector('[data-slot="migration-status"]')!;
     expect(line.textContent).toContain(F.migrationFailed);
@@ -2330,329 +2144,3 @@ describe("宽度迁移：保存前的确认 + 在飞状态面 (spec 2026-09-26 D
   });
 });
 
-describe("ASR model row: in-field candidates and the provider switch (spec 2026-09-27)", () => {
-  /** The rendered candidate labels, in menu order. */
-  async function openAsrMenu() {
-    fireEvent.pointerDown(
-      screen.getByRole("button", { name: F.asrModelCandidates }),
-    );
-    return (await screen.findAllByRole("menuitem")).map(
-      (item) => item.textContent,
-    );
-  }
-
-  const asrInput = () => screen.getByLabelText<HTMLInputElement>(F.asrModel);
-
-  /** 引擎选择是下拉：点开触发器，再点那一条。 */
-  async function switchEngine(label: string) {
-    fireEvent.click(screen.getByRole("combobox", { name: F.asrProvider }));
-    fireEvent.click(await screen.findByRole("option", { name: label }));
-  }
-
-  it("offers the engine's common models inside the field and writes a picked one back", async () => {
-    renderPage();
-    openFunctionalView();
-
-    expect(await openAsrMenu()).toEqual(["paraformer-zh", "paraformer-en"]);
-
-    fireEvent.click(screen.getAllByRole("menuitem")[1]!);
-    expect(asrInput().value).toBe("paraformer-en");
-  });
-
-  it("swaps the whole candidate group with the engine", async () => {
-    renderPage();
-    openFunctionalView();
-
-    await switchEngine(F.asrProviderWhisper);
-
-    expect(await openAsrMenu()).toEqual([
-      "small",
-      "tiny",
-      "base",
-      "medium",
-      "large-v3",
-      "large-v3-turbo",
-    ]);
-  });
-
-  it("explains the row with the selected engine's own hint", async () => {
-    renderPage();
-    openFunctionalView();
-
-    expect(screen.getByLabelText(F.asrModelFunasrHint)).toBeTruthy();
-    expect(screen.queryByLabelText(F.asrModelWhisperHint)).toBeNull();
-
-    await switchEngine(F.asrProviderWhisper);
-
-    expect(screen.getByLabelText(F.asrModelWhisperHint)).toBeTruthy();
-    expect(screen.queryByLabelText(F.asrModelFunasrHint)).toBeNull();
-  });
-
-  it("carries the per-model capability note in the funasr hint", () => {
-    renderPage();
-    openFunctionalView();
-
-    const text =
-      screen.getByLabelText(F.asrModelFunasrHint).getAttribute("aria-label") ??
-      "";
-
-    for (const name of ["paraformer-zh", "paraformer-en"]) {
-      expect(text.split(name)).toHaveLength(2); // once each
-    }
-    // 2026-09-29：`sensevoice` 从菜单与注记里删掉（短名 AutoModel 不认；且实测 0 段）。
-    expect(text).not.toContain("sensevoice");
-    expect(text).toContain("逐句时间戳");
-    expect(text).toContain("镜头卡");
-  });
-
-  it("replaces a value the target engine cannot load when the provider switches", async () => {
-    renderPage();
-    openFunctionalView();
-
-    await switchEngine(F.asrProviderWhisper);
-    expect(asrInput().value).toBe("small");
-
-    await switchEngine(F.asrProviderFunasr);
-    expect(asrInput().value).toBe("paraformer-zh");
-  });
-
-  it("keeps a hand-typed funasr value when switching back to funasr", async () => {
-    renderPage();
-    openFunctionalView();
-
-    await switchEngine(F.asrProviderWhisper);
-    fireEvent.change(asrInput(), { target: { value: "iic/SenseVoiceSmall" } });
-    await switchEngine(F.asrProviderFunasr);
-
-    expect(asrInput().value).toBe("iic/SenseVoiceSmall");
-  });
-
-  it("submits whatever is typed, and leaves the video block alone when untouched", async () => {
-    renderPage();
-    openFunctionalView();
-
-    fireEvent.change(asrInput(), { target: { value: "./models/tiny-zh" } });
-    fireEvent.click(screen.getByRole("button", { name: zhCN.common.save }));
-
-    await waitFor(() => expect(saveMock).toHaveBeenCalledTimes(1));
-    expect(
-      (saveMock.mock.calls[0]?.[0] as { video?: { asr_model?: string } }).video
-        ?.asr_model,
-    ).toBe("./models/tiny-zh");
-
-    saveMock.mockClear();
-    cleanup();
-    renderPage();
-    openFunctionalView();
-
-    fireEvent.change(screen.getByLabelText(F.rerankModel), {
-      target: { value: "qwen3-rerank-v2" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: zhCN.common.save }));
-
-    await waitFor(() => expect(saveMock).toHaveBeenCalledTimes(1));
-    expect(saveMock.mock.calls[0]?.[0]).not.toHaveProperty("video");
-  });
-});
-
-/**
- * ASR 行（spec 2026-09-28 D1/D2/D3/D7）：四行、三组下拉、两态锁法、探针点。
- *
- * 四行的标签直接复用页面已有的词（提供商 / Model ID / API Key / 接口地址），角色的区分靠
- * aria-label（`F.asr*`）——与检索那两列同一套做法。锁法只有两态：本地引擎（进程内）两格都锁，
- * 服务档两格都填、地址格用厂商端点做灰字占位。
- */
-describe("ASR row: four rows, grouped providers, and the probe (spec 2026-09-28)", () => {
-  const asrProvider = () =>
-    screen.getByRole("combobox", { name: F.asrProvider });
-  const saveButton = () =>
-    screen.getByRole<HTMLButtonElement>("button", { name: zhCN.common.save });
-  const lockedCells = () =>
-    document.querySelectorAll('[data-slot="asr-locked"]');
-
-  /** 服务档的默认形态：dashscope + 厂商地址 + 已存钥匙。 */
-  function setService(over: Partial<RagConfigView["config"]> = {}) {
-    setRag({
-      video: { asr_provider: "dashscope", asr_model: "qwen-audio-3.1-asr-flash" },
-      asr_base_url: "https://dashscope.aliyuncs.com",
-      asr_api_key: MASKED,
-      ...over,
-    });
-  }
-
-  /** 探针结论的桩：结论只认「取结论时的那组值」（与另两个探针同一把尺子）。 */
-  function setAsrProbe(
-    over: {
-      status?: "ok" | "no_timestamps" | "refused" | "unreachable";
-      detail?: string;
-      pending?: boolean;
-    } = {},
-  ) {
-    const current = formValuesFromConfig(
-      view({
-        video: {
-          asr_provider: "dashscope",
-          asr_model: "qwen-audio-3.1-asr-flash",
-        },
-        asr_base_url: "https://dashscope.aliyuncs.com",
-        asr_api_key: MASKED,
-      }),
-    );
-    ragHooksMock.useProbeAsrService.mockReturnValue({
-      mutate: asrProbeMock,
-      data:
-        over.status === undefined
-          ? undefined
-          : {
-              key: asrProbeKey(current, true),
-              status: over.status,
-              detail: over.detail ?? "服务端原话",
-            },
-      isPending: over.pending ?? false,
-    });
-  }
-
-  it("renders the four rows with the page's own labels", () => {
-    setService();
-    renderPage();
-    openFunctionalView();
-
-    expect(asrProvider()).toBeTruthy();
-    expect(screen.getByLabelText(F.asrModel)).toBeTruthy();
-    expect(screen.getByLabelText(F.asrApiKey)).toBeTruthy();
-    expect(screen.getByLabelText(F.asrBaseUrl)).toBeTruthy();
-  });
-
-  it("groups the provider menu into engines and protocol tiers", async () => {
-    setService();
-    renderPage();
-    openFunctionalView();
-
-    fireEvent.click(asrProvider());
-    const listbox = await screen.findByRole("listbox");
-
-    expect(
-      within(listbox)
-        .getAllByRole("option")
-        .map((option) => option.textContent),
-    ).toEqual([
-      F.asrProviderFunasr,
-      F.asrProviderWhisper,
-      F.asrProviderOpenaiAudio,
-      F.asrProviderDashscope,
-    ]);
-    // 三组各带自己的标题，且成员就是那四个值——按 Radix 的 group 元素读成员，别只读文本。
-    const members = (label: string) =>
-      within(
-        within(listbox).getByText(label).closest('[role="group"]')!,
-      )
-        .getAllByRole("option")
-        .map((option) => option.textContent);
-    expect(members(F.asrGroupLocal)).toEqual([
-      F.asrProviderFunasr,
-      F.asrProviderWhisper,
-    ]);
-    expect(members(F.asrGroupProtocol)).toEqual([F.asrProviderOpenaiAudio]);
-    expect(members(F.asrGroupNative)).toEqual([F.asrProviderDashscope]);
-  });
-
-  it("locks both service fields for an in-process engine and hides neither row", () => {
-    setRag(); // 默认 funasr
-    renderPage();
-    openFunctionalView();
-
-    expect(screen.queryByLabelText(F.asrApiKey)).toBeNull();
-    expect(screen.queryByLabelText(F.asrBaseUrl)).toBeNull();
-    // 铁律：恒显、锁而不藏——两格仍各占一行，锁框说明理由。
-    expect(lockedCells()).toHaveLength(2);
-  });
-
-  it("keeps both service fields editable and shows the vendor endpoint as the placeholder", () => {
-    setService({ asr_base_url: "" });
-    renderPage();
-    openFunctionalView();
-
-    const address = screen.getByLabelText<HTMLInputElement>(F.asrBaseUrl);
-    expect(address.disabled).toBe(false);
-    expect(address.placeholder).toBe("https://dashscope.aliyuncs.com");
-    expect(screen.getByLabelText(F.asrApiKey)).toBeTruthy();
-    expect(lockedCells()).toHaveLength(0);
-  });
-
-  it("carries no probe control for in-process engines", () => {
-    setRag(); // 默认 funasr
-    renderPage();
-    openFunctionalView();
-
-    expect(document.querySelector('[data-slot="asr-probe"]')).toBeNull();
-    expect(
-      screen.queryByRole("button", { name: new RegExp(F.asrProbe) }),
-    ).toBeNull();
-  });
-
-  it("carries none for service tiers either — the manual probe is dormant (2026-09-30)", () => {
-    setService();
-    renderPage();
-    openFunctionalView();
-
-    // 零入口休眠（用户裁定）：兜底＝保存期构造拒绝（缺地址/钥匙 ⇒ 400）＋ 入库期 asr=failed；
-    // 「连得上但没分段」那格因此变静默——已登记在 spec §6.2。探针链路（路由/夹具/判定/hook）
-    // 与保存区那道门都留着，只是没有入口。
-    expect(document.querySelector('[data-slot="asr-probe"]')).toBeNull();
-    expect(
-      screen.queryByRole("button", { name: new RegExp(F.asrProbe) }),
-    ).toBeNull();
-  });
-
-  it("names the engine row after the ASR model, and nests its details under it", () => {
-    setService();
-    renderPage();
-    openFunctionalView();
-
-    // 主角行与「图片描述模型 (VLM)」同级（spec 2026-09-30 观感二轮：原「提供商」行改名）。
-    expect(screen.getByText(F.asrModelRow)).toBeTruthy();
-
-    // 三张明细行降一级（照稀疏服务那套嵌套：标签带缩进竖线）。
-    for (const label of [F.asrModel, F.asrApiKey, F.asrBaseUrl]) {
-      const row = screen.getByLabelText(label).closest(".grid")!;
-      expect(row.querySelector("span.border-l")).toBeTruthy();
-    }
-  });
-
-
-  it("blocks Save on a no_timestamps verdict — the only blocking state", () => {
-    setService();
-    setAsrProbe({
-      status: "no_timestamps",
-      detail: "连得上，但没给出可用的段级时间戳（空，或只有一条整段）：服务端没分段。",
-    });
-    renderPage();
-    openFunctionalView();
-
-    // 先造一处真改动，否则 Save 本来就禁用（空 payload 会把整个文件清空）。改的是**别的行**：
-    // 动 ASR 那四格里的任何一格都会换掉探针的 key，结论就不算数了（那是另一条规则）。
-    fireEvent.change(screen.getByLabelText(F.qdrantUrl), {
-      target: { value: "http://qdrant:6334" },
-    });
-
-    expect(saveButton().disabled).toBe(true);
-    expect(screen.getByText(F.asrProbeBlocksSave)).toBeTruthy();
-  });
-
-  it("leaves Save alone for the report-only states", () => {
-    setService();
-    setAsrProbe({
-      status: "unreachable",
-      detail: "未能连通（ConnectError）：All connection attempts failed",
-    });
-    renderPage();
-    openFunctionalView();
-
-    fireEvent.change(screen.getByLabelText(F.qdrantUrl), {
-      target: { value: "http://qdrant:6334" },
-    });
-
-    expect(saveButton().disabled).toBe(false);
-    expect(screen.queryByText(F.asrProbeBlocksSave)).toBeNull();
-  });
-});

@@ -14,6 +14,7 @@ import {
   useMemo,
   useState,
   type ImgHTMLAttributes,
+  type ReactNode,
 } from "react";
 
 import { Loader } from "@/components/ai-elements/loader";
@@ -150,6 +151,8 @@ export function MessageListItem({
   canEdit = false,
   isEditPending = false,
   onEditAndRegenerate,
+  footer,
+  renderContent,
 }: {
   className?: string;
   message: Message;
@@ -164,6 +167,14 @@ export function MessageListItem({
   canEdit?: boolean;
   isEditPending?: boolean;
   onEditAndRegenerate?: (replacementText: string) => void | Promise<boolean>;
+  /** Extra content rendered after the message body (e.g. kb citation cards). */
+  footer?: ReactNode;
+  /**
+   * Optional body renderer (e.g. kb citation superscripts on assistant
+   * answers). Return undefined/null to fall back to the default
+   * MarkdownContent — callers that never pass this see zero change.
+   */
+  renderContent?: (content: string, isLoading: boolean) => ReactNode;
 }) {
   const { t } = useI18n();
   const isHuman = message.type === "human";
@@ -228,6 +239,7 @@ export function MessageListItem({
         runId={runId}
         showWorkspaceChanges={showWorkspaceChanges}
         durationSeconds={durationSeconds}
+        renderContent={renderContent}
         editState={
           isHuman && isEditing
             ? {
@@ -241,6 +253,7 @@ export function MessageListItem({
             : undefined
         }
       />
+      {footer}
       {!isLoading && showCopyButton && (
         <MessageToolbar
           className={cn(
@@ -380,6 +393,7 @@ function MessageContent_({
   showWorkspaceChanges = false,
   durationSeconds,
   editState,
+  renderContent,
 }: {
   className?: string;
   message: Message;
@@ -389,6 +403,7 @@ function MessageContent_({
   runId?: string;
   showWorkspaceChanges?: boolean;
   durationSeconds?: number;
+  renderContent?: (content: string, isLoading: boolean) => ReactNode;
   editState?: {
     draft: string;
     disabled: boolean;
@@ -607,12 +622,14 @@ function MessageContent_({
           {reasoningContent}
         </MessageReasoning>
       )}
-      <MarkdownContent
-        content={contentToDisplay}
-        isLoading={isLoading}
-        className="my-3"
-        components={components}
-      />
+      {renderContent?.(contentToDisplay, isLoading) ?? (
+        <MarkdownContent
+          content={contentToDisplay}
+          isLoading={isLoading}
+          className="my-3"
+          components={components}
+        />
+      )}
       <CitationSourcesPanel sources={citationSources} />
       <KnowledgeSourcesPanel content={contentToDisplay} />
       {message.type === "ai" && showWorkspaceChanges && (

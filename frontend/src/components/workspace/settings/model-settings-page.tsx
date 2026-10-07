@@ -26,6 +26,7 @@ import {
 } from "@/core/models/management";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
+import { FunctionalModelsView } from "./functional-models-view";
 import { SettingsSection } from "./settings-section";
 
 export function ModelSettingsPage() {
@@ -136,6 +137,9 @@ export function ModelSettingsPage() {
               saved={refresh}
             />
           )}
+          {/* 功能模型与知识库后端配置（首期 RAG）：挂在共享模型页内、与模型列表同一
+              operator 门（canManage）之下——功能模型的引用选项来自上面的模型列表。 */}
+          <FunctionalModelsView />
         </div>
       )}
     </SettingsSection>

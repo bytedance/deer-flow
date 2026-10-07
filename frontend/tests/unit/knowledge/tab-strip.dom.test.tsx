@@ -18,15 +18,24 @@ import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { zhCN } from "@/core/i18n/locales/zh-CN";
 
-const TK = zhCN.knowledge.tabs;
+// 首期收窄后中间栏只剩「文档」；溢出机制测试自备多 tab 夹具（标签自足，
+// 不依赖已切标签页的 i18n 键）。
+const L = {
+  documents: "文档",
+  wiki: "百科",
+  recall: "检索测试",
+  vectors: "向量空间",
+  graph: "知识图谱",
+  eval: "评测",
+} as const;
 
 const TABS = [
-  { value: "documents", label: TK.documents },
-  { value: "wiki", label: TK.wiki },
-  { value: "recall", label: TK.recall },
-  { value: "vectors", label: TK.vectors },
-  { value: "graph", label: TK.graph },
-  { value: "eval", label: TK.eval },
+  { value: "documents", label: L.documents },
+  { value: "wiki", label: L.wiki },
+  { value: "recall", label: L.recall },
+  { value: "vectors", label: L.vectors },
+  { value: "graph", label: L.graph },
+  { value: "eval", label: L.eval },
 ] as const;
 
 const PINNED_KEYS = [
@@ -135,10 +144,10 @@ describe("TabStrip 折叠呈现（D1 乙 / D3 / D6）", () => {
     renderStrip();
     openMaskMenu();
     const items = screen.getAllByRole("menuitem");
-    expect(items.map((node) => node.textContent)).toEqual([TK.graph, TK.eval]);
-    expect(screen.queryByRole("menuitem", { name: TK.documents })).toBeNull();
-    expect(screen.queryByRole("menuitem", { name: TK.recall })).toBeNull();
-    expect(screen.queryByRole("menuitem", { name: TK.vectors })).toBeNull();
+    expect(items.map((node) => node.textContent)).toEqual([L.graph, L.eval]);
+    expect(screen.queryByRole("menuitem", { name: L.documents })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: L.recall })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: L.vectors })).toBeNull();
   });
 
   it("④ 遮罩按钮开下拉（keyDown 照先例开 Radix 菜单）", () => {
@@ -160,7 +169,7 @@ describe("TabStrip 折叠呈现（D1 乙 / D3 / D6）", () => {
     });
     const onSelect = renderStrip();
     openMaskMenu();
-    fireEvent.click(screen.getByRole("menuitem", { name: TK.eval }));
+    fireEvent.click(screen.getByRole("menuitem", { name: L.eval }));
     expect(onSelect).toHaveBeenCalledWith("eval");
   });
 

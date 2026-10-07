@@ -54,7 +54,7 @@ describe("KbAssistantContent real pipeline", () => {
       heading_path: [],
       text: "条目全文",
       score: 0.7,
-      source_type: "wiki",
+      source_type: "chunk",
       citation_nos: [1],
     };
     const chunk: KnowledgeCitation = { ...CHUNK, citation_nos: [5, 9] };

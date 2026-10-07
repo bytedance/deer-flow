@@ -81,6 +81,7 @@ export function useKnowledgeBaseEnabled() {
     retry: false,
   });
   return {
+    enabled: data?.enabled ?? false,
     scopeSelectionEnabled: data?.scopeSelectionEnabled ?? false,
     isLoading: isPending,
   };

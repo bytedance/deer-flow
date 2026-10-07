@@ -101,15 +101,17 @@ describe("DocumentPanel toolbar", () => {
 });
 
 describe("DocumentPanel 空态", () => {
-  it("渲染九宫格文件图标：九种类型齐全、默认降调、悬停彩蛋类就位", () => {
+  it("渲染九宫格文件图标：切片欢迎类型齐全、默认降调、悬停彩蛋类就位", () => {
     renderPanel({ documents: [] });
     const grid = screen.getByTestId("empty-doc-icons");
     const icons = [...grid.querySelectorAll("[data-filetype]")];
     expect(icons).toHaveLength(9);
     const kinds = icons.map((svg) => svg.getAttribute("data-filetype"));
-    for (const kind of ["pdf", "word", "sheet", "ppt", "code", "image", "media", "archive", "unknown"]) {
+    // 视频腿已裁（切片不接受 .mp4 上传）⇒ 九宫格不含 media，notes.md 补第九格（code 类重复）。
+    for (const kind of ["pdf", "word", "sheet", "ppt", "code", "image", "archive", "unknown"]) {
       expect(kinds).toContain(kind);
     }
+    expect(kinds).not.toContain("media");
     // 降噪：默认半透明；悬停恢复全彩 + 上浮（彩蛋）。
     expect(icons[0]!.className).toContain("opacity-60");
     expect(icons[0]!.className).toContain("hover:opacity-100");
@@ -331,7 +333,7 @@ describe("DocumentPanel table", () => {
           status: "parsing",
           progress_percent: 0,
           chunk_count: null,
-          path_status: { vector: "pending", graph: "pending", wiki: "pending" },
+          path_status: { vector: "pending" },
         }),
       ],
     });
@@ -412,8 +414,6 @@ describe("DocumentPanel table", () => {
         doc({
           path_status: {
             vector: "done",
-            graph: "done",
-            wiki: "ready",
             caption: "degraded",
           },
         }),
@@ -435,92 +435,7 @@ describe("DocumentPanel table", () => {
     expect(handlers.onRetryDocument).toHaveBeenCalledWith("doc-1");
   });
 
-  it("干净就绪行不出现重试入口：明细仍走 Tooltip（D2=甲边界）", () => {
-    renderPanel({
-      documents: [
-        doc({ path_status: { vector: "done", graph: "done", wiki: "ready" } }),
-      ],
-    });
-    expect(screen.queryByTestId("doc-retry-trigger")).toBeNull();
-    expect(screen.getByTestId("path-status-trigger")).toBeTruthy();
-  });
-
-  it("右键菜单为失败行提供重试兜底（Drive/OneDrive 主流兜底路径）", async () => {
-    const handlers = renderPanel({
-      documents: [doc({ status: "failed", error: "boom", chunk_count: null })],
-    });
-    fireEvent.contextMenu(screen.getByText("产品手册.pdf"));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /重试/ }));
-    expect(handlers.onRetryDocument).toHaveBeenCalledWith("doc-1");
-  });
-
-  it("右键菜单为降级行提供重试兜底（与失败行同款路径，2026-10-04）", async () => {
-    const handlers = renderPanel({
-      documents: [
-        doc({
-          path_status: { vector: "done", graph: "degraded", wiki: "ready" },
-        }),
-      ],
-    });
-    fireEvent.contextMenu(screen.getByText("产品手册.pdf"));
-    fireEvent.click(await screen.findByRole("menuitem", { name: /重试/ }));
-    expect(handlers.onRetryDocument).toHaveBeenCalledWith("doc-1");
-  });
-
-  it("就绪文档右键提供快捷出题（出一条，2026-09-02）", async () => {
-    const onGenerateQuestion = rs.fn();
-    renderPanel({ onGenerateQuestion });
-    fireEvent.contextMenu(screen.getByText("产品手册.pdf"));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "生成考题" }));
-    // runAfterMenuClose 把动作延到菜单退场后（rAF），等一帧窗口。
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(onGenerateQuestion).toHaveBeenCalledWith(["doc-1"]);
-  });
-
-  it("未就绪文档的右键菜单不出现快捷出题（无切片必 409）", () => {
-    renderPanel({
-      documents: [doc({ status: "failed", error: "boom", chunk_count: null })],
-    });
-    fireEvent.contextMenu(screen.getByText("产品手册.pdf"));
-    expect(screen.queryByRole("menuitem", { name: /生成考题/ })).toBeNull();
-  });
-
-  it("批量右键提供联合出题：全选就绪才亮，传选中集（2026-09-02）", async () => {
-    const onGenerateQuestion = rs.fn();
-    renderPanel({
-      documents: [
-        doc({ id: "doc-1" }),
-        doc({ id: "doc-2", name: "并发笔记.md" }),
-      ],
-      onGenerateQuestion,
-    });
-    fireEvent.click(screen.getByLabelText("选择文档: 产品手册.pdf"));
-    fireEvent.click(screen.getByLabelText("选择文档: 并发笔记.md"));
-    fireEvent.contextMenu(screen.getByText("并发笔记.md"));
-    // 结构（2026-09-02 用户拍板）：非破坏组（生成考题→取消选择）在上，
-    // 分隔线后危险操作沉底单独隔离——全菜单仅一条分隔线。
-    expect(await screen.findAllByRole("separator")).toHaveLength(1);
-    fireEvent.click(
-      await screen.findByRole("menuitem", { name: "生成考题（联合）" }),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(onGenerateQuestion).toHaveBeenCalledWith(["doc-1", "doc-2"]);
-  });
-
-  it("选中集含未就绪文档时批量菜单不出现联合出题", () => {
-    renderPanel({
-      documents: [
-        doc({ id: "doc-1" }),
-        doc({ id: "doc-2", name: "坏文档.md", status: "failed", error: "boom" }),
-      ],
-    });
-    fireEvent.click(screen.getByLabelText("选择文档: 产品手册.pdf"));
-    fireEvent.click(screen.getByLabelText("选择文档: 坏文档.md"));
-    fireEvent.contextMenu(screen.getByText("产品手册.pdf"));
-    expect(screen.queryByRole("menuitem", { name: /生成考题/ })).toBeNull();
-  });
-
-  it("批量右键的取消选择在生成考题下方、带 X 图标且能清选择（2026-09-02）", () => {
+  it("批量右键的取消选择带 X 图标且能清选择（2026-09-02）", () => {
     renderPanel({
       documents: [
         doc({ id: "doc-1" }),
@@ -532,9 +447,9 @@ describe("DocumentPanel table", () => {
     fireEvent.contextMenu(screen.getByText("并发笔记.md"));
     const items = screen.getAllByRole("menuitem");
     const names = items.map((item) => item.textContent);
-    // 顺序：生成考题（联合）在取消选择之上，删除所选沉底。
-    expect(names).toEqual(["生成考题（联合）", "取消选择", "删除所选"]);
-    const cancel = items[1]!;
+    // 切片裁掉出题面：批量菜单只剩取消选择 + 删除所选。
+    expect(names).toEqual(["取消选择", "删除所选"]);
+    const cancel = items[0]!;
     expect(cancel.querySelector("svg")).toBeTruthy();
     fireEvent.click(cancel);
     // 选择清空：两行复选框都回到未勾选（批量栏已退役，看行状态）。
@@ -605,8 +520,6 @@ describe("DocumentPanel 悬停三个点窄列", () => {
         doc({
           path_status: {
             vector: "done",
-            graph: "done",
-            wiki: "ready",
             caption: "degraded",
           },
         }),
@@ -760,7 +673,7 @@ describe("DocumentPanel per-path status hover (P3, spec 2026-08-11 §5)", () => 
           status: "indexing",
           progress_percent: 87,
           chunk_count: null,
-          path_status: { vector: "done", graph: "indexing", wiki: "pending" },
+          path_status: { vector: "indexing" },
         }),
       ],
     });
@@ -772,7 +685,7 @@ describe("DocumentPanel per-path status hover (P3, spec 2026-08-11 §5)", () => 
     expect(screen.queryByTestId("path-status-trigger")).toBeNull();
   });
 
-  it("assembles the three-path breakdown, combining the graph-sourced percent", () => {
+  it("assembles the two-leg breakdown (vector + caption)", () => {
     render(
       <I18nContext.Provider
         value={{ locale: "zh-CN", setLocale: () => undefined, t: zhCN }}
@@ -781,23 +694,21 @@ describe("DocumentPanel per-path status hover (P3, spec 2026-08-11 §5)", () => 
           doc={doc({
             status: "indexing",
             progress_percent: 87,
-            path_status: { vector: "done", graph: "indexing", wiki: "pending" },
+            path_status: { vector: "indexing", caption: "done" },
           })}
         />
       </I18nContext.Provider>,
     );
     const breakdown = screen.getByTestId("path-status-breakdown");
     expect(breakdown.textContent).toContain("向量");
+    expect(breakdown.textContent).toContain("索引中");
+    expect(breakdown.textContent).toContain("配文");
     expect(breakdown.textContent).toContain("已完成");
-    // 悬停文案组合展示百分比（progress_percent 与图谱路同源）
-    expect(breakdown.textContent).toContain("图谱");
-    expect(breakdown.textContent).toContain("索引中 87%");
-    // wiki 为库级镜像——文案挑明库级语义
-    expect(breakdown.textContent).toContain("百科（库级）");
-    expect(breakdown.textContent).toContain("待处理");
+    // 切片不组合百分比：progress_percent 只喂进度条，不进悬停明细。
+    expect(breakdown.textContent).not.toContain("%");
   });
 
-  it("renders degraded / failed / wiki-ready states verbatim", () => {
+  it("renders degraded / failed states verbatim", () => {
     render(
       <I18nContext.Provider
         value={{ locale: "zh-CN", setLocale: () => undefined, t: zhCN }}
@@ -805,7 +716,7 @@ describe("DocumentPanel per-path status hover (P3, spec 2026-08-11 §5)", () => 
         <PathStatusBreakdown
           doc={doc({
             status: "ready",
-            path_status: { vector: "failed", graph: "degraded", wiki: "ready" },
+            path_status: { vector: "failed", caption: "degraded" },
           })}
         />
       </I18nContext.Provider>,
@@ -813,7 +724,10 @@ describe("DocumentPanel per-path status hover (P3, spec 2026-08-11 §5)", () => 
     const breakdown = screen.getByTestId("path-status-breakdown");
     expect(breakdown.textContent).toContain("失败");
     expect(breakdown.textContent).toContain("部分降级");
-    expect(breakdown.textContent).toContain("已生成");
+    // degraded 着琥珀（对齐项目 caution 视觉词汇）。
+    expect(
+      breakdown.querySelector('[data-state="degraded"]')!.className,
+    ).toContain("text-amber-600");
     // 就绪态不组合百分比
     expect(breakdown.textContent).not.toContain("%");
   });
@@ -1044,152 +958,31 @@ describe("DocumentPanel 失败通知面板接线", () => {
   });
 });
 
-// ── 视频入库（spec 2026-09-08 §5，plan Task 9）────────────────────────────
-// 文档列表视频行加时长徽章；path_status hover 为视频文档前置
-// asr/segment/caption 三条腿芯片，degraded 状态着琥珀色（对齐现有视觉词汇）。
-// 镜头数与「切片数」列重复，2026-09-09 从徽章移除（只留时长）。
-describe("DocumentPanel 视频文档徽章（spec 2026-09-08 §5）", () => {
-  it("视频行渲染时长徽章（duration_ms 注入；镜头数与切片列重复已移除）", () => {
-    renderPanel({
-      documents: [
-        doc({
-          name: "产品培训.mp4",
-          status: "ready",
-          chunk_count: 42,
-          duration_ms: 754_000, // 12:34
-          shot_count: 42,
-        }),
-      ],
-    });
-    const meta = screen.getByTestId("doc-video-meta");
-    expect(meta.textContent).toContain("12:34");
-    expect(meta.textContent).not.toContain("镜头"); // 与切片数列重复，不再渲染
-  });
-
-  it("时长跨小时进位为 H:MM:SS", () => {
-    renderPanel({
-      documents: [
-        doc({
-          name: "长视频.mkv",
-          duration_ms: 3_754_000, // 1:02:34
-          shot_count: 7,
-        }),
-      ],
-    });
-    expect(screen.getByTestId("doc-video-meta").textContent).toContain(
-      "1:02:34",
-    );
-  });
-
-  it("文本文档不渲染视频徽章", () => {
-    renderPanel({ documents: [doc({ name: "产品手册.pdf" })] });
-    expect(screen.queryByTestId("doc-video-meta")).toBeNull();
-  });
-
-  it("视频未物化（无 duration_ms）时不渲染徽章", () => {
-    renderPanel({
-      documents: [
-        doc({ name: "产品培训.mp4", status: "parsing", chunk_count: null }),
-      ],
-    });
-    expect(screen.queryByTestId("doc-video-meta")).toBeNull();
-  });
-});
-
-describe("PathStatusBreakdown 视频腿三芯片 + degraded 琥珀（spec 2026-09-08 §5）", () => {
-  it("pathStatusLines 为视频文档前置 asr/segment/caption 三腿", () => {
-    const lines = pathStatusLines(
-      doc({
-        path_status: {
-          asr: "done",
-          segment: "degraded",
-          caption: "indexing",
-          vector: "done",
-          graph: "done",
-          wiki: "ready",
-        },
-      }),
-    );
-    expect(lines!.map((line) => line.path)).toEqual([
-      "asr",
-      "segment",
-      "caption",
-      "vector",
-      "graph",
-      "wiki",
-    ]);
-  });
-
-  it("pathStatusLines 带哪个键就返回哪一腿（不带 caption 键的文本文档仍是 vector/graph/wiki）", () => {
-    const lines = pathStatusLines(
-      doc({ path_status: { vector: "done", graph: "done", wiki: "ready" } }),
-    );
-    expect(lines!.map((line) => line.path)).toEqual([
-      "vector",
-      "graph",
-      "wiki",
-    ]);
-  });
-
-  it("pathStatusLines 文本文档带 caption 键时多出配文一行", () => {
-    // Since spec 2026-09-23 D8 a text document with images writes its own caption
-    // verdict; the key's presence is what adds the line (no frontend branch for it).
+// ── 逐腿状态（首期：vector + caption）────────────────────────────────────
+describe("PathStatusBreakdown 首期两腿 + degraded 琥珀", () => {
+  it("pathStatusLines 带 caption 键时多出配文一行（排在 vector 之前）", () => {
     const lines = pathStatusLines(
       doc({
         path_status: {
           caption: "degraded",
           vector: "done",
-          graph: "done",
-          wiki: "ready",
         },
       }),
     );
-    expect(lines!.map((line) => line.path)).toEqual([
-      "caption",
-      "vector",
-      "graph",
-      "wiki",
-    ]);
-    expect(lines!.find((line) => line.path === "caption")!.state).toBe(
-      "degraded",
-    );
+    expect(lines!.map((line) => line.path)).toEqual(["caption", "vector"]);
+    expect(lines!.find((line) => line.path === "caption")!.state).toBe("degraded");
   });
 
-  it("视频文档 hover 渲染 asr/segment/caption 标签，排在检索腿之前", () => {
-    render(
-      <I18nContext.Provider
-        value={{ locale: "zh-CN", setLocale: () => undefined, t: zhCN }}
-      >
-        <PathStatusBreakdown
-          doc={doc({
-            status: "ready",
-            path_status: {
-              asr: "done",
-              segment: "done",
-              caption: "done",
-              vector: "done",
-              graph: "done",
-              wiki: "ready",
-            },
-          })}
-        />
-      </I18nContext.Provider>,
+  it("pathStatusLines 不带 caption 键时只有 vector 一行", () => {
+    const lines = pathStatusLines(doc({ path_status: { vector: "done" } }));
+    expect(lines!.map((line) => line.path)).toEqual(["vector"]);
+  });
+
+  it("caption 为 null（未走到该腿）时不渲染配文行", () => {
+    const lines = pathStatusLines(
+      doc({ path_status: { vector: "pending", caption: null } }),
     );
-    const breakdown = screen.getByTestId("path-status-breakdown");
-    const paths = [...breakdown.querySelectorAll("[data-path]")].map((el) =>
-      el.getAttribute("data-path"),
-    );
-    expect(paths).toEqual([
-      "asr",
-      "segment",
-      "caption",
-      "vector",
-      "graph",
-      "wiki",
-    ]);
-    expect(breakdown.textContent).toContain("语音");
-    expect(breakdown.textContent).toContain("分镜");
-    expect(breakdown.textContent).toContain("配文");
+    expect(lines!.map((line) => line.path)).toEqual(["vector"]);
   });
 
   it("degraded 腿的状态文案着琥珀色，done 腿不着色", () => {
@@ -1201,31 +994,21 @@ describe("PathStatusBreakdown 视频腿三芯片 + degraded 琥珀（spec 2026-0
           doc={doc({
             status: "ready",
             path_status: {
-              asr: "done",
-              segment: "degraded",
-              caption: "done",
+              caption: "degraded",
               vector: "done",
-              graph: "degraded",
-              wiki: "ready",
             },
           })}
         />
       </I18nContext.Provider>,
     );
     const breakdown = screen.getByTestId("path-status-breakdown");
-    const segmentState = breakdown.querySelector(
-      "[data-path='segment'] [data-state='degraded']",
+    const captionState = breakdown.querySelector(
+      "[data-path='caption'] [data-state='degraded']",
     );
-    expect(segmentState?.className).toContain("text-amber-600");
-    // 图谱腿 degraded 同样着色（着色按状态而非腿，视觉词汇统一）
-    const graphState = breakdown.querySelector(
-      "[data-path='graph'] [data-state='degraded']",
+    expect(captionState?.className).toContain("text-amber-600");
+    const vectorState = breakdown.querySelector(
+      "[data-path='vector'] [data-state='done']",
     );
-    expect(graphState?.className).toContain("text-amber-600");
-    // done 腿不着琥珀
-    const asrState = breakdown.querySelector(
-      "[data-path='asr'] [data-state='done']",
-    );
-    expect(asrState?.className).not.toContain("text-amber");
+    expect(vectorState?.className).not.toContain("text-amber");
   });
 });

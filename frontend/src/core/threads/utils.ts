@@ -1,6 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
-import { KB_ID_METADATA_KEY } from "@/core/knowledge/kb-threads";
+import { KB_ID_METADATA_KEY, kbIdOfThread } from "@/core/knowledge/kb-threads";
 
 import type { AgentThread, AgentThreadContext } from "./types";
 
@@ -70,12 +70,31 @@ export function agentNameOfThread(thread: {
   return typeof metaAgent === "string" && metaAgent ? metaAgent : undefined;
 }
 
+/**
+ * 知识库绑定线程的规范路由。抽出来给**只有 id、没有线程对象**的调用方用
+ * (知识库聊天面板就是这种:它手上是 kb id + thread id),与 `pathOfThread`
+ * 的 kb 分支共用同一个构造,免得两处各写一份 URL。
+ */
+export function pathOfKnowledgeThread(kbId: string, threadId: string) {
+  return `/workspace/knowledge?kb=${encodeURIComponent(kbId)}&thread=${encodeURIComponent(threadId)}`;
+}
+
 export function pathOfThread(
   thread: ThreadRouteTarget,
   context?: Pick<AgentThreadContext, "agent_name"> | null,
 ) {
   const threadId = typeof thread === "string" ? thread : thread.thread_id;
   const encodedThreadId = encodeURIComponent(threadId);
+  // KB-bound threads (metadata.kb_id, spec §5.2) open inside the knowledge
+  // page — the agents route would run the same rag agent WITHOUT its kb
+  // binding, so retrieval could never fire there. This branch wins over the
+  // agent route below because kb threads also carry metadata.agent_name.
+  if (typeof thread !== "string") {
+    const kbId = kbIdOfThread(thread);
+    if (kbId) {
+      return pathOfKnowledgeThread(kbId, threadId);
+    }
+  }
   const agentName =
     typeof thread === "string"
       ? context?.agent_name

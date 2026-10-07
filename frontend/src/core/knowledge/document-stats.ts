@@ -56,14 +56,7 @@ export function documentsRefetchInterval(
   if (!docs) return false;
   if (docs.some((doc) => !isDocumentTerminal(doc)))
     return DOCUMENTS_POLL_INTERVAL_MS;
-  // The wiki leg is a library-level mirror injected into path_status at read
-  // time — it keeps moving after every document reaches a terminal state
-  // (generation typically outlasts indexing). Keep polling while it reports
-  // "generating", otherwise the badge freezes mid-flight (live bug
-  // 2026-08-13: 23 entries ready, hover stuck on 生成中 until manual refresh).
-  return docs.some((doc) => doc.path_status?.wiki === "generating")
-    ? DOCUMENTS_POLL_INTERVAL_MS
-    : false;
+  return false;
 }
 
 /** Human-readable byte size (1024-based, one decimal for KB+). */

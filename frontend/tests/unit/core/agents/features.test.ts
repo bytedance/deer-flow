@@ -123,11 +123,13 @@ describe("fetchKnowledgeBaseFeature", () => {
       jsonResponse(200, {
         agents_api: { enabled: true },
         knowledge_base: {
+          enabled: true,
           scope_selection_enabled: true,
         },
       }),
     );
     await expect(fetchKnowledgeBaseFeature()).resolves.toEqual({
+      enabled: true,
       scopeSelectionEnabled: true,
     });
   });
@@ -137,6 +139,7 @@ describe("fetchKnowledgeBaseFeature", () => {
       jsonResponse(200, { agents_api: { enabled: true } }),
     );
     await expect(fetchKnowledgeBaseFeature()).resolves.toEqual({
+      enabled: false,
       scopeSelectionEnabled: false,
     });
   });

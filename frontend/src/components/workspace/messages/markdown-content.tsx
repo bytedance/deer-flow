@@ -14,6 +14,7 @@ import {
 } from "react";
 
 import { type ClipboardSafeStreamdownProps } from "@/components/ai-elements/streamdown";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   preprocessStreamdownMarkdown,
   rehypeStreamingListItems,
@@ -49,6 +50,23 @@ const SMOOTH_REVEAL_MIN_CHARS_PER_COMMIT = 64;
 const SMOOTH_REVEAL_DURATION_MS = 300;
 
 const StreamingCodeBlockContext = createContext(false);
+
+/**
+ * 表格沉入隐式 ScrollArea（2026-09-10 对齐项目隐式滑条，aa02a307 同款）：streamdown
+ * 表格外壳（data-streamdown="table-wrapper"）硬编码的原生 overflow-x/y-auto 粗滑条
+ * （带箭头、常驻）由 globals.css 退役为 visible，横滚/纵滚改由 ScrollArea
+ * （horizontal + type="scroll" + 停 2s 淡出）承担——与题库表/百科 Tab/窄视口横滚同款。
+ */
+function StreamingTable({
+  node: _node,
+  ...props
+}: ComponentProps<"table"> & { node?: unknown }) {
+  return (
+    <ScrollArea horizontal scrollHideDelay={2000} type="scroll">
+      <table {...props} />
+    </ScrollArea>
+  );
+}
 
 function useSmoothStreamingContent(content: string, isLoading: boolean) {
   const initialContent =
@@ -237,6 +255,7 @@ export function MarkdownContent({
   const components = useMemo(() => {
     const baseComponents = {
       a: createMarkdownLinkComponent(),
+      table: StreamingTable,
       ...componentsFromProps,
     };
     if (!isStreamingRender) {
@@ -254,6 +273,7 @@ export function MarkdownContent({
   return (
     <SafeMessageResponse
       className={className}
+      controls={{ table: { fullscreen: false } }}
       remarkPlugins={remarkPlugins}
       rehypePlugins={effectiveRehypePlugins}
       components={toStreamdownComponents(components)}

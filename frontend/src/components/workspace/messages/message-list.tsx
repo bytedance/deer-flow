@@ -328,6 +328,8 @@ export function MessageList({
   sidecarSurface = false,
   initialScroll = "smooth",
   resizeScroll = "smooth",
+  renderMessageFooter,
+  renderMessageContent,
 }: {
   archiveDownloadsEnabled?: boolean;
   className?: string;
@@ -363,6 +365,17 @@ export function MessageList({
   sidecarSurface?: boolean;
   initialScroll?: ConversationProps["initial"];
   resizeScroll?: ConversationProps["resize"];
+  /** Extra per-message footer (e.g. kb citation cards under an answer). */
+  renderMessageFooter?: (message: Message) => ReactNode;
+  /**
+   * Optional per-message body renderer (e.g. kb citation superscripts).
+   * Return undefined/null to fall back to the default MarkdownContent.
+   */
+  renderMessageContent?: (
+    message: Message,
+    content: string,
+    isLoading: boolean,
+  ) => ReactNode;
 }) {
   const { t } = useI18n();
   const sidecar = useMaybeSidecar();
@@ -1219,6 +1232,13 @@ export function MessageList({
                           }
                           threadId={threadId}
                           artifactPaths={artifactPaths}
+                          footer={renderMessageFooter?.(msg)}
+                          renderContent={
+                            renderMessageContent
+                              ? (content, loading) =>
+                                  renderMessageContent(msg, content, loading)
+                              : undefined
+                          }
                           runId={
                             group.type === "assistant"
                               ? (msg as { run_id?: string }).run_id

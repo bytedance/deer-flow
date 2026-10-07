@@ -1,11 +1,9 @@
 "use client";
 
-import { Code2, Eye, ImageOff, Loader2, Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { Code2, Eye, ImageOff } from "lucide-react";
 import { type ComponentProps, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { MarkdownContent } from "@/components/workspace/messages/markdown-content";
 import { useI18n } from "@/core/i18n/hooks";
@@ -61,10 +59,10 @@ export function ChunkImage({
 /**
  * Shared chunk card (spec §3.6 切片可视化 / §4.6 引用展开): the chunk drawer
  * renders the full-metadata form; the citation card expands to the same
- * component with just doc name + text. Phase-3 Batch-1 adds edit/delete actions.
+ * component with just doc name + text. Read-only in the first phase.
  */
 export function ChunkCard({
-  chunkId,
+  chunkId: _chunkId,
   text,
   headingPath,
   index,
@@ -74,14 +72,8 @@ export function ChunkCard({
   docName,
   kbId,
   docId,
-  lastEditedAt,
-  onEdit,
-  onDelete,
-  onReExtract,
-  isReExtracting,
-  reExtractDisabled,
-  extractStatus,
 }: {
+  /** Kept for call-site compatibility; the read-only card never reads it. */
   chunkId?: string;
   text: string;
   headingPath?: string[];
@@ -95,24 +87,11 @@ export function ChunkCard({
   /** Enable in-place image rendering: relative `images/…` refs resolve via the document files route. */
   kbId?: string;
   docId?: string;
-  lastEditedAt?: string | null;
-  onEdit?: (chunkId: string, newText: string) => Promise<void>;
-  onDelete?: (chunkId: string) => void;
-  onReExtract?: (chunkId: string) => void;
-  /** This card's re-extraction is in flight (spinner + hint line). */
-  isReExtracting?: boolean;
-  /** Another chunk of the same document is extracting (button disabled, backend mutex is per-document). */
-  reExtractDisabled?: boolean;
-  /** Backend pending status (cross-session tracking). */
-  extractStatus?: string;
 }) {
   const { t } = useI18n();
   const tc = t.knowledge.chunkDrawer;
-  const [isEditing, setIsEditing] = useState(false);
-  const [editedText, setEditedText] = useState(text);
-  const [isSaving, setIsSaving] = useState(false);
   // 渲染/原始切换（2026-08-22 展示增强）：查看态默认渲染 Markdown，调试切片
-  // 边界时可切回原始文本（单换行、# 符号等原样保留）。编辑态恒为原始文本。
+  // 边界时可切回原始文本（单换行、# 符号等原样保留）。
   const [viewMode, setViewMode] = useState<"rendered" | "raw">("rendered");
   const [entitiesExpanded, setEntitiesExpanded] = useState(false);
   const components = useMemo(
@@ -122,22 +101,6 @@ export function ChunkCard({
     [docId, kbId, tc.imageUnavailable],
   );
 
-  const handleSave = async () => {
-    if (!chunkId || !onEdit) return;
-    setIsSaving(true);
-    try {
-      await onEdit(chunkId, editedText);
-      setIsEditing(false);
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const handleCancel = () => {
-    setEditedText(text);
-    setIsEditing(false);
-  };
-
   const hasHeader =
     index != null || Boolean(docName ?? (headingPath && headingPath.length > 0));
   const visibleEntities = entities
@@ -145,162 +108,97 @@ export function ChunkCard({
       ? entities
       : entities.slice(0, ENTITY_CAP)
     : entities;
-  // 页脚栏渲染条件：有度量（tokens/页码/已编辑）或有操作按钮时才加分隔线。
-  const hasFooterMeta = page != null || tokenCount != null || Boolean(lastEditedAt);
-  const hasFooterActions = Boolean(onEdit ?? onDelete ?? onReExtract) && Boolean(chunkId);
+  // 页脚栏渲染条件：有度量（tokens/页码）时才加分隔线。
+  const hasFooterMeta = page != null || tokenCount != null;
 
   return (
     // 底色复用项目标准面板配方（2026-09-05 三改，同设置-集成 Card）：bg-card
     // （light 纯白 / dark 与 background 同档差）+ border，在 bg-background 窗底上
     // 自然分层；shadow 比 Card 的 shadow-sm 轻一档适配列表密度。
     <div className="bg-card text-card-foreground flex flex-col gap-1.5 rounded-md border p-3 text-sm shadow-xs">
-      {(hasHeader || !isEditing) && (
-        <div className="flex items-start justify-between gap-2">
-          {hasHeader ? (
-            <div className="text-muted-foreground flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
-              {index != null && (
-                <span className="font-mono tabular-nums opacity-80">#{index + 1}</span>
-              )}
-              {docName && <span className="font-medium">{docName}</span>}
-              {headingPath && headingPath.length > 0 && <span>{headingPath.join(" / ")}</span>}
-            </div>
-          ) : (
-            <span />
-          )}
-          {!isEditing && (
-            <ToggleGroup
-              className="ml-auto shrink-0"
-              size="sm"
-              type="single"
-              value={viewMode}
-              variant="outline"
-              onValueChange={(value) => {
-                if (value) {
-                  setViewMode(value as "rendered" | "raw");
-                }
-              }}
-            >
-              <ToggleGroupItem aria-label={tc.viewRendered} className="h-7 px-2" value="rendered">
-                <Eye className="size-3.5" />
-              </ToggleGroupItem>
-              <ToggleGroupItem aria-label={tc.viewRaw} className="h-7 px-2" value="raw">
-                <Code2 className="size-3.5" />
-              </ToggleGroupItem>
-            </ToggleGroup>
-          )}
-        </div>
-      )}
-
-      {isEditing ? (
-        <div className="flex flex-col gap-2">
-          <Textarea
-            className="min-h-[100px] font-mono text-sm"
-            onChange={(e) => setEditedText(e.target.value)}
-            value={editedText}
-          />
-          <p className="text-muted-foreground text-xs">{tc.editHint}</p>
-          <div className="flex gap-2">
-            <Button disabled={isSaving || !editedText.trim()} onClick={handleSave} size="sm">
-              {tc.save}
-            </Button>
-            <Button disabled={isSaving} onClick={handleCancel} size="sm" variant="outline">
-              {tc.cancel}
-            </Button>
+      <div className="flex items-start justify-between gap-2">
+        {hasHeader ? (
+          <div className="text-muted-foreground flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs">
+            {index != null && (
+              <span className="font-mono tabular-nums opacity-80">#{index + 1}</span>
+            )}
+            {docName && <span className="font-medium">{docName}</span>}
+            {headingPath && headingPath.length > 0 && <span>{headingPath.join(" / ")}</span>}
           </div>
-        </div>
+        ) : (
+          <span />
+        )}
+        <ToggleGroup
+          className="ml-auto shrink-0"
+          size="sm"
+          type="single"
+          value={viewMode}
+          variant="outline"
+          onValueChange={(value) => {
+            if (value) {
+              setViewMode(value as "rendered" | "raw");
+            }
+          }}
+        >
+          <ToggleGroupItem aria-label={tc.viewRendered} className="h-7 px-2" value="rendered">
+            <Eye className="size-3.5" />
+          </ToggleGroupItem>
+          <ToggleGroupItem aria-label={tc.viewRaw} className="h-7 px-2" value="raw">
+            <Code2 className="size-3.5" />
+          </ToggleGroupItem>
+        </ToggleGroup>
+      </div>
+
+      {viewMode === "rendered" ? (
+        <MarkdownContent
+          className="text-sm [&_blockquote]:my-1.5 [&_h1]:text-base [&_h1]:font-semibold [&_h2]:text-sm [&_h2]:font-semibold [&_h3]:text-sm [&_h3]:font-semibold [&_h4]:text-sm [&_h4]:font-medium [&_li]:my-0.5 [&_ol]:my-1.5 [&_p]:my-1.5 [&_pre]:my-2 [&_ul]:my-1.5"
+          components={components}
+          content={text}
+          isLoading={false}
+        />
       ) : (
-        <>
-          {viewMode === "rendered" ? (
-            <MarkdownContent
-              className="text-sm [&_blockquote]:my-1.5 [&_h1]:text-base [&_h1]:font-semibold [&_h2]:text-sm [&_h2]:font-semibold [&_h3]:text-sm [&_h3]:font-semibold [&_h4]:text-sm [&_h4]:font-medium [&_li]:my-0.5 [&_ol]:my-1.5 [&_p]:my-1.5 [&_pre]:my-2 [&_ul]:my-1.5"
-              components={components}
-              content={text}
-              isLoading={false}
-            />
-          ) : (
-            <p className="text-sm break-words whitespace-pre-wrap">{text}</p>
+        <p className="text-sm break-words whitespace-pre-wrap">{text}</p>
+      )}
+      {entities && entities.length > 0 && (
+        <span className="text-muted-foreground flex flex-wrap items-center gap-1 text-xs">
+          <span className="shrink-0">{tc.entities}:</span>
+          {visibleEntities?.map((entity) => (
+            <Badge className="text-[10px]" key={entity} variant="secondary">
+              {entity}
+            </Badge>
+          ))}
+          {entities.length > ENTITY_CAP && !entitiesExpanded && (
+            <button
+              onClick={() => setEntitiesExpanded(true)}
+              title={entities.slice(ENTITY_CAP).join(", ")}
+              type="button"
+            >
+              <Badge className="text-[10px]" variant="outline">
+                +{entities.length - ENTITY_CAP}
+              </Badge>
+            </button>
           )}
-          {entities && entities.length > 0 && (
-            <span className="text-muted-foreground flex flex-wrap items-center gap-1 text-xs">
-              <span className="shrink-0">{tc.entities}:</span>
-              {visibleEntities?.map((entity) => (
-                <Badge className="text-[10px]" key={entity} variant="secondary">
-                  {entity}
-                </Badge>
-              ))}
-              {entities.length > ENTITY_CAP && !entitiesExpanded && (
-                <button
-                  onClick={() => setEntitiesExpanded(true)}
-                  title={entities.slice(ENTITY_CAP).join(", ")}
-                  type="button"
-                >
-                  <Badge className="text-[10px]" variant="outline">
-                    +{entities.length - ENTITY_CAP}
-                  </Badge>
-                </button>
+        </span>
+      )}
+      {/* 页脚栏（2026-09-05 卡片重设计）：border-t 把度量与正文分层；
+          tokens/页码不再夹在正文与按钮之间。 */}
+      {hasFooterMeta && (
+        <div className="flex flex-col gap-1 border-t border-border/60 pt-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+            <span className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+              {page != null && (
+                <span>
+                  {tc.page} {page}
+                </span>
+              )}
+              {tokenCount != null && (
+                <span>
+                  {tokenCount} {tc.tokens}
+                </span>
               )}
             </span>
-          )}
-          {/* 页脚栏（2026-09-05 卡片重设计）：border-t 把度量与操作一起与正文分层；
-              按钮常显（仅三个，无需 hover 隐藏）；tokens/页码不再夹在正文与按钮之间。 */}
-          {(hasFooterMeta || hasFooterActions) && (
-            <div className="flex flex-col gap-1 border-t border-border/60 pt-1.5">
-              <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-                <span className="text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
-                  {page != null && (
-                    <span>
-                      {tc.page} {page}
-                    </span>
-                  )}
-                  {tokenCount != null && (
-                    <span>
-                      {tokenCount} {tc.tokens}
-                    </span>
-                  )}
-                  {lastEditedAt && (
-                    <Badge className="text-[10px]" variant="outline">
-                      {tc.edited}
-                    </Badge>
-                  )}
-                </span>
-                {hasFooterActions && (
-                  <span className="flex gap-1">
-                    {onEdit && (
-                      <Button disabled={isReExtracting} onClick={() => setIsEditing(true)} size="sm" variant="ghost">
-                        <Pencil className="mr-1 h-3 w-3" />
-                        {tc.edit}
-                      </Button>
-                    )}
-                    {onReExtract && (
-                      <Button
-                        disabled={isReExtracting ?? reExtractDisabled}
-                        onClick={() => onReExtract(chunkId!)}
-                        size="sm"
-                        title={tc.reExtractCost}
-                        variant="ghost"
-                      >
-                        {(isReExtracting || extractStatus === "pending") ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1 h-3 w-3" />}
-                        {(isReExtracting || extractStatus === "pending") ? tc.reExtracting : tc.reExtract}
-                      </Button>
-                    )}
-                    {onDelete && (
-                      <Button disabled={isReExtracting} onClick={() => onDelete(chunkId!)} size="sm" variant="ghost">
-                        <Trash2 className="mr-1 h-3 w-3" />
-                        {tc.delete}
-                      </Button>
-                    )}
-                  </span>
-                )}
-              </div>
-              {isReExtracting || extractStatus === "pending" ? (
-                <p className="text-muted-foreground flex items-center gap-1 text-xs">
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  {tc.reExtractHint}
-                </p>
-              ) : null}
-            </div>
-          )}
-        </>
+          </div>
+        </div>
       )}
     </div>
   );

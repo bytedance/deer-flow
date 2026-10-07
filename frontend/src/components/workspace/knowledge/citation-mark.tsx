@@ -1,6 +1,6 @@
 "use client";
 
-import { BookOpen, FileText, StickyNote } from "lucide-react";
+import { FileText } from "lucide-react";
 import type { ComponentProps } from "react";
 
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
@@ -35,21 +35,11 @@ export type CitationMarkItem = { citation: KnowledgeCitation; index: number };
 export function CitationPreviewCard({ citation }: { citation: KnowledgeCitation }) {
   const { t } = useI18n();
   const tc = t.knowledge.chat;
-  // Phase-3 P6 (spec §8): manual cards cited through wiki_search get their
-  // own badge (「我的卡片」/StickyNote) alongside 百科/文档.
-  const sourceType = citation.source_type ?? "chunk";
-  const typeLabel = sourceType === "wiki" ? tc.sourceTypeWiki : sourceType === "manual" ? tc.sourceTypeManual : tc.sourceTypeChunk;
   return (
     <div className="flex flex-col gap-1.5" data-testid="citation-preview">
       <div className="flex items-center gap-1.5 text-xs">
-        {sourceType === "wiki" ? (
-          <BookOpen className="text-muted-foreground size-3.5" />
-        ) : sourceType === "manual" ? (
-          <StickyNote className="text-muted-foreground size-3.5" />
-        ) : (
-          <FileText className="text-muted-foreground size-3.5" />
-        )}
-        <span className="text-muted-foreground">{typeLabel}</span>
+        <FileText className="text-muted-foreground size-3.5" />
+        <span className="text-muted-foreground">{tc.sourceTypeChunk}</span>
         <span className="min-w-0 flex-1 truncate font-medium">{citation.doc_name}</span>
         {citation.page != null && <span className="text-muted-foreground shrink-0">{tc.pageLabel(citation.page)}</span>}
       </div>

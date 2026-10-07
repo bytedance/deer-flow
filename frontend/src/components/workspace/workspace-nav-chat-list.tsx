@@ -3,6 +3,7 @@
 import {
   BotIcon,
   CalendarClock,
+  LibraryBig,
   MessagesSquare,
   BlocksIcon,
 } from "lucide-react";
@@ -21,12 +22,15 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAgentsApiEnabled } from "@/core/agents";
+import { useKnowledgeBaseEnabled } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 
 export function WorkspaceNavChatList() {
   const { t } = useI18n();
   const pathname = usePathname();
   const { enabled: agentsEnabled } = useAgentsApiEnabled();
+  // 未启用门控（RFC §6.2 四项之四）：知识扩展关闭时入口不可达（不轮询扩展端点）。
+  const { enabled: knowledgeEnabled } = useKnowledgeBaseEnabled();
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>
@@ -80,6 +84,19 @@ export function WorkspaceNavChatList() {
             </Tooltip>
           )}
         </SidebarMenuItem>
+        {knowledgeEnabled && (
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              isActive={pathname.startsWith("/workspace/knowledge")}
+              asChild
+            >
+              <Link className="text-muted-foreground" href="/workspace/knowledge">
+                <LibraryBig />
+                <span>{t.sidebar.knowledge}</span>
+              </Link>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        )}
         <SidebarMenuItem>
           <SidebarMenuButton
             isActive={pathname.startsWith("/workspace/scheduled-tasks")}

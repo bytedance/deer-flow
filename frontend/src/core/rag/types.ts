@@ -6,12 +6,6 @@
  * declared here", and secrets arrive masked (or empty when the environment backs them).
  */
 
-/** Video-ingestion model choices the settings UI may override. */
-export interface RagVideoValues {
-  asr_provider?: "funasr" | "whisper" | "openai-audio" | "dashscope" | null;
-  asr_model?: string | null;
-}
-
 /** One effective RAG configuration object (the PUT body, and the GET's `config`). */
 export interface RagConfigValues {
   qdrant_url?: string | null;
@@ -20,8 +14,6 @@ export interface RagConfigValues {
   rerank_model?: string | null;
   rerank_api_key?: string | null;
   vlm_model?: string | null;
-  extract_model?: string | null;
-  judge_model?: string | null;
   /**
    * The RAG-wide default (spec 2026-09-23 D2): the model every RAG role falls back to when it
    * declares none of its own. A plain `models:` entry name — the backend resolves what to do
@@ -29,20 +21,9 @@ export interface RagConfigValues {
    */
   default_model?: string | null;
   /**
-   * The two roles that had no field at all (spec 2026-09-26 D2), shaped exactly like the
-   * other model references: an entry name the backend resolves, so the rows ask for no
-   * endpoint and no key.
+   * Follow-chat thinking toggle (spec 2026-10-03 leg-thinking-follow-chat D1=甲): a checked
+   * leg sends "thinking on" exactly like chat does.
    */
-  wiki_model?: string | null;
-  synthesis_model?: string | null;
-  /**
-   * Follow-chat thinking toggles (spec 2026-10-03 leg-thinking-follow-chat D1=甲): one
-   * boolean per functional role; a checked leg sends "thinking on" exactly like chat does.
-   */
-  extract_thinking?: boolean | null;
-  wiki_thinking?: boolean | null;
-  judge_thinking?: boolean | null;
-  synthesis_thinking?: boolean | null;
   vlm_thinking?: boolean | null;
   mineru_api_token?: string | null;
   /**
@@ -85,9 +66,6 @@ export interface RagConfigValues {
     | "devanagari"
     | null;
   parse_model_version?: "pipeline" | "vlm" | null;
-  asr_base_url?: string | null;
-  asr_api_key?: string | null;
-  video?: RagVideoValues | null;
 }
 
 /**
@@ -130,19 +108,6 @@ export interface RagRerankProviderCapability {
 }
 
 /**
- * One ASR provider's declared capability (spec 2026-09-28 §3). Narrower than the two retrieval
- * blocks on purpose: the ASR row reads only the placeholder source, because the lock the others'
- * `has_fixed_endpoint` used to drive was retired by the 2026-09-25 endpoint unlock. Absent
- * entirely on a response from a server that predates the field — the row then falls back to the
- * shared example placeholder.
- */
-export interface RagAsrProviderCapability {
-  provider_id: string;
-  /** The vendor's own endpoint, shown greyed out while the address field is empty. */
-  default_endpoint: string | null;
-}
-
-/**
  * GET/PUT response: the effective values plus the flattened per-field origin map.
  *
  * `warning` is the save-time probe's verdict (spec 2026-09-17 save-time probe §3 D3): `null` when
@@ -156,7 +121,6 @@ export interface RagConfigView {
   sources: Record<string, RagConfigSource>;
   embedding_providers?: RagEmbeddingProviderCapability[];
   rerank_providers?: RagRerankProviderCapability[];
-  asr_providers?: RagAsrProviderCapability[];
   warning: string | null;
   /**
    * Where the width migration stands (spec 2026-09-26 D5-7). A save that changes the width
@@ -258,28 +222,6 @@ export interface RagConnectivityProbeRequest {
   base_url?: string | null;
   api_key?: string | null;
   embedding_dimension?: number | null;
-}
-
-/** A candidate ASR service to reach, before anything is saved (spec 2026-09-28 D7). */
-export interface RagAsrProbeRequest {
-  asr_provider: string;
-  asr_model: string;
-  asr_base_url?: string | null;
-  /** Omitted (or the masking sentinel) means "use the stored or environment key". */
-  asr_api_key?: string | null;
-}
-
-/**
- * Whether the service answers with *real* segment timestamps.
- *
- * `no_timestamps` covers both ways of not having any — no segments at all, and segments whose
- * boundaries were fabricated by pro-rating the duration over character counts — because it is
- * the one state allowed to block a save. `refused` is kept apart from `unreachable` for the
- * same reason the connectivity probe keeps them apart: the repair each one points at differs.
- */
-export interface RagAsrProbeResponse {
-  status: "ok" | "no_timestamps" | "refused" | "unreachable";
-  detail: string;
 }
 
 /**
