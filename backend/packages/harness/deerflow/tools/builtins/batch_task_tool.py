@@ -353,6 +353,9 @@ def _batch_result_window(item: dict[str, Any], offset: int, max_chars: int, expe
 
 
 def _batch_result_response_limit(runtime: Runtime) -> int:
+    # Keep this inline cap aligned with tool_output_budget_middleware's
+    # _effective_trigger / _budget_content, consumed by _patch_tool_message.
+    # Changes there must also update this cap and the reader budget regressions.
     config = getattr(_batch_app_config(runtime), "tool_output", None)
     if not isinstance(config, ToolOutputConfig):
         config = ToolOutputConfig()
@@ -387,6 +390,9 @@ async def read_batch_result(runtime: Runtime, batch_id: str, position: StrictInt
         max_chars: Window character limit, between 1 and 8192 (default 4000).
         expected_revision: Previous revision required when offset is nonzero.
     """
+    # 100_000 is SubagentBatchesConfig.max_items_per_batch's schema ceiling.
+    # Keep these bounds in lockstep; use the ceiling rather than today's configured
+    # cap so lowering the submission limit does not hide existing batch items.
     if any(type(value) is not int for value in (position, offset, max_chars)) or not 0 <= position < 100_000 or offset < 0 or not 1 <= max_chars <= 8192:
         return json.dumps({"status": "invalid_request"})
     if expected_revision is not None and (not isinstance(expected_revision, str) or re.fullmatch(r"[a-f0-9]{64}", expected_revision) is None):
