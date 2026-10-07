@@ -26,7 +26,9 @@ def windows_incompatible_segment(segment: str) -> str | None:
         return None
     if segment.endswith((" ", ".")):
         return "trailing dot or space"
-    stem = segment.split(".", 1)[0]
+    # Windows ignores ASCII spaces before a device name's extension (NUL .txt).
+    # Trim only for comparison; ordinary filenames must retain their spaces.
+    stem = segment.split(".", 1)[0].rstrip(" ")
     if stem.upper() in _WINDOWS_RESERVED_NAMES:
         return "reserved Windows device name"
     return None
