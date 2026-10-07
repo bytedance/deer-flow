@@ -57,6 +57,33 @@ def strip_think_blocks(text: str, *, truncate_unclosed: bool = True) -> str:
     return "".join(parts).strip()
 
 
+def strip_leading_think_blocks(text: str) -> str:
+    """Remove leading reasoning for display summaries, leaving tags in the answer intact.
+
+    Unlike structured-response parsing, a displayed answer may explain the
+    tag in prose or code. Only a leading XML-style reasoning section is
+    removed; an unfinished section has no answer to summarize.
+    """
+    start = 0
+    while True:
+        whitespace_start = start
+        while start < len(text) and text[start].isspace():
+            start += 1
+        newline = text.rfind("\n", whitespace_start, start)
+        indent = text[max(newline + 1, whitespace_start) : start]
+        if (whitespace_start == 0 or newline >= 0) and ("\t" in indent or indent.startswith("    ")):
+            break  # Root-level indented Markdown code is a literal example.
+        opening = _THINK_OPEN_PREFIX_RE.match(text, start)
+        if opening is None or (opening.end() < len(text) and not (text[opening.end()].isspace() or text[opening.end()] == ">")):
+            break
+        end = text.find(">", opening.end())
+        closing = _find_think_close(text, end + 1) if end >= 0 else None
+        if closing is None:
+            return ""
+        start = closing[1]
+    return text[start:].strip()
+
+
 def strip_markdown_code_fence(text: str) -> str:
     """Remove a single wrapping markdown code fence when present."""
     stripped = text.strip()

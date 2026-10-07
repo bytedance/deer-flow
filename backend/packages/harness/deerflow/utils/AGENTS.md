@@ -21,6 +21,9 @@ suffix. Keep its case-insensitive tag handling, optional whitespace before
 the closing `>`, and the `truncate_unclosed` behavior. Regression coverage
 lives in `tests/test_utils_llm_text.py`.
 
+Display summaries use `strip_leading_think_blocks` before limiting text;
+`test_run_journal_visible_summary.py` preserves literal tags in the answer.
+
 ### Agent / Tool Assembly Off-Load
 
 `start_run` also resolves the factory through `run_assembly` before admission:
