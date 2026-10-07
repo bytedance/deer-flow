@@ -111,6 +111,9 @@ type SendMessageOptions = {
    * submitted. It never fires for a dropped send or one whose attachments fail
    * to prepare or upload, so callers can safely perform one-time cleanup (e.g.
    * clearing quoted references) without losing state a retry still needs.
+   * The guarantee ends at dispatch: a run that fails afterwards does not
+   * reject `thread.submit` (the SDK reports it through the stream's
+   * `onError`), so the send resolves and the composer is cleared as a whole.
    */
   onSent?: () => void;
 };
