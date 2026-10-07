@@ -144,10 +144,8 @@ It is disabled by default; see the linked guide to enable it.
 For Google's official Gemini OpenAI-compatible endpoint, use the
 [Gemini reasoning profile](backend/docs/CONFIGURATION.md#gemini-via-googles-openai-compatible-endpoint).
 
-The MindIE adapter preserves escapes in XML tool-call parameters, including JSON
-objects and arrays. Its escaped-newline compatibility conversion applies to the
-remaining reply text, so tool arguments containing `\n` are not rewritten as display
-text before parsing.
+For MindIE XML tool calls, see the
+[argument parsing and newline compatibility guide](backend/docs/CONFIGURATION.md#mindie-xml-tool-arguments).
 
 1. **Clone the DeerFlow repository**
 

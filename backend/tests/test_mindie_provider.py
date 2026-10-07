@@ -412,6 +412,41 @@ class TestParseXmlToolCalls:
         _, calls = _parse_xml_tool_call_to_dict(content)
         assert calls[0]["args"]["bad"] == "{broken json"
 
+    @pytest.mark.parametrize(
+        ("raw_value", "expected"),
+        [
+            (r"first line\nsecond line", "first line\nsecond line"),
+            (r"echo first\necho second", "echo first\necho second"),
+            ("before\\n```python\nprint('a\\nb')\n```\\nafter", "before\n```python\nprint('a\\nb')\n```\nafter"),
+            (r"{broken json\nnext line", "{broken json\nnext line"),
+            ("first<&>\nsecond", "first<&>\nsecond"),
+        ],
+        ids=["multiline-file", "multiline-command", "fenced-code", "malformed-json", "existing-newline-and-entities"],
+    )
+    def test_raw_string_parameters_keep_multiline_compatibility(self, raw_value, expected):
+        encoded = html.escape(raw_value, quote=False)
+        content = f"<tool_call><function=write><parameter=content>{encoded}</parameter></function></tool_call>"
+
+        _, calls = _parse_xml_tool_call_to_dict(content)
+
+        assert calls[0]["args"]["content"] == expected
+
+    def test_python_literal_argument_preserves_its_own_escape_semantics(self):
+        raw_value = r"{'text': 'first\nsecond', 'literal': r'first\nsecond'}"
+        content = f"<tool_call><function=process><parameter=data>{raw_value}</parameter></function></tool_call>"
+
+        _, calls = _parse_xml_tool_call_to_dict(content)
+
+        assert calls[0]["args"]["data"] == {"text": "first\nsecond", "literal": r"first\nsecond"}
+
+    @pytest.mark.parametrize("raw_value", [r'{"n":1e400,"text":"first\nsecond"}', r"{'n':1e400,'text':'first\nsecond'}"])
+    def test_rejected_numeric_containers_keep_escaped_newlines(self, raw_value):
+        content = f"<tool_call><function=process><parameter=data>{raw_value}</parameter></function></tool_call>"
+
+        _, calls = _parse_xml_tool_call_to_dict(content)
+
+        assert calls[0]["args"]["data"] == raw_value
+
     def test_non_string_input_returned_as_is(self):
         result = _parse_xml_tool_call_to_dict(None)
         assert result == (None, [])
@@ -483,15 +518,15 @@ class TestPatchResult:
 
     def test_multiple_xml_calls_preserve_payloads_and_native_calls(self):
         value = {"text": "line1\nline2"}
-        literal = r"print('a\nb')"
-        content = f"<tool_call><function=process><parameter=data>{json.dumps(value)}</parameter></function></tool_call><tool_call><function=write><parameter=content>{literal}</parameter></function></tool_call>"
+        raw_text = r"first line\nsecond line"
+        content = f"<tool_call><function=process><parameter=data>{json.dumps(value)}</parameter></function></tool_call><tool_call><function=write><parameter=content>{raw_text}</parameter></function></tool_call>"
         native = {"name": "native", "args": {"text": r"a\nb"}, "id": "native-id"}
 
         msg = self._model()._patch_result_with_tools(_make_chat_result(content, tool_calls=[native])).generations[0].message
 
         assert msg.tool_calls[0] == native
         assert msg.tool_calls[1]["args"] == {"data": value}
-        assert msg.tool_calls[2]["args"] == {"content": literal}
+        assert msg.tool_calls[2]["args"] == {"content": "first line\nsecond line"}
         assert msg.content == ""
 
     def test_unparseable_xml_keeps_content_and_newline_compatibility(self):
@@ -532,6 +567,28 @@ class TestPatchResult:
 
         assert len(calls) == 1
         assert calls[0]["args"]["data"] == value
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["sync", "async", "tool-stream"])
+    async def test_generation_paths_restore_multiline_raw_parameters(self, mode):
+        content = r"<tool_call><function=write><parameter=content>first line\nsecond line</parameter></function></tool_call>"
+        result = _make_chat_result(content)
+        model = self._model()
+        messages = [HumanMessage(content="write a two-line file")]
+
+        if mode == "sync":
+            with patch("deerflow.models.mindie_provider.ChatOpenAI._generate", return_value=result):
+                calls = model._generate(messages).generations[0].message.tool_calls
+        else:
+            with patch("deerflow.models.mindie_provider.ChatOpenAI._agenerate", new_callable=AsyncMock, return_value=result):
+                if mode == "async":
+                    calls = (await model._agenerate(messages)).generations[0].message.tool_calls
+                else:
+                    chunks = [chunk async for chunk in model._astream(messages, tools=[{"name": "write"}])]
+                    calls = [call for chunk in chunks for call in chunk.message.tool_calls]
+
+        assert len(calls) == 1
+        assert calls[0]["args"] == {"content": "first line\nsecond line"}
 
     def test_patch_result_appends_to_existing_tool_calls(self):
         model = self._model()

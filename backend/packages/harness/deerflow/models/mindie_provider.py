@@ -158,13 +158,17 @@ def _parse_xml_tool_call_to_dict(content: str) -> tuple[str, list[dict]]:
                         if _safe_literal(candidate):
                             parsed_value = candidate
                     except (ValueError, SyntaxError):
-                        pass
+                        # Raw strings retain the gateway's multiline compatibility.
+                        # Structured arguments must be parsed before this decode.
+                        parsed_value = _decode_escaped_newlines_outside_fences(raw_value).strip()
                 except ValueError:
                     # Preserve the entire argument when JSON numeric conversion
                     # rejects overflow, underflow, or the integer digit limit.
                     # Retrying containers with literal_eval would turn nested
                     # underflowing numbers into zero and bypass this validation.
                     pass
+            else:
+                parsed_value = _decode_escaped_newlines_outside_fences(raw_value).strip()
 
             args[key] = parsed_value
 
