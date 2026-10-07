@@ -26,7 +26,14 @@ def _app_config(models: list[ModelConfig]) -> AppConfig:
 
 
 def _legacy_model() -> ModelConfig:
-    return ModelConfig(name="legacy", model="legacy", use="langchain_openai:ChatOpenAI", supports_thinking=True, supports_reasoning_effort=True)
+    return ModelConfig(
+        name="legacy",
+        model="legacy",
+        use="langchain_openai:ChatOpenAI",
+        supports_thinking=True,
+        supports_reasoning_effort=True,
+        supports_vision=True,
+    )
 
 
 def _contract_model() -> ModelConfig:
@@ -65,6 +72,7 @@ def test_list_models_projects_reasoning_for_every_model(client):
     legacy = by_name["legacy"]
     assert legacy["supports_thinking"] is True
     assert legacy["supports_reasoning_effort"] is True
+    assert legacy["supports_vision"] is True
     assert legacy["reasoning"] == {
         "thinking": "optional",
         "effort": {"values": ["minimal", "low", "medium", "high"], "default": None, "aliases": {}},
@@ -76,6 +84,7 @@ def test_list_models_projects_reasoning_for_every_model(client):
     # Deprecation-window projection: the booleans are derived from the contract.
     assert contract["supports_thinking"] is True
     assert contract["supports_reasoning_effort"] is True
+    assert contract["supports_vision"] is False
     assert contract["reasoning"] == {
         "thinking": "required",
         "effort": {"values": ["low", "high", "max"], "default": "max", "aliases": {"minimal": "low", "medium": "high"}},

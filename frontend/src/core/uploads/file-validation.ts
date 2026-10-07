@@ -8,6 +8,23 @@ const MACOS_APP_BUNDLE_CONTENT_TYPES = new Set([
 export const MACOS_APP_BUNDLE_UPLOAD_MESSAGE =
   "macOS .app bundles can't be uploaded directly from the browser. Compress the app as a .zip or upload the .dmg instead.";
 
+const IMAGE_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".webp"]);
+
+export function isImageUpload(file: Pick<File, "name" | "type">) {
+  if (file.type.toLowerCase().startsWith("image/")) {
+    return true;
+  }
+  const dot = file.name.lastIndexOf(".");
+  return dot >= 0 && IMAGE_EXTENSIONS.has(file.name.slice(dot).toLowerCase());
+}
+
+export function requiresVisionModel(
+  supportsVision: boolean | undefined,
+  files: readonly Pick<File, "name" | "type">[],
+) {
+  return supportsVision === false && files.some(isImageUpload);
+}
+
 export function isLikelyMacOSAppBundle(file: Pick<File, "name" | "type">) {
   return (
     file.name.toLowerCase().endsWith(".app") &&

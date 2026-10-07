@@ -3,6 +3,8 @@ import { expect, test } from "@rstest/core";
 import {
   MACOS_APP_BUNDLE_UPLOAD_MESSAGE,
   formatUploadSize,
+  isImageUpload,
+  requiresVisionModel,
   isLikelyMacOSAppBundle,
   splitUnsupportedUploadFiles,
   validateUploadLimits,
@@ -58,6 +60,23 @@ test("returns no message when every file is supported", () => {
   expect(result.accepted.length).toBe(1);
   expect(result.rejected.length).toBe(0);
   expect(result.message).toBeUndefined();
+});
+
+test("identifies image uploads from MIME type or supported image extension", () => {
+  expect(isImageUpload({ name: "photo.bin", type: "image/png" })).toBe(true);
+  expect(isImageUpload({ name: "photo.WEBP", type: "" })).toBe(true);
+  expect(isImageUpload({ name: "notes.txt", type: "text/plain" })).toBe(false);
+});
+
+test("blocks images only for a model explicitly marked text-only", () => {
+  const image = { name: "chart.png", type: "image/png" };
+
+  expect(requiresVisionModel(false, [image])).toBe(true);
+  expect(requiresVisionModel(true, [image])).toBe(false);
+  expect(requiresVisionModel(undefined, [image])).toBe(false);
+  expect(
+    requiresVisionModel(false, [{ name: "notes.txt", type: "text/plain" }]),
+  ).toBe(false);
 });
 
 test("accepts a file at the per-file limit and rejects one byte over", () => {

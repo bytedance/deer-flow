@@ -307,6 +307,12 @@ components directly. On a legacy model, `resolveReasoningEffort` keeps only its
 advertised generic values; this drops a remembered provider-specific token after
 a model switch without changing the backend's direct legacy-request behavior.
 
+`/api/models` also projects `supports_vision`. Before upload or run creation,
+`InputBox` rejects image attachments only when the selected model explicitly
+reports `false`, preserving compatibility with older Gateways where the field is
+absent. The error must name the selected model and leave the draft and images in
+place so the user can switch models or remove them.
+
 ## Full-stack plugin UI
 
 `core/extensions/` loads authenticated deployment-installed ES modules from `/api/plugins`.

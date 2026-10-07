@@ -44,6 +44,7 @@ class ModelResponse(BaseModel):
     model: str = Field(..., description="Actual provider model identifier")
     display_name: str | None = Field(None, description="Human-readable name")
     description: str | None = Field(None, description="Model description")
+    supports_vision: bool = Field(default=False, description="Whether the model can inspect image inputs")
     supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode (deprecated: derived from `reasoning`)")
     supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort (deprecated: derived from `reasoning`)")
     reasoning: ReasoningCapabilitiesResponse = Field(..., description="Normalized reasoning capability contract")
@@ -55,6 +56,7 @@ def _model_response(model: ModelConfig) -> ModelResponse:
         model=model.model,
         display_name=model.display_name,
         description=model.description,
+        supports_vision=model.supports_vision,
         supports_thinking=model.supports_thinking,
         supports_reasoning_effort=model.supports_reasoning_effort,
         reasoning=ReasoningCapabilitiesResponse(**reasoning_capabilities_payload(resolve_reasoning_contract(model))),
@@ -105,6 +107,7 @@ async def list_models(
                     "model": "gpt-4",
                     "display_name": "GPT-4",
                     "description": "OpenAI GPT-4 model",
+                    "supports_vision": false,
                     "supports_thinking": false,
                     "supports_reasoning_effort": false,
                     "reasoning": {"thinking": "unsupported", "effort": null, "history": null, "source": "legacy"}
@@ -114,6 +117,7 @@ async def list_models(
                     "model": "claude-3-opus",
                     "display_name": "Claude 3 Opus",
                     "description": "Anthropic Claude 3 Opus model",
+                    "supports_vision": true,
                     "supports_thinking": true,
                     "supports_reasoning_effort": false,
                     "reasoning": {"thinking": "optional", "effort": null, "history": null, "source": "legacy"}
@@ -185,6 +189,7 @@ async def get_model(
             "name": "gpt-4",
             "display_name": "GPT-4",
             "description": "OpenAI GPT-4 model",
+            "supports_vision": false,
             "supports_thinking": false
         }
         ```

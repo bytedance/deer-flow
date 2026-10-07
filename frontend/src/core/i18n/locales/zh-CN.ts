@@ -515,6 +515,8 @@ export const zhCN: Translations = {
     pleaseWaitStreaming: "请等待当前响应完成。",
     stopStreamingUnavailable: "你的角色无权停止正在运行的回合。",
     startTurnUnavailable: "你的角色无权开启新的回合。",
+    visionModelRequired: (model: string) =>
+      `${model} 无法查看图片附件。请切换到支持视觉的模型，或移除图片后再发送。`,
   },
 
   // Sidebar

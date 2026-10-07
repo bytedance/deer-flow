@@ -425,6 +425,7 @@ export interface Translations {
     pleaseWaitStreaming: string;
     stopStreamingUnavailable: string;
     startTurnUnavailable: string;
+    visionModelRequired: (model: string) => string;
   };
 
   // Sidebar

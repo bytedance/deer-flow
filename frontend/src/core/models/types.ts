@@ -27,6 +27,8 @@ export interface Model {
   model: string;
   display_name: string;
   description?: string | null;
+  /** Undefined only when connected to an older Gateway. */
+  supports_vision?: boolean;
   /** @deprecated derived from `reasoning`; kept for older Gateways. */
   supports_thinking?: boolean;
   /** @deprecated derived from `reasoning`; kept for older Gateways. */

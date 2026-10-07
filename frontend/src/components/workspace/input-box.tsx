@@ -125,6 +125,7 @@ import { threadTokenUsageQueryKey } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import {
   formatUploadSize,
+  requiresVisionModel,
   splitUnsupportedUploadFiles,
   useUploadLimits,
   validateUploadLimits,
@@ -1388,6 +1389,24 @@ export function InputBox({
       const files = message.files.flatMap((file) =>
         file.file instanceof File ? [file.file] : [],
       );
+      const uploadCandidates = [
+        ...files,
+        ...projectAttachments.map((attachment) => ({
+          name: attachment.filename,
+          type: "",
+        })),
+      ];
+      if (
+        selectedModel &&
+        requiresVisionModel(selectedModel.supports_vision, uploadCandidates)
+      ) {
+        toast.error(
+          t.inputBox.visionModelRequired(
+            selectedModel.display_name || selectedModel.name,
+          ),
+        );
+        return Promise.reject(new Error("vision-model-required"));
+      }
       const uploadValidation = validateUploadLimits([], files, uploadLimits);
       if (uploadValidation.violations.length > 0) {
         reportUploadLimitViolations(uploadValidation.violations);
@@ -1563,9 +1582,7 @@ export function InputBox({
       resolvedModelName,
       selectedModel,
       sidecar,
-      t.inputBox.suggestionPlaceholderRequired,
-      t.inputBox.mentionMultipleSkills,
-      t.inputBox.mentionExtensionsLimit,
+      t.inputBox,
       conversationCapability,
       threadId,
       uploadLimits,

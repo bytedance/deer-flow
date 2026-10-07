@@ -551,6 +551,8 @@ export const enUS: Translations = {
     stopStreamingUnavailable:
       "Stopping the running turn is not permitted for your role.",
     startTurnUnavailable: "Starting a new turn is not permitted for your role.",
+    visionModelRequired: (model: string) =>
+      `${model} cannot inspect image attachments. Switch to a vision-capable model or remove the image before sending.`,
   },
 
   // Sidebar
