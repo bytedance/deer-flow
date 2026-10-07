@@ -101,7 +101,10 @@ import {
   supportsThinking as modelSupportsThinking,
 } from "@/core/models/reasoning";
 import { attachProjectDocument } from "@/core/projects/api";
-import { useStagedProjectAttachments } from "@/core/projects/composer-attach";
+import {
+  clearProjectAttachments,
+  useStagedProjectAttachments,
+} from "@/core/projects/composer-attach";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
@@ -584,6 +587,9 @@ export function InputBox({
   } | null>(null);
   const draftSaveTimerRef = useRef<number | null>(null);
   const draftSaveGenerationRef = useRef(0);
+  // The conversation the composer shows now; a send's onSent can arrive
+  // after an attachment upload, when it already shows another one.
+  const currentDraftKeyRef = useRef<string | null>(null);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const { data: suggestionsConfig } = useSuggestionsConfig();
@@ -909,9 +915,10 @@ export function InputBox({
   }, [cancelDraftSaveTimer]);
   const scheduleDraftSave = useCallback(
     (draft: ComposerDraft, key = draftKey) => {
-      // An accepted attachment send keeps its text visible until upload finishes.
-      // Reference cleanup can rerun this effect meanwhile; do not resurrect the
-      // accepted snapshot. Actual input edits release it, even for identical text.
+      // An accepted attachment send keeps its text visible until its submit
+      // resolves. Reference cleanup can rerun this effect meanwhile; do not
+      // resurrect the accepted snapshot. Actual input edits release it, even
+      // for identical text.
       const accepted = acceptedDraftRef.current;
       if (
         accepted?.key === key &&
@@ -1015,6 +1022,7 @@ export function InputBox({
   }, [thread.messages]);
 
   useLayoutEffect(() => {
+    currentDraftKeyRef.current = draftKey;
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
     setTextInput("");
@@ -1506,9 +1514,18 @@ export function InputBox({
         ...(referenceIds.length
           ? { conversationReferences: referenceIds }
           : {}),
-        // Clear one-time state only once the send genuinely proceeds. If the
-        // send is dropped by the in-flight guard, `onSent` never fires.
+        // Clear one-time state only once the send is genuinely dispatched.
+        // `onSent` never fires for a dropped send or a failed attachment
+        // upload, so a retry keeps its quotes, references and staged files.
         onSent: () => {
+          if (currentDraftKeyRef.current !== draftKey) {
+            // The upload finished after the composer moved to another
+            // conversation. Its live state belongs to that one now; retire
+            // only what this send left persisted for its own conversation.
+            clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
+            clearProjectAttachments(threadId);
+            return;
+          }
           setMentionQuery(null);
           setMentionButtonOpen(false);
           if (pendingDraftSubmissionRef.current?.key === draftKey) {

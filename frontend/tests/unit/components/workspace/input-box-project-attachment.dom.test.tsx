@@ -19,8 +19,15 @@ import { ThreadContext } from "@/components/workspace/messages/context";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { DEFAULT_LOCALE } from "@/core/i18n";
 import { I18nProvider } from "@/core/i18n/context";
-import { stageProjectAttachment } from "@/core/projects/composer-attach";
+import {
+  readProjectAttachments,
+  stageProjectAttachment,
+} from "@/core/projects/composer-attach";
 import type { AttachProjectDocumentResult } from "@/core/projects/types";
+import {
+  buildComposerDraftKey,
+  readComposerDraft,
+} from "@/core/threads/composer-draft";
 
 rs.mock("next/navigation", () => ({
   useRouter: () => ({ push: rs.fn(), replace: rs.fn(), refresh: rs.fn() }),
@@ -77,7 +84,7 @@ function renderComposer({ onSubmit }: { onSubmit: SubmitSpy }) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  const tree = (onSubmitProp: SubmitSpy): ReactNode => (
+  const tree = (onSubmitProp: SubmitSpy, threadId = "thread-1"): ReactNode => (
     <I18nProvider initialLocale={DEFAULT_LOCALE}>
       <QueryClientProvider client={queryClient}>
         <AuthProvider
@@ -94,7 +101,7 @@ function renderComposer({ onSubmit }: { onSubmit: SubmitSpy }) {
           >
             <PromptInputProvider>
               <InputBox
-                threadId="thread-1"
+                threadId={threadId}
                 status="ready"
                 context={{ mode: "flash" } as never}
                 onSubmit={onSubmitProp}
@@ -105,7 +112,12 @@ function renderComposer({ onSubmit }: { onSubmit: SubmitSpy }) {
       </QueryClientProvider>
     </I18nProvider>
   );
-  return render(tree(onSubmit));
+  const rendered = render(tree(onSubmit));
+  return {
+    ...rendered,
+    switchThread: (threadId: string) =>
+      rendered.rerender(tree(onSubmit, threadId)),
+  };
 }
 
 function getSubmitButton(container: HTMLElement): HTMLButtonElement {
@@ -265,5 +277,48 @@ describe("InputBox staged project attachments", () => {
       expect(screen.queryByTestId("project-attachment-chip")).toBeNull(),
     );
     expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires only the sending thread's state when its upload finishes after a thread switch", async () => {
+    stageProjectAttachment("thread-1", ATTACHMENT);
+    stageProjectAttachment("thread-2", OTHER_ATTACHMENT);
+    let dispatched!: () => void;
+    const onSubmit: SubmitSpy = rs.fn(
+      (_message: unknown, options?: InputBoxSubmitOptions) => {
+        // Keep the send open, as an attachment upload does, and report it
+        // dispatched only later.
+        dispatched = () => options?.onSent?.();
+        return new Promise<void>(() => undefined);
+      },
+    );
+    const { container, switchThread } = renderComposer({ onSubmit });
+    await screen.findByTestId("project-attachment-chip");
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "summarize it" },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const sendingDraftKey = buildComposerDraftKey({
+      userId: "user-1",
+      threadId: "thread-1",
+    });
+    const storage = window.sessionStorage;
+    expect(readComposerDraft(storage, sendingDraftKey)?.text).toBe(
+      "summarize it",
+    );
+    fireEvent.click(getSubmitButton(container));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+
+    switchThread("thread-2");
+    await screen.findByText(OTHER_ATTACHMENT.filename);
+    dispatched();
+
+    // The composer now shows thread-2: its staged chip survives, while the
+    // sent thread's persisted draft and staged attachment are retired.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getAllByTestId("project-attachment-chip")).toHaveLength(1);
+    expect(screen.getByText(OTHER_ATTACHMENT.filename)).toBeTruthy();
+    expect(readProjectAttachments("thread-2")).toEqual([OTHER_ATTACHMENT]);
+    expect(readProjectAttachments("thread-1")).toEqual([]);
+    expect(readComposerDraft(storage, sendingDraftKey)).toBeNull();
   });
 });

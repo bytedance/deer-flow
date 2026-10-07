@@ -804,6 +804,14 @@ This release closes that milestone with **439 merged pull requests**.
 
 ### Fixed
 
+- **frontend:** Retrying a message after its attachment upload fails now keeps
+  the context that was attached to it. The composer dropped its quotes,
+  conversation references, staged project files and stored draft as soon as a
+  send started, before the attachments uploaded, so after a failed upload the
+  text and files were still there but a retry went out without that context.
+  That one-time state now clears only once the send is dispatched, after the
+  upload. A send that finishes uploading after the user has switched to another
+  conversation clears only its own conversation's stored draft and staged files.
 - **frontend:** A failed reconnect after a page refresh is now retried in the same
   tab. The SDK reconnects once from the tab's `lg:stream` pointer and keeps that
   pointer on error, and active-run recovery skipped any run with a matching

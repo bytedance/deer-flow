@@ -106,10 +106,11 @@ type SendMessageOptions = {
    */
   conversationReferences?: string[];
   /**
-   * Invoked exactly once when the send passes the in-flight guard and is
-   * genuinely dispatched. It never fires on the early-return path, so callers
-   * can safely perform one-time cleanup (e.g. clearing quoted references)
-   * without losing state when a concurrent send is dropped.
+   * Invoked exactly once when the send is genuinely dispatched: after the
+   * in-flight guard and after any attachments upload, right before the run is
+   * submitted. It never fires for a dropped send or one whose attachments fail
+   * to prepare or upload, so callers can safely perform one-time cleanup (e.g.
+   * clearing quoted references) without losing state a retry still needs.
    */
   onSent?: () => void;
 };
@@ -2552,10 +2553,6 @@ export function useThreadStream({
       }
       sendInFlightRef.current = true;
 
-      // The send has genuinely proceeded past the in-flight guard, so callers
-      // can now run one-time cleanup that must not fire on the dropped path.
-      options?.onSent?.();
-
       const text = message.text.trim();
 
       // Capture the current human message count before showing optimistic
@@ -2702,6 +2699,10 @@ export function useThreadStream({
           }
         }
 
+        // Attachments are uploaded, so the send is genuinely dispatched and
+        // callers can drop one-time state. A failed upload rejected above
+        // without reaching here, leaving that state for a retry.
+        options?.onSent?.();
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({

@@ -20,8 +20,8 @@ import type { AttachProjectDocumentResult } from "./types";
  * - Mounting the composer only *reads* the list — nothing is consumed on
  *   mount, so a reload or a remount before submission keeps every chip.
  * - ``setAttachments`` writes every change through, and submission clears
- *   the list in its ``onSent`` callback, which only fires when the send
- *   genuinely proceeds.
+ *   the list in its ``onSent`` callback, which only fires once the send is
+ *   dispatched (after any upload), so a failed upload keeps the chip.
  *
  * sessionStorage (not module memory) so the pending list also survives a
  * full page load of the target thread.
@@ -104,6 +104,15 @@ export function readProjectAttachments(
   }
   storage.removeItem(storageKey(threadId));
   return [];
+}
+
+/**
+ * Drop a thread's pending attachments from storage without touching any
+ * mounted composer state. For a send that is dispatched after the composer
+ * has already moved on to another thread.
+ */
+export function clearProjectAttachments(threadId: string): void {
+  safeSessionStorage()?.removeItem(storageKey(threadId));
 }
 
 /**
