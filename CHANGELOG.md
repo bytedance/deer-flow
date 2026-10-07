@@ -833,6 +833,20 @@ This release closes that milestone with **439 merged pull requests**.
   proxy used by `pnpm start` without nginx, no longer buffer the stream and
   deliver it in bursts. `X-Accel-Buffering: no` and `Content-Location` are
   unchanged, and nginx deployments behave as before. ([#6393])
+- **config:** Every Gateway process that shares one `extensions_config.json`
+  now sees the MCP and skill changes made by another one. The parsed file was
+  cached once per process and only the process that handled the write
+  reloaded it, so with several uvicorn workers, or several Pods on one shared
+  volume, the other processes kept their startup copy: the MCP servers the
+  agent could use and, more importantly, the local-bash absolute path
+  allowlist derived from the filesystem MCP server differed between replicas
+  until each one restarted. `get_extensions_config()` now revalidates the
+  cached instance against the file's path and content signature on every
+  read, as `get_app_config()` does for `config.yaml`, and the `extensions`
+  snapshot of the cached `AppConfig` follows it. A truncated or invalid
+  revision (for example midway through the non-atomic overwrite fallback on
+  a bind-mounted file) keeps the previous configuration and is logged once;
+  a broken file at startup still fails loudly. ([#6386])
 - **middleware:** Tool-output budgeting no longer hides a failed shell exit from
   subagent evidence. A bash result between `externalize_min_chars` (12,000) and
   the sandbox limit (20,000) was replaced by a preview ending in its `Access:`
@@ -9073,6 +9087,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6365]: https://github.com/bytedance/deer-flow/pull/6365
 [#6370]: https://github.com/bytedance/deer-flow/pull/6370
 [#6378]: https://github.com/bytedance/deer-flow/pull/6378
+[#6386]: https://github.com/bytedance/deer-flow/pull/6386
 [#6388]: https://github.com/bytedance/deer-flow/pull/6388
 [#6393]: https://github.com/bytedance/deer-flow/pull/6393
 [#6401]: https://github.com/bytedance/deer-flow/pull/6401
